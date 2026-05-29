@@ -107,8 +107,13 @@ class InterruptTrackerTests(unittest.TestCase):
         self.assertEqual(format_input_prompt(), "> ")
 
     def test_input_preview_collapses_long_text(self) -> None:
-        self.assertEqual(_input_preview("x" * 600), "[text 600 chars]")
+        self.assertEqual(_input_preview("x" * 600), f"{'x' * 50} [text 600 chars]")
         self.assertIsNone(_input_preview("short text"))
+
+    def test_input_preview_collapses_long_multiline_text_with_prefix(self) -> None:
+        text = "first line\nsecond line\n" + ("x" * 260)
+        expected_prefix = " ".join(text[:50].split())
+        self.assertEqual(_input_preview(text), f"{expected_prefix} [text 283 chars]")
 
     def test_rendered_input_line_count_accounts_for_wrapping_and_newlines(self) -> None:
         self.assertEqual(_rendered_input_line_count("abc", width=80), 1)
@@ -133,9 +138,31 @@ class InterruptTrackerTests(unittest.TestCase):
         with patch("orbit.terminal.cli.shutil.get_terminal_size", return_value=type("TS", (), {"columns": 80})()):
             _rewrite_long_input_line("x" * 600, stream=stream)
         output = "".join(stream.buffer)
-        self.assertIn("[text 600 chars]", output)
+        self.assertIn(f"{'x' * 50} [text 600 chars]", output)
         self.assertIn("F", output)
         self.assertIn("\x1b[2K", output)
+
+    def test_rewrite_long_single_line_does_not_move_above_input_line(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.buffer: list[str] = []
+
+            def write(self, text: str) -> None:
+                self.buffer.append(text)
+
+            def flush(self) -> None:
+                return None
+
+            def isatty(self) -> bool:
+                return True
+
+        stream = FakeStream()
+        with patch("orbit.terminal.cli.shutil.get_terminal_size", return_value=type("TS", (), {"columns": 1200})()):
+            _rewrite_long_input_line("x" * 600, stream=stream)
+        output = "".join(stream.buffer)
+        self.assertIn(f"{'x' * 50} [text 600 chars]", output)
+        self.assertIn("\x1b[1F", output)
+        self.assertNotIn("\x1b[2F", output)
 
     def test_parse_config_supports_thinking_flags(self) -> None:
         config = parse_config(["--think", "on", "--show-thinking"])

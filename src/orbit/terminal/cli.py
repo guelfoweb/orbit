@@ -32,6 +32,7 @@ TIMER_COLOR = "\x1b[90m"
 TIMER_RESET = "\x1b[0m"
 LONG_INPUT_PREVIEW_CHARS = 512
 LONG_INPUT_MULTILINE_CHARS = 256
+LONG_INPUT_PREVIEW_PREFIX_CHARS = 50
 
 
 @dataclass
@@ -115,7 +116,10 @@ def _input_preview(text: str) -> str | None:
     is_multiline = "\n" in text
     if len(text) <= LONG_INPUT_PREVIEW_CHARS and not (is_multiline and len(text) > LONG_INPUT_MULTILINE_CHARS):
         return None
-    return f"[text {len(text)} chars]"
+    prefix = " ".join(text[:LONG_INPUT_PREVIEW_PREFIX_CHARS].split())
+    if not prefix:
+        return f"[text {len(text)} chars]"
+    return f"{prefix} [text {len(text)} chars]"
 
 
 def _rewrite_long_input_line(text: str, *, stream=None) -> None:
@@ -134,7 +138,8 @@ def _rewrite_long_input_line(text: str, *, stream=None) -> None:
                 target.write("\x1b[2K")
                 if index < rendered_lines - 1:
                     target.write("\x1b[1E")
-            target.write(f"\x1b[{rendered_lines}F")
+            if rendered_lines > 1:
+                target.write(f"\x1b[{rendered_lines - 1}F")
             target.write(format_user_prompt(preview))
             target.write("\n")
         if hasattr(target, "flush"):
