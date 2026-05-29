@@ -256,6 +256,8 @@ class WebTools:
             return None
         parsed = urlparse(raw_url)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
+            if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/y.js"):
+                return None
             if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
                 target = parse_qs(parsed.query).get("uddg")
                 if target:

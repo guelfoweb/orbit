@@ -42,6 +42,7 @@ from orbit.core.intent_router import (
 )
 from orbit.core.loop_guard import ToolCallRecord, signatures_match
 from orbit.core.turn_policy import TurnPolicyState, _repeated_tool_retry_prompt, classify_model_reply
+from orbit.core.tool_guardrails import codebase_redundant_listing_prompt
 from orbit.skills import Skill
 
 
@@ -276,6 +277,19 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
         self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS)
 
+    def test_apk_triage_metadata_routes_to_binary_analysis(self) -> None:
+        route = route_intent(
+            'Perform static APK triage on the file "malware/Questionario BNL.apk". '
+            "Identify file type and hashes first, then inspect APK container metadata."
+        )
+        self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS)
+
+    def test_plain_apk_size_request_stays_filesystem_metadata(self) -> None:
+        route = route_intent("what is the size and modified time of malware/sample.apk?")
+        self.assertEqual(route.intent, INTENT_TEXT_DOCUMENT_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_FILE_READING)
+
     def test_directory_zip_reference_routes_to_binary_analysis(self) -> None:
         route = route_intent("analyze the zip in this directory")
         self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
@@ -330,7 +344,18 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent_class, INTENT_CLASS_SHELL_TASK)
 
     def test_gemma_model_first_base64_decode_finalizes_locally(self) -> None:
-        client = FakeClient([])
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": (
+                            "Initial evidence is collected. Continuing with static reverse engineering: inspect scripts/APK "
+                            "container contents, suspicious strings, URLs, configs, and document findings in the case report."
+                        )
+                    }
+                }
+            ]
+        )
         client.model = "gemma4:e2b"
         registry = FakeRegistry()
         agent = AgentLoop(client=client, registry=registry, max_loops=4)
@@ -594,6 +619,40 @@ class AgentLoopTests(unittest.TestCase):
         result = agent.run_turn("Tell me how many files exist in the workspace and what the newest file is.")
         self.assertIn("There are 2 files", result.content)
         self.assertIn("new.txt", result.content)
+        self.assertEqual(registry.called, [("stat_path", {"path": ".", "recursive": True})])
+        self.assertEqual(client.calls, [])
+
+    def test_workspace_newest_file_method_request_explains_stat_path_source(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "stat_path":
+                return {
+                    "ok": True,
+                    "path": ".",
+                    "type": "dir",
+                    "recursive": True,
+                    "file_count": 2,
+                    "dir_count": 0,
+                    "entries": [
+                        {"path": "new.txt", "type": "file", "modified_at": "2026-05-28T10:00:00+00:00"},
+                        {"path": "old.txt", "type": "file", "modified_at": "2026-05-27T10:00:00+00:00"},
+                    ],
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn(
+            "Answer this only after checking tools/current workspace: newest file, modified time, and how did you determine it?"
+        )
+        self.assertIn("new.txt", result.content)
+        self.assertIn("2026-05-28T10:00:00+00:00", result.content)
+        self.assertIn("stat_path", result.content)
+        self.assertIn("modification times", result.content)
         self.assertEqual(registry.called, [("stat_path", {"path": ".", "recursive": True})])
         self.assertEqual(client.calls, [])
 
@@ -2845,6 +2904,64 @@ class AgentLoopTests(unittest.TestCase):
         result = agent.run_turn("Search the web for OpenAI API docs and return one result only.")
         self.assertEqual(result.content, "OpenAI API Platform - https://platform.openai.com/docs/api-reference")
         self.assertEqual(registry.called, [("search_web", {"query": "OpenAI API docs", "max_results": 1})])
+        self.assertEqual(len(client.calls), 1)
+
+    def test_current_factual_generic_search_can_finalize_from_bounded_results(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 4,
+                    "eval_duration": 50_000_000,
+                    "total_duration": 200_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "search_web",
+                                    "arguments": {"query": "Dante Alighieri", "max_results": 3},
+                                }
+                            }
+                        ],
+                    },
+                },
+                {
+                    "message": {
+                        "content": "Dante Alighieri is available on Wikipedia and Britannica."
+                    }
+                },
+            ]
+        )
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            return {
+                "ok": True,
+                "query": "Dante Alighieri",
+                "results": [
+                    {
+                        "title": "Dante Alighieri - Wikipedia",
+                        "url": "https://en.wikipedia.org/wiki/Dante_Alighieri",
+                        "snippet": "Dante was an Italian poet, writer, and philosopher.",
+                    },
+                    {
+                        "title": "Dante | Biography, Poems, & Facts",
+                        "url": "https://www.britannica.com/biography/Dante-Alighieri",
+                        "snippet": "Dante is best known for The Divine Comedy.",
+                    },
+                ],
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("search online for information about Dante Alighieri")
+        self.assertIn("Search results for `Dante Alighieri`", result.content)
+        self.assertIn("Italian poet", result.content)
+        self.assertIn("The Divine Comedy", result.content)
+        self.assertEqual(registry.called, [("search_web", {"query": "Dante Alighieri", "max_results": 3})])
         self.assertEqual(len(client.calls), 1)
 
     def test_system_info_request_in_italian_can_finalize_locally(self) -> None:
@@ -6728,7 +6845,155 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Use the discovered candidate", result.content)
         self.assertEqual(registry.called[0], ("list_files", {"path": ".", "recursive": False, "max_entries": 12}))
         self.assertEqual(registry.called[1], ("bash", {"command": "file sample.apk"}))
-        self.assertEqual(registry.called[2], ("bash", {"command": "unzip -l sample.apk | head -n 20"}))
+        self.assertEqual(registry.called[2], ("bash", {"command": "md5sum sample.apk"}))
+        self.assertEqual(registry.called[3], ("bash", {"command": "sha1sum sample.apk"}))
+        self.assertEqual(registry.called[4], ("bash", {"command": "sha256sum sample.apk"}))
+        self.assertEqual(registry.called[5], ("bash", {"command": "unzip -l sample.apk | head -n 20"}))
+
+    def test_static_analysis_all_samples_seeds_multiple_formats_from_case_directory(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": (
+                            "Initial evidence is collected. Continuing with static reverse engineering: inspect scripts/APK "
+                            "container contents, suspicious strings, URLs, configs, and document findings in the case report."
+                        )
+                    }
+                }
+            ]
+        )
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "list_files":
+                return {
+                    "ok": True,
+                    "path": "malware",
+                    "recursive": True,
+                    "count": 2,
+                    "dir_count": 0,
+                    "file_count": 2,
+                    "truncated": False,
+                    "summary": "dropper.ps1, app.apk",
+                    "entries": [
+                        {"path": "malware/dropper.ps1", "type": "file"},
+                        {"path": "malware/app.apk", "type": "file"},
+                    ],
+                }
+            if name == "bash":
+                command = arguments["command"]
+                if command.startswith("file "):
+                    return {"ok": True, "command": command, "stdout": f"{command.split(' ', 1)[1]}: test data"}
+                if command.startswith("md5sum "):
+                    return {"ok": True, "command": command, "stdout": "a" * 32 + "  sample"}
+                if command.startswith("sha1sum "):
+                    return {"ok": True, "command": command, "stdout": "b" * 40 + "  sample"}
+                if command.startswith("sha256sum "):
+                    return {"ok": True, "command": command, "stdout": "c" * 64 + "  sample"}
+                return {"ok": True, "command": command, "stdout": "Archive: app.apk"}
+            return {"ok": True}
+
+        registry.call = call
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        agent._model_metadata = ModelMetadata(
+            active_model="gemma4:e2b-fast",
+            context_window=8192,
+            capabilities=("completion", "tools"),
+            tools_supported=True,
+        )
+        result = agent.run_turn("Perform static analysis for all malware samples in the malware directory. Collect initial evidence: file type and hashes.")
+        self.assertIn("Bounded static reverse inspection completed for 2 sample(s)", result.content)
+        self.assertIn("malware/dropper.ps1", result.content)
+        self.assertIn("malware/app.apk", result.content)
+        self.assertIn("Next deeper steps", result.content)
+        self.assertEqual(registry.called[0], ("list_files", {"path": "malware", "recursive": True, "max_entries": 80}))
+        commands = [arguments["command"] for name, arguments in registry.called if name == "bash"]
+        self.assertIn("file malware/dropper.ps1", commands)
+        self.assertIn("sha256sum malware/dropper.ps1", commands)
+        self.assertIn("file malware/app.apk", commands)
+        self.assertIn("unzip -l malware/app.apk | head -n 20", commands)
+        self.assertEqual(client.calls, [])
+
+    def test_model_first_binary_analysis_seeds_explicit_apk_path_with_spaces(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 30,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 8,
+                    "eval_duration": 50_000_000,
+                    "total_duration": 170_000_000,
+                    "message": {"content": "Static APK intake is complete; next inspect manifest, resources, classes, URLs, and config logic."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "bash":
+                return {"ok": True, "command": arguments["command"], "stdout": "ok"}
+            return {"ok": True}
+
+        registry.call = call
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        agent._model_metadata = ModelMetadata(
+            active_model="gemma4:e2b-fast",
+            context_window=8192,
+            capabilities=("completion", "tools"),
+            tools_supported=True,
+        )
+        result = agent.run_turn('Perform static APK triage on the file "malware/Questionario BNL.apk". Identify file type and hashes first, then inspect APK container metadata.')
+        self.assertIn("Bounded static reverse inspection completed for 1 sample(s)", result.content)
+        self.assertIn("APK/container focus", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(
+            registry.called[:5],
+            [
+                ("bash", {"command": "file 'malware/Questionario BNL.apk'"}),
+                ("bash", {"command": "md5sum 'malware/Questionario BNL.apk'"}),
+                ("bash", {"command": "sha1sum 'malware/Questionario BNL.apk'"}),
+                ("bash", {"command": "sha256sum 'malware/Questionario BNL.apk'"}),
+                ("bash", {"command": "unzip -l 'malware/Questionario BNL.apk' | head -n 20"}),
+            ],
+        )
+
+    def test_static_evidence_only_request_can_finalize_locally(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "bash":
+                command = arguments["command"]
+                if command.startswith("file "):
+                    return {"ok": True, "command": command, "stdout": "sample.apk: Android package (APK)"}
+                if command.startswith("md5sum "):
+                    return {"ok": True, "command": command, "stdout": "a" * 32 + "  sample.apk"}
+                if command.startswith("sha1sum "):
+                    return {"ok": True, "command": command, "stdout": "b" * 40 + "  sample.apk"}
+                if command.startswith("sha256sum "):
+                    return {"ok": True, "command": command, "stdout": "c" * 64 + "  sample.apk"}
+                return {"ok": True, "command": command, "stdout": "Archive: sample.apk"}
+            return {"ok": True}
+
+        registry.call = call
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        agent._model_metadata = ModelMetadata(
+            active_model="gemma4:e2b-fast",
+            context_window=8192,
+            capabilities=("completion", "tools"),
+            tools_supported=True,
+        )
+        result = agent.run_turn('Collect only initial evidence for "sample.apk": file type and hashes.')
+        self.assertIn("Initial static evidence collected for 1 sample(s)", result.content)
+        self.assertIn("sample.apk", result.content)
+        self.assertEqual(client.calls, [])
 
     def test_binary_analysis_repeated_list_files_is_redirected_to_real_candidates(self) -> None:
         client = FakeClient(
@@ -7384,6 +7649,36 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("recursive listing", prompt)
         self.assertIn("Do not call list_files again for the same location", prompt)
 
+    def test_codebase_redundant_listing_prompt_reuses_seeded_recursive_listing(self) -> None:
+        messages = [
+            {"role": "user", "content": "Inspect the workspace and identify relevant files."},
+            {
+                "role": "tool",
+                "tool_name": "list_files",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "path": ".",
+                        "recursive": True,
+                        "entries": [
+                            {"path": "agent.py", "type": "file"},
+                            {"path": "summary.txt", "type": "file"},
+                        ],
+                    }
+                ),
+            },
+        ]
+        tool_calls = [{"function": {"name": "list_files", "arguments": {"path": ".", "recursive": False}}}]
+        prompt = codebase_redundant_listing_prompt(
+            intent=INTENT_CODEBASE_INSPECTION,
+            tool_calls=tool_calls,
+            messages=messages,
+            parse_arguments=lambda value: value,
+        )
+        self.assertIsNotNone(prompt)
+        self.assertIn("already have a recursive list_files result", prompt or "")
+        self.assertIn("Do not call list_files again", prompt or "")
+
     def test_codebase_inspection_blocks_read_file_on_guessed_or_directory_paths_after_listing(self) -> None:
         client = FakeClient(
             [
@@ -7469,7 +7764,6 @@ class AgentLoopTests(unittest.TestCase):
             registry.called,
             [
                 ("list_files", {"path": ".", "recursive": True, "max_entries": 80}),
-                ("list_files", {"path": ".", "recursive": False}),
             ],
         )
 

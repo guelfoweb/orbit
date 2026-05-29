@@ -467,6 +467,36 @@ Rules:
 - Fix: limit security scan to one chunk per candidate.
 - Example: workspace security prompt over `agent.py`.
 
+### 76. Static malware triage was misrouted as filesystem metadata
+- Symptom: APK/static-analysis prompts that mentioned metadata did not collect sample evidence.
+- Cause: generic metadata routing won over binary/static sample intent.
+- Fix: detect static triage signals before metadata routing and seed bounded evidence collection.
+- Example: `collect initial metadata for malware/Questionario BNL.apk`.
+
+### 77. Static sample evidence required unnecessary model synthesis
+- Symptom: hash/type/container evidence was collected but the model could still loop or summarize weakly.
+- Cause: no local finalizer for sufficient static-analysis evidence.
+- Fix: finalize concise evidence locally from `file`, hashes, and bounded archive listings.
+- Example: `Perform static analysis for all malware samples in the malware directory`.
+
+### 78. Metadata answers omitted provenance when asked
+- Symptom: newest-file prompts answered the file and timestamp but not how the answer was determined.
+- Cause: local `stat_path` formatter ignored method/provenance wording.
+- Fix: add bounded provenance text when the prompt asks how the metadata was determined.
+- Example: `what is the newest file ... and how did you determine it?`.
+
+### 79. Generic web search could surface sponsored redirects or over-compress results
+- Symptom: generic search returned weak synthesis or DuckDuckGo sponsored `/y.js` redirects.
+- Cause: model summarized search results too aggressively and the extractor did not skip ad redirects.
+- Fix: provide bounded local search-result summaries for simple information searches and filter ad redirects at extraction time.
+- Example: `search online for information about Dante Alighieri`.
+
+### 80. Static malware skill stopped at hashes or entered slow scaffolding loops
+- Symptom: malware/static-analysis prompts either stopped after file type and hashes or spent long model loops creating/listing the case directory.
+- Cause: initial evidence was treated as sufficient, while the full skill prompt was too heavy for the small model before useful reverse-engineering evidence was gathered.
+- Fix: distinguish evidence-only requests from static/reverse analysis, seed bounded manifest/container/script/string inspection, and locally summarize bounded reverse-inspection evidence unless a case/report update is explicitly requested.
+- Example: `Perform static reverse engineering for the samples in the malware directory`.
+
 ## Recurring Guidelines
 
 - Keep the base prompt short.

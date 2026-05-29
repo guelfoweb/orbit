@@ -47,6 +47,26 @@ FETCH_URL_HINTS = (
     "page",
 )
 ONE_RESULT_HINTS = ("one result only", "one result", "un solo risultato", "single result")
+GENERIC_SEARCH_INFO_HINTS = (
+    "search online for information about",
+    "search the web for information about",
+    "search web for information about",
+    "search online information about",
+    "search the web information about",
+)
+SEARCH_SYNTHESIS_HINTS = (
+    "summarize",
+    "summary",
+    "synthesize",
+    "synthesis",
+    "main trends",
+    "key points",
+    "sintesi",
+    "riassumi",
+    "riassunto",
+    "sintetizza",
+    "punti chiave",
+)
 VERSION_QUERY_HINTS = ("version", "versione", "__version__", "release")
 PROJECT_METADATA_CANDIDATES = ("pyproject.toml", "package.json", "Cargo.toml", "README.md")
 URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
@@ -265,7 +285,42 @@ def local_current_factual_result(
             title = fetched.get("title")
             if isinstance(title, str) and title.strip():
                 return title.strip()
+    if any(hint in lowered for hint in GENERIC_SEARCH_INFO_HINTS) and not any(
+        hint in lowered for hint in SEARCH_SYNTHESIS_HINTS
+    ):
+        search = latest_search_web_result_in_current_turn(messages)
+        if search is not None:
+            return _format_search_results_summary(search)
     return None
+
+
+def _format_search_results_summary(search: dict[str, Any]) -> str | None:
+    results = search.get("results")
+    if not isinstance(results, list):
+        return None
+    query = search.get("query")
+    if isinstance(query, str) and query.strip():
+        lines = [f"Search results for `{query.strip()}`:"]
+    else:
+        lines = ["Search results:"]
+    for item in results[:3]:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        url = item.get("url")
+        snippet = item.get("snippet")
+        if not isinstance(title, str) or not title.strip() or not isinstance(url, str) or not url.strip():
+            continue
+        line = f"- {title.strip()} - {url.strip()}"
+        if isinstance(snippet, str) and snippet.strip():
+            cleaned = " ".join(snippet.split())
+            if len(cleaned) > 220:
+                cleaned = cleaned[:217].rstrip() + "..."
+            line += f"\n  {cleaned}"
+        lines.append(line)
+    if len(lines) == 1:
+        return None
+    return "\n".join(lines)
 
 def _system_info_result(
     *,

@@ -47,6 +47,7 @@ from .tool_guardrails import (
     binary_seeded_summary,
     binary_tool_strategy_prompt,
     binary_text_reply_handling,
+    codebase_redundant_listing_prompt,
     current_factual_lookup_fetch_followup,
     codebase_review_reply_handling,
     apply_deterministic_file_edit,
@@ -77,6 +78,8 @@ from .tool_guardrails import (
     local_workspace_file_classification_result,
     local_workspace_file_presence_result,
     local_workspace_security_scan_result,
+    local_static_sample_evidence_result,
+    local_static_reverse_inspection_result,
     local_explicit_text_result,
     condense_explicit_text_summary_messages,
     should_defer_explicit_text_summary_to_model,
@@ -416,6 +419,31 @@ class AgentLoop:
                 if local_security_scan is not None:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_security_scan, metrics)
+                seed_binary_discovery(
+                    user_input=user_input,
+                    route=route,
+                    registry=self.registry,
+                    messages=self.messages,
+                    metrics=metrics,
+                    policy_state=policy_state,
+                    on_event=on_event,
+                )
+                local_static_evidence = local_static_sample_evidence_result(
+                    intent=route.intent,
+                    user_input=user_input,
+                    messages=self.messages,
+                )
+                if local_static_evidence is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_static_evidence, metrics)
+                local_static_reverse = local_static_reverse_inspection_result(
+                    intent=route.intent,
+                    user_input=user_input,
+                    messages=self.messages,
+                )
+                if local_static_reverse is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_static_reverse, metrics)
                 seed_explicit_text_read(
                     user_input=user_input,
                     route=route,
@@ -574,6 +602,7 @@ class AgentLoop:
                     on_event=on_event,
                 )
                 seed_binary_discovery(
+                    user_input=user_input,
                     route=route,
                     registry=self.registry,
                     messages=self.messages,
@@ -781,6 +810,15 @@ class AgentLoop:
                 )
                 if workspace_scope_prompt is not None:
                     self._append_system_message(workspace_scope_prompt)
+                    continue
+                redundant_codebase_listing = codebase_redundant_listing_prompt(
+                    intent=route.intent,
+                    tool_calls=tool_calls,
+                    messages=self.messages,
+                    parse_arguments=parse_arguments,
+                )
+                if redundant_codebase_listing is not None:
+                    self._append_system_message(redundant_codebase_listing)
                     continue
                 binary_guard_prompt = binary_analysis_guard_prompt(
                     intent=route.intent,
@@ -1064,7 +1102,13 @@ class AgentLoop:
             if decision.action in {"abort_empty_reply", "abort_repeated_tool_loop"}:
                 metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                 return self._result(decision.content or "Turn aborted by policy.", metrics)
-            self._execute_tool_calls(tool_calls, metrics=metrics, policy_state=policy_state, on_event=on_event)
+            self._execute_tool_calls(
+                tool_calls,
+                metrics=metrics,
+                policy_state=policy_state,
+                on_event=on_event,
+                intent=route.intent if self.tools_enabled else None,
+            )
             local_mixed_evidence = local_mixed_local_web_evidence_result(
                 intent=route.intent if self.tools_enabled else None,
                 user_input=user_input,
@@ -1075,15 +1119,14 @@ class AgentLoop:
                 return self._result(local_mixed_evidence, metrics)
             if model_first_runtime and route is not None:
                 self._append_model_first_post_tool_prompt(route, tool_calls)
-            if not model_first_runtime:
-                local_factual_result = local_current_factual_result(
-                    intent=route.intent if self.tools_enabled else None,
-                    user_input=user_input,
-                    messages=self.messages,
-                )
-                if local_factual_result is not None:
-                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
-                    return self._result(local_factual_result, metrics)
+            local_factual_result = local_current_factual_result(
+                intent=route.intent if self.tools_enabled else None,
+                user_input=user_input,
+                messages=self.messages,
+            )
+            if local_factual_result is not None:
+                metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                return self._result(local_factual_result, metrics)
         final_content = format_max_loops_message(self.max_loops, policy_state)
         if self.tools_enabled and route is not None and route.intent == "binary_or_pdf_analysis":
             seeded = binary_seeded_summary(self.messages)
@@ -1418,12 +1461,21 @@ class AgentLoop:
         metrics: TurnMetrics,
         policy_state: TurnPolicyState,
         on_event: EventSink | None = None,
+        intent: str | None = None,
     ) -> None:
         for tool_call in tool_calls:
             fn = tool_call.get("function", {})
             name = fn.get("name")
             arguments = parse_arguments(fn.get("arguments"))
             if not name:
+                continue
+            redundant_listing_message = self._redundant_codebase_listing_message(
+                intent=intent,
+                name=name,
+                arguments=arguments,
+            )
+            if redundant_listing_message is not None:
+                self._append_system_message(redundant_listing_message)
                 continue
             if on_event is not None:
                 on_event(ToolCallEvent(loop=policy_state.loop_count, name=name, arguments=arguments))
@@ -1559,6 +1611,63 @@ class AgentLoop:
                     )
                 )
         self.messages.append(tool_message)
+
+    def _redundant_codebase_listing_message(
+        self,
+        *,
+        intent: str | None,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> str | None:
+        if intent != "codebase_inspection" or name != "list_files":
+            return None
+        path = str(arguments.get("path") or ".").strip().rstrip("/") or "."
+        if path not in {".", "./"}:
+            return None
+        for message in reversed(self.messages):
+            if message.get("role") == "user":
+                return None
+            if message.get("role") != "tool" or message.get("tool_name") != "list_files":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or payload.get("ok") is not True:
+                continue
+            listed_path = str(payload.get("path") or ".").strip().rstrip("/") or "."
+            if listed_path == ".":
+                paths = self._listed_paths_from_payload(payload, limit=24)
+                suffix = f" Existing paths include: {', '.join(paths)}." if paths else ""
+                return (
+                    "Skipped a redundant list_files call because a workspace listing is already available in this turn. "
+                    "Do not ask the user for the listing output and do not answer yet. "
+                    "Reuse these returned paths and call read_file on one concrete source or documentation file before the final assessment."
+                    f"{suffix}"
+                )
+        return None
+
+    @staticmethod
+    def _listed_paths_from_payload(payload: dict[str, Any], *, limit: int) -> list[str]:
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            summary = payload.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return [item.strip() for item in summary.split(",") if item.strip()][:limit]
+            return []
+        paths: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get("path")
+            if isinstance(path, str) and path.strip():
+                paths.append(path.strip())
+                if len(paths) >= limit:
+                    break
+        return paths
 
     def _bootstrap_skill_workspace_docs(
         self,

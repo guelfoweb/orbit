@@ -70,6 +70,11 @@ from .guardrail_review import (
     local_codebase_review_result as _local_codebase_review_result,
     seed_codebase_review_reads_impl,
 )
+from .static_analysis_guardrails import (
+    local_static_reverse_inspection_result,
+    local_static_sample_evidence_result,
+    seed_binary_discovery_impl,
+)
 from .events import ToolCallEvent, ToolResultEvent, ToolRouteEvent
 from .intent_router import INTENT_BINARY_OR_PDF_ANALYSIS, INTENT_CODEBASE_INSPECTION, INTENT_TEXT_DOCUMENT_ANALYSIS
 from .message_ops import (
@@ -218,6 +223,7 @@ def local_text_document_result(
 
 def seed_binary_discovery(
     *,
+    user_input: str = "",
     route: Any,
     registry: Any,
     messages: list[dict[str, Any]],
@@ -225,57 +231,17 @@ def seed_binary_discovery(
     policy_state: TurnPolicyState,
     on_event: Any,
 ) -> None:
-    if route.intent != INTENT_BINARY_OR_PDF_ANALYSIS:
-        return
-    if _has_pdf_text_extract_in_current_turn(messages):
-        return
-    if has_recent_tool_result(messages, "list_files"):
-        return
-    result = _seed_guardrail_tool(
-        name="list_files",
-        arguments={"path": ".", "recursive": False, "max_entries": 12},
+    seed_binary_discovery_impl(
+        user_input=user_input,
         route=route,
         registry=registry,
         messages=messages,
         metrics=metrics,
         policy_state=policy_state,
         on_event=on_event,
-        emit_route=True,
-    )
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                _binary_listing_guidance(messages)
-            ),
-        }
-    )
-    candidates = likely_binary_candidates_from_recent_listing(messages, limit=1)
-    if not candidates or has_recent_tool_result(messages, "bash"):
-        return
-    command = f"file {candidates[0]}"
-    bash_result = _seed_guardrail_tool(
-        name="bash",
-        arguments={"command": command},
-        route=route,
-        registry=registry,
-        messages=messages,
-        metrics=metrics,
-        policy_state=policy_state,
-        on_event=on_event,
-    )
-    lowered_candidate = candidates[0].lower()
-    if not any(lowered_candidate.endswith(ext) for ext in ARCHIVE_CONTAINER_EXTENSIONS):
-        return
-    _seed_guardrail_tool(
-        name="bash",
-        arguments={"command": f"unzip -l {candidates[0]} | head -n 20"},
-        route=route,
-        registry=registry,
-        messages=messages,
-        metrics=metrics,
-        policy_state=policy_state,
-        on_event=on_event,
+        run_guardrail_tool=_seed_guardrail_tool,
+        binary_listing_guidance=_binary_listing_guidance,
+        has_pdf_text_extract_in_current_turn=_has_pdf_text_extract_in_current_turn,
     )
 
 
@@ -602,6 +568,32 @@ def seed_codebase_listing(
         on_event=on_event,
         emit_route=True,
     )
+
+
+def codebase_redundant_listing_prompt(
+    *,
+    intent: str | None,
+    tool_calls: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    parse_arguments: Any,
+) -> str | None:
+    if intent != INTENT_CODEBASE_INSPECTION:
+        return None
+    if not _has_recursive_listing_for_path(messages, "."):
+        return None
+    for tool_call in tool_calls:
+        function = tool_call.get("function", {}) or {}
+        if function.get("name") != "list_files":
+            continue
+        arguments = parse_arguments(function.get("arguments"))
+        path = str(arguments.get("path") or ".").strip() or "."
+        if path in {".", "./"}:
+            return (
+                "You already have a recursive list_files result for the current workspace. "
+                "Do not call list_files again for this location. Use the existing paths to choose the most relevant file, "
+                "then call read_file on one concrete returned file path or answer from the evidence already available."
+            )
+    return None
 
 
 def seed_codebase_review_reads(
@@ -1064,6 +1056,28 @@ def _has_recursive_listing_in_current_turn(messages: list[dict[str, Any]]) -> bo
     return False
 
 
+def _has_recursive_listing_for_path(messages: list[dict[str, Any]], path: str) -> bool:
+    normalized = path.rstrip("/") or "."
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return False
+        if message.get("role") != "tool" or message.get("tool_name") != "list_files":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            continue
+        listed_path = str(payload.get("path") or ".").rstrip("/") or "."
+        if listed_path == normalized and payload.get("recursive") is True:
+            return True
+    return False
+
+
 def _prefers_english_output(text: str) -> bool:
     return prefers_english_output(text)
 
@@ -1453,7 +1467,10 @@ def _format_file_metadata_result(result: dict[str, Any], lowered_input: str) -> 
             parts.append(f"size: {size} bytes")
         if isinstance(modified, str) and modified:
             parts.append(f"modified: {modified}")
-    return "; ".join(parts)
+    output = "; ".join(parts)
+    if _asks_for_metadata_method(lowered_input):
+        output += ". Determined with `stat_path` on the requested path."
+    return output
 
 
 def _format_directory_metadata_result(result: dict[str, Any], lowered_input: str) -> str | None:
@@ -1487,7 +1504,10 @@ def _format_directory_metadata_result(result: dict[str, Any], lowered_input: str
             if isinstance(modified, str) and modified:
                 suffix += f" modified at {modified}"
             prefix.append(suffix)
-        return ". ".join(prefix) + "."
+        output = ". ".join(prefix) + "."
+        if _asks_for_metadata_method(lowered_input):
+            output += " Determined with `stat_path` on the workspace directory, using modification times from bounded filesystem metadata."
+        return output
     parts: list[str] = []
     if isinstance(file_count, int):
         parts.append(f"files: {file_count}")
@@ -1499,6 +1519,24 @@ def _format_directory_metadata_result(result: dict[str, Any], lowered_input: str
     if isinstance(path, str):
         parts.insert(0, f"`{path}`")
     return "; ".join(parts) if parts else None
+
+
+def _asks_for_metadata_method(lowered_input: str) -> bool:
+    return any(
+        hint in lowered_input
+        for hint in (
+            "how did you determine",
+            "how did you know",
+            "how was this determined",
+            "method",
+            "determined it",
+            "determine it",
+            "come lo hai determinato",
+            "come l'hai determinato",
+            "come lo sai",
+            "metodo",
+        )
+    )
 
 
 def generic_tool_access_reply_handling(

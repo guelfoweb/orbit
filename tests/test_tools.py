@@ -365,6 +365,29 @@ class ToolRegistryTests(unittest.TestCase):
             ],
         )
 
+    def test_search_web_skips_duckduckgo_ad_redirects(self) -> None:
+        html = """
+        <html>
+          <body>
+            <div class="result results_links results_links_deep web-result">
+              <div class="links_main links_deep result__body">
+                <a class="result__a" href="https://duckduckgo.com/y.js?ad_provider=bingv7aa">Sponsored result</a>
+              </div>
+            </div>
+            <div class="result results_links results_links_deep web-result">
+              <div class="links_main links_deep result__body">
+                <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Farticle">Real result</a>
+                <a class="result__snippet">Useful organic result.</a>
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+        results = WebTools._extract_search_results(html, max_results=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Real result")
+        self.assertEqual(results[0]["url"], "https://example.org/article")
+
     def test_search_web_uses_form_encoded_post(self) -> None:
         captured = {}
 

@@ -97,6 +97,10 @@ _BINARY_HINTS = (
     "pdftotext",
     "binary",
     "malware",
+    "static triage",
+    "static analysis",
+    "suspicious file",
+    "sample",
 )
 _BINARY_FORMAT_TOKENS = (
     "apk",
@@ -566,6 +570,8 @@ def _looks_like_local_filesystem_metadata_request(intent_text: _IntentText) -> b
     workspace_tokens = {"workspace", "workdir", "directory", "folder", "cartella", "progetto", "project"}
     if not (intent_text.token_set & metadata_tokens):
         return False
+    if _looks_like_binary_triage_request(intent_text):
+        return False
     return _looks_like_text_path_request(intent_text) or bool(intent_text.token_set & workspace_tokens)
 
 
@@ -598,6 +604,28 @@ def _looks_like_binary_analysis_request(intent_text: _IntentText) -> bool:
 
 def _mentions_binary_format_token(intent_text: _IntentText) -> bool:
     return any(re.search(rf"\b{re.escape(token)}\b", intent_text.text) for token in _BINARY_FORMAT_TOKENS)
+
+
+def _looks_like_binary_triage_request(intent_text: _IntentText) -> bool:
+    if not (_matches_any(intent_text, _BINARY_HINTS) or _mentions_binary_format_token(intent_text)):
+        return False
+    triage_tokens = {
+        "analyze",
+        "analysis",
+        "analizza",
+        "triage",
+        "inspect",
+        "inspection",
+        "static",
+        "hash",
+        "hashes",
+        "container",
+        "strings",
+        "decompile",
+        "identify",
+        "type",
+    }
+    return bool(intent_text.token_set & triage_tokens)
 
 
 def _looks_like_general_knowledge_request(intent_text: _IntentText) -> bool:
