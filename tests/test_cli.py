@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from orbit.terminal.cli import (
     InterruptTracker,
+    LastTurnDebug,
     TurnTimer,
     _input_preview,
     _rendered_input_line_count,
@@ -24,10 +25,26 @@ from orbit.terminal import history as history_module
 from orbit.terminal.ui import format_input_prompt, format_status, format_user_prompt, print_live_event
 from orbit.terminal.config import parse_config
 from orbit.core.agent import TurnStatus
-from orbit.core.events import ThinkingChunkEvent, ThinkingEndEvent, ThinkingStartEvent
+from orbit.core.events import DebugTimingEvent, ThinkingChunkEvent, ThinkingEndEvent, ThinkingStartEvent, ToolCallEvent, ToolResultEvent, ToolRouteEvent
 
 
 class InterruptTrackerTests(unittest.TestCase):
+    def test_last_turn_debug_formats_compact_route_tool_and_timing(self) -> None:
+        debug = LastTurnDebug()
+        self.assertEqual(debug.format(), "No turn debug data yet.")
+
+        debug.record(ToolRouteEvent(loop=1, intent="codebase_inspection", categories=("filesystem",), reason="source prompt"))
+        debug.record(ToolCallEvent(loop=1, name="list_files", arguments={"path": "."}))
+        debug.record(ToolResultEvent(loop=1, name="list_files", ok=True, elapsed_ms=1.2))
+        debug.record(DebugTimingEvent(phase="model", elapsed_ms=42.0, detail="loop=1"))
+        debug.status_text = "demo | ctx: 8192"
+
+        rendered = debug.format()
+        self.assertIn("route: codebase_inspection -> filesystem", rendered)
+        self.assertIn("tools: list_files ok 1.2ms", rendered)
+        self.assertIn("timing: model loop=1 42.0ms", rendered)
+        self.assertIn("status: demo | ctx: 8192", rendered)
+
     def test_first_interrupt_does_not_exit(self) -> None:
         tracker = InterruptTracker(window_sec=1.5)
         self.assertFalse(tracker.register(now=10.0))
@@ -409,7 +426,7 @@ class InterruptTrackerTests(unittest.TestCase):
         )
         rendered = format_status(status)
         self.assertIn("tk_pf: 45.0/s", rendered)
-        self.assertIn("tk_gen 12.0/s", rendered)
+        self.assertIn("tk_gen: 12.0/s", rendered)
         self.assertIn("msg: 2", rendered)
         self.assertNotIn("think: off", rendered)
         self.assertNotIn("show-thinking: off", rendered)

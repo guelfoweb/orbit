@@ -6,8 +6,10 @@ import shutil
 import sys
 import threading
 import time
+from typing import Any
 
 from ..core.client import OllamaError
+from ..core.events import DebugTimingEvent, ToolCallEvent, ToolResultEvent, ToolRouteEvent
 from ..core.runtime import OrbitRuntime
 from ..session import create_session_name, list_sessions_for_workdir
 from ..skills import list_skills
@@ -99,6 +101,72 @@ class TurnTimer:
         elapsed = time.monotonic() - self._started_at if self._started_at is not None else 0.0
         text = f"{elapsed:.1f}s "
         return f"{TIMER_COLOR}{text}{TIMER_RESET}"
+
+
+@dataclass
+class LastTurnDebug:
+    route: str | None = None
+    route_categories: tuple[str, ...] = ()
+    route_reason: str | None = None
+    tool_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    tool_results: list[tuple[str, bool, str | None, float | None]] = field(default_factory=list)
+    timings: list[tuple[str, float, str | None]] = field(default_factory=list)
+    status_text: str | None = None
+
+    def reset(self) -> None:
+        self.route = None
+        self.route_categories = ()
+        self.route_reason = None
+        self.tool_calls.clear()
+        self.tool_results.clear()
+        self.timings.clear()
+        self.status_text = None
+
+    def record(self, event) -> None:
+        if isinstance(event, ToolRouteEvent):
+            self.route = event.intent
+            self.route_categories = event.categories
+            self.route_reason = event.reason
+        elif isinstance(event, ToolCallEvent):
+            self.tool_calls.append((event.name, event.arguments))
+        elif isinstance(event, ToolResultEvent):
+            self.tool_results.append((event.name, event.ok, event.error, event.elapsed_ms))
+        elif isinstance(event, DebugTimingEvent):
+            self.timings.append((event.phase, event.elapsed_ms, event.detail))
+
+    def has_data(self) -> bool:
+        return bool(self.route or self.tool_calls or self.tool_results or self.timings or self.status_text)
+
+    def format(self) -> str:
+        if not self.has_data():
+            return "No turn debug data yet."
+        lines = ["Last turn:"]
+        if self.route:
+            categories = f" -> {', '.join(self.route_categories)}" if self.route_categories else ""
+            reason = f" ({self.route_reason})" if self.route_reason else ""
+            lines.append(f"- route: {self.route}{categories}{reason}")
+        if self.tool_calls or self.tool_results:
+            result_by_index = list(self.tool_results)
+            rendered_tools: list[str] = []
+            for index, (name, _arguments) in enumerate(self.tool_calls):
+                if index < len(result_by_index):
+                    result_name, ok, error, elapsed_ms = result_by_index[index]
+                    label = result_name or name
+                    state = "ok" if ok else f"error: {error or 'failed'}"
+                    elapsed = f" {elapsed_ms:.1f}ms" if elapsed_ms is not None else ""
+                    rendered_tools.append(f"{label} {state}{elapsed}")
+                else:
+                    rendered_tools.append(f"{name} pending")
+            lines.append(f"- tools: {'; '.join(rendered_tools)}")
+        if self.timings:
+            rendered_timings = []
+            for phase, elapsed_ms, detail in self.timings[-8:]:
+                suffix = f" {detail}" if detail else ""
+                rendered_timings.append(f"{phase}{suffix} {elapsed_ms:.1f}ms")
+            lines.append(f"- timing: {'; '.join(rendered_timings)}")
+        if self.status_text:
+            lines.append(f"- status: {self.status_text}")
+        return "\n".join(lines)
 
 
 def _run_turn_with_timer(runtime, prompt: str, on_event=None):
@@ -202,6 +270,11 @@ def main(argv: list[str] | None = None) -> int:
     print(format_status(runtime.agent.current_status()))
     print("Type /help for commands.")
     event_printer = make_live_event_printer(debug_timing=config.debug_timing)
+    debug_recorder = LastTurnDebug()
+
+    def record_and_print_event(event) -> None:
+        debug_recorder.record(event)
+        event_printer(event)
 
     while True:
         try:
@@ -242,6 +315,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(format_status(runtime.agent.current_status()))
             except OllamaError as exc:
                 print(f"error: {exc}")
+            continue
+        if user_input == "/debug last":
+            print(debug_recorder.format())
             continue
         if user_input == "/skill show":
             print(format_skill(runtime.agent))
@@ -296,7 +372,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: unknown command: {user_input}")
             continue
         try:
-            result = _run_turn_with_timer(runtime, user_input, on_event=event_printer)
+            debug_recorder.reset()
+            result = _run_turn_with_timer(runtime, user_input, on_event=record_and_print_event)
+            debug_recorder.status_text = format_status(result.status)
             interrupts.reset()
             print(result.content)
             print(format_status(result.status))

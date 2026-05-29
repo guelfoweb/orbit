@@ -31,6 +31,7 @@ LIVE_OUTPUT_LOCK = threading.Lock()
 def print_help() -> None:
     print("Commands:")
     print("  /compact")
+    print("  /debug last")
     print("  /exit")
     print("  /help")
     print("  /reset")
@@ -76,9 +77,9 @@ def format_status(status: TurnStatus) -> str:
     output_text = str(status.output_tokens) if status.output_tokens is not None else "-"
     rate_parts: list[str] = []
     if status.prefill_tps is not None:
-        rate_parts.append(f"pf: {status.prefill_tps:.1f}/s")
+        rate_parts.append(f"tk_pf: {status.prefill_tps:.1f}/s")
     if status.decode_tps is not None:
-        rate_parts.append(f"gen: {status.decode_tps:.1f}/s")
+        rate_parts.append(f"tk_gen: {status.decode_tps:.1f}/s")
     show_thinking_state = getattr(status, "show_thinking_state", "off")
     line = (
         f"{status.active_model} | "
@@ -88,7 +89,7 @@ def format_status(status: TurnStatus) -> str:
         f"tk_out: {output_text}"
     )
     if rate_parts:
-        line = f"{line} | {' | '.join(part.replace('pf:', 'tk_pf:').replace('gen:', 'tk_gen') for part in rate_parts)}"
+        line = f"{line} | {' | '.join(rate_parts)}"
     if not (status.think_state == "off" and show_thinking_state == "off"):
         line = f"{line} | think: {status.think_state} | show-thinking: {show_thinking_state}"
     if status.warning:

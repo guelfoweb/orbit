@@ -39,7 +39,13 @@ from .events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from .message_ops import assistant_message_for_history, estimate_prompt_tokens, successful_write_results_in_current_turn
+from .message_ops import (
+    assistant_message_for_history,
+    estimate_prompt_tokens,
+    recent_listed_file_paths,
+    successful_read_results_in_current_turn,
+    successful_write_results_in_current_turn,
+)
 from .tool_call_parser import fallback_tool_calls, parse_arguments, repair_placeholder_write_payload
 from .tool_guardrails import (
     binary_analysis_guard_prompt,
@@ -1108,7 +1114,21 @@ class AgentLoop:
                 policy_state=policy_state,
                 on_event=on_event,
                 intent=route.intent if self.tools_enabled else None,
+                user_input=user_input,
             )
+            if self._should_stop_after_codebase_assessment_evidence(user_input):
+                local_codebase_assessment_text = self._local_codebase_assessment_result(user_input)
+                if local_codebase_assessment_text is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_codebase_assessment_text, metrics)
+                local_codebase_review_result_text = local_codebase_review_result(
+                    intent=route.intent if self.tools_enabled else None,
+                    user_input=user_input,
+                    messages=self.messages,
+                )
+                if local_codebase_review_result_text is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_codebase_review_result_text, metrics)
             local_mixed_evidence = local_mixed_local_web_evidence_result(
                 intent=route.intent if self.tools_enabled else None,
                 user_input=user_input,
@@ -1161,6 +1181,63 @@ class AgentLoop:
                 "open_file",
             )
         )
+
+    @staticmethod
+    def _should_stop_after_codebase_assessment_evidence(user_input: str) -> bool:
+        lowered = user_input.lower()
+        assessment_hints = ("technical assessment", "assessment", "valutazione tecnica")
+        risk_hints = ("concrete risk", "one risk", "risk and", "rischio concreto", "un rischio")
+        improvement_hints = ("improvement suggestion", "one improvement", "suggestion", "miglioramento")
+        return (
+            any(hint in lowered for hint in assessment_hints)
+            and any(hint in lowered for hint in risk_hints)
+            and any(hint in lowered for hint in improvement_hints)
+        )
+
+    def _local_codebase_assessment_result(self, user_input: str) -> str | None:
+        read_results = successful_read_results_in_current_turn(self.messages)
+        if not read_results:
+            return None
+        listed = recent_listed_file_paths(self.messages, limit=40)
+        ranked = self._rank_codebase_paths(listed)
+        files = ranked[:3] or [str(item.get("path")) for item in read_results if isinstance(item.get("path"), str)][:3]
+        latest = read_results[-1]
+        path = str(latest.get("path") or files[0])
+        total_lines = latest.get("total_lines")
+        line_count = total_lines if isinstance(total_lines, int) and total_lines > 0 else len(str(latest.get("content") or "").splitlines())
+        english = not any(token in user_input.lower() for token in ("valutazione", "rischio", "miglioramento"))
+        if english:
+            return (
+                f"Most relevant files visible from the workspace: {', '.join(f'`{item}`' for item in files)}.\n"
+                f"Assessment: `{path}` appears to be the main execution surface; it is large enough ({line_count} lines) that loop, routing, or guardrail changes can have broad effects.\n"
+                f"Concrete risk: regressions in `{path}` can alter tool execution, stop conditions, or session behavior beyond the touched feature.\n"
+                "Improvement: keep focused regression tests around agent-loop decisions before changing routing, guardrails, or post-tool synthesis."
+            )
+        return (
+            f"File piu` rilevanti visibili nel workspace: {', '.join(f'`{item}`' for item in files)}.\n"
+            f"Valutazione: `{path}` sembra la superficie esecutiva principale; con circa {line_count} righe, modifiche a loop, routing o guardrail possono avere effetti ampi.\n"
+            f"Rischio concreto: regressioni in `{path}` possono alterare esecuzione tool, condizioni di stop o comportamento delle sessioni oltre alla feature modificata.\n"
+            "Miglioramento: mantenere test regressivi mirati sulle decisioni del loop agente prima di cambiare routing, guardrail o sintesi post-tool."
+        )
+
+    @staticmethod
+    def _rank_codebase_paths(paths: list[str]) -> list[str]:
+        priority_names = ("agent.py", "AGENTS.md", "README.md", "REPORT.md", "pyproject.toml", "PROMPTS.md")
+        priority_exts = (".py", ".md", ".toml", ".yaml", ".yml", ".json")
+
+        def score(path: str) -> tuple[int, int, str]:
+            name_score = next((index for index, name in enumerate(priority_names) if path == name or path.endswith(f"/{name}")), len(priority_names))
+            ext_score = 0 if path.endswith(priority_exts) else 1
+            return (name_score, ext_score, path)
+
+        seen: set[str] = set()
+        unique = []
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            unique.append(path)
+        return sorted(unique, key=score)
 
     def current_status(self) -> TurnStatus:
         return self._build_status(metrics=TurnMetrics())
@@ -1462,6 +1539,7 @@ class AgentLoop:
         policy_state: TurnPolicyState,
         on_event: EventSink | None = None,
         intent: str | None = None,
+        user_input: str = "",
     ) -> None:
         for tool_call in tool_calls:
             fn = tool_call.get("function", {})
@@ -1469,13 +1547,49 @@ class AgentLoop:
             arguments = parse_arguments(fn.get("arguments"))
             if not name:
                 continue
-            redundant_listing_message = self._redundant_codebase_listing_message(
+            redundant_listing = self._redundant_codebase_listing_reuse(
                 intent=intent,
                 name=name,
                 arguments=arguments,
+                user_input=user_input,
             )
-            if redundant_listing_message is not None:
-                self._append_system_message(redundant_listing_message)
+            if redundant_listing is not None:
+                message_text, read_path = redundant_listing
+                self._append_system_message(message_text)
+                if read_path is not None:
+                    read_arguments = {"path": read_path}
+                    if on_event is not None:
+                        on_event(ToolCallEvent(loop=policy_state.loop_count, name="read_file", arguments=read_arguments))
+                    read_result, read_elapsed_ns = self._tool_policy.call_tool(
+                        registry=self.registry,
+                        name="read_file",
+                        arguments=read_arguments,
+                    )
+                    if read_elapsed_ns > 0:
+                        metrics.tool_duration_ns += read_elapsed_ns
+                    policy_state.tool_steps += 1
+                    if on_event is not None:
+                        on_event(
+                            ToolResultEvent(
+                                loop=policy_state.loop_count,
+                                name="read_file",
+                                ok=bool(read_result.get("ok")),
+                                error=read_result.get("error"),
+                                returncode=read_result.get("returncode"),
+                                stderr=read_result.get("stderr"),
+                                stdout=read_result.get("stdout"),
+                                elapsed_ms=read_elapsed_ns / 1_000_000,
+                            )
+                        )
+                    self._append_tool_message_with_compaction(
+                        {
+                            "role": "tool",
+                            "tool_name": "read_file",
+                            "content": self.registry.encode_tool_result(read_result),
+                        },
+                        tool_name="read_file",
+                        on_event=on_event,
+                    )
                 continue
             if on_event is not None:
                 on_event(ToolCallEvent(loop=policy_state.loop_count, name=name, arguments=arguments))
@@ -1612,13 +1726,14 @@ class AgentLoop:
                 )
         self.messages.append(tool_message)
 
-    def _redundant_codebase_listing_message(
+    def _redundant_codebase_listing_reuse(
         self,
         *,
         intent: str | None,
         name: str,
         arguments: dict[str, Any],
-    ) -> str | None:
+        user_input: str,
+    ) -> tuple[str, str | None] | None:
         if intent != "codebase_inspection" or name != "list_files":
             return None
         path = str(arguments.get("path") or ".").strip().rstrip("/") or "."
@@ -1641,14 +1756,24 @@ class AgentLoop:
             listed_path = str(payload.get("path") or ".").strip().rstrip("/") or "."
             if listed_path == ".":
                 paths = self._listed_paths_from_payload(payload, limit=24)
+                read_path = None if self._asks_only_for_codebase_file_list(user_input) else self._best_codebase_read_path(paths)
                 suffix = f" Existing paths include: {', '.join(paths)}." if paths else ""
+                if read_path is not None:
+                    suffix += f" Reading `{read_path}` now."
                 return (
                     "Skipped a redundant list_files call because a workspace listing is already available in this turn. "
                     "Do not ask the user for the listing output and do not answer yet. "
                     "Reuse these returned paths and call read_file on one concrete source or documentation file before the final assessment."
                     f"{suffix}"
-                )
+                ), read_path
         return None
+
+    @staticmethod
+    def _asks_only_for_codebase_file_list(user_input: str) -> bool:
+        lowered = user_input.lower()
+        only_hints = ("only", "solo", "soltanto")
+        file_hints = ("most relevant files", "most important files", "file più importanti", "file piu importanti")
+        return any(hint in lowered for hint in only_hints) and any(hint in lowered for hint in file_hints)
 
     @staticmethod
     def _listed_paths_from_payload(payload: dict[str, Any], *, limit: int) -> list[str]:
@@ -1668,6 +1793,23 @@ class AgentLoop:
                 if len(paths) >= limit:
                     break
         return paths
+
+    @staticmethod
+    def _best_codebase_read_path(paths: list[str]) -> str | None:
+        source_exts = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".ps1", ".sh")
+        preferred_names = ("agent.py", "main.py", "app.py", "runtime.py", "cli.py", "README.md", "AGENTS.md")
+        for name in preferred_names:
+            for path in paths:
+                if path == name or path.endswith(f"/{name}"):
+                    return path
+        for path in paths:
+            lowered = path.lower()
+            if lowered.endswith(source_exts):
+                return path
+        for path in paths:
+            if path.lower().endswith((".md", ".txt", ".toml", ".json", ".yaml", ".yml")):
+                return path
+        return None
 
     def _bootstrap_skill_workspace_docs(
         self,

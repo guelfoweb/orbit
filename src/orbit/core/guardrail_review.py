@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 import re
 
@@ -12,6 +13,7 @@ from .code_review_signals import (
 )
 from .intent_router import INTENT_CODEBASE_INSPECTION
 from .message_ops import (
+    has_recent_tool_result,
     last_read_file_result,
     merged_read_file_result_in_current_turn,
     normalize_relative_path,
@@ -96,6 +98,63 @@ CODE_REVIEW_READ_MAX_CHARS = 9000
 CODE_REVIEW_READ_MAX_CHUNKS = 2
 
 
+def seed_codebase_listing_impl(
+    *,
+    user_input: str,
+    route: Any,
+    registry: Any,
+    messages: list[dict[str, Any]],
+    metrics: Any,
+    policy_state: Any,
+    on_event: Any,
+    run_guardrail_tool: Callable[..., dict[str, Any]],
+) -> None:
+    if route.intent != INTENT_CODEBASE_INSPECTION:
+        return
+    lowered = user_input.lower()
+    if not any(hint in lowered for hint in IMPORTANT_FILES_HINTS + ARCHITECTURE_SUMMARY_HINTS + HOTSPOT_HINTS + CODE_REVIEW_HINTS):
+        return
+    if has_recent_tool_result(messages, "list_files"):
+        return
+    run_guardrail_tool(
+        name="list_files",
+        arguments={"path": ".", "recursive": True, "max_entries": 80},
+        route=route,
+        registry=registry,
+        messages=messages,
+        metrics=metrics,
+        policy_state=policy_state,
+        on_event=on_event,
+        emit_route=True,
+    )
+
+
+def codebase_redundant_listing_prompt(
+    *,
+    intent: str | None,
+    tool_calls: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    parse_arguments: Any,
+) -> str | None:
+    if intent != INTENT_CODEBASE_INSPECTION:
+        return None
+    if not _has_recursive_listing_for_path(messages, "."):
+        return None
+    for tool_call in tool_calls:
+        function = tool_call.get("function", {}) or {}
+        if function.get("name") != "list_files":
+            continue
+        arguments = parse_arguments(function.get("arguments"))
+        path = str(arguments.get("path") or ".").strip() or "."
+        if path in {".", "./"}:
+            return (
+                "You already have a recursive list_files result for the current workspace. "
+                "Do not call list_files again for this location. Use the existing paths to choose the most relevant file, "
+                "then call read_file on one concrete returned file path or answer from the evidence already available."
+            )
+    return None
+
+
 def seed_codebase_review_reads_impl(
     *,
     user_input: str,
@@ -136,6 +195,28 @@ def seed_codebase_review_reads_impl(
                 run_guardrail_tool=run_guardrail_tool,
                 max_chunks=max_chunks_per_file,
             )
+
+
+def _has_recursive_listing_for_path(messages: list[dict[str, Any]], path: str) -> bool:
+    normalized = path.rstrip("/") or "."
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return False
+        if message.get("role") != "tool" or message.get("tool_name") != "list_files":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            continue
+        listed_path = str(payload.get("path") or ".").rstrip("/") or "."
+        if listed_path == normalized and payload.get("recursive") is True:
+            return True
+    return False
 
 
 def local_codebase_priority_files_result(
