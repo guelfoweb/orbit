@@ -16,9 +16,12 @@ from orbit.terminal.cli import (
     TurnTimer,
     _format_turn_status,
     _input_preview,
+    _print_turn_output,
     _rendered_input_line_count,
     _rewrite_long_input_line,
+    _run_turn_with_timer,
     _should_print_turn_separator,
+    _should_render_model_markdown,
     _turn_preprocessing_label,
     _turn_separator,
 )
@@ -374,6 +377,32 @@ class InterruptTrackerTests(unittest.TestCase):
         printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
         self.assertIn("echo: hello from pipe", printed)
 
+    def test_run_turn_with_timer_stops_timer_before_thinking_events(self) -> None:
+        calls: list[str] = []
+
+        class FakeTimer:
+            def start(self) -> None:
+                calls.append("start")
+
+            def stop(self) -> None:
+                calls.append("stop")
+
+        class FakeRuntime:
+            def run_turn(self, prompt: str, on_event=None):
+                calls.append(f"run:{prompt}")
+                if on_event is not None:
+                    on_event(ThinkingStartEvent(loop=1))
+                return "done"
+
+        def record_event(event) -> None:
+            calls.append(type(event).__name__)
+
+        with patch("orbit.terminal.cli.TurnTimer", return_value=FakeTimer()):
+            result = _run_turn_with_timer(FakeRuntime(), "hello", on_event=record_event)
+
+        self.assertEqual(result, "done")
+        self.assertEqual(calls, ["start", "run:hello", "stop", "ThinkingStartEvent", "stop"])
+
     def test_turn_timer_keeps_final_neutral_line(self) -> None:
         class FakeStream:
             def __init__(self) -> None:
@@ -422,8 +451,7 @@ class InterruptTrackerTests(unittest.TestCase):
             print_live_event(ThinkingEndEvent(loop=0))
         output = "".join(fake_stderr.buffer)
         self.assertIn("└ thinking\n", output)
-        self.assertIn("  first chunk\n", output)
-        self.assertIn("  second line\n", output)
+        self.assertIn("  first chunksecond line\n", output)
         self.assertIn("  third line\n", output)
 
     def test_format_status_omits_final_time_and_tool_fields(self) -> None:
@@ -526,6 +554,58 @@ class InterruptTrackerTests(unittest.TestCase):
             rendered = _format_turn_status(status, source="model", prep="vision")
         self.assertTrue(rendered.endswith("| msg: 2 | src: model | prep: vision\x1b[0m"))
         self.assertNotIn("\x1b[0m | msg:", rendered)
+
+    def test_print_turn_output_renders_markdown_only_for_model_sources(self) -> None:
+        status = TurnStatus(
+            active_model="demo",
+            context_window=8192,
+            session_messages=3,
+            session_turns=2,
+            prompt_tokens=120,
+            estimated_prompt_tokens=120,
+            output_tokens=18,
+            prefill_tps=None,
+            decode_tps=None,
+            model_elapsed_sec=None,
+            wall_elapsed_sec=None,
+            tool_elapsed_sec=None,
+            usage_ratio=0.25,
+            warning=None,
+            think_state="off",
+            show_thinking_state="off",
+        )
+        with (
+            patch("orbit.terminal.cli.print_model_markdown") as markdown_print,
+            patch("builtins.print") as plain_print,
+            patch("orbit.terminal.cli._should_print_turn_separator", return_value=False),
+        ):
+            _print_turn_output("**bold**", status, source="model")
+            _print_turn_output("local text", status, source="local")
+        markdown_print.assert_called_once_with("**bold**")
+        self.assertTrue(any(call.args and call.args[0] == "local text" for call in plain_print.call_args_list))
+
+    def test_model_markdown_is_disabled_when_show_thinking_is_on(self) -> None:
+        status = TurnStatus(
+            active_model="demo",
+            context_window=8192,
+            session_messages=3,
+            session_turns=2,
+            prompt_tokens=120,
+            estimated_prompt_tokens=120,
+            output_tokens=18,
+            prefill_tps=None,
+            decode_tps=None,
+            model_elapsed_sec=None,
+            wall_elapsed_sec=None,
+            tool_elapsed_sec=None,
+            usage_ratio=0.25,
+            warning=None,
+            think_state="on",
+            show_thinking_state="on",
+        )
+        self.assertFalse(_should_render_model_markdown(status, source="model"))
+        self.assertFalse(_should_render_model_markdown(status, source="tool+model"))
+        self.assertFalse(_should_render_model_markdown(status, source="local"))
 
     def test_turn_preprocessing_label_detects_media_paths(self) -> None:
         self.assertEqual(_turn_preprocessing_label("transcribe audio/voice.wav"), "audio")

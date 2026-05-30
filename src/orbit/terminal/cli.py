@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from ..core.client import OllamaError
-from ..core.events import DebugTimingEvent, ToolCallEvent, ToolResultEvent, ToolRouteEvent
+from ..core.events import DebugTimingEvent, ThinkingStartEvent, ToolCallEvent, ToolResultEvent, ToolRouteEvent
 from ..core.runtime import OrbitRuntime
 from ..session import create_session_name, list_sessions_for_workdir
 from ..skills import list_skills
@@ -26,6 +26,7 @@ from .ui import (
     format_status,
     make_live_event_printer,
     print_help,
+    print_model_markdown,
     print_tools,
 )
 
@@ -76,11 +77,12 @@ class TurnTimer:
     def stop(self) -> None:
         if not self._is_enabled() or self._started_at is None:
             return
+        elapsed_text = self._formatted_elapsed()
         self._stop_event.set()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=0.2)
-        self._write(f"\r{self._formatted_elapsed()}\n")
+        self._write(f"\r{elapsed_text}\n")
         self._thread = None
         self._started_at = None
 
@@ -185,8 +187,15 @@ class LastTurnDebug:
 def _run_turn_with_timer(runtime, prompt: str, on_event=None):
     timer = TurnTimer()
     timer.start()
+
+    def wrapped_on_event(event):
+        if isinstance(event, ThinkingStartEvent):
+            timer.stop()
+        if on_event is not None:
+            on_event(event)
+
     try:
-        return runtime.run_turn(prompt, on_event=on_event)
+        return runtime.run_turn(prompt, on_event=wrapped_on_event)
     finally:
         timer.stop()
 
@@ -208,10 +217,19 @@ def _format_turn_status(status: object, source: str | None = None, prep: str | N
 
 
 def _print_turn_output(content: str, status: object, source: str | None = None, prep: str | None = None) -> None:
-    print(content)
+    if _should_render_model_markdown(status, source=source):
+        print_model_markdown(content)
+    else:
+        print(content)
     if _should_print_turn_separator(content):
         print(_turn_separator())
     print(_format_turn_status(status, source=source, prep=prep))
+
+
+def _should_render_model_markdown(status: object, *, source: str | None) -> bool:
+    if source not in {"model", "tool+model"}:
+        return False
+    return getattr(status, "show_thinking_state", "off") != "on"
 
 
 def _should_print_turn_separator(content: str) -> bool:

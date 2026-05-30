@@ -86,8 +86,7 @@ def load_session(name: str) -> SessionData | None:
     skill_ref = raw.get("skill_ref")
     if not isinstance(skill_ref, str):
         skill_ref = None
-    workdir_value = raw.get("workdir")
-    workdir = Path(workdir_value).resolve() if isinstance(workdir_value, str) and workdir_value.strip() else None
+    workdir = _parse_workdir(raw.get("workdir"))
     updated_at = raw.get("updated_at")
     if not isinstance(updated_at, int):
         updated_at = None
@@ -117,7 +116,7 @@ def list_sessions_for_workdir(workdir: Path) -> list[SessionSummary]:
             continue
         session_workdir = _parse_workdir(raw.get("workdir"))
         if session_workdir is not None:
-            if session_workdir != workdir:
+            if not _same_workdir(session_workdir, workdir):
                 continue
         elif not (name == base_name or name.startswith(f"{base_name}-")):
             continue
@@ -186,7 +185,14 @@ def save_session(name: str, messages: list[dict[str, Any]], skill_ref: str | Non
 def _parse_workdir(value: Any) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
-    return Path(value).resolve()
+    expanded = os.path.expanduser(value.strip())
+    return Path(os.path.abspath(expanded))
+
+
+def _same_workdir(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
+
+
 def _extract_first_prompt(messages: Any) -> str:
     if isinstance(messages, list):
         for message in messages:

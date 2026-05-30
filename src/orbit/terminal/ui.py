@@ -3,6 +3,13 @@ from __future__ import annotations
 import sys
 import threading
 
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+except Exception:  # pragma: no cover - optional fallback for constrained installs
+    Console = None
+    Markdown = None
+
 from ..core.agent import AgentLoop, TurnStatus
 from ..core.events import (
     DebugTimingEvent,
@@ -26,6 +33,7 @@ STATUS_COLOR = "\x1b[90m"
 PROMPT_COLOR = "\x1b[96m"
 RESET_COLOR = "\x1b[0m"
 LIVE_OUTPUT_LOCK = threading.Lock()
+_THINKING_AT_LINE_START = True
 
 
 def print_help() -> None:
@@ -47,6 +55,22 @@ def print_tools(registry: ToolRegistry) -> None:
     for tool in registry.definitions():
         fn = tool["function"]
         print(f"- {fn['name']}: {fn['description']}")
+
+
+def print_model_markdown(content: str) -> None:
+    """Render final model replies only; live/debug output stays plain."""
+    if not _can_render_markdown():
+        print(content)
+        return
+    try:
+        console = Console(file=sys.stdout, soft_wrap=True)
+        console.print(Markdown(content))
+    except Exception:
+        print(content)
+
+
+def _can_render_markdown() -> bool:
+    return bool(Console is not None and Markdown is not None and getattr(sys.stdout, "isatty", lambda: False)())
 
 
 def format_user_prompt(text: str) -> str:
@@ -307,21 +331,37 @@ def _print_live_line(text: str) -> None:
 
 
 def _print_thinking_start() -> None:
+    global _THINKING_AT_LINE_START
+    _THINKING_AT_LINE_START = True
     _print_live_line("└ thinking")
 
 
 def _print_thinking_chunk(text: str) -> None:
+    global _THINKING_AT_LINE_START
     if not isinstance(text, str) or not text:
         return
-    lines = text.splitlines() or [text]
     with LIVE_OUTPUT_LOCK:
-        for line in lines:
-            if sys.stderr.isatty():
-                print(f"{STATUS_COLOR}  {line}{RESET_COLOR}", file=sys.stderr)
-            else:
-                print(f"  {line}", file=sys.stderr)
+        for char in text:
+            if _THINKING_AT_LINE_START:
+                _write_thinking_text("  ")
+                _THINKING_AT_LINE_START = False
+            _write_thinking_text(char)
+            if char == "\n":
+                _THINKING_AT_LINE_START = True
+        if hasattr(sys.stderr, "flush"):
+            sys.stderr.flush()
 
 
 def _print_thinking_end() -> None:
+    global _THINKING_AT_LINE_START
     with LIVE_OUTPUT_LOCK:
-        print("", file=sys.stderr)
+        if not _THINKING_AT_LINE_START:
+            print("", file=sys.stderr)
+        _THINKING_AT_LINE_START = True
+
+
+def _write_thinking_text(text: str) -> None:
+    if sys.stderr.isatty():
+        sys.stderr.write(f"{STATUS_COLOR}{text}{RESET_COLOR}")
+        return
+    sys.stderr.write(text)

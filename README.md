@@ -32,6 +32,7 @@ The goal is to stay simple, predictable, and easy to debug.
 - Python 3.10+
 - Ollama running locally
 - Python package `ollama` installed through the project dependency
+- Python package `rich` installed through the project dependency for Markdown rendering of final model replies
 - A model that supports tool calling; for local image/audio inspection, a model that also advertises `vision` and/or `audio`
 
 Optional media dependencies:
@@ -93,6 +94,40 @@ Performance notes for Ollama:
 - Recommended CPU-only server env for this project: `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE=-1`, optionally `OLLAMA_MAX_LOADED_MODELS=1`.
 - Keep the tuned model parameters in `Modelfile.gemma4-e2b-fast-t6-c8k`: `num_ctx 8192`, `num_thread 6`, `num_batch 96`.
 - On laptops/NUCs, CPU governor or power profile can dominate token throughput; use `performance` when benchmarking.
+
+Check the model currently loaded by Ollama:
+
+```bash
+curl -s http://127.0.0.1:11434/api/ps | jq
+```
+
+Example CPU-only output:
+
+```json
+{
+  "models": [
+    {
+      "name": "gemma4:e2b-fast-t6-c8k",
+      "model": "gemma4:e2b-fast-t6-c8k",
+      "size": 7679746272,
+      "details": {
+        "format": "gguf",
+        "family": "gemma4",
+        "families": ["gemma4"],
+        "parameter_size": "5.1B",
+        "quantization_level": "Q4_K_M"
+      },
+      "expires_at": "2318-09-09T17:43:43.936212989+02:00",
+      "size_vram": 0,
+      "context_length": 8192
+    }
+  ]
+}
+```
+
+- `expires_at` far in the future means the model is effectively kept loaded.
+- `size_vram: 0` means the model is running on system RAM/CPU, not GPU VRAM.
+- `context_length` should match the tuned context window.
 
 Vision:
 
