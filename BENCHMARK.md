@@ -34,6 +34,7 @@ Target machine: CPU-only NUC-class system with 6 cores / 12 threads and 64 GB RA
 - Review prompts must not execute `read_file` with a missing path.
 - Long text prompts must stay bounded and avoid context exhaustion.
 - Vision prompts must complete without Ollama runner crashes.
+- Audio prompts may take about one model call per 5 second chunk plus one synthesis call; they must complete without raw long-audio runner crashes.
 - Local plus web prompts must not claim local evidence unless `read_file` actually ran.
 
 ## Current Model Profile
@@ -78,7 +79,9 @@ Heavy prompts:
 
 1. `review agent.py for vulnerabilities and security issues`
 2. `analyze the text promessi_sposi.txt and summarize it in 5 lines`
-3. `compare two images: cmp-blue.png and vision-test.png and tell me the differences`
+3. `compare two images: images/vision-test-1.png and images/vision-test-2.jpg and tell me the differences`
+4. `transcribe audio/voice-sample-16k-mono.wav`
+5. `summarize audio/voice-sample.wav in one sentence`
 
 ## Latest Observed Run
 
@@ -88,7 +91,8 @@ Recent runs with `gemma4:e2b-fast-t6-c8k` showed:
 - Simple chat: about `2-4s` depending on warm state.
 - Code review prompt: about `70-75s`.
 - Long text summary prompt: about `23-24s`.
-- Vision comparison prompt: about `43-45s`.
+- Vision comparison prompt: about `90-115s` when using per-image inspection plus synthesis on CPU-only hardware.
+- Audio summary/transcription over a 26s file: about `70-90s` with 5s chunks.
 - Generation speed: typically about `13-15 tk/s` on CPU-only hardware.
 
 Known limitation:

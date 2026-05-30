@@ -152,23 +152,26 @@ Rules:
 
 Minimum slash commands:
 
-- `/help`
-- `/tools`
-- `/skill show`
-- `/skill use <name-or-path>`
-- `/skill clear`
-- `/status`
 - `/compact`
+- `/debug`
+- `/exit`
+- `/help`
 - `/reset`
 - `/sessions clear`
-- `/exit`
+- `/skill clear | list | show | use <ref>`
+- `/status`
+- `/think on|off|auto`
+- `/thinking on|off`
+- `/tools`
 
 UX rules:
 
 - Unknown slash commands must never be sent to the model.
 - `/skill clear` restores the default skill.
+- `/debug` shows the last-turn debug summary; `/debug last` may remain as a hidden compatibility alias but should not be advertised.
+- `/status` shows current runtime state: model, capabilities, context usage, session, workdir, skill, tools, and thinking state.
 - `/compact` must use hybrid compaction with both message-count and context-budget thresholds.
-- The status line must show at least: model, context window with percentage, message count, input/output tokens, prefill/generation speed, and total turn time.
+- The per-turn status line must show at least: model, context window with percentage, token flow with prefill/generation speeds, message count, response source, and media preprocessing when applicable.
 - Very long user input may be visually collapsed as `[text N chars]` without changing the real content sent to the model.
 
 ## Compaction And Turn Policy
@@ -197,6 +200,7 @@ Turn policy:
 - Prefer the standard library when sufficient, except for the official Ollama client.
 - Avoid extra dependencies without clear value.
 - `Pillow` is allowed for bounded local image normalization in the vision path.
+- `ffmpeg`/`ffprobe` are required for bounded local audio normalization and chunking; audio prompts must fail clearly if they are missing.
 - Packaging must stay minimal.
 
 Minimum test coverage:
@@ -213,6 +217,7 @@ Minimum test coverage:
 - simple `bash` execution
 - context/model metadata parsing
 - vision image normalization
+- audio path detection and chunking
 - tool-result compaction pressure
 
 ## Evolution Rules

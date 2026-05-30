@@ -3,7 +3,7 @@
 Version: `0.1.0`
 
 Minimal interactive CLI that uses Ollama tool calling with a small set of local tools.
-The default runtime stays small: low prompt overhead, bounded loops, compact tool-oriented context, and an optional local vision path for explicit image files.
+The default runtime stays small: low prompt overhead, bounded loops, compact tool-oriented context, and optional local vision/audio paths for explicit local files.
 `orbit` is tuned primarily around `gemma4:e2b` and its local Ollama behavior; other models may work, but comparable reliability is not guaranteed.
 
 Available local tools:
@@ -32,8 +32,18 @@ The goal is to stay simple, predictable, and easy to debug.
 - Python 3.10+
 - Ollama running locally
 - Python package `ollama` installed through the project dependency
-- Python package `Pillow` installed through the project dependency for image normalization on the vision path
-- A model that supports tool calling; for local image inspection, a model that also advertises `vision`
+- A model that supports tool calling; for local image/audio inspection, a model that also advertises `vision` and/or `audio`
+
+Optional media dependencies:
+
+- Vision requires the Python package `Pillow`, installed through the project dependency.
+- Audio requires the system binaries `ffmpeg` and `ffprobe`; without them, audio prompts fail with a clear error instead of sending unstable raw audio to Ollama.
+
+Install audio dependencies on Debian/Ubuntu/Linux Mint:
+
+```bash
+sudo apt install ffmpeg
+```
 
 ## Install
 
@@ -88,13 +98,28 @@ Vision:
 
 - `orbit` can inspect explicit local image paths in prompts such as:
   - `describe the image workdir/cat.png`
-  - `compare two images: cmp-blue.png and cmp-red.png and tell me the differences`
+  - `compare two images: images/vision-test-1.png and images/vision-test-2.jpg and tell me the differences`
 - supported formats: `png`, `jpg`, `jpeg`, `webp`, `bmp`, `gif`
 - images are normalized before being sent to Ollama:
   - converted to `RGB`
   - alpha flattened
   - large images resized conservatively
 - this keeps the vision path bounded and avoids known runner instability on some raw image inputs
+
+Audio:
+
+- `orbit` can inspect explicit local audio paths in prompts such as:
+  - `transcribe audio/voice-sample.wav`
+  - `summarize audio/voice-sample.wav in one sentence`
+- requires `ffmpeg` and `ffprobe` on `PATH`
+- supported source formats: `wav`, `mp3`, `m4a`, `flac`, `ogg`
+- audio is normalized with `ffmpeg` before being sent to Ollama:
+  - WAV PCM 16-bit
+  - mono
+  - 16 kHz
+  - 5 second chunks
+- this keeps the audio path bounded; long single audio attachments are avoided because they can crash or timeout the local runner
+- if `ffmpeg` or `ffprobe` is missing, Orbit does not attempt audio inspection
 
 Model selection:
 
@@ -117,10 +142,8 @@ Session storage:
 - `/help`
 - `/tools`
 - `/status`
-- `/skill list`
-- `/skill show`
-- `/skill use <name-or-path>`
-- `/skill clear`
+- `/debug`
+- `/skill clear | list | show | use <name-or-path>`
 - `/think on|off|auto`
 - `/thinking on|off`
 - `/compact`

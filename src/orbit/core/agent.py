@@ -19,6 +19,12 @@ from .client import OllamaClient
 from .client import is_thinking_unsupported_error
 from .context_budget import BudgetPressure, evaluate_budget_pressure
 from .guardrail_factual import allows_fetch_url_query
+from .guardrail_audio import (
+    AudioChunk,
+    ExplicitAudioRequest,
+    prepare_audio_chunks,
+    resolve_explicit_audio_requests,
+)
 from .model_first_guidance import MODEL_FIRST_INTENT_GUIDANCE, model_first_post_tool_prompt
 from .model_payloads import (
     ModelPayloadCompactor,
@@ -178,6 +184,16 @@ VISION_SYSTEM_PROMPT = """You are the local assistant running inside the Orbit C
 Analyze the attached local image from the user's workspace and answer directly from visible evidence only.
 If the user asks to read text from the image, transcribe only visible text.
 If the image does not contain enough evidence, say so briefly.
+When multiple images are attached, treat them as distinct images in the same order as their labels.
+When comparing images, mention major content differences, including visible text if present.
+Keep the answer concise.
+"""
+
+AUDIO_SYSTEM_PROMPT = """You are the local assistant running inside the Orbit CLI.
+Analyze attached local audio chunks from the user's workspace.
+Transcribe speech faithfully when possible.
+If a chunk is unclear, say unclear for that chunk.
+Do not claim that no audio was provided when an audio attachment is present.
 Keep the answer concise.
 """
 
@@ -299,6 +315,14 @@ class AgentLoop:
         route = route_tool_categories(user_input, skill=self.skill) if self.tools_enabled else None
         self._emit_timing(on_event, "route", route_started_at, route.intent if route is not None else "chat-only")
         pre_model_started_at = time.monotonic_ns()
+        explicit_audio_result = self._run_explicit_audio_request(
+            user_input=user_input,
+            metrics=metrics,
+            on_event=on_event,
+        )
+        if explicit_audio_result is not None:
+            metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+            return self._result(explicit_audio_result, metrics)
         explicit_image_result = self._run_explicit_image_request(
             user_input=user_input,
             metrics=metrics,
@@ -2007,6 +2031,102 @@ class AgentLoop:
                 return response
             raise
 
+    def _run_explicit_audio_request(
+        self,
+        *,
+        user_input: str,
+        metrics: TurnMetrics,
+        on_event: EventSink | None,
+    ) -> str | None:
+        try:
+            requests = resolve_explicit_audio_requests(user_input=user_input, workdir=self.registry.workdir)
+        except ToolError as exc:
+            return str(exc)
+        if not requests:
+            return None
+        if not self._supports_audio():
+            return "The current model does not advertise audio support for local audio inspection."
+        if len(requests) > 1:
+            return "Audio inspection currently supports one local audio file per request."
+        request = requests[0]
+        try:
+            chunks = prepare_audio_chunks(request.full_path)
+        except ToolError as exc:
+            return str(exc)
+        return self._run_audio_chunks_request(
+            user_input=user_input,
+            label=request.path,
+            chunks=chunks,
+            metrics=metrics,
+            on_event=on_event,
+        )
+
+    def _run_audio_chunks_request(
+        self,
+        *,
+        user_input: str,
+        label: str,
+        chunks: list[AudioChunk],
+        metrics: TurnMetrics,
+        on_event: EventSink | None,
+    ) -> str:
+        transcripts: list[str] = []
+        for chunk in chunks:
+            request_messages = [
+                {"role": "system", "content": AUDIO_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Transcribe audio chunk {chunk.index} from {label}. "
+                        f"Time range: {chunk.start_seconds:.1f}s-{chunk.start_seconds + chunk.duration_seconds:.1f}s. "
+                        "Return only the spoken words if clear; otherwise return unclear."
+                    ),
+                    "images": [chunk.payload_base64],
+                },
+            ]
+            try:
+                response = self._perform_vision_chat_with_retry(
+                    loop=chunk.index,
+                    request_messages=request_messages,
+                    on_event=on_event,
+                )
+            except Exception as exc:
+                return str(exc)
+            self._update_metrics(metrics, response)
+            message = response.get("message", {})
+            content = str(message.get("content", "")).strip() or "unclear"
+            transcripts.append(f"[{chunk.start_seconds:.1f}-{chunk.start_seconds + chunk.duration_seconds:.1f}s] {content}")
+        synthesis_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Answer the user's audio request using only these chunk transcripts. "
+                    "If the user asked for transcription, provide a cleaned transcript. "
+                    "If the user asked for a summary, summarize the transcript. "
+                    "Do not claim that audio was unavailable."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"{user_input}\n\nAudio chunk transcripts for {label}:\n" + "\n".join(transcripts),
+            },
+        ]
+        try:
+            response = self._perform_vision_chat_with_retry(
+                loop=len(chunks) + 1,
+                request_messages=synthesis_messages,
+                on_event=on_event,
+            )
+        except Exception as exc:
+            return str(exc)
+        self._update_metrics(metrics, response)
+        message = response.get("message", {})
+        content = str(message.get("content", "")).strip()
+        if not content:
+            content = "\n".join(transcripts)
+        self.messages.append({"role": "assistant", "content": content})
+        return content
+
     def _run_explicit_image_request(
         self,
         *,
@@ -2031,14 +2151,19 @@ class AgentLoop:
                 labels.append(request.path)
         except ToolError as exc:
             return str(exc)
-        request_messages = [
-            {"role": "system", "content": VISION_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"{user_input}\n\nAttached session/local images: {', '.join(labels)}",
-                "images": encoded_images,
-            },
-        ]
+        if len(encoded_images) > 1:
+            return self._run_multi_image_request(
+                user_input=user_input,
+                labels=labels,
+                encoded_images=encoded_images,
+                metrics=metrics,
+                on_event=on_event,
+            )
+        request_messages = self._build_vision_messages(
+            user_input=user_input,
+            labels=labels,
+            encoded_images=encoded_images,
+        )
         for attempt in range(2):
             if on_event is not None:
                 on_event(ModelRequestEvent(loop=attempt + 1))
@@ -2065,6 +2190,137 @@ class AgentLoop:
                     }
                 )
         return "The model returned an empty reply for the requested image."
+
+    def _run_multi_image_request(
+        self,
+        *,
+        user_input: str,
+        labels: list[str],
+        encoded_images: list[str],
+        metrics: TurnMetrics,
+        on_event: EventSink | None,
+    ) -> str:
+        descriptions: list[str] = []
+        for index, (label, encoded) in enumerate(zip(labels, encoded_images, strict=False), start=1):
+            request_messages = [
+                {"role": "system", "content": VISION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Inspect Image {index}: {label}. "
+                        "Return exactly two short lines: "
+                        "Visible text: transcribe any readable text, or say none/unclear. "
+                        "Subject: describe the main visible subject."
+                    ),
+                    "images": [encoded],
+                },
+            ]
+            try:
+                response = self._perform_vision_chat_with_retry(
+                    loop=index,
+                    request_messages=request_messages,
+                    on_event=on_event,
+                )
+            except Exception as exc:
+                return str(exc)
+            self._update_metrics(metrics, response)
+            message = response.get("message", {})
+            content = str(message.get("content", "")).strip()
+            if not content:
+                content = "No description returned."
+            descriptions.append(f"Image {index} ({label}): {content}")
+        synthesis_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Answer the user's multi-image request using only these per-image descriptions. "
+                    "Do not claim that images were unavailable. Keep the answer concise."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"{user_input}\n\nPer-image evidence:\n" + "\n".join(descriptions),
+            },
+        ]
+        try:
+            response = self._perform_vision_chat_with_retry(
+                loop=len(descriptions) + 1,
+                request_messages=synthesis_messages,
+                on_event=on_event,
+            )
+        except Exception as exc:
+            return str(exc)
+        self._update_metrics(metrics, response)
+        message = response.get("message", {})
+        content = str(message.get("content", "")).strip()
+        if not content:
+            content = "\n".join(descriptions)
+        self.messages.append({"role": "assistant", "content": content})
+        return content
+
+    def _perform_vision_chat_with_retry(
+        self,
+        *,
+        loop: int,
+        request_messages: list[dict[str, Any]],
+        on_event: EventSink | None,
+    ) -> dict[str, Any]:
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                return self._perform_chat_request(
+                    loop=loop,
+                    request_messages=request_messages,
+                    request_tools=[],
+                    on_event=on_event,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1.0)
+                    continue
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("vision request failed")
+
+    @staticmethod
+    def _build_vision_messages(
+        *,
+        user_input: str,
+        labels: list[str],
+        encoded_images: list[str],
+    ) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = [{"role": "system", "content": VISION_SYSTEM_PROMPT}]
+        if len(encoded_images) <= 1:
+            label_text = labels[0] if labels else "image"
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"{user_input}\n\nAttached image: Image 1 = {label_text}",
+                    "images": encoded_images,
+                }
+            )
+            return messages
+        for index, (label, encoded) in enumerate(zip(labels, encoded_images, strict=False), start=1):
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Image {index}: {label}",
+                    "images": [encoded],
+                }
+            )
+        mapping = ", ".join(f"Image {index} = {label}" for index, label in enumerate(labels, start=1))
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"{user_input}\n\n"
+                    f"Attached images are distinct and ordered as: {mapping}. "
+                    "Compare or describe them by these image numbers and file names."
+                ),
+            }
+        )
+        return messages
 
     def _resolve_image_requests(
         self,
@@ -2154,6 +2410,11 @@ class AgentLoop:
         if self._model_metadata is None:
             self._model_metadata = self.client.inspect_model()
         return "vision" in self._model_metadata.capabilities
+
+    def _supports_audio(self) -> bool:
+        if self._model_metadata is None:
+            self._model_metadata = self.client.inspect_model()
+        return "audio" in self._model_metadata.capabilities
 
     def _skill_prompt_content(self) -> str:
         if self.skill is None:

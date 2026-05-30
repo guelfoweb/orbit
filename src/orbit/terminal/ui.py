@@ -31,15 +31,12 @@ LIVE_OUTPUT_LOCK = threading.Lock()
 def print_help() -> None:
     print("Commands:")
     print("  /compact")
-    print("  /debug last")
+    print("  /debug")
     print("  /exit")
     print("  /help")
     print("  /reset")
     print("  /sessions clear")
-    print("  /skill clear (restore default)")
-    print("  /skill list")
-    print("  /skill show")
-    print("  /skill use <ref>")
+    print("  /skill clear | list | show | use <ref>")
     print("  /status")
     print("  /think on|off|auto")
     print("  /thinking on|off")
@@ -119,6 +116,27 @@ def format_skill(agent: AgentLoop) -> str:
     if agent.skill is None:
         return "skill: -"
     return f"skill: {agent.skill.name} | path: {agent.skill.path}"
+
+
+def format_runtime_status(runtime) -> str:
+    status = runtime.agent.current_status()
+    metadata = getattr(runtime, "model_metadata", None)
+    capabilities = getattr(metadata, "capabilities", ()) or ()
+    capability_text = ", ".join(capabilities) if capabilities else "-"
+    tools_state = "enabled" if getattr(runtime, "tools_enabled", False) else "disabled"
+    skill = runtime.agent.skill.name if runtime.agent.skill is not None else "-"
+    lines = [
+        f"model: {status.active_model}",
+        f"capabilities: {capability_text}",
+        f"ctx: {status.context_window or 'unknown'} | used: ~{status.estimated_prompt_tokens}"
+        + (f" ({status.usage_ratio * 100:.1f}%)" if status.usage_ratio is not None else ""),
+        f"session: {runtime.session_name} | msg: {status.session_turns}",
+        f"workdir: {runtime.config.workdir}",
+        f"skill: {skill}",
+        f"tools: {tools_state}",
+        f"think: {status.think_state} | show-thinking: {getattr(status, 'show_thinking_state', 'off')}",
+    ]
+    return "\n".join(lines)
 
 
 def print_live_event(event) -> None:

@@ -10,7 +10,7 @@
 6. `tell me how many files exist in the workspace and what the newest file is.`
 7. `review agent.py for vulnerabilities and security issues`
 8. `summarize the article in italian at this link: https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html explain the central thesis and key messages`
-9. `compare two images: cmp-blue.png and vision-test.png and tell me the differences`
+9. `compare two images: images/vision-test-1.png and images/vision-test-2.jpg and tell me the differences`
 10. `search online for information about Dante Alighieri`
 11. `Does this page mention "transumanesimo"? https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html`
 12. `Does this page talk about human dignity and freedom in the age of artificial intelligence? https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html`
@@ -18,10 +18,14 @@
 ## Strong Prompts
 
 1. `Inspect the workspace, identify the three most relevant files for understanding this project, read them, and give me a concise technical assessment with one concrete risk and one improvement suggestion.`
-2. `Compare cmp-blue.png, cmp-red.png, and vision-test.png. If any image is missing, say exactly which one and continue with the others. Then explain the differences in one short paragraph.`
+2. `Compare images/vision-test-1.png and images/vision-test-2.jpg. Mention subject differences and any visible text.`
 3. `Read promessi_sposi.txt, summarize it in exactly 4 lines, and make sure the summary is faithful to the text without inventing any details.`
 4. `Search the workspace for anything that looks like a security issue, then explain whether the issue is in code, configuration, or documentation. If you cannot prove it, say so explicitly.`
 5. `Answer this only after checking the available tools and the current workspace state: what is the newest file in the workspace, what is its modified time, and how did you determine it?`
+6. `What text is visible in images/vision-test-2.jpg? If text is unclear, say unclear. Also say what animal is shown.`
+7. `Compare two images: images/vision-test-1.png and images/vision-test-2.jpg. Mention subject differences and any visible text.`
+8. `transcribe audio/voice-sample-16k-mono.wav`
+9. `summarize audio/voice-sample.wav in one sentence`
 
 ## Skill Prompts
 

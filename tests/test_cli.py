@@ -19,6 +19,7 @@ from orbit.terminal.cli import (
     _rendered_input_line_count,
     _rewrite_long_input_line,
     _should_print_turn_separator,
+    _turn_preprocessing_label,
     _turn_separator,
 )
 from orbit.session import SessionSummary
@@ -27,6 +28,7 @@ from orbit.terminal.cli import _choose_startup_session, _read_stdin_prompt, main
 from orbit.terminal import history as history_module
 from orbit.terminal.ui import (
     format_input_prompt,
+    format_runtime_status,
     format_status,
     format_user_prompt,
     make_live_event_printer,
@@ -497,6 +499,9 @@ class InterruptTrackerTests(unittest.TestCase):
             show_thinking_state="off",
         )
         self.assertTrue(_format_turn_status(status, source="local").endswith("| msg: 2 | src: local"))
+        self.assertTrue(
+            _format_turn_status(status, source="model", prep="audio").endswith("| msg: 2 | src: model | prep: audio")
+        )
 
     def test_format_turn_status_keeps_source_badge_inside_tty_color(self) -> None:
         status = TurnStatus(
@@ -518,9 +523,55 @@ class InterruptTrackerTests(unittest.TestCase):
             show_thinking_state="off",
         )
         with patch("orbit.terminal.ui.sys.stdout.isatty", return_value=True):
-            rendered = _format_turn_status(status, source="model")
-        self.assertTrue(rendered.endswith("| msg: 2 | src: model\x1b[0m"))
+            rendered = _format_turn_status(status, source="model", prep="vision")
+        self.assertTrue(rendered.endswith("| msg: 2 | src: model | prep: vision\x1b[0m"))
         self.assertNotIn("\x1b[0m | msg:", rendered)
+
+    def test_turn_preprocessing_label_detects_media_paths(self) -> None:
+        self.assertEqual(_turn_preprocessing_label("transcribe audio/voice.wav"), "audio")
+        self.assertEqual(_turn_preprocessing_label("describe images/cat.png"), "vision")
+        self.assertIsNone(_turn_preprocessing_label("hello there"))
+
+    def test_format_runtime_status_includes_capabilities_session_and_workdir(self) -> None:
+        status = TurnStatus(
+            active_model="demo",
+            context_window=8192,
+            session_messages=3,
+            session_turns=2,
+            prompt_tokens=None,
+            estimated_prompt_tokens=1234,
+            output_tokens=None,
+            prefill_tps=None,
+            decode_tps=None,
+            model_elapsed_sec=None,
+            wall_elapsed_sec=None,
+            tool_elapsed_sec=None,
+            usage_ratio=0.15,
+            warning=None,
+            think_state="off",
+            show_thinking_state="off",
+        )
+        runtime = type(
+            "Runtime",
+            (),
+            {
+                "agent": type("Agent", (), {"current_status": lambda self: status, "skill": type("Skill", (), {"name": "orbit-default"})()})(),
+                "model_metadata": type("Meta", (), {"capabilities": ("completion", "tools", "vision", "audio")})(),
+                "tools_enabled": True,
+                "session_name": "demo-session",
+                "config": type("Config", (), {"workdir": Path("/tmp/project")})(),
+            },
+        )()
+
+        rendered = format_runtime_status(runtime)
+
+        self.assertIn("model: demo", rendered)
+        self.assertIn("capabilities: completion, tools, vision, audio", rendered)
+        self.assertIn("ctx: 8192 | used: ~1234 (15.0%)", rendered)
+        self.assertIn("session: demo-session | msg: 2", rendered)
+        self.assertIn("workdir: /tmp/project", rendered)
+        self.assertIn("skill: orbit-default", rendered)
+        self.assertIn("tools: enabled", rendered)
 
     def test_turn_separator_only_for_long_tty_output(self) -> None:
         with patch("sys.stdout.isatty", return_value=False):
@@ -649,6 +700,51 @@ class InterruptTrackerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
         self.assertIn("cleared 2 session(s) for /tmp/project", printed)
+
+    def test_main_accepts_debug_alias_without_sending_to_model(self) -> None:
+        runtime = type(
+            "Runtime",
+            (),
+            {
+                "startup_notice": None,
+                "startup_summary": ("first", "second"),
+                "config": type("Config", (), {"workdir": Path("/tmp/project")})(),
+                "session_name": "project-12345678",
+                "agent": type("Agent", (), {"current_status": lambda self: type(
+                    "Status",
+                    (),
+                    {
+                        "active_model": "demo",
+                        "context_window": 8192,
+                        "session_messages": 1,
+                        "session_turns": 1,
+                        "prompt_tokens": 10,
+                        "estimated_prompt_tokens": 10,
+                        "output_tokens": 2,
+                        "prefill_tps": None,
+                        "decode_tps": None,
+                        "model_elapsed_sec": None,
+                        "wall_elapsed_sec": None,
+                        "tool_elapsed_sec": None,
+                        "usage_ratio": None,
+                        "warning": None,
+                        "think_state": "no",
+                    },
+                )()})(),
+                "run_turn": lambda self, prompt, on_event=None: (_ for _ in ()).throw(AssertionError("run_turn should not be called")),
+            },
+        )()
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("orbit.terminal.cli.list_sessions_for_workdir", return_value=[]),
+            patch("orbit.terminal.cli.OrbitRuntime.from_config", return_value=runtime),
+            patch("builtins.input", side_effect=["/debug", "/exit"]),
+            patch("builtins.print") as mock_print,
+        ):
+            exit_code = main(["--model", "demo"])
+        self.assertEqual(exit_code, 0)
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+        self.assertIn("No turn debug data yet.", printed)
 
     def test_main_reports_effective_thinking_state_after_think_command(self) -> None:
         runtime = type(

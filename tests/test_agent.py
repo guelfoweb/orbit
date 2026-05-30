@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import struct
 import sys
@@ -79,6 +80,16 @@ class VisionFakeClient(FakeClient):
         )
 
 
+class AudioFakeClient(FakeClient):
+    def inspect_model(self):
+        return ModelMetadata(
+            active_model="gemma4:e2b-fast-t6-c8k",
+            context_window=8192,
+            capabilities=("completion", "tools", "vision", "audio"),
+            tools_supported=True,
+        )
+
+
 class FakeRegistry:
     def __init__(self):
         self.called = []
@@ -140,6 +151,20 @@ def _write_png(path: Path, r: int, g: int, b: int) -> None:
     raw = bytes([0, r, g, b])
     payload = signature + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
     path.write_bytes(payload)
+
+
+def _write_wav(path: Path, *, seconds: float, rate: int = 16000) -> None:
+    import wave
+
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(rate)
+        frames = bytearray()
+        for i in range(int(rate * seconds)):
+            sample = int(0.2 * 32767 * math.sin(2 * math.pi * 440 * i / rate))
+            frames += struct.pack("<h", sample)
+        audio.writeframes(frames)
 
 
 class AgentLoopTests(unittest.TestCase):
@@ -5442,6 +5467,78 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(client.calls[0]["tools"], [])
         self.assertEqual(client.calls[0]["messages"][1]["images"][0][:8], "iVBORw0K")
 
+    def test_visible_text_image_request_uses_vision_without_reading_binary_file(self) -> None:
+        client = VisionFakeClient(
+            [
+                {
+                    "prompt_eval_count": 24,
+                    "prompt_eval_duration": 120_000_000,
+                    "eval_count": 8,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 240_000_000,
+                    "message": {"content": "Visible text is unclear. The image shows a dog."},
+                }
+            ]
+        )
+        registry = FakeRegistry()
+        _write_png(registry.workdir / "dog.png", 128, 128, 128)
+
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("What text is visible in dog.png? Also say what animal is shown.")
+
+        self.assertIn("dog", result.content.lower())
+        self.assertEqual(registry.called, [])
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls[0]["tools"], [])
+        self.assertIn("Attached image: Image 1 = dog.png", client.calls[0]["messages"][1]["content"])
+
+    def test_explicit_audio_request_chunks_and_synthesizes_without_tools(self) -> None:
+        client = AudioFakeClient(
+            [
+                {
+                    "prompt_eval_count": 24,
+                    "prompt_eval_duration": 120_000_000,
+                    "eval_count": 8,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 240_000_000,
+                    "message": {"content": "hello world"},
+                },
+                {
+                    "prompt_eval_count": 24,
+                    "prompt_eval_duration": 120_000_000,
+                    "eval_count": 8,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 240_000_000,
+                    "message": {"content": "Hello world."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+        _write_wav(registry.workdir / "voice.wav", seconds=1.0)
+
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("transcribe voice.wav")
+
+        self.assertEqual(result.content, "Hello world.")
+        self.assertEqual(registry.called, [])
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0]["tools"], [])
+        self.assertIn("Transcribe audio chunk 1 from voice.wav", client.calls[0]["messages"][1]["content"])
+        self.assertEqual(len(client.calls[0]["messages"][1]["images"]), 1)
+        self.assertIn("Audio chunk transcripts for voice.wav", client.calls[1]["messages"][1]["content"])
+
+    def test_explicit_audio_request_without_audio_support_returns_readable_error(self) -> None:
+        client = VisionFakeClient([])
+        registry = FakeRegistry()
+        _write_wav(registry.workdir / "voice.wav", seconds=1.0)
+
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("transcribe voice.wav")
+
+        self.assertIn("does not advertise audio support", result.content.lower())
+        self.assertEqual(registry.called, [])
+        self.assertEqual(client.calls, [])
+
     def test_explicit_image_request_in_italian_uses_vision_without_tools(self) -> None:
         client = VisionFakeClient(
             [
@@ -5475,8 +5572,24 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_count": 14,
                     "eval_duration": 90_000_000,
                     "total_duration": 260_000_000,
+                    "message": {"content": "Image 1 is blue."},
+                },
+                {
+                    "prompt_eval_count": 28,
+                    "prompt_eval_duration": 120_000_000,
+                    "eval_count": 14,
+                    "eval_duration": 90_000_000,
+                    "total_duration": 260_000_000,
+                    "message": {"content": "Image 2 is red."},
+                },
+                {
+                    "prompt_eval_count": 28,
+                    "prompt_eval_duration": 120_000_000,
+                    "eval_count": 14,
+                    "eval_duration": 90_000_000,
+                    "total_duration": 260_000_000,
                     "message": {"content": "The first image is blue, while the second image is red."},
-                }
+                },
             ]
         )
         registry = FakeRegistry()
@@ -5488,8 +5601,13 @@ class AgentLoopTests(unittest.TestCase):
 
         self.assertIn("first image is blue", result.content.lower())
         self.assertEqual(registry.called, [])
-        self.assertEqual(len(client.calls), 1)
-        self.assertEqual(len(client.calls[0]["messages"][1]["images"]), 2)
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(client.calls[0]["messages"][1]["images"]), 1)
+        self.assertEqual(len(client.calls[1]["messages"][1]["images"]), 1)
+        self.assertIn("Inspect Image 1: cmp-blue.png", client.calls[0]["messages"][1]["content"])
+        self.assertIn("Inspect Image 2: cmp-red.png", client.calls[1]["messages"][1]["content"])
+        self.assertIn("Image 1 (cmp-blue.png): Image 1 is blue.", client.calls[2]["messages"][1]["content"])
+        self.assertIn("Image 2 (cmp-red.png): Image 2 is red.", client.calls[2]["messages"][1]["content"])
 
     def test_compare_two_explicit_images_in_italian_attaches_both(self) -> None:
         client = VisionFakeClient(
@@ -5500,8 +5618,24 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_count": 14,
                     "eval_duration": 90_000_000,
                     "total_duration": 260_000_000,
+                    "message": {"content": "Image 1 è blu."},
+                },
+                {
+                    "prompt_eval_count": 28,
+                    "prompt_eval_duration": 120_000_000,
+                    "eval_count": 14,
+                    "eval_duration": 90_000_000,
+                    "total_duration": 260_000_000,
+                    "message": {"content": "Image 2 è rossa."},
+                },
+                {
+                    "prompt_eval_count": 28,
+                    "prompt_eval_duration": 120_000_000,
+                    "eval_count": 14,
+                    "eval_duration": 90_000_000,
+                    "total_duration": 260_000_000,
                     "message": {"content": "La prima immagine è blu, mentre la seconda è rossa."},
-                }
+                },
             ]
         )
         registry = FakeRegistry()
@@ -5513,8 +5647,13 @@ class AgentLoopTests(unittest.TestCase):
 
         self.assertIn("prima immagine", result.content.lower())
         self.assertEqual(registry.called, [])
-        self.assertEqual(len(client.calls), 1)
-        self.assertEqual(len(client.calls[0]["messages"][1]["images"]), 2)
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(client.calls[0]["messages"][1]["images"]), 1)
+        self.assertEqual(len(client.calls[1]["messages"][1]["images"]), 1)
+        self.assertIn("Inspect Image 1: blu.png", client.calls[0]["messages"][1]["content"])
+        self.assertIn("Inspect Image 2: rosso.png", client.calls[1]["messages"][1]["content"])
+        self.assertIn("Image 1 (blu.png): Image 1 è blu.", client.calls[2]["messages"][1]["content"])
+        self.assertIn("Image 2 (rosso.png): Image 2 è rossa.", client.calls[2]["messages"][1]["content"])
 
     def test_explicit_image_request_without_vision_support_returns_readable_error(self) -> None:
         client = FakeClient([])

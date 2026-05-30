@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import math
+import re
 import shutil
 import sys
 import threading
@@ -20,6 +21,7 @@ from .ui import (
     format_input_prompt,
     format_user_prompt,
     format_skill,
+    format_runtime_status,
     format_startup_line,
     format_status,
     make_live_event_printer,
@@ -35,6 +37,8 @@ TIMER_RESET = "\x1b[0m"
 LONG_INPUT_PREVIEW_CHARS = 512
 LONG_INPUT_MULTILINE_CHARS = 256
 LONG_INPUT_PREVIEW_PREFIX_CHARS = 50
+IMAGE_PATH_RE = re.compile(r"[A-Za-z0-9_./\\-]+\.(?:png|jpe?g|webp|bmp|gif)\b", re.IGNORECASE)
+AUDIO_PATH_RE = re.compile(r"[A-Za-z0-9_./\\-]+\.(?:wav|mp3|m4a|flac|ogg)\b", re.IGNORECASE)
 
 
 @dataclass
@@ -187,11 +191,13 @@ def _run_turn_with_timer(runtime, prompt: str, on_event=None):
         timer.stop()
 
 
-def _format_turn_status(status: object, source: str | None = None) -> str:
+def _format_turn_status(status: object, source: str | None = None, prep: str | None = None) -> str:
     text = format_status(status)
     suffix_parts = [f"msg: {getattr(status, 'session_turns', '-')}"]
     if source:
         suffix_parts.append(f"src: {source}")
+    if prep:
+        suffix_parts.append(f"prep: {prep}")
     if suffix_parts:
         suffix = " | ".join(suffix_parts)
         reset = "\x1b[0m"
@@ -201,11 +207,11 @@ def _format_turn_status(status: object, source: str | None = None) -> str:
     return text
 
 
-def _print_turn_output(content: str, status: object, source: str | None = None) -> None:
+def _print_turn_output(content: str, status: object, source: str | None = None, prep: str | None = None) -> None:
     print(content)
     if _should_print_turn_separator(content):
         print(_turn_separator())
-    print(_format_turn_status(status, source=source))
+    print(_format_turn_status(status, source=source, prep=prep))
 
 
 def _should_print_turn_separator(content: str) -> bool:
@@ -219,6 +225,14 @@ def _should_print_turn_separator(content: str) -> bool:
 def _turn_separator() -> str:
     width = max(20, min(80, shutil.get_terminal_size(fallback=(80, 24)).columns))
     return "-" * width
+
+
+def _turn_preprocessing_label(prompt: str) -> str | None:
+    if AUDIO_PATH_RE.search(prompt):
+        return "audio"
+    if IMAGE_PATH_RE.search(prompt):
+        return "vision"
+    return None
 
 
 def _input_preview(text: str) -> str | None:
@@ -303,7 +317,12 @@ def main(argv: list[str] | None = None) -> int:
                 event_printer(event)
 
             result = _run_turn_with_timer(runtime, config.prompt, on_event=record_and_print_event)
-            _print_turn_output(result.content, result.status, source=debug_recorder.response_source(result.status))
+            _print_turn_output(
+                result.content,
+                result.status,
+                source=debug_recorder.response_source(result.status),
+                prep=_turn_preprocessing_label(config.prompt),
+            )
             return 0
         except OllamaError as exc:
             print(f"error: {exc}")
@@ -361,11 +380,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if user_input == "/status":
             try:
-                print(format_status(runtime.agent.current_status()))
+                print(format_runtime_status(runtime))
             except OllamaError as exc:
                 print(f"error: {exc}")
             continue
-        if user_input == "/debug last":
+        if user_input in {"/debug", "/debug last"}:
             print(debug_recorder.format())
             continue
         if user_input == "/skill show":
@@ -424,9 +443,10 @@ def main(argv: list[str] | None = None) -> int:
             debug_recorder.reset()
             result = _run_turn_with_timer(runtime, user_input, on_event=record_and_print_event)
             source = debug_recorder.response_source(result.status)
-            debug_recorder.status_text = _format_turn_status(result.status, source=source)
+            prep = _turn_preprocessing_label(user_input)
+            debug_recorder.status_text = _format_turn_status(result.status, source=source, prep=prep)
             interrupts.reset()
-            _print_turn_output(result.content, result.status, source=source)
+            _print_turn_output(result.content, result.status, source=source, prep=prep)
         except KeyboardInterrupt:
             print()
             if interrupts.register():

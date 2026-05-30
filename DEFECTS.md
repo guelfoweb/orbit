@@ -497,6 +497,18 @@ Rules:
 - Fix: distinguish evidence-only requests from static/reverse analysis, seed bounded manifest/container/script/string inspection, and locally summarize bounded reverse-inspection evidence unless a case/report update is explicitly requested.
 - Example: `Perform static reverse engineering for the samples in the malware directory`.
 
+### 81. Multi-image comparison ignored later images or text
+- Symptom: image comparisons could describe only the first image or miss text visible in another image.
+- Cause: passing multiple images in one Ollama message was unstable for the target model/runtime.
+- Fix: inspect each image separately, request visible text and subject, then synthesize the comparison from per-image evidence.
+- Example: `compare two images: images/vision-test-1.png and images/vision-test-2.jpg`.
+
+### 82. Audio prompts tried unsupported raw audio paths
+- Symptom: long audio attachments crashed or timed out the runner, while `audio`/`audios` fields were ignored.
+- Cause: Ollama/Gemma4 handled short WAV audio only through the attachment path and was unstable with long raw audio.
+- Fix: require `ffmpeg`/`ffprobe`, normalize to WAV PCM 16 kHz mono, split into 5s chunks, transcribe chunks separately, then synthesize.
+- Example: `transcribe audio/voice-sample-16k-mono.wav`.
+
 ## Recurring Guidelines
 
 - Keep the base prompt short.
