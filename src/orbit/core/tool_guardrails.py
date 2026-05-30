@@ -26,6 +26,11 @@ from .guardrail_documents import (
     seed_explicit_text_read_impl,
     summarize_text_content as _summarize_text_content,
 )
+from .guardrail_patterns import (
+    local_markdown_checkbox_extraction_result as _local_markdown_checkbox_extraction_result,
+    markdown_checkbox_redundant_read_prompt as _markdown_checkbox_redundant_read_prompt,
+    seed_markdown_checkbox_extraction as _seed_markdown_checkbox_extraction,
+)
 from .binary_guardrails import (
     ARCHIVE_CONTAINER_EXTENSIONS,
     binary_analysis_guard_prompt as _binary_analysis_guard_prompt,
@@ -557,6 +562,56 @@ def seed_codebase_listing(
         policy_state=policy_state,
         on_event=on_event,
         run_guardrail_tool=_run_guardrail_tool,
+    )
+
+
+def seed_markdown_checkbox_extraction(
+    *,
+    skill: Any,
+    user_input: str,
+    route: ToolRoute,
+    registry: Any,
+    messages: list[dict[str, Any]],
+    metrics: TurnMetrics,
+    policy_state: TurnPolicyState,
+    on_event: Any,
+) -> None:
+    _seed_markdown_checkbox_extraction(
+        skill=skill,
+        user_input=user_input,
+        route=route,
+        registry=registry,
+        messages=messages,
+        metrics=metrics,
+        policy_state=policy_state,
+        on_event=on_event,
+        run_guardrail_tool=_run_guardrail_tool,
+    )
+
+
+def local_markdown_checkbox_extraction_result(
+    *,
+    skill: Any,
+    user_input: str,
+    messages: list[dict[str, Any]],
+) -> str | None:
+    return _local_markdown_checkbox_extraction_result(skill=skill, user_input=user_input, messages=messages)
+
+
+def markdown_checkbox_redundant_read_prompt(
+    *,
+    skill: Any,
+    user_input: str,
+    name: str,
+    arguments: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> str | None:
+    return _markdown_checkbox_redundant_read_prompt(
+        skill=skill,
+        user_input=user_input,
+        name=name,
+        arguments=arguments,
+        messages=messages,
     )
 
 

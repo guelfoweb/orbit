@@ -507,3 +507,86 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(second["text"], "ABCDEFGHIJ1234567890" * 10)
         self.assertEqual(second["start_char"], 200)
         self.assertEqual(second["end_char"], 400)
+
+    def test_fetch_url_literal_query_returns_bounded_matches(self) -> None:
+        class DummyResponse:
+            status = 200
+            headers = type(
+                "Headers",
+                (),
+                {
+                    "get_content_type": lambda self: "text/html",
+                    "get_content_charset": lambda self: "utf-8",
+                },
+            )()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"<html><title>Doc</title><body><p>Alpha transhumanism beta.</p><p>Other text.</p></body></html>"
+
+            def geturl(self):
+                return "https://example.com/"
+
+        with patch("orbit.tooling.web.request.urlopen", return_value=DummyResponse()):
+            tool = WebTools()
+            result = tool.fetch_url({"url": "https://example.com", "query": "transhumanism", "max_links": 0})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["query"], "transhumanism")
+        self.assertEqual(result["query_mode"], "literal")
+        self.assertEqual(result["match_count"], 1)
+        self.assertTrue(result["has_query_matches"])
+        self.assertIn("transhumanism", result["text"])
+        self.assertIn("context", result["matches"][0])
+
+    def test_fetch_url_concept_query_returns_keyword_overlap_candidates(self) -> None:
+        text = (
+            "<html><body>"
+            "<p>Technology must preserve human dignity and freedom in the digital transition.</p>"
+            "<p>Unrelated paragraph about weather.</p>"
+            "</body></html>"
+        )
+
+        class DummyResponse:
+            status = 200
+            headers = type(
+                "Headers",
+                (),
+                {
+                    "get_content_type": lambda self: "text/html",
+                    "get_content_charset": lambda self: "utf-8",
+                },
+            )()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return text.encode("utf-8")
+
+            def geturl(self):
+                return "https://example.com/"
+
+        with patch("orbit.tooling.web.request.urlopen", return_value=DummyResponse()):
+            tool = WebTools()
+            result = tool.fetch_url(
+                {
+                    "url": "https://example.com",
+                    "query": "human dignity and freedom",
+                    "query_mode": "concept",
+                    "max_links": 0,
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["query_mode"], "concept")
+        self.assertEqual(result["match_count"], 1)
+        self.assertIn("human dignity", result["matches"][0]["context"])

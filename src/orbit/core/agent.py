@@ -18,6 +18,7 @@ from .compact import (
 from .client import OllamaClient
 from .client import is_thinking_unsupported_error
 from .context_budget import BudgetPressure, evaluate_budget_pressure
+from .guardrail_factual import allows_fetch_url_query
 from .model_first_guidance import MODEL_FIRST_INTENT_GUIDANCE, model_first_post_tool_prompt
 from .model_payloads import (
     ModelPayloadCompactor,
@@ -81,9 +82,11 @@ from .tool_guardrails import (
     local_mixed_local_web_evidence_result,
     local_directory_listing_result,
     local_filesystem_metadata_result,
+    local_markdown_checkbox_extraction_result,
     local_workspace_file_classification_result,
     local_workspace_file_presence_result,
     local_workspace_security_scan_result,
+    markdown_checkbox_redundant_read_prompt,
     local_static_sample_evidence_result,
     local_static_reverse_inspection_result,
     local_explicit_text_result,
@@ -102,6 +105,7 @@ from .tool_guardrails import (
     seed_explicit_pdf_read,
     seed_directory_discovery,
     seed_filesystem_metadata,
+    seed_markdown_checkbox_extraction,
     seed_workspace_file_classification,
     seed_workspace_file_presence_check,
     seed_workspace_security_scan,
@@ -139,6 +143,7 @@ Do not invent a personal name, vendor, or creator.
 Reuse the conversation and prior tool results before calling a tool.
 If a tool is needed, choose the smallest valid tool and prefer one tool at a time.
 Use bash for machine and environment inspection.
+Use bash with rg or grep for extracting explicit textual markers or line patterns from files, such as Markdown checkboxes, TODO/FIXME, tags, dates, URLs, errors, warnings, CVEs, IPs, or hashes.
 Use list_files for workspace structure.
 Use read_file for a known file path.
 Use write_file, append_file, or replace_in_file for file edits.
@@ -425,6 +430,16 @@ class AgentLoop:
                 if local_security_scan is not None:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_security_scan, metrics)
+                local_checkbox_result = self._try_markdown_checkbox_extraction(
+                    user_input=user_input,
+                    route=route,
+                    metrics=metrics,
+                    policy_state=policy_state,
+                    on_event=on_event,
+                )
+                if local_checkbox_result is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_checkbox_result, metrics)
                 seed_binary_discovery(
                     user_input=user_input,
                     route=route,
@@ -507,6 +522,23 @@ class AgentLoop:
                 if local_pdf_result is not None:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_pdf_result, metrics)
+                seed_current_factual_tool(
+                    user_input=user_input,
+                    route=route,
+                    registry=self.registry,
+                    messages=self.messages,
+                    metrics=metrics,
+                    policy_state=policy_state,
+                    on_event=on_event,
+                )
+                local_factual_result = local_current_factual_result(
+                    intent=route.intent,
+                    user_input=user_input,
+                    messages=self.messages,
+                )
+                if local_factual_result is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_factual_result, metrics)
             if not model_first_runtime:
                 seed_directory_discovery(
                     user_input=user_input,
@@ -562,6 +594,16 @@ class AgentLoop:
                     policy_state=policy_state,
                     on_event=on_event,
                 )
+                local_checkbox_result = self._try_markdown_checkbox_extraction(
+                    user_input=user_input,
+                    route=route,
+                    metrics=metrics,
+                    policy_state=policy_state,
+                    on_event=on_event,
+                )
+                if local_checkbox_result is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_checkbox_result, metrics)
                 seed_codebase_listing(
                     user_input=user_input,
                     route=route,
@@ -1194,6 +1236,42 @@ class AgentLoop:
             and any(hint in lowered for hint in improvement_hints)
         )
 
+    def _try_markdown_checkbox_extraction(
+        self,
+        *,
+        user_input: str,
+        route: ToolRoute,
+        metrics: TurnMetrics,
+        policy_state: TurnPolicyState,
+        on_event: EventSink | None,
+    ) -> str | None:
+        seed_markdown_checkbox_extraction(
+            skill=self.skill,
+            user_input=user_input,
+            route=route,
+            registry=self.registry,
+            messages=self.messages,
+            metrics=metrics,
+            policy_state=policy_state,
+            on_event=on_event,
+        )
+        return local_markdown_checkbox_extraction_result(
+            skill=self.skill,
+            user_input=user_input,
+            messages=self.messages,
+        )
+
+    @staticmethod
+    def _sanitize_fetch_url_arguments(*, user_input: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if "query" not in arguments:
+            return arguments
+        if allows_fetch_url_query(user_input):
+            return arguments
+        sanitized = dict(arguments)
+        for key in ("query", "query_mode", "max_matches", "context_chars"):
+            sanitized.pop(key, None)
+        return sanitized
+
     def _local_codebase_assessment_result(self, user_input: str) -> str | None:
         read_results = successful_read_results_in_current_turn(self.messages)
         if not read_results:
@@ -1546,6 +1624,18 @@ class AgentLoop:
             name = fn.get("name")
             arguments = parse_arguments(fn.get("arguments"))
             if not name:
+                continue
+            if name == "fetch_url":
+                arguments = self._sanitize_fetch_url_arguments(user_input=user_input, arguments=arguments)
+            redundant_markdown_read = markdown_checkbox_redundant_read_prompt(
+                skill=self.skill,
+                user_input=user_input,
+                name=name,
+                arguments=arguments,
+                messages=self.messages,
+            )
+            if redundant_markdown_read is not None:
+                self._append_system_message(redundant_markdown_read)
                 continue
             redundant_listing = self._redundant_codebase_listing_reuse(
                 intent=intent,

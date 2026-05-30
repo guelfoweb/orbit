@@ -43,6 +43,7 @@ from orbit.core.intent_router import (
 from orbit.core.loop_guard import ToolCallRecord, signatures_match
 from orbit.core.turn_policy import TurnPolicyState, _repeated_tool_retry_prompt, classify_model_reply
 from orbit.core.tool_guardrails import codebase_redundant_listing_prompt
+from orbit.core.tool_router import route_tool_categories
 from orbit.skills import Skill
 
 
@@ -142,6 +143,243 @@ def _write_png(path: Path, r: int, g: int, b: int) -> None:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_pattern_extraction_route_exposes_shell_without_losing_filesystem(self) -> None:
+        route = route_tool_categories('Read Daily.md and extract all open tasks marked with "- [ ]".')
+        self.assertIn("filesystem", route.categories)
+        self.assertIn("shell", route.categories)
+
+    def test_markdown_open_task_extraction_uses_bounded_search_and_preserves_sections(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "bash":
+                return {
+                    "ok": True,
+                    "command": arguments["command"],
+                    "returncode": 0,
+                    "stdout": "\n".join(
+                        [
+                            "1:## Daily",
+                            "3:### Work",
+                            "4:- [ ] Fix report #work",
+                            "5:- [ ] Follow up 🔁 every day #work",
+                            "8:### Personal",
+                            "9:- [ ] Renew insurance #personal 📅 2026-05-29 ✅ 2026-05-29",
+                        ]
+                    ),
+                    "stderr": "",
+                    "truncated": False,
+                }
+            return {"ok": True}
+
+        registry.call = call
+        skill = Skill(name="obsidian-daily", path=Path("/tmp/obsidian-daily/SKILL.md"), content="# Obsidian Daily Task Review\n")
+        agent = AgentLoop(client=client, registry=registry, max_loops=3, skill=skill)
+        result = agent.run_turn('Read Daily.md. Extract all open tasks marked with "- [ ]". Ignore completed tasks marked with "- [x]".')
+
+        self.assertEqual(len(client.calls), 0)
+        self.assertEqual(len(registry.called), 1)
+        self.assertEqual(registry.called[0][0], "bash")
+        command = registry.called[0][1]["command"]
+        self.assertIn("Daily.md", command)
+        self.assertIn(r"[-*] \[ \]", command)
+        self.assertIn("Work", result.content)
+        self.assertIn("- [ ] Fix report #work", result.content)
+        self.assertIn("Personal", result.content)
+        self.assertIn("- [ ] Renew insurance #personal", result.content)
+        self.assertIn("inconsistent metadata", result.content)
+
+    def test_markdown_open_task_semantic_analysis_uses_model_after_bounded_search(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "bash":
+                return {
+                    "ok": True,
+                    "command": arguments["command"],
+                    "returncode": 0,
+                    "stdout": "\n".join(
+                        [
+                            "3:### Work",
+                            "4:- [ ] Fix report #work 📅 2026-05-01",
+                            "5:- [ ] Follow up 🔁 every day #work",
+                            "8:### Personal",
+                            "9:- [ ] Renew insurance #personal 📅 2026-05-29 ✅ 2026-05-29",
+                        ]
+                    ),
+                    "stderr": "",
+                    "truncated": False,
+                }
+            return {"ok": True}
+
+        registry.call = call
+        skill = Skill(name="obsidian-daily", path=Path("/tmp/obsidian-daily/SKILL.md"), content="# Obsidian Daily Task Review\n")
+        agent = AgentLoop(client=client, registry=registry, max_loops=3, skill=skill)
+        result = agent.run_turn(
+            'Read Daily.md. Extract all open tasks marked with "- [ ]", then analyze them semantically and suggest top priorities.'
+        )
+
+        self.assertEqual(registry.called[0][0], "bash")
+        self.assertEqual(len(client.calls), 0)
+        self.assertIn("Overdue tasks", result.content)
+        self.assertIn("- [ ] Fix report #work", result.content)
+        self.assertIn("Recurring tasks", result.content)
+        self.assertIn("- [ ] Follow up", result.content)
+        self.assertIn("Top 3 priorities", result.content)
+        self.assertIn("inconsistent metadata", result.content)
+
+    def test_markdown_open_task_semantic_analysis_skips_redundant_read_file(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "bash":
+                return {
+                    "ok": True,
+                    "command": arguments["command"],
+                    "returncode": 0,
+                    "stdout": "3:### Work\n4:- [ ] Fix report #work 📅 2026-05-01\n",
+                    "stderr": "",
+                    "truncated": False,
+                }
+            return {"ok": True, "content": "should not be read"}
+
+        registry.call = call
+        skill = Skill(name="obsidian-daily", path=Path("/tmp/obsidian-daily/SKILL.md"), content="# Obsidian Daily Task Review\n")
+        agent = AgentLoop(client=client, registry=registry, max_loops=3, skill=skill)
+        result = agent.run_turn(
+            'Read Daily.md. Extract all open tasks marked with "- [ ]", then analyze them semantically and suggest top priorities.'
+        )
+
+        self.assertEqual([name for name, _arguments in registry.called], ["bash"])
+        self.assertIn("Top 3 priorities", result.content)
+
+    def test_markdown_checkbox_extraction_without_obsidian_skill_stays_model_driven(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 40,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 250_000_000,
+                    "message": {"content": "Model handled generic markdown task request."},
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn('Read Daily.md. Extract all open tasks marked with "- [ ]".')
+
+        self.assertEqual(registry.called, [])
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(result.content, "Model handled generic markdown task request.")
+
+    def test_url_mention_check_fetches_with_query_and_answers_from_matches(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "fetch_url":
+                return {
+                    "ok": True,
+                    "url": arguments["url"],
+                    "final_url": arguments["url"],
+                    "title": "Example",
+                    "text": "The document discusses transhumanism and posthumanism.",
+                    "query": arguments.get("query"),
+                    "query_mode": arguments.get("query_mode"),
+                    "match_count": 1,
+                    "matches": [
+                        {
+                            "context": "The document discusses transhumanism and posthumanism.",
+                            "start_char": 24,
+                            "end_char": 38,
+                        }
+                    ],
+                    "has_query_matches": True,
+                }
+            return {"ok": True}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn('Does this page mention "transhumanism"? https://example.com/doc')
+
+        self.assertEqual(len(client.calls), 0)
+        self.assertEqual(
+            registry.called,
+            [
+                (
+                    "fetch_url",
+                    {
+                        "url": "https://example.com/doc",
+                        "max_links": 0,
+                        "query": "transhumanism",
+                        "query_mode": "literal",
+                        "max_matches": 8,
+                        "context_chars": 320,
+                    },
+                )
+            ],
+        )
+        self.assertIn("transhumanism", result.content)
+        self.assertIn("Yes", result.content)
+
+    def test_summary_url_request_strips_model_invented_fetch_query(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 4,
+                    "eval_duration": 50_000_000,
+                    "total_duration": 200_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "fetch_url",
+                                    "arguments": {
+                                        "url": "https://example.com/doc",
+                                        "query": "summarize the article",
+                                        "query_mode": "concept",
+                                        "max_matches": 8,
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                },
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 6,
+                    "eval_duration": 50_000_000,
+                    "total_duration": 200_000_000,
+                    "message": {"content": "Summary."},
+                },
+            ]
+        )
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("summarize the article at this link: https://example.com/doc")
+
+        self.assertEqual(result.content, "Summary.")
+        self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.com/doc"})])
+
     def test_runs_tool_then_finalizes(self) -> None:
         client = FakeClient(
             [

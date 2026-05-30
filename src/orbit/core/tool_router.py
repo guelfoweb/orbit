@@ -40,6 +40,8 @@ class ToolRoute:
 def route_tool_categories(user_input: str, *, skill: Skill | None = None) -> ToolRoute:
     intent_route = route_intent(user_input)
     categories = categories_for_intent_class(intent_route.intent_class)
+    if _looks_like_pattern_extraction_request(user_input):
+        categories = _merge_categories(categories, (TOOL_CATEGORY_SHELL,))
     categories = _merge_categories(categories, extra_categories_for_skill(skill, intent_route.intent))
     return ToolRoute(intent=intent_route.intent, intent_class=intent_route.intent_class, categories=categories, reason=intent_route.reason)
 
@@ -72,3 +74,27 @@ def _merge_categories(base: tuple[str, ...], extra: tuple[str, ...]) -> tuple[st
         if category not in merged:
             merged.append(category)
     return tuple(merged)
+
+
+def _looks_like_pattern_extraction_request(user_input: str) -> bool:
+    lowered = user_input.lower()
+    pattern_hints = (
+        "- [ ]",
+        "todo",
+        "fixme",
+        "cve",
+        "url",
+        "urls",
+        "ip",
+        "hash",
+        "error",
+        "errors",
+        "warning",
+        "warnings",
+        "tag",
+        "tags",
+        "open tasks",
+        "task aperti",
+    )
+    action_hints = ("extract", "estrai", "find", "show", "return", "list", "cerca", "trova")
+    return any(hint in lowered for hint in pattern_hints) and any(hint in lowered for hint in action_hints)

@@ -14,6 +14,8 @@ from .common import ToolError, coerce_int
 MAX_FETCH_TEXT_CHARS = 12_000
 MAX_FETCH_LINKS = 25
 MAX_SEARCH_RESULTS = 10
+MAX_FETCH_QUERY_MATCHES = 8
+DEFAULT_FETCH_QUERY_CONTEXT_CHARS = 260
 DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
 BROWSER_LIKE_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -76,6 +78,7 @@ def web_definitions() -> list[dict[str, Any]]:
                 "description": (
                     "Fetch one explicit web page URL and return text, title, final URL, and a bounded link list. "
                     "Use this only when you already have a concrete http/https URL. "
+                    "Use query/query_mode to check whether the page mentions a term or discusses a concept without reading the whole page. "
                     "Use start_char to continue a long page in chunks. "
                     "Do not use it as a general web search tool and do not guess search-engine or encyclopedia URLs from a name alone."
                 ),
@@ -86,6 +89,10 @@ def web_definitions() -> list[dict[str, Any]]:
                         "start_char": {"type": "integer", "minimum": 0},
                         "max_chars": {"type": "integer", "minimum": 200, "maximum": MAX_FETCH_TEXT_CHARS},
                         "max_links": {"type": "integer", "minimum": 0, "maximum": MAX_FETCH_LINKS},
+                        "query": {"type": "string"},
+                        "query_mode": {"type": "string", "enum": ["literal", "concept"]},
+                        "max_matches": {"type": "integer", "minimum": 1, "maximum": MAX_FETCH_QUERY_MATCHES},
+                        "context_chars": {"type": "integer", "minimum": 80, "maximum": 800},
                         "timeout": {"type": "integer", "minimum": 1, "maximum": 120},
                     },
                     "required": ["url"],
@@ -128,19 +135,33 @@ class WebTools:
         start_char = max(0, coerce_int(arguments.get("start_char"), 0))
         max_chars = min(MAX_FETCH_TEXT_CHARS, max(200, coerce_int(arguments.get("max_chars"), 8000)))
         max_links = min(MAX_FETCH_LINKS, max(0, coerce_int(arguments.get("max_links"), 10)))
+        query = arguments.get("query")
+        query = query.strip() if isinstance(query, str) and query.strip() else None
+        query_mode = arguments.get("query_mode")
+        query_mode = query_mode if query_mode in {"literal", "concept"} else "literal"
+        max_matches = min(MAX_FETCH_QUERY_MATCHES, max(1, coerce_int(arguments.get("max_matches"), 5)))
+        context_chars = min(800, max(80, coerce_int(arguments.get("context_chars"), DEFAULT_FETCH_QUERY_CONTEXT_CHARS)))
         timeout = min(120, max(1, coerce_int(arguments.get("timeout"), 20)))
         final_url, status_code, content_type, text = self._fetch_page(raw_url, timeout=timeout)
         full_text = self._extract_text(text)
         total_chars = len(full_text)
-        if start_char > total_chars:
-            start_char = total_chars
-        end_char = min(total_chars, start_char + max_chars)
-        chunk_text = full_text[start_char:end_char]
-        highlights = self._extract_highlights(chunk_text)
-        truncated = end_char < total_chars
+        matches = self._search_text(full_text, query=query, mode=query_mode, max_matches=max_matches, context_chars=context_chars) if query else []
+        if query:
+            start_char = 0
+            chunk_text = "\n\n".join(item["context"] for item in matches)
+            end_char = min(total_chars, len(chunk_text))
+            highlights = []
+            truncated = False
+        else:
+            if start_char > total_chars:
+                start_char = total_chars
+            end_char = min(total_chars, start_char + max_chars)
+            chunk_text = full_text[start_char:end_char]
+            highlights = self._extract_highlights(chunk_text)
+            truncated = end_char < total_chars
         chunk_count = max(1, math.ceil(total_chars / max_chars)) if total_chars else 1
         chunk_index = 1 if not total_chars else (start_char // max_chars) + 1
-        return {
+        result = {
             "ok": True,
             "url": raw_url,
             "final_url": final_url,
@@ -159,6 +180,17 @@ class WebTools:
             "has_more": truncated,
             "truncated": truncated,
         }
+        if query:
+            result.update(
+                {
+                    "query": query,
+                    "query_mode": query_mode,
+                    "match_count": len(matches),
+                    "matches": matches,
+                    "has_query_matches": bool(matches),
+                }
+            )
+        return result
 
     def _fetch_page(
         self,
@@ -315,6 +347,127 @@ class WebTools:
                 if len(highlights) >= limit:
                     return highlights
         return highlights
+
+    @classmethod
+    def _search_text(
+        cls,
+        text: str,
+        *,
+        query: str,
+        mode: str,
+        max_matches: int,
+        context_chars: int,
+    ) -> list[dict[str, Any]]:
+        if not text.strip() or not query.strip():
+            return []
+        if mode == "concept":
+            return cls._search_text_by_concept(text, query=query, max_matches=max_matches, context_chars=context_chars)
+        return cls._search_text_literal(text, query=query, max_matches=max_matches, context_chars=context_chars)
+
+    @staticmethod
+    def _search_text_literal(text: str, *, query: str, max_matches: int, context_chars: int) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        for match in pattern.finditer(text):
+            start = max(0, match.start() - context_chars)
+            end = min(len(text), match.end() + context_chars)
+            context = text[start:end].strip()
+            if start > 0:
+                context = "..." + context
+            if end < len(text):
+                context += "..."
+            matches.append(
+                {
+                    "start_char": match.start(),
+                    "end_char": match.end(),
+                    "term": text[match.start():match.end()],
+                    "context": context,
+                }
+            )
+            if len(matches) >= max_matches:
+                break
+        return matches
+
+    @classmethod
+    def _search_text_by_concept(cls, text: str, *, query: str, max_matches: int, context_chars: int) -> list[dict[str, Any]]:
+        keywords = cls._query_keywords(query)
+        if not keywords:
+            return cls._search_text_literal(text, query=query, max_matches=max_matches, context_chars=context_chars)
+        candidates: list[tuple[int, int, int, str, list[str]]] = []
+        for match in re.finditer(r"[^.!?;:]{40,900}(?:[.!?;:]|$)", text):
+            paragraph = match.group(0).strip()
+            lowered = paragraph.lower()
+            hits = [keyword for keyword in keywords if keyword in lowered]
+            if not hits:
+                continue
+            score = len(set(hits))
+            candidates.append((score, -len(paragraph), match.start(), paragraph, sorted(set(hits))))
+        candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+        results: list[dict[str, Any]] = []
+        seen_contexts: set[str] = set()
+        for score, _length, start, paragraph, hits in candidates:
+            context = paragraph[: context_chars * 2].strip()
+            if len(paragraph) > len(context):
+                context = context.rstrip() + "..."
+            if context in seen_contexts:
+                continue
+            seen_contexts.add(context)
+            results.append(
+                {
+                    "start_char": start,
+                    "end_char": start + len(paragraph),
+                    "score": score,
+                    "keywords": hits,
+                    "context": context,
+                }
+            )
+            if len(results) >= max_matches:
+                break
+        return results
+
+    @staticmethod
+    def _query_keywords(query: str) -> list[str]:
+        expansions = {
+            "artificial": ("intelligenza", "artificiale"),
+            "intelligence": ("intelligenza", "artificiale"),
+            "dignity": ("dignità", "dignita"),
+            "freedom": ("libertà", "liberta"),
+            "human": ("umano", "umana", "persona"),
+            "humans": ("umano", "umana", "persona"),
+            "technology": ("tecnica", "tecnologia"),
+            "digital": ("digitale",),
+            "justice": ("giustizia",),
+            "work": ("lavoro",),
+            "peace": ("pace",),
+            "war": ("guerra",),
+            "truth": ("verità", "verita"),
+            "family": ("famiglia",),
+            "dignità": ("dignity",),
+            "dignita": ("dignity",),
+            "libertà": ("freedom",),
+            "liberta": ("freedom",),
+            "umano": ("human", "person"),
+            "umana": ("human", "person"),
+            "persona": ("human", "person"),
+            "intelligenza": ("intelligence",),
+            "artificiale": ("artificial",),
+        }
+        stopwords = {
+            "about", "does", "mention", "mentions", "talk", "talks", "this", "that", "there", "with", "from", "page",
+            "article", "text", "what", "where", "when", "which", "whether", "verify", "check", "concept", "topic",
+            "parla", "parlano", "menziona", "menzionano", "questo", "questa", "pagina", "articolo", "testo",
+            "concetto", "tema", "verifica", "controlla", "dice", "riguardo", "qualcosa", "particolare",
+        }
+        words = [word.lower() for word in re.findall(r"[\wÀ-ÿ-]{4,}", query)]
+        unique: list[str] = []
+        for word in words:
+            if word in stopwords or word in unique:
+                continue
+            unique.append(word)
+            for expanded in expansions.get(word, ()):
+                if expanded not in unique:
+                    unique.append(expanded)
+        return unique[:12]
 
     @classmethod
     def _clean_fragment(cls, text: str) -> str:

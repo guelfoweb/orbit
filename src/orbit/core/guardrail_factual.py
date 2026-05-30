@@ -70,6 +70,27 @@ SEARCH_SYNTHESIS_HINTS = (
 VERSION_QUERY_HINTS = ("version", "versione", "__version__", "release")
 PROJECT_METADATA_CANDIDATES = ("pyproject.toml", "package.json", "Cargo.toml", "README.md")
 URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
+QUOTED_QUERY_RE = re.compile(r"""["“”']([^"“”']{2,120})["“”']""")
+URL_CHECK_QUERY_HINTS = (
+    "mention",
+    "mentions",
+    "mentioned",
+    "talk about",
+    "talks about",
+    "contains",
+    "check if",
+    "verify if",
+    "whether",
+    "si parla",
+    "parla di",
+    "menziona",
+    "citato",
+    "contiene",
+    "verifica se",
+    "controlla se",
+    "riguardo",
+)
+URL_SUMMARY_HINTS = ("summarize", "summary", "riassumi", "riassunto", "sintesi", "sintetizza")
 
 
 def seed_current_factual_tool(
@@ -84,7 +105,7 @@ def seed_current_factual_tool(
     has_recent_tool_result: Callable[[list[dict[str, Any]], str], bool],
     run_guardrail_tool: Callable[..., dict[str, Any]],
 ) -> None:
-    if route.intent != "current_factual_lookup":
+    if route.intent not in {"current_factual_lookup", "url_inspection"}:
         return
     lowered = user_input.lower()
     explicit_url = _extract_explicit_url(user_input)
@@ -96,9 +117,14 @@ def seed_current_factual_tool(
     if wants_url_fetch:
         if explicit_url is None or has_recent_tool_result(messages, "fetch_url"):
             return
+        query_spec = _extract_url_check_query(user_input, explicit_url)
+        arguments: dict[str, Any] = {"url": explicit_url, "max_links": 0}
+        if query_spec is not None:
+            query, mode = query_spec
+            arguments.update({"query": query, "query_mode": mode, "max_matches": 8, "context_chars": 320})
         run_guardrail_tool(
             name="fetch_url",
-            arguments={"url": explicit_url, "max_links": 0},
+            arguments=arguments,
             route=route,
             registry=registry,
             messages=messages,
@@ -107,6 +133,11 @@ def seed_current_factual_tool(
             on_event=on_event,
             emit_route=True,
         )
+
+
+def allows_fetch_url_query(user_input: str) -> bool:
+    lowered = user_input.lower()
+    return any(hint in lowered for hint in URL_CHECK_QUERY_HINTS)
 
 
 def apply_deterministic_bounded_command(
@@ -264,7 +295,7 @@ def local_current_factual_result(
     latest_search_web_result_in_current_turn: Callable[[list[dict[str, Any]]], dict[str, Any] | None],
     latest_fetch_url_result_in_current_turn: Callable[[list[dict[str, Any]]], dict[str, Any] | None],
 ) -> str | None:
-    if intent != "current_factual_lookup":
+    if intent not in {"current_factual_lookup", "url_inspection"}:
         return None
     lowered = user_input.lower()
     if any(hint in lowered for hint in ONE_RESULT_HINTS):
@@ -285,6 +316,30 @@ def local_current_factual_result(
             title = fetched.get("title")
             if isinstance(title, str) and title.strip():
                 return title.strip()
+    fetched = latest_fetch_url_result_in_current_turn(messages)
+    if fetched is not None and isinstance(fetched.get("query"), str):
+        query = fetched.get("query")
+        match_count = fetched.get("match_count")
+        if not isinstance(match_count, int):
+            return None
+        english = prefers_english_output(lowered)
+        if match_count <= 0:
+            if english:
+                return f"I did not find textual evidence for `{query}` in the fetched page."
+            return f"Non ho trovato evidenze testuali per `{query}` nella pagina recuperata."
+        matches = fetched.get("matches")
+        contexts: list[str] = []
+        if isinstance(matches, list):
+            for item in matches[:3]:
+                if isinstance(item, dict) and isinstance(item.get("context"), str):
+                    contexts.append(" ".join(item["context"].split()))
+        if english:
+            lines = [f"Yes. I found {match_count} relevant match(es) for `{query}` in the fetched page."]
+            lines.extend(f"- {context[:320].rstrip()}" for context in contexts)
+            return "\n".join(lines)
+        lines = [f"Sì. Ho trovato {match_count} evidenza/e rilevante/i per `{query}` nella pagina recuperata."]
+        lines.extend(f"- {context[:320].rstrip()}" for context in contexts)
+        return "\n".join(lines)
     if any(hint in lowered for hint in GENERIC_SEARCH_INFO_HINTS) and not any(
         hint in lowered for hint in SEARCH_SYNTHESIS_HINTS
     ):
@@ -553,6 +608,43 @@ def _extract_explicit_url(user_input: str) -> str | None:
     if match is None:
         return None
     return match.group(0).strip()
+
+
+def _extract_url_check_query(user_input: str, explicit_url: str) -> tuple[str, str] | None:
+    without_url = user_input.replace(explicit_url, " ")
+    lowered = without_url.lower()
+    if not any(hint in lowered for hint in URL_CHECK_QUERY_HINTS):
+        return None
+    if any(hint in lowered for hint in URL_SUMMARY_HINTS) and not any(hint in lowered for hint in URL_CHECK_QUERY_HINTS):
+        return None
+    quoted = QUOTED_QUERY_RE.search(without_url)
+    if quoted is not None:
+        query = quoted.group(1).strip()
+        if query:
+            return query, "literal"
+    cleanup_patterns = (
+        r"\bdoes\s+(?:this|the)?\s*(?:page|article|text|encyclical)?\s*(?:mention|talk about|contains?)\b",
+        r"\bverify\s+if\b",
+        r"\bcheck\s+if\b",
+        r"\bwhether\b",
+        r"\bin\s+(?:this|the)?\s*(?:page|article|text|encyclical)\b",
+        r"\bsi\s+parla\s+di\b",
+        r"\bparla\s+di\b",
+        r"\bmenziona\b",
+        r"\bcontiene\b",
+        r"\bverifica\s+se\b",
+        r"\bcontrolla\s+se\b",
+        r"\briguardo\s+a\b",
+        r"\?$",
+    )
+    query = without_url
+    for pattern in cleanup_patterns:
+        query = re.sub(pattern, " ", query, flags=re.IGNORECASE)
+    query = " ".join(query.split()).strip(" :;,.?")
+    if not query or len(query) < 3:
+        return None
+    mode = "literal" if len(query.split()) <= 3 else "concept"
+    return query[:160], mode
 
 
 def _looks_like_time_query(lowered: str) -> bool:
