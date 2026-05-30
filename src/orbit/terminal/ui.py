@@ -75,25 +75,23 @@ def format_status(status: TurnStatus) -> str:
         context_text = "unknown"
     input_text = str(status.prompt_tokens) if status.prompt_tokens is not None else f"~{status.estimated_prompt_tokens}"
     output_text = str(status.output_tokens) if status.output_tokens is not None else "-"
-    rate_parts: list[str] = []
-    if status.prefill_tps is not None:
-        rate_parts.append(f"tk_pf: {status.prefill_tps:.1f}/s")
-    if status.decode_tps is not None:
-        rate_parts.append(f"tk_gen: {status.decode_tps:.1f}/s")
+    token_text = _format_token_flow(
+        input_text=input_text,
+        output_text=output_text,
+        prefill_tps=status.prefill_tps,
+        decode_tps=status.decode_tps,
+    )
     show_thinking_state = getattr(status, "show_thinking_state", "off")
     line = (
         f"{status.active_model} | "
         f"ctx: {context_text} | "
-        f"msg: {status.session_turns} | "
-        f"tk_in: {input_text} | "
-        f"tk_out: {output_text}"
+        f"tk: {token_text}"
     )
-    if rate_parts:
-        line = f"{line} | {' | '.join(rate_parts)}"
     if not (status.think_state == "off" and show_thinking_state == "off"):
         line = f"{line} | think: {status.think_state} | show-thinking: {show_thinking_state}"
-    if status.warning:
-        line = f"{line} | {status.warning}"
+    warning = _format_status_warning(status.warning)
+    if warning:
+        line = f"{line} | {warning}"
     if sys.stdout.isatty():
         return f"{STATUS_COLOR}{line}{RESET_COLOR}"
     return line
@@ -103,6 +101,18 @@ def format_startup_line(text: str) -> str:
     if sys.stdout.isatty():
         return f"{STATUS_COLOR}{text}{RESET_COLOR}"
     return text
+
+
+def _format_token_flow(
+    *,
+    input_text: str,
+    output_text: str,
+    prefill_tps: float | None,
+    decode_tps: float | None,
+) -> str:
+    left = f"{input_text} ({prefill_tps:.1f}/s)" if prefill_tps is not None else input_text
+    right = f"{output_text} ({decode_tps:.1f}/s)" if decode_tps is not None else output_text
+    return f"{left} -> {right}"
 
 
 def format_skill(agent: AgentLoop) -> str:
@@ -170,10 +180,23 @@ def print_live_event(event) -> None:
 def make_live_event_printer(*, debug_timing: bool = False):
     def printer(event) -> None:
         if debug_timing and isinstance(event, ToolResultEvent) and event.elapsed_ms is not None:
-            _print_live_line(f"└ timing tool:{event.name}: {event.elapsed_ms:.1f}ms")
+            state = "ok" if event.ok else "error"
+            _print_live_line(f"└ {event.name} {state} · {event.elapsed_ms:.1f}ms")
+        if isinstance(event, ToolRouteEvent) and not debug_timing:
+            return
         print_live_event(event)
 
     return printer
+
+
+def _format_status_warning(warning: str | None) -> str | None:
+    if not warning:
+        return None
+    if warning == "critical: context window nearly exhausted":
+        return "context high: consider /compact"
+    if warning == "warning: context window getting tight":
+        return "context rising: consider /compact soon"
+    return warning
 
 
 def _render_tool_detail(name: str, arguments: dict) -> str:
@@ -211,11 +234,38 @@ def _format_tool_error_lines(event: ToolResultEvent) -> list[str]:
         detail_parts.append(f"stderr={stderr}")
     elif stdout:
         detail_parts.append(f"stdout={stdout}")
+    label = f"{event.name} error" if event.name else "tool error"
     if detail_parts:
-        lines = [f"  error ({', '.join(detail_parts)})"]
+        lines = [f"  {label} ({', '.join(detail_parts)})"]
     else:
-        lines = [f"  error: {message}"]
+        lines = [f"  {label}: {message}"]
+    hint = _tool_error_hint(event)
+    if hint:
+        lines.append(f"  hint: {hint}")
     return lines
+
+
+def _tool_error_hint(event: ToolResultEvent) -> str | None:
+    text = " ".join(
+        part
+        for part in (
+            event.error or "",
+            event.stderr or "",
+            event.stdout or "",
+        )
+        if part
+    ).lower()
+    if "timed out" in text or "timeout" in text:
+        if event.name == "bash":
+            return "target a smaller path or use a bounded inspection command"
+        if event.name == "fetch_url":
+            return "retry with a smaller page chunk or a more specific query"
+        return "retry with a narrower request"
+    if "outside" in text and "workdir" in text:
+        return "use a path inside the configured workdir"
+    if "read_file" in text and event.name in {"write_file", "append_file", "replace_in_file"}:
+        return "read the existing file first, then retry the edit"
+    return None
 
 
 def _extract_repeated_tool_detail(value: str | None) -> str:

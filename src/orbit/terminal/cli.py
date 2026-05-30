@@ -168,6 +168,15 @@ class LastTurnDebug:
             lines.append(f"- status: {self.status_text}")
         return "\n".join(lines)
 
+    def response_source(self, status: object) -> str:
+        has_tools = bool(self.tool_results or self.tool_calls)
+        output_tokens = getattr(status, "output_tokens", None)
+        if isinstance(output_tokens, int) and output_tokens > 0:
+            return "tool+model" if has_tools else "model"
+        if has_tools:
+            return "local"
+        return "local"
+
 
 def _run_turn_with_timer(runtime, prompt: str, on_event=None):
     timer = TurnTimer()
@@ -176,6 +185,40 @@ def _run_turn_with_timer(runtime, prompt: str, on_event=None):
         return runtime.run_turn(prompt, on_event=on_event)
     finally:
         timer.stop()
+
+
+def _format_turn_status(status: object, source: str | None = None) -> str:
+    text = format_status(status)
+    suffix_parts = [f"msg: {getattr(status, 'session_turns', '-')}"]
+    if source:
+        suffix_parts.append(f"src: {source}")
+    if suffix_parts:
+        suffix = " | ".join(suffix_parts)
+        reset = "\x1b[0m"
+        if text.endswith(reset):
+            return f"{text[: -len(reset)]} | {suffix}{reset}"
+        return f"{text} | {suffix}"
+    return text
+
+
+def _print_turn_output(content: str, status: object, source: str | None = None) -> None:
+    print(content)
+    if _should_print_turn_separator(content):
+        print(_turn_separator())
+    print(_format_turn_status(status, source=source))
+
+
+def _should_print_turn_separator(content: str) -> bool:
+    if not bool(getattr(sys.stdout, "isatty", lambda: False)()):
+        return False
+    if not isinstance(content, str):
+        return False
+    return len(content) > 1200 or content.count("\n") >= 8
+
+
+def _turn_separator() -> str:
+    width = max(20, min(80, shutil.get_terminal_size(fallback=(80, 24)).columns))
+    return "-" * width
 
 
 def _input_preview(text: str) -> str | None:
@@ -252,9 +295,15 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if runtime.startup_notice:
                 print(runtime.startup_notice)
-            result = _run_turn_with_timer(runtime, config.prompt, on_event=make_live_event_printer(debug_timing=config.debug_timing))
-            print(result.content)
-            print(format_status(result.status))
+            debug_recorder = LastTurnDebug()
+            event_printer = make_live_event_printer(debug_timing=config.debug_timing)
+
+            def record_and_print_event(event) -> None:
+                debug_recorder.record(event)
+                event_printer(event)
+
+            result = _run_turn_with_timer(runtime, config.prompt, on_event=record_and_print_event)
+            _print_turn_output(result.content, result.status, source=debug_recorder.response_source(result.status))
             return 0
         except OllamaError as exc:
             print(f"error: {exc}")
@@ -374,10 +423,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             debug_recorder.reset()
             result = _run_turn_with_timer(runtime, user_input, on_event=record_and_print_event)
-            debug_recorder.status_text = format_status(result.status)
+            source = debug_recorder.response_source(result.status)
+            debug_recorder.status_text = _format_turn_status(result.status, source=source)
             interrupts.reset()
-            print(result.content)
-            print(format_status(result.status))
+            _print_turn_output(result.content, result.status, source=source)
         except KeyboardInterrupt:
             print()
             if interrupts.register():

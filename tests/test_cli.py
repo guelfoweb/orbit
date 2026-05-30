@@ -14,15 +14,24 @@ from orbit.terminal.cli import (
     InterruptTracker,
     LastTurnDebug,
     TurnTimer,
+    _format_turn_status,
     _input_preview,
     _rendered_input_line_count,
     _rewrite_long_input_line,
+    _should_print_turn_separator,
+    _turn_separator,
 )
 from orbit.session import SessionSummary
 from orbit.terminal.config import AppConfig
 from orbit.terminal.cli import _choose_startup_session, _read_stdin_prompt, main
 from orbit.terminal import history as history_module
-from orbit.terminal.ui import format_input_prompt, format_status, format_user_prompt, print_live_event
+from orbit.terminal.ui import (
+    format_input_prompt,
+    format_status,
+    format_user_prompt,
+    make_live_event_printer,
+    print_live_event,
+)
 from orbit.terminal.config import parse_config
 from orbit.core.agent import TurnStatus
 from orbit.core.events import DebugTimingEvent, ThinkingChunkEvent, ThinkingEndEvent, ThinkingStartEvent, ToolCallEvent, ToolResultEvent, ToolRouteEvent
@@ -44,6 +53,16 @@ class InterruptTrackerTests(unittest.TestCase):
         self.assertIn("tools: list_files ok 1.2ms", rendered)
         self.assertIn("timing: model loop=1 42.0ms", rendered)
         self.assertIn("status: demo | ctx: 8192", rendered)
+
+    def test_last_turn_debug_classifies_response_source(self) -> None:
+        status = type("Status", (), {"output_tokens": 12})()
+        debug = LastTurnDebug()
+        self.assertEqual(debug.response_source(status), "model")
+        debug.record(ToolCallEvent(loop=1, name="read_file", arguments={"path": "README.md"}))
+        debug.record(ToolResultEvent(loop=1, name="read_file", ok=True, elapsed_ms=1.0))
+        self.assertEqual(debug.response_source(status), "tool+model")
+        local_status = type("Status", (), {"output_tokens": None})()
+        self.assertEqual(debug.response_source(local_status), "local")
 
     def test_first_interrupt_does_not_exit(self) -> None:
         tracker = InterruptTracker(window_sec=1.5)
@@ -425,11 +444,165 @@ class InterruptTrackerTests(unittest.TestCase):
             show_thinking_state="off",
         )
         rendered = format_status(status)
-        self.assertIn("tk_pf: 45.0/s", rendered)
-        self.assertIn("tk_gen: 12.0/s", rendered)
-        self.assertIn("msg: 2", rendered)
+        self.assertIn("tk: 120 (45.0/s) -> 18 (12.0/s)", rendered)
+        self.assertNotIn("msg: 2", rendered)
+        self.assertNotIn("tk: 120->18", rendered)
+        self.assertNotIn("tk_in:", rendered)
+        self.assertNotIn("tk_out:", rendered)
+        self.assertNotIn("tk_pf:", rendered)
+        self.assertNotIn("tk_gen:", rendered)
         self.assertNotIn("think: off", rendered)
         self.assertNotIn("show-thinking: off", rendered)
+
+    def test_format_status_rewrites_context_warnings(self) -> None:
+        status = TurnStatus(
+            active_model="demo",
+            context_window=8192,
+            session_messages=3,
+            session_turns=2,
+            prompt_tokens=120,
+            estimated_prompt_tokens=120,
+            output_tokens=18,
+            prefill_tps=None,
+            decode_tps=None,
+            model_elapsed_sec=None,
+            wall_elapsed_sec=None,
+            tool_elapsed_sec=None,
+            usage_ratio=0.95,
+            warning="critical: context window nearly exhausted",
+            think_state="off",
+            show_thinking_state="off",
+        )
+        rendered = format_status(status)
+        self.assertIn("context high: consider /compact", rendered)
+        self.assertNotIn("critical: context window nearly exhausted", rendered)
+
+    def test_format_turn_status_appends_source_badge(self) -> None:
+        status = TurnStatus(
+            active_model="demo",
+            context_window=8192,
+            session_messages=3,
+            session_turns=2,
+            prompt_tokens=120,
+            estimated_prompt_tokens=120,
+            output_tokens=18,
+            prefill_tps=None,
+            decode_tps=None,
+            model_elapsed_sec=None,
+            wall_elapsed_sec=None,
+            tool_elapsed_sec=None,
+            usage_ratio=0.25,
+            warning=None,
+            think_state="off",
+            show_thinking_state="off",
+        )
+        self.assertTrue(_format_turn_status(status, source="local").endswith("| msg: 2 | src: local"))
+
+    def test_format_turn_status_keeps_source_badge_inside_tty_color(self) -> None:
+        status = TurnStatus(
+            active_model="demo",
+            context_window=8192,
+            session_messages=3,
+            session_turns=2,
+            prompt_tokens=120,
+            estimated_prompt_tokens=120,
+            output_tokens=18,
+            prefill_tps=None,
+            decode_tps=None,
+            model_elapsed_sec=None,
+            wall_elapsed_sec=None,
+            tool_elapsed_sec=None,
+            usage_ratio=0.25,
+            warning=None,
+            think_state="off",
+            show_thinking_state="off",
+        )
+        with patch("orbit.terminal.ui.sys.stdout.isatty", return_value=True):
+            rendered = _format_turn_status(status, source="model")
+        self.assertTrue(rendered.endswith("| msg: 2 | src: model\x1b[0m"))
+        self.assertNotIn("\x1b[0m | msg:", rendered)
+
+    def test_turn_separator_only_for_long_tty_output(self) -> None:
+        with patch("sys.stdout.isatty", return_value=False):
+            self.assertFalse(_should_print_turn_separator("line\n" * 20))
+        with patch("sys.stdout.isatty", return_value=True):
+            self.assertFalse(_should_print_turn_separator("short"))
+            self.assertTrue(_should_print_turn_separator("line\n" * 9))
+
+    def test_turn_separator_uses_bounded_terminal_width(self) -> None:
+        with patch("orbit.terminal.cli.shutil.get_terminal_size", return_value=type("TS", (), {"columns": 120})()):
+            self.assertEqual(_turn_separator(), "-" * 80)
+
+    def test_live_event_printer_hides_route_without_debug_timing(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.buffer: list[str] = []
+
+            def write(self, text: str) -> None:
+                self.buffer.append(text)
+
+            def flush(self) -> None:
+                return None
+
+            def isatty(self) -> bool:
+                return False
+
+        fake_stderr = FakeStream()
+        with patch("orbit.terminal.ui.sys.stderr", fake_stderr):
+            make_live_event_printer(debug_timing=False)(
+                ToolRouteEvent(loop=0, intent="text_document_analysis", categories=("filesystem",), reason=None)
+            )
+        self.assertEqual("".join(fake_stderr.buffer), "")
+
+    def test_live_event_printer_shows_compact_tool_timing_in_debug_mode(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.buffer: list[str] = []
+
+            def write(self, text: str) -> None:
+                self.buffer.append(text)
+
+            def flush(self) -> None:
+                return None
+
+            def isatty(self) -> bool:
+                return False
+
+        fake_stderr = FakeStream()
+        with patch("orbit.terminal.ui.sys.stderr", fake_stderr):
+            make_live_event_printer(debug_timing=True)(
+                ToolResultEvent(loop=0, name="read_file", ok=True, elapsed_ms=4.2)
+            )
+        self.assertIn("└ read_file ok · 4.2ms", "".join(fake_stderr.buffer))
+
+    def test_tool_error_includes_tool_name_and_timeout_hint(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.buffer: list[str] = []
+
+            def write(self, text: str) -> None:
+                self.buffer.append(text)
+
+            def flush(self) -> None:
+                return None
+
+            def isatty(self) -> bool:
+                return False
+
+        fake_stderr = FakeStream()
+        with patch("orbit.terminal.ui.sys.stderr", fake_stderr):
+            print_live_event(
+                ToolResultEvent(
+                    loop=0,
+                    name="bash",
+                    ok=False,
+                    error="Command timed out after 30 seconds",
+                    elapsed_ms=30000.0,
+                )
+            )
+        output = "".join(fake_stderr.buffer)
+        self.assertIn("bash error: Command timed out after 30 seconds", output)
+        self.assertIn("hint: target a smaller path or use a bounded inspection command", output)
 
     def test_main_accepts_session_clear_alias_without_sending_to_model(self) -> None:
         runtime = type(
