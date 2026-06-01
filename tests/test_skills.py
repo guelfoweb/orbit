@@ -79,8 +79,8 @@ class SkillTests(unittest.TestCase):
                 encoding="utf-8",
             )
             skill = resolve_skill("analysis-skill", skill_roots=[root])
-            self.assertEqual(extra_categories_for_skill(skill, "binary_or_pdf_analysis"), ("write",))
-            prompt = startup_prompt_for_skill(skill, "binary_or_pdf_analysis", [{"role": "system", "content": "base"}])
+            self.assertEqual(extra_categories_for_skill(skill, "binary_analysis"), ("write",))
+            prompt = startup_prompt_for_skill(skill, "binary_analysis", [{"role": "system", "content": "base"}])
             self.assertIn("Active skill startup is mandatory", prompt)
 
     def test_workspace_doc_bootstrap_actions_create_missing_docs(self) -> None:

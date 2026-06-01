@@ -20,8 +20,10 @@ from orbit.core.client import OllamaError
 from orbit.core.client import ModelMetadata
 from orbit.core.events import ToolResultCompactEvent
 from orbit.core.intent_router import (
+    INTENT_BINARY_ANALYSIS,
     INTENT_BINARY_OR_PDF_ANALYSIS,
     INTENT_BOUNDED_COMMAND,
+    INTENT_CLASS_BINARY_ANALYSIS,
     INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
     INTENT_CHITCHAT,
     INTENT_CLASS_CHAT_GENERAL,
@@ -30,6 +32,7 @@ from orbit.core.intent_router import (
     INTENT_CLASS_FILE_READING,
     INTENT_CLASS_KNOWLEDGE_QUESTION,
     INTENT_CLASS_MACHINE_INSPECTION,
+    INTENT_CLASS_PDF_ANALYSIS,
     INTENT_CLASS_SHELL_TASK,
     INTENT_CLASS_URL_INSPECTION,
     INTENT_CLASS_WEB_LOOKUP,
@@ -38,6 +41,7 @@ from orbit.core.intent_router import (
     INTENT_CURRENT_FACTUAL_LOOKUP,
     INTENT_FILE_EDIT,
     INTENT_GENERAL_KNOWLEDGE,
+    INTENT_PDF_ANALYSIS,
     INTENT_TEXT_DOCUMENT_ANALYSIS,
     route_intent,
 )
@@ -537,16 +541,47 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_explicit_zip_path_routes_to_binary_analysis(self) -> None:
         route = route_intent("analyze workdir/sample.zip")
-        self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
-        self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS)
+        self.assertEqual(route.intent, INTENT_BINARY_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_ANALYSIS)
 
     def test_apk_triage_metadata_routes_to_binary_analysis(self) -> None:
         route = route_intent(
             'Perform static APK triage on the file "malware/Questionario BNL.apk". '
             "Identify file type and hashes first, then inspect APK container metadata."
         )
-        self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
-        self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS)
+        self.assertEqual(route.intent, INTENT_BINARY_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_ANALYSIS)
+
+    def test_discursive_security_statement_does_not_route_to_malware_triage(self) -> None:
+        route = route_intent(
+            "1. The AI has capabilities to get IoC very fast. I tried GPT-5.4 with Codex CLI "
+            "to analyze a malicious APK and it analyzed the sample, extracted the second stage "
+            "and detected the C2. 2. The ML is useful to categorize and detect many pattern attacks quickly. "
+            "Nowday all the intelligence platforms work with ML. 3. The future of security tools is AI centric "
+            "and developed in vibe coding using AI."
+        )
+        self.assertEqual(route.intent, INTENT_CHITCHAT)
+        self.assertEqual(route.intent_class, INTENT_CLASS_CHAT_GENERAL)
+
+    def test_security_learning_prompt_does_not_route_to_malware_triage(self) -> None:
+        route = route_intent("ok, ask me somethink about malware analysis, C2 or IoC")
+        self.assertEqual(route.intent, INTENT_CHITCHAT)
+        self.assertEqual(route.intent_class, INTENT_CLASS_CHAT_GENERAL)
+
+    def test_discursive_web_search_statement_does_not_route_to_web_lookup(self) -> None:
+        route = route_intent("what do you think about web search in LLMs?")
+        self.assertEqual(route.intent, INTENT_CHITCHAT)
+        self.assertEqual(route.intent_class, INTENT_CLASS_CHAT_GENERAL)
+
+    def test_discursive_command_statement_does_not_route_to_shell(self) -> None:
+        route = route_intent("show me how grep works")
+        self.assertEqual(route.intent, INTENT_GENERAL_KNOWLEDGE)
+        self.assertEqual(route.intent_class, INTENT_CLASS_KNOWLEDGE_QUESTION)
+
+    def test_discursive_file_statement_does_not_route_to_filesystem(self) -> None:
+        route = route_intent("tell me about file systems")
+        self.assertEqual(route.intent, INTENT_GENERAL_KNOWLEDGE)
+        self.assertEqual(route.intent_class, INTENT_CLASS_KNOWLEDGE_QUESTION)
 
     def test_plain_apk_size_request_stays_filesystem_metadata(self) -> None:
         route = route_intent("what is the size and modified time of malware/sample.apk?")
@@ -555,8 +590,8 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_directory_zip_reference_routes_to_binary_analysis(self) -> None:
         route = route_intent("analyze the zip in this directory")
-        self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
-        self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS)
+        self.assertEqual(route.intent, INTENT_BINARY_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_BINARY_ANALYSIS)
 
     def test_explicit_code_file_review_routes_to_codebase_inspection_in_english(self) -> None:
         route = route_intent("analyze the python code in this file: agent.py and tell me if you find bugs.")
@@ -3471,19 +3506,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(
             {tool["function"]["name"] for tool in client.calls[0]["tools"]},
-            {
-                "read_file",
-                "list_files",
-                "stat_path",
-                "make_directory",
-                "delete_path",
-                "replace_in_file",
-                "write_file",
-                "append_file",
-                "bash",
-                "search_web",
-                "fetch_url",
-            },
+            {"bash"},
         )
 
     def test_gemma_model_retries_after_generic_access_refusal_and_then_uses_tool(self) -> None:
@@ -6847,17 +6870,18 @@ class AgentLoopTests(unittest.TestCase):
         route = route_intent("mostrami il contenuto di REPORT.md")
         self.assertEqual(route.intent, "text_document_analysis")
 
-    def test_intent_router_detects_binary_or_pdf_analysis(self) -> None:
+    def test_intent_router_detects_pdf_analysis(self) -> None:
         route = route_intent("analizza questo file pdf con pdftotext o strings")
-        self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
+        self.assertEqual(route.intent, INTENT_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_PDF_ANALYSIS)
 
     def test_intent_router_detects_bare_binary_format_tokens(self) -> None:
         route = route_intent("analizza il file apk dentro questa cartella di lavoro")
-        self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
+        self.assertEqual(route.intent, INTENT_BINARY_ANALYSIS)
 
     def test_intent_router_detects_binary_stem_analysis(self) -> None:
         route = route_intent("nel binario che trovi in questa directory, prova prima il metodo più adatto")
-        self.assertEqual(route.intent, INTENT_BINARY_OR_PDF_ANALYSIS)
+        self.assertEqual(route.intent, INTENT_BINARY_ANALYSIS)
 
     def test_intent_router_detects_general_knowledge_without_web(self) -> None:
         route = route_intent("perchè il cielo è blu?")
@@ -7293,6 +7317,158 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("file malware/app.apk", commands)
         self.assertIn("unzip -l malware/app.apk | head -n 20", commands)
         self.assertEqual(client.calls, [])
+
+    def test_discursive_security_statement_does_not_trigger_local_static_triage(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 30,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 220_000_000,
+                    "message": {"content": "This is a strategic security opinion, not a request to inspect local samples."},
+                }
+            ]
+        )
+        registry = FakeRegistry()
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn(
+            "1. The AI has capabilities to get IoC very fast. I tried GPT-5.4 with Codex CLI "
+            "to analyze a malicious APK and it analyzed the sample, extracted the second stage "
+            "and detected the C2. 2. The ML is useful to categorize and detect many pattern attacks quickly. "
+            "Nowday all the intelligence platforms work with ML. 3. The future of security tools is AI centric "
+            "and developed in vibe coding using AI."
+        )
+        self.assertIn("strategic security opinion", result.content)
+        self.assertEqual(registry.called, [])
+        self.assertEqual(client.calls[0]["tools"], [])
+
+    def test_security_learning_prompt_does_not_trigger_local_static_triage(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 30,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 10,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 220_000_000,
+                    "message": {"content": "What is the difference between an IoC and a behavioral indicator?"},
+                }
+            ]
+        )
+        registry = FakeRegistry()
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("ok, ask me somethink about malware analysis, C2 or IoC")
+        self.assertIn("IoC", result.content)
+        self.assertEqual(registry.called, [])
+        self.assertEqual(client.calls[0]["tools"], [])
+
+    def test_ambiguous_binary_route_asks_model_before_using_tools(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 24,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 1,
+                    "eval_duration": 10_000_000,
+                    "total_duration": 120_000_000,
+                    "message": {"content": "NO"},
+                },
+                {
+                    "prompt_eval_count": 32,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 220_000_000,
+                    "message": {"content": "Malware analysis is the static or dynamic study of suspicious software."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("tell me about malware analysis")
+        self.assertIn("Malware analysis", result.content)
+        self.assertEqual(registry.called, [])
+        self.assertEqual(client.calls[0]["tools"], [])
+        self.assertIn("Answer only YES or NO", client.calls[0]["messages"][0]["content"])
+        self.assertEqual(client.calls[1]["tools"], [])
+
+    def test_model_first_entity_lookup_uses_web_without_confirmation_gate(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 24,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 4,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 220_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{"function": {"name": "search_web", "arguments": {"query": "Dante Alighieri", "max_results": 3}}}],
+                    },
+                },
+                {
+                    "prompt_eval_count": 32,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 220_000_000,
+                    "message": {"content": "Dante was an Italian poet, writer, and philosopher."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            return {
+                "ok": True,
+                "query": arguments["query"],
+                "results": [{"title": "Dante Alighieri - Wikipedia", "url": "https://en.wikipedia.org/wiki/Dante_Alighieri", "snippet": "Dante was an Italian poet, writer, and philosopher."}],
+            }
+
+        registry.call = call
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("who is Dante Alighieri?")
+        self.assertIn("Italian poet", result.content)
+        self.assertEqual(registry.called, [("search_web", {"query": "Dante Alighieri", "max_results": 3})])
+        self.assertEqual(client.calls[0]["tools"][0]["function"]["name"], "search_web")
+
+    def test_model_first_ambiguous_prompt_asks_model_before_exposing_tools(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 24,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 1,
+                    "eval_duration": 10_000_000,
+                    "total_duration": 120_000_000,
+                    "message": {"content": "NO"},
+                },
+                {
+                    "prompt_eval_count": 32,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 220_000_000,
+                    "message": {"content": "Please provide the text and the concrete conclusion you want changed."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+        client.model = "gemma4:e2b-fast"
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("change the conclusion")
+        self.assertIn("provide the text", result.content.lower())
+        self.assertEqual(registry.called, [])
+        self.assertEqual(client.calls[0]["tools"], [])
+        self.assertIn("unsupported external actions", client.calls[0]["messages"][0]["content"])
+        self.assertEqual(client.calls[1]["tools"], [])
 
     def test_model_first_binary_analysis_seeds_explicit_apk_path_with_spaces(self) -> None:
         client = FakeClient(

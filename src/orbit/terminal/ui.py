@@ -37,18 +37,31 @@ _THINKING_AT_LINE_START = True
 
 
 def print_help() -> None:
-    print("Commands:")
-    print("  /compact")
-    print("  /debug")
-    print("  /exit")
-    print("  /help")
-    print("  /reset")
-    print("  /sessions clear")
-    print("  /skill clear | list | show | use <ref>")
-    print("  /status")
-    print("  /think on|off|auto")
-    print("  /thinking on|off")
-    print("  /tools")
+    print("Commands")
+    print()
+    print("Session")
+    print("  /reset              Clear the current session history.")
+    print("  /compact            Compact older session history.")
+    print("  /sessions clear     Delete all sessions for this workdir and start fresh.")
+    print()
+    print("Skills")
+    print("  /skill list         List available skills.")
+    print("  /skill show         Show the active skill.")
+    print("  /skill use <ref>    Activate a skill by name, path, or SKILL.md.")
+    print("  /skill clear        Restore the default skill.")
+    print()
+    print("Runtime")
+    print("  /status             Show model, workdir, skill, context, tools, and thinking state.")
+    print("  /tools              List available local tools.")
+    print("  /debug              Show last-turn route, tool calls, timings, and status.")
+    print()
+    print("Thinking")
+    print("  /think on|off|auto  Set model thinking mode.")
+    print("  /thinking on|off    Show or hide thinking output when available.")
+    print()
+    print("General")
+    print("  /help               Show this help.")
+    print("  /exit               Exit Orbit.")
 
 
 def print_tools(registry: ToolRegistry) -> None:
@@ -165,6 +178,9 @@ def format_runtime_status(runtime) -> str:
 
 def print_live_event(event) -> None:
     if isinstance(event, DebugTimingEvent):
+        if event.phase == "intent-check" and event.detail:
+            _print_live_line(f"└ intent-check: {event.detail}")
+            return
         detail = f" {event.detail}" if event.detail else ""
         _print_live_line(f"└ timing {event.phase}: {event.elapsed_ms:.1f}ms{detail}")
         return

@@ -11,6 +11,12 @@ from .code_review_signals import (
     has_code_file_extension,
     has_code_language_hint,
 )
+from .intent_signals import (
+    DISCUSSION_MARKERS,
+    LEARNING_MARKERS,
+    contains_phrase,
+    looks_like_discursive_security_text,
+)
 from .text_utils import word_tokens
 
 
@@ -23,12 +29,16 @@ INTENT_CLASS_WEB_LOOKUP = "web_lookup"
 INTENT_CLASS_URL_INSPECTION = "url_inspection"
 INTENT_CLASS_SHELL_TASK = "shell_task"
 INTENT_CLASS_CODEBASE_INSPECTION = "codebase_inspection"
+INTENT_CLASS_BINARY_ANALYSIS = "binary_analysis"
+INTENT_CLASS_PDF_ANALYSIS = "pdf_analysis"
 INTENT_CLASS_BINARY_OR_PDF_ANALYSIS = "binary_or_pdf_analysis"
 INTENT_CLASS_KNOWLEDGE_QUESTION = "knowledge_question"
 INTENT_CLASS_AMBIGUOUS = "ambiguous"
 
 INTENT_CODEBASE_INSPECTION = "codebase_inspection"
 INTENT_TEXT_DOCUMENT_ANALYSIS = "text_document_analysis"
+INTENT_BINARY_ANALYSIS = "binary_analysis"
+INTENT_PDF_ANALYSIS = "pdf_analysis"
 INTENT_BINARY_OR_PDF_ANALYSIS = "binary_or_pdf_analysis"
 INTENT_CURRENT_FACTUAL_LOOKUP = "current_factual_lookup"
 INTENT_GENERAL_KNOWLEDGE = "general_knowledge"
@@ -36,6 +46,30 @@ INTENT_CHITCHAT = "chitchat"
 INTENT_FILE_EDIT = "file_edit"
 INTENT_BOUNDED_COMMAND = "bounded_command"
 INTENT_AMBIGUOUS = "ambiguous"
+
+BINARY_OR_PDF_ANALYSIS_INTENTS = frozenset(
+    {
+        INTENT_BINARY_ANALYSIS,
+        INTENT_PDF_ANALYSIS,
+        INTENT_BINARY_OR_PDF_ANALYSIS,
+    }
+)
+
+BINARY_OR_PDF_ANALYSIS_CLASSES = frozenset(
+    {
+        INTENT_CLASS_BINARY_ANALYSIS,
+        INTENT_CLASS_PDF_ANALYSIS,
+        INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
+    }
+)
+
+
+def is_binary_or_pdf_analysis_intent(intent: str | None) -> bool:
+    return intent in BINARY_OR_PDF_ANALYSIS_INTENTS
+
+
+def is_binary_or_pdf_analysis_class(intent_class: str | None) -> bool:
+    return intent_class in BINARY_OR_PDF_ANALYSIS_CLASSES
 
 _CODEBASE_HINTS = (
     "codebase",
@@ -362,6 +396,24 @@ def _intent_rules() -> tuple[IntentRule, ...]:
             matcher=lambda text: _looks_like_workspace_security_search_request(text),
         ),
         IntentRule(
+            intent=INTENT_CHITCHAT,
+            intent_class=INTENT_CLASS_CHAT_GENERAL,
+            reason="discursive web/search statement",
+            matcher=lambda text: _looks_like_discursive_web_statement(text),
+        ),
+        IntentRule(
+            intent=INTENT_GENERAL_KNOWLEDGE,
+            intent_class=INTENT_CLASS_KNOWLEDGE_QUESTION,
+            reason="discursive tool/command statement",
+            matcher=lambda text: _looks_like_discursive_tool_or_command_statement(text),
+        ),
+        IntentRule(
+            intent=INTENT_GENERAL_KNOWLEDGE,
+            intent_class=INTENT_CLASS_KNOWLEDGE_QUESTION,
+            reason="discursive file/base64 statement",
+            matcher=lambda text: _looks_like_discursive_file_or_encoding_statement(text),
+        ),
+        IntentRule(
             intent=INTENT_CURRENT_FACTUAL_LOOKUP,
             intent_class=INTENT_CLASS_WEB_LOOKUP,
             reason="factual web lookup hints",
@@ -382,6 +434,12 @@ def _intent_rules() -> tuple[IntentRule, ...]:
         IntentRule(
             intent=INTENT_CHITCHAT,
             intent_class=INTENT_CLASS_CHAT_GENERAL,
+            reason="discursive security statement",
+            matcher=lambda text: _looks_like_discursive_security_statement(text) or _looks_like_security_learning_prompt(text),
+        ),
+        IntentRule(
+            intent=INTENT_CHITCHAT,
+            intent_class=INTENT_CLASS_CHAT_GENERAL,
             reason="creative generation hints",
             matcher=lambda text: _looks_like_creative_generation_request(text),
         ),
@@ -392,14 +450,16 @@ def _intent_rules() -> tuple[IntentRule, ...]:
             matcher=lambda text: _looks_like_file_edit_request(text),
         ),
         IntentRule(
-            intent=INTENT_BINARY_OR_PDF_ANALYSIS,
-            intent_class=INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
-            reason="binary/pdf hints",
-            matcher=lambda text: (
-                _matches_any(text, _BINARY_HINTS)
-                or _looks_like_binary_analysis_request(text)
-                or _mentions_binary_format_token(text)
-            ),
+            intent=INTENT_PDF_ANALYSIS,
+            intent_class=INTENT_CLASS_PDF_ANALYSIS,
+            reason="pdf analysis hints",
+            matcher=lambda text: _looks_like_pdf_analysis_request(text),
+        ),
+        IntentRule(
+            intent=INTENT_BINARY_ANALYSIS,
+            intent_class=INTENT_CLASS_BINARY_ANALYSIS,
+            reason="binary analysis hints",
+            matcher=lambda text: _looks_like_binary_triage_request(text) or _looks_like_operational_binary_stem_request(text),
         ),
         IntentRule(
             intent=INTENT_BOUNDED_COMMAND,
@@ -471,6 +531,8 @@ def _looks_like_shell_command(intent_text: _IntentText) -> bool:
 
 def _looks_like_system_info_request(intent_text: _IntentText) -> bool:
     token_set = intent_text.token_set
+    if token_set & {"cpu", "cpus", "processor", "processors", "core", "cores"}:
+        return bool(token_set & {"how", "many", "quanti", "quante", "number", "numero"})
     machine_tokens = {"pc", "computer", "machine", "macchina", "laptop", "notebook", "portatile", "system", "sistema"}
     info_tokens = {"config", "configuration", "configurazione", "spec", "specs", "hardware", "info", "information", "informazioni"}
     own_tokens = {"this", "thise", "my", "questo", "questa", "mio", "mia"}
@@ -517,7 +579,7 @@ def _looks_like_base64_transform_request(intent_text: _IntentText) -> bool:
 
 
 def _looks_like_text_path_request(intent_text: _IntentText) -> bool:
-    path_tokens = (
+    extension_tokens = (
         *CODE_FILE_EXTENSIONS,
         ".md",
         ".txt",
@@ -531,10 +593,14 @@ def _looks_like_text_path_request(intent_text: _IntentText) -> bool:
         ".webp",
         ".bmp",
         ".gif",
-        "/",
-        "\\",
     )
-    return any(token in intent_text.text for token in path_tokens)
+    text = intent_text.text
+    if "/" in text or "\\" in text:
+        return True
+    return any(
+        re.search(rf"(^|[\s`'\"(])[\w.-]+{re.escape(token)}(?=$|[\s`'\"),.;:?!])", text)
+        for token in extension_tokens
+    )
 
 
 def _looks_like_local_filesystem_metadata_request(intent_text: _IntentText) -> bool:
@@ -606,16 +672,72 @@ def _mentions_binary_format_token(intent_text: _IntentText) -> bool:
     return any(re.search(rf"\b{re.escape(token)}\b", intent_text.text) for token in _BINARY_FORMAT_TOKENS)
 
 
+def _looks_like_pdf_content_request(intent_text: _IntentText) -> bool:
+    if ".pdf" not in intent_text.text:
+        return False
+    if _looks_like_discursive_security_statement(intent_text):
+        return False
+    content_tokens = {
+        "read",
+        "open",
+        "show",
+        "summarize",
+        "summary",
+        "extract",
+        "leggi",
+        "mostra",
+        "riassumi",
+        "estrai",
+        "contenuto",
+        "content",
+    }
+    return bool(intent_text.token_set & content_tokens)
+
+
+def _looks_like_pdf_analysis_request(intent_text: _IntentText) -> bool:
+    if _looks_like_discursive_security_statement(intent_text):
+        return False
+    if _looks_like_pdf_content_request(intent_text):
+        return True
+    pdf_tokens = {"pdf", "pdftotext"}
+    action_tokens = {
+        "analyze",
+        "analysis",
+        "analyse",
+        "analizza",
+        "analisi",
+        "read",
+        "open",
+        "show",
+        "summarize",
+        "extract",
+        "leggi",
+        "apri",
+        "mostra",
+        "riassumi",
+        "estrai",
+        "contenuto",
+        "content",
+    }
+    return bool(intent_text.token_set & pdf_tokens) and bool(intent_text.token_set & action_tokens)
+
+
 def _looks_like_binary_triage_request(intent_text: _IntentText) -> bool:
     if not (_matches_any(intent_text, _BINARY_HINTS) or _mentions_binary_format_token(intent_text)):
+        return False
+    if _looks_like_discursive_security_statement(intent_text):
         return False
     triage_tokens = {
         "analyze",
         "analysis",
+        "analyse",
         "analizza",
+        "analisi",
         "triage",
         "inspect",
         "inspection",
+        "ispeziona",
+        "ispezionare",
         "static",
         "hash",
         "hashes",
@@ -623,9 +745,61 @@ def _looks_like_binary_triage_request(intent_text: _IntentText) -> bool:
         "strings",
         "decompile",
         "identify",
+        "identifica",
         "type",
     }
     return bool(intent_text.token_set & triage_tokens)
+
+
+def _looks_like_operational_binary_stem_request(intent_text: _IntentText) -> bool:
+    if not _looks_like_binary_analysis_request(intent_text):
+        return False
+    if _looks_like_discursive_security_statement(intent_text):
+        return False
+    action_tokens = {
+        "analyze",
+        "analyse",
+        "analizza",
+        "inspect",
+        "ispeziona",
+        "prova",
+        "try",
+        "find",
+        "trova",
+        "extract",
+        "estrai",
+        "identify",
+        "identifica",
+    }
+    return bool(intent_text.token_set & action_tokens)
+
+
+def _looks_like_discursive_security_statement(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    if looks_like_discursive_security_text(text):
+        return True
+    if " to analyze " in text and not re.search(r"\b(?:please|can you|could you|perform|run|do|analyze|analyse|analizza|inspect|ispeziona)\b", text[:80]):
+        return True
+    return False
+
+
+def _looks_like_security_learning_prompt(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    if not contains_phrase(text, LEARNING_MARKERS):
+        return False
+    security_terms = {
+        "malware",
+        "ioc",
+        "c2",
+        "phishing",
+        "threat",
+        "attack",
+        "attacks",
+        "cybersecurity",
+        "security",
+        "sicurezza",
+    }
+    return bool(intent_text.token_set & security_terms)
 
 
 def _looks_like_general_knowledge_request(intent_text: _IntentText) -> bool:
@@ -681,6 +855,8 @@ def _looks_like_creative_generation_request(intent_text: _IntentText) -> bool:
 
 
 def _looks_like_current_factual_lookup(intent_text: _IntentText) -> bool:
+    if _looks_like_discursive_web_statement(intent_text):
+        return False
     if _matches_any(intent_text, _FACTUAL_HINTS):
         return True
     if _is_time_lookup(intent_text.token_set):
@@ -690,8 +866,118 @@ def _looks_like_current_factual_lookup(intent_text: _IntentText) -> bool:
     return False
 
 
+def _looks_like_discursive_tool_or_command_statement(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    if _looks_like_discursive_security_statement(intent_text):
+        return False
+    command_terms = {"bash", "shell", "command", "commands", "comando", "comandi", "terminal", "grep", "find", "ls", "pwd", "sed", "awk", "unzip", "tool", "tools", "strumento", "strumenti"}
+    if not (intent_text.token_set & command_terms):
+        return False
+    if _looks_like_shell_command_execution_request(intent_text):
+        return False
+    discursive_markers = (
+        *DISCUSSION_MARKERS,
+        "show me how",
+        "list common",
+        "common ",
+        "find a good way",
+        "good way",
+        "best way",
+    )
+    if contains_phrase(text, discursive_markers):
+        return True
+    concept_terms = {"work", "works", "funziona", "concetto", "concept", "common", "comuni"}
+    return bool(intent_text.token_set & concept_terms)
+
+
+def _looks_like_shell_command_execution_request(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    execution_markers = (
+        "run ",
+        "execute ",
+        "esegui ",
+        "lancia ",
+        "display ",
+        "show disk",
+        "show storage",
+        "df ",
+        "du ",
+        "pwd",
+        "base64 -",
+        "python3 -c",
+    )
+    return any(marker in text for marker in execution_markers)
+
+
+def _looks_like_discursive_file_or_encoding_statement(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    if _looks_like_text_path_request(intent_text):
+        return False
+    file_or_encoding_terms = {"file", "files", "filesystem", "filesystems", "base64", "encoding", "decoding", "codifica", "decodifica"}
+    if not (intent_text.token_set & file_or_encoding_terms):
+        return False
+    discursive_markers = (
+        *DISCUSSION_MARKERS,
+        "what is",
+        "what are",
+        "usually",
+        "typically",
+        "di solito",
+    )
+    return contains_phrase(text, discursive_markers)
+
+
 def _looks_like_explicit_web_fetch_request(intent_text: _IntentText) -> bool:
     return _is_explicit_web_fetch_request(intent_text.token_set)
+
+
+def _looks_like_discursive_web_statement(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    if not (intent_text.token_set & {"web", "internet", "search", "lookup", "online", "browser", "browsing", "ricerca", "cercare"}):
+        return False
+    if _looks_like_explicit_web_lookup_request(intent_text):
+        return False
+    discussion_markers = (
+        *DISCUSSION_MARKERS,
+        "talk about",
+    )
+    if contains_phrase(text, discussion_markers):
+        return True
+    conceptual_terms = {
+        "llm",
+        "llms",
+        "model",
+        "models",
+        "modello",
+        "modelli",
+        "tool",
+        "tools",
+        "strumento",
+        "strumenti",
+        "browser",
+        "browsing",
+        "ricerca",
+    }
+    return bool(intent_text.token_set & conceptual_terms) and not _looks_like_explicit_web_fetch_request(intent_text)
+
+
+def _looks_like_explicit_web_lookup_request(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    explicit_phrases = (
+        "search online",
+        "search the web",
+        "search web",
+        "look up online",
+        "lookup online",
+        "cerca online",
+        "cercami online",
+        "cerca sul web",
+        "cerca in rete",
+        "cercami in rete",
+    )
+    if any(phrase in text for phrase in explicit_phrases):
+        return True
+    return bool(intent_text.token_set & {"latest", "recent", "current", "today", "news", "weather", "forecast", "ultime", "recente", "recenti", "attuale", "oggi", "notizie", "meteo", "previsioni"})
 
 
 def _looks_like_codebase_inspection_request(intent_text: _IntentText) -> bool:

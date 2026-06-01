@@ -5,6 +5,7 @@
 Use this after runtime, routing, compaction, or guardrail changes:
 
 ```bash
+python3 -m unittest tests.test_route_matrix -q
 python3 scripts/run_prompt_benchmark.py --model gemma4:e2b-fast-t6-c8k
 python3 scripts/run_prompt_benchmark.py --model gemma4:e2b-fast-t6-c8k --include-heavy
 ```
@@ -36,6 +37,8 @@ Target machine: CPU-only NUC-class system with 6 cores / 12 threads and 64 GB RA
 - Vision prompts must complete without Ollama runner crashes.
 - Audio prompts may take about one model call per 5 second chunk plus one synthesis call; they must complete without raw long-audio runner crashes.
 - Local plus web prompts must not claim local evidence unless `read_file` actually ran.
+- Ambiguous/discursive prompts must not expose broad tool sets unless the intent gate confirms tool use.
+- Routing checks should include conceptual mentions of tools, commands, file systems, encoding, web search, and malware analysis.
 
 ## Current Model Profile
 
@@ -82,6 +85,16 @@ Heavy prompts:
 3. `compare two images: images/vision-test-1.png and images/vision-test-2.jpg and tell me the differences`
 4. `transcribe audio/voice-sample-16k-mono.wav`
 5. `summarize audio/voice-sample.wav in one sentence`
+
+Ambiguous routing prompts:
+
+1. `show me how grep works`
+2. `tell me about file systems`
+3. `tell me about base64 encoding`
+4. `what do you think about web search in LLMs?`
+5. `tell me about malware analysis`
+6. `change the conclusion`
+7. `use the tool to send an email to test@example.com`
 
 ## Latest Observed Run
 

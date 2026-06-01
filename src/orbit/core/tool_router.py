@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from ..skills import Skill
 from .intent_router import (
     INTENT_CLASS_AMBIGUOUS,
+    INTENT_CLASS_BINARY_ANALYSIS,
     INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
     INTENT_CLASS_CHAT_GENERAL,
     INTENT_CLASS_CODEBASE_INSPECTION,
@@ -12,6 +13,7 @@ from .intent_router import (
     INTENT_CLASS_FILE_READING,
     INTENT_CLASS_KNOWLEDGE_QUESTION,
     INTENT_CLASS_MACHINE_INSPECTION,
+    INTENT_CLASS_PDF_ANALYSIS,
     INTENT_CLASS_SHELL_TASK,
     INTENT_CLASS_URL_INSPECTION,
     INTENT_CLASS_WEB_LOOKUP,
@@ -40,7 +42,7 @@ class ToolRoute:
 def route_tool_categories(user_input: str, *, skill: Skill | None = None) -> ToolRoute:
     intent_route = route_intent(user_input)
     categories = categories_for_intent_class(intent_route.intent_class)
-    if _looks_like_pattern_extraction_request(user_input):
+    if categories and _looks_like_pattern_extraction_request(user_input):
         categories = _merge_categories(categories, (TOOL_CATEGORY_SHELL,))
     categories = _merge_categories(categories, extra_categories_for_skill(skill, intent_route.intent))
     return ToolRoute(intent=intent_route.intent, intent_class=intent_route.intent_class, categories=categories, reason=intent_route.reason)
@@ -57,7 +59,7 @@ def categories_for_intent_class(intent_class: str) -> tuple[str, ...]:
         return (TOOL_CATEGORY_FILESYSTEM,)
     if intent_class in {INTENT_CLASS_WORKSPACE_DISCOVERY, INTENT_CLASS_FILE_READING}:
         return (TOOL_CATEGORY_FILESYSTEM,)
-    if intent_class == INTENT_CLASS_BINARY_OR_PDF_ANALYSIS:
+    if intent_class in {INTENT_CLASS_BINARY_ANALYSIS, INTENT_CLASS_PDF_ANALYSIS, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS}:
         return (TOOL_CATEGORY_SHELL, TOOL_CATEGORY_FILESYSTEM)
     if intent_class in {INTENT_CLASS_MACHINE_INSPECTION, INTENT_CLASS_SHELL_TASK}:
         return (TOOL_CATEGORY_SHELL,)

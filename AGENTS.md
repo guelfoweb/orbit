@@ -125,6 +125,7 @@ Key responsibilities:
 - `core/events.py`: typed events between loop, runtime, and UI
 - `core/agent.py`: agent loop and turn metrics
 - `core/tool_router.py`: tool subset exposed to the model
+- `core/intent_gate.py`: model-assisted YES/NO confirmation for risky ambiguous tool routes
 - `core/context_budget.py`: context pressure thresholds and profiles
 - `core/loop_guard.py`: repeated tool-call history and matching
 - `core/tool_call_parser.py`: fallback parsing for near-valid JSON/text tool calls
@@ -141,6 +142,9 @@ Rules:
 - Do not recentralize logic in `terminal/cli.py`.
 - `orbit` may expose `--think on|off|auto` and `--show-thinking`.
 - `--debug-timing` may expose bounded timing diagnostics but must remain off by default.
+- Do not expose all tools for vague prompts on the main Gemma runtime.
+- Clear intents should keep fast direct routing; ambiguous, high-risk, or unsupported actions should pass through the YES/NO intent gate before exposing tools.
+- The intent gate must answer only whether Orbit should proceed with available local tools; it must not perform the task itself.
 
 ## UX
 
@@ -228,6 +232,8 @@ Minimum test coverage:
 - If a feature increases loop complexity, prefer a small bounded tool over implicit core logic.
 - Never route or remediate based on one exact observed user prompt.
 - Use reusable signals: tokens, request structure, intent classes, and behavior classes.
+- Keep routing fixes semantic: distinguish explanation/opinion/learning prompts from operational tool requests.
+- Discursive mentions of tools, commands, file systems, encoding, web search, or malware analysis must not expose tools unless the request is operational.
 - Regression prompts must be checked in both Italian and English when the fix affects language behavior.
 - Remediations must work coherently in both languages.
 - After every relevant fix, run unit tests and at least one real test with the target model.

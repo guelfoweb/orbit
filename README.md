@@ -212,12 +212,55 @@ Orbit home:
 - `bash` runs with `shell=False` and blocks shell operators and common destructive commands.
 - `search_web` performs bounded generic web search and returns structured `title`/`url`/`snippet` results.
 - `fetch_url` performs bounded HTTP fetches for explicit known URLs and returns structured text, title, final URL, and links. It is not a general web search tool.
-- local image inspection is not a separate tool; it is a bounded multimodal path triggered only by explicit image paths in the prompt
-- `orbit` uses a 2-stage tool routing strategy: it first narrows the tool category (`filesystem`, `write`, `shell`, `web`), then exposes only that subset to the model for the turn.
 - auto-compaction uses an explicit context budget engine with one conservative internal profile tuned for the main `gemma4:e2b` path.
 - Tool execution is handled client-side in a standard multi-turn loop through the Ollama Python SDK.
 - When a skill is active, its `SKILL.md` content is appended to the system prompt.
 - `/skill clear` restores the default `orbit-default` skill.
+
+## Routing And Intent Gate
+
+Orbit does not expose every tool on every turn.
+The runtime uses a layered routing strategy to keep a small local model from choosing tools for purely conversational prompts.
+
+Turn flow:
+
+1. classify the prompt into an intent class
+2. expose only the matching tool category when the intent is clear
+3. use fast local paths for bounded deterministic cases
+4. ask a small YES/NO intent gate only for risky ambiguous cases
+5. continue as chat, tool loop, vision, or audio path
+
+Intent classes map to narrow tool subsets:
+
+- `chat_general` and `knowledge_question`: no tools
+- `workspace_discovery` and `file_reading`: filesystem tools
+- `file_editing`: write plus filesystem tools
+- `machine_inspection` and `shell_task`: shell tool only
+- `web_lookup` and `url_inspection`: web tools only
+- `binary_analysis`: shell plus filesystem tools for static/container inspection
+- `pdf_analysis`: shell plus filesystem tools for bounded PDF text extraction
+- `ambiguous`: no direct tool exposure on Gemma until the intent gate confirms tool use
+
+The intent gate is deliberately not used for every prompt.
+It exists only where a wrong tool route is more harmful than one extra model call.
+
+The gate answers only `YES` or `NO`:
+
+- `YES`: the user is asking Orbit to use an available local tool, inspect or edit workspace files, run a bounded shell command, search/fetch web content, or perform local static analysis.
+- `NO`: the user is asking for conversation, explanation, opinion, learning, quiz behavior, unsupported external actions such as sending email, or a vague action without a concrete target.
+
+Examples:
+
+- `show me how grep works` stays chat/knowledge; it does not expose `bash`.
+- `tell me about file systems` stays chat/knowledge; it does not expose filesystem tools.
+- `tell me about base64 encoding` stays chat/knowledge; `decode this string ... from base64` uses the bounded transform path.
+- `what do you think about web search in LLMs?` stays chat; `search online for information about Dante Alighieri` uses web search.
+- `tell me about malware analysis` goes through the gate; explicit sample/path analysis uses bounded local static inspection.
+- `change the conclusion` goes through the gate because there is no concrete target.
+- `use the tool to send an email to test@example.com` is rejected as unsupported instead of exposing filesystem/write/shell/web tools directly.
+
+Vision and audio are not ordinary tools.
+They are bounded multimodal paths triggered only by explicit local image/audio paths in the prompt, after path confinement and normalization.
 - `/compact` replaces older messages with a local structured memory summary and keeps the most recent raw messages intact.
 
 ## Test

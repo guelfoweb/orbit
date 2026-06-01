@@ -35,6 +35,7 @@ from orbit.terminal.ui import (
     format_status,
     format_user_prompt,
     make_live_event_printer,
+    print_help,
     print_live_event,
 )
 from orbit.terminal.config import parse_config
@@ -43,6 +44,21 @@ from orbit.core.events import DebugTimingEvent, ThinkingChunkEvent, ThinkingEndE
 
 
 class InterruptTrackerTests(unittest.TestCase):
+    def test_print_help_groups_commands_with_descriptions(self) -> None:
+        with patch("builtins.print") as mocked_print:
+            print_help()
+        rendered = "\n".join(str(call.args[0]) if call.args else "" for call in mocked_print.call_args_list)
+        self.assertIn("Session", rendered)
+        self.assertIn("/sessions clear", rendered)
+        self.assertIn("Delete all sessions for this workdir", rendered)
+        self.assertIn("Skills", rendered)
+        self.assertIn("/skill use <ref>", rendered)
+        self.assertIn("Runtime", rendered)
+        self.assertIn("/debug", rendered)
+        self.assertIn("Thinking", rendered)
+        self.assertIn("/think on|off|auto", rendered)
+        self.assertIn("General", rendered)
+
     def test_last_turn_debug_formats_compact_route_tool_and_timing(self) -> None:
         debug = LastTurnDebug()
         self.assertEqual(debug.format(), "No turn debug data yet.")
@@ -705,6 +721,29 @@ class InterruptTrackerTests(unittest.TestCase):
                 ToolResultEvent(loop=0, name="read_file", ok=True, elapsed_ms=4.2)
             )
         self.assertIn("└ read_file ok · 4.2ms", "".join(fake_stderr.buffer))
+
+    def test_live_event_printer_shows_intent_check_outcome_without_timing_noise(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.buffer: list[str] = []
+
+            def write(self, text: str) -> None:
+                self.buffer.append(text)
+
+            def flush(self) -> None:
+                return None
+
+            def isatty(self) -> bool:
+                return False
+
+        fake_stderr = FakeStream()
+        with patch("orbit.terminal.ui.sys.stderr", fake_stderr):
+            make_live_event_printer(debug_timing=True)(
+                DebugTimingEvent(phase="intent-check", elapsed_ms=2.4, detail="ambiguous -> NO")
+            )
+        rendered = "".join(fake_stderr.buffer)
+        self.assertIn("└ intent-check: ambiguous -> NO", rendered)
+        self.assertNotIn("timing intent-check", rendered)
 
     def test_tool_error_includes_tool_name_and_timeout_hint(self) -> None:
         class FakeStream:

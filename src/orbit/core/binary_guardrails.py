@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .intent_router import INTENT_BINARY_OR_PDF_ANALYSIS
+from .intent_router import is_binary_or_pdf_analysis_intent
 from .turn_policy import TurnPolicyState
 
 LIKELY_BINARY_EXTENSIONS = {".pdf", ".apk", ".dex", ".so", ".dll", ".exe", ".bin", ".dylib", ".a", ".o"}
@@ -36,7 +36,7 @@ def binary_analysis_guard_prompt(
     recent_archive_container_for_member: Callable[[list[dict[str, Any]], str], str | None],
     was_listed_by_list_files: Callable[[list[dict[str, Any]], str], bool],
 ) -> str | None:
-    if intent != INTENT_BINARY_OR_PDF_ANALYSIS or not tool_calls:
+    if not is_binary_or_pdf_analysis_intent(intent) or not tool_calls:
         return None
     if len(tool_calls) != 1:
         return None
@@ -91,7 +91,7 @@ def binary_tool_strategy_prompt(
     tool_calls: list[dict[str, Any]],
     parse_arguments: Any,
 ) -> str | None:
-    if intent != INTENT_BINARY_OR_PDF_ANALYSIS or len(tool_calls) != 1:
+    if not is_binary_or_pdf_analysis_intent(intent) or len(tool_calls) != 1:
         return None
     function = tool_calls[0].get("function", {}) or {}
     if function.get("name") != "bash":
@@ -122,7 +122,7 @@ def binary_listing_retry_prompt(
     has_recent_tool_result: Callable[[list[dict[str, Any]], str], bool],
     likely_binary_candidates_from_recent_listing: Callable[[list[dict[str, Any]]], list[str]],
 ) -> str | None:
-    if intent != INTENT_BINARY_OR_PDF_ANALYSIS or len(tool_calls) != 1:
+    if not is_binary_or_pdf_analysis_intent(intent) or len(tool_calls) != 1:
         return None
     function = tool_calls[0].get("function", {}) or {}
     if function.get("name") != "list_files":
@@ -142,7 +142,7 @@ def binary_text_reply_handling(
     content: str,
     policy_state: TurnPolicyState,
 ) -> tuple[str, str] | None:
-    if intent != INTENT_BINARY_OR_PDF_ANALYSIS:
+    if not is_binary_or_pdf_analysis_intent(intent):
         return None
     if policy_state.tool_history:
         return None

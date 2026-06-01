@@ -79,7 +79,7 @@ from .static_analysis_guardrails import (
     seed_binary_discovery_impl,
 )
 from .events import ToolCallEvent, ToolResultEvent, ToolRouteEvent
-from .intent_router import INTENT_BINARY_OR_PDF_ANALYSIS, INTENT_CODEBASE_INSPECTION, INTENT_TEXT_DOCUMENT_ANALYSIS
+from .intent_router import INTENT_CODEBASE_INSPECTION, INTENT_TEXT_DOCUMENT_ANALYSIS, is_binary_or_pdf_analysis_intent
 from .message_ops import (
     has_recent_tool_result,
     last_fetch_url_result,
@@ -1771,7 +1771,7 @@ def fake_tool_response_handling(
             if top:
                 lines = "\n".join(f"- `{path}`" for path in top)
                 return ("final", f"I file più importanti da leggere per primi sono:\n{lines}")
-    if intent == INTENT_BINARY_OR_PDF_ANALYSIS:
+    if is_binary_or_pdf_analysis_intent(intent):
         candidates = likely_binary_candidates_from_recent_listing(messages, limit=1)
         if candidates:
             write_results = successful_write_results_in_current_turn(messages)
@@ -2114,7 +2114,7 @@ def unsupported_tool_prompt(
     allowed = ", ".join(sorted(allowed_tool_names))
     blocked = ", ".join(sorted(set(unsupported)))
     binary_hint = ""
-    if route.intent == INTENT_BINARY_OR_PDF_ANALYSIS:
+    if is_binary_or_pdf_analysis_intent(route.intent):
         binary_hint = (
             " For binary or PDF analysis, first discover a real candidate path with list_files if the file name is not explicit, "
             "then use a shell-oriented tool such as bash for strings, pdftotext, file, or another bounded binary-aware command."

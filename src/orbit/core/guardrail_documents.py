@@ -5,7 +5,7 @@ from typing import Any, Callable
 import re
 import shlex
 
-from .intent_router import INTENT_BINARY_OR_PDF_ANALYSIS, INTENT_CURRENT_FACTUAL_LOOKUP, INTENT_TEXT_DOCUMENT_ANALYSIS
+from .intent_router import INTENT_CURRENT_FACTUAL_LOOKUP, INTENT_PDF_ANALYSIS, INTENT_TEXT_DOCUMENT_ANALYSIS, is_binary_or_pdf_analysis_intent
 from .message_ops import (
     last_read_file_result,
     merged_read_file_result_in_current_turn,
@@ -161,7 +161,7 @@ def seed_explicit_pdf_read_impl(
     on_event: Any,
     run_guardrail_tool: Callable[..., dict[str, Any]],
 ) -> None:
-    if route.intent != INTENT_BINARY_OR_PDF_ANALYSIS:
+    if route.intent != INTENT_PDF_ANALYSIS and not is_binary_or_pdf_analysis_intent(route.intent):
         return
     path = extract_explicit_pdf_path(user_input)
     if path is None:
@@ -332,7 +332,7 @@ def local_explicit_pdf_result(
     user_input: str,
     messages: list[dict[str, Any]],
 ) -> str | None:
-    if intent != INTENT_BINARY_OR_PDF_ANALYSIS:
+    if intent != INTENT_PDF_ANALYSIS and not is_binary_or_pdf_analysis_intent(intent):
         return None
     path = extract_explicit_pdf_path(user_input)
     if path is None:

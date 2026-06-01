@@ -17,6 +17,8 @@ MODEL_FIRST_INTENT_GUIDANCE = {
     "web_lookup": "Intent: web_lookup. Prefer search_web, then synthesize briefly from results.",
     "url_inspection": "Intent: url_inspection. Prefer fetch_url for the explicit URL, then read it chunk by chunk if needed. If the user asks about a specific entity, answer that point first.",
     "codebase_inspection": "Intent: codebase_inspection. Prefer list_files first, then read only relevant files. If the user asked for a fixed number of files, stop after you have that many relevant files. Answer in one line only unless the user explicitly asks for a multi-part breakdown.",
+    "binary_analysis": "Intent: binary_analysis. Prefer bounded static inspection of a real discovered path.",
+    "pdf_analysis": "Intent: pdf_analysis. Prefer bounded text extraction from the explicit PDF path.",
     "binary_or_pdf_analysis": "Intent: binary_or_pdf_analysis. Prefer bounded inspection of a real discovered path.",
 }
 
@@ -31,6 +33,8 @@ MODEL_FIRST_POST_TOOL_GUIDANCE = {
     "web_lookup": "Synthesize only the key result evidence. Keep it short.",
     "url_inspection": "Summarize the fetched chunk only. If the user asked about a specific entity, answer that point first. If more text is needed, fetch the same URL again with start_char=next_start_char.",
     "codebase_inspection": "Answer only the requested inspection task. Keep it short and preferably in one line.",
+    "binary_analysis": "Report only the relevant static-analysis findings.",
+    "pdf_analysis": "Answer only from extracted PDF evidence. Keep it short.",
     "binary_or_pdf_analysis": "Report only the relevant findings.",
 }
 

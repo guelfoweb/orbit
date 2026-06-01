@@ -25,6 +25,8 @@ from .guardrail_audio import (
     prepare_audio_chunks,
     resolve_explicit_audio_requests,
 )
+from .intent_gate import intent_gate_decision, intent_gate_messages, parse_intent_gate_reply
+from .intent_router import is_binary_or_pdf_analysis_intent
 from .model_first_guidance import MODEL_FIRST_INTENT_GUIDANCE, model_first_post_tool_prompt
 from .model_payloads import (
     ModelPayloadCompactor,
@@ -345,6 +347,15 @@ class AgentLoop:
             identity_prompt = assistant_identity_system_prompt(user_input)
             if identity_prompt is not None:
                 self._append_system_message(identity_prompt)
+        gate_decision = intent_gate_decision(user_input, route)
+        if self.tools_enabled and model_first_runtime and gate_decision.confirm:
+            if not self._model_confirms_tool_route(user_input=user_input, route=route, metrics=metrics, on_event=on_event):
+                route = ToolRoute(
+                    intent="chitchat",
+                    intent_class="chat_general",
+                    categories=(),
+                    reason=f"{route.reason}; {gate_decision.reason}; model declined tool route",
+                )
         if self.tools_enabled and route is not None:
             if model_first_runtime and route.categories:
                 intent_guidance = MODEL_FIRST_INTENT_GUIDANCE.get(route.intent_class)
@@ -1214,7 +1225,7 @@ class AgentLoop:
                 metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                 return self._result(local_factual_result, metrics)
         final_content = format_max_loops_message(self.max_loops, policy_state)
-        if self.tools_enabled and route is not None and route.intent == "binary_or_pdf_analysis":
+        if self.tools_enabled and route is not None and is_binary_or_pdf_analysis_intent(route.intent):
             seeded = binary_seeded_summary(self.messages)
             if seeded is not None:
                 final_content = seeded
@@ -1431,6 +1442,32 @@ class AgentLoop:
         if duration_ns is None or duration_ns <= 0:
             return None
         return duration_ns / 1_000_000_000
+
+    def _model_confirms_tool_route(
+        self,
+        *,
+        user_input: str,
+        route: ToolRoute,
+        metrics: TurnMetrics,
+        on_event: EventSink | None,
+    ) -> bool:
+        messages = intent_gate_messages(user_input=user_input, route=route)
+        try:
+            started_at = time.monotonic_ns()
+            response = self.client.chat(
+                messages=messages,
+                tools=[],
+                options={"temperature": 0.0},
+                think=False,
+            )
+            self._update_metrics(metrics, response)
+        except Exception:
+            self._emit_timing(on_event, "intent-check", started_at, f"{route.intent} -> fail-open")
+            return True
+        parsed = parse_intent_gate_reply((response.get("message") or {}).get("content"))
+        outcome = "unclear, fail-open" if parsed is None else ("YES" if parsed else "NO")
+        self._emit_timing(on_event, "intent-check", started_at, f"{route.intent} -> {outcome}")
+        return True if parsed is None else parsed
 
     def _system_prompt(self) -> str:
         if self._prefers_model_first_runtime():

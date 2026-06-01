@@ -27,6 +27,19 @@
 8. `transcribe audio/voice-sample-16k-mono.wav`
 9. `summarize audio/voice-sample.wav in one sentence`
 
+## Ambiguous Intent Prompts
+
+1. `tell me about malware analysis`
+2. `ask me something about malware analysis, C2 or IoC`
+3. `malware analysis is useful for extracting IoCs quickly. What do you think?`
+4. `change the conclusion`
+5. `what do you think about web search in LLMs?`
+6. `who is Dante Alighieri?`
+7. `show me how grep works`
+8. `tell me about file systems`
+9. `tell me about base64 encoding`
+10. `use the tool to send an email to test@example.com`
+
 ## Skill Prompts
 
 Run with `--skill obsidian-daily` and the Obsidian vault as `--workdir`.

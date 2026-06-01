@@ -509,6 +509,30 @@ Rules:
 - Fix: require `ffmpeg`/`ffprobe`, normalize to WAV PCM 16 kHz mono, split into 5s chunks, transcribe chunks separately, then synthesize.
 - Example: `transcribe audio/voice-sample-16k-mono.wav`.
 
+### 83. Security discussion prompts triggered local malware triage
+- Symptom: conversational prompts mentioning malware analysis, C2, IoC, or APKs could trigger `list_files` and bounded static triage.
+- Cause: binary/static routing treated security terminology as operational intent.
+- Fix: classify discursive and learning prompts as chat, add a model YES/NO intent gate for ambiguous high-impact binary routes, and keep explicit sample/path prompts operational.
+- Example: `ask me something about malware analysis, C2 or IoC`.
+
+### 84. Web/search discussion prompts triggered web lookup
+- Symptom: prompts discussing web search as a concept could expose web tools instead of answering conversationally.
+- Cause: broad `web`, `search`, and `about` hints were enough to classify the turn as current factual lookup.
+- Fix: classify discursive web/search statements as chat, keep explicit/current lookup phrases operational, and add a model YES/NO gate for weak web lookup prompts on the target model.
+- Example: `what do you think about web search in LLMs?`.
+
+### 85. Discursive tool words exposed shell or filesystem tools
+- Symptom: prompts mentioning `grep`, `find`, `file systems`, `base64`, or `tools` conceptually could expose shell/filesystem/write/web tools.
+- Cause: command and path hints were matched as operational intent even when the prompt asked for explanation or unsupported external action.
+- Fix: route discursive command/file/encoding prompts to knowledge/chat, make path-extension detection stricter, recognize CPU count as bounded machine inspection, and gate fully ambiguous prompts before exposing tools on Gemma.
+- Example: `show me how grep works`.
+
+### 86. PDF document analysis shared the binary-analysis intent
+- Symptom: normal PDF reading/summarization and binary/static analysis shared the same `binary_or_pdf_analysis` route.
+- Cause: PDF and binary files both needed bounded shell/filesystem handling, so they were historically grouped under one intent.
+- Fix: split routing into `pdf_analysis` for document extraction and `binary_analysis` for static/container inspection, while keeping a compatibility helper for older guardrails.
+- Example: `Summarize docs/Project Overview.pdf.`.
+
 ## Recurring Guidelines
 
 - Keep the base prompt short.
