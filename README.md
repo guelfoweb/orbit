@@ -78,7 +78,47 @@ You can also point to a different Ollama endpoint:
 .venv/bin/orbit --base-url http://127.0.0.1:11434
 ```
 
-## User Config
+## Model profile and benchmark hardware
+
+Orbit is primarily developed and tested with a tuned Ollama profile for `gemma4:e2b`:
+
+```text
+Modelfile.gemma4-e2b-fast-t6-c8k
+```
+
+```text
+FROM gemma4:e2b
+
+# Tuned for a 6-core / 12-thread CPU machine.
+PARAMETER temperature 0
+PARAMETER num_ctx 8192
+PARAMETER num_thread 6
+PARAMETER num_batch 96
+```
+
+Create the local model profile with:
+
+```bash
+ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
+```
+
+Then run Orbit with:
+
+```bash
+orbit --model gemma4:e2b-fast-t6-c8k
+```
+
+The current regression benchmarks were run on a CPU-only Intel NUC 10 class machine:
+
+- Intel Core i7-10710U
+- 6 cores / 12 threads
+- 64 GB RAM
+- no GPU acceleration
+- Ollama serving the model from system RAM
+
+The tuned profile is meant to keep the runtime usable on this kind of hardware: bounded context, deterministic sampling, controlled batch size, and a thread count aligned with the CPU. Other `gemma4` profiles may work, but Orbit is not tuned or guaranteed for them with the same reliability.
+
+## User config
 
 Orbit can load default options from:
 
@@ -138,7 +178,6 @@ Performance notes for Ollama:
 - Runtime env such as `OLLAMA_NUM_PARALLEL` and `OLLAMA_KEEP_ALIVE` must be set on the Ollama server process.
 - If Ollama runs as `ollama.service`, exporting those variables before `orbit` has no effect on the server.
 - Recommended CPU-only server env for this project: `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE=-1`, optionally `OLLAMA_MAX_LOADED_MODELS=1`.
-- Keep the tuned model parameters in `Modelfile.gemma4-e2b-fast-t6-c8k`: `num_ctx 8192`, `num_thread 6`, `num_batch 96`.
 - On laptops/NUCs, CPU governor or power profile can dominate token throughput; use `performance` when benchmarking.
 
 Check the model currently loaded by Ollama:
@@ -263,7 +302,7 @@ Orbit home:
 - When a skill is active, its `SKILL.md` content is appended to the system prompt.
 - `/skill clear` restores the default `orbit-default` skill.
 
-## Routing And Intent Gate
+## Routing and intent gate
 
 Orbit does not expose every tool on every turn.
 The runtime uses a layered routing strategy to keep a small local model from choosing tools for purely conversational prompts.
