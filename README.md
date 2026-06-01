@@ -78,6 +78,52 @@ You can also point to a different Ollama endpoint:
 .venv/bin/orbit --base-url http://127.0.0.1:11434
 ```
 
+## User Config
+
+Orbit can load default options from:
+
+```text
+~/.orbit/config.json
+```
+
+The file is optional. If it is missing, Orbit behaves exactly like the CLI defaults. CLI flags override matching config values when a matching flag exists.
+
+Recommended minimal config:
+
+```json
+{
+  "model": "gemma4:e2b-fast-t6-c8k",
+  "host": "http://127.0.0.1:11434",
+  "workdir": ".",
+  "timeout": 300,
+  "think": "off",
+  "debug_timing": false,
+  "ui": {
+    "markdown": true,
+    "collapse_long_input": true,
+    "long_input_preview_chars": 50
+  },
+  "tools": {
+    "max_loops": 10
+  }
+}
+```
+
+Supported keys:
+
+- `model`: default Ollama model name.
+- `host` or `base_url`: Ollama HTTP endpoint.
+- `workdir`: default logical workspace root.
+- `timeout`: Ollama client timeout in seconds.
+- `think`: `auto`, `on`, or `off`.
+- `debug_timing`: enable bounded debug timing output by default.
+- `ui.markdown`: render final model replies as Markdown when possible.
+- `ui.collapse_long_input`: visually collapse very long pasted input in the REPL.
+- `ui.long_input_preview_chars`: number of leading characters shown before `[text N chars]`.
+- `tools.max_loops`: default tool/model loop budget.
+
+Keep project-specific behavior in skills, not in this global config. The default `orbit-default` skill is loaded automatically when no skill is selected.
+
 Long-running turns:
 
 - use `--timeout <seconds>` if a model or task needs more time

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import tempfile
 from unittest.mock import patch
 import sys
 import unittest
@@ -26,6 +28,7 @@ from orbit.terminal.cli import (
     _turn_separator,
 )
 from orbit.session import SessionSummary
+from orbit.terminal import config as config_module
 from orbit.terminal.config import AppConfig
 from orbit.terminal.cli import _choose_startup_session, _read_stdin_prompt, main
 from orbit.terminal import history as history_module
@@ -44,6 +47,13 @@ from orbit.core.events import DebugTimingEvent, ThinkingChunkEvent, ThinkingEndE
 
 
 class InterruptTrackerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._config_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._config_tmp.cleanup)
+        patcher = patch.object(config_module, "CONFIG_PATH", Path(self._config_tmp.name) / "missing-config.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_print_help_groups_commands_with_descriptions(self) -> None:
         with patch("builtins.print") as mocked_print:
             print_help()
@@ -239,6 +249,102 @@ class InterruptTrackerTests(unittest.TestCase):
         config = parse_config(["--debug-timing"])
         self.assertTrue(config.debug_timing)
 
+    def test_parse_config_loads_user_config_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workspace"
+            workdir.mkdir()
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "model": "gemma4:e2b-fast-t6-c8k",
+                        "host": "http://localhost:11434",
+                        "workdir": str(workdir),
+                        "timeout": 600,
+                        "think": "off",
+                        "debug_timing": True,
+                        "ui": {
+                            "markdown": False,
+                            "collapse_long_input": False,
+                            "long_input_preview_chars": 24,
+                        },
+                        "tools": {"max_loops": 12},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = parse_config([], config_path=config_path)
+
+        self.assertEqual(config.model, "gemma4:e2b-fast-t6-c8k")
+        self.assertEqual(config.base_url, "http://localhost:11434")
+        self.assertEqual(config.workdir, workdir.resolve())
+        self.assertEqual(config.timeout, 600)
+        self.assertEqual(config.think_mode, "off")
+        self.assertTrue(config.debug_timing)
+        self.assertFalse(config.render_markdown)
+        self.assertFalse(config.collapse_long_input)
+        self.assertEqual(config.long_input_preview_chars, 24)
+        self.assertEqual(config.max_loops, 12)
+        self.assertTrue(config.max_loops_explicit)
+        self.assertTrue(config.think_explicit)
+
+    def test_parse_config_cli_overrides_user_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "workspace"
+            other = root / "other"
+            workdir.mkdir()
+            other.mkdir()
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "model": "configured",
+                        "host": "http://configured",
+                        "workdir": str(workdir),
+                        "timeout": 600,
+                        "think": "off",
+                        "tools": {"max_loops": 12},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = parse_config(
+                [
+                    "--model",
+                    "cli-model",
+                    "--base-url",
+                    "http://cli",
+                    "--workdir",
+                    str(other),
+                    "--timeout",
+                    "30",
+                    "--think",
+                    "on",
+                    "--max-loops",
+                    "5",
+                ],
+                config_path=config_path,
+            )
+
+        self.assertEqual(config.model, "cli-model")
+        self.assertEqual(config.base_url, "http://cli")
+        self.assertEqual(config.workdir, other.resolve())
+        self.assertEqual(config.timeout, 30)
+        self.assertEqual(config.think_mode, "on")
+        self.assertEqual(config.max_loops, 5)
+        self.assertTrue(config.max_loops_explicit)
+
+    def test_parse_config_rejects_invalid_user_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text('{"tools": {"max_loops": "many"}}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "tools.max_loops"):
+                parse_config([], config_path=config_path)
+
     def test_parse_config_joins_multiword_prompt(self) -> None:
         config = parse_config(["--model", "demo", "perchè", "il", "cielo", "è", "blu?"])
         self.assertEqual(config.prompt, "perchè il cielo è blu?")
@@ -286,6 +392,17 @@ class InterruptTrackerTests(unittest.TestCase):
         ):
             history_module.setup_history()
         self.assertIn("set enable-bracketed-paste on", calls[0])
+
+    def test_main_ctrl_c_during_session_selection_exits_cleanly(self) -> None:
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("orbit.terminal.cli.list_sessions_for_workdir", side_effect=KeyboardInterrupt),
+            patch("builtins.print") as mock_print,
+        ):
+            exit_code = main(["--model", "demo"])
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(mock_print.call_count, 1)
+        self.assertEqual(mock_print.call_args.args, ())
 
     def test_main_uses_stdin_prompt_in_one_shot_mode(self) -> None:
         fake_runtime = type(

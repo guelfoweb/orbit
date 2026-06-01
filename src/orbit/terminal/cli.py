@@ -216,8 +216,15 @@ def _format_turn_status(status: object, source: str | None = None, prep: str | N
     return text
 
 
-def _print_turn_output(content: str, status: object, source: str | None = None, prep: str | None = None) -> None:
-    if _should_render_model_markdown(status, source=source):
+def _print_turn_output(
+    content: str,
+    status: object,
+    source: str | None = None,
+    prep: str | None = None,
+    *,
+    render_markdown: bool = True,
+) -> None:
+    if render_markdown and _should_render_model_markdown(status, source=source):
         print_model_markdown(content)
     else:
         print(content)
@@ -253,20 +260,28 @@ def _turn_preprocessing_label(prompt: str) -> str | None:
     return None
 
 
-def _input_preview(text: str) -> str | None:
+def _input_preview(text: str, *, preview_prefix_chars: int = LONG_INPUT_PREVIEW_PREFIX_CHARS) -> str | None:
     if not isinstance(text, str) or not text:
         return None
     is_multiline = "\n" in text
     if len(text) <= LONG_INPUT_PREVIEW_CHARS and not (is_multiline and len(text) > LONG_INPUT_MULTILINE_CHARS):
         return None
-    prefix = " ".join(text[:LONG_INPUT_PREVIEW_PREFIX_CHARS].split())
+    prefix = " ".join(text[: max(1, preview_prefix_chars)].split())
     if not prefix:
         return f"[text {len(text)} chars]"
     return f"{prefix} [text {len(text)} chars]"
 
 
-def _rewrite_long_input_line(text: str, *, stream=None) -> None:
-    preview = _input_preview(text)
+def _rewrite_long_input_line(
+    text: str,
+    *,
+    stream=None,
+    enabled: bool = True,
+    preview_prefix_chars: int = LONG_INPUT_PREVIEW_PREFIX_CHARS,
+) -> None:
+    if not enabled:
+        return
+    preview = _input_preview(text, preview_prefix_chars=preview_prefix_chars)
     if preview is None:
         return
     target = sys.stdout if stream is None else stream
@@ -312,7 +327,11 @@ def main(argv: list[str] | None = None) -> int:
         config = replace(config, prompt=stdin_prompt)
 
     if config.prompt is None and config.session_name is None:
-        config = _choose_startup_session(config)
+        try:
+            config = _choose_startup_session(config)
+        except KeyboardInterrupt:
+            print()
+            return 130
 
     try:
         runtime = OrbitRuntime.from_config(config)
@@ -340,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
                 result.status,
                 source=debug_recorder.response_source(result.status),
                 prep=_turn_preprocessing_label(config.prompt),
+                render_markdown=config.render_markdown,
             )
             return 0
         except OllamaError as exc:
@@ -377,7 +397,11 @@ def main(argv: list[str] | None = None) -> int:
         interrupts.reset()
         if not user_input:
             continue
-        _rewrite_long_input_line(user_input)
+        _rewrite_long_input_line(
+            user_input,
+            enabled=config.collapse_long_input,
+            preview_prefix_chars=config.long_input_preview_chars,
+        )
         remember_input(user_input)
         if user_input == "/exit":
             return 0
@@ -464,7 +488,13 @@ def main(argv: list[str] | None = None) -> int:
             prep = _turn_preprocessing_label(user_input)
             debug_recorder.status_text = _format_turn_status(result.status, source=source, prep=prep)
             interrupts.reset()
-            _print_turn_output(result.content, result.status, source=source, prep=prep)
+            _print_turn_output(
+                result.content,
+                result.status,
+                source=source,
+                prep=prep,
+                render_markdown=config.render_markdown,
+            )
         except KeyboardInterrupt:
             print()
             if interrupts.register():

@@ -270,6 +270,36 @@ Run:
 orbit --model gemma4:e2b-fast-t6-c8k
 ```
 
+User config:
+
+- Optional config path: `~/.orbit/config.json`.
+- If the file is missing, Orbit must keep the same CLI defaults.
+- CLI flags must override matching config values when a matching flag exists.
+- Keep the config small and limited to runtime/UI defaults.
+- Do not store prompt policy, project-specific behavior, session state, or skill content in the global config.
+- `orbit-default` remains the automatic default skill and should not need to be duplicated in config.
+
+Supported config keys:
+
+```json
+{
+  "model": "gemma4:e2b-fast-t6-c8k",
+  "host": "http://127.0.0.1:11434",
+  "workdir": ".",
+  "timeout": 300,
+  "think": "off",
+  "debug_timing": false,
+  "ui": {
+    "markdown": true,
+    "collapse_long_input": true,
+    "long_input_preview_chars": 50
+  },
+  "tools": {
+    "max_loops": 10
+  }
+}
+```
+
 Ollama server performance notes:
 
 - If Ollama runs as a systemd service, environment variables exported before `orbit` do not configure the server.
