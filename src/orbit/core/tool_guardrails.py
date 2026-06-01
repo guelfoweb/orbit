@@ -777,6 +777,7 @@ def codebase_review_reply_handling(
         content=content,
         messages=messages,
         policy_state=policy_state,
+        prefers_english_output=_prefers_english_output,
     )
 
 

@@ -156,7 +156,13 @@ def compact_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, A
         }
         chunk_notes = payload.get("chunk_notes")
         if isinstance(chunk_notes, list):
-            result["chunk_notes"] = chunk_notes[:8]
+            result["chunk_notes"] = [_trim_text(str(note), 180) for note in chunk_notes[:6]]
+        document_map = payload.get("document_map")
+        if isinstance(document_map, list):
+            result["document_map"] = _compact_document_map(document_map)
+        synthesis_guidance = payload.get("synthesis_guidance")
+        if isinstance(synthesis_guidance, str) and synthesis_guidance.strip():
+            result["synthesis_guidance"] = synthesis_guidance[:240]
         content = payload.get("content")
         if isinstance(content, str) and not summary_read:
             result["content"] = content[:MODEL_FIRST_TOOL_TEXT_LIMIT]
@@ -254,3 +260,27 @@ def compact_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, A
             result["links"] = links[:MODEL_FIRST_TOOL_LINKS_LIMIT]
         return result
     return payload
+
+
+def _compact_document_map(document_map: list[Any]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for item in document_map[:6]:
+        if not isinstance(item, dict):
+            continue
+        mapped: dict[str, Any] = {
+            "lines": item.get("lines"),
+            "position": item.get("position"),
+            "focus": _trim_text(str(item.get("focus") or ""), 130),
+        }
+        terms = item.get("key_terms")
+        if isinstance(terms, list) and terms:
+            mapped["key_terms"] = [str(term)[:40] for term in terms[:3]]
+        compacted.append(mapped)
+    return compacted
+
+
+def _trim_text(value: str, limit: int) -> str:
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."

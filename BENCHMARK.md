@@ -2,53 +2,32 @@
 
 ## Minimal Regression Benchmark
 
-Use this after runtime, routing, compaction, or guardrail changes:
+Use this after runtime, routing, compaction, guardrail, media, or tool changes:
 
 ```bash
-python3 -m unittest tests.test_route_matrix -q
-python3 scripts/run_prompt_benchmark.py --model gemma4:e2b-fast-t6-c8k
-python3 scripts/run_prompt_benchmark.py --model gemma4:e2b-fast-t6-c8k --include-heavy
-```
-
-For one-off latency diagnosis without changing normal output:
-
-```bash
+python3 -m unittest discover -s tests -q
 PYTHONPATH=src python3 -m orbit --workdir workdir --model gemma4:e2b-fast-t6-c8k --debug-timing "list all files and directories in the current workspace"
 ```
 
-`--debug-timing` prints bounded route, tool, and model timings to stderr. It is off by default.
+`--debug-timing` prints bounded route, intent-gate, tool, and model timings. It is off by default.
 
 ## Method
 
-- Use one isolated session per prompt.
-- Run prompts sequentially only.
-- Treat the first prompt after a cold Ollama restart as a cold-start outlier.
-- Use unit tests for correctness coverage and this benchmark for behavior and latency regression checks.
-- Keep the target model `gemma4:e2b-fast-t6-c8k` unless explicitly comparing model profiles.
-
-## Current Baseline Target
-
-Target machine: CPU-only NUC-class system with 6 cores / 12 threads and 64 GB RAM.
-
-- Fast bounded prompts should complete in about 1s each.
-- Heavy prompts may take tens of seconds, but must complete without tool errors or timeouts.
-- Review prompts must not execute `read_file` with a missing path.
-- Long text prompts must stay bounded and avoid context exhaustion.
-- Vision prompts must complete without Ollama runner crashes.
-- Audio prompts may take about one model call per 5 second chunk plus one synthesis call; they must complete without raw long-audio runner crashes.
-- Local plus web prompts must not claim local evidence unless `read_file` actually ran.
-- Ambiguous/discursive prompts must not expose broad tool sets unless the intent gate confirms tool use.
-- Routing checks should include conceptual mentions of tools, commands, file systems, encoding, web search, and malware analysis.
+- Target model: `gemma4:e2b-fast-t6-c8k`.
+- Target context: `8192`.
+- Prompt source: [PROMPTS.md](PROMPTS.md).
+- Run prompts sequentially, one at a time.
+- Use one isolated session per prompt to avoid history contamination.
+- Keep Ollama warm before measuring; exclude the warm-up prompt from benchmark results.
+- Use `--debug-timing` on every prompt.
+- Treat `src: local` as a valid fast path when Orbit can answer from bounded local evidence without another model call.
+- Skill prompts may depend on a private local workdir; do not publish personal task contents in benchmark notes.
 
 ## Current Model Profile
-
-Recommended local profile:
 
 ```bash
 ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
 ```
-
-Model file parameters:
 
 ```text
 FROM gemma4:e2b
@@ -58,7 +37,7 @@ PARAMETER num_thread 6
 PARAMETER num_batch 96
 ```
 
-Ollama server performance settings should be applied to the server process, not only to the `orbit` client process:
+Recommended Ollama server settings must be applied to the server process:
 
 ```bash
 OLLAMA_NUM_PARALLEL=1
@@ -66,48 +45,65 @@ OLLAMA_KEEP_ALIVE=-1
 OLLAMA_MAX_LOADED_MODELS=1
 ```
 
-If Ollama runs through systemd, put these values in an `ollama.service` drop-in and restart the service.
+## Latest Warm Run
 
-## Prompt Set
+Run date: 2026-06-01
 
-Fast prompts:
+Warm-up excluded from results: `hi` completed in `2.6s`, `src: model`, `ctx: 1.4%`.
 
-1. `hi, who are you?`
-2. `list all files and directories in the current workspace`
-3. `decode this string "Y2lhbw==" from base64`
-4. `what is the size and modified time of agent.py?`
-5. `tell me how many files exist in the workspace and what the newest file is.`
+Summary:
 
-Heavy prompts:
+| Group | Count | Exit OK | Fastest | Slowest | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Strategic Suite | 12 | 12 | `0.5s` | `91.8s` | local, web, vision, and review paths covered |
+| Strong Prompts | 9 | 9 | `0.5s` | `107.5s` | heavy vision/audio/long-text paths covered |
+| Ambiguous Intent Prompts | 10 | 10 | `3.3s` | `43.0s` | tool suppression and intent-gate behavior covered |
+| Skill Prompts | 1 | 1 | `1.5s` | `1.5s` | skill path covered with private output omitted |
 
-1. `review agent.py for vulnerabilities and security issues`
-2. `analyze the text promessi_sposi.txt and summarize it in 5 lines`
-3. `compare two images: images/vision-test-1.png and images/vision-test-2.jpg and tell me the differences`
-4. `transcribe audio/voice-sample-16k-mono.wav`
-5. `summarize audio/voice-sample.wav in one sentence`
+Observations:
 
-Ambiguous routing prompts:
+- All prompts exited successfully.
+- Fast bounded local paths completed in about `0.5s`.
+- Web exact-match checks over fetched pages completed in about `1.0s` through local evidence extraction.
+- Vision comparison required multiple model calls and ranged from about `85s` to `108s` on CPU-only hardware.
+- Audio transcription/summary completed in about `66s` to `70s` with chunked preprocessing.
+- Ambiguous operational prompts correctly avoided broad tool execution when the intent gate returned `NO`.
+- Code review now returns a more evidence-based local finding instead of generic security advice.
+- Long literary summarization uses compacted progressive evidence; it is slower than the previous extractive-only path but produces a more coherent summary with lower context pressure than the initial refactor attempt.
 
-1. `show me how grep works`
-2. `tell me about file systems`
-3. `tell me about base64 encoding`
-4. `what do you think about web search in LLMs?`
-5. `tell me about malware analysis`
-6. `change the conclusion`
-7. `use the tool to send an email to test@example.com`
+## Debug Timing Table
 
-## Latest Observed Run
-
-Recent runs with `gemma4:e2b-fast-t6-c8k` showed:
-
-- Fast bounded prompts: about `0.5s` for local deterministic/tool-backed paths.
-- Simple chat: about `2-4s` depending on warm state.
-- Code review prompt: about `70-75s`.
-- Long text summary prompt: about `23-24s`.
-- Vision comparison prompt: about `90-115s` when using per-image inspection plus synthesis on CPU-only hardware.
-- Audio summary/transcription over a 26s file: about `70-90s` with 5s chunks.
-- Generation speed: typically about `13-15 tk/s` on CPU-only hardware.
-
-Known limitation:
-
-- Code review on large files is still semantically weak compared with frontier models. It is useful for bounded local triage, not deep security assurance.
+| ID | Elapsed | Context | Source | Route | Intent Gate | Tools / Media |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| P01 | `0.5s` | `9.4%` | `local` | text_document_analysis -> filesystem | - | list_files |
+| P02 | `0.5s` | `8.9%` | `local` | codebase_inspection -> filesystem | - | list_files |
+| P03 | `0.5s` | `6.4%` | `local` | - | - | - |
+| P04 | `0.5s` | `8.0%` | `local` | text_document_analysis -> filesystem | - | read_file |
+| P05 | `0.5s` | `6.9%` | `local` | text_document_analysis -> filesystem | - | stat_path |
+| P06 | `0.5s` | `16.7%` | `local` | text_document_analysis -> filesystem | - | stat_path |
+| P07 | `66.1s` | `21.4%` | `tool+model` | codebase_inspection -> filesystem | - | list_files, read_file |
+| P08 | `91.8s` | `27.1%` | `tool+model` | current_factual_lookup -> web | - | fetch_url |
+| P09 | `87.4s` | `2.1%` | `model` | - | - | vision |
+| P10 | `18.8s` | `8.6%` | `tool+model` | current_factual_lookup -> web | - | search_web |
+| P11 | `1.0s` | `34.8%` | `local` | current_factual_lookup -> web | - | fetch_url |
+| P12 | `1.0s` | `29.6%` | `local` | current_factual_lookup -> web | - | fetch_url |
+| P13 | `9.5s` | `9.4%` | `tool+model` | codebase_inspection -> filesystem | - | list_files, read_file |
+| P14 | `84.8s` | `2.1%` | `model` | - | - | vision |
+| P15 | `31.5s` | `13.8%` | `tool+model` | text_document_analysis -> filesystem | - | read_file chunks |
+| P16 | `0.5s` | `36.3%` | `local` | codebase_inspection -> filesystem | - | list_files, read_file |
+| P17 | `0.5s` | `17.0%` | `local` | text_document_analysis -> filesystem | - | stat_path |
+| P18 | `29.8s` | `5.4%` | `model` | - | - | vision |
+| P19 | `107.5s` | `2.1%` | `model` | - | - | vision |
+| P20 | `70.0s` | `2.6%` | `model` | - | - | audio |
+| P21 | `65.8s` | `2.5%` | `model` | - | - | audio |
+| P22 | `34.8s` | `1.4%` | `model` | chitchat | binary_analysis -> NO | - |
+| P23 | `3.3s` | `1.5%` | `model` | chitchat | - | - |
+| P24 | `29.9s` | `1.6%` | `model` | chitchat | binary_analysis -> NO | - |
+| P25 | `7.4s` | `1.4%` | `model` | chitchat | ambiguous -> NO | - |
+| P26 | `32.2s` | `1.5%` | `model` | chitchat | - | - |
+| P27 | `27.6s` | `11.1%` | `tool+model` | current_factual_lookup -> web | - | search_web |
+| P28 | `43.0s` | `1.4%` | `model` | general_knowledge | - | - |
+| P29 | `24.4s` | `1.4%` | `model` | general_knowledge | - | - |
+| P30 | `32.0s` | `1.4%` | `model` | general_knowledge | - | - |
+| P31 | `7.2s` | `1.5%` | `model` | chitchat | ambiguous -> NO | - |
+| P32 | `1.5s` | `17.1%` | `local` | text_document_analysis -> filesystem, shell | - | rg |

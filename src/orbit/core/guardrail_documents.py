@@ -38,6 +38,8 @@ TERM_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'-]{2,}")
 TERM_STOPWORDS = {
     "about",
     "after",
+    "alla",
+    "alle",
     "also",
     "anche",
     "ancora",
@@ -49,13 +51,17 @@ TERM_STOPWORDS = {
     "come",
     "con",
     "contro",
+    "cosa",
     "così",
     "dalla",
     "dalle",
     "dallo",
+    "della",
     "delle",
     "dello",
     "dentro",
+    "detto",
+    "disse",
     "dopo",
     "dove",
     "from",
@@ -67,6 +73,8 @@ TERM_STOPWORDS = {
     "nelle",
     "nello",
     "opera",
+    "prima",
+    "quel",
     "perchè",
     "questo",
     "quella",
@@ -74,6 +82,7 @@ TERM_STOPWORDS = {
     "sotto",
     "sono",
     "storia",
+    "tanto",
     "sulla",
     "sulle",
     "their",
@@ -84,6 +93,30 @@ TERM_STOPWORDS = {
     "through",
     "where",
 }
+NARRATIVE_MARKERS = (
+    "renzo",
+    "lucia",
+    "rodrigo",
+    "federigo",
+    "agnese",
+    "abbondio",
+    "cristoforo",
+    "cerc",
+    "rispose",
+    "rimase",
+    "andò",
+    "ando",
+    "arriv",
+    "fugg",
+    "spos",
+    "peste",
+    "tries",
+    "faces",
+    "meets",
+    "returns",
+    "discovers",
+    "learns",
+)
 
 
 def seed_explicit_text_read_impl(
@@ -296,6 +329,11 @@ def condense_explicit_text_summary_messages(
         "sampled_start_lines": sampled_start_lines,
         "total_lines": total_lines,
         "chunk_notes": chunk_notes,
+        "document_map": build_document_map(_read_chunks_for_path(messages, path), total_lines=total_lines),
+        "synthesis_guidance": (
+            "Use chunk_notes as sampled evidence across the document. Prefer recurring entities, themes, conflicts, "
+            "and progression across beginning/middle/end over isolated quoted fragments."
+        ),
         "content": summary_text[:SUMMARY_EVIDENCE_TEXT_LIMIT],
         "notice": "summary sample read",
     }
@@ -501,6 +539,30 @@ def build_chunk_evidence_summary(chunk_notes: list[str]) -> str:
     return "Sampled file evidence:\n" + "\n".join(f"- {note}" for note in visible)
 
 
+def build_document_map(chunks: list[dict[str, Any]], *, total_lines: int | None) -> list[dict[str, Any]]:
+    mapped: list[dict[str, Any]] = []
+    for chunk in chunks[:12]:
+        content = chunk.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        start_line = chunk.get("start_line")
+        returned_lines = chunk.get("returned_lines")
+        if not isinstance(start_line, int) or start_line <= 0:
+            start_line = 1
+        if not isinstance(returned_lines, int) or returned_lines <= 0:
+            returned_lines = len(content.splitlines())
+        end_line = start_line + max(0, returned_lines - 1)
+        mapped.append(
+            {
+                "lines": f"{start_line}-{end_line}",
+                "position": _document_position(start_line=start_line, total_lines=total_lines),
+                "focus": _chunk_focus_summary(content) or "",
+                "key_terms": _content_key_terms(content),
+            }
+        )
+    return mapped
+
+
 def extract_requested_summary_lines(user_input: str) -> int | None:
     match = SUMMARY_LINE_COUNT_RE.search(user_input)
     if match is None:
@@ -670,12 +732,19 @@ def _is_low_information_candidate(candidate: str) -> bool:
     lowered = candidate.lower()
     if lowered.startswith("[illustrazione:") or lowered.startswith("[illustration:"):
         return True
+    if re.match(r"^\[\d+\]\s", candidate):
+        return True
+    if " pag. " in lowered or lowered.startswith("pag. "):
+        return True
+    if candidate.count("?") >= 2:
+        return True
     return False
 
 
 def _candidate_summary_score(candidate: str) -> tuple[int, int, int]:
     terms = _content_key_terms(candidate)
-    capitalized = sum(1 for token in candidate.split() if token[:1].isupper())
+    tokens = candidate.split()
+    capitalized = sum(1 for token in tokens if token[:1].isupper() and len(token.strip(".,;:!?\"'«»")) > 2)
     length = min(len(candidate), 160)
     penalty = 0
     lowered = candidate.lower()
@@ -683,7 +752,20 @@ def _candidate_summary_score(candidate: str) -> tuple[int, int, int]:
         penalty -= 2
     if "[illustrazione:" in lowered or "[illustration:" in lowered:
         penalty -= 4
+    if "?" in candidate:
+        penalty -= 4
+    if re.match(r"^\[\d+\]\s", candidate) or " pag. " in lowered:
+        penalty -= 8
+    if tokens and tokens[0][:1].islower():
+        penalty -= 2
+    narrative_score = _narrative_marker_score(lowered)
+    if narrative_score:
+        penalty += min(6, narrative_score * 2)
     return (len(terms) + capitalized + penalty, length, -candidate.count("..."))
+
+
+def _narrative_marker_score(lowered: str) -> int:
+    return sum(1 for marker in NARRATIVE_MARKERS if marker in lowered)
 
 
 def _merge_chunk_candidates(chunk_candidates: list[list[str]]) -> list[str]:
@@ -727,6 +809,21 @@ def _chunk_evidence_note(chunk: dict[str, Any]) -> str | None:
     if terms:
         parts.append("terms: " + ", ".join(terms))
     return "; ".join(parts)
+
+
+def _document_position(*, start_line: int, total_lines: int | None) -> str:
+    if not isinstance(total_lines, int) or total_lines <= 0:
+        return "unknown"
+    ratio = start_line / max(1, total_lines)
+    if ratio <= 0.2:
+        return "beginning"
+    if ratio >= 0.8:
+        return "ending"
+    if ratio <= 0.45:
+        return "early-middle"
+    if ratio >= 0.6:
+        return "late-middle"
+    return "middle"
 
 
 def _chunk_focus_summary(content: str) -> str | None:

@@ -4,7 +4,7 @@ Version: `0.1.0`
 
 Minimal interactive CLI that uses Ollama tool calling with a small set of local tools.
 The default runtime stays small: low prompt overhead, bounded loops, compact tool-oriented context, and optional local vision/audio paths for explicit local files.
-`orbit` is tuned primarily around `gemma4:e2b` and its local Ollama behavior; other models may work, but comparable reliability is not guaranteed.
+`orbit` is tuned around local `gemma4` profiles, with `gemma4:e2b` as the primary target.
 
 Available local tools:
 
@@ -158,11 +158,11 @@ Audio:
 
 Model selection:
 
-- if you pass `--model`, `orbit` uses that model
+- if you pass `--model`, `orbit` uses that Gemma4 model/profile
 - if you omit `--model`, `orbit` uses the first model already running in Ollama
 - if no model is running, `orbit` exits with an explicit error
 - if the selected model does not advertise `tools` capability via Ollama model details, `orbit` warns and falls back to chat-only mode
-- the main runtime and prompt strategy are optimized around `gemma4:e2b`; other models are best-effort only
+- the main runtime and prompt strategy are optimized around `gemma4:e2b`
 
 Session storage:
 

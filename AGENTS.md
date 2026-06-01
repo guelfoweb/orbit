@@ -24,7 +24,7 @@ Permanent constraints:
 - The main path must use Ollama native tool calling.
 - A limited fallback is allowed for tool calls returned as JSON/text.
 - `orbit` is built and tuned primarily around `gemma4:e2b`.
-- Other models are best-effort and are not guaranteed to behave with the same reliability.
+- Other Gemma4 profiles are best-effort and are not guaranteed to behave with the same reliability.
 - If `--model` is omitted, use the first model already running from `/api/ps`.
 - If no model is running and `--model` is omitted, fail with a clear error.
 - Timeout must be configurable from the CLI and timeout errors must suggest increasing it.

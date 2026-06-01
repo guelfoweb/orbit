@@ -465,7 +465,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent_class, INTENT_CLASS_MACHINE_INSPECTION)
 
     def test_web_lookup_route_exposes_english_intent_class(self) -> None:
-        route = route_intent("cerca online informazioni su Mario Nobile")
+        route = route_intent("cerca online informazioni su Dante Alighieri")
         self.assertEqual(route.intent, INTENT_CURRENT_FACTUAL_LOOKUP)
         self.assertEqual(route.intent_class, INTENT_CLASS_WEB_LOOKUP)
 
@@ -554,7 +554,7 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_discursive_security_statement_does_not_route_to_malware_triage(self) -> None:
         route = route_intent(
-            "1. The AI has capabilities to get IoC very fast. I tried GPT-5.4 with Codex CLI "
+            "1. The AI has capabilities to get IoC very fast. I tried a Gemma4 local CLI "
             "to analyze a malicious APK and it analyzed the sample, extracted the second stage "
             "and detected the C2. 2. The ML is useful to categorize and detect many pattern attacks quickly. "
             "Nowday all the intelligence platforms work with ML. 3. The future of security tools is AI centric "
@@ -1925,6 +1925,50 @@ class AgentLoopTests(unittest.TestCase):
             ],
         )
 
+    def test_code_review_request_reports_concrete_security_patterns(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "list_files":
+                return {
+                    "ok": True,
+                    "path": ".",
+                    "recursive": True,
+                    "entries": [
+                        {"path": "src/app.py", "type": "file"},
+                    ],
+                }
+            if name == "read_file":
+                return {
+                    "ok": True,
+                    "path": "src/app.py",
+                    "content": (
+                        "import subprocess\n"
+                        "password = 'supersecretvalue'\n"
+                        "def run(cmd):\n"
+                        "    return subprocess.run(cmd, shell=True)\n"
+                        "def calc(expr):\n"
+                        "    return eval(expr)\n"
+                    ),
+                    "start_line": 1,
+                    "returned_lines": 6,
+                    "total_lines": 6,
+                    "next_start_line": 7,
+                    "has_more": False,
+                    "truncated": False,
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("Review this codebase for vulnerabilities and security issues.")
+        self.assertIn("hardcoded secret-like value", result.content)
+        self.assertIn("shell=True", result.content)
+        self.assertIn("dynamic code execution", result.content)
+        self.assertEqual(client.calls, [])
+
     def test_code_review_request_in_italian_reports_todo_or_placeholder_signals(self) -> None:
         client = FakeClient([])
         registry = FakeRegistry()
@@ -2227,6 +2271,8 @@ class AgentLoopTests(unittest.TestCase):
         ]
         self.assertEqual(len(evidence_messages), 1)
         self.assertIn("chunk_notes", evidence_messages[0])
+        self.assertIn("document_map", evidence_messages[0])
+        self.assertIn("synthesis_guidance", evidence_messages[0])
         self.assertIn("\"summary_read\": true", evidence_messages[0])
         persisted_tool_payloads = [
             json.loads(item["content"])
@@ -2236,6 +2282,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(len(persisted_tool_payloads), 1)
         self.assertTrue(persisted_tool_payloads[0].get("summary_read"))
         self.assertIn("chunk_notes", persisted_tool_payloads[0])
+        self.assertIn("document_map", persisted_tool_payloads[0])
+        self.assertIn("synthesis_guidance", persisted_tool_payloads[0])
         self.assertGreaterEqual(len(persisted_tool_payloads[0]["chunk_notes"]), 2)
         self.assertEqual(
             registry.called,
@@ -3167,7 +3215,7 @@ class AgentLoopTests(unittest.TestCase):
                                 "function": {
                                     "name": "search_web",
                                     "arguments": {
-                                        "query": "OpenAI API docs",
+                                        "query": "Gemma4 Ollama docs",
                                         "max_results": 1,
                                     },
                                 }
@@ -3182,7 +3230,7 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_duration": 80_000_000,
                     "total_duration": 250_000_000,
                     "message": {
-                        "content": "OpenAI API Platform - https://platform.openai.com/docs/api-reference"
+                        "content": "Gemma4 model page - https://ollama.com/library/gemma4"
                     },
                 },
             ]
@@ -3193,15 +3241,15 @@ class AgentLoopTests(unittest.TestCase):
             registry.called.append((name, arguments))
             return {
                 "ok": True,
-                "query": "OpenAI API docs",
-                "results": [{"title": "OpenAI API Platform", "url": "https://platform.openai.com/docs/api-reference"}],
+                "query": "Gemma4 Ollama docs",
+                "results": [{"title": "Gemma4 model page", "url": "https://ollama.com/library/gemma4"}],
             }
 
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
-        result = agent.run_turn("Search the web for OpenAI API docs and return one result only.")
-        self.assertEqual(result.content, "OpenAI API Platform - https://platform.openai.com/docs/api-reference")
-        self.assertEqual(registry.called, [("search_web", {"query": "OpenAI API docs", "max_results": 1})])
+        result = agent.run_turn("Search the web for Gemma4 Ollama docs and return one result only.")
+        self.assertEqual(result.content, "Gemma4 model page - https://ollama.com/library/gemma4")
+        self.assertEqual(registry.called, [("search_web", {"query": "Gemma4 Ollama docs", "max_results": 1})])
         self.assertEqual(len(client.calls), 1)
 
     def test_current_factual_generic_search_can_finalize_from_bounded_results(self) -> None:
@@ -3636,6 +3684,62 @@ class AgentLoopTests(unittest.TestCase):
                 for message in retry_messages
             )
         )
+
+    def test_gemma_model_replaces_unanchored_generic_security_review_with_local_evidence(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 4,
+                    "eval_duration": 50_000_000,
+                    "total_duration": 200_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {"function": {"name": "read_file", "arguments": {"path": "agent.py"}}},
+                        ],
+                    },
+                },
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 10,
+                    "eval_duration": 70_000_000,
+                    "total_duration": 210_000_000,
+                    "message": {
+                        "content": (
+                            "Potential risks include prompt injection risk, tool execution security, "
+                            "and error handling and state management. If the inputs are not sanitized, this could be a risk."
+                        ),
+                    },
+                },
+            ]
+        )
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "read_file":
+                return {
+                    "ok": True,
+                    "path": "agent.py",
+                    "content": "def run(expr):\n    return eval(expr)\n",
+                    "start_line": 1,
+                    "returned_lines": 2,
+                    "total_lines": 2,
+                    "has_more": False,
+                    "truncated": False,
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("review agent.py for vulnerabilities and security issues")
+        self.assertIn("dynamic code execution", result.content)
+        self.assertIn("agent.py:2", result.content)
+        self.assertEqual(len(client.calls), 2)
 
     def test_gemma_model_finalizes_review_when_followup_read_file_has_no_path(self) -> None:
         client = FakeClient(
@@ -4685,7 +4789,7 @@ class AgentLoopTests(unittest.TestCase):
                                 "function": {
                                     "name": "search_web",
                                     "arguments": {
-                                        "query": "Mario Nobile",
+                                        "query": "Dante Alighieri",
                                         "max_results": 3,
                                     },
                                 }
@@ -4700,7 +4804,7 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_duration": 80_000_000,
                     "total_duration": 250_000_000,
                     "message": {
-                        "content": "Mario Nobile appears in public-sector digital leadership roles, including AgID references."
+                        "content": "Dante Alighieri appears in literary history references, including the Divine Comedy."
                     },
                 },
             ]
@@ -4715,18 +4819,18 @@ class AgentLoopTests(unittest.TestCase):
                 "query": arguments["query"],
                 "results": [
                     {
-                        "title": "Mario Nobile - Governo Italiano",
-                        "url": "https://www.governo.it/mario-nobile",
-                        "snippet": "Direttore generale dell'Agenzia per l'Italia Digitale.",
+                        "title": "Dante Alighieri - Treccani",
+                        "url": "https://www.treccani.it/enciclopedia/dante-alighieri/",
+                        "snippet": "Poeta italiano, autore della Divina Commedia.",
                     }
                 ],
             }
 
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
-        result = agent.run_turn("search online for information about Mario Nobile and summarize it")
-        self.assertIn("agid", result.content.lower())
-        self.assertEqual(registry.called, [("search_web", {"query": "Mario Nobile", "max_results": 3})])
+        result = agent.run_turn("search online for information about Dante Alighieri and summarize it")
+        self.assertIn("divine comedy", result.content.lower())
+        self.assertEqual(registry.called, [("search_web", {"query": "Dante Alighieri", "max_results": 3})])
         self.assertEqual(len(client.calls), 2)
 
     def test_documentation_search_request_in_english_uses_model_for_summary_after_search(self) -> None:
@@ -4745,7 +4849,7 @@ class AgentLoopTests(unittest.TestCase):
                                 "function": {
                                     "name": "search_web",
                                     "arguments": {
-                                        "query": "tool calling Granite 2 Ollama on-premise",
+                                        "query": "tool calling Gemma4 Ollama on-premise",
                                         "max_results": 3,
                                     },
                                 }
@@ -4760,7 +4864,7 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_duration": 80_000_000,
                     "total_duration": 250_000_000,
                     "message": {
-                        "content": "Tool calling in Ollama is suitable for on-premise use because the runtime and the model can stay local. Granite 2 support should still be validated against the specific Ollama documentation."
+                        "content": "Tool calling in Ollama is suitable for on-premise use because the runtime and the Gemma4 model can stay local. Gemma4 support should still be validated against the specific Ollama documentation."
                     },
                 },
             ]
@@ -4784,10 +4888,10 @@ class AgentLoopTests(unittest.TestCase):
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
         result = agent.run_turn(
-            "Search for documentation on tool calling with Granite 2 and Ollama, summarize it, and tell me whether it is suitable for an on-premise environment."
+            "Search for documentation on tool calling with Gemma4 and Ollama, summarize it, and tell me whether it is suitable for an on-premise environment."
         )
         self.assertIn("suitable for on-premise use", result.content.lower())
-        self.assertEqual(registry.called, [("search_web", {"query": "tool calling Granite 2 Ollama on-premise", "max_results": 3})])
+        self.assertEqual(registry.called, [("search_web", {"query": "tool calling Gemma4 Ollama on-premise", "max_results": 3})])
         self.assertEqual(len(client.calls), 2)
 
     def test_search_and_summary_request_in_italian_uses_model_for_summary_after_search(self) -> None:
@@ -4806,7 +4910,7 @@ class AgentLoopTests(unittest.TestCase):
                                 "function": {
                                     "name": "search_web",
                                     "arguments": {
-                                        "query": "Mario Nobile",
+                                        "query": "Dante Alighieri",
                                         "max_results": 3,
                                     },
                                 }
@@ -4821,7 +4925,7 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_duration": 80_000_000,
                     "total_duration": 250_000_000,
                     "message": {
-                        "content": "Mario Nobile risulta associato all'Agenzia per l'Italia Digitale e a ruoli pubblici nel digitale, secondo i risultati trovati."
+                        "content": "Dante Alighieri risulta associato alla letteratura italiana e alla Divina Commedia, secondo i risultati trovati."
                     },
                 },
             ]
@@ -4835,23 +4939,23 @@ class AgentLoopTests(unittest.TestCase):
                 "query": arguments["query"],
                 "results": [
                     {
-                        "title": "Mario Nobile - Governo Italiano",
-                        "url": "https://www.governo.it/mario-nobile",
-                        "snippet": "Direttore generale dell'Agenzia per l'Italia Digitale.",
+                        "title": "Dante Alighieri - Treccani",
+                        "url": "https://www.treccani.it/enciclopedia/dante-alighieri/",
+                        "snippet": "Poeta italiano, autore della Divina Commedia.",
                     },
                     {
-                        "title": "Chi è il nuovo direttore dell'Agenzia per l'Italia digitale",
-                        "url": "https://www.wired.it/article/agid-direttore-generale-mario-nobile/",
-                        "snippet": "Approfondimento sul nuovo direttore generale AgID.",
+                        "title": "Dante Alighieri",
+                        "url": "https://www.britannica.com/biography/Dante-Alighieri",
+                        "snippet": "Italian poet and author of the Divine Comedy.",
                     },
                 ],
             }
 
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
-        result = agent.run_turn("cerca online informazioni su Mario Nobile e fammi una sintesi")
-        self.assertIn("agenzia per l'italia digitale", result.content.lower())
-        self.assertEqual(registry.called, [("search_web", {"query": "Mario Nobile", "max_results": 3})])
+        result = agent.run_turn("cerca online informazioni su Dante Alighieri e fammi una sintesi")
+        self.assertIn("letteratura italiana", result.content.lower())
+        self.assertEqual(registry.called, [("search_web", {"query": "Dante Alighieri", "max_results": 3})])
         self.assertEqual(len(client.calls), 2)
 
     def test_simple_calculation_request_can_finalize_locally(self) -> None:
@@ -4902,7 +5006,7 @@ class AgentLoopTests(unittest.TestCase):
                                 "function": {
                                     "name": "search_web",
                                     "arguments": {
-                                        "query": "Mario Nobile",
+                                        "query": "Dante Alighieri",
                                         "max_results": 3,
                                     },
                                 }
@@ -4917,7 +5021,7 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_duration": 80_000_000,
                     "total_duration": 250_000_000,
                     "message": {
-                        "content": "Mario Nobile risulta associato a ruoli pubblici nel digitale, in particolare all'Agenzia per l'Italia Digitale."
+                        "content": "Dante Alighieri risulta associato alla letteratura italiana, in particolare alla Divina Commedia."
                     },
                 },
             ]
@@ -4928,26 +5032,26 @@ class AgentLoopTests(unittest.TestCase):
             registry.called.append((name, arguments))
             return {
                 "ok": True,
-                "query": "Mario Nobile",
+                "query": "Dante Alighieri",
                 "results": [
                     {
-                        "title": "Mario Nobile - Governo Italiano",
-                        "url": "https://www.governo.it/mario-nobile",
-                        "snippet": "Direttore generale dell'Agenzia per l'Italia Digitale.",
+                        "title": "Dante Alighieri - Treccani",
+                        "url": "https://www.treccani.it/enciclopedia/dante-alighieri/",
+                        "snippet": "Poeta italiano, autore della Divina Commedia.",
                     },
                     {
-                        "title": "Profilo LinkedIn di Mario Nobile",
-                        "url": "https://www.linkedin.com/in/mario-nobile",
-                        "snippet": "Esperienze e incarichi pubblici e digitali.",
+                        "title": "Dante Alighieri",
+                        "url": "https://en.wikipedia.org/wiki/Dante_Alighieri",
+                        "snippet": "Poet, writer, and philosopher from Florence.",
                     },
                 ],
             }
 
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
-        result = agent.run_turn("mi cerchi online informazioni su Mario Nobile?")
-        self.assertIn("agenzia per l'italia digitale", result.content.lower())
-        self.assertEqual(registry.called, [("search_web", {"query": "Mario Nobile", "max_results": 3})])
+        result = agent.run_turn("mi cerchi online informazioni su Dante Alighieri?")
+        self.assertIn("letteratura italiana", result.content.lower())
+        self.assertEqual(registry.called, [("search_web", {"query": "Dante Alighieri", "max_results": 3})])
         self.assertEqual(len(client.calls), 2)
 
     def test_entity_lookup_request_can_finalize_locally_from_search_results(self) -> None:
@@ -5918,7 +6022,7 @@ class AgentLoopTests(unittest.TestCase):
             def chat(self, *, messages, tools, options, think=None, stream=False):
                 self.calls.append({"messages": messages, "tools": tools, "options": options, "think": think, "stream": stream})
                 if stream and think is True:
-                    raise OllamaError('"demo-model" does not support thinking (status code: 400)')
+                    raise OllamaError('"gemma4:e2b" does not support thinking (status code: 400)')
                 return {
                     "prompt_eval_count": 10,
                     "prompt_eval_duration": 100_000_000,
@@ -6688,11 +6792,11 @@ class AgentLoopTests(unittest.TestCase):
         )
         registry = FakeRegistry()
         agent = AgentLoop(client=client, registry=registry, max_loops=2)
-        result = agent.run_turn("cerca online informazioni su Mario Nobile")
+        result = agent.run_turn("cerca online informazioni su Dante Alighieri")
         self.assertEqual(result.content, "done")
         self.assertEqual(registry.routed[0], ("web",))
         self.assertEqual(client.calls[0]["tools"][0]["function"]["name"], "search_web")
-        self.assertEqual(route_intent("cerca online informazioni su Mario Nobile").intent, INTENT_CURRENT_FACTUAL_LOOKUP)
+        self.assertEqual(route_intent("cerca online informazioni su Dante Alighieri").intent, INTENT_CURRENT_FACTUAL_LOOKUP)
 
     def test_routes_weather_queries_to_web_tools_subset(self) -> None:
         client = FakeClient(
@@ -7335,7 +7439,7 @@ class AgentLoopTests(unittest.TestCase):
         client.model = "gemma4:e2b-fast"
         agent = AgentLoop(client=client, registry=registry, max_loops=4)
         result = agent.run_turn(
-            "1. The AI has capabilities to get IoC very fast. I tried GPT-5.4 with Codex CLI "
+            "1. The AI has capabilities to get IoC very fast. I tried a Gemma4 local CLI "
             "to analyze a malicious APK and it analyzed the sample, extracted the second stage "
             "and detected the C2. 2. The ML is useful to categorize and detect many pattern attacks quickly. "
             "Nowday all the intelligence platforms work with ML. 3. The future of security tools is AI centric "
@@ -7968,7 +8072,7 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_context_budget_uses_single_internal_profile(self) -> None:
         self.assertEqual(profile_for_model("gemma4:e2b").soft_tokens, 9000)
-        self.assertEqual(profile_for_model("unknown-model").soft_tokens, 9000)
+        self.assertEqual(profile_for_model("gemma4:e4b").soft_tokens, 9000)
 
     def test_compact_uses_model_refinement_when_available(self) -> None:
         client = FakeClient(
@@ -8878,8 +8982,8 @@ class AgentLoopTests(unittest.TestCase):
         prompt = _repeated_tool_retry_prompt(
             ToolCallRecord(
                 name="fetch_url",
-                signature='fetch_url:{"url": "https://www.google.com/search?q=Mario+Nobile"}',
-                detail="fetch_url.url=https://www.google.com/search?q=Mario+Nobile",
+                signature='fetch_url:{"url": "https://www.google.com/search?q=Dante+Alighieri"}',
+                detail="fetch_url.url=https://www.google.com/search?q=Dante+Alighieri",
             ),
             TurnPolicyState(),
         )
@@ -8890,8 +8994,8 @@ class AgentLoopTests(unittest.TestCase):
         prompt = _repeated_tool_retry_prompt(
             ToolCallRecord(
                 name="search_web",
-                signature='search_web:{"query": "Mario Nobile"}',
-                detail="search_web.query=Mario Nobile",
+                signature='search_web:{"query": "Dante Alighieri"}',
+                detail="search_web.query=Dante Alighieri",
             ),
             TurnPolicyState(),
         )
@@ -8991,18 +9095,18 @@ class AgentLoopTests(unittest.TestCase):
     def test_signatures_match_requires_same_normalized_signature(self) -> None:
         first = ToolCallRecord(
             name="search_web",
-            signature='search_web:{"query": "Mario Nobile architetto"}',
-            detail="search_web.query=Mario Nobile architetto",
+            signature='search_web:{"query": "Dante Alighieri poeta"}',
+            detail="search_web.query=Dante Alighieri poeta",
         )
         second = ToolCallRecord(
             name="search_web",
-            signature='search_web:{"query": "Mario Nobile architect Italy"}',
-            detail="search_web.query=Mario Nobile architect Italy",
+            signature='search_web:{"query": "Dante Alighieri poet Italy"}',
+            detail="search_web.query=Dante Alighieri poet Italy",
         )
         same = ToolCallRecord(
             name="search_web",
-            signature='search_web:{"query": "Mario Nobile architetto"}',
-            detail="search_web.query=Mario Nobile architetto",
+            signature='search_web:{"query": "Dante Alighieri poeta"}',
+            detail="search_web.query=Dante Alighieri poeta",
         )
         self.assertFalse(signatures_match(first, second))
         self.assertTrue(signatures_match(first, same))

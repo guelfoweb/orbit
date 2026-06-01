@@ -27,7 +27,7 @@ Rules:
 - Symptom: generic web queries generated guessed Google, Bing, or Wikipedia URLs.
 - Cause: there was no dedicated search tool and the `fetch_url` contract was too weak.
 - Fix: added `search_web`; restricted `fetch_url` to explicit known URLs.
-- Example: `search online for information about Mario Nobile`.
+- Example: `search online for information about Dante Alighieri`.
 
 ### 3. DuckDuckGo HTML search used the wrong HTTP method
 - Symptom: generic web search returned weak or empty results.
@@ -35,11 +35,11 @@ Rules:
 - Fix: switched to bounded form-encoded requests with structured output.
 - Example: `https://html.duckduckgo.com/html/`.
 
-### 4. Thinking-capable mode crashed on unsupported models
+### 4. Thinking-capable mode crashed on unsupported Gemma4 profiles
 - Symptom: `does not support thinking (400)` aborted the client.
-- Cause: no fallback when `think` was requested on incompatible models.
+- Cause: no fallback when `think` was requested on an incompatible Gemma4 profile.
 - Fix: catch the error, warn, and retry without thinking.
-- Example: `/think on` with a non-thinking model.
+- Example: `/think on` with a non-thinking Gemma4 profile.
 
 ### 5. Pseudo-JSON tool calls were printed instead of executed
 - Symptom: the model emitted a textual tool call and Orbit treated it as normal text.
@@ -49,7 +49,7 @@ Rules:
 
 ### 6. Noisy directories inflated context and caused `list_files` loops
 - Symptom: repeated workspace listings over `.venv`, `.git`, `node_modules`, and caches.
-- Cause: directory listing was too noisy for small models.
+- Cause: directory listing was too noisy for the target Gemma4 profile.
 - Fix: ignore common noise directories and bound listing output.
 - Example: `what files are in this folder?`.
 
@@ -57,16 +57,16 @@ Rules:
 - Symptom: related but different web queries were treated as loops.
 - Cause: near-duplicate matching was too aggressive.
 - Fix: block only genuinely identical calls after light normalization.
-- Example: `Mario Nobile architect` vs `Mario Nobile architect Italy`.
+- Example: `Dante Alighieri poet` vs `Dante Alighieri poet Italy`.
 
-### 8. Models without `tools` capability failed unclearly
-- Symptom: some models never emitted native tool calls.
+### 8. Gemma4 profiles without `tools` capability failed unclearly
+- Symptom: some Gemma4 profiles never emitted native tool calls.
 - Cause: backend/model capability differences.
 - Fix: inspect metadata and degrade to chat-only with a warning.
-- Example: startup with a model that does not advertise `tools`.
+- Example: startup with a Gemma4 profile that does not advertise `tools`.
 
-### 9. Too many tools confused small models
-- Symptom: models picked the wrong tool for simple requests.
+### 9. Too many tools confused the target Gemma4 profile
+- Symptom: Gemma4 picked the wrong tool for simple requests.
 - Cause: all tools were exposed in every turn.
 - Fix: two-stage tool routing by category: filesystem, write, shell, web.
 - Example: simple filesystem prompts seeing web/write tools.
@@ -222,10 +222,10 @@ Rules:
 - Example: `hello` with an analysis skill active.
 
 ### 35. Metadata defaults and lightweight model profiles regressed
-- Symptom: tests failed on `ModelMetadata`; lightweight models started with too-heavy defaults.
+- Symptom: tests failed on `ModelMetadata`; lightweight Gemma4 profiles started with too-heavy defaults.
 - Cause: `parameter_size` became required and runtime did not recognize small quantized profiles.
 - Fix: make metadata optional and tune lightweight defaults.
-- Example: `glm-4.7-flash-iq3_m:latest`.
+- Example: `gemma4:e2b-fast-t6-c8k`.
 
 ### 36. Default agent path was too heavy
 - Symptom: ordinary turns paid for long prompts and skill context.
@@ -273,7 +273,7 @@ Rules:
 - Symptom: online lookup routed to web but answered without real results.
 - Cause: generic web prompts were not seeded strongly enough.
 - Fix: seed `search_web` for broader online lookup requests and finalize from structured evidence.
-- Example: `search online for information about Mario Nobile`.
+- Example: `search online for information about Dante Alighieri`.
 
 ### 44. "Important files" inspection wasted loops
 - Symptom: the model read many files instead of answering from listing evidence.
@@ -532,6 +532,18 @@ Rules:
 - Cause: PDF and binary files both needed bounded shell/filesystem handling, so they were historically grouped under one intent.
 - Fix: split routing into `pdf_analysis` for document extraction and `binary_analysis` for static/container inspection, while keeping a compatibility helper for older guardrails.
 - Example: `Summarize docs/Project Overview.pdf.`.
+
+### 87. Code review synthesis drifted into generic security advice
+- Symptom: explicit code-review prompts could return plausible but unanchored findings such as generic prompt-injection or tool-execution risks.
+- Cause: after `read_file`, model-first synthesis was still allowed to answer without concrete line or pattern evidence.
+- Fix: add bounded local security-pattern extraction and replace unanchored generic security reviews with evidence-based local findings when possible.
+- Example: `review agent.py for vulnerabilities and security issues`.
+
+### 88. Long document summaries over-weighted noisy sampled fragments
+- Symptom: summaries of very large narrative documents could focus on isolated quotes, questions, footnotes, or weak chunk fragments.
+- Cause: sampled chunk notes lacked a document map and candidate scoring allowed low-information literary fragments.
+- Fix: add `document_map`, synthesis guidance, better Italian stopwords, footnote filtering, and narrative-aware candidate scoring for long sampled summaries.
+- Example: `Read promessi_sposi.txt, summarize it in exactly 4 lines`.
 
 ## Recurring Guidelines
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 import re
+from dataclasses import dataclass
 
 from .code_review_signals import (
     CODE_FILE_EXTENSIONS,
@@ -96,6 +97,69 @@ CODE_REVIEW_READ_MAX_FILES = 3
 CODE_REVIEW_READ_MAX_LINES = 220
 CODE_REVIEW_READ_MAX_CHARS = 9000
 CODE_REVIEW_READ_MAX_CHUNKS = 2
+
+
+@dataclass(frozen=True)
+class SecurityDetector:
+    pattern: re.Pattern[str]
+    english_template: str
+    italian_template: str
+
+
+SECURITY_DETECTORS: tuple[SecurityDetector, ...] = (
+    SecurityDetector(
+        re.compile(r"\bshell\s*=\s*True\b"),
+        "High: `{path}:{line}` enables `shell=True`, which expands command-injection impact if any argument is user-controlled.",
+        "Alta: `{path}:{line}` abilita `shell=True`, aumentando l'impatto di command injection se un argomento e` controllabile dall'utente.",
+    ),
+    SecurityDetector(
+        re.compile(r"\b(?:os\.system|os\.popen|commands\.getoutput)\s*\("),
+        "High: `{path}:{line}` executes shell commands through a broad shell API; prefer bounded subprocess calls with explicit arguments.",
+        "Alta: `{path}:{line}` esegue comandi tramite API shell ampia; meglio subprocess bounded con argomenti espliciti.",
+    ),
+    SecurityDetector(
+        re.compile(r"\b(?:eval|exec)\s*\("),
+        "High: `{path}:{line}` uses dynamic code execution; verify that no untrusted input can reach this call.",
+        "Alta: `{path}:{line}` usa esecuzione dinamica di codice; verifica che input non fidato non possa raggiungerla.",
+    ),
+    SecurityDetector(
+        re.compile(r"\bpickle\.(?:load|loads)\s*\("),
+        "High: `{path}:{line}` deserializes pickle data, which is unsafe for untrusted content.",
+        "Alta: `{path}:{line}` deserializza dati pickle, non sicuri con contenuti non fidati.",
+    ),
+    SecurityDetector(
+        re.compile(r"\byaml\.load\s*\((?![^)]*SafeLoader)"),
+        "High: `{path}:{line}` calls `yaml.load` without an obvious `SafeLoader`.",
+        "Alta: `{path}:{line}` chiama `yaml.load` senza un `SafeLoader` evidente.",
+    ),
+    SecurityDetector(
+        re.compile(r"\bverify\s*=\s*False\b"),
+        "Medium: `{path}:{line}` disables TLS certificate verification.",
+        "Media: `{path}:{line}` disabilita la verifica dei certificati TLS.",
+    ),
+    SecurityDetector(
+        re.compile(r"\btempfile\.mktemp\s*\("),
+        "Medium: `{path}:{line}` uses `tempfile.mktemp`, which can introduce race conditions.",
+        "Media: `{path}:{line}` usa `tempfile.mktemp`, che puo` introdurre race condition.",
+    ),
+    SecurityDetector(
+        re.compile(r"\b(?:password|passwd|secret|api[_-]?key|token)\s*=\s*['\"][^'\"]{8,}['\"]", re.IGNORECASE),
+        "Medium: `{path}:{line}` appears to contain a hardcoded secret-like value.",
+        "Media: `{path}:{line}` sembra contenere un valore hardcoded simile a un segreto.",
+    ),
+)
+
+UNANCHORED_SECURITY_REVIEW_HINTS = (
+    "prompt injection risk",
+    "tool execution security",
+    "input sanitization",
+    "error handling and state management",
+    "command injection or arbitrary file system access",
+    "if the inputs",
+    "if any argument",
+    "could be a risk",
+    "could lead to",
+)
 
 
 def seed_codebase_listing_impl(
@@ -312,6 +376,10 @@ def local_codebase_review_result(
         return None
     english = prefers_english_output(lowered)
     review_targets = code_review_target_paths(recent_listed_file_paths(messages, limit=40))
+    if not review_targets:
+        review_targets = code_review_target_paths(
+            [str(item.get("path")) for item in read_results if isinstance(item.get("path"), str)]
+        )
     findings: list[str] = []
     merged_results: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
@@ -324,6 +392,14 @@ def local_codebase_review_result(
             continue
         seen_paths.add(normalized)
         merged_results.append(result)
+        for finding in infer_security_review_findings(result, english=english):
+            if finding in findings:
+                continue
+            findings.append(finding)
+            if len(findings) >= 3:
+                break
+        if len(findings) >= 3:
+            break
         finding = infer_code_review_finding(result, english=english)
         if finding is not None:
             findings.append(finding)
@@ -354,6 +430,7 @@ def codebase_review_reply_handling(
     content: str,
     messages: list[dict[str, Any]],
     policy_state: Any,
+    prefers_english_output: Callable[[str], bool],
 ) -> tuple[str, str] | None:
     if intent != INTENT_CODEBASE_INSPECTION:
         return None
@@ -441,6 +518,15 @@ def codebase_review_reply_handling(
             "Perform a bug and risk review of the inspected code and report up to 3 concrete findings. "
             "If no clear bug is visible in the inspected portions, say `No concrete bug found in the inspected portions.` and give at most 1 precise remaining uncertainty.",
         )
+    if _looks_like_unanchored_generic_security_review(content):
+        local_review = local_codebase_review_result(
+            intent=intent,
+            user_input=user_input,
+            messages=messages,
+            prefers_english_output=prefers_english_output,
+        )
+        if local_review is not None:
+            return ("final", local_review)
     if not any(hint in lowered for hint in uncertainty_hints):
         return None
     policy_state.synthesis_retries += 1
@@ -451,6 +537,19 @@ def codebase_review_reply_handling(
         "Review this file directly and report up to 3 concrete bug or risk findings visible in the file itself. "
         "If no clear bug is visible in this file, say that explicitly and give at most 1 precise remaining uncertainty.",
     )
+
+
+def _looks_like_unanchored_generic_security_review(content: str) -> bool:
+    lowered = content.lower()
+    if not any(hint in lowered for hint in UNANCHORED_SECURITY_REVIEW_HINTS):
+        return False
+    if re.search(r"`[^`]+:\d+`", content):
+        return False
+    if re.search(r"\bline\s+\d+\b", lowered):
+        return False
+    if "no concrete bug" in lowered or "no concrete vulnerability" in lowered:
+        return False
+    return True
 
 
 def code_review_target_paths(paths: list[str]) -> list[str]:
@@ -574,6 +673,40 @@ def infer_code_review_finding(result: dict[str, Any], *, english: bool) -> str |
     if any(token in lowered_path for token in ("/registry.py", "/router.py", "/cli.py", "/runtime.py")):
         return f"- Medium: `{path}` is an integration surface, so small changes there can propagate widely even when the diff looks localized." if english else f"- Media: `{path}` e` una superficie di integrazione, quindi anche modifiche piccole possono propagare effetti ampi pur sembrando locali."
     return None
+
+
+def infer_security_review_findings(result: dict[str, Any], *, english: bool) -> list[str]:
+    path = result.get("path")
+    content = result.get("content")
+    if not isinstance(path, str) or not isinstance(content, str):
+        return []
+    start_line = result.get("start_line")
+    base_line = start_line if isinstance(start_line, int) and start_line > 0 else 1
+    findings: list[str] = []
+    for line_number, detector in _security_detector_hits(content, base_line=base_line):
+        findings.append(_format_security_finding(detector, path=path, line=line_number, english=english))
+        if len(findings) >= 3:
+            break
+    return findings
+
+
+def _security_detector_hits(content: str, *, base_line: int) -> list[tuple[int, SecurityDetector]]:
+    hits: list[tuple[int, SecurityDetector]] = []
+    for offset, line in enumerate(content.splitlines()):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        for detector in SECURITY_DETECTORS:
+            if not detector.pattern.search(stripped):
+                continue
+            hits.append((base_line + offset, detector))
+            break
+    return hits
+
+
+def _format_security_finding(detector: SecurityDetector, *, path: str, line: int, english: bool) -> str:
+    template = detector.english_template if english else detector.italian_template
+    return template.format(path=path, line=line)
 
 
 def infer_cross_file_review_findings(results: list[dict[str, Any]], *, english: bool) -> list[str]:

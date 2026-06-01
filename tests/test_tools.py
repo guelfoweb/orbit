@@ -343,7 +343,7 @@ class ToolRegistryTests(unittest.TestCase):
             <div class="result results_links results_links_deep web-result">
               <div class="links_main links_deep result__body">
                 <h2 class="result__title">
-                  <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fprofile">Mario Nobile - Profile</a>
+                  <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fprofile">Dante Alighieri - Profile</a>
                 </h2>
                 <a class="result__url" href="https://example.com/profile">example.com/profile</a>
                 <a class="result__snippet">Official profile page.</a>
@@ -357,7 +357,7 @@ class ToolRegistryTests(unittest.TestCase):
             results,
             [
                 {
-                    "title": "Mario Nobile - Profile",
+                    "title": "Dante Alighieri - Profile",
                     "url": "https://example.com/profile",
                     "snippet": "Official profile page.",
                     "display_url": "example.com/profile",
@@ -399,11 +399,11 @@ class ToolRegistryTests(unittest.TestCase):
                 return raw_url, 200, "text/html", "<html></html>"
 
         tool = InspectWebTools()
-        result = tool.search_web({"query": "Mario Nobile", "timeout": 7})
+        result = tool.search_web({"query": "Dante Alighieri", "timeout": 7})
         self.assertTrue(result["ok"])
         self.assertEqual(captured["url"], "https://html.duckduckgo.com/html/")
         self.assertEqual(captured["timeout"], 7)
-        self.assertEqual(captured["form_data"], {"q": "Mario Nobile"})
+        self.assertEqual(captured["form_data"], {"q": "Dante Alighieri"})
 
     def test_fetch_url_uses_browser_like_headers(self) -> None:
         captured = {}

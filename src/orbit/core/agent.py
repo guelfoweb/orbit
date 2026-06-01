@@ -1576,8 +1576,10 @@ class AgentLoop:
         )
         system_prompt = (
             "You are the local assistant running inside the Orbit CLI. "
-            "Summarize the whole file from bounded sampled chunk notes only. "
-            "Write a real summary, not the notes themselves. "
+            "Summarize the whole file from bounded sampled chunk notes and document-map evidence only. "
+            "Write a real synthesis, not the notes themselves. "
+            "Prefer recurring entities, themes, conflicts, progression, and ending signals over isolated fragments. "
+            "If evidence is sampled or partial, say so briefly without weakening the summary. "
             "Do not repeat raw excerpts unless the user explicitly asked for quotes."
             f"{line_instruction}"
         )
