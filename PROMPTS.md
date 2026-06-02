@@ -42,6 +42,6 @@
 
 ## Skill Prompts
 
-Run with `--skill obsidian-daily` and the Obsidian vault as `--workdir`.
+Run with `--skill task-notes` and a workspace containing `Daily.md`.
 
 1. `Read Daily.md. Extract all open tasks marked with "- [ ]", then analyze them semantically: group them by Work and Personal, identify overdue tasks, recurring tasks, and suggest the top 3 priorities for today. Use only evidence from Daily.md.`

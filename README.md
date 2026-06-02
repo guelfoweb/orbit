@@ -1,46 +1,28 @@
 # orbit
 
-Version: `0.1.0`
+Orbit is a minimal local CLI for Ollama tool calling.
 
-Minimal interactive CLI that uses Ollama tool calling with a small set of local tools.
-The default runtime stays small: low prompt overhead, bounded loops, compact tool-oriented context, and optional local vision/audio paths for explicit local files.
-`orbit` is tuned around local `gemma4` profiles, with `gemma4:e2b` as the primary target.
+It is an experimental project focused on small local Gemma4 runtimes, not a general-purpose agent framework.
 
-Available local tools:
+It provides an interactive REPL, persistent sessions, a small set of bounded local tools, optional skills, and explicit local vision/audio paths. The runtime is designed to stay lean: low prompt overhead, narrow tool exposure, bounded loops, and compact context handling.
 
-- `read_file`
-- `list_files`
-- `stat_path`
-- `replace_in_file`
-- `write_file`
-- `append_file`
-- `bash`
-- `search_web`
-- `fetch_url` for explicit known URLs
-- optional `SKILL.md` import
+Orbit is developed primarily around `gemma4:e2b`, using a tuned Ollama profile called:
 
-The goal is to stay simple, predictable, and easy to debug.
+```text
+gemma4:e2b-fast-t6-c8k
+```
 
-## Layout
-
-- `src/orbit/core/`: agent loop, Ollama client, compaction, runtime, sessions, turn policy, tool routing, context budget, loop guard
-- `src/orbit/tooling/`: tool registry and local tools by domain
-- `src/orbit/terminal/`: CLI, config parsing, history, and terminal rendering
+Other `gemma4` profiles may work, but they are best-effort and are not guaranteed to behave with the same reliability.
 
 ## Requirements
 
 - Python 3.10+
+- Git
 - Ollama running locally
-- Python package `ollama` installed through the project dependency
-- Python package `rich` installed through the project dependency for Markdown rendering of final model replies
-- A model that supports tool calling; for local image/audio inspection, a model that also advertises `vision` and/or `audio`
+- A Gemma4 model with tool-call support
+- `ffmpeg` and `ffprobe` only if you want audio support
 
-Optional media dependencies:
-
-- Vision requires the Python package `Pillow`, installed through the project dependency.
-- Audio requires the system binaries `ffmpeg` and `ffprobe`; without them, audio prompts fail with a clear error instead of sending unstable raw audio to Ollama.
-
-Install audio dependencies on Debian/Ubuntu/Linux Mint:
+Install optional audio dependencies on Debian/Ubuntu/Linux Mint:
 
 ```bash
 sudo apt install ffmpeg
@@ -48,43 +30,45 @@ sudo apt install ffmpeg
 
 ## Install
 
-```bash
-cd orbit
-python3 -m venv .venv
-.venv/bin/pip install -e .
-```
-
-## Run
+Install Orbit CLI:
 
 ```bash
-.venv/bin/orbit --workdir .
+curl -fsSL https://raw.githubusercontent.com/guelfoweb/orbit/main/install.sh | sh
 ```
 
-With a skill:
+The installer:
+
+- clones or updates the repository in `~/.local/share/orbit`
+- creates `~/.local/share/orbit/.venv`
+- installs the Python package
+- links the executable to `~/.local/bin/orbit`
+- creates `~/.orbit/config.json` only if it does not already exist
+- does not create or download Ollama models
+
+If `orbit` is not found after installation, make sure `~/.local/bin` is in your `PATH`.
+
+## Set up gemma4:e2b
+
+After installing Orbit, create the tuned local model profile from the local checkout:
 
 ```bash
-.venv/bin/orbit --workdir . --skill malware-analysis-static
+~/.local/share/orbit/tune-e2b.sh
 ```
 
-You can pass either:
+The script:
 
-- a skill name resolved from `~/.orbit/skills` or `./skills`
-- a directory containing `SKILL.md`
-- a direct path to `SKILL.md`
+- checks that `ollama` is installed
+- pulls `gemma4:e2b` if missing
+- creates `gemma4:e2b-fast-t6-c8k` from `Modelfile.gemma4-e2b-fast-t6-c8k`
+- prints the final launch command
 
-You can also point to a different Ollama endpoint:
+Equivalent manual command:
 
 ```bash
-.venv/bin/orbit --base-url http://127.0.0.1:11434
+ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
 ```
 
-## Model profile and benchmark hardware
-
-Orbit is primarily developed and tested with a tuned Ollama profile for `gemma4:e2b`:
-
-```text
-Modelfile.gemma4-e2b-fast-t6-c8k
-```
+The tuned Modelfile:
 
 ```text
 FROM gemma4:e2b
@@ -96,27 +80,43 @@ PARAMETER num_thread 6
 PARAMETER num_batch 96
 ```
 
-Create the local model profile with:
+## Run
 
-```bash
-ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
-```
-
-Then run Orbit with:
+Start Orbit:
 
 ```bash
 orbit --model gemma4:e2b-fast-t6-c8k
 ```
 
-The current regression benchmarks were run on a CPU-only Intel NUC 10 class machine:
+If `~/.orbit/config.json` already defines the model, you can simply run:
 
-- Intel Core i7-10710U
-- 6 cores / 12 threads
-- 64 GB RAM
-- no GPU acceleration
-- Ollama serving the model from system RAM
+```bash
+orbit
+```
 
-The tuned profile is meant to keep the runtime usable on this kind of hardware: bounded context, deterministic sampling, controlled batch size, and a thread count aligned with the CPU. Other `gemma4` profiles may work, but Orbit is not tuned or guaranteed for them with the same reliability.
+Run inside a specific workspace:
+
+```bash
+orbit --workdir /path/to/workspace
+```
+
+Run a one-shot prompt:
+
+```bash
+orbit "list all files in the current workspace"
+```
+
+Use a skill:
+
+```bash
+orbit --workdir . --skill notes
+```
+
+A skill can be:
+
+- a name resolved from `~/.orbit/skills` or `./skills`
+- a directory containing `SKILL.md`
+- a direct path to `SKILL.md`
 
 ## User config
 
@@ -126,9 +126,9 @@ Orbit can load default options from:
 ~/.orbit/config.json
 ```
 
-The file is optional. If it is missing, Orbit behaves exactly like the CLI defaults. CLI flags override matching config values when a matching flag exists.
+The file is optional. CLI flags override matching config values.
 
-Recommended minimal config:
+Recommended config:
 
 ```json
 {
@@ -149,38 +149,23 @@ Recommended minimal config:
 }
 ```
 
-Supported keys:
+Keep project-specific behavior in skills, not in this global config. The bundled `orbit-default` skill is loaded automatically when no skill is selected.
 
-- `model`: default Ollama model name.
-- `host` or `base_url`: Ollama HTTP endpoint.
-- `workdir`: default logical workspace root.
-- `timeout`: Ollama client timeout in seconds.
-- `think`: `auto`, `on`, or `off`.
-- `debug_timing`: enable bounded debug timing output by default.
-- `ui.markdown`: render final model replies as Markdown when possible.
-- `ui.collapse_long_input`: visually collapse very long pasted input in the REPL.
-- `ui.long_input_preview_chars`: number of leading characters shown before `[text N chars]`.
-- `tools.max_loops`: default tool/model loop budget.
+## Ollama performance notes
 
-Keep project-specific behavior in skills, not in this global config. The default `orbit-default` skill is loaded automatically when no skill is selected.
+Runtime environment variables must be set on the Ollama server process, not only before launching Orbit.
 
-Long-running turns:
+Recommended CPU-only settings:
 
-- use `--timeout <seconds>` if a model or task needs more time
-- example: `orbit --timeout 600`
-- use `--think on|off|auto` to control thinking-capable models
-- use `--show-thinking` to render the reasoning trace in the terminal before the final answer
-- the `gemma4:e2b` model-first profile defaults to `think=off` in `auto` mode
-- the default loop budget is conservative; raise it with `--max-loops` only when the task genuinely needs more agentic depth
+```text
+OLLAMA_NUM_PARALLEL=1
+OLLAMA_KEEP_ALIVE=-1
+OLLAMA_MAX_LOADED_MODELS=1
+```
 
-Performance notes for Ollama:
+If Ollama runs as `ollama.service`, configure these values in a systemd drop-in and restart the service.
 
-- Runtime env such as `OLLAMA_NUM_PARALLEL` and `OLLAMA_KEEP_ALIVE` must be set on the Ollama server process.
-- If Ollama runs as `ollama.service`, exporting those variables before `orbit` has no effect on the server.
-- Recommended CPU-only server env for this project: `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE=-1`, optionally `OLLAMA_MAX_LOADED_MODELS=1`.
-- On laptops/NUCs, CPU governor or power profile can dominate token throughput; use `performance` when benchmarking.
-
-Check the model currently loaded by Ollama:
+Check the loaded model:
 
 ```bash
 curl -s http://127.0.0.1:11434/api/ps | jq
@@ -210,52 +195,122 @@ Example CPU-only output:
 }
 ```
 
+Useful fields:
+
 - `expires_at` far in the future means the model is effectively kept loaded.
 - `size_vram: 0` means the model is running on system RAM/CPU, not GPU VRAM.
 - `context_length` should match the tuned context window.
 
-Vision:
+On laptops and NUC-class machines, CPU governor or power profile can affect throughput more than `num_ctx`, `num_thread`, or `num_batch`.
 
-- `orbit` can inspect explicit local image paths in prompts such as:
-  - `describe the image workdir/cat.png`
-  - `compare two images: images/vision-test-1.png and images/vision-test-2.jpg and tell me the differences`
-- supported formats: `png`, `jpg`, `jpeg`, `webp`, `bmp`, `gif`
-- images are normalized before being sent to Ollama:
-  - converted to `RGB`
-  - alpha flattened
-  - large images resized conservatively
-- this keeps the vision path bounded and avoids known runner instability on some raw image inputs
+## Local tools
 
-Audio:
+Orbit exposes only a narrow tool subset for each turn.
 
-- `orbit` can inspect explicit local audio paths in prompts such as:
-  - `transcribe audio/voice-sample.wav`
-  - `summarize audio/voice-sample.wav in one sentence`
-- requires `ffmpeg` and `ffprobe` on `PATH`
-- supported source formats: `wav`, `mp3`, `m4a`, `flac`, `ogg`
-- audio is normalized with `ffmpeg` before being sent to Ollama:
-  - WAV PCM 16-bit
-  - mono
-  - 16 kHz
-  - 5 second chunks
-- this keeps the audio path bounded; long single audio attachments are avoided because they can crash or timeout the local runner
-- if `ffmpeg` or `ffprobe` is missing, Orbit does not attempt audio inspection
+Available local tools:
 
-Model selection:
+- `read_file`
+- `list_files`
+- `stat_path`
+- `replace_in_file`
+- `write_file`
+- `append_file`
+- `bash`
+- `search_web`
+- `fetch_url`
 
-- if you pass `--model`, `orbit` uses that Gemma4 model/profile
-- if you omit `--model`, `orbit` uses the first model already running in Ollama
-- if no model is running, `orbit` exits with an explicit error
-- if the selected model does not advertise `tools` capability via Ollama model details, `orbit` warns and falls back to chat-only mode
-- the main runtime and prompt strategy are optimized around `gemma4:e2b`
+## Safety
 
-Session storage:
+Orbit can read and modify files inside the configured `workdir` and can run bounded shell commands through guarded tool calls.
 
-- sessions are saved under `~/.orbit/sessions/`
-- on interactive startup, `orbit` looks for existing sessions for the current `--workdir`
-- if sessions exist, it shows their names plus the first prompt line and lets you choose one or start a new session
-- new session names are derived from the current `--workdir`
-- you can override it with `--session <name>`
+Use it only inside workspaces you control. Keep the `workdir` narrow, review file edits before trusting them, and do not point Orbit at directories containing secrets unless that is explicitly part of the task.
+
+The guardrails reduce risk, but they do not make local agentic execution risk-free.
+
+Tool access is bounded:
+
+- filesystem access is confined to `--workdir`
+- file reads enforce line and character limits
+- writes are size-limited
+- overwriting unread existing files is guarded
+- `bash` uses `shell=False`
+- shell operators, redirects, chaining, and common destructive commands are blocked
+- web search and URL fetches return structured bounded text, not raw unbounded HTML
+
+## Vision
+
+Orbit can inspect explicit local image paths:
+
+```text
+describe the image images/cat.png
+compare two images: image1.png and image2.jpg
+```
+
+Supported formats:
+
+- `png`
+- `jpg`
+- `jpeg`
+- `webp`
+- `bmp`
+- `gif`
+
+Images are normalized before being sent to Ollama: RGB conversion, alpha flattening, and conservative resizing for large inputs.
+
+## Audio
+
+Orbit can inspect explicit local audio paths:
+
+```text
+transcribe audio/voice-sample.wav
+summarize audio/voice-sample.wav in one sentence
+```
+
+Supported source formats:
+
+- `wav`
+- `mp3`
+- `m4a`
+- `flac`
+- `ogg`
+
+Audio requires `ffmpeg` and `ffprobe`. Files are normalized to WAV PCM 16-bit, mono, 16 kHz, and split into 5 second chunks before being sent to the model.
+
+If `ffmpeg` or `ffprobe` is missing, Orbit fails clearly instead of sending unstable raw audio to Ollama.
+
+## Sessions
+
+Sessions are stored under:
+
+```text
+~/.orbit/sessions/
+```
+
+On interactive startup, Orbit looks for existing sessions matching the current `workdir`. If more than one exists, it lets you choose one or start a new session.
+
+Useful commands:
+
+- `/reset`: reset the current session
+- `/compact`: compact older context into a structured memory summary
+- `/sessions clear`: delete sessions for the current `workdir`
+
+## Skills
+
+Skills are optional `SKILL.md` instruction files.
+
+Default lookup roots:
+
+- `~/.orbit/skills`
+- `./skills`
+
+Useful commands:
+
+- `/skill list`
+- `/skill show`
+- `/skill use <ref>`
+- `/skill clear`
+
+`/skill clear` restores the bundled `orbit-default` skill.
 
 ## Interactive commands
 
@@ -263,94 +318,71 @@ Session storage:
 - `/tools`
 - `/status`
 - `/debug`
-- `/skill clear | list | show | use <name-or-path>`
+- `/skill clear | list | show | use <ref>`
 - `/think on|off|auto`
 - `/thinking on|off`
 - `/compact`
 - `/reset`
+- `/sessions clear`
 - `/exit`
 
-Input history:
+Input history is persisted in:
 
-- arrow up/down scroll through previous prompts
-- history is persisted in `~/.orbit/history`
-- very long pasted prompts are collapsed visually in the terminal as `[text N chars]`
-- the full original text is still sent to the model; only the REPL rendering is shortened
+```text
+~/.orbit/history
+```
 
-Orbit home:
-
-- `~/.orbit/history` stores prompt history
-- `~/.orbit/skills/` is the native skill directory
-- `~/.orbit/sessions/` stores persistent chat sessions
-- a bundled `orbit-default` skill is auto-loaded when no explicit skill is selected
-- the bundled default skill is intentionally short so the default path stays lean
-
-## Notes
-
-- File access is restricted to `--workdir`.
-- `read_file` is bounded by line and character limits.
-- `stat_path` returns bounded filesystem metadata such as type, size, modified time, mode, and newest directory entries.
-- `replace_in_file` is the preferred patch-first edit tool for focused updates to existing text files.
-- first writes to existing unread files are guarded: `orbit` asks the model to `read_file` first before overwriting
-- identical read-only tool calls can be served from a small session cache to reduce wasted latency
-- tools that fail repeatedly in the same session are gradually de-prioritized or dropped from the exposed schema
-- `bash` runs with `shell=False` and blocks shell operators and common destructive commands.
-- `search_web` performs bounded generic web search and returns structured `title`/`url`/`snippet` results.
-- `fetch_url` performs bounded HTTP fetches for explicit known URLs and returns structured text, title, final URL, and links. It is not a general web search tool.
-- auto-compaction uses an explicit context budget engine with one conservative internal profile tuned for the main `gemma4:e2b` path.
-- Tool execution is handled client-side in a standard multi-turn loop through the Ollama Python SDK.
-- When a skill is active, its `SKILL.md` content is appended to the system prompt.
-- `/skill clear` restores the default `orbit-default` skill.
+Very long pasted prompts are visually collapsed in the terminal as `[text N chars]`, but the full original text is still sent to the model.
 
 ## Routing and intent gate
 
 Orbit does not expose every tool on every turn.
-The runtime uses a layered routing strategy to keep a small local model from choosing tools for purely conversational prompts.
+
+The runtime first classifies the user request, then exposes only the smallest useful tool subset. Ambiguous high-risk routes can pass through a strict YES/NO intent gate before tools are shown to the model.
 
 Turn flow:
 
-1. classify the prompt into an intent class
-2. expose only the matching tool category when the intent is clear
-3. use fast local paths for bounded deterministic cases
-4. ask a small YES/NO intent gate only for risky ambiguous cases
-5. continue as chat, tool loop, vision, or audio path
-
-Intent classes map to narrow tool subsets:
-
-- `chat_general` and `knowledge_question`: no tools
-- `workspace_discovery` and `file_reading`: filesystem tools
-- `file_editing`: write plus filesystem tools
-- `machine_inspection` and `shell_task`: shell tool only
-- `web_lookup` and `url_inspection`: web tools only
-- `binary_analysis`: shell plus filesystem tools for static/container inspection
-- `pdf_analysis`: shell plus filesystem tools for bounded PDF text extraction
-- `ambiguous`: no direct tool exposure on Gemma until the intent gate confirms tool use
-
-The intent gate is deliberately not used for every prompt.
-It exists only where a wrong tool route is more harmful than one extra model call.
-
-The gate answers only `YES` or `NO`:
-
-- `YES`: the user is asking Orbit to use an available local tool, inspect or edit workspace files, run a bounded shell command, search/fetch web content, or perform local static analysis.
-- `NO`: the user is asking for conversation, explanation, opinion, learning, quiz behavior, unsupported external actions such as sending email, or a vague action without a concrete target.
+```text
+prompt -> intent routing -> optional intent gate -> minimal tool subset -> model
+```
 
 Examples:
 
-- `show me how grep works` stays chat/knowledge; it does not expose `bash`.
-- `tell me about file systems` stays chat/knowledge; it does not expose filesystem tools.
-- `tell me about base64 encoding` stays chat/knowledge; `decode this string ... from base64` uses the bounded transform path.
-- `what do you think about web search in LLMs?` stays chat; `search online for information about Dante Alighieri` uses web search.
-- `tell me about malware analysis` goes through the gate; explicit sample/path analysis uses bounded local static inspection.
-- `change the conclusion` goes through the gate because there is no concrete target.
-- `use the tool to send an email to test@example.com` is rejected as unsupported instead of exposing filesystem/write/shell/web tools directly.
+- `show me how grep works` stays chat/knowledge and does not expose `bash`.
+- `tell me about file systems` stays chat/knowledge and does not expose filesystem tools.
+- `decode this string "Y2lhbw==" from base64` uses a bounded local transform.
+- `search online for information about Dante Alighieri` exposes web tools only.
+- `read README.md` exposes filesystem tools only.
+- `compare image1.png and image2.jpg` uses the bounded vision path.
 
-Vision and audio are not ordinary tools.
-They are bounded multimodal paths triggered only by explicit local image/audio paths in the prompt, after path confinement and normalization.
-- `/compact` replaces older messages with a local structured memory summary and keeps the most recent raw messages intact.
+The goal is to reduce ambiguity for small local models: fewer exposed tools, fewer wrong tool calls, fewer loops, and lower token waste.
+
+## Benchmark hardware
+
+The current regression benchmarks were run on a CPU-only Intel NUC 10 class machine:
+
+- Intel Core i7-10710U
+- 6 cores / 12 threads
+- 64 GB RAM
+- no GPU acceleration
+- Ollama serving the model from system RAM
+
+See [BENCHMARK.md](BENCHMARK.md) for the current prompt suite and observed timings.
+
+## Project layout
+
+- `src/orbit/core/`: agent loop, Ollama client, runtime, sessions, routing, compaction, guardrails
+- `src/orbit/tooling/`: local tool registry and tool implementations
+- `src/orbit/terminal/`: CLI, config parsing, history, and terminal rendering
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Test
 
+Run the unit test suite:
+
 ```bash
-cd orbit
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -q
 ```

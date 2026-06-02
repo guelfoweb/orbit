@@ -41,7 +41,7 @@ def seed_markdown_checkbox_extraction(
     on_event: Any,
     run_guardrail_tool: Callable[..., dict[str, Any]],
 ) -> None:
-    if not obsidian_daily_skill_enabled(skill):
+    if not markdown_task_skill_enabled(skill):
         return
     path = markdown_checkbox_extraction_path(user_input)
     if path is None:
@@ -79,7 +79,7 @@ def local_markdown_checkbox_extraction_result(
     user_input: str,
     messages: list[dict[str, Any]],
 ) -> str | None:
-    if not obsidian_daily_skill_enabled(skill):
+    if not markdown_task_skill_enabled(skill):
         return None
     if markdown_checkbox_extraction_path(user_input) is None:
         return None
@@ -102,7 +102,7 @@ def markdown_checkbox_redundant_read_prompt(
     arguments: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> str | None:
-    if not obsidian_daily_skill_enabled(skill):
+    if not markdown_task_skill_enabled(skill):
         return None
     target_path = markdown_checkbox_extraction_path(user_input)
     if target_path is None or not markdown_checkbox_needs_semantic_analysis(user_input):
@@ -120,12 +120,12 @@ def markdown_checkbox_redundant_read_prompt(
     )
 
 
-def obsidian_daily_skill_enabled(skill: Any) -> bool:
+def markdown_task_skill_enabled(skill: Any) -> bool:
     name = getattr(skill, "name", "")
     content = getattr(skill, "content", "")
-    if isinstance(name, str) and name == "obsidian-daily":
+    if isinstance(name, str) and name in {"task-notes", "daily-tasks"}:
         return True
-    if isinstance(content, str) and "Obsidian Daily Task Review" in content:
+    if isinstance(content, str) and "Markdown Task Review" in content:
         return True
     return False
 

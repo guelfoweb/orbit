@@ -6,7 +6,7 @@
 
 Current version: `0.1.0`
 
-Observed defects and mitigations must be tracked in [DEFECTS.md](/home/guelfoweb/LAB/orbit/DEFECTS.md).
+Internal notes must stay out of the public repository unless they are intentionally documented.
 
 Permanent constraints:
 
@@ -309,6 +309,6 @@ Ollama server performance notes:
 
 ## Regression Prompts
 
-Keep the curated prompt suite in [PROMPTS.md](/home/guelfoweb/LAB/orbit/PROMPTS.md).
+Keep the curated prompt suite in [PROMPTS.md](PROMPTS.md).
 
-Run the benchmark instructions in [BENCHMARK.md](/home/guelfoweb/LAB/orbit/BENCHMARK.md) after runtime, routing, guardrail, compaction, or tool changes.
+Run the benchmark instructions in [BENCHMARK.md](BENCHMARK.md) after runtime, routing, guardrail, compaction, or tool changes.

@@ -205,7 +205,7 @@ class AgentLoopTests(unittest.TestCase):
             return {"ok": True}
 
         registry.call = call
-        skill = Skill(name="obsidian-daily", path=Path("/tmp/obsidian-daily/SKILL.md"), content="# Obsidian Daily Task Review\n")
+        skill = Skill(name="task-notes", path=Path("/tmp/task-notes/SKILL.md"), content="# Markdown Task Review\n")
         agent = AgentLoop(client=client, registry=registry, max_loops=3, skill=skill)
         result = agent.run_turn('Read Daily.md. Extract all open tasks marked with "- [ ]". Ignore completed tasks marked with "- [x]".')
 
@@ -248,7 +248,7 @@ class AgentLoopTests(unittest.TestCase):
             return {"ok": True}
 
         registry.call = call
-        skill = Skill(name="obsidian-daily", path=Path("/tmp/obsidian-daily/SKILL.md"), content="# Obsidian Daily Task Review\n")
+        skill = Skill(name="task-notes", path=Path("/tmp/task-notes/SKILL.md"), content="# Markdown Task Review\n")
         agent = AgentLoop(client=client, registry=registry, max_loops=3, skill=skill)
         result = agent.run_turn(
             'Read Daily.md. Extract all open tasks marked with "- [ ]", then analyze them semantically and suggest top priorities.'
@@ -282,7 +282,7 @@ class AgentLoopTests(unittest.TestCase):
             return {"ok": True, "content": "should not be read"}
 
         registry.call = call
-        skill = Skill(name="obsidian-daily", path=Path("/tmp/obsidian-daily/SKILL.md"), content="# Obsidian Daily Task Review\n")
+        skill = Skill(name="task-notes", path=Path("/tmp/task-notes/SKILL.md"), content="# Markdown Task Review\n")
         agent = AgentLoop(client=client, registry=registry, max_loops=3, skill=skill)
         result = agent.run_turn(
             'Read Daily.md. Extract all open tasks marked with "- [ ]", then analyze them semantically and suggest top priorities.'
@@ -470,7 +470,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent_class, INTENT_CLASS_WEB_LOOKUP)
 
     def test_url_inspection_route_exposes_english_intent_class(self) -> None:
-        route = route_intent("controlla cosa riporta il sito: https://guelfoweb.com/")
+        route = route_intent("controlla cosa riporta il sito: https://example.com/")
         self.assertEqual(route.intent, INTENT_CURRENT_FACTUAL_LOOKUP)
         self.assertEqual(route.intent_class, INTENT_CLASS_URL_INSPECTION)
 
@@ -546,7 +546,7 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_apk_triage_metadata_routes_to_binary_analysis(self) -> None:
         route = route_intent(
-            'Perform static APK triage on the file "malware/Questionario BNL.apk". '
+            'Perform static APK triage on the file "samples/banking sample.apk". '
             "Identify file type and hashes first, then inspect APK container metadata."
         )
         self.assertEqual(route.intent, INTENT_BINARY_ANALYSIS)
@@ -5070,7 +5070,7 @@ class AgentLoopTests(unittest.TestCase):
                                 "function": {
                                     "name": "search_web",
                                     "arguments": {
-                                        "query": "guelfoweb",
+                                        "query": "example researcher",
                                         "max_results": 3,
                                     },
                                 }
@@ -5085,7 +5085,7 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_duration": 80_000_000,
                     "total_duration": 250_000_000,
                     "message": {
-                        "content": "guelfoweb appears to be Gianni Amato's GitHub profile and personal site."
+                        "content": "Example Researcher appears to be a public profile and personal site."
                     },
                 },
             ]
@@ -5096,16 +5096,16 @@ class AgentLoopTests(unittest.TestCase):
             registry.called.append((name, arguments))
             return {
                 "ok": True,
-                "query": "guelfoweb",
+                "query": "example researcher",
                 "results": [
                     {
-                        "title": "guelfoweb (Gianni Amato) · GitHub",
-                        "url": "https://github.com/guelfoweb",
-                        "snippet": "GitHub profile for guelfoweb / Gianni Amato.",
+                        "title": "Example Researcher · GitHub",
+                        "url": "https://github.com/example",
+                        "snippet": "GitHub profile for Example Researcher.",
                     },
                     {
-                        "title": "Random notes | guelfoweb",
-                        "url": "https://guelfoweb.com/",
+                        "title": "Research notes | Example Researcher",
+                        "url": "https://example.org/",
                         "snippet": "Personal site and notes.",
                     },
                 ],
@@ -5113,9 +5113,9 @@ class AgentLoopTests(unittest.TestCase):
 
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
-        result = agent.run_turn("dimi chi è guelfoweb")
-        self.assertIn("github profile", result.content.lower())
-        self.assertEqual(registry.called, [("search_web", {"query": "guelfoweb", "max_results": 3})])
+        result = agent.run_turn("dimi chi è example researcher")
+        self.assertIn("public profile", result.content.lower())
+        self.assertEqual(registry.called, [("search_web", {"query": "example researcher", "max_results": 3})])
         self.assertEqual(len(client.calls), 2)
 
     def test_current_factual_title_only_can_finalize_locally_from_fetch(self) -> None:
@@ -5157,7 +5157,7 @@ class AgentLoopTests(unittest.TestCase):
                     "eval_duration": 80_000_000,
                     "total_duration": 250_000_000,
                     "message": {
-                        "content": "Il sito riporta note e articoli di guelfoweb su sicurezza, Linux e sviluppo."
+                        "content": "Il sito riporta note e articoli di esempio su sicurezza, Linux e sviluppo."
                     },
                 },
             ]
@@ -5168,18 +5168,18 @@ class AgentLoopTests(unittest.TestCase):
             registry.called.append((name, arguments))
             return {
                 "ok": True,
-                "url": "https://guelfoweb.com/",
-                "final_url": "https://guelfoweb.com/",
-                "title": "Random notes | guelfoweb",
-                "text": "Random notes and articles by guelfoweb about security, Linux and development.",
-                "highlights": ["Random notes and articles by guelfoweb about security, Linux and development."],
+                "url": "https://example.org/",
+                "final_url": "https://example.org/",
+                "title": "Research notes | Example",
+                "text": "Example notes and articles about security, Linux and development.",
+                "highlights": ["Example notes and articles about security, Linux and development."],
             }
 
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
-        result = agent.run_turn("controlla cosa riporta il sito: https://guelfoweb.com/")
+        result = agent.run_turn("controlla cosa riporta il sito: https://example.org/")
         self.assertIn("sicurezza, Linux e sviluppo", result.content)
-        self.assertEqual(registry.called, [("fetch_url", {"url": "https://guelfoweb.com/", "max_links": 0})])
+        self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.org/", "max_links": 0})])
         self.assertEqual(len(client.calls), 2)
 
     def test_explicit_site_check_request_in_english_routes_to_fetch_url_and_uses_model_to_summarize(self) -> None:
@@ -7604,18 +7604,18 @@ class AgentLoopTests(unittest.TestCase):
             capabilities=("completion", "tools"),
             tools_supported=True,
         )
-        result = agent.run_turn('Perform static APK triage on the file "malware/Questionario BNL.apk". Identify file type and hashes first, then inspect APK container metadata.')
+        result = agent.run_turn('Perform static APK triage on the file "samples/banking sample.apk". Identify file type and hashes first, then inspect APK container metadata.')
         self.assertIn("Bounded static reverse inspection completed for 1 sample(s)", result.content)
         self.assertIn("APK/container focus", result.content)
         self.assertEqual(client.calls, [])
         self.assertEqual(
             registry.called[:5],
             [
-                ("bash", {"command": "file 'malware/Questionario BNL.apk'"}),
-                ("bash", {"command": "md5sum 'malware/Questionario BNL.apk'"}),
-                ("bash", {"command": "sha1sum 'malware/Questionario BNL.apk'"}),
-                ("bash", {"command": "sha256sum 'malware/Questionario BNL.apk'"}),
-                ("bash", {"command": "unzip -l 'malware/Questionario BNL.apk' | head -n 20"}),
+                ("bash", {"command": "file 'samples/banking sample.apk'"}),
+                ("bash", {"command": "md5sum 'samples/banking sample.apk'"}),
+                ("bash", {"command": "sha1sum 'samples/banking sample.apk'"}),
+                ("bash", {"command": "sha256sum 'samples/banking sample.apk'"}),
+                ("bash", {"command": "unzip -l 'samples/banking sample.apk' | head -n 20"}),
             ],
         )
 
@@ -7677,7 +7677,7 @@ class AgentLoopTests(unittest.TestCase):
                     "message": {
                         "content": "",
                         "tool_calls": [
-                            {"function": {"name": "bash", "arguments": {"command": "unzip -l Questionario_BNL.apk"}}}
+                            {"function": {"name": "bash", "arguments": {"command": "unzip -l suspicious_app.apk"}}}
                         ],
                     },
                 },
@@ -7700,7 +7700,7 @@ class AgentLoopTests(unittest.TestCase):
                     "ok": True,
                     "path": ".",
                     "entries": [
-                        {"path": "Questionario_BNL.apk", "type": "file"},
+                        {"path": "suspicious_app.apk", "type": "file"},
                         {"path": "notes.txt", "type": "file"},
                     ],
                 }
@@ -7714,7 +7714,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(registry.called[1][0], "bash")
         system_messages = [item.get("content", "") for item in agent.messages if item.get("role") == "system"]
         self.assertTrue(
-            any("Likely candidate paths from that listing: Questionario_BNL.apk" in content for content in system_messages)
+            any("Likely candidate paths from that listing: suspicious_app.apk" in content for content in system_messages)
         )
 
     def test_tokens_per_second_helper(self) -> None:

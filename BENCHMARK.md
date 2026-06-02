@@ -21,7 +21,7 @@ PYTHONPATH=src python3 -m orbit --workdir workdir --model gemma4:e2b-fast-t6-c8k
 - Keep Ollama warm before measuring; exclude the warm-up prompt from benchmark results.
 - Use `--debug-timing` on every prompt.
 - Treat `src: local` as a valid fast path when Orbit can answer from bounded local evidence without another model call.
-- Skill prompts may depend on a private local workdir; do not publish personal task contents in benchmark notes.
+- Skill prompts may depend on a local fixture workdir; do not publish fixture contents in benchmark notes.
 
 ## Current Model Profile
 
@@ -58,7 +58,7 @@ Summary:
 | Strategic Suite | 12 | 12 | `0.5s` | `91.8s` | local, web, vision, and review paths covered |
 | Strong Prompts | 9 | 9 | `0.5s` | `107.5s` | heavy vision/audio/long-text paths covered |
 | Ambiguous Intent Prompts | 10 | 10 | `3.3s` | `43.0s` | tool suppression and intent-gate behavior covered |
-| Skill Prompts | 1 | 1 | `1.5s` | `1.5s` | skill path covered with private output omitted |
+| Skill Prompts | 1 | 1 | `1.5s` | `1.5s` | skill path covered with fixture output omitted |
 
 Observations:
 

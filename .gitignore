@@ -12,3 +12,4 @@ workdir/
 .agents/
 .claude/
 .codex/
+DEFECTS.md
