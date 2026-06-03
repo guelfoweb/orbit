@@ -16,11 +16,13 @@ Other `gemma4` profiles may work, but they are best-effort and are not guarantee
 
 ## Requirements
 
+- Linux is the primary supported environment. macOS may work, but it is currently best-effort and not part of the tested target. Windows is not supported.
 - Python 3.10+
 - Git
 - Ollama running locally
 - A Gemma4 model with tool-call support
 - `ffmpeg` and `ffprobe` only if you want audio support
+- `pypdf` is installed automatically with Orbit and is used for bounded PDF text extraction
 
 Install optional audio dependencies on Debian/Ubuntu/Linux Mint:
 
@@ -194,12 +196,6 @@ Example CPU-only output:
   ]
 }
 ```
-
-Useful fields:
-
-- `expires_at` far in the future means the model is effectively kept loaded.
-- `size_vram: 0` means the model is running on system RAM/CPU, not GPU VRAM.
-- `context_length` should match the tuned context window.
 
 On laptops and NUC-class machines, CPU governor or power profile can affect throughput more than `num_ctx`, `num_thread`, or `num_batch`.
 

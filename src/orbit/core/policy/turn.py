@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 import re
-from .intent_router import INTENT_CODEBASE_INSPECTION, INTENT_FILE_EDIT
-from .loop_guard import (
+from ..intent.router import INTENT_CODEBASE_INSPECTION, INTENT_FILE_EDIT
+from .loop import (
     ToolCallRecord,
     repeated_tool_count,
     repeated_read_path_record,
@@ -13,8 +13,8 @@ from .loop_guard import (
     sampled_read_paths,
     register_tool_calls as register_loop_tool_calls,
 )
-from .turn_policy_helpers import completed_edit_paths, edited_paths, file_edit_completion_message, read_target_paths, target_edit_paths
-from .turn_policy_prompts import repeated_tool_retry_prompt
+from .helpers import completed_edit_paths, edited_paths, file_edit_completion_message, read_target_paths, target_edit_paths
+from .prompts import repeated_tool_retry_prompt
 
 
 EMPTY_REPLY_RETRY_SYSTEM_PROMPT = (

@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Any
 
-from ..core.client import OllamaError
+from ..core.ollama_client import OllamaError
 from ..core.events import DebugTimingEvent, ThinkingStartEvent, ToolCallEvent, ToolResultEvent, ToolRouteEvent
 from ..core.runtime import OrbitRuntime
 from ..session import create_session_name, list_sessions_for_workdir

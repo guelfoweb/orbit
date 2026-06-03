@@ -2,23 +2,42 @@ from __future__ import annotations
 
 from typing import Callable
 
-from .text_utils import word_tokens
+from ..text_utils import word_tokens
 
 
-DIRECTORY_DISCOVERY_HINTS = (
+DIRECTORY_TERMS = (
     "directory",
+    "directories",
     "folder",
     "folders",
-    "directories",
+    "subdirectory",
+    "subdirectories",
     "workdir",
     "workspace",
     "working directory",
     "cartella",
     "cartelle",
+    "sottocartella",
+    "sottocartelle",
+)
+DIRECTORY_ONLY_TERMS = (
+    "directories",
+    "folder",
+    "folders",
+    "subdirectory",
+    "subdirectories",
+    "cartella",
+    "cartelle",
+    "sottocartella",
+    "sottocartelle",
+)
+DIRECTORY_DISCOVERY_HINTS = (
+    *DIRECTORY_TERMS,
     "quali file",
     "quali sono i file",
 )
-DIRECTORY_CONTENT_HINTS = (
+DIRECTORY_CONTENT_TERMS = (
+    "are there",
     "contain",
     "contains",
     "content",
@@ -27,11 +46,17 @@ DIRECTORY_CONTENT_HINTS = (
     "files",
     "show",
     "list",
+    "what are",
+    "which are",
     "mostra",
     "contiene",
     "ci sono",
     "elenca",
+    "quali",
+    "quali sono",
+    "there are",
 )
+DIRECTORY_CONTENT_HINTS = DIRECTORY_CONTENT_TERMS
 DIRECTORY_METADATA_HINTS = (
     "newest",
     "latest",
@@ -51,6 +76,30 @@ DIRECTORY_METADATA_HINTS = (
     "dimensioni",
     "permessi",
     "esiste",
+)
+DIRECTORY_RECURSIVE_TERMS = (
+    "directory structure",
+    "full tree",
+    "recursively",
+    "recursive",
+    "subtree",
+    "tree",
+    "tutto",
+    "tutti i file",
+    "tutte le cartelle",
+    "ricorsiv",
+    "struttura",
+    "albero",
+)
+DIRECTORY_FOLLOWUP_QUESTION_TERMS = (
+    "are there",
+    "there are",
+    "there is",
+    "what are",
+    "which are",
+    "ci sono",
+    "quali sono",
+    "quali",
 )
 
 
@@ -146,10 +195,29 @@ def local_directory_listing_result(
     recent_listed_directory_paths: Callable[[list[dict[str, object]], int], list[str]],
     prefers_english_output: Callable[[str], bool],
 ) -> str | None:
-    if intent != text_document_intent:
-        return None
     if not needs_directory_discovery(user_input):
         return None
+    if intent != text_document_intent:
+        if not _directory_listing_followup_question(user_input):
+            return None
+        if not recent_listed_paths(messages, 1):
+            return None
+    if _directory_listing_prefers_tree(user_input):
+        listed = recent_listed_paths(messages, 80)
+        if not listed:
+            return None
+        directories = set(recent_listed_directory_paths(messages, 80))
+        return _format_tree_listing(listed, directories)
+    if directory_listing_wants_recursive(user_input) and not _directory_listing_prefers_directories(user_input):
+        listed = recent_listed_paths(messages, 80)
+        if not listed:
+            return None
+        if _directory_listing_prefers_mixed_entries(user_input):
+            return ", ".join(listed)
+        files_only = [path for path in listed if "." in path.rsplit("/", 1)[-1]]
+        if files_only:
+            return ", ".join(files_only)
+        return ", ".join(listed)
     if _directory_listing_prefers_directories(user_input):
         listed = recent_listed_directory_paths(messages, 8)
         if not listed:
@@ -175,7 +243,7 @@ def needs_directory_discovery(user_input: str) -> bool:
         return False
     if not any(hint in lowered for hint in DIRECTORY_DISCOVERY_HINTS):
         return False
-    if not any(hint in lowered for hint in DIRECTORY_CONTENT_HINTS):
+    if not any(hint in lowered for hint in DIRECTORY_CONTENT_HINTS) and not _short_directory_question(lowered):
         return False
     if any(hint in lowered for hint in DIRECTORY_METADATA_HINTS):
         return False
@@ -184,15 +252,48 @@ def needs_directory_discovery(user_input: str) -> bool:
     return True
 
 
+def directory_listing_target_from_recent_listing(
+    user_input: str,
+    messages: list[dict[str, object]],
+    recent_listed_directory_paths: Callable[[list[dict[str, object]], int], list[str]],
+) -> str | None:
+    lowered = user_input.strip().lower()
+    if not lowered:
+        return None
+    if not any(term in lowered for term in DIRECTORY_CONTENT_TERMS):
+        return None
+    for path in recent_listed_directory_paths(messages, 80):
+        name = path.rstrip("/").rsplit("/", 1)[-1]
+        if not name:
+            continue
+        candidates = (
+            f"{path.lower()} directory",
+            f"{path.lower()} folder",
+            f"{name.lower()} directory",
+            f"{name.lower()} folder",
+            f"directory {path.lower()}",
+            f"folder {path.lower()}",
+            f"cartella {path.lower()}",
+            f"cartella {name.lower()}",
+        )
+        if any(candidate in lowered for candidate in candidates):
+            return path
+    return None
+
+
+def directory_listing_wants_recursive(user_input: str) -> bool:
+    lowered = user_input.strip().lower()
+    return any(term in lowered for term in DIRECTORY_RECURSIVE_TERMS)
+
+
 def _directory_listing_prefers_directories(user_input: str) -> bool:
     lowered = user_input.strip().lower()
     if "files and directories" in lowered or "file e cartelle" in lowered or "file e directory" in lowered:
         return False
-    directory_terms = ("directories", "folder", "folders", "cartella", "cartelle")
     explicit_directory_only_terms = ("non file", "not files", "instead of files", "rather than files")
     if any(term in lowered for term in explicit_directory_only_terms):
         return True
-    return any(term in lowered for term in directory_terms)
+    return any(term in lowered for term in DIRECTORY_ONLY_TERMS)
 
 
 def _directory_listing_prefers_mixed_entries(user_input: str) -> bool:
@@ -201,6 +302,46 @@ def _directory_listing_prefers_mixed_entries(user_input: str) -> bool:
         return True
     mixed_terms = ("cosa contiene", "what does", "contains", "contain", "contents", "content", "inside", "contiene")
     return any(term in lowered for term in mixed_terms) and not _directory_listing_prefers_directories(user_input)
+
+
+def _directory_listing_prefers_tree(user_input: str) -> bool:
+    lowered = user_input.strip().lower()
+    tree_terms = ("tree", "directory structure", "full structure", "struttura", "albero")
+    return any(term in lowered for term in tree_terms)
+
+
+def _directory_listing_followup_question(user_input: str) -> bool:
+    lowered = user_input.strip().lower()
+    return any(term in lowered for term in DIRECTORY_ONLY_TERMS) and (
+        any(term in lowered for term in DIRECTORY_FOLLOWUP_QUESTION_TERMS) or _short_directory_question(lowered)
+    )
+
+
+def _short_directory_question(lowered_input: str) -> bool:
+    tokens = set(word_tokens(lowered_input))
+    if len(tokens) > 4:
+        return False
+    question_tokens = {"what", "which", "quali"}
+    directory_tokens = {
+        "directories",
+        "folders",
+        "subdirectories",
+        "cartelle",
+        "sottocartelle",
+    }
+    return bool(tokens & question_tokens) and bool(tokens & directory_tokens)
+
+
+def _format_tree_listing(paths: list[str], directories: set[str]) -> str:
+    lines = ["."]
+    for path in sorted(set(paths)):
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            continue
+        indent = "  " * (len(parts) - 1)
+        suffix = "/" if path in directories else ""
+        lines.append(f"{indent}- {parts[-1]}{suffix}")
+    return "\n".join(lines)
 
 
 def _empty_directory_listing_message(
@@ -214,6 +355,7 @@ def _empty_directory_listing_message(
     if prefers_english_output(user_input):
         return "There are no subdirectories in the current working directory."
     return "Non ci sono sottocartelle nella directory di lavoro corrente."
+
 
 def _matches_typos(token_set: set[str], candidates: set[str]) -> bool:
     for token in token_set:

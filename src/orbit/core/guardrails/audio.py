@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 import re
 
-from ..tooling.common import ToolError, resolve_path
+from ...tooling.common import ToolError, resolve_path
 
 
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".m4a", ".flac", ".ogg")

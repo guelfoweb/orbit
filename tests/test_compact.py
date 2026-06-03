@@ -9,7 +9,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.core.compact import SUMMARY_MARKER, build_hybrid_refinement_messages, compact_messages, plan_compaction
+from orbit.core.compaction import SUMMARY_MARKER, build_hybrid_refinement_messages, compact_messages, plan_compaction
 
 
 class CompactTests(unittest.TestCase):

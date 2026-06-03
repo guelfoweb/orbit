@@ -5,7 +5,7 @@ import binascii
 import re
 from typing import Any, Callable
 
-from .text_utils import prefers_english_output, word_tokens
+from ..text_utils import prefers_english_output, word_tokens
 
 
 TITLE_ONLY_HINTS = ("title only", "page title only", "solo il titolo", "only the title")
@@ -340,6 +340,11 @@ def local_current_factual_result(
         lines = [f"Sì. Ho trovato {match_count} evidenza/e rilevante/i per `{query}` nella pagina recuperata."]
         lines.extend(f"- {context[:320].rstrip()}" for context in contexts)
         return "\n".join(lines)
+    fetched = latest_fetch_url_result_in_current_turn(messages)
+    if fetched is not None and _asks_for_fetched_page_summary(lowered):
+        summary = _local_fetched_page_summary(fetched, user_input=user_input)
+        if summary is not None:
+            return summary
     if any(hint in lowered for hint in GENERIC_SEARCH_INFO_HINTS) and not any(
         hint in lowered for hint in SEARCH_SYNTHESIS_HINTS
     ):
@@ -347,6 +352,175 @@ def local_current_factual_result(
         if search is not None:
             return _format_search_results_summary(search)
     return None
+
+
+def _asks_for_fetched_page_summary(lowered: str) -> bool:
+    summary_hints = URL_SUMMARY_HINTS + (
+        "central thesis",
+        "key messages",
+        "main message",
+        "di cosa parla",
+    )
+    return any(hint in lowered for hint in summary_hints)
+
+
+def _local_fetched_page_summary(fetched: dict[str, Any], *, user_input: str) -> str | None:
+    text = fetched.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    title = fetched.get("title")
+    title_text = title.strip() if isinstance(title, str) and title.strip() else None
+    lowered = user_input.lower()
+    italian = not prefers_english_output(lowered) or any(hint in lowered for hint in ("italian", "italiano", "italiana", "in italian", "in italiano", "riassumi", "sintesi"))
+    want_thesis = any(hint in lowered for hint in ("central thesis", "tesi centrale"))
+    want_key_messages = any(hint in lowered for hint in ("key messages", "messaggi chiave", "punti chiave"))
+    sentences = _fetched_page_sentences(text)
+    if not sentences:
+        return None
+    selected = _select_representative_sentences(sentences, max_items=5)
+    if not selected:
+        return None
+    if italian:
+        lines: list[str] = []
+        if title_text:
+            lines.append(f"Titolo: {title_text}")
+        if want_thesis:
+            lines.append(f"Tesi centrale: {selected[0]}")
+        else:
+            lines.append("Sintesi:")
+        body = selected[1:] if want_thesis else selected
+        if want_key_messages:
+            lines.append("Messaggi chiave:")
+        for item in body[:4]:
+            lines.append(f"- {item}")
+        if fetched.get("has_more"):
+            lines.append("[Sintesi basata sul primo estratto bounded della pagina.]")
+        return "\n".join(lines)
+    lines = []
+    if title_text:
+        lines.append(f"Title: {title_text}")
+    if want_thesis:
+        lines.append(f"Central thesis: {selected[0]}")
+    else:
+        lines.append("Summary:")
+    body = selected[1:] if want_thesis else selected
+    if want_key_messages:
+        lines.append("Key messages:")
+    for item in body[:4]:
+        lines.append(f"- {item}")
+    if fetched.get("has_more"):
+        lines.append("[Summary based on the first bounded page excerpt.]")
+    return "\n".join(lines)
+
+
+def _fetched_page_sentences(text: str) -> list[str]:
+    line_candidates: list[str] = []
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.split()).strip(" -•\t\r\n")
+        if not _looks_like_content_sentence(line):
+            continue
+        line_candidates.extend(_split_long_page_line(line))
+        if len(line_candidates) >= 16:
+            break
+    if line_candidates:
+        return line_candidates[:16]
+    compact = " ".join(text.split())
+    if not compact:
+        return []
+    raw = re.split(r"(?<=[.!?])\s+|(?<=\.) (?=[A-ZÀ-Ö])", compact)
+    sentences: list[str] = []
+    for item in raw:
+        sentence = item.strip(" -•\t\r\n")
+        if not _looks_like_content_sentence(sentence):
+            continue
+        if sentence.lower() in {existing.lower() for existing in sentences}:
+            continue
+        sentences.append(sentence)
+        if len(sentences) >= 16:
+            break
+    return sentences
+
+
+def _looks_like_content_sentence(value: str) -> bool:
+    if len(value) < 40 or len(value) > 700:
+        return False
+    lowered = value.lower()
+    navigation_terms = (
+        "la santa sede",
+        "magisterium",
+        "calendario",
+        "biglietti",
+        "udienze",
+        "sala stampa",
+        "vatican news",
+        "l'osservatore romano",
+        "multimedia",
+    )
+    if any(term in lowered for term in navigation_terms):
+        return False
+    if any(term in lowered for term in ("capitolo", "introduzione", "conclusione")):
+        return False
+    if value.isupper() and len(value.split()) <= 12:
+        return False
+    content_terms = (
+        "dignità",
+        "persona",
+        "intelligenza artificiale",
+        "libertà",
+        "giustizia",
+        "fraternità",
+        "lavoro",
+        "pace",
+        "umanità",
+        "human dignity",
+        "artificial intelligence",
+        "freedom",
+        "justice",
+        "work",
+        "peace",
+    )
+    if any(term in lowered for term in content_terms):
+        return True
+    return bool(re.search(r"[.!?]$", value)) and len(value.split()) >= 8
+
+
+def _split_long_page_line(line: str) -> list[str]:
+    if len(line) <= 260:
+        return [line]
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", line) if part.strip()]
+    filtered = [part for part in parts if _looks_like_content_sentence(part)]
+    return filtered or [line[:260].rstrip()]
+
+
+def _select_representative_sentences(sentences: list[str], *, max_items: int) -> list[str]:
+    selected: list[str] = []
+    priority_terms = (
+        "dignità",
+        "persona",
+        "intelligenza artificiale",
+        "libertà",
+        "lavoro",
+        "pace",
+        "giustizia",
+        "human dignity",
+        "artificial intelligence",
+        "freedom",
+        "work",
+        "peace",
+        "justice",
+    )
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(term in lowered for term in priority_terms):
+            selected.append(sentence)
+        if len(selected) >= max_items:
+            return selected
+    for sentence in sentences:
+        if sentence not in selected:
+            selected.append(sentence)
+        if len(selected) >= max_items:
+            break
+    return selected
 
 
 def _format_search_results_summary(search: dict[str, Any]) -> str | None:

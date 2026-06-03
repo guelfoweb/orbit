@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from orbit.core.intent_gate import intent_gate_decision, intent_gate_messages, parse_intent_gate_reply, should_confirm_tool_route
-from orbit.core.tool_router import route_tool_categories
+from orbit.core.intent.gate import intent_gate_decision, intent_gate_messages, parse_intent_gate_reply, should_confirm_tool_route
+from orbit.core.tools.router import route_tool_categories
 
 
 class IntentGateTests(unittest.TestCase):

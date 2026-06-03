@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.core.guardrail_vision import MAX_IMAGE_EDGE, _normalized_image_bytes
+from orbit.core.guardrails.vision import MAX_IMAGE_EDGE, _normalized_image_bytes
 
 
 class VisionTests(unittest.TestCase):
@@ -39,4 +39,3 @@ class VisionTests(unittest.TestCase):
             normalized = Image.open(BytesIO(payload))
 
             self.assertLessEqual(max(normalized.size), MAX_IMAGE_EDGE)
-

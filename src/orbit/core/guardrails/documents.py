@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Callable
 import re
 import shlex
+import time
 
-from .intent_router import INTENT_CURRENT_FACTUAL_LOOKUP, INTENT_PDF_ANALYSIS, INTENT_TEXT_DOCUMENT_ANALYSIS, is_binary_or_pdf_analysis_intent
-from .message_ops import (
+from ..events import ToolCallEvent, ToolResultEvent, ToolRouteEvent
+from ..intent.router import INTENT_CURRENT_FACTUAL_LOOKUP, INTENT_PDF_ANALYSIS, INTENT_TEXT_DOCUMENT_ANALYSIS, is_static_file_analysis_intent
+from ..messages import (
     last_read_file_result,
     merged_read_file_result_in_current_turn,
     normalize_relative_path,
@@ -18,8 +21,22 @@ from .message_ops import (
 SHOW_CONTENT_HINTS = ("show", "mostra", "content", "contenuto", "display")
 READ_TEXT_HINTS = ("read", "open", "leggi", "apri")
 SUMMARY_HINTS = ("summarize", "summary", "riassumi", "riassunto", "in one line", "in una riga")
+ABOUT_DOCUMENT_HINTS = (
+    "what this document is about",
+    "what is this document about",
+    "what the document is about",
+    "what is about this document",
+    "what is about this doc",
+    "what is about this documet",
+    "what is this doc about",
+    "what is it about",
+    "di cosa parla",
+    "cosa contiene",
+)
 SINGLE_LINE_SUMMARY_HINTS = ("in one line", "one short line", "in una riga", "una riga")
 PDF_READ_HINTS = ("read", "leggi", "leggimi", "open", "apri", "file", "documento", "document")
+PDF_PAGE_COUNT_HINTS = ("page", "pages", "pagina", "pagine")
+PDF_PAGE_COUNT_QUERY_HINTS = ("how many", "page count", "page number", "page numbers", "number of pages", "quante pagine", "numero di pagine", "numeri pagina", "numeri di pagina")
 TEXT_PATH_RE = re.compile(r"(?P<path>[A-Za-z0-9_./-]+\.(?:md|txt|json|toml|yaml|yml|py|rst))")
 QUOTED_PDF_PATH_RE = re.compile(r"(?P<quote>[\"'`])(?P<path>[^\"'`]+\.pdf)(?P=quote)", re.IGNORECASE)
 SUMMARY_LINE_COUNT_RE = re.compile(r"\b(?P<count>\d{1,2})\s+(?:short\s+)?(?:lines?|righe?)\b", re.IGNORECASE)
@@ -30,10 +47,13 @@ SUMMARY_SENTENCE_COUNT_RE = re.compile(
 
 SUMMARY_READ_MAX_CHUNKS = 4
 SUMMARY_READ_LONG_MAX_CHUNKS = 8
+SUMMARY_READ_PREFIX_MAX_CHUNKS = 4
 SUMMARY_READ_MAX_LINES = 120
 SUMMARY_READ_MAX_CHARS = 6000
 PDF_TEXT_HEAD_LINES = 240
+PDF_TEXT_MAX_CHARS = 12000
 SUMMARY_EVIDENCE_TEXT_LIMIT = 1200
+SUMMARY_PREFIX_EXCERPT_LIMIT = 6000
 TERM_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'-]{2,}")
 TERM_STOPWORDS = {
     "about",
@@ -194,16 +214,36 @@ def seed_explicit_pdf_read_impl(
     on_event: Any,
     run_guardrail_tool: Callable[..., dict[str, Any]],
 ) -> None:
-    if route.intent != INTENT_PDF_ANALYSIS and not is_binary_or_pdf_analysis_intent(route.intent):
+    if route.intent != INTENT_PDF_ANALYSIS and not is_static_file_analysis_intent(route.intent):
         return
     path = extract_explicit_pdf_path(user_input)
     if path is None:
         return
     lowered = user_input.lower()
-    if not any(hint in lowered for hint in SHOW_CONTENT_HINTS + SUMMARY_HINTS + PDF_READ_HINTS):
+    if not _wants_pdf_text_or_metadata(lowered):
         return
     if latest_pdf_text_extract_result(messages, path) is not None:
         return
+    pypdf_result = extract_pdf_text_with_pypdf(
+        path=path,
+        workdir=getattr(registry, "workdir", None),
+        max_lines=PDF_TEXT_HEAD_LINES,
+        max_chars=PDF_TEXT_MAX_CHARS,
+    )
+    if pypdf_result is not None:
+        append_internal_pdf_extract_result(
+            result=pypdf_result,
+            route=route,
+            registry=registry,
+            messages=messages,
+            metrics=metrics,
+            policy_state=policy_state,
+            on_event=on_event,
+        )
+        if result_has_useful_text(pypdf_result):
+            return
+        if _asks_for_pdf_page_count(lowered) and isinstance(pypdf_result.get("pages"), int):
+            return
     pdftotext_result = run_guardrail_tool(
         name="bash",
         arguments={"command": f"pdftotext {shlex.quote(path)} - | head -n {PDF_TEXT_HEAD_LINES}"},
@@ -318,25 +358,32 @@ def condense_explicit_text_summary_messages(
             total_lines = payload.get("total_lines")
     if len(matching_indexes) <= 1:
         return
-    chunk_notes = build_chunk_evidence_notes(_read_chunks_for_path(messages, path))
+    chunks = _read_chunks_for_path(messages, path)
+    chunk_notes = build_chunk_evidence_notes(chunks)
     if not summary_text:
         summary_text = build_chunk_evidence_summary(chunk_notes)
+    prefix_focused = _prefers_prefix_summary(user_input=user_input, path=path)
     replacement = {
         "ok": True,
         "path": path,
         "summary_read": True,
+        "prefix_focused": prefix_focused,
         "sampled_chunks": len(matching_indexes),
         "sampled_start_lines": sampled_start_lines,
         "total_lines": total_lines,
         "chunk_notes": chunk_notes,
-        "document_map": build_document_map(_read_chunks_for_path(messages, path), total_lines=total_lines),
+        "document_map": build_document_map(chunks, total_lines=total_lines),
         "synthesis_guidance": (
-            "Use chunk_notes as sampled evidence across the document. Prefer recurring entities, themes, conflicts, "
-            "and progression across beginning/middle/end over isolated quoted fragments."
+            "Use text_excerpt first when present; otherwise use chunk_notes as sampled evidence. Prefer recurring entities, "
+            "themes, conflicts, and progression over isolated quoted fragments."
         ),
         "content": summary_text[:SUMMARY_EVIDENCE_TEXT_LIMIT],
         "notice": "summary sample read",
     }
+    if prefix_focused:
+        excerpt = _prefix_text_excerpt(chunks)
+        if excerpt:
+            replacement["text_excerpt"] = excerpt[:SUMMARY_PREFIX_EXCERPT_LIMIT]
     first_index = matching_indexes[0]
     messages[first_index] = {
         "role": "tool",
@@ -370,27 +417,43 @@ def local_explicit_pdf_result(
     user_input: str,
     messages: list[dict[str, Any]],
 ) -> str | None:
-    if intent != INTENT_PDF_ANALYSIS and not is_binary_or_pdf_analysis_intent(intent):
+    if intent != INTENT_PDF_ANALYSIS and not is_static_file_analysis_intent(intent):
         return None
     path = extract_explicit_pdf_path(user_input)
     if path is None:
         return None
     result = latest_pdf_text_extract_result(messages, path)
+    lowered = user_input.lower()
+    if result is None and _asks_for_pdf_page_count(lowered):
+        result = latest_pypdf_result(messages, path)
     if result is None:
         return None
+    if _asks_for_pdf_page_count(lowered):
+        pages = result.get("pages")
+        if isinstance(pages, int) and pages >= 0:
+            return f"`{path}` has {pages} page{'s' if pages != 1 else ''}."
     stdout = result.get("stdout")
     if not isinstance(stdout, str) or not stdout.strip():
         return None
     content = stdout.strip()
-    source = "strings" if is_strings_extract_result(result, path) else "pdftotext"
-    lowered = user_input.lower()
-    if any(hint in lowered for hint in SUMMARY_HINTS):
+    source = pdf_extract_source(result, path)
+    if any(hint in lowered for hint in SUMMARY_HINTS + ABOUT_DOCUMENT_HINTS):
         summary = summarize_text_content(content, single_line=any(hint in lowered for hint in SINGLE_LINE_SUMMARY_HINTS))
         if summary is not None:
             return summary
     if any(hint in lowered for hint in SHOW_CONTENT_HINTS + PDF_READ_HINTS):
         return content + f"\n\n[bounded PDF extract via {source}]"
     return None
+
+
+def _wants_pdf_text_or_metadata(lowered: str) -> bool:
+    return any(hint in lowered for hint in SHOW_CONTENT_HINTS + SUMMARY_HINTS + ABOUT_DOCUMENT_HINTS + PDF_READ_HINTS) or _asks_for_pdf_page_count(lowered)
+
+
+def _asks_for_pdf_page_count(lowered: str) -> bool:
+    if any(hint in lowered for hint in PDF_PAGE_COUNT_QUERY_HINTS):
+        return True
+    return any(hint in lowered for hint in PDF_PAGE_COUNT_HINTS) and any(hint in lowered for hint in ("how", "many", "count", "number", "quante", "quanti", "numero"))
 
 
 def extract_explicit_text_path(user_input: str) -> str | None:
@@ -422,6 +485,9 @@ def seed_document_summary_reads(
     lowered = user_input.lower()
     single_line = any(hint in lowered for hint in SINGLE_LINE_SUMMARY_HINTS)
     max_chunks = SUMMARY_READ_MAX_CHUNKS if single_line else SUMMARY_READ_LONG_MAX_CHUNKS
+    prefix_focused = _prefers_prefix_summary(user_input=user_input, path=path)
+    if prefix_focused:
+        max_chunks = min(max_chunks, SUMMARY_READ_PREFIX_MAX_CHUNKS)
     existing = [
         item
         for item in successful_read_results_in_current_turn(messages)
@@ -453,6 +519,7 @@ def seed_document_summary_reads(
         total_lines=total_lines,
         max_chunks=max_chunks,
         chunk_lines=SUMMARY_READ_MAX_LINES,
+        prefix_focused=prefix_focused,
     )
     existing_starts = {int(item.get("start_line", 1)) for item in existing if isinstance(item.get("start_line"), int)}
     if isinstance(latest.get("start_line"), int):
@@ -902,11 +969,19 @@ def _is_sampled_summary_read(messages: list[dict[str, Any]], path: str) -> bool:
     return False
 
 
-def _summary_read_start_lines(*, total_lines: int | None, max_chunks: int, chunk_lines: int) -> list[int]:
+def _summary_read_start_lines(
+    *,
+    total_lines: int | None,
+    max_chunks: int,
+    chunk_lines: int,
+    prefix_focused: bool = False,
+) -> list[int]:
     if max_chunks <= 0:
         return []
     if total_lines is None or total_lines <= chunk_lines:
         return [1]
+    if prefix_focused:
+        return [1 + slot * chunk_lines for slot in range(max_chunks) if 1 + slot * chunk_lines <= total_lines]
     if total_lines <= chunk_lines * max_chunks:
         return [1 + slot * chunk_lines for slot in range(max_chunks) if 1 + slot * chunk_lines <= total_lines]
     last_start = max(1, total_lines - chunk_lines + 1)
@@ -927,6 +1002,40 @@ def _summary_read_start_lines(*, total_lines: int | None, max_chunks: int, chunk
     return starts
 
 
+def _prefers_prefix_summary(*, user_input: str, path: str) -> bool:
+    lowered = f"{user_input} {path}".lower()
+    section_terms = (
+        "canto",
+        "capitolo",
+        "chapter",
+        "scene",
+        "scena",
+        "act ",
+        "atto",
+        "part ",
+        "parte",
+        "book ",
+        "libro",
+    )
+    return any(term in lowered for term in section_terms)
+
+
+def _prefix_text_excerpt(chunks: list[dict[str, Any]]) -> str:
+    ordered = sorted(chunks, key=lambda item: int(item.get("start_line", 1)))
+    parts: list[str] = []
+    for chunk in ordered:
+        content = chunk.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        start_line = chunk.get("start_line")
+        label = f"[lines {start_line}]" if isinstance(start_line, int) else "[excerpt]"
+        parts.append(f"{label}\n{content.strip()}")
+        joined = "\n\n".join(parts)
+        if len(joined) >= SUMMARY_PREFIX_EXCERPT_LIMIT:
+            return joined[:SUMMARY_PREFIX_EXCERPT_LIMIT]
+    return "\n\n".join(parts)
+
+
 def latest_pdftotext_result(messages: list[dict[str, Any]], path: str) -> dict[str, Any] | None:
     normalized_path = normalize_relative_path(path)
     expected_prefixes = (
@@ -938,6 +1047,18 @@ def latest_pdftotext_result(messages: list[dict[str, Any]], path: str) -> dict[s
         if not isinstance(command, str):
             continue
         if any(command.strip().startswith(prefix) for prefix in expected_prefixes):
+            return result
+    return None
+
+
+def latest_pypdf_result(messages: list[dict[str, Any]], path: str) -> dict[str, Any] | None:
+    normalized_path = normalize_relative_path(path)
+    expected_prefix = f"pypdf_extract {shlex.quote(normalized_path)} "
+    for result in reversed(successful_bash_results_in_current_turn(messages)):
+        command = result.get("command")
+        if not isinstance(command, str):
+            continue
+        if command.strip().startswith(expected_prefix):
             return result
     return None
 
@@ -958,6 +1079,9 @@ def latest_pdf_strings_result(messages: list[dict[str, Any]], path: str) -> dict
 
 
 def latest_pdf_text_extract_result(messages: list[dict[str, Any]], path: str) -> dict[str, Any] | None:
+    result = latest_pypdf_result(messages, path)
+    if result is not None and result_has_useful_text(result):
+        return result
     result = latest_pdftotext_result(messages, path)
     if result is not None and result_has_useful_text(result):
         return result
@@ -981,7 +1105,7 @@ def result_has_useful_text(result: dict[str, Any]) -> bool:
 
 def is_pdf_extract_command(command: str) -> bool:
     stripped = command.strip()
-    return stripped.startswith("pdftotext ") or stripped.startswith("strings ")
+    return stripped.startswith("pypdf_extract ") or stripped.startswith("pdftotext ") or stripped.startswith("strings ")
 
 
 def is_strings_extract_result(result: dict[str, Any], path: str) -> bool:
@@ -991,6 +1115,126 @@ def is_strings_extract_result(result: dict[str, Any], path: str) -> bool:
     normalized_path = normalize_relative_path(path)
     return command.strip().startswith(f"strings {normalized_path} |") or command.strip().startswith(
         f"strings {shlex.quote(normalized_path)} |"
+    )
+
+
+def pdf_extract_source(result: dict[str, Any], path: str) -> str:
+    command = result.get("command")
+    if isinstance(command, str) and command.strip().startswith("pypdf_extract "):
+        return "pypdf"
+    if is_strings_extract_result(result, path):
+        return "strings"
+    return "pdftotext"
+
+
+def extract_pdf_text_with_pypdf(*, path: str, workdir: object, max_lines: int, max_chars: int) -> dict[str, Any] | None:
+    if not isinstance(workdir, Path):
+        return None
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return None
+    normalized = normalize_relative_path(path)
+    command = f"pypdf_extract {shlex.quote(normalized)} --max-lines {max_lines}"
+    root = workdir.resolve()
+    candidate = (root / normalized).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return {
+            "ok": False,
+            "command": command,
+            "stdout": "",
+            "stderr": f"path escapes workdir: {path}",
+            "returncode": 1,
+            "extractor": "pypdf",
+        }
+    if not candidate.exists() or not candidate.is_file():
+        return {
+            "ok": False,
+            "command": command,
+            "stdout": "",
+            "stderr": f"file not found: {path}",
+            "returncode": 1,
+            "extractor": "pypdf",
+        }
+    try:
+        reader = PdfReader(str(candidate))
+        lines: list[str] = []
+        chars = 0
+        truncated = False
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if len(lines) >= max_lines or chars + len(line) + 1 > max_chars:
+                    truncated = True
+                    break
+                lines.append(line)
+                chars += len(line) + 1
+            if truncated:
+                break
+        stdout = "\n".join(lines)
+        return {
+            "ok": bool(stdout.strip()),
+            "command": command,
+            "stdout": stdout,
+            "stderr": "" if stdout.strip() else "pypdf extracted no useful text",
+            "returncode": 0 if stdout.strip() else 1,
+            "extractor": "pypdf",
+            "pages": len(reader.pages),
+            "truncated": truncated,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "command": command,
+            "stdout": "",
+            "stderr": f"pypdf failed: {exc}",
+            "returncode": 1,
+            "extractor": "pypdf",
+        }
+
+
+def append_internal_pdf_extract_result(
+    *,
+    result: dict[str, Any],
+    route: Any,
+    registry: Any,
+    messages: list[dict[str, Any]],
+    metrics: Any,
+    policy_state: Any,
+    on_event: Any,
+) -> None:
+    if on_event is not None:
+        on_event(ToolRouteEvent(loop=0, intent=route.intent, categories=route.categories, reason=route.reason))
+        on_event(ToolCallEvent(loop=0, name="bash", arguments={"command": str(result.get("command") or "pypdf_extract")}))
+    started_at = time.monotonic_ns()
+    elapsed_ns = time.monotonic_ns() - started_at
+    if elapsed_ns > 0:
+        metrics.tool_duration_ns += elapsed_ns
+    policy_state.tool_steps += 1
+    if on_event is not None:
+        on_event(
+            ToolResultEvent(
+                loop=0,
+                name="bash",
+                ok=bool(result.get("ok")),
+                error=result.get("error"),
+                returncode=result.get("returncode"),
+                stderr=result.get("stderr"),
+                stdout=result.get("stdout"),
+                elapsed_ms=elapsed_ns / 1_000_000,
+            )
+        )
+    messages.append(
+        {
+            "role": "tool",
+            "tool_name": "bash",
+            "content": registry.encode_tool_result(result),
+        }
     )
 
 

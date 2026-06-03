@@ -5,15 +5,15 @@ from typing import Any, Callable
 import re
 from dataclasses import dataclass
 
-from .code_review_signals import (
+from .review_signals import (
     CODE_FILE_EXTENSIONS,
     CODE_REVIEW_OUTPUT_HINTS,
     CODE_REVIEW_REQUEST_HINTS,
     has_code_file_extension,
     has_code_language_hint,
 )
-from .intent_router import INTENT_CODEBASE_INSPECTION
-from .message_ops import (
+from ..intent.router import INTENT_CODEBASE_INSPECTION
+from ..messages import (
     has_recent_tool_result,
     last_read_file_result,
     merged_read_file_result_in_current_turn,
@@ -160,6 +160,57 @@ UNANCHORED_SECURITY_REVIEW_HINTS = (
     "could be a risk",
     "could lead to",
 )
+CODE_REVIEW_UNCERTAINTY_HINTS = (
+    "cannot definitively",
+    "without executing the code",
+    "having more context",
+    "need the actual implementation",
+    "need more context",
+    "surrounding modules",
+    "other modules",
+    "does not contain executable logic",
+    "only contains imports",
+    "primarily defines the dependencies",
+    "large import block",
+    "non posso determinare",
+    "senza eseguire il codice",
+    "servirebbe più contesto",
+    "mi servirebbe più contesto",
+    "moduli circostanti",
+    "altri moduli",
+)
+CODE_REVIEW_IMPORT_ONLY_HINTS = (
+    "import block",
+    "only contains imports",
+    "does not contain executable logic",
+    "primarily defines the dependencies",
+)
+CODE_REVIEW_SECTION_LIMITED_HINTS = (
+    "specific section",
+    "code snippet",
+    "provided code snippet",
+    "this section",
+    "this snippet",
+    "questa sezione",
+    "questo snippet",
+)
+CODE_REVIEW_GENERIC_SUMMARY_HINTS = (
+    "the file",
+    "this file",
+    "contains",
+    "defines",
+    "orchestrates",
+    "handles",
+    "includes",
+    "the module",
+    "il file",
+    "questo file",
+    "contiene",
+    "definisce",
+    "gestisce",
+    "include",
+    "il modulo",
+)
 
 
 def seed_codebase_listing_impl(
@@ -177,6 +228,8 @@ def seed_codebase_listing_impl(
         return
     lowered = user_input.lower()
     if not any(hint in lowered for hint in IMPORTANT_FILES_HINTS + ARCHITECTURE_SUMMARY_HINTS + HOTSPOT_HINTS + CODE_REVIEW_HINTS):
+        return
+    if any("/" in path or "\\" in path for path in explicit_code_review_paths(user_input)):
         return
     if has_recent_tool_result(messages, "list_files"):
         return
@@ -235,6 +288,29 @@ def seed_codebase_review_reads_impl(
         return
     lowered = user_input.lower()
     if not any(hint in lowered for hint in CODE_REVIEW_HINTS):
+        return
+    explicit_paths = [path for path in explicit_code_review_paths(user_input) if "/" in path or "\\" in path]
+    if explicit_paths:
+        already_read = {
+            normalize_relative_path(str(item.get("path", "")))
+            for item in successful_read_results_in_current_turn(messages)
+            if isinstance(item.get("path"), str)
+        }
+        for path in explicit_paths[:CODE_REVIEW_READ_MAX_FILES]:
+            normalized = normalize_relative_path(path)
+            if normalized in already_read:
+                continue
+            seed_progressive_code_review_reads(
+                path=normalized,
+                route=route,
+                registry=registry,
+                messages=messages,
+                metrics=metrics,
+                policy_state=policy_state,
+                on_event=on_event,
+                run_guardrail_tool=run_guardrail_tool,
+                max_chunks=max_chunks_per_file,
+            )
         return
     listed = recent_listed_file_paths(messages, limit=40)
     if not listed:
@@ -350,8 +426,8 @@ def local_codebase_hotspot_result(
         bullets.append("- `src/orbit/core/agent.py`: it is the most sensitive point for loop stability, tool routing, and stop conditions." if english else "- `src/orbit/core/agent.py`: e` il punto piu` sensibile per stabilita` del loop, tool routing e stop conditions.")
     if "src/orbit/core/runtime.py" in listed:
         bullets.append("- `src/orbit/core/runtime.py`: it concentrates bootstrap, sessions, and startup policy, so changes there have broad impact." if english else "- `src/orbit/core/runtime.py`: concentra bootstrap, sessioni e policy di avvio, quindi ha impatto trasversale.")
-    if "src/orbit/core/tool_guardrails.py" in listed:
-        bullets.append("- `src/orbit/core/tool_guardrails.py`: it concentrates many runtime heuristics, so it needs close control to avoid drift and regressions." if english else "- `src/orbit/core/tool_guardrails.py`: raccoglie molte euristiche runtime; va tenuto sotto controllo per evitare drift e regressioni.")
+    if "src/orbit/core/tools/guardrails.py" in listed:
+        bullets.append("- `src/orbit/core/tools/guardrails.py`: it concentrates many runtime heuristics, so it needs close control to avoid drift and regressions." if english else "- `src/orbit/core/tools/guardrails.py`: raccoglie molte euristiche runtime; va tenuto sotto controllo per evitare drift e regressioni.")
     elif "src/orbit/terminal/cli.py" in listed:
         bullets.append("- `src/orbit/terminal/cli.py`: it deserves attention for REPL UX and safe slash-command handling." if english else "- `src/orbit/terminal/cli.py`: merita attenzione per UX REPL e gestione sicura dei comandi slash.")
     if not bullets:
@@ -369,6 +445,8 @@ def local_codebase_review_result(
     if intent != INTENT_CODEBASE_INSPECTION:
         return None
     lowered = user_input.lower()
+    if _asks_for_explanatory_codebase_bug_analysis(user_input):
+        return None
     if not any(hint in lowered for hint in CODE_REVIEW_HINTS):
         return None
     read_results = successful_read_results_in_current_turn(messages)
@@ -413,6 +491,8 @@ def local_codebase_review_result(
             if len(findings) >= 3:
                 break
     if not findings:
+        if _asks_for_explanatory_codebase_bug_analysis(user_input):
+            return None
         targets = [item.get("path") for item in read_results if isinstance(item.get("path"), str)]
         targets = [path for path in targets if isinstance(path, str)][:3]
         if not targets:
@@ -436,98 +516,172 @@ def codebase_review_reply_handling(
         return None
     if policy_state.synthesis_retries >= 2:
         return None
-    if not _looks_like_explicit_file_review_request(user_input):
-        return None
     read_results = successful_read_results_in_current_turn(messages)
     if not read_results:
+        return _codebase_retry_after_listing_only(
+            user_input=user_input,
+            messages=messages,
+            policy_state=policy_state,
+        )
+    if not _looks_like_explicit_file_review_request(user_input) and not _looks_like_codebase_request_that_needs_read(user_input):
         return None
     latest = read_results[-1]
     path = latest.get("path")
     if not isinstance(path, str) or not path.strip():
         return None
     lowered = content.lower()
-    uncertainty_hints = (
-        "cannot definitively",
-        "without executing the code",
-        "having more context",
-        "need the actual implementation",
-        "need more context",
-        "surrounding modules",
-        "other modules",
-        "does not contain executable logic",
-        "only contains imports",
-        "primarily defines the dependencies",
-        "large import block",
-        "non posso determinare",
-        "senza eseguire il codice",
-        "servirebbe più contesto",
-        "mi servirebbe più contesto",
-        "moduli circostanti",
-        "altri moduli",
+    retry = _codebase_retry_after_incomplete_chunk(
+        latest=latest,
+        path=path,
+        lowered_content=lowered,
+        policy_state=policy_state,
     )
-    import_only_hints = (
-        "import block",
-        "only contains imports",
-        "does not contain executable logic",
-        "primarily defines the dependencies",
+    if retry is not None:
+        return retry
+    retry = _codebase_retry_after_generic_summary(
+        path=path,
+        lowered_content=lowered,
+        policy_state=policy_state,
     )
-    section_limited_hints = (
-        "specific section",
-        "code snippet",
-        "provided code snippet",
-        "this section",
-        "this snippet",
-        "questa sezione",
-        "questo snippet",
+    if retry is not None:
+        return retry
+    retry = _codebase_retry_after_file_list_only_reply(
+        user_input=user_input,
+        content=content,
+        read_results=read_results,
+        policy_state=policy_state,
     )
-    review_output_hints = CODE_REVIEW_OUTPUT_HINTS
-    generic_summary_hints = (
-        "the file",
-        "this file",
-        "contains",
-        "defines",
-        "orchestrates",
-        "handles",
-        "includes",
-        "the module",
-        "il file",
-        "questo file",
-        "contiene",
-        "definisce",
-        "gestisce",
-        "include",
-        "il modulo",
+    if retry is not None:
+        return retry
+    final = _codebase_final_from_unanchored_security_review(
+        intent=intent,
+        user_input=user_input,
+        content=content,
+        messages=messages,
+        prefers_english_output=prefers_english_output,
     )
-    if latest.get("has_more") or latest.get("truncated"):
-        next_start_line = latest.get("next_start_line")
-        if policy_state.synthesis_retries < 1 and isinstance(next_start_line, int) and next_start_line > 1:
-            if any(hint in lowered for hint in uncertainty_hints + import_only_hints + section_limited_hints):
-                policy_state.synthesis_retries += 1
-                return (
-                    "retry",
-                    f"You only saw an incomplete chunk of `{path}`. "
-                    f"Continue reading the same file with read_file using start_line={next_start_line}, then continue the review from the combined file evidence. "
-                    "Do not conclude from the first import or header block alone.",
-                )
-    if any(hint in lowered for hint in generic_summary_hints) and not any(hint in lowered for hint in review_output_hints):
-        policy_state.synthesis_retries += 1
-        return (
-            "retry",
-            f"You already read concrete code from `{path}`. "
-            "Do not summarize the file structure. "
-            "Perform a bug and risk review of the inspected code and report up to 3 concrete findings. "
-            "If no clear bug is visible in the inspected portions, say `No concrete bug found in the inspected portions.` and give at most 1 precise remaining uncertainty.",
-        )
-    if _looks_like_unanchored_generic_security_review(content):
-        local_review = local_codebase_review_result(
-            intent=intent,
-            user_input=user_input,
-            messages=messages,
-            prefers_english_output=prefers_english_output,
-        )
-        if local_review is not None:
-            return ("final", local_review)
-    if not any(hint in lowered for hint in uncertainty_hints):
+    if final is not None:
+        return final
+    return _codebase_retry_after_generic_uncertainty(
+        path=path,
+        lowered_content=lowered,
+        policy_state=policy_state,
+    )
+
+
+def _codebase_retry_after_listing_only(
+    *,
+    user_input: str,
+    messages: list[dict[str, Any]],
+    policy_state: Any,
+) -> tuple[str, str] | None:
+    if not _looks_like_codebase_request_that_needs_read(user_input):
+        return None
+    listed = recent_listed_file_paths(messages, limit=80)
+    if not listed:
+        return None
+    candidates = topic_aware_code_review_target_paths(listed, user_input)
+    if not candidates:
+        return None
+    policy_state.synthesis_retries += 1
+    return (
+        "retry",
+        "You only listed workspace paths, but the user asked for code inspection or bug analysis. "
+        f"Call read_file now on `{candidates[0]}`, then answer from that concrete evidence. "
+        "Do not finalize from a file list alone.",
+    )
+
+
+def _codebase_retry_after_incomplete_chunk(
+    *,
+    latest: dict[str, Any],
+    path: str,
+    lowered_content: str,
+    policy_state: Any,
+) -> tuple[str, str] | None:
+    if not (latest.get("has_more") or latest.get("truncated")):
+        return None
+    next_start_line = latest.get("next_start_line")
+    if policy_state.synthesis_retries >= 1 or not isinstance(next_start_line, int) or next_start_line <= 1:
+        return None
+    if not any(hint in lowered_content for hint in CODE_REVIEW_UNCERTAINTY_HINTS + CODE_REVIEW_IMPORT_ONLY_HINTS + CODE_REVIEW_SECTION_LIMITED_HINTS):
+        return None
+    policy_state.synthesis_retries += 1
+    return (
+        "retry",
+        f"You only saw an incomplete chunk of `{path}`. "
+        f"Continue reading the same file with read_file using start_line={next_start_line}, then continue the review from the combined file evidence. "
+        "Do not conclude from the first import or header block alone.",
+    )
+
+
+def _codebase_retry_after_generic_summary(
+    *,
+    path: str,
+    lowered_content: str,
+    policy_state: Any,
+) -> tuple[str, str] | None:
+    if not any(hint in lowered_content for hint in CODE_REVIEW_GENERIC_SUMMARY_HINTS):
+        return None
+    if any(hint in lowered_content for hint in CODE_REVIEW_OUTPUT_HINTS):
+        return None
+    policy_state.synthesis_retries += 1
+    return (
+        "retry",
+        f"You already read concrete code from `{path}`. "
+        "Do not summarize the file structure. "
+        "Perform a bug and risk review of the inspected code and report up to 3 concrete findings. "
+        "If no clear bug is visible in the inspected portions, say `No concrete bug found in the inspected portions.` and give at most 1 precise remaining uncertainty.",
+    )
+
+
+def _codebase_retry_after_file_list_only_reply(
+    *,
+    user_input: str,
+    content: str,
+    read_results: list[dict[str, Any]],
+    policy_state: Any,
+) -> tuple[str, str] | None:
+    if not (_asks_for_explanatory_codebase_bug_analysis(user_input) and _looks_like_file_list_only_reply(content)):
+        return None
+    paths = [str(item.get("path")) for item in read_results if isinstance(item.get("path"), str)]
+    policy_state.synthesis_retries += 1
+    return (
+        "retry",
+        "You already read concrete code. Do not answer with only a list of files. "
+        f"Use the evidence from {', '.join(paths[:3])} to explain one possible bug or routing risk and a minimal fix. "
+        "If no concrete bug is visible, say that explicitly and give one precise remaining uncertainty.",
+    )
+
+
+def _codebase_final_from_unanchored_security_review(
+    *,
+    intent: str,
+    user_input: str,
+    content: str,
+    messages: list[dict[str, Any]],
+    prefers_english_output: Callable[[str], bool],
+) -> tuple[str, str] | None:
+    if not _looks_like_unanchored_generic_security_review(content):
+        return None
+    local_review = local_codebase_review_result(
+        intent=intent,
+        user_input=user_input,
+        messages=messages,
+        prefers_english_output=prefers_english_output,
+    )
+    if local_review is None:
+        return None
+    return ("final", local_review)
+
+
+def _codebase_retry_after_generic_uncertainty(
+    *,
+    path: str,
+    lowered_content: str,
+    policy_state: Any,
+) -> tuple[str, str] | None:
+    if not any(hint in lowered_content for hint in CODE_REVIEW_UNCERTAINTY_HINTS):
         return None
     policy_state.synthesis_retries += 1
     return (
@@ -550,6 +704,34 @@ def _looks_like_unanchored_generic_security_review(content: str) -> bool:
     if "no concrete bug" in lowered or "no concrete vulnerability" in lowered:
         return False
     return True
+
+
+def _looks_like_file_list_only_reply(content: str) -> bool:
+    stripped = content.strip()
+    if not stripped:
+        return False
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if not lines:
+        return False
+    path_like_lines = 0
+    for line in lines:
+        if re.search(r"`[^`]+\.(?:py|js|ts|tsx|jsx|go|rs|java|c|cpp|h|hpp|ps1|sh|md|toml|json|yaml|yml)`", line):
+            path_like_lines += 1
+        elif re.search(r"\b[\w./-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|c|cpp|h|hpp|ps1|sh|md|toml|json|yaml|yml)\b", line):
+            path_like_lines += 1
+    if path_like_lines == 0:
+        return False
+    explanatory_terms = ("bug", "risk", "fix", "because", "therefore", "issue", "vulnerability", "exploit", "rischio", "problema", "correzione")
+    if any(term in stripped.lower() for term in explanatory_terms):
+        return False
+    return path_like_lines >= max(1, len(lines) - 1)
+
+
+def _asks_for_explanatory_codebase_bug_analysis(user_input: str) -> bool:
+    lowered = user_input.lower()
+    explanation_hints = ("explain", "propose", "minimal fix", "fix", "spiega", "proponi", "correzione")
+    bug_hints = ("bug", "bugs", "issue", "issues", "risk", "risks", "problema", "problemi", "rischio", "rischi")
+    return any(hint in lowered for hint in explanation_hints) and any(hint in lowered for hint in bug_hints)
 
 
 def code_review_target_paths(paths: list[str]) -> list[str]:
@@ -579,6 +761,86 @@ def code_review_target_paths(paths: list[str]) -> list[str]:
         seen.add(path)
         out.append(path)
     return out
+
+
+def topic_aware_code_review_target_paths(paths: list[str], user_input: str) -> list[str]:
+    candidates = code_review_target_paths(paths)
+    if not candidates:
+        return []
+    lowered = user_input.lower()
+    topic_preferences: tuple[str, ...] = ()
+    if any(token in lowered for token in ("routing", "router", "intent", "tool routing", "tool-call", "tool call", "tool calls")):
+        topic_preferences = (
+            "src/orbit/core/intent/router.py",
+            "src/orbit/core/tools/router.py",
+            "src/orbit/core/tools/guardrails.py",
+            "src/orbit/core/agent.py",
+        )
+    elif any(token in lowered for token in ("tool", "tools", "strumento", "strumenti")):
+        topic_preferences = (
+            "src/orbit/core/tools/guardrails.py",
+            "src/orbit/core/tools/router.py",
+            "src/orbit/tooling/registry.py",
+            "src/orbit/core/agent.py",
+        )
+    if not topic_preferences:
+        return candidates
+    ranked = sorted(
+        candidates,
+        key=lambda path: (
+            next((index for index, preferred in enumerate(topic_preferences) if path == preferred or path.endswith(preferred)), len(topic_preferences)),
+            candidates.index(path),
+        ),
+    )
+    return ranked
+
+
+def _looks_like_codebase_request_that_needs_read(user_input: str) -> bool:
+    lowered = user_input.lower()
+    if "most relevant files" in lowered or "most important files" in lowered:
+        return False
+    required_action_hints = (
+        "inspect",
+        "read",
+        "review",
+        "analyze",
+        "analyse",
+        "bug",
+        "bugs",
+        "issue",
+        "issues",
+        "risk",
+        "risks",
+        "finding",
+        "findings",
+        "vulnerability",
+        "vulnerabilities",
+        "ispeziona",
+        "leggi",
+        "rivedi",
+        "analizza",
+        "problema",
+        "problemi",
+        "rischio",
+        "rischi",
+        "vulnerabilità",
+        "vulnerabilita",
+    )
+    return any(hint in lowered for hint in required_action_hints)
+
+
+def explicit_code_review_paths(user_input: str) -> list[str]:
+    extension_pattern = "|".join(re.escape(ext) for ext in sorted(CODE_FILE_EXTENSIONS, key=len, reverse=True))
+    pattern = re.compile(rf"(?<![\w.-])([A-Za-z0-9_./\\-]+(?:{extension_pattern}))(?![\w.-])", re.IGNORECASE)
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(user_input):
+        path = normalize_relative_path(match.group(1).strip("`'\".,:;()[]{}"))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
 
 
 def _looks_like_explicit_file_review_request(user_input: str) -> bool:
@@ -714,10 +976,10 @@ def infer_cross_file_review_findings(results: list[dict[str, Any]], *, english: 
     findings: list[str] = []
     if {"src/orbit/core/agent.py", "src/orbit/core/runtime.py"} <= normalized_paths:
         findings.append("- High: `src/orbit/core/agent.py` and `src/orbit/core/runtime.py` form a tight execution boundary, so changes usually need regression checks across loop behavior, sessions, and startup policy." if english else "- Alta: `src/orbit/core/agent.py` e `src/orbit/core/runtime.py` formano un confine esecutivo stretto, quindi le modifiche richiedono di solito regressioni su loop, sessioni e policy di avvio.")
-    if {"src/orbit/core/agent.py", "src/orbit/core/tool_guardrails.py"} <= normalized_paths:
-        findings.append("- Medium: `src/orbit/core/agent.py` and `src/orbit/core/tool_guardrails.py` are coupled through routing and stop/fallback behavior, so partial fixes can drift unless both sides are reviewed together." if english else "- Media: `src/orbit/core/agent.py` e `src/orbit/core/tool_guardrails.py` sono accoppiati tramite routing e fallback/stop, quindi fix parziali rischiano drift se non vengono rivisti insieme.")
-    if {"src/orbit/core/tool_guardrails.py", "src/orbit/core/intent_router.py"} <= normalized_paths or {"src/orbit/core/tool_guardrails.py", "src/orbit/core/tool_router.py"} <= normalized_paths:
+    if {"src/orbit/core/agent.py", "src/orbit/core/tools/guardrails.py"} <= normalized_paths:
+        findings.append("- Medium: `src/orbit/core/agent.py` and `src/orbit/core/tools/guardrails.py` are coupled through routing and stop/fallback behavior, so partial fixes can drift unless both sides are reviewed together." if english else "- Media: `src/orbit/core/agent.py` e `src/orbit/core/tools/guardrails.py` sono accoppiati tramite routing e fallback/stop, quindi fix parziali rischiano drift se non vengono rivisti insieme.")
+    if {"src/orbit/core/tools/guardrails.py", "src/orbit/core/intent/router.py"} <= normalized_paths or {"src/orbit/core/tools/guardrails.py", "src/orbit/core/tools/router.py"} <= normalized_paths:
         findings.append("- Medium: routing rules and guardrails are split across multiple modules, so review should check that intent classification and runtime enforcement stay aligned." if english else "- Media: regole di routing e guardrail sono distribuiti su piu` moduli, quindi la review deve verificare che classificazione intent ed enforcement runtime restino allineati.")
-    if {"src/orbit/tooling/registry.py", "src/orbit/core/tool_guardrails.py"} <= normalized_paths:
+    if {"src/orbit/tooling/registry.py", "src/orbit/core/tools/guardrails.py"} <= normalized_paths:
         findings.append("- Medium: tool exposure and runtime assumptions are split between `registry` and guardrails, so adding or changing tools should be reviewed across both layers." if english else "- Media: esposizione delle tool e assunzioni runtime sono divise tra `registry` e guardrail, quindi aggiunte o cambi alle tool vanno riviste su entrambi i livelli.")
     return findings

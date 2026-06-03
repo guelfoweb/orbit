@@ -5,7 +5,7 @@ import re
 import shlex
 from typing import Any, Callable
 
-from .text_utils import word_tokens
+from ..text_utils import word_tokens
 
 
 REPLACE_KEEP_HINTS = ("and keep", "and leave", "otherwise unchanged", "file otherwise unchanged", "lascia", "invariat")

@@ -38,6 +38,7 @@ from orbit.terminal.ui import (
     format_status,
     format_user_prompt,
     make_live_event_printer,
+    print_model_markdown,
     print_help,
     print_live_event,
 )
@@ -739,6 +740,25 @@ class InterruptTrackerTests(unittest.TestCase):
         self.assertFalse(_should_render_model_markdown(status, source="model"))
         self.assertFalse(_should_render_model_markdown(status, source="tool+model"))
         self.assertFalse(_should_render_model_markdown(status, source="local"))
+
+    def test_print_model_markdown_uses_rich_wrapping(self) -> None:
+        class FakeStdout:
+            def isatty(self) -> bool:
+                return True
+
+        fake_stdout = FakeStdout()
+        with (
+            patch("sys.stdout", fake_stdout),
+            patch("orbit.terminal.ui.Markdown") as markdown_cls,
+            patch("orbit.terminal.ui.Console") as console_cls,
+        ):
+            print_model_markdown("**long markdown**")
+
+        console_cls.assert_called_once()
+        self.assertIs(console_cls.call_args.kwargs["file"], fake_stdout)
+        self.assertIs(console_cls.call_args.kwargs["soft_wrap"], False)
+        markdown_cls.assert_called_once_with("**long markdown**")
+        console_cls.return_value.print.assert_called_once_with(markdown_cls.return_value)
 
     def test_turn_preprocessing_label_detects_media_paths(self) -> None:
         self.assertEqual(_turn_preprocessing_label("transcribe audio/voice.wav"), "audio")

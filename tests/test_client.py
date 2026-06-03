@@ -9,7 +9,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.core.client import OllamaClient
+from orbit.core.ollama_client import OllamaClient
 
 
 class ClientTests(unittest.TestCase):

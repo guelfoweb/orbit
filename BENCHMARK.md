@@ -1,6 +1,6 @@
 # BENCHMARK
 
-## Minimal Regression Benchmark
+## Minimal regression benchmark
 
 Use this after runtime, routing, compaction, guardrail, media, or tool changes:
 
@@ -23,7 +23,7 @@ PYTHONPATH=src python3 -m orbit --workdir workdir --model gemma4:e2b-fast-t6-c8k
 - Treat `src: local` as a valid fast path when Orbit can answer from bounded local evidence without another model call.
 - Skill prompts may depend on a local fixture workdir; do not publish fixture contents in benchmark notes.
 
-## Current Model Profile
+## Current model profile
 
 ```bash
 ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
@@ -45,7 +45,7 @@ OLLAMA_KEEP_ALIVE=-1
 OLLAMA_MAX_LOADED_MODELS=1
 ```
 
-## Latest Warm Run
+## Latest warm run
 
 Run date: 2026-06-01
 
@@ -71,7 +71,7 @@ Observations:
 - Code review now returns a more evidence-based local finding instead of generic security advice.
 - Long literary summarization uses compacted progressive evidence; it is slower than the previous extractive-only path but produces a more coherent summary with lower context pressure than the initial refactor attempt.
 
-## Debug Timing Table
+## Debug timing table
 
 | ID | Elapsed | Context | Source | Route | Intent Gate | Tools / Media |
 | --- | ---: | ---: | --- | --- | --- | --- |

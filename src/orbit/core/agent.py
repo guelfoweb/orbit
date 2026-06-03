@@ -7,7 +7,7 @@ import re
 import time
 from typing import Any
 
-from .compact import (
+from .compaction import (
     CompactionPlan,
     SUMMARY_MARKER,
     apply_compaction,
@@ -15,20 +15,20 @@ from .compact import (
     normalize_model_summary,
     plan_compaction,
 )
-from .client import OllamaClient
-from .client import is_thinking_unsupported_error
-from .context_budget import BudgetPressure, evaluate_budget_pressure
-from .guardrail_factual import allows_fetch_url_query
-from .guardrail_audio import (
+from .ollama_client import OllamaClient
+from .ollama_client import is_thinking_unsupported_error
+from .policy.context import BudgetPressure, evaluate_budget_pressure
+from .guardrails.factual import allows_fetch_url_query
+from .guardrails.audio import (
     AudioChunk,
     ExplicitAudioRequest,
     prepare_audio_chunks,
     resolve_explicit_audio_requests,
 )
-from .intent_gate import intent_gate_decision, intent_gate_messages, parse_intent_gate_reply
-from .intent_router import is_binary_or_pdf_analysis_intent
-from .model_first_guidance import MODEL_FIRST_INTENT_GUIDANCE, model_first_post_tool_prompt
-from .model_payloads import (
+from .intent.gate import intent_gate_decision, intent_gate_messages, parse_intent_gate_reply
+from .intent.router import INTENT_CODEBASE_INSPECTION, is_static_file_analysis_intent
+from .model.guidance import MODEL_FIRST_INTENT_GUIDANCE, model_first_post_tool_prompt
+from .model.payloads import (
     ModelPayloadCompactor,
     compact_message_for_model as _compact_message_for_model,
     compact_tool_payload as _compact_tool_payload,
@@ -48,15 +48,16 @@ from .events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from .message_ops import (
+from .messages import (
     assistant_message_for_history,
     estimate_prompt_tokens,
+    recent_listed_paths,
     recent_listed_file_paths,
     successful_read_results_in_current_turn,
     successful_write_results_in_current_turn,
 )
-from .tool_call_parser import fallback_tool_calls, parse_arguments, repair_placeholder_write_payload
-from .tool_guardrails import (
+from .tools.call_parser import fallback_tool_calls, parse_arguments, repair_placeholder_write_payload
+from .tools.guardrails import (
     binary_analysis_guard_prompt,
     binary_listing_retry_prompt,
     binary_seeded_summary,
@@ -65,6 +66,9 @@ from .tool_guardrails import (
     codebase_redundant_listing_prompt,
     current_factual_lookup_fetch_followup,
     codebase_review_reply_handling,
+    directory_listing_target_from_recent_listing,
+    has_structured_explicit_code_review_path,
+    local_missing_explicit_code_review_file_result,
     apply_deterministic_file_edit,
     apply_deterministic_bounded_command,
     file_edit_post_write_reply_handling,
@@ -125,18 +129,18 @@ from .tool_guardrails import (
     unsupported_tool_prompt,
     workspace_listing_scope_prompt,
 )
-from .tool_router import ToolRoute, route_tool_categories
-from .tool_execution_policy import ToolExecutionPolicy
+from .tools.router import ToolRoute, route_tool_categories
+from .tools.execution_policy import ToolExecutionPolicy
 from .skill_hints import should_bootstrap_workspace_docs, startup_prompt_for_skill, workspace_doc_bootstrap_actions
 from ..skills import DEFAULT_SKILL_REF, Skill
 from ..tooling.registry import ToolRegistry
-from .turn_policy import (
+from .policy.turn import (
     TurnPolicyState,
     classify_model_reply,
     format_max_loops_message,
     register_tool_calls,
 )
-from .guardrail_vision import ExplicitImageRequest, encode_image_base64, resolve_explicit_image_requests
+from .guardrails.vision import ExplicitImageRequest, encode_image_base64, resolve_explicit_image_requests
 from ..tooling.common import ToolError
 
 
@@ -347,6 +351,20 @@ class AgentLoop:
             identity_prompt = assistant_identity_system_prompt(user_input)
             if identity_prompt is not None:
                 self._append_system_message(identity_prompt)
+        if (
+            self.tools_enabled
+            and model_first_runtime
+            and recent_listed_paths(self.messages, 1)
+            and directory_listing_target_from_recent_listing(user_input, self.messages) is None
+        ):
+            local_listing_result = local_directory_listing_result(
+                intent=route.intent,
+                user_input=user_input,
+                messages=self.messages,
+            )
+            if local_listing_result is not None:
+                metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                return self._result(local_listing_result, metrics)
         gate_decision = intent_gate_decision(user_input, route)
         if self.tools_enabled and model_first_runtime and gate_decision.confirm:
             if not self._model_confirms_tool_route(user_input=user_input, route=route, metrics=metrics, on_event=on_event):
@@ -475,6 +493,50 @@ class AgentLoop:
                 if local_checkbox_result is not None:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_checkbox_result, metrics)
+                if has_structured_explicit_code_review_path(user_input):
+                    seed_codebase_listing(
+                        user_input=user_input,
+                        route=route,
+                        registry=self.registry,
+                        messages=self.messages,
+                        metrics=metrics,
+                        policy_state=policy_state,
+                        on_event=on_event,
+                    )
+                    seed_codebase_review_reads(
+                        user_input=user_input,
+                        route=route,
+                        registry=self.registry,
+                        messages=self.messages,
+                        metrics=metrics,
+                        policy_state=policy_state,
+                        on_event=on_event,
+                    )
+                    missing_code_file = local_missing_explicit_code_review_file_result(
+                        intent=route.intent,
+                        user_input=user_input,
+                        messages=self.messages,
+                    )
+                    if missing_code_file is not None:
+                        metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                        return self._result(missing_code_file, metrics)
+                seed_explicit_pdf_read(
+                    user_input=user_input,
+                    route=route,
+                    registry=self.registry,
+                    messages=self.messages,
+                    metrics=metrics,
+                    policy_state=policy_state,
+                    on_event=on_event,
+                )
+                local_pdf_result = local_explicit_pdf_result(
+                    intent=route.intent,
+                    user_input=user_input,
+                    messages=self.messages,
+                )
+                if local_pdf_result is not None:
+                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                    return self._result(local_pdf_result, metrics)
                 seed_binary_discovery(
                     user_input=user_input,
                     route=route,
@@ -501,15 +563,6 @@ class AgentLoop:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_static_reverse, metrics)
                 seed_explicit_text_read(
-                    user_input=user_input,
-                    route=route,
-                    registry=self.registry,
-                    messages=self.messages,
-                    metrics=metrics,
-                    policy_state=policy_state,
-                    on_event=on_event,
-                )
-                seed_explicit_pdf_read(
                     user_input=user_input,
                     route=route,
                     registry=self.registry,
@@ -549,14 +602,6 @@ class AgentLoop:
                     )
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_text_result, metrics)
-                local_pdf_result = local_explicit_pdf_result(
-                    intent=route.intent,
-                    user_input=user_input,
-                    messages=self.messages,
-                )
-                if local_pdf_result is not None:
-                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
-                    return self._result(local_pdf_result, metrics)
                 seed_current_factual_tool(
                     user_input=user_input,
                     route=route,
@@ -804,10 +849,11 @@ class AgentLoop:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_factual_result, metrics)
             if not model_first_runtime:
-                local_tooling_result = local_tooling_concept_result(user_input)
-                if local_tooling_result is not None:
-                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
-                    return self._result(local_tooling_result, metrics)
+                if route.intent != INTENT_CODEBASE_INSPECTION:
+                    local_tooling_result = local_tooling_concept_result(user_input)
+                    if local_tooling_result is not None:
+                        metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                        return self._result(local_tooling_result, metrics)
                 deterministic_bounded_result = apply_deterministic_bounded_command(
                     user_input=user_input,
                     route=route,
@@ -961,15 +1007,6 @@ class AgentLoop:
                 if binary_listing_prompt is not None:
                     self._append_system_message(binary_listing_prompt)
                     continue
-                filesystem_path_prompt = filesystem_read_path_guard_prompt(
-                    intent=route.intent,
-                    tool_calls=tool_calls,
-                    messages=self.messages,
-                    parse_arguments=parse_arguments,
-                )
-                if filesystem_path_prompt is not None:
-                    self._append_system_message(filesystem_path_prompt)
-                    continue
                 codebase_missing_read_path = local_codebase_review_after_missing_read_path(
                     intent=route.intent,
                     user_input=user_input,
@@ -980,6 +1017,15 @@ class AgentLoop:
                 if codebase_missing_read_path is not None:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(codebase_missing_read_path, metrics)
+                filesystem_path_prompt = filesystem_read_path_guard_prompt(
+                    intent=route.intent,
+                    tool_calls=tool_calls,
+                    messages=self.messages,
+                    parse_arguments=parse_arguments,
+                )
+                if filesystem_path_prompt is not None:
+                    self._append_system_message(filesystem_path_prompt)
+                    continue
                 local_document_result = local_text_document_result(
                     intent=route.intent,
                     tool_calls=tool_calls,
@@ -1119,20 +1165,21 @@ class AgentLoop:
                         continue
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(payload, metrics)
-                codebase_review_reply = codebase_review_reply_handling(
-                    intent=route.intent,
-                    user_input=user_input,
-                    content=str(message.get("content") or ""),
-                    messages=self.messages,
-                    policy_state=policy_state,
-                )
-                if codebase_review_reply is not None:
-                    action, payload = codebase_review_reply
-                    if action == "retry":
-                        self._append_system_message(payload)
-                        continue
-                    metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
-                    return self._result(payload, metrics)
+                if not tool_calls:
+                    codebase_review_reply = codebase_review_reply_handling(
+                        intent=route.intent,
+                        user_input=user_input,
+                        content=str(message.get("content") or ""),
+                        messages=self.messages,
+                        policy_state=policy_state,
+                    )
+                    if codebase_review_reply is not None:
+                        action, payload = codebase_review_reply
+                        if action == "retry":
+                            self._append_system_message(payload)
+                            continue
+                        metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                        return self._result(payload, metrics)
                 binary_text_handling = binary_text_reply_handling(
                     intent=route.intent,
                     content=str(message.get("content") or ""),
@@ -1193,6 +1240,14 @@ class AgentLoop:
                 intent=route.intent if self.tools_enabled else None,
                 user_input=user_input,
             )
+            local_factual_result = local_current_factual_result(
+                intent=route.intent if self.tools_enabled else None,
+                user_input=user_input,
+                messages=self.messages,
+            )
+            if local_factual_result is not None:
+                metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                return self._result(local_factual_result, metrics)
             if self._should_stop_after_codebase_assessment_evidence(user_input):
                 local_codebase_assessment_text = self._local_codebase_assessment_result(user_input)
                 if local_codebase_assessment_text is not None:
@@ -1216,16 +1271,8 @@ class AgentLoop:
                 return self._result(local_mixed_evidence, metrics)
             if model_first_runtime and route is not None:
                 self._append_model_first_post_tool_prompt(route, tool_calls)
-            local_factual_result = local_current_factual_result(
-                intent=route.intent if self.tools_enabled else None,
-                user_input=user_input,
-                messages=self.messages,
-            )
-            if local_factual_result is not None:
-                metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
-                return self._result(local_factual_result, metrics)
         final_content = format_max_loops_message(self.max_loops, policy_state)
-        if self.tools_enabled and route is not None and is_binary_or_pdf_analysis_intent(route.intent):
+        if self.tools_enabled and route is not None and is_static_file_analysis_intent(route.intent):
             seeded = binary_seeded_summary(self.messages)
             if seeded is not None:
                 final_content = seeded

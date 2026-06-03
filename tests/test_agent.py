@@ -15,16 +15,15 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.core.agent import AgentLoop, _compact_message_for_model
-from orbit.core.context_budget import profile_for_model
-from orbit.core.client import OllamaError
-from orbit.core.client import ModelMetadata
+import orbit.core.guardrails.documents as documents_module
+from orbit.core.policy.context import profile_for_model
+from orbit.core.ollama_client import OllamaError
+from orbit.core.ollama_client import ModelMetadata
 from orbit.core.events import ToolResultCompactEvent
-from orbit.core.intent_router import (
+from orbit.core.intent.router import (
     INTENT_BINARY_ANALYSIS,
-    INTENT_BINARY_OR_PDF_ANALYSIS,
     INTENT_BOUNDED_COMMAND,
     INTENT_CLASS_BINARY_ANALYSIS,
-    INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
     INTENT_CHITCHAT,
     INTENT_CLASS_CHAT_GENERAL,
     INTENT_CLASS_CODEBASE_INSPECTION,
@@ -45,10 +44,10 @@ from orbit.core.intent_router import (
     INTENT_TEXT_DOCUMENT_ANALYSIS,
     route_intent,
 )
-from orbit.core.loop_guard import ToolCallRecord, signatures_match
-from orbit.core.turn_policy import TurnPolicyState, _repeated_tool_retry_prompt, classify_model_reply
-from orbit.core.tool_guardrails import codebase_redundant_listing_prompt
-from orbit.core.tool_router import route_tool_categories
+from orbit.core.policy.loop import ToolCallRecord, signatures_match
+from orbit.core.policy.turn import TurnPolicyState, _repeated_tool_retry_prompt, classify_model_reply
+from orbit.core.tools.guardrails import codebase_redundant_listing_prompt
+from orbit.core.tools.router import route_tool_categories
 from orbit.skills import Skill
 
 
@@ -291,6 +290,40 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual([name for name, _arguments in registry.called], ["bash"])
         self.assertIn("Top 3 priorities", result.content)
 
+    def test_obsidian_daily_skill_uses_bounded_open_task_extraction(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "bash":
+                return {
+                    "ok": True,
+                    "command": arguments["command"],
+                    "returncode": 0,
+                    "stdout": "3:### Work\n4:- [ ] Open task #work\n8:### Personal\n9:- [ ] Personal task #personal\n",
+                    "stderr": "",
+                    "truncated": False,
+                }
+            return {"ok": True, "content": "should not be read"}
+
+        registry.call = call
+        skill = Skill(
+            name="obsidian-daily",
+            path=Path("/tmp/obsidian-daily/SKILL.md"),
+            content="# Obsidian Daily Task Review\n",
+        )
+        agent = AgentLoop(client=client, registry=registry, max_loops=3, skill=skill)
+        result = agent.run_turn(
+            'Read Daily.md. Extract all open tasks marked with "- [ ]", then analyze them semantically and suggest top priorities.'
+        )
+
+        self.assertEqual([name for name, _arguments in registry.called], ["bash"])
+        self.assertEqual(client.calls, [])
+        self.assertIn("- [ ] Open task #work", result.content)
+        self.assertIn("- [ ] Personal task #personal", result.content)
+
     def test_markdown_checkbox_extraction_without_obsidian_skill_stays_model_driven(self) -> None:
         client = FakeClient(
             [
@@ -305,6 +338,12 @@ class AgentLoopTests(unittest.TestCase):
             ]
         )
         client.model = "gemma4:e2b-fast-t6-c8k"
+        client.inspect_model = lambda: ModelMetadata(
+            active_model="gemma4:e2b-fast-t6-c8k",
+            context_window=8192,
+            capabilities=("completion", "tools"),
+            tools_supported=True,
+        )
         registry = FakeRegistry()
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
         result = agent.run_turn('Read Daily.md. Extract all open tasks marked with "- [ ]".')
@@ -573,10 +612,31 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent, INTENT_CHITCHAT)
         self.assertEqual(route.intent_class, INTENT_CLASS_CHAT_GENERAL)
 
+    def test_discursive_web_search_pros_and_cons_does_not_route_to_web_lookup(self) -> None:
+        route = route_intent("what are the pros and cons of giving LLMs access to web search?")
+        self.assertEqual(route.intent, INTENT_CHITCHAT)
+        self.assertEqual(route.intent_class, INTENT_CLASS_CHAT_GENERAL)
+
     def test_discursive_command_statement_does_not_route_to_shell(self) -> None:
         route = route_intent("show me how grep works")
         self.assertEqual(route.intent, INTENT_GENERAL_KNOWLEDGE)
         self.assertEqual(route.intent_class, INTENT_CLASS_KNOWLEDGE_QUESTION)
+
+    def test_explicit_text_path_with_whether_question_routes_to_file_reading(self) -> None:
+        route = route_intent(
+            "Read text/divina_commedia_inferno_canto1.txt and tell me whether it mentions fear, "
+            "divine guidance, and moral confusion."
+        )
+        self.assertEqual(route.intent, INTENT_TEXT_DOCUMENT_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_FILE_READING)
+
+    def test_workspace_tool_routing_inspection_overrides_embedded_discursive_example(self) -> None:
+        route = route_intent(
+            'First list the current workspace recursively, then inspect only the most relevant file related to tool routing. '
+            'Explain one possible bug that could cause a conversational prompt like "tell me about grep" to use shell tools by mistake.'
+        )
+        self.assertEqual(route.intent, INTENT_CODEBASE_INSPECTION)
+        self.assertEqual(route.intent_class, INTENT_CLASS_CODEBASE_INSPECTION)
 
     def test_discursive_file_statement_does_not_route_to_filesystem(self) -> None:
         route = route_intent("tell me about file systems")
@@ -598,6 +658,36 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent, INTENT_CODEBASE_INSPECTION)
         self.assertEqual(route.intent_class, INTENT_CLASS_CODEBASE_INSPECTION)
 
+    def test_pdf_file_with_this_file_phrase_routes_to_pdf_analysis(self) -> None:
+        route = route_intent("analyze and summarize this file: pdf/Glossario.pdf")
+        self.assertEqual(route.intent, INTENT_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_PDF_ANALYSIS)
+
+    def test_pdf_page_count_request_routes_to_pdf_analysis(self) -> None:
+        route = route_intent("how many pages has this document? pdf/Glossario.pdf")
+        self.assertEqual(route.intent, INTENT_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_PDF_ANALYSIS)
+
+    def test_pdf_page_numbers_request_routes_to_pdf_analysis(self) -> None:
+        route = route_intent("give me the page numbers of this document pdf/Glossario.pdf")
+        self.assertEqual(route.intent, INTENT_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_PDF_ANALYSIS)
+
+    def test_pdf_about_request_routes_to_pdf_analysis(self) -> None:
+        route = route_intent("explain me what this document is about: pdf/Glossario.pdf")
+        self.assertEqual(route.intent, INTENT_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_PDF_ANALYSIS)
+
+    def test_pdf_about_request_with_typo_routes_to_pdf_analysis(self) -> None:
+        route = route_intent("what is about this documet: pdf/Glossario.pdf?")
+        self.assertEqual(route.intent, INTENT_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_PDF_ANALYSIS)
+
+    def test_pdf_about_request_in_italian_routes_to_pdf_analysis(self) -> None:
+        route = route_intent("di cosa parla questo documento? pdf/Glossario.pdf")
+        self.assertEqual(route.intent, INTENT_PDF_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_PDF_ANALYSIS)
+
     def test_explicit_code_file_review_routes_to_codebase_inspection_in_italian(self) -> None:
         route = route_intent("analizza il codice python in questo file: agent.py e dimmi se trovi bug.")
         self.assertEqual(route.intent, INTENT_CODEBASE_INSPECTION)
@@ -605,6 +695,14 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_explicit_cpp_vulnerability_review_routes_to_codebase_inspection(self) -> None:
         route = route_intent("review src/parser.cpp for vulnerabilities and security issues.")
+        self.assertEqual(route.intent, INTENT_CODEBASE_INSPECTION)
+        self.assertEqual(route.intent_class, INTENT_CLASS_CODEBASE_INSPECTION)
+
+    def test_explicit_typescript_exploit_review_routes_to_codebase_inspection(self) -> None:
+        route = route_intent(
+            "analyze src/tools/group-k.ts file and finds possible vulnerabilities. "
+            "Tell me which function are vulnerable and explain me how an attacker shoud exploit it"
+        )
         self.assertEqual(route.intent, INTENT_CODEBASE_INSPECTION)
         self.assertEqual(route.intent_class, INTENT_CLASS_CODEBASE_INSPECTION)
 
@@ -1220,6 +1318,73 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("one concrete source file", prompt.lower())
         self.assertIn("concrete bug or risk findings", prompt.lower())
 
+    def test_explicit_typescript_security_review_reads_requested_file(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 120,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 20,
+                    "eval_duration": 80_000_000,
+                    "total_duration": 220_000_000,
+                    "message": {"content": "The vulnerable function is `runGroupK`."},
+                }
+            ]
+        )
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "read_file":
+                return {
+                    "ok": True,
+                    "path": arguments["path"],
+                    "content": "export function runGroupK(input: string) { return input }\n",
+                    "start_line": 1,
+                    "returned_lines": 1,
+                    "total_lines": 1,
+                    "next_start_line": 2,
+                    "has_more": False,
+                    "truncated": False,
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "analyze src/tools/group-k.ts file and finds possible vulnerabilities. "
+            "Tell me which function are vulnerable and explain me how an attacker shoud exploit it"
+        )
+
+        self.assertEqual(result.content, "The vulnerable function is `runGroupK`.")
+        self.assertEqual(
+            registry.called,
+            [("read_file", {"path": "src/tools/group-k.ts", "start_line": 1, "max_lines": 220, "max_chars": 9000})],
+        )
+
+    def test_explicit_nested_code_review_missing_file_finalizes_locally(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "read_file":
+                return {"ok": False, "path": arguments["path"], "error": f"file not found: {arguments['path']}"}
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("review src/tools/group-k.ts for vulnerabilities")
+
+        self.assertIn("was not found", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(
+            registry.called,
+            [("read_file", {"path": "src/tools/group-k.ts", "start_line": 1, "max_lines": 220, "max_chars": 9000})],
+        )
+
     def test_gemma_model_first_prunes_transient_system_messages_after_turn(self) -> None:
         client = FakeClient(
             [
@@ -1536,6 +1701,33 @@ class AgentLoopTests(unittest.TestCase):
         result = agent.run_turn("mostrami il contenuto di REPORT.md")
         self.assertEqual(result.content, "hello report")
 
+    def test_explicit_text_path_question_exposes_file_reading_tools(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 120,
+                    "prompt_eval_duration": 1_000_000_000,
+                    "eval_count": 16,
+                    "eval_duration": 500_000_000,
+                    "total_duration": 1_700_000_000,
+                    "message": {"content": "The text explicitly mentions fear and guidance."},
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-fast-t6-c8k"
+        registry = FakeRegistry()
+
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "Read text/divina_commedia_inferno_canto1.txt and tell me whether it mentions fear, "
+            "divine guidance, and moral confusion."
+        )
+
+        self.assertEqual(result.content, "The text explicitly mentions fear and guidance.")
+        tool_names = {item["function"]["name"] for item in client.calls[0]["tools"]}
+        self.assertIn("read_file", tool_names)
+        self.assertEqual(registry.called, [])
+
     def test_text_document_show_request_stops_after_first_successful_read(self) -> None:
         client = FakeClient(
             [
@@ -1638,6 +1830,86 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(client.calls, [])
         self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": True, "max_entries": 80})])
 
+    def test_codebase_routing_inspection_retries_when_model_finalizes_after_listing_only(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 100,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 0,
+                    "eval_duration": 0,
+                    "total_duration": 120_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {"function": {"name": "list_files", "arguments": {"path": ".", "recursive": True, "max_entries": 80}}}
+                        ],
+                    },
+                },
+                {
+                    "prompt_eval_count": 200,
+                    "prompt_eval_duration": 200_000_000,
+                    "eval_count": 20,
+                    "eval_duration": 100_000_000,
+                    "total_duration": 320_000_000,
+                    "message": {"content": "- `src/orbit/core/agent.py`\n- `src/orbit/core/intent/router.py`"},
+                },
+                {
+                    "prompt_eval_count": 220,
+                    "prompt_eval_duration": 220_000_000,
+                    "eval_count": 40,
+                    "eval_duration": 200_000_000,
+                    "total_duration": 460_000_000,
+                    "message": {"content": "One possible bug is a discursive command matcher running before an operational workspace matcher."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "list_files":
+                return {
+                    "ok": True,
+                    "path": ".",
+                    "recursive": True,
+                    "entries": [
+                        {"path": "src/orbit/core/agent.py", "type": "file"},
+                        {"path": "src/orbit/core/intent/router.py", "type": "file"},
+                        {"path": "src/orbit/core/tools/router.py", "type": "file"},
+                        {"path": "src/orbit/tooling/registry.py", "type": "file"},
+                    ],
+                }
+            if name == "read_file":
+                return {
+                    "ok": True,
+                    "path": arguments["path"],
+                    "content": "def route_intent(user_input):\n    return route\n",
+                    "truncated": False,
+                    "has_more": False,
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=5)
+        result = agent.run_turn(
+            'First list the current workspace recursively, then inspect only the most relevant file related to tool routing. '
+            'Explain one possible bug that could cause a conversational prompt like "tell me about grep" to use shell tools by mistake, '
+            'and propose a minimal fix without editing files.'
+        )
+
+        self.assertIn("discursive command matcher", result.content)
+        self.assertEqual(registry.called[0][0], "list_files")
+        self.assertEqual(registry.called[1][0], "read_file")
+        self.assertEqual(registry.called[2][0], "read_file")
+        retry_prompts = [
+            message.get("content", "")
+            for call in client.calls
+            for message in call["messages"]
+            if message.get("role") == "system" and "Do not answer with only a list of files" in str(message.get("content", ""))
+        ]
+        self.assertTrue(retry_prompts)
+
     def test_codebase_architecture_summary_request_can_finalize_locally_from_seeded_listing(self) -> None:
         client = FakeClient([])
         registry = FakeRegistry()
@@ -1708,7 +1980,7 @@ class AgentLoopTests(unittest.TestCase):
                     "entries": [
                         {"path": "src/orbit/core/agent.py", "type": "file"},
                         {"path": "src/orbit/core/runtime.py", "type": "file"},
-                        {"path": "src/orbit/core/tool_guardrails.py", "type": "file"},
+                        {"path": "src/orbit/core/tools/guardrails.py", "type": "file"},
                     ],
                 }
             return {"ok": False, "error": "unexpected"}
@@ -1718,7 +1990,7 @@ class AgentLoopTests(unittest.TestCase):
         result = agent.run_turn("Quali sono i 3 punti del codice che meritano più attenzione per stabilità e manutenzione?")
         self.assertIn("`src/orbit/core/agent.py`", result.content)
         self.assertIn("`src/orbit/core/runtime.py`", result.content)
-        self.assertIn("`src/orbit/core/tool_guardrails.py`", result.content)
+        self.assertIn("`src/orbit/core/tools/guardrails.py`", result.content)
         self.assertEqual(client.calls, [])
 
     def test_codebase_hotspot_request_in_english_can_finalize_locally(self) -> None:
@@ -1735,7 +2007,7 @@ class AgentLoopTests(unittest.TestCase):
                     "entries": [
                         {"path": "src/orbit/core/agent.py", "type": "file"},
                         {"path": "src/orbit/core/runtime.py", "type": "file"},
-                        {"path": "src/orbit/core/tool_guardrails.py", "type": "file"},
+                        {"path": "src/orbit/core/tools/guardrails.py", "type": "file"},
                     ],
                 }
             return {"ok": False, "error": "unexpected"}
@@ -1745,7 +2017,7 @@ class AgentLoopTests(unittest.TestCase):
         result = agent.run_turn("Which 3 parts of this codebase deserve the most attention for stability and maintainability?")
         self.assertIn("`src/orbit/core/agent.py`", result.content)
         self.assertIn("`src/orbit/core/runtime.py`", result.content)
-        self.assertIn("`src/orbit/core/tool_guardrails.py`", result.content)
+        self.assertIn("`src/orbit/core/tools/guardrails.py`", result.content)
         self.assertEqual(client.calls, [])
 
     def test_code_review_request_in_english_can_finalize_locally_after_targeted_reads(self) -> None:
@@ -1762,7 +2034,7 @@ class AgentLoopTests(unittest.TestCase):
                     "entries": [
                         {"path": "src/orbit/core/agent.py", "type": "file"},
                         {"path": "src/orbit/core/runtime.py", "type": "file"},
-                        {"path": "src/orbit/core/tool_guardrails.py", "type": "file"},
+                        {"path": "src/orbit/core/tools/guardrails.py", "type": "file"},
                         {"path": "src/orbit/tooling/registry.py", "type": "file"},
                     ],
                 }
@@ -1784,10 +2056,10 @@ class AgentLoopTests(unittest.TestCase):
                     "truncated": False,
                     "has_more": False,
                 }
-            if name == "read_file" and arguments["path"] == "src/orbit/core/tool_guardrails.py":
+            if name == "read_file" and arguments["path"] == "src/orbit/core/tools/guardrails.py":
                 return {
                     "ok": True,
-                    "path": "src/orbit/core/tool_guardrails.py",
+                    "path": "src/orbit/core/tools/guardrails.py",
                     "content": "re.compile('a')\nre.compile('b')\nX_HINTS = ()\nY_HINTS = ()\nvalue.startswith('a')\nvalue.startswith('b')\n",
                     "total_lines": 220,
                     "truncated": False,
@@ -1800,7 +2072,7 @@ class AgentLoopTests(unittest.TestCase):
         result = agent.run_turn("Review this codebase and list the top 3 risks or findings before making changes.")
         self.assertIn("High:", result.content)
         self.assertIn("`src/orbit/core/agent.py`", result.content)
-        self.assertIn("`src/orbit/core/tool_guardrails.py`", result.content)
+        self.assertIn("`src/orbit/core/tools/guardrails.py`", result.content)
         self.assertEqual(client.calls, [])
         self.assertEqual(registry.called[0], ("list_files", {"path": ".", "recursive": True, "max_entries": 80}))
         self.assertEqual(registry.called[1][0], "read_file")
@@ -2018,7 +2290,7 @@ class AgentLoopTests(unittest.TestCase):
                     "entries": [
                         {"path": "src/orbit/core/agent.py", "type": "file"},
                         {"path": "src/orbit/core/runtime.py", "type": "file"},
-                        {"path": "src/orbit/core/tool_guardrails.py", "type": "file"},
+                        {"path": "src/orbit/core/tools/guardrails.py", "type": "file"},
                     ],
                 }
             if name == "read_file":
@@ -2690,6 +2962,148 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(
             registry.called,
             [("bash", {"command": "pdftotext 'docs/Project Overview.pdf' - | head -n 240"})],
+        )
+
+    def test_explicit_pdf_summary_prefers_pypdf_before_shell_extractors(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+        original = documents_module.extract_pdf_text_with_pypdf
+
+        def fake_pypdf_extract(**kwargs):
+            return {
+                "ok": True,
+                "command": "pypdf_extract 'docs/Project Overview.pdf' --max-lines 240",
+                "stdout": "PyPDF extracted project scope.\nPyPDF extracted recommendations.\n",
+                "stderr": "",
+                "returncode": 0,
+                "extractor": "pypdf",
+                "pages": 2,
+                "truncated": False,
+            }
+
+        documents_module.extract_pdf_text_with_pypdf = fake_pypdf_extract
+        try:
+            agent = AgentLoop(client=client, registry=registry, max_loops=3)
+            result = agent.run_turn("Summarize docs/Project Overview.pdf.")
+        finally:
+            documents_module.extract_pdf_text_with_pypdf = original
+
+        self.assertIn("PyPDF extracted project scope.", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(registry.called, [])
+
+    def test_explicit_pdf_page_count_uses_pypdf_metadata_without_shell(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+        original = documents_module.extract_pdf_text_with_pypdf
+
+        def fake_pypdf_extract(**kwargs):
+            return {
+                "ok": True,
+                "command": "pypdf_extract pdf/Glossario.pdf --max-lines 240",
+                "stdout": "",
+                "stderr": "",
+                "returncode": 0,
+                "extractor": "pypdf",
+                "pages": 3,
+                "truncated": False,
+            }
+
+        documents_module.extract_pdf_text_with_pypdf = fake_pypdf_extract
+        try:
+            agent = AgentLoop(client=client, registry=registry, max_loops=3)
+            result = agent.run_turn("how many pages has this document? pdf/Glossario.pdf")
+        finally:
+            documents_module.extract_pdf_text_with_pypdf = original
+
+        self.assertIn("has 3 pages", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(registry.called, [])
+
+    def test_explicit_pdf_about_request_uses_pypdf_summary(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+        original = documents_module.extract_pdf_text_with_pypdf
+
+        def fake_pypdf_extract(**kwargs):
+            return {
+                "ok": True,
+                "command": "pypdf_extract pdf/Glossario.pdf --max-lines 240",
+                "stdout": "Glossario base AI e Cybersecurity.\nPhishing is a credential theft attempt.\nRansomware blocks data and asks for ransom.\n",
+                "stderr": "",
+                "returncode": 0,
+                "extractor": "pypdf",
+                "pages": 3,
+                "truncated": False,
+            }
+
+        documents_module.extract_pdf_text_with_pypdf = fake_pypdf_extract
+        try:
+            agent = AgentLoop(client=client, registry=registry, max_loops=3)
+            result = agent.run_turn("explain me what this document is about: pdf/Glossario.pdf")
+        finally:
+            documents_module.extract_pdf_text_with_pypdf = original
+
+        self.assertIn("Glossario base AI e Cybersecurity.", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(registry.called, [])
+
+    def test_explicit_pdf_about_request_with_doc_abbreviation_uses_pypdf_summary(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+        original = documents_module.extract_pdf_text_with_pypdf
+
+        def fake_pypdf_extract(**kwargs):
+            return {
+                "ok": True,
+                "command": "pypdf_extract pdf/Glossario.pdf --max-lines 240",
+                "stdout": "Glossario base AI e Cybersecurity.\nPhishing tramite SMS.\n",
+                "stderr": "",
+                "returncode": 0,
+                "extractor": "pypdf",
+                "pages": 3,
+                "truncated": False,
+            }
+
+        documents_module.extract_pdf_text_with_pypdf = fake_pypdf_extract
+        try:
+            agent = AgentLoop(client=client, registry=registry, max_loops=3)
+            result = agent.run_turn("what is about this doc: pdf/Glossario.pdf?")
+        finally:
+            documents_module.extract_pdf_text_with_pypdf = original
+
+        self.assertIn("Glossario base AI e Cybersecurity.", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(registry.called, [])
+
+    def test_explicit_pdf_analyze_and_summary_prefers_text_extraction_over_static_triage(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name != "bash":
+                return {"ok": False, "error": "unexpected"}
+            command = arguments["command"]
+            if command.startswith("pdftotext "):
+                return {
+                    "ok": True,
+                    "command": command,
+                    "stdout": "Glossary entry one explains local routing.\nGlossary entry two defines tool calls.\n",
+                    "stderr": "",
+                    "returncode": 0,
+                }
+            return {"ok": False, "command": command, "stderr": "unexpected static command"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("Analyze pdf/Glossario.pdf and summarize what it contains.")
+        self.assertIn("Glossary entry one", result.content)
+        self.assertNotIn("Bounded static reverse inspection", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(
+            registry.called,
+            [("bash", {"command": "pdftotext pdf/Glossario.pdf - | head -n 240"})],
         )
 
     def test_explicit_pdf_show_request_in_italian_can_finalize_locally(self) -> None:
@@ -5139,6 +5553,95 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.com", "max_links": 0})])
         self.assertEqual(client.calls, [])
 
+    def test_url_article_summary_can_finalize_locally_from_fetch_without_second_model_call(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 4,
+                    "eval_duration": 50_000_000,
+                    "total_duration": 200_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{"function": {"name": "fetch_url", "arguments": {"url": "https://example.com/article"}}}],
+                    },
+                }
+            ]
+        )
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            return {
+                "ok": True,
+                "url": "https://example.com/article",
+                "final_url": "https://example.com/article",
+                "title": "Magnifica Humanitas",
+                "text": (
+                    "La dignità della persona umana deve essere custodita nel tempo dell'intelligenza artificiale. "
+                    "La libertà non può essere ridotta a dipendenza tecnologica o mercificazione. "
+                    "Il lavoro, la scuola e la comunicazione devono restare orientati al bene comune. "
+                    "La pace e la giustizia richiedono responsabilità condivisa."
+                ),
+                "has_more": True,
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "summarize the article in italian at this link: https://example.com/article explain the central thesis and key messages"
+        )
+        self.assertIn("Tesi centrale", result.content)
+        self.assertIn("Messaggi chiave", result.content)
+        self.assertIn("dignità", result.content.lower())
+        self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.com/article"})])
+        self.assertEqual(len(client.calls), 1)
+
+    def test_url_article_summary_skips_navigation_and_table_of_contents(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 4,
+                    "eval_duration": 50_000_000,
+                    "total_duration": 200_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{"function": {"name": "fetch_url", "arguments": {"url": "https://example.com/article"}}}],
+                    },
+                }
+            ]
+        )
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            return {
+                "ok": True,
+                "url": "https://example.com/article",
+                "final_url": "https://example.com/article",
+                "title": "Example encyclical",
+                "text": (
+                    "La Santa Sede Magisterium Calendario Celebrazioni Liturgiche Biglietti Udienze Sala Stampa Vatican News\n"
+                    "CAPITOLO 1 UN PENSIERO DINAMICO FEDELE AL VANGELO\n"
+                    "Ogni generazione riceve il compito di dare forma al proprio tempo perché la dignità di ogni persona sia custodita e la giustizia promossa.\n"
+                    "La persona umana non può essere ridotta a dato, funzione o ingranaggio della tecnica.\n"
+                    "L'intelligenza artificiale richiede responsabilità, trasparenza e governo orientato al bene comune.\n"
+                ),
+                "has_more": False,
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "summarize the article in italian at this link: https://example.com/article explain the central thesis and key messages"
+        )
+        self.assertIn("Tesi centrale: Ogni generazione riceve", result.content)
+        self.assertNotIn("La Santa Sede Magisterium", result.content)
+        self.assertEqual(len(client.calls), 1)
+
     def test_explicit_site_check_request_in_italian_routes_to_fetch_url_and_uses_model_to_summarize(self) -> None:
         client = FakeClient(
             [
@@ -5350,9 +5853,10 @@ class AgentLoopTests(unittest.TestCase):
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
         result = agent.run_turn("riassumi questo sito: https://example.com")
-        self.assertIn("documentazione", result.content.lower())
+        self.assertIn("sintesi", result.content.lower())
+        self.assertIn("documentation examples", result.content.lower())
         self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.com", "max_links": 0})])
-        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(len(client.calls), 0)
 
     def test_colloquial_page_question_in_italian_routes_to_fetch_url_and_uses_model_to_summarize(self) -> None:
         client = FakeClient(
@@ -5479,9 +5983,10 @@ class AgentLoopTests(unittest.TestCase):
         registry.call = call
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
         result = agent.run_turn("dammi un riassunto di questo link: https://example.com")
-        self.assertIn("documentazione", result.content.lower())
+        self.assertIn("sintesi", result.content.lower())
+        self.assertIn("documentation examples", result.content.lower())
         self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.com", "max_links": 0})])
-        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(len(client.calls), 0)
 
     def test_whats_on_page_request_in_italian_routes_to_fetch_url_and_uses_model_to_summarize(self) -> None:
         client = FakeClient(
@@ -5964,6 +6469,241 @@ class AgentLoopTests(unittest.TestCase):
         result = agent.run_turn("cosa contiene questa directory?")
         self.assertEqual(result.content, "src, tests, README.md, pyproject.toml, AGENTS.md")
         self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": False, "max_entries": 12})])
+        self.assertEqual(client.calls, [])
+
+    def test_recursive_workdir_listing_uses_recursive_list_files_locally(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name != "list_files":
+                return {"ok": False, "error": "unexpected"}
+            return {
+                "ok": True,
+                "path": ".",
+                "recursive": True,
+                "count": 8,
+                "dir_count": 3,
+                "file_count": 5,
+                "truncated": False,
+                "entries": [
+                    {"path": "src", "type": "dir"},
+                    {"path": "src/app.py", "type": "file"},
+                    {"path": "tests", "type": "dir"},
+                    {"path": "tests/test_app.py", "type": "file"},
+                    {"path": "README.md", "type": "file"},
+                    {"path": "docs", "type": "dir"},
+                    {"path": "docs/guide.md", "type": "file"},
+                    {"path": "docs/reference.md", "type": "file"},
+                ],
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("list all files in this workdir recursively")
+        self.assertEqual(result.content, "src/app.py, tests/test_app.py, README.md, docs/guide.md, docs/reference.md")
+        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": True, "max_entries": 80})])
+        self.assertEqual(client.calls, [])
+
+    def test_tree_workdir_request_uses_recursive_list_files_locally(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name != "list_files":
+                return {"ok": False, "error": "unexpected"}
+            return {
+                "ok": True,
+                "path": ".",
+                "recursive": True,
+                "count": 4,
+                "dir_count": 2,
+                "file_count": 2,
+                "truncated": False,
+                "entries": [
+                    {"path": "docs", "type": "dir"},
+                    {"path": "docs/guide.md", "type": "file"},
+                    {"path": "src", "type": "dir"},
+                    {"path": "src/app.py", "type": "file"},
+                ],
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("show a tree of this workdir")
+        self.assertEqual(result.content, ".\n- docs/\n  - guide.md\n- src/\n  - app.py")
+        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": True, "max_entries": 80})])
+        self.assertEqual(client.calls, [])
+
+    def test_directory_followup_reuses_previous_list_files_result_locally(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        agent.messages.append(
+            {
+                "role": "tool",
+                "tool_name": "list_files",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "path": ".",
+                        "recursive": False,
+                        "entries": [
+                            {"path": "audio", "type": "dir"},
+                            {"path": "images", "type": "dir"},
+                            {"path": "README.md", "type": "file"},
+                        ],
+                    }
+                ),
+            }
+        )
+
+        result = agent.run_turn("there are directories?")
+        self.assertEqual(result.content, "audio, images")
+        self.assertEqual(registry.called, [])
+        self.assertEqual(client.calls, [])
+
+    def test_what_are_directories_followup_reuses_previous_listing_locally(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        agent.messages.append(
+            {
+                "role": "tool",
+                "tool_name": "list_files",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "path": ".",
+                        "recursive": False,
+                        "entries": [
+                            {"path": "audio", "type": "dir"},
+                            {"path": "case", "type": "dir"},
+                            {"path": "summary.txt", "type": "file"},
+                        ],
+                    }
+                ),
+            }
+        )
+
+        result = agent.run_turn("What are the directories?")
+        self.assertEqual(result.content, "audio, case")
+        self.assertEqual(registry.called, [])
+        self.assertEqual(client.calls, [])
+
+    def test_short_directory_questions_reuse_previous_listing_locally(self) -> None:
+        for prompt in ("which folders?", "quali cartelle?"):
+            with self.subTest(prompt=prompt):
+                client = FakeClient([])
+                client.model = "gemma4:e2b"
+                registry = FakeRegistry()
+                agent = AgentLoop(client=client, registry=registry, max_loops=3)
+                agent.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": "list_files",
+                        "content": json.dumps(
+                            {
+                                "ok": True,
+                                "path": ".",
+                                "recursive": False,
+                                "entries": [
+                                    {"path": "audio", "type": "dir"},
+                                    {"path": "images", "type": "dir"},
+                                    {"path": "summary.txt", "type": "file"},
+                                ],
+                            }
+                        ),
+                    }
+                )
+
+                result = agent.run_turn(prompt)
+                self.assertEqual(result.content, "audio, images")
+                self.assertEqual(registry.called, [])
+                self.assertEqual(client.calls, [])
+
+    def test_subdirectory_question_seeds_top_level_list_files_locally(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name != "list_files":
+                return {"ok": False, "error": "unexpected"}
+            return {
+                "ok": True,
+                "path": ".",
+                "recursive": False,
+                "count": 4,
+                "dir_count": 2,
+                "file_count": 2,
+                "truncated": False,
+                "entries": [
+                    {"path": "audio", "type": "dir"},
+                    {"path": "images", "type": "dir"},
+                    {"path": "README.md", "type": "file"},
+                    {"path": "summary.txt", "type": "file"},
+                ],
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn("there are subdirectories in this workdir?")
+        self.assertEqual(result.content, "audio, images")
+        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": False, "max_entries": 12})])
+        self.assertEqual(client.calls, [])
+
+    def test_named_listed_directory_content_lists_that_directory_locally(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        agent.messages.append(
+            {
+                "role": "tool",
+                "tool_name": "list_files",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "path": ".",
+                        "recursive": False,
+                        "entries": [
+                            {"path": "audio", "type": "dir"},
+                            {"path": "text", "type": "dir"},
+                            {"path": "summary.txt", "type": "file"},
+                        ],
+                    }
+                ),
+            }
+        )
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name != "list_files":
+                return {"ok": False, "error": "unexpected"}
+            return {
+                "ok": True,
+                "path": "text",
+                "recursive": False,
+                "count": 2,
+                "dir_count": 0,
+                "file_count": 2,
+                "truncated": False,
+                "entries": [
+                    {"path": "text/divina_commedia_inferno_canto1.txt", "type": "file"},
+                    {"path": "text/promessi_sposi.txt", "type": "file"},
+                ],
+            }
+
+        registry.call = call
+        result = agent.run_turn("what text directory contains?")
+        self.assertEqual(result.content, "text/divina_commedia_inferno_canto1.txt, text/promessi_sposi.txt")
+        self.assertEqual(registry.called, [("list_files", {"path": "text", "recursive": False, "max_entries": 12})])
         self.assertEqual(client.calls, [])
 
     def test_chat_only_mode_ignores_tool_calls(self) -> None:
@@ -7286,7 +8026,7 @@ class AgentLoopTests(unittest.TestCase):
         registry = FakeRegistry()
         agent = AgentLoop(client=client, registry=registry, max_loops=4)
         result = agent.run_turn("analyze the binary you find in this directory using the most appropriate method first")
-        self.assertIn("could not identify a real binary or PDF candidate", result.content)
+        self.assertIn("could not identify a real static-analysis candidate", result.content)
 
     def test_binary_analysis_seeds_list_files_before_model_guessing(self) -> None:
         client = FakeClient(
@@ -8888,14 +9628,14 @@ class AgentLoopTests(unittest.TestCase):
         prompt = _repeated_tool_retry_prompt(
             ToolCallRecord(
                 name="read_file",
-                signature="read_file:{\"path\": \"src/orbit/core/compact.py\"}",
-                detail="read_file.path=src/orbit/core/compact.py",
+                signature="read_file:{\"path\": \"src/orbit/core/compaction.py\"}",
+                detail="read_file.path=src/orbit/core/compaction.py",
             ),
             TurnPolicyState(
                 tool_history=[
                     ToolCallRecord(name="read_file", signature="read_file:{\"path\": \"README.md\"}", detail="read_file.path=README.md"),
                     ToolCallRecord(name="read_file", signature="read_file:{\"path\": \"src/orbit/core/agent.py\"}", detail="read_file.path=src/orbit/core/agent.py"),
-                    ToolCallRecord(name="read_file", signature="read_file:{\"path\": \"src/orbit/core/compact.py\"}", detail="read_file.path=src/orbit/core/compact.py"),
+                    ToolCallRecord(name="read_file", signature="read_file:{\"path\": \"src/orbit/core/compaction.py\"}", detail="read_file.path=src/orbit/core/compaction.py"),
                 ],
             ),
         )
@@ -8913,12 +9653,12 @@ class AgentLoopTests(unittest.TestCase):
                 ToolCallRecord(name="read_file", signature='read_file:{"path":"c.py"}', detail="read_file.path=c.py"),
                 ToolCallRecord(name="read_file", signature='read_file:{"path":"d.py"}', detail="read_file.path=d.py"),
                 ToolCallRecord(name="read_file", signature='read_file:{"path":"e.py"}', detail="read_file.path=e.py"),
-                ToolCallRecord(name="read_file", signature='read_file:{"path":"compact.py","start_line":1}', detail="read_file.path=compact.py"),
+                ToolCallRecord(name="read_file", signature='read_file:{"path":"compaction.py","start_line":1}', detail="read_file.path=compaction.py"),
             ],
         )
         decision = classify_model_reply(
             content="",
-            tool_calls=[{"function": {"name": "read_file", "arguments": {"path": "compact.py", "start_line": 120}}}],
+            tool_calls=[{"function": {"name": "read_file", "arguments": {"path": "compaction.py", "start_line": 120}}}],
             state=state,
         )
         self.assertEqual(decision.action, "retry_repeated_tool")

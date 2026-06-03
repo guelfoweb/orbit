@@ -9,7 +9,7 @@ from .common import ToolError
 from .filesystem import FilesystemTools, filesystem_definitions
 from .shell import ShellTools, shell_definitions
 from .web import WebTools, web_definitions
-from ..core.tool_router import (
+from ..core.tools.router import (
     TOOL_CATEGORY_FILESYSTEM,
     TOOL_CATEGORY_SHELL,
     TOOL_CATEGORY_WEB,

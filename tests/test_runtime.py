@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
 from orbit.core.events import SessionAutoCompactEvent
 import orbit.core.runtime as runtime_module
 from orbit.core.runtime import OrbitRuntime
-from orbit.core.client import ModelMetadata
+from orbit.core.ollama_client import ModelMetadata
 
 
 class FakeAgent:

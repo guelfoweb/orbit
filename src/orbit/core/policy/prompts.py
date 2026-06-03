@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .loop_guard import (
+from .loop import (
     ToolCallRecord,
     extract_path,
     extract_read_path,

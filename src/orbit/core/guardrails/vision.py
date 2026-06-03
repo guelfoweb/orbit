@@ -8,7 +8,7 @@ import re
 
 from PIL import Image
 
-from ..tooling.common import ToolError, resolve_path
+from ...tooling.common import ToolError, resolve_path
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")

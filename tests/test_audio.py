@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.core.guardrail_audio import (
+from orbit.core.guardrails.audio import (
     AUDIO_CHUNK_SECONDS,
     extract_explicit_audio_paths,
     prepare_audio_chunks,

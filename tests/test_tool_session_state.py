@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.core.tool_session_state import ToolDedupCache, ToolSessionState, ToolTrustDecay
+from orbit.core.tools.session_state import ToolDedupCache, ToolSessionState, ToolTrustDecay
 
 
 class ToolSessionStateTests(unittest.TestCase):

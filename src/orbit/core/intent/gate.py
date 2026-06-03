@@ -3,14 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-from .intent_router import (
+from .router import (
     INTENT_CLASS_AMBIGUOUS,
     INTENT_CLASS_BINARY_ANALYSIS,
-    INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
     INTENT_CLASS_PDF_ANALYSIS,
     INTENT_CLASS_WEB_LOOKUP,
 )
-from .tool_router import ToolRoute
+from ..tools.router import ToolRoute
 
 
 INTENT_GATE_SYSTEM_PROMPT = (
@@ -36,7 +35,7 @@ def should_confirm_tool_route(user_input: str, route: ToolRoute | None) -> bool:
 def intent_gate_decision(user_input: str, route: ToolRoute | None) -> IntentGateDecision:
     if route is None or not route.categories:
         return IntentGateDecision(confirm=False, reason="no tool route")
-    if route.intent_class in {INTENT_CLASS_BINARY_ANALYSIS, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS}:
+    if route.intent_class == INTENT_CLASS_BINARY_ANALYSIS:
         if is_clear_local_binary_operation(user_input):
             return IntentGateDecision(confirm=False, reason="clear local binary operation")
         return IntentGateDecision(confirm=True, reason="ambiguous binary/static route")

@@ -76,7 +76,7 @@ def print_model_markdown(content: str) -> None:
         print(content)
         return
     try:
-        console = Console(file=sys.stdout, soft_wrap=True)
+        console = Console(file=sys.stdout, soft_wrap=False)
         console.print(Markdown(content))
     except Exception:
         print(content)

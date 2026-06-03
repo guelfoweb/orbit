@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..skills import Skill
-from .intent_router import (
+from ...skills import Skill
+from ..intent.router import (
     INTENT_CLASS_AMBIGUOUS,
     INTENT_CLASS_BINARY_ANALYSIS,
-    INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
     INTENT_CLASS_CHAT_GENERAL,
     INTENT_CLASS_CODEBASE_INSPECTION,
     INTENT_CLASS_FILE_EDITING,
@@ -20,7 +19,7 @@ from .intent_router import (
     INTENT_CLASS_WORKSPACE_DISCOVERY,
     route_intent,
 )
-from .skill_hints import extra_categories_for_skill
+from ..skill_hints import extra_categories_for_skill
 
 
 TOOL_CATEGORY_FILESYSTEM = "filesystem"
@@ -59,7 +58,7 @@ def categories_for_intent_class(intent_class: str) -> tuple[str, ...]:
         return (TOOL_CATEGORY_FILESYSTEM,)
     if intent_class in {INTENT_CLASS_WORKSPACE_DISCOVERY, INTENT_CLASS_FILE_READING}:
         return (TOOL_CATEGORY_FILESYSTEM,)
-    if intent_class in {INTENT_CLASS_BINARY_ANALYSIS, INTENT_CLASS_PDF_ANALYSIS, INTENT_CLASS_BINARY_OR_PDF_ANALYSIS}:
+    if intent_class in {INTENT_CLASS_BINARY_ANALYSIS, INTENT_CLASS_PDF_ANALYSIS}:
         return (TOOL_CATEGORY_SHELL, TOOL_CATEGORY_FILESYSTEM)
     if intent_class in {INTENT_CLASS_MACHINE_INSPECTION, INTENT_CLASS_SHELL_TASK}:
         return (TOOL_CATEGORY_SHELL,)

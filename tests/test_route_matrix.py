@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from orbit.core.intent_gate import should_confirm_tool_route
-from orbit.core.intent_router import (
+from orbit.core.intent.gate import should_confirm_tool_route
+from orbit.core.intent.router import (
     INTENT_CLASS_AMBIGUOUS,
     INTENT_CLASS_BINARY_ANALYSIS,
     INTENT_CLASS_CHAT_GENERAL,
@@ -14,7 +14,7 @@ from orbit.core.intent_router import (
     INTENT_CLASS_SHELL_TASK,
     INTENT_CLASS_WEB_LOOKUP,
 )
-from orbit.core.tool_router import TOOL_CATEGORY_FILESYSTEM, TOOL_CATEGORY_SHELL, TOOL_CATEGORY_WEB, route_tool_categories
+from orbit.core.tools.router import TOOL_CATEGORY_FILESYSTEM, TOOL_CATEGORY_SHELL, TOOL_CATEGORY_WEB, route_tool_categories
 
 
 class RouteMatrixTests(unittest.TestCase):

@@ -111,7 +111,12 @@ New tools are allowed only when they are:
 
 Required structure:
 
-- `orbit/core/`: agent loop, Ollama client, compaction, runtime, sessions, policy, routing, context budget, loop guard, parser, guardrails
+- `orbit/core/`: agent loop, Ollama client, compaction, runtime, sessions, policy, context budget, loop guard, parser, and shared message/model helpers
+- `orbit/core/intent/`: intent routing, intent signals, and model-assisted intent gate
+- `orbit/core/guardrails/`: bounded guardrail helpers by domain: chat, documents, factual lookup, file edits, patterns, review, vision, and audio
+- `orbit/core/tools/`: tool routing, runtime tool guardrails, tool-call parsing, execution policy, and tool session state
+- `orbit/core/policy/`: turn policy, retry prompts, and policy helpers
+- `orbit/core/binary/`: binary and static-analysis guardrails
 - `orbit/tooling/`: registry and local tools by domain
 - `orbit/terminal/`: CLI, config, history, and text rendering
 
@@ -124,16 +129,22 @@ Key responsibilities:
 - `terminal/ui.py`: help, tools, status, and rendering
 - `core/events.py`: typed events between loop, runtime, and UI
 - `core/agent.py`: agent loop and turn metrics
-- `core/tool_router.py`: tool subset exposed to the model
-- `core/intent_gate.py`: model-assisted YES/NO confirmation for risky ambiguous tool routes
-- `core/context_budget.py`: context pressure thresholds and profiles
-- `core/loop_guard.py`: repeated tool-call history and matching
-- `core/tool_call_parser.py`: fallback parsing for near-valid JSON/text tool calls
-- `core/message_ops.py`: pure helpers over messages
-- `core/tool_guardrails.py`: runtime constraints without bloating the main loop
-- `core/tool_session_state.py` and `core/tool_execution_policy.py`: read-before-write, dedup, trust decay, and rehydration
-- `core/compact.py`: session compaction
-- `core/turn_policy.py`: explicit turn state classification
+- `core/tools/router.py`: tool subset exposed to the model
+- `core/tools/guardrails.py`: runtime constraints without bloating the main loop
+- `core/tools/call_parser.py`: fallback parsing for near-valid JSON/text tool calls
+- `core/tools/session_state.py` and `core/tools/execution_policy.py`: read-before-write, dedup, trust decay, and rehydration
+- `core/intent/router.py`: semantic intent classification
+- `core/intent/gate.py`: model-assisted YES/NO confirmation for risky ambiguous tool routes
+- `core/intent/signals.py`: reusable intent signal helpers
+- `core/policy/context.py`: context pressure thresholds and profiles
+- `core/policy/loop.py`: repeated tool-call history and matching
+- `core/messages.py`: pure helpers over messages
+- `core/model/guidance.py` and `core/model/payloads.py`: model-facing guidance and payload compaction helpers
+- `core/guardrails/*.py`: domain-specific guardrails used by `core/tools/guardrails.py` and `core/agent.py`
+- `core/compaction.py`: session compaction
+- `core/policy/turn.py`: explicit turn state classification
+- `core/policy/prompts.py` and `core/policy/helpers.py`: turn retry prompts and small policy helpers
+- `core/binary/guardrails.py` and `core/binary/static_analysis.py`: binary/static analysis helpers
 - `tooling/common.py`, `tooling/filesystem.py`, `tooling/shell.py`, `tooling/web.py`: domain tool implementations
 
 Rules:
@@ -204,6 +215,7 @@ Turn policy:
 - Prefer the standard library when sufficient, except for the official Ollama client.
 - Avoid extra dependencies without clear value.
 - `Pillow` is allowed for bounded local image normalization in the vision path.
+- `pypdf` is allowed for bounded local PDF text extraction; `pdftotext`/`strings` may remain fallback extractors.
 - `ffmpeg`/`ffprobe` are required for bounded local audio normalization and chunking; audio prompts must fail clearly if they are missing.
 - Packaging must stay minimal.
 

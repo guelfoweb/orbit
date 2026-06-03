@@ -5,19 +5,19 @@ from dataclasses import dataclass
 from functools import lru_cache
 import re
 
-from .code_review_signals import (
+from ..guardrails.review_signals import (
     CODE_FILE_EXTENSIONS,
     CODE_REVIEW_REQUEST_HINTS,
     has_code_file_extension,
     has_code_language_hint,
 )
-from .intent_signals import (
+from .signals import (
     DISCUSSION_MARKERS,
     LEARNING_MARKERS,
     contains_phrase,
     looks_like_discursive_security_text,
 )
-from .text_utils import word_tokens
+from ..text_utils import word_tokens
 
 
 INTENT_CLASS_CHAT_GENERAL = "chat_general"
@@ -31,7 +31,6 @@ INTENT_CLASS_SHELL_TASK = "shell_task"
 INTENT_CLASS_CODEBASE_INSPECTION = "codebase_inspection"
 INTENT_CLASS_BINARY_ANALYSIS = "binary_analysis"
 INTENT_CLASS_PDF_ANALYSIS = "pdf_analysis"
-INTENT_CLASS_BINARY_OR_PDF_ANALYSIS = "binary_or_pdf_analysis"
 INTENT_CLASS_KNOWLEDGE_QUESTION = "knowledge_question"
 INTENT_CLASS_AMBIGUOUS = "ambiguous"
 
@@ -39,7 +38,6 @@ INTENT_CODEBASE_INSPECTION = "codebase_inspection"
 INTENT_TEXT_DOCUMENT_ANALYSIS = "text_document_analysis"
 INTENT_BINARY_ANALYSIS = "binary_analysis"
 INTENT_PDF_ANALYSIS = "pdf_analysis"
-INTENT_BINARY_OR_PDF_ANALYSIS = "binary_or_pdf_analysis"
 INTENT_CURRENT_FACTUAL_LOOKUP = "current_factual_lookup"
 INTENT_GENERAL_KNOWLEDGE = "general_knowledge"
 INTENT_CHITCHAT = "chitchat"
@@ -47,29 +45,27 @@ INTENT_FILE_EDIT = "file_edit"
 INTENT_BOUNDED_COMMAND = "bounded_command"
 INTENT_AMBIGUOUS = "ambiguous"
 
-BINARY_OR_PDF_ANALYSIS_INTENTS = frozenset(
+STATIC_FILE_ANALYSIS_INTENTS = frozenset(
     {
         INTENT_BINARY_ANALYSIS,
         INTENT_PDF_ANALYSIS,
-        INTENT_BINARY_OR_PDF_ANALYSIS,
     }
 )
 
-BINARY_OR_PDF_ANALYSIS_CLASSES = frozenset(
+STATIC_FILE_ANALYSIS_CLASSES = frozenset(
     {
         INTENT_CLASS_BINARY_ANALYSIS,
         INTENT_CLASS_PDF_ANALYSIS,
-        INTENT_CLASS_BINARY_OR_PDF_ANALYSIS,
     }
 )
 
 
-def is_binary_or_pdf_analysis_intent(intent: str | None) -> bool:
-    return intent in BINARY_OR_PDF_ANALYSIS_INTENTS
+def is_static_file_analysis_intent(intent: str | None) -> bool:
+    return intent in STATIC_FILE_ANALYSIS_INTENTS
 
 
-def is_binary_or_pdf_analysis_class(intent_class: str | None) -> bool:
-    return intent_class in BINARY_OR_PDF_ANALYSIS_CLASSES
+def is_static_file_analysis_class(intent_class: str | None) -> bool:
+    return intent_class in STATIC_FILE_ANALYSIS_CLASSES
 
 _CODEBASE_HINTS = (
     "codebase",
@@ -315,6 +311,84 @@ _SYSTEM_INFO_QUERY_HINTS = (
     "informazioni di sistema",
     "caratteristiche",
 )
+_LOCAL_FILE_READ_ACTION_TOKENS = frozenset(
+    {
+        "read",
+        "open",
+        "show",
+        "summarize",
+        "summary",
+        "analyze",
+        "analyse",
+        "extract",
+        "quote",
+        "mentions",
+        "mention",
+        "contains",
+        "contain",
+        "evidence",
+        "tell",
+        "whether",
+        "leggi",
+        "apri",
+        "mostra",
+        "riassumi",
+        "analizza",
+        "estrai",
+        "cita",
+        "menziona",
+        "contiene",
+    }
+)
+_WORKSPACE_INSPECTION_TOKENS = frozenset(
+    {"workspace", "workdir", "directory", "folder", "repo", "repository", "project", "progetto", "cartella"}
+)
+_WORKSPACE_OPERATION_TOKENS = frozenset(
+    {
+        "list",
+        "show",
+        "inspect",
+        "read",
+        "analyze",
+        "analyse",
+        "identify",
+        "find",
+        "check",
+        "explain",
+        "elenca",
+        "mostra",
+        "ispeziona",
+        "leggi",
+        "analizza",
+        "identifica",
+        "trova",
+        "controlla",
+        "spiega",
+    }
+)
+_WORKSPACE_CODE_CONTEXT_TOKENS = frozenset(
+    {
+        "routing",
+        "router",
+        "tool",
+        "tools",
+        "code",
+        "bug",
+        "bugs",
+        "issue",
+        "issues",
+        "fix",
+        "function",
+        "functions",
+        "codice",
+        "strumento",
+        "strumenti",
+        "problema",
+        "problemi",
+        "funzione",
+        "funzioni",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -396,6 +470,24 @@ def _intent_rules() -> tuple[IntentRule, ...]:
             matcher=lambda text: _looks_like_workspace_security_search_request(text),
         ),
         IntentRule(
+            intent=INTENT_CODEBASE_INSPECTION,
+            intent_class=INTENT_CLASS_CODEBASE_INSPECTION,
+            reason="explicit code file review hints",
+            matcher=lambda text: _looks_like_explicit_code_file_review_request(text),
+        ),
+        IntentRule(
+            intent=INTENT_CODEBASE_INSPECTION,
+            intent_class=INTENT_CLASS_CODEBASE_INSPECTION,
+            reason="operational workspace inspection hints",
+            matcher=lambda text: _looks_like_operational_workspace_inspection_request(text),
+        ),
+        IntentRule(
+            intent=INTENT_TEXT_DOCUMENT_ANALYSIS,
+            intent_class=INTENT_CLASS_FILE_READING,
+            reason="explicit local file reading hints",
+            matcher=lambda text: _looks_like_explicit_local_file_read_request(text),
+        ),
+        IntentRule(
             intent=INTENT_CHITCHAT,
             intent_class=INTENT_CLASS_CHAT_GENERAL,
             reason="discursive web/search statement",
@@ -418,6 +510,12 @@ def _intent_rules() -> tuple[IntentRule, ...]:
             intent_class=INTENT_CLASS_WEB_LOOKUP,
             reason="factual web lookup hints",
             matcher=lambda text: _looks_like_current_factual_lookup(text),
+        ),
+        IntentRule(
+            intent=INTENT_PDF_ANALYSIS,
+            intent_class=INTENT_CLASS_PDF_ANALYSIS,
+            reason="pdf analysis hints",
+            matcher=lambda text: _looks_like_pdf_analysis_request(text),
         ),
         IntentRule(
             intent=INTENT_GENERAL_KNOWLEDGE,
@@ -450,12 +548,6 @@ def _intent_rules() -> tuple[IntentRule, ...]:
             matcher=lambda text: _looks_like_file_edit_request(text),
         ),
         IntentRule(
-            intent=INTENT_PDF_ANALYSIS,
-            intent_class=INTENT_CLASS_PDF_ANALYSIS,
-            reason="pdf analysis hints",
-            matcher=lambda text: _looks_like_pdf_analysis_request(text),
-        ),
-        IntentRule(
             intent=INTENT_BINARY_ANALYSIS,
             intent_class=INTENT_CLASS_BINARY_ANALYSIS,
             reason="binary analysis hints",
@@ -484,7 +576,7 @@ def _intent_rules() -> tuple[IntentRule, ...]:
             intent=INTENT_CODEBASE_INSPECTION,
             intent_class=INTENT_CLASS_CODEBASE_INSPECTION,
             reason="codebase hints",
-            matcher=lambda text: _looks_like_codebase_inspection_request(text) or _looks_like_explicit_code_file_review_request(text),
+            matcher=lambda text: _looks_like_codebase_inspection_request(text),
         ),
         IntentRule(
             intent=INTENT_TEXT_DOCUMENT_ANALYSIS,
@@ -603,6 +695,18 @@ def _looks_like_text_path_request(intent_text: _IntentText) -> bool:
     )
 
 
+def _looks_like_explicit_local_file_read_request(intent_text: _IntentText) -> bool:
+    if not _looks_like_text_path_request(intent_text):
+        return False
+    if _looks_like_file_edit_request(intent_text):
+        return False
+    if _looks_like_explicit_web_lookup_request(intent_text):
+        return False
+    if _looks_like_binary_triage_request(intent_text) or _looks_like_pdf_analysis_request(intent_text):
+        return False
+    return bool(intent_text.token_set & _LOCAL_FILE_READ_ACTION_TOKENS)
+
+
 def _looks_like_local_filesystem_metadata_request(intent_text: _IntentText) -> bool:
     metadata_tokens = {
         "metadata",
@@ -694,10 +798,43 @@ def _looks_like_pdf_content_request(intent_text: _IntentText) -> bool:
     return bool(intent_text.token_set & content_tokens)
 
 
+def _looks_like_pdf_metadata_request(intent_text: _IntentText) -> bool:
+    if ".pdf" not in intent_text.text:
+        return False
+    if _looks_like_discursive_security_statement(intent_text):
+        return False
+    page_tokens = {"page", "pages", "pagina", "pagine"}
+    query_tokens = {"how", "many", "count", "number", "quante", "quanti", "numero"}
+    if any(phrase in intent_text.text for phrase in ("page number", "page numbers", "numeri pagina", "numeri di pagina")):
+        return True
+    return bool(intent_text.token_set & page_tokens) and bool(intent_text.token_set & query_tokens)
+
+
+def _looks_like_pdf_about_request(intent_text: _IntentText) -> bool:
+    if ".pdf" not in intent_text.text:
+        return False
+    if _looks_like_discursive_security_statement(intent_text):
+        return False
+    about_phrases = (
+        "what this document is about",
+        "what is this document about",
+        "what the document is about",
+        "what is about this document",
+        "what is about this documet",
+        "what is this doc about",
+        "what is it about",
+        "di cosa parla",
+        "cosa contiene",
+    )
+    if any(phrase in intent_text.text for phrase in about_phrases):
+        return True
+    return bool(intent_text.token_set & {"about", "parla", "contiene"}) and bool(intent_text.token_set & {"document", "documet", "doc", "documento", "file"})
+
+
 def _looks_like_pdf_analysis_request(intent_text: _IntentText) -> bool:
     if _looks_like_discursive_security_statement(intent_text):
         return False
-    if _looks_like_pdf_content_request(intent_text):
+    if _looks_like_pdf_content_request(intent_text) or _looks_like_pdf_metadata_request(intent_text) or _looks_like_pdf_about_request(intent_text):
         return True
     pdf_tokens = {"pdf", "pdftotext"}
     action_tokens = {
@@ -935,7 +1072,7 @@ def _looks_like_discursive_web_statement(intent_text: _IntentText) -> bool:
     text = intent_text.text
     if not (intent_text.token_set & {"web", "internet", "search", "lookup", "online", "browser", "browsing", "ricerca", "cercare"}):
         return False
-    if _looks_like_explicit_web_lookup_request(intent_text):
+    if _has_explicit_web_url(intent_text) or _looks_like_explicit_web_lookup_request(intent_text):
         return False
     discussion_markers = (
         *DISCUSSION_MARKERS,
@@ -958,7 +1095,7 @@ def _looks_like_discursive_web_statement(intent_text: _IntentText) -> bool:
         "browsing",
         "ricerca",
     }
-    return bool(intent_text.token_set & conceptual_terms) and not _looks_like_explicit_web_fetch_request(intent_text)
+    return bool(intent_text.token_set & conceptual_terms) and not _looks_like_explicit_web_lookup_request(intent_text)
 
 
 def _looks_like_explicit_web_lookup_request(intent_text: _IntentText) -> bool:
@@ -967,13 +1104,22 @@ def _looks_like_explicit_web_lookup_request(intent_text: _IntentText) -> bool:
         "search online",
         "search the web",
         "search web",
+        "search for",
+        "search information",
+        "search documentation",
         "look up online",
+        "look up",
         "lookup online",
         "cerca online",
         "cercami online",
         "cerca sul web",
         "cerca in rete",
         "cercami in rete",
+        "cerca informazioni",
+        "cercare informazioni",
+        "cerca documentazione",
+        "cercare documentazione",
+        "trova informazioni",
     )
     if any(phrase in text for phrase in explicit_phrases):
         return True
@@ -995,6 +1141,17 @@ def _looks_like_codebase_inspection_request(intent_text: _IntentText) -> bool:
         "sicurezza", "falla", "falle",
     }
     return bool(token_set & code_tokens) and bool(token_set & inspection_tokens)
+
+
+def _looks_like_operational_workspace_inspection_request(intent_text: _IntentText) -> bool:
+    if _looks_like_file_edit_request(intent_text):
+        return False
+    token_set = intent_text.token_set
+    if not (token_set & _WORKSPACE_INSPECTION_TOKENS):
+        return False
+    if not (token_set & _WORKSPACE_OPERATION_TOKENS):
+        return False
+    return bool(token_set & _WORKSPACE_CODE_CONTEXT_TOKENS)
 
 
 def _looks_like_workspace_security_search_request(intent_text: _IntentText) -> bool:
@@ -1050,13 +1207,44 @@ def _looks_like_explicit_code_file_review_request(intent_text: _IntentText) -> b
         return False
     if not ((token_set & review_tokens) or any(hint in request_text for hint in CODE_REVIEW_REQUEST_HINTS)):
         return False
-    return has_code_file_extension(request_text) or has_code_language_hint(request_text) or "this file" in request_text or "questo file" in request_text
+    return has_code_file_extension(request_text) or has_code_language_hint(request_text)
 
 
 def _looks_like_workspace_discovery_request(intent_text: _IntentText) -> bool:
     token_set = intent_text.token_set
-    workspace_tokens = {"directory", "folder", "folders", "cartella", "cartelle", "workdir", "workspace"}
-    listing_tokens = {"contain", "contains", "content", "contents", "inside", "files", "show", "mostra", "contiene", "ci", "sono", "elenca", "which", "quali"}
+    workspace_tokens = {
+        "directory",
+        "directories",
+        "folder",
+        "folders",
+        "subdirectory",
+        "subdirectories",
+        "cartella",
+        "cartelle",
+        "sottocartelle",
+        "workdir",
+        "workspace",
+    }
+    listing_tokens = {
+        "any",
+        "are",
+        "contain",
+        "contains",
+        "content",
+        "contents",
+        "inside",
+        "files",
+        "show",
+        "there",
+        "mostra",
+        "contiene",
+        "ci",
+        "sono",
+        "elenca",
+        "which",
+        "quali",
+        "what",
+    }
     if not token_set & workspace_tokens:
         return False
     if any(token in intent_text.text for token in (".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", "/", "\\")):

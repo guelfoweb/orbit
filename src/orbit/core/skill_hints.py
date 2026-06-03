@@ -7,7 +7,6 @@ from ..skills import Skill
 
 ANALYSIS_INTENTS = {
     "binary_analysis",
-    "binary_or_pdf_analysis",
     "pdf_analysis",
     "text_document_analysis",
     "codebase_inspection",
@@ -46,7 +45,7 @@ def startup_prompt_for_skill(skill: Skill | None, intent: str, messages: list[di
         parts.append("Active skill startup is mandatory: create or reuse the case/work directory.")
     if skill_requires_workspace_docs(skill):
         parts.append("Create or read AGENTS.md and REPORT.md, then keep them updated.")
-    if intent in {"binary_analysis", "binary_or_pdf_analysis"}:
+    if intent == "binary_analysis":
         parts.append("Then identify the real sample, hash it, identify its type/container, and inspect embedded members.")
     if not parts:
         return None

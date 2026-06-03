@@ -163,6 +163,9 @@ def compact_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, A
         synthesis_guidance = payload.get("synthesis_guidance")
         if isinstance(synthesis_guidance, str) and synthesis_guidance.strip():
             result["synthesis_guidance"] = synthesis_guidance[:240]
+        text_excerpt = payload.get("text_excerpt")
+        if isinstance(text_excerpt, str) and text_excerpt.strip():
+            result["text_excerpt"] = text_excerpt[:5000]
         content = payload.get("content")
         if isinstance(content, str) and not summary_read:
             result["content"] = content[:MODEL_FIRST_TOOL_TEXT_LIMIT]

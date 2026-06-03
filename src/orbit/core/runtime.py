@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .. import __version__
 from .agent import AgentLoop, TurnResult
-from .client import ModelMetadata, OllamaClient
+from .ollama_client import ModelMetadata, OllamaClient
 from .events import EventSink, SessionAutoCompactEvent
 from ..paths import ensure_orbit_home
 from ..session import create_session_name, delete_sessions_for_workdir, load_session, save_session

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .code_review_signals import (
+from ..guardrails.review_signals import (
     CODE_REVIEW_REQUEST_HINTS,
     has_code_file_extension,
     has_code_language_hint,
@@ -19,7 +19,6 @@ MODEL_FIRST_INTENT_GUIDANCE = {
     "codebase_inspection": "Intent: codebase_inspection. Prefer list_files first, then read only relevant files. If the user asked for a fixed number of files, stop after you have that many relevant files. Answer in one line only unless the user explicitly asks for a multi-part breakdown.",
     "binary_analysis": "Intent: binary_analysis. Prefer bounded static inspection of a real discovered path.",
     "pdf_analysis": "Intent: pdf_analysis. Prefer bounded text extraction from the explicit PDF path.",
-    "binary_or_pdf_analysis": "Intent: binary_or_pdf_analysis. Prefer bounded inspection of a real discovered path.",
 }
 
 MODEL_FIRST_POST_TOOL_GUIDANCE = {
@@ -35,7 +34,6 @@ MODEL_FIRST_POST_TOOL_GUIDANCE = {
     "codebase_inspection": "Answer only the requested inspection task. Keep it short and preferably in one line.",
     "binary_analysis": "Report only the relevant static-analysis findings.",
     "pdf_analysis": "Answer only from extracted PDF evidence. Keep it short.",
-    "binary_or_pdf_analysis": "Report only the relevant findings.",
 }
 
 

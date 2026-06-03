@@ -8,8 +8,8 @@ import re
 import shlex
 import shutil
 
-from .guardrail_documents import extract_explicit_text_path
-from .message_ops import has_recent_tool_result
+from .documents import extract_explicit_text_path
+from ..messages import has_recent_tool_result
 
 
 OPEN_CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[\s\]\s+")
@@ -123,9 +123,9 @@ def markdown_checkbox_redundant_read_prompt(
 def markdown_task_skill_enabled(skill: Any) -> bool:
     name = getattr(skill, "name", "")
     content = getattr(skill, "content", "")
-    if isinstance(name, str) and name in {"task-notes", "daily-tasks"}:
+    if isinstance(name, str) and name in {"task-notes", "daily-tasks", "obsidian-daily"}:
         return True
-    if isinstance(content, str) and "Markdown Task Review" in content:
+    if isinstance(content, str) and ("Markdown Task Review" in content or "Obsidian Daily Task Review" in content):
         return True
     return False
 

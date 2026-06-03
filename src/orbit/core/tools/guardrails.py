@@ -6,7 +6,7 @@ import shlex
 import time
 from typing import Any
 
-from .guardrail_documents import (
+from ..guardrails.documents import (
     SHOW_CONTENT_HINTS,
     SUMMARY_HINTS,
     TEXT_PATH_RE,
@@ -26,12 +26,12 @@ from .guardrail_documents import (
     seed_explicit_text_read_impl,
     summarize_text_content as _summarize_text_content,
 )
-from .guardrail_patterns import (
+from ..guardrails.patterns import (
     local_markdown_checkbox_extraction_result as _local_markdown_checkbox_extraction_result,
     markdown_checkbox_redundant_read_prompt as _markdown_checkbox_redundant_read_prompt,
     seed_markdown_checkbox_extraction as _seed_markdown_checkbox_extraction,
 )
-from .binary_guardrails import (
+from ..binary.guardrails import (
     ARCHIVE_CONTAINER_EXTENSIONS,
     binary_analysis_guard_prompt as _binary_analysis_guard_prompt,
     binary_listing_guidance as _binary_listing_guidance_impl,
@@ -40,21 +40,23 @@ from .binary_guardrails import (
     binary_text_reply_handling as _binary_text_reply_handling,
     binary_tool_strategy_prompt as _binary_tool_strategy_prompt,
 )
-from .guardrail_chat import (
+from ..guardrails.chat import (
     assistant_identity_system_prompt as _assistant_identity_system_prompt,
+    directory_listing_target_from_recent_listing as _directory_listing_target_from_recent_listing,
+    directory_listing_wants_recursive as _directory_listing_wants_recursive,
     local_assistant_identity_result as _local_assistant_identity_result,
     local_directory_listing_result as _local_directory_listing_result,
     local_pure_chitchat_result as _local_pure_chitchat_result,
     needs_directory_discovery as _needs_directory_discovery,
 )
-from .guardrail_file_edit import (
+from ..guardrails.file_edit import (
     apply_deterministic_file_edit as _apply_deterministic_file_edit,
     file_edit_placeholder_handling as _file_edit_placeholder_handling,
     file_edit_post_write_reply_handling as _file_edit_post_write_reply_handling,
     infer_file_edit_section_append as _infer_file_edit_section_append,
     placeholder_write_replacement_text as _placeholder_write_replacement_text,
 )
-from .guardrail_factual import (
+from ..guardrails.factual import (
     PROJECT_METADATA_CANDIDATES,
     VERSION_QUERY_HINTS,
     apply_deterministic_bounded_command as _apply_deterministic_bounded_command,
@@ -63,9 +65,10 @@ from .guardrail_factual import (
     local_tooling_concept_result as _local_tooling_concept_result,
     seed_current_factual_tool as _seed_current_factual_tool,
 )
-from .guardrail_review import (
+from ..guardrails.review import (
     codebase_redundant_listing_prompt as _codebase_redundant_listing_prompt,
     codebase_review_reply_handling as _codebase_review_reply_handling,
+    explicit_code_review_paths as _explicit_code_review_paths,
     local_codebase_architecture_result as _local_codebase_architecture_result,
     local_codebase_hotspot_result as _local_codebase_hotspot_result,
     local_codebase_priority_files_result as _local_codebase_priority_files_result,
@@ -73,14 +76,14 @@ from .guardrail_review import (
     seed_codebase_listing_impl,
     seed_codebase_review_reads_impl,
 )
-from .static_analysis_guardrails import (
+from ..binary.static_analysis import (
     local_static_reverse_inspection_result,
     local_static_sample_evidence_result,
     seed_binary_discovery_impl,
 )
-from .events import ToolCallEvent, ToolResultEvent, ToolRouteEvent
-from .intent_router import INTENT_CODEBASE_INSPECTION, INTENT_TEXT_DOCUMENT_ANALYSIS, is_binary_or_pdf_analysis_intent
-from .message_ops import (
+from ..events import ToolCallEvent, ToolResultEvent, ToolRouteEvent
+from ..intent.router import INTENT_CODEBASE_INSPECTION, INTENT_TEXT_DOCUMENT_ANALYSIS, is_static_file_analysis_intent
+from ..messages import (
     has_recent_tool_result,
     last_fetch_url_result,
     last_read_file_result,
@@ -99,9 +102,9 @@ from .message_ops import (
     successful_write_results_in_current_turn,
     was_listed_by_list_files,
 )
-from .turn_policy import TurnPolicyState
-from .turn_policy_helpers import file_edit_completion_message
-from .text_utils import prefers_english_output
+from ..policy.turn import TurnPolicyState
+from ..policy.helpers import file_edit_completion_message
+from ..text_utils import prefers_english_output
 
 
 LOCAL_ACCESS_REFUSAL_HINTS = (
@@ -262,11 +265,17 @@ def seed_directory_discovery(
         return
     if not _needs_directory_discovery(user_input):
         return
-    if has_recent_tool_result(messages, "list_files"):
+    target_path = _directory_listing_target_from_recent_listing(
+        user_input,
+        messages,
+        recent_listed_directory_paths,
+    )
+    if has_recent_tool_result(messages, "list_files") and target_path is None:
         return
+    recursive = _directory_listing_wants_recursive(user_input)
     _seed_guardrail_tool(
         name="list_files",
-        arguments={"path": ".", "recursive": False, "max_entries": 12},
+        arguments={"path": target_path or ".", "recursive": recursive, "max_entries": 80 if recursive else 12},
         route=route,
         registry=registry,
         messages=messages,
@@ -669,6 +678,17 @@ def local_directory_listing_result(
     )
 
 
+def directory_listing_target_from_recent_listing(
+    user_input: str,
+    messages: list[dict[str, Any]],
+) -> str | None:
+    return _directory_listing_target_from_recent_listing(
+        user_input,
+        messages,
+        recent_listed_directory_paths,
+    )
+
+
 def local_codebase_priority_files_result(
     *,
     intent: str | None,
@@ -678,6 +698,40 @@ def local_codebase_priority_files_result(
     if intent != INTENT_CODEBASE_INSPECTION or not _has_recursive_listing_in_current_turn(messages):
         return None
     return _local_codebase_priority_files_result(intent=intent, user_input=user_input, messages=messages)
+
+
+def has_structured_explicit_code_review_path(user_input: str) -> bool:
+    return any("/" in path or "\\" in path for path in _explicit_code_review_paths(user_input))
+
+
+def local_missing_explicit_code_review_file_result(
+    *,
+    intent: str | None,
+    user_input: str,
+    messages: list[dict[str, Any]],
+) -> str | None:
+    if intent != INTENT_CODEBASE_INSPECTION:
+        return None
+    for path in _explicit_code_review_paths(user_input):
+        normalized = normalize_relative_path(path)
+        for message in reversed(messages):
+            if message.get("role") != "tool" or message.get("tool_name") != "read_file":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or normalize_relative_path(str(payload.get("path") or normalized)) != normalized:
+                continue
+            if payload.get("ok") is True:
+                return None
+            error = str(payload.get("error") or "")
+            if "file not found" in error.lower():
+                return f"`{normalized}` was not found in the current workdir. I cannot analyze it until the file exists at that path."
+    return None
 
 
 def local_codebase_architecture_result(
@@ -1772,7 +1826,7 @@ def fake_tool_response_handling(
             if top:
                 lines = "\n".join(f"- `{path}`" for path in top)
                 return ("final", f"I file più importanti da leggere per primi sono:\n{lines}")
-    if is_binary_or_pdf_analysis_intent(intent):
+    if is_static_file_analysis_intent(intent):
         candidates = likely_binary_candidates_from_recent_listing(messages, limit=1)
         if candidates:
             write_results = successful_write_results_in_current_turn(messages)
@@ -2115,9 +2169,9 @@ def unsupported_tool_prompt(
     allowed = ", ".join(sorted(allowed_tool_names))
     blocked = ", ".join(sorted(set(unsupported)))
     binary_hint = ""
-    if is_binary_or_pdf_analysis_intent(route.intent):
+    if is_static_file_analysis_intent(route.intent):
         binary_hint = (
-            " For binary or PDF analysis, first discover a real candidate path with list_files if the file name is not explicit, "
+            " For static file analysis, first discover a real candidate path with list_files if the file name is not explicit, "
             "then use a shell-oriented tool such as bash for strings, pdftotext, file, or another bounded binary-aware command."
         )
     return (

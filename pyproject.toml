@@ -9,7 +9,7 @@ description = "Simple interactive local-tool REPL for Ollama tool calling"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-dependencies = ["ollama>=0.6.0", "Pillow>=10.0.0", "rich>=13.0.0"]
+dependencies = ["ollama>=0.6.0", "Pillow>=10.0.0", "pypdf>=4.0.0", "rich>=13.0.0"]
 
 [project.scripts]
 orbit = "orbit.terminal.cli:main"

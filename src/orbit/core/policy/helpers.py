@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .loop_guard import ToolCallRecord, extract_path
+from .loop import ToolCallRecord, extract_path
 
 
 def edited_paths(history: list[ToolCallRecord]) -> set[str]:

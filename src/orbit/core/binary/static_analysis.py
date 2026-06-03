@@ -4,10 +4,10 @@ import re
 import shlex
 from typing import Any, Callable
 
-from .binary_guardrails import ARCHIVE_CONTAINER_EXTENSIONS
-from .intent_signals import LEARNING_MARKERS, contains_phrase, looks_like_discursive_security_text
-from .intent_router import is_binary_or_pdf_analysis_intent
-from .message_ops import (
+from .guardrails import ARCHIVE_CONTAINER_EXTENSIONS
+from ..intent.signals import LEARNING_MARKERS, contains_phrase, looks_like_discursive_security_text
+from ..intent.router import INTENT_BINARY_ANALYSIS, is_static_file_analysis_intent
+from ..messages import (
     has_recent_tool_result,
     likely_binary_candidates_from_recent_listing,
     successful_bash_results_in_current_turn,
@@ -63,7 +63,7 @@ def seed_binary_discovery_impl(
     binary_listing_guidance: Callable[[list[dict[str, Any]]], str],
     has_pdf_text_extract_in_current_turn: Callable[[list[dict[str, Any]]], bool],
 ) -> None:
-    if not is_binary_or_pdf_analysis_intent(route.intent):
+    if not is_static_file_analysis_intent(route.intent):
         return
     if not _is_operational_static_analysis_request(user_input):
         return
@@ -125,7 +125,7 @@ def local_static_sample_evidence_result(
     user_input: str,
     messages: list[dict[str, Any]],
 ) -> str | None:
-    if not is_binary_or_pdf_analysis_intent(intent):
+    if intent != INTENT_BINARY_ANALYSIS:
         return None
     lowered = user_input.lower()
     evidence_hints = ("initial evidence", "hash", "hashes", "file type", "md5", "sha1", "sha256", "evidenze")
@@ -158,7 +158,7 @@ def local_static_reverse_inspection_result(
     user_input: str,
     messages: list[dict[str, Any]],
 ) -> str | None:
-    if not is_binary_or_pdf_analysis_intent(intent):
+    if intent != INTENT_BINARY_ANALYSIS:
         return None
     lowered = user_input.lower()
     if not _asks_for_static_reverse_analysis(user_input):

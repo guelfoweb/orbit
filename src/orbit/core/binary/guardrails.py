@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .intent_router import is_binary_or_pdf_analysis_intent
-from .turn_policy import TurnPolicyState
+from ..intent.router import is_static_file_analysis_intent
+from ..policy.turn import TurnPolicyState
 
 LIKELY_BINARY_EXTENSIONS = {".pdf", ".apk", ".dex", ".so", ".dll", ".exe", ".bin", ".dylib", ".a", ".o"}
 ARCHIVE_CONTAINER_EXTENSIONS = {".apk", ".zip", ".jar", ".aar", ".ipa"}
@@ -36,7 +36,7 @@ def binary_analysis_guard_prompt(
     recent_archive_container_for_member: Callable[[list[dict[str, Any]], str], str | None],
     was_listed_by_list_files: Callable[[list[dict[str, Any]], str], bool],
 ) -> str | None:
-    if not is_binary_or_pdf_analysis_intent(intent) or not tool_calls:
+    if not is_static_file_analysis_intent(intent) or not tool_calls:
         return None
     if len(tool_calls) != 1:
         return None
@@ -47,7 +47,7 @@ def binary_analysis_guard_prompt(
     path = arguments.get("path")
     if not isinstance(path, str) or not path.strip():
         return (
-            "For binary or PDF analysis, do not guess a file name. "
+            "For static file analysis, do not guess a file name. "
             "First call list_files on the relevant subtree to discover a real candidate path, "
             "then inspect that candidate with a binary-aware command such as file, strings, or pdftotext."
         )
@@ -55,8 +55,8 @@ def binary_analysis_guard_prompt(
     name = normalized.rsplit("/", 1)[-1].lower()
     if name in LOW_PRIORITY_TEXT_NAMES or name.startswith("."):
         return (
-            "For binary or PDF analysis, do not start from hidden files, config files, or metadata documents. "
-            "First call list_files to discover the actual binary or PDF candidate, then inspect that candidate with bash using file, strings, pdftotext, or another bounded binary-aware command."
+            "For static file analysis, do not start from hidden files, config files, or metadata documents. "
+            "First call list_files to discover the actual static-analysis candidate, then inspect that candidate with bash using file, strings, pdftotext, or another bounded binary-aware command."
         )
     if any(normalized.lower().endswith(ext) for ext in ARCHIVE_CONTAINER_EXTENSIONS):
         return (
@@ -78,7 +78,7 @@ def binary_analysis_guard_prompt(
     if any(normalized.lower().endswith(ext) for ext in LIKELY_BINARY_EXTENSIONS):
         return None
     return (
-        "For binary or PDF analysis, do not guess a read_file path. "
+        "For static file analysis, do not guess a read_file path. "
         "First call list_files on the relevant subtree to discover a real candidate path, "
         "then inspect that candidate with bash using file, strings, pdftotext, or another bounded binary-aware command. "
         "Use read_file only for extracted text or manifest-like text files."
@@ -91,7 +91,7 @@ def binary_tool_strategy_prompt(
     tool_calls: list[dict[str, Any]],
     parse_arguments: Any,
 ) -> str | None:
-    if not is_binary_or_pdf_analysis_intent(intent) or len(tool_calls) != 1:
+    if not is_static_file_analysis_intent(intent) or len(tool_calls) != 1:
         return None
     function = tool_calls[0].get("function", {}) or {}
     if function.get("name") != "bash":
@@ -122,7 +122,7 @@ def binary_listing_retry_prompt(
     has_recent_tool_result: Callable[[list[dict[str, Any]], str], bool],
     likely_binary_candidates_from_recent_listing: Callable[[list[dict[str, Any]]], list[str]],
 ) -> str | None:
-    if not is_binary_or_pdf_analysis_intent(intent) or len(tool_calls) != 1:
+    if not is_static_file_analysis_intent(intent) or len(tool_calls) != 1:
         return None
     function = tool_calls[0].get("function", {}) or {}
     if function.get("name") != "list_files":
@@ -142,7 +142,7 @@ def binary_text_reply_handling(
     content: str,
     policy_state: TurnPolicyState,
 ) -> tuple[str, str] | None:
-    if not is_binary_or_pdf_analysis_intent(intent):
+    if not is_static_file_analysis_intent(intent):
         return None
     if policy_state.tool_history:
         return None
@@ -159,14 +159,14 @@ def binary_text_reply_handling(
     if policy_state.synthesis_retries >= 1:
         return (
             "final",
-            "I could not identify a real binary or PDF candidate because the model kept guessing a missing path. "
+            "I could not identify a real static-analysis candidate because the model kept guessing a missing path. "
             "List files in the target subtree first or specify the filename explicitly, then inspect that discovered path with a bounded binary-aware command.",
         )
     policy_state.synthesis_retries += 1
     return (
         "retry",
         "Do not answer with a guessed binary path or a suggested command on a missing file. "
-        "First call list_files on the relevant subtree to discover a real candidate binary or PDF. "
+        "First call list_files on the relevant subtree to discover a real static-analysis candidate. "
         "Then inspect that discovered path with one bounded binary-aware command such as file, strings, or pdftotext."
     )
 
@@ -223,14 +223,14 @@ def binary_listing_guidance(
     if candidates:
         preview = ", ".join(candidates)
         return (
-            "A top-level file listing has already been collected for this binary/PDF task. "
+            "A top-level file listing has already been collected for this static-analysis task. "
             f"Likely candidate paths from that listing: {preview}. "
             "Do not call list_files again for the same location. "
             "Choose one real candidate path from the listing, then inspect it with one bounded binary-aware or archive-aware command. "
             "Do not guess placeholder names."
         )
     return (
-        "A top-level file listing has already been collected for this binary/PDF task. "
+        "A top-level file listing has already been collected for this static-analysis task. "
         "Do not call list_files again for the same location. "
         "Choose one real candidate path from that listing before attempting any binary-aware command. "
         "Do not guess placeholder names."
