@@ -590,3 +590,106 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(result["query_mode"], "concept")
         self.assertEqual(result["match_count"], 1)
         self.assertIn("human dignity", result["matches"][0]["context"])
+
+    def test_fetch_url_concept_query_handles_multiple_concepts(self) -> None:
+        text = (
+            "<html><body>"
+            "<p>La dignità della persona deve essere custodita nella trasformazione digitale.</p>"
+            "<p>La libertà richiede responsabilità e giustizia.</p>"
+            "<p>L'intelligenza artificiale può aiutare l'uomo se resta trasparente.</p>"
+            "</body></html>"
+        )
+
+        class DummyResponse:
+            status = 200
+            headers = type(
+                "Headers",
+                (),
+                {
+                    "get_content_type": lambda self: "text/html",
+                    "get_content_charset": lambda self: "utf-8",
+                },
+            )()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return text.encode("utf-8")
+
+            def geturl(self):
+                return "https://example.com/"
+
+        with patch("orbit.tooling.web.request.urlopen", return_value=DummyResponse()):
+            tool = WebTools()
+            result = tool.fetch_url(
+                {
+                    "url": "https://example.com",
+                    "query": "dignity, freedom, and artificial intelligence",
+                    "query_mode": "concept",
+                    "max_links": 0,
+                    "max_matches": 8,
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["query_mode"], "concept")
+        self.assertGreaterEqual(result["match_count"], 3)
+        contexts = "\n".join(item["context"] for item in result["matches"])
+        self.assertIn("dignità", contexts)
+        self.assertIn("libertà", contexts)
+        self.assertIn("intelligenza artificiale", contexts)
+
+    def test_fetch_url_concept_query_handles_synonymic_concepts(self) -> None:
+        text = (
+            "<html><body>"
+            "<p>La dignità della persona resta il criterio fondamentale.</p>"
+            "<p>La libertà della coscienza non può essere ridotta a controllo.</p>"
+            "<p>I sistemi di intelligenza artificiale richiedono trasparenza.</p>"
+            "</body></html>"
+        )
+
+        class DummyResponse:
+            status = 200
+            headers = type(
+                "Headers",
+                (),
+                {
+                    "get_content_type": lambda self: "text/html",
+                    "get_content_charset": lambda self: "utf-8",
+                },
+            )()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return text.encode("utf-8")
+
+            def geturl(self):
+                return "https://example.com/"
+
+        with patch("orbit.tooling.web.request.urlopen", return_value=DummyResponse()):
+            tool = WebTools()
+            result = tool.fetch_url(
+                {
+                    "url": "https://example.com",
+                    "query": "human worth, free will, or AI systems",
+                    "query_mode": "concept",
+                    "max_links": 0,
+                    "max_matches": 8,
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["match_count"], 3)
+        contexts = "\n".join(item["context"] for item in result["matches"])
+        self.assertIn("dignità", contexts)
+        self.assertIn("libertà", contexts)
+        self.assertIn("intelligenza artificiale", contexts)

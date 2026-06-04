@@ -30,6 +30,9 @@ ABOUT_DOCUMENT_HINTS = (
     "what is about this documet",
     "what is this doc about",
     "what is it about",
+    "general topic",
+    "topic it covers",
+    "topic",
     "di cosa parla",
     "cosa contiene",
 )
@@ -39,7 +42,8 @@ PDF_PAGE_COUNT_HINTS = ("page", "pages", "pagina", "pagine")
 PDF_PAGE_COUNT_QUERY_HINTS = ("how many", "page count", "page number", "page numbers", "number of pages", "quante pagine", "numero di pagine", "numeri pagina", "numeri di pagina")
 TEXT_PATH_RE = re.compile(r"(?P<path>[A-Za-z0-9_./-]+\.(?:md|txt|json|toml|yaml|yml|py|rst))")
 QUOTED_PDF_PATH_RE = re.compile(r"(?P<quote>[\"'`])(?P<path>[^\"'`]+\.pdf)(?P=quote)", re.IGNORECASE)
-SUMMARY_LINE_COUNT_RE = re.compile(r"\b(?P<count>\d{1,2})\s+(?:short\s+)?(?:lines?|righe?)\b", re.IGNORECASE)
+SUMMARY_LINE_COUNT_RE = re.compile(r"\b(?P<count>\d{1,2})[\s-]+(?:short\s+)?(?:lines?|righe?)\b", re.IGNORECASE)
+SUMMARY_WORD_LINE_COUNT_RE = re.compile(r"\b(?P<count>[A-Za-zÀ-ÿ]+)[\s-]+(?:short\s+)?(?:lines?|righe?)\b", re.IGNORECASE)
 SUMMARY_SENTENCE_COUNT_RE = re.compile(
     r"\b(?P<count>\d{1,2}|one|two|three|four|five|una|uno|due|tre|quattro|cinque)\s+(?:short\s+)?(?:sentences?|frasi?)\b",
     re.IGNORECASE,
@@ -50,6 +54,8 @@ SUMMARY_READ_LONG_MAX_CHUNKS = 8
 SUMMARY_READ_PREFIX_MAX_CHUNKS = 4
 SUMMARY_READ_MAX_LINES = 120
 SUMMARY_READ_MAX_CHARS = 6000
+SUMMARY_READ_BEGINNING_MAX_LINES = 45
+SUMMARY_READ_BEGINNING_MAX_CHARS = 3000
 PDF_TEXT_HEAD_LINES = 240
 PDF_TEXT_MAX_CHARS = 12000
 SUMMARY_EVIDENCE_TEXT_LIMIT = 1200
@@ -356,7 +362,7 @@ def condense_explicit_text_summary_messages(
             sampled_start_lines.append(start_line)
         if isinstance(payload.get("total_lines"), int):
             total_lines = payload.get("total_lines")
-    if len(matching_indexes) <= 1:
+    if len(matching_indexes) <= 1 and not _prefers_beginning_summary(user_input):
         return
     chunks = _read_chunks_for_path(messages, path)
     chunk_notes = build_chunk_evidence_notes(chunks)
@@ -408,7 +414,14 @@ def should_defer_explicit_text_summary_to_model(
     lowered = user_input.lower()
     if not any(hint in lowered for hint in SUMMARY_HINTS):
         return False
-    return len(_read_chunks_for_path(messages, path)) > 1
+    chunks = _read_chunks_for_path(messages, path)
+    if (
+        _prefers_beginning_summary(user_input)
+        and extract_requested_summary_lines(user_input) is not None
+        and any(chunk.get("has_more") for chunk in chunks)
+    ):
+        return True
+    return len(chunks) > 1
 
 
 def local_explicit_pdf_result(
@@ -428,10 +441,18 @@ def local_explicit_pdf_result(
         result = latest_pypdf_result(messages, path)
     if result is None:
         return None
-    if _asks_for_pdf_page_count(lowered):
+    wants_page_count = _asks_for_pdf_page_count(lowered)
+    wants_about = any(hint in lowered for hint in SUMMARY_HINTS + ABOUT_DOCUMENT_HINTS)
+    if wants_page_count:
         pages = result.get("pages")
         if isinstance(pages, int) and pages >= 0:
-            return f"`{path}` has {pages} page{'s' if pages != 1 else ''}."
+            page_line = f"`{path}` has {pages} page{'s' if pages != 1 else ''}."
+            stdout = result.get("stdout")
+            if wants_about and isinstance(stdout, str) and stdout.strip():
+                summary = summarize_pdf_topic(stdout.strip())
+                if summary is not None:
+                    return f"{page_line}\nTopic: {summary}"
+            return page_line
     stdout = result.get("stdout")
     if not isinstance(stdout, str) or not stdout.strip():
         return None
@@ -488,6 +509,12 @@ def seed_document_summary_reads(
     prefix_focused = _prefers_prefix_summary(user_input=user_input, path=path)
     if prefix_focused:
         max_chunks = min(max_chunks, SUMMARY_READ_PREFIX_MAX_CHUNKS)
+    beginning_focused = _prefers_beginning_summary(user_input)
+    chunk_lines = SUMMARY_READ_BEGINNING_MAX_LINES if beginning_focused else SUMMARY_READ_MAX_LINES
+    chunk_chars = SUMMARY_READ_BEGINNING_MAX_CHARS if beginning_focused else SUMMARY_READ_MAX_CHARS
+    if beginning_focused:
+        prefix_focused = True
+        max_chunks = 1
     existing = [
         item
         for item in successful_read_results_in_current_turn(messages)
@@ -499,7 +526,7 @@ def seed_document_summary_reads(
     if latest is None:
         latest = run_guardrail_tool(
             name="read_file",
-            arguments={"path": path, "start_line": 1, "max_lines": SUMMARY_READ_MAX_LINES, "max_chars": SUMMARY_READ_MAX_CHARS},
+            arguments={"path": path, "start_line": 1, "max_lines": chunk_lines, "max_chars": chunk_chars},
             route=route,
             registry=registry,
             messages=messages,
@@ -518,7 +545,7 @@ def seed_document_summary_reads(
     planned_starts = _summary_read_start_lines(
         total_lines=total_lines,
         max_chunks=max_chunks,
-        chunk_lines=SUMMARY_READ_MAX_LINES,
+        chunk_lines=chunk_lines,
         prefix_focused=prefix_focused,
     )
     existing_starts = {int(item.get("start_line", 1)) for item in existing if isinstance(item.get("start_line"), int)}
@@ -531,7 +558,7 @@ def seed_document_summary_reads(
             continue
         latest = run_guardrail_tool(
             name="read_file",
-            arguments={"path": path, "start_line": next_start_line, "max_lines": SUMMARY_READ_MAX_LINES, "max_chars": SUMMARY_READ_MAX_CHARS},
+            arguments={"path": path, "start_line": next_start_line, "max_lines": chunk_lines, "max_chars": chunk_chars},
             route=route,
             registry=registry,
             messages=messages,
@@ -568,6 +595,20 @@ def summarize_text_content(
     limit = max(2, min(12, max_lines if isinstance(max_lines, int) and max_lines > 0 else 3))
     selected = _spread_candidates(candidates, limit=limit)
     return "\n".join(f"- {line}" for line in selected)
+
+
+def summarize_pdf_topic(content: str) -> str | None:
+    candidates = _paragraph_candidates(content) or _line_candidates(content)
+    if not candidates:
+        return None
+    informative = [candidate for candidate in candidates if not _is_low_information_candidate(candidate)]
+    selected = informative or candidates
+    if len(selected) == 1:
+        return selected[0]
+    first = selected[0]
+    if len(first.split()) <= 3:
+        return f"{first}. {selected[1]}"
+    return first
 
 
 def summarize_chunked_text_results(
@@ -632,10 +673,35 @@ def build_document_map(chunks: list[dict[str, Any]], *, total_lines: int | None)
 
 def extract_requested_summary_lines(user_input: str) -> int | None:
     match = SUMMARY_LINE_COUNT_RE.search(user_input)
+    if match is not None:
+        count = int(match.group("count"))
+        return max(1, min(12, count))
+    match = SUMMARY_WORD_LINE_COUNT_RE.search(user_input)
     if match is None:
         return None
-    count = int(match.group("count"))
-    return max(1, min(12, count))
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "una": 1,
+        "due": 2,
+        "tre": 3,
+        "quattro": 4,
+        "cinque": 5,
+        "sei": 6,
+        "sette": 7,
+        "otto": 8,
+        "nove": 9,
+        "dieci": 10,
+    }
+    return words.get(match.group("count").lower())
 
 
 def extract_requested_summary_sentences(user_input: str) -> int | None:
@@ -1018,6 +1084,21 @@ def _prefers_prefix_summary(*, user_input: str, path: str) -> bool:
         "libro",
     )
     return any(term in lowered for term in section_terms)
+
+
+def _prefers_beginning_summary(user_input: str) -> bool:
+    lowered = user_input.lower()
+    beginning_terms = (
+        "beginning",
+        "opening",
+        "start of",
+        "first part",
+        "inizio",
+        "incipit",
+        "parte iniziale",
+        "prime righe",
+    )
+    return any(term in lowered for term in beginning_terms)
 
 
 def _prefix_text_excerpt(chunks: list[dict[str, Any]]) -> str:

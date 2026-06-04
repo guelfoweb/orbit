@@ -9,7 +9,7 @@ It provides an interactive REPL, persistent sessions, a small set of bounded loc
 Orbit is developed primarily around `gemma4:e2b`, using a tuned Ollama profile called:
 
 ```text
-gemma4:e2b-fast-t6-c8k
+gemma4:e2b-c8k
 ```
 
 Other `gemma4` profiles may work, but they are best-effort and are not guaranteed to behave with the same reliability.
@@ -51,7 +51,7 @@ If `orbit` is not found after installation, make sure `~/.local/bin` is in your 
 
 ## Set up gemma4:e2b
 
-After installing Orbit, create the tuned local model profile from the local checkout:
+After installing Orbit, create the local model profiles from the local checkout:
 
 ```bash
 ~/.local/share/orbit/tune-e2b.sh
@@ -61,25 +61,48 @@ The script:
 
 - checks that `ollama` is installed
 - pulls `gemma4:e2b` if missing
-- creates `gemma4:e2b-fast-t6-c8k` from `Modelfile.gemma4-e2b-fast-t6-c8k`
+- creates `gemma4:e2b-c8k` from `Modelfile.gemma4-e2b-c8k`
+- creates `gemma4:e2b-c4k` from `Modelfile.gemma4-e2b-c4k`
 - prints the final launch command
 
-Equivalent manual command:
+This creates two Ollama profiles that share the same base model, so they do not duplicate the full model storage:
+
+| Profile | Target machine | When to use |
+| --- | --- | --- |
+| `gemma4:e2b-c8k` | Intel NUC 10 class CPU-only machine, Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM | Default Orbit profile and benchmark target |
+| `gemma4:e2b-c4k` | Intel Xeon E3-1275 v6 CPU-only machine, 4 physical cores / 8 threads, about 16 GB RAM | Conservative fallback for smaller machines or Ollama GGML scheduler crashes |
+
+Manual setup is also possible:
 
 ```bash
-ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
+ollama create gemma4:e2b-c8k -f Modelfile.gemma4-e2b-c8k
+ollama create gemma4:e2b-c4k -f Modelfile.gemma4-e2b-c4k
 ```
 
-The tuned Modelfile:
+Profile details:
+
+`Modelfile.gemma4-e2b-c8k`
 
 ```text
 FROM gemma4:e2b
 
-# Tuned for a 6-core / 12-thread CPU machine.
+# Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM.
 PARAMETER temperature 0
 PARAMETER num_ctx 8192
 PARAMETER num_thread 6
 PARAMETER num_batch 96
+```
+
+`Modelfile.gemma4-e2b-c4k`
+
+```text
+FROM gemma4:e2b
+
+# Intel Xeon E3-1275 v6, 4 physical cores / 8 threads, about 16 GB RAM.
+PARAMETER temperature 0
+PARAMETER num_ctx 4096
+PARAMETER num_thread 4
+PARAMETER num_batch 64
 ```
 
 ## Run
@@ -87,8 +110,22 @@ PARAMETER num_batch 96
 Start Orbit:
 
 ```bash
-orbit --model gemma4:e2b-fast-t6-c8k
+orbit --model gemma4:e2b-c8k
 ```
+
+If `gemma4:e2b-c8k` fails at startup or on the first prompt with an Ollama error like:
+
+```text
+llama-server process has terminated: GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS) failed
+```
+
+try the conservative profile:
+
+```bash
+orbit --model gemma4:e2b-c4k
+```
+
+That error comes from the Ollama/llama.cpp runner, not from Orbit. It usually means the current model profile is too aggressive for the machine or runner combination. The first values to reduce are `num_ctx` and `num_batch`.
 
 If `~/.orbit/config.json` already defines the model, you can simply run:
 
@@ -134,7 +171,7 @@ Recommended config:
 
 ```json
 {
-  "model": "gemma4:e2b-fast-t6-c8k",
+  "model": "gemma4:e2b-c8k",
   "host": "http://127.0.0.1:11434",
   "workdir": ".",
   "timeout": 300,
@@ -157,6 +194,8 @@ Keep project-specific behavior in skills, not in this global config. The bundled
 
 Runtime environment variables must be set on the Ollama server process, not only before launching Orbit.
 
+If Ollama runs as a systemd service, exporting these variables in the same shell used to start `orbit` has no effect on the already-running server. In that case, configure the service itself.
+
 Recommended CPU-only settings:
 
 ```text
@@ -165,7 +204,46 @@ OLLAMA_KEEP_ALIVE=-1
 OLLAMA_MAX_LOADED_MODELS=1
 ```
 
-If Ollama runs as `ollama.service`, configure these values in a systemd drop-in and restart the service.
+Check the active service configuration:
+
+```bash
+systemctl cat ollama
+systemctl show ollama -p Environment
+```
+
+If the environment only shows `PATH=...`, the recommended Ollama settings are not active.
+
+Create a systemd drop-in:
+
+```bash
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null <<'EOF'
+[Service]
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_KEEP_ALIVE=-1"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+Verify that the override is loaded:
+
+```bash
+systemctl cat ollama
+systemctl show ollama -p Environment
+```
+
+The output should include:
+
+```text
+# /etc/systemd/system/ollama.service.d/override.conf
+[Service]
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_KEEP_ALIVE=-1"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+```
 
 Check the loaded model:
 
@@ -179,8 +257,8 @@ Example CPU-only output:
 {
   "models": [
     {
-      "name": "gemma4:e2b-fast-t6-c8k",
-      "model": "gemma4:e2b-fast-t6-c8k",
+      "name": "gemma4:e2b-c8k",
+      "model": "gemma4:e2b-c8k",
       "size": 7679746272,
       "details": {
         "format": "gguf",

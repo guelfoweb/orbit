@@ -259,7 +259,7 @@ class InterruptTrackerTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
-                        "model": "gemma4:e2b-fast-t6-c8k",
+                        "model": "gemma4:e2b-c8k",
                         "host": "http://localhost:11434",
                         "workdir": str(workdir),
                         "timeout": 600,
@@ -278,7 +278,7 @@ class InterruptTrackerTests(unittest.TestCase):
 
             config = parse_config([], config_path=config_path)
 
-        self.assertEqual(config.model, "gemma4:e2b-fast-t6-c8k")
+        self.assertEqual(config.model, "gemma4:e2b-c8k")
         self.assertEqual(config.base_url, "http://localhost:11434")
         self.assertEqual(config.workdir, workdir.resolve())
         self.assertEqual(config.timeout, 600)

@@ -18,14 +18,15 @@ from .compaction import (
 from .ollama_client import OllamaClient
 from .ollama_client import is_thinking_unsupported_error
 from .policy.context import BudgetPressure, evaluate_budget_pressure
-from .guardrails.factual import allows_fetch_url_query
+from .guardrails.factual import normalize_fetch_url_arguments
 from .guardrails.audio import (
     AudioChunk,
     ExplicitAudioRequest,
     prepare_audio_chunks,
     resolve_explicit_audio_requests,
 )
-from .intent.gate import intent_gate_decision, intent_gate_messages, parse_intent_gate_reply
+from .intent.gate import intent_gate_decision
+from .intent.model_gate import model_confirms_tool_call, model_confirms_tool_route
 from .intent.router import INTENT_CODEBASE_INSPECTION, is_static_file_analysis_intent
 from .model.guidance import MODEL_FIRST_INTENT_GUIDANCE, model_first_post_tool_prompt
 from .model.payloads import (
@@ -367,7 +368,15 @@ class AgentLoop:
                 return self._result(local_listing_result, metrics)
         gate_decision = intent_gate_decision(user_input, route)
         if self.tools_enabled and model_first_runtime and gate_decision.confirm:
-            if not self._model_confirms_tool_route(user_input=user_input, route=route, metrics=metrics, on_event=on_event):
+            if not model_confirms_tool_route(
+                client=self.client,
+                user_input=user_input,
+                route=route,
+                metrics=metrics,
+                update_metrics=self._update_metrics,
+                emit_timing=self._emit_timing,
+                on_event=on_event,
+            ):
                 route = ToolRoute(
                     intent="chitchat",
                     intent_class="chat_general",
@@ -575,7 +584,7 @@ class AgentLoop:
                     intent=route.intent,
                     user_input=user_input,
                     messages=self.messages,
-                )
+                ) or _should_defer_beginning_summary_to_model(user_input)
                 if defer_text_summary_to_model:
                     condense_explicit_text_summary_messages(
                         user_input=user_input,
@@ -594,7 +603,7 @@ class AgentLoop:
                     user_input=user_input,
                     messages=self.messages,
                 )
-                if local_text_result is not None and not defer_text_summary_to_model:
+                if local_text_result is not None:
                     condense_explicit_text_summary_messages(
                         user_input=user_input,
                         messages=self.messages,
@@ -818,6 +827,20 @@ class AgentLoop:
                 if local_filesystem_metadata is not None:
                     metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
                     return self._result(local_filesystem_metadata, metrics)
+                defer_text_summary_to_model = _should_defer_beginning_summary_to_model(user_input)
+                if defer_text_summary_to_model:
+                    condense_explicit_text_summary_messages(
+                        user_input=user_input,
+                        messages=self.messages,
+                    )
+                    model_text_result = self._summarize_explicit_text_evidence(
+                        user_input=user_input,
+                        metrics=metrics,
+                    )
+                    if model_text_result is not None:
+                        self.messages.append({"role": "assistant", "content": model_text_result})
+                        metrics.wall_duration_ns = time.monotonic_ns() - turn_started_at
+                        return self._result(model_text_result, metrics)
                 local_text_result = local_explicit_text_result(
                     intent=route.intent,
                     user_input=user_input,
@@ -1239,6 +1262,7 @@ class AgentLoop:
                 on_event=on_event,
                 intent=route.intent if self.tools_enabled else None,
                 user_input=user_input,
+                route=route if self.tools_enabled else None,
             )
             local_factual_result = local_current_factual_result(
                 intent=route.intent if self.tools_enabled else None,
@@ -1345,14 +1369,7 @@ class AgentLoop:
 
     @staticmethod
     def _sanitize_fetch_url_arguments(*, user_input: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if "query" not in arguments:
-            return arguments
-        if allows_fetch_url_query(user_input):
-            return arguments
-        sanitized = dict(arguments)
-        for key in ("query", "query_mode", "max_matches", "context_chars"):
-            sanitized.pop(key, None)
-        return sanitized
+        return normalize_fetch_url_arguments(user_input, arguments)
 
     def _local_codebase_assessment_result(self, user_input: str) -> str | None:
         read_results = successful_read_results_in_current_turn(self.messages)
@@ -1489,32 +1506,6 @@ class AgentLoop:
         if duration_ns is None or duration_ns <= 0:
             return None
         return duration_ns / 1_000_000_000
-
-    def _model_confirms_tool_route(
-        self,
-        *,
-        user_input: str,
-        route: ToolRoute,
-        metrics: TurnMetrics,
-        on_event: EventSink | None,
-    ) -> bool:
-        messages = intent_gate_messages(user_input=user_input, route=route)
-        try:
-            started_at = time.monotonic_ns()
-            response = self.client.chat(
-                messages=messages,
-                tools=[],
-                options={"temperature": 0.0},
-                think=False,
-            )
-            self._update_metrics(metrics, response)
-        except Exception:
-            self._emit_timing(on_event, "intent-check", started_at, f"{route.intent} -> fail-open")
-            return True
-        parsed = parse_intent_gate_reply((response.get("message") or {}).get("content"))
-        outcome = "unclear, fail-open" if parsed is None else ("YES" if parsed else "NO")
-        self._emit_timing(on_event, "intent-check", started_at, f"{route.intent} -> {outcome}")
-        return True if parsed is None else parsed
 
     def _system_prompt(self) -> str:
         if self._prefers_model_first_runtime():
@@ -1667,6 +1658,7 @@ class AgentLoop:
                             }
                         )
                         continue
+                    content = _force_summary_line_count(content, requested_lines)
                 return content
             if attempt == 0:
                 requests.append(
@@ -1728,6 +1720,7 @@ class AgentLoop:
         on_event: EventSink | None = None,
         intent: str | None = None,
         user_input: str = "",
+        route: ToolRoute | None = None,
     ) -> None:
         for tool_call in tool_calls:
             fn = tool_call.get("function", {})
@@ -1790,6 +1783,45 @@ class AgentLoop:
                         tool_name="read_file",
                         on_event=on_event,
                     )
+                continue
+            if not model_confirms_tool_call(
+                client=self.client,
+                user_input=user_input,
+                route=route,
+                tool_name=name,
+                arguments=arguments,
+                messages=self.messages,
+                metrics=metrics,
+                update_metrics=self._update_metrics,
+                emit_timing=self._emit_timing,
+                on_event=on_event,
+            ):
+                result = {
+                    "ok": False,
+                    "error": (
+                        "tool call declined by semantic gate: the proposed tool does not match the user's request"
+                    ),
+                    "tool": name,
+                    "_guarded": True,
+                }
+                self._append_tool_message_with_compaction(
+                    {
+                        "role": "tool",
+                        "tool_name": name,
+                        "content": self.registry.encode_tool_result(result),
+                    },
+                    tool_name=name,
+                    on_event=on_event,
+                )
+                self.messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            f"The proposed `{name}` tool call was declined by the semantic tool gate. "
+                            "Answer the user without that tool, or choose a different tool only if it directly matches the request."
+                        ),
+                    }
+                )
                 continue
             if on_event is not None:
                 on_event(ToolCallEvent(loop=policy_state.loop_count, name=name, arguments=arguments))
@@ -2597,11 +2629,75 @@ def _looks_like_summary_evidence_echo(content: str) -> bool:
 
 
 def _requested_summary_line_count(user_input: str) -> int | None:
-    match = re.search(r"\b(?P<count>\d{1,2})\s+(?:short\s+)?(?:lines?|righe?)\b", user_input, flags=re.IGNORECASE)
+    match = re.search(r"\b(?P<count>\d{1,2})[\s-]+(?:short\s+)?(?:lines?|righe?)\b", user_input, flags=re.IGNORECASE)
+    if match is not None:
+        return max(1, min(12, int(match.group("count"))))
+    word_counts = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "una": 1,
+        "due": 2,
+        "tre": 3,
+        "quattro": 4,
+        "cinque": 5,
+        "sei": 6,
+        "sette": 7,
+        "otto": 8,
+        "nove": 9,
+        "dieci": 10,
+    }
+    match = re.search(r"\b(?P<count>[A-Za-zÀ-ÿ]+)[\s-]+(?:short\s+)?(?:lines?|righe?)\b", user_input, flags=re.IGNORECASE)
     if match is None:
         return None
-    return max(1, min(12, int(match.group("count"))))
+    value = word_counts.get(match.group("count").lower())
+    return value if value is not None else None
+
+
+def _should_defer_beginning_summary_to_model(user_input: str) -> bool:
+    if _requested_summary_line_count(user_input) is None:
+        return False
+    lowered = user_input.lower()
+    beginning_terms = (
+        "beginning",
+        "opening",
+        "start of",
+        "first part",
+        "inizio",
+        "incipit",
+        "parte iniziale",
+        "prime righe",
+    )
+    return any(term in lowered for term in beginning_terms)
 
 
 def _summary_line_count(content: str) -> int:
     return sum(1 for line in content.splitlines() if line.strip())
+
+
+def _force_summary_line_count(content: str, requested_lines: int) -> str:
+    requested_lines = max(1, min(12, requested_lines))
+    existing = [line.strip(" -*\t") for line in content.splitlines() if line.strip()]
+    if len(existing) == requested_lines:
+        return "\n".join(existing)
+    text = " ".join(existing) if existing else " ".join(content.split())
+    sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+", text) if item.strip()]
+    if len(sentences) >= requested_lines:
+        return "\n".join(sentences[:requested_lines])
+    lines = sentences or ([text] if text else [])
+    while len(lines) < requested_lines and lines:
+        longest_index = max(range(len(lines)), key=lambda index: len(lines[index]))
+        words = lines[longest_index].split()
+        if len(words) < 8:
+            break
+        midpoint = len(words) // 2
+        replacement = [" ".join(words[:midpoint]).strip(), " ".join(words[midpoint:]).strip()]
+        lines = lines[:longest_index] + replacement + lines[longest_index + 1 :]
+    return "\n".join(lines[:requested_lines]) if lines else content

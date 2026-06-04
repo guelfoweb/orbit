@@ -24,7 +24,7 @@ HEAVY_PROMPTS = (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a small Orbit prompt benchmark.")
-    parser.add_argument("--model", default="gemma4:e2b-fast-t6-c8k")
+    parser.add_argument("--model", default="gemma4:e2b-c8k")
     parser.add_argument("--workdir", default="workdir")
     parser.add_argument("--timeout", type=int, default=420)
     parser.add_argument("--include-heavy", action="store_true")

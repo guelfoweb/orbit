@@ -77,6 +77,8 @@ URL_CHECK_QUERY_HINTS = (
     "mentioned",
     "talk about",
     "talks about",
+    "touch on",
+    "touches on",
     "contains",
     "check if",
     "verify if",
@@ -138,6 +140,64 @@ def seed_current_factual_tool(
 def allows_fetch_url_query(user_input: str) -> bool:
     lowered = user_input.lower()
     return any(hint in lowered for hint in URL_CHECK_QUERY_HINTS)
+
+
+def normalize_fetch_url_arguments(user_input: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if "query" not in arguments:
+        return arguments
+    if not allows_fetch_url_query(user_input):
+        sanitized = dict(arguments)
+        for key in ("query", "query_mode", "max_matches", "context_chars"):
+            sanitized.pop(key, None)
+        return sanitized
+    url = arguments.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return arguments
+    extracted = _extract_url_check_query(user_input, url.strip())
+    if extracted is None:
+        return arguments
+    extracted_query, extracted_mode = extracted
+    current_query = str(arguments.get("query") or "").strip()
+    if current_query and not _is_weak_fetch_query(current_query):
+        if current_query.lower() == extracted_query.lower() and extracted_mode == "concept":
+            normalized = dict(arguments)
+            normalized.update(
+                {
+                    "query_mode": "concept",
+                    "max_matches": int(normalized.get("max_matches") or 8),
+                    "context_chars": int(normalized.get("context_chars") or 320),
+                }
+            )
+            normalized.setdefault("max_links", 0)
+            return normalized
+        return arguments
+    normalized = dict(arguments)
+    normalized.update(
+        {
+            "query": extracted_query,
+            "query_mode": extracted_mode,
+            "max_matches": int(normalized.get("max_matches") or 8),
+            "context_chars": int(normalized.get("context_chars") or 320),
+        }
+    )
+    normalized.setdefault("max_links", 0)
+    return normalized
+
+
+def _is_weak_fetch_query(query: str) -> bool:
+    normalized = query.strip().lower()
+    weak_queries = {
+        "content",
+        "document",
+        "page",
+        "article",
+        "text",
+        "this document",
+        "the document",
+        "this page",
+        "the page",
+    }
+    return normalized in weak_queries or len(normalized) < 4
 
 
 def apply_deterministic_bounded_command(
@@ -798,6 +858,12 @@ def _extract_url_check_query(user_input: str, explicit_url: str) -> tuple[str, s
             return query, "literal"
     cleanup_patterns = (
         r"\bdoes\s+(?:this|the)?\s*(?:page|article|text|encyclical)?\s*(?:mention|talk about|contains?)\b",
+        r"\bcheck\s+whether\s+(?:this|the)?\s*(?:(?:[\w'-]+)\s+){0,3}(?:page|article|text|document|encyclical)?\s*(?:discusses|discuss|talks about|talk about|touches on|touch on|mentions|mention|contains?)\b",
+        r"\bcheck\s+whether\b",
+        r"\bcheck\s+(?:this|the)?\s*(?:page|article|text|document|encyclical)?\s*(?:for|about)\b",
+        r"\blook\s+at\s+(?:this|the)?\s*(?:page|article|text|document|encyclical)?\s*(?:and\s+)?tell\s+me\s+if\s+(?:it\s+)?(?:touches on|touch on|discusses|discuss|talks about|talk about|mentions|mention|contains?)\b",
+        r"\b(?:this|the)?\s*(?:(?:[\w'-]+)\s+){0,3}(?:page|article|text|document|encyclical)\s*(?:discusses|discuss|talks about|talk about|touches on|touch on|mentions|mention|contains?)\b",
+        r"\b(?:discusses|discuss|talks about|talk about|touches on|touch on)\b",
         r"\bverify\s+if\b",
         r"\bcheck\s+if\b",
         r"\bwhether\b",
@@ -815,10 +881,34 @@ def _extract_url_check_query(user_input: str, explicit_url: str) -> tuple[str, s
     for pattern in cleanup_patterns:
         query = re.sub(pattern, " ", query, flags=re.IGNORECASE)
     query = " ".join(query.split()).strip(" :;,.?")
+    query = _strip_url_query_noise(query)
     if not query or len(query) < 3:
         return None
     mode = "literal" if len(query.split()) <= 3 else "concept"
     return query[:160], mode
+
+
+def _strip_url_query_noise(query: str) -> str:
+    tokens = query.split()
+    noise = {
+        "this",
+        "the",
+        "page",
+        "article",
+        "text",
+        "document",
+        "encyclical",
+        "content",
+        "whether",
+        "if",
+        "for",
+        "about",
+    }
+    while tokens and tokens[0].strip(" ,.:;?").lower() in noise:
+        tokens.pop(0)
+    while tokens and tokens[-1].strip(" ,.:;?").lower() in noise:
+        tokens.pop()
+    return " ".join(tokens).strip(" :;,.?")
 
 
 def _looks_like_time_query(lowered: str) -> bool:

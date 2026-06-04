@@ -1,0 +1,9 @@
+FROM gemma4:e2b
+
+# Conservative CPU-only profile used on an Intel Xeon E3-1275 v6 machine:
+# 4 physical cores / 8 threads, about 16 GB RAM.
+# Also use this when the c8k profile crashes the Ollama runner with GGML scheduler errors.
+PARAMETER temperature 0
+PARAMETER num_ctx 4096
+PARAMETER num_thread 4
+PARAMETER num_batch 64

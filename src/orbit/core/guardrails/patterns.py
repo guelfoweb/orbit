@@ -90,7 +90,7 @@ def local_markdown_checkbox_extraction_result(
     if not isinstance(stdout, str) or not stdout.strip():
         return "No open Markdown checkbox tasks found."
     if markdown_checkbox_needs_semantic_analysis(user_input):
-        return format_markdown_checkbox_semantic_analysis(stdout)
+        return None
     return format_markdown_checkbox_matches(stdout)
 
 

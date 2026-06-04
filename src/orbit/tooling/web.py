@@ -390,9 +390,76 @@ class WebTools:
 
     @classmethod
     def _search_text_by_concept(cls, text: str, *, query: str, max_matches: int, context_chars: int) -> list[dict[str, Any]]:
+        concepts = cls._query_concepts(query)
+        if len(concepts) > 1:
+            return cls._search_text_by_concepts(
+                text,
+                concepts=concepts,
+                max_matches=max_matches,
+                context_chars=context_chars,
+            )
         keywords = cls._query_keywords(query)
         if not keywords:
             return cls._search_text_literal(text, query=query, max_matches=max_matches, context_chars=context_chars)
+        return cls._search_text_by_keywords(
+            text,
+            keywords=keywords,
+            max_matches=max_matches,
+            context_chars=context_chars,
+        )
+
+    @classmethod
+    def _search_text_by_concepts(
+        cls,
+        text: str,
+        *,
+        concepts: list[str],
+        max_matches: int,
+        context_chars: int,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        seen_contexts: set[str] = set()
+        per_concept_limit = max(1, min(2, max_matches // max(1, len(concepts)) + 1))
+        for concept in concepts:
+            keywords = cls._query_keywords(concept)
+            if not keywords:
+                continue
+            for item in cls._search_text_by_keywords(
+                text,
+                keywords=keywords,
+                max_matches=per_concept_limit,
+                context_chars=context_chars,
+            ):
+                context = str(item.get("context") or "")
+                if not context or context in seen_contexts:
+                    continue
+                seen_contexts.add(context)
+                enriched = dict(item)
+                enriched["query_part"] = concept
+                results.append(enriched)
+                if len(results) >= max_matches:
+                    return results
+        return results
+
+    @staticmethod
+    def _query_concepts(query: str) -> list[str]:
+        parts = [
+            part.strip(" .:;!?")
+            for part in re.split(r"\s*(?:,|\band\b|\bor\b|\be\b|\bo\b)\s*", query, flags=re.IGNORECASE)
+            if part.strip(" .:;!?")
+        ]
+        return parts if len(parts) > 1 else []
+
+    @staticmethod
+    def _search_text_by_keywords(
+        text: str,
+        *,
+        keywords: list[str],
+        max_matches: int,
+        context_chars: int,
+    ) -> list[dict[str, Any]]:
+        if not keywords:
+            return []
         candidates: list[tuple[int, int, int, str, list[str]]] = []
         for match in re.finditer(r"[^.!?;:]{40,900}(?:[.!?;:]|$)", text):
             paragraph = match.group(0).strip()
@@ -434,6 +501,11 @@ class WebTools:
             "freedom": ("libertà", "liberta"),
             "human": ("umano", "umana", "persona"),
             "humans": ("umano", "umana", "persona"),
+            "worth": ("dignità", "dignita", "persona", "dignity"),
+            "free": ("libertà", "liberta", "freedom"),
+            "will": ("libertà", "liberta", "freedom", "coscienza"),
+            "system": ("sistema", "sistemi"),
+            "systems": ("sistema", "sistemi"),
             "technology": ("tecnica", "tecnologia"),
             "digital": ("digitale",),
             "justice": ("giustizia",),
@@ -459,6 +531,8 @@ class WebTools:
             "concetto", "tema", "verifica", "controlla", "dice", "riguardo", "qualcosa", "particolare",
         }
         words = [word.lower() for word in re.findall(r"[\wÀ-ÿ-]{4,}", query)]
+        if re.search(r"\bai\b", query, flags=re.IGNORECASE):
+            words.extend(["artificial", "intelligence"])
         unique: list[str] = []
         for word in words:
             if word in stopwords or word in unique:

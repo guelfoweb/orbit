@@ -14,6 +14,8 @@ DIRECTORY_TERMS = (
     "subdirectories",
     "workdir",
     "workspace",
+    "workspace root",
+    "root",
     "working directory",
     "cartella",
     "cartelle",
@@ -43,6 +45,9 @@ DIRECTORY_CONTENT_TERMS = (
     "content",
     "contents",
     "inside",
+    "inside the workspace",
+    "workspace root",
+    "root",
     "files",
     "show",
     "list",
@@ -227,6 +232,15 @@ def local_directory_listing_result(
         listed = recent_listed_paths(messages, 12)
         if not listed:
             return None
+        if _directory_listing_prefers_separated_entries(user_input):
+            directories = set(recent_listed_directory_paths(messages, 12))
+            files = [path for path in listed if path not in directories]
+            directory_list = [path for path in listed if path in directories]
+            return _format_separated_listing(
+                files=files,
+                directories=directory_list,
+                english=prefers_english_output(user_input),
+            )
         return ", ".join(listed)
     listed = recent_listed_paths(messages, 5)
     if not listed:
@@ -288,7 +302,14 @@ def directory_listing_wants_recursive(user_input: str) -> bool:
 
 def _directory_listing_prefers_directories(user_input: str) -> bool:
     lowered = user_input.strip().lower()
-    if "files and directories" in lowered or "file e cartelle" in lowered or "file e directory" in lowered:
+    if (
+        "files and directories" in lowered
+        or "files from directories" in lowered
+        or "separating files" in lowered
+        or "separate files" in lowered
+        or "file e cartelle" in lowered
+        or "file e directory" in lowered
+    ):
         return False
     explicit_directory_only_terms = ("non file", "not files", "instead of files", "rather than files")
     if any(term in lowered for term in explicit_directory_only_terms):
@@ -302,6 +323,27 @@ def _directory_listing_prefers_mixed_entries(user_input: str) -> bool:
         return True
     mixed_terms = ("cosa contiene", "what does", "contains", "contain", "contents", "content", "inside", "contiene")
     return any(term in lowered for term in mixed_terms) and not _directory_listing_prefers_directories(user_input)
+
+
+def _directory_listing_prefers_separated_entries(user_input: str) -> bool:
+    lowered = user_input.strip().lower()
+    separated_terms = (
+        "separating files from directories",
+        "separate files from directories",
+        "separating files and directories",
+        "separate files and directories",
+        "separati",
+        "separa file",
+    )
+    return any(term in lowered for term in separated_terms)
+
+
+def _format_separated_listing(*, files: list[str], directories: list[str], english: bool) -> str:
+    file_title = "Files" if english else "File"
+    directory_title = "Directories" if english else "Directory"
+    file_value = ", ".join(files) if files else "none"
+    directory_value = ", ".join(directories) if directories else "none"
+    return f"{file_title}: {file_value}\n{directory_title}: {directory_value}"
 
 
 def _directory_listing_prefers_tree(user_input: str) -> bool:

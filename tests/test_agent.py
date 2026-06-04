@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.core.agent import AgentLoop, _compact_message_for_model
+from orbit.core.agent import AgentLoop, _compact_message_for_model, _requested_summary_line_count
 import orbit.core.guardrails.documents as documents_module
 from orbit.core.policy.context import profile_for_model
 from orbit.core.ollama_client import OllamaError
@@ -76,7 +76,7 @@ class FakeClient:
 class VisionFakeClient(FakeClient):
     def inspect_model(self):
         return ModelMetadata(
-            active_model="gemma4:e2b-fast-t6-c8k",
+            active_model="gemma4:e2b-c8k",
             context_window=8192,
             capabilities=("completion", "tools", "vision"),
             tools_supported=True,
@@ -86,7 +86,7 @@ class VisionFakeClient(FakeClient):
 class AudioFakeClient(FakeClient):
     def inspect_model(self):
         return ModelMetadata(
-            active_model="gemma4:e2b-fast-t6-c8k",
+            active_model="gemma4:e2b-c8k",
             context_window=8192,
             capabilities=("completion", "tools", "vision", "audio"),
             tools_supported=True,
@@ -177,8 +177,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("shell", route.categories)
 
     def test_markdown_open_task_extraction_uses_bounded_search_and_preserves_sections(self) -> None:
-        client = FakeClient([])
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client = VisionFakeClient([])
         registry = FakeRegistry()
 
         def call(name, arguments):
@@ -221,8 +220,25 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("inconsistent metadata", result.content)
 
     def test_markdown_open_task_semantic_analysis_uses_model_after_bounded_search(self) -> None:
-        client = FakeClient([])
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": (
+                            "Overdue tasks\n"
+                            "- [ ] Fix report #work\n\n"
+                            "Recurring tasks\n"
+                            "- [ ] Follow up\n\n"
+                            "Top 3 priorities\n"
+                            "1. - [ ] Fix report #work\n\n"
+                            "Notes\n"
+                            "- inconsistent metadata"
+                        )
+                    }
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-c8k"
         registry = FakeRegistry()
 
         def call(name, arguments):
@@ -254,7 +270,7 @@ class AgentLoopTests(unittest.TestCase):
         )
 
         self.assertEqual(registry.called[0][0], "bash")
-        self.assertEqual(len(client.calls), 0)
+        self.assertEqual(len(client.calls), 1)
         self.assertIn("Overdue tasks", result.content)
         self.assertIn("- [ ] Fix report #work", result.content)
         self.assertIn("Recurring tasks", result.content)
@@ -263,8 +279,16 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("inconsistent metadata", result.content)
 
     def test_markdown_open_task_semantic_analysis_skips_redundant_read_file(self) -> None:
-        client = FakeClient([])
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": "Top 3 priorities\n1. - [ ] Fix report #work"
+                    }
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-c8k"
         registry = FakeRegistry()
 
         def call(name, arguments):
@@ -291,8 +315,16 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Top 3 priorities", result.content)
 
     def test_obsidian_daily_skill_uses_bounded_open_task_extraction(self) -> None:
-        client = FakeClient([])
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": "- [ ] Open task #work\n- [ ] Personal task #personal"
+                    }
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-c8k"
         registry = FakeRegistry()
 
         def call(name, arguments):
@@ -320,7 +352,7 @@ class AgentLoopTests(unittest.TestCase):
         )
 
         self.assertEqual([name for name, _arguments in registry.called], ["bash"])
-        self.assertEqual(client.calls, [])
+        self.assertEqual(len(client.calls), 1)
         self.assertIn("- [ ] Open task #work", result.content)
         self.assertIn("- [ ] Personal task #personal", result.content)
 
@@ -337,9 +369,9 @@ class AgentLoopTests(unittest.TestCase):
                 }
             ]
         )
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client.model = "gemma4:e2b-c8k"
         client.inspect_model = lambda: ModelMetadata(
-            active_model="gemma4:e2b-fast-t6-c8k",
+            active_model="gemma4:e2b-c8k",
             context_window=8192,
             capabilities=("completion", "tools"),
             tools_supported=True,
@@ -354,7 +386,7 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_url_mention_check_fetches_with_query_and_answers_from_matches(self) -> None:
         client = FakeClient([])
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client.model = "gemma4:e2b-c8k"
         registry = FakeRegistry()
 
         def call(name, arguments):
@@ -440,7 +472,7 @@ class AgentLoopTests(unittest.TestCase):
                 },
             ]
         )
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client.model = "gemma4:e2b-c8k"
         registry = FakeRegistry()
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
         result = agent.run_turn("summarize the article at this link: https://example.com/doc")
@@ -617,6 +649,11 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent, INTENT_CHITCHAT)
         self.assertEqual(route.intent_class, INTENT_CLASS_CHAT_GENERAL)
 
+    def test_explicit_without_browsing_web_search_prompt_stays_chat(self) -> None:
+        route = route_intent("explain the advantages and risks of web search for language models without browsing")
+        self.assertEqual(route.intent, INTENT_CHITCHAT)
+        self.assertEqual(route.intent_class, INTENT_CLASS_CHAT_GENERAL)
+
     def test_discursive_command_statement_does_not_route_to_shell(self) -> None:
         route = route_intent("show me how grep works")
         self.assertEqual(route.intent, INTENT_GENERAL_KNOWLEDGE)
@@ -729,6 +766,16 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(route.intent, INTENT_TEXT_DOCUMENT_ANALYSIS)
         self.assertEqual(route.intent_class, INTENT_CLASS_FILE_READING)
 
+    def test_workspace_root_inside_request_routes_to_local_filesystem(self) -> None:
+        route = route_intent("show me what is inside the workspace root, separating files from directories if possible")
+        self.assertEqual(route.intent, INTENT_TEXT_DOCUMENT_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_WORKSPACE_DISCOVERY)
+
+    def test_workspace_recently_changed_file_request_routes_to_local_filesystem(self) -> None:
+        route = route_intent("use workspace metadata to identify the most recently changed file")
+        self.assertEqual(route.intent, INTENT_TEXT_DOCUMENT_ANALYSIS)
+        self.assertEqual(route.intent_class, INTENT_CLASS_FILE_READING)
+
     def test_workspace_security_search_routes_to_codebase_not_web(self) -> None:
         route = route_intent("Search the workspace for anything that looks like a security issue.")
         self.assertEqual(route.intent, INTENT_CODEBASE_INSPECTION)
@@ -753,6 +800,12 @@ class AgentLoopTests(unittest.TestCase):
             ]
         )
         client.model = "gemma4:e2b"
+        client.inspect_model = lambda: ModelMetadata(
+            active_model="gemma4:e2b",
+            context_window=8192,
+            capabilities=("completion", "tools"),
+            tools_supported=True,
+        )
         registry = FakeRegistry()
         agent = AgentLoop(client=client, registry=registry, max_loops=4)
         result = agent.run_turn('decode this string "Y2lhbw==" from base64')
@@ -785,7 +838,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Source code: agent.py", result.content)
         self.assertIn("Configuration: config.json", result.content)
         self.assertIn("Documentation/text: README.md", result.content)
-        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": False, "max_entries": 80})])
+        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": False, "max_entries": 12})])
         self.assertEqual(client.calls, [])
 
     def test_gemma_model_first_answers_missing_json_config_from_listing(self) -> None:
@@ -810,7 +863,7 @@ class AgentLoopTests(unittest.TestCase):
         agent = AgentLoop(client=client, registry=registry, max_loops=4)
         result = agent.run_turn("Without guessing, inspect the workspace and tell me whether there is any JSON configuration file. If none exists, say exactly that and do not create one.")
         self.assertEqual(result.content, "No JSON configuration file exists in the current workspace.")
-        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": False, "max_entries": 80})])
+        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": False, "max_entries": 12})])
         self.assertEqual(client.calls, [])
 
     def test_gemma_model_first_preserves_local_and_web_evidence(self) -> None:
@@ -959,6 +1012,92 @@ class AgentLoopTests(unittest.TestCase):
                 ("stat_path", {"path": ".", "recursive": True}),
             ],
         )
+        self.assertEqual(client.calls, [])
+
+    def test_workspace_root_inside_request_lists_entries_locally(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "list_files":
+                return {
+                    "ok": True,
+                    "path": ".",
+                    "entries": [
+                        {"path": "audio", "type": "dir"},
+                        {"path": "text/summary.txt", "type": "file"},
+                    ],
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("show me what is inside the workspace root, separating files from directories if possible")
+        self.assertIn("audio", result.content)
+        self.assertIn("text/summary.txt", result.content)
+        self.assertEqual(registry.called, [("list_files", {"path": ".", "recursive": False, "max_entries": 12})])
+        self.assertEqual(client.calls, [])
+
+    def test_workspace_recently_changed_file_finalizes_locally(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "stat_path":
+                return {
+                    "ok": True,
+                    "path": ".",
+                    "type": "dir",
+                    "recursive": True,
+                    "file_count": 2,
+                    "dir_count": 0,
+                    "entries": [
+                        {"path": "latest.md", "type": "file", "modified_at": "2026-06-04T10:00:00+00:00"},
+                        {"path": "older.md", "type": "file", "modified_at": "2026-06-03T10:00:00+00:00"},
+                    ],
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("use workspace metadata to identify the most recently changed file and tell me when it was modified")
+        self.assertIn("latest.md", result.content)
+        self.assertIn("2026-06-04T10:00:00+00:00", result.content)
+        self.assertEqual(registry.called, [("stat_path", {"path": ".", "recursive": True})])
+        self.assertEqual(client.calls, [])
+
+    def test_workspace_updated_file_count_request_finalizes_with_recursive_metadata(self) -> None:
+        client = FakeClient([])
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name == "stat_path":
+                return {
+                    "ok": True,
+                    "path": ".",
+                    "type": "dir",
+                    "recursive": True,
+                    "file_count": 2,
+                    "dir_count": 1,
+                    "entries": [
+                        {"path": "fresh.txt", "type": "file", "modified_at": "2026-06-04T10:00:00+00:00"},
+                        {"path": "old.txt", "type": "file", "modified_at": "2026-06-03T10:00:00+00:00"},
+                    ],
+                }
+            return {"ok": False, "error": "unexpected"}
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("count the files in this workspace and report the most recently updated file")
+        self.assertIn("There are 2 files", result.content)
+        self.assertIn("fresh.txt", result.content)
+        self.assertEqual(registry.called, [("stat_path", {"path": ".", "recursive": True})])
         self.assertEqual(client.calls, [])
 
     def test_gemma_model_first_file_metadata_finalizes_locally(self) -> None:
@@ -1714,7 +1853,7 @@ class AgentLoopTests(unittest.TestCase):
                 }
             ]
         )
-        client.model = "gemma4:e2b-fast-t6-c8k"
+        client.model = "gemma4:e2b-c8k"
         registry = FakeRegistry()
 
         agent = AgentLoop(client=client, registry=registry, max_loops=3)
@@ -2389,6 +2528,14 @@ class AgentLoopTests(unittest.TestCase):
         )
         self.assertEqual(client.calls, [])
 
+    def test_requested_summary_line_count_accepts_hyphenated_word_count(self) -> None:
+        self.assertEqual(
+            _requested_summary_line_count(
+                "open text/divina_commedia_inferno_canto1.txt and give me a faithful four-line summary"
+            ),
+            4,
+        )
+
     def test_long_explicit_summary_request_reads_multiple_chunks_before_summarizing(self) -> None:
         client = FakeClient([])
         registry = FakeRegistry()
@@ -2434,6 +2581,45 @@ class AgentLoopTests(unittest.TestCase):
                 ("read_file", {"path": "README.md", "start_line": 121, "max_lines": 120, "max_chars": 6000}),
             ],
         )
+
+    def test_beginning_summary_request_reads_only_first_chunk(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "message": {"content": "Line one.\nLine two.\nLine three.\nLine four."},
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 100_000_000,
+                }
+            ]
+        )
+        client.model = "gemma4:e2b"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            if name != "read_file":
+                return {"ok": False, "error": "unexpected"}
+            return {
+                "ok": True,
+                "path": "text/divina_commedia_inferno_canto1.txt",
+                "start_line": arguments.get("start_line", 1),
+                "returned_lines": 120,
+                "total_lines": 400,
+                "next_start_line": 121,
+                "has_more": True,
+                "truncated": False,
+                "content": "Nel mezzo del cammin di nostra vita\nmi ritrovai per una selva oscura\n",
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "open text/divina_commedia_inferno_canto1.txt and give me a faithful four-line summary of the beginning of the text"
+        )
+        self.assertEqual(result.content, "Line one.\nLine two.\nLine three.\nLine four.")
+        self.assertEqual(len([call for call in registry.called if call[0] == "read_file"]), 1)
 
     def test_read_and_summarize_request_prefers_progressive_summary_over_single_show_read(self) -> None:
         client = FakeClient([])
@@ -3017,6 +3203,38 @@ class AgentLoopTests(unittest.TestCase):
             documents_module.extract_pdf_text_with_pypdf = original
 
         self.assertIn("has 3 pages", result.content)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(registry.called, [])
+
+    def test_explicit_pdf_page_count_and_topic_request_uses_single_pypdf_extract(self) -> None:
+        client = FakeClient([])
+        registry = FakeRegistry()
+        original = documents_module.extract_pdf_text_with_pypdf
+
+        def fake_pypdf_extract(**kwargs):
+            return {
+                "ok": True,
+                "command": "pypdf_extract pdf/Glossario.pdf --max-lines 240",
+                "stdout": "Glossario\nPhishing is a credential theft attempt.\n",
+                "stderr": "",
+                "returncode": 0,
+                "extractor": "pypdf",
+                "pages": 3,
+                "truncated": False,
+            }
+
+        documents_module.extract_pdf_text_with_pypdf = fake_pypdf_extract
+        try:
+            agent = AgentLoop(client=client, registry=registry, max_loops=3)
+            result = agent.run_turn(
+                "inspect pdf/Glossario.pdf and tell me both its page count and the general topic it covers"
+            )
+        finally:
+            documents_module.extract_pdf_text_with_pypdf = original
+
+        self.assertIn("has 3 pages", result.content)
+        self.assertIn("Topic:", result.content)
+        self.assertIn("Phishing is a credential theft attempt.", result.content)
         self.assertEqual(client.calls, [])
         self.assertEqual(registry.called, [])
 
@@ -5553,6 +5771,204 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.com", "max_links": 0})])
         self.assertEqual(client.calls, [])
 
+    def test_url_semantic_multi_concept_check_extracts_content_query(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "fetch_url",
+                                    "arguments": {
+                                        "url": "https://example.com/doc",
+                                        "query": "content",
+                                        "query_mode": "concept",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 1,
+                    "eval_duration": 100_000_000,
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            return {
+                "ok": True,
+                "url": arguments["url"],
+                "query": arguments.get("query"),
+                "query_mode": arguments.get("query_mode"),
+                "match_count": 2,
+                "matches": [
+                    {
+                        "context": "The document discusses human dignity, freedom, and artificial intelligence."
+                    }
+                ],
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "check whether this Vatican document discusses dignity, freedom, and artificial intelligence: https://example.com/doc"
+        )
+        self.assertIn("dignity", result.content.lower())
+        self.assertEqual(
+            registry.called,
+            [
+                (
+                    "fetch_url",
+                    {
+                        "url": "https://example.com/doc",
+                        "max_links": 0,
+                        "query": "dignity, freedom, and artificial intelligence",
+                        "query_mode": "concept",
+                        "max_matches": 8,
+                        "context_chars": 320,
+                    },
+                )
+            ],
+        )
+        self.assertEqual(len(client.calls), 1)
+
+    def test_url_synonymic_touch_request_extracts_concept_query(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "fetch_url",
+                                    "arguments": {
+                                        "url": "https://example.com/doc",
+                                        "query": "content",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 1,
+                    "eval_duration": 100_000_000,
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            return {
+                "ok": True,
+                "url": arguments["url"],
+                "query": arguments.get("query"),
+                "query_mode": arguments.get("query_mode"),
+                "match_count": 3,
+                "matches": [{"context": "The document touches on human worth, free will, and AI systems."}],
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "look at this page and tell me if it touches on human worth, free will, or AI systems: https://example.com/doc"
+        )
+        self.assertIn("human worth", result.content.lower())
+        self.assertEqual(
+            registry.called,
+            [
+                (
+                    "fetch_url",
+                    {
+                        "url": "https://example.com/doc",
+                        "query": "human worth, free will, or AI systems",
+                        "query_mode": "concept",
+                        "max_matches": 8,
+                        "context_chars": 320,
+                        "max_links": 0,
+                    },
+                )
+            ],
+        )
+        self.assertEqual(client.calls, [])
+
+    def test_url_semantic_multi_concept_check_forces_concept_mode_for_matching_query(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "fetch_url",
+                                    "arguments": {
+                                        "url": "https://example.com/doc",
+                                        "query": "dignity, freedom, and artificial intelligence",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 1,
+                    "eval_duration": 100_000_000,
+                }
+            ]
+        )
+        client.model = "gemma4:e2b-c8k"
+        registry = FakeRegistry()
+
+        def call(name, arguments):
+            registry.called.append((name, arguments))
+            return {
+                "ok": True,
+                "url": arguments["url"],
+                "query": arguments.get("query"),
+                "query_mode": arguments.get("query_mode"),
+                "match_count": 3,
+                "matches": [
+                    {
+                        "context": "The document discusses dignity, freedom, and artificial intelligence."
+                    }
+                ],
+            }
+
+        registry.call = call
+        agent = AgentLoop(client=client, registry=registry, max_loops=3)
+        result = agent.run_turn(
+            "check whether this Vatican document discusses dignity, freedom, and artificial intelligence: https://example.com/doc"
+        )
+        self.assertIn("dignity", result.content.lower())
+        self.assertEqual(
+            registry.called,
+            [
+                (
+                    "fetch_url",
+                    {
+                        "url": "https://example.com/doc",
+                        "query": "dignity, freedom, and artificial intelligence",
+                        "query_mode": "concept",
+                        "max_matches": 8,
+                        "context_chars": 320,
+                        "max_links": 0,
+                    },
+                )
+            ],
+        )
+        self.assertEqual(len(client.calls), 1)
+
     def test_url_article_summary_can_finalize_locally_from_fetch_without_second_model_call(self) -> None:
         client = FakeClient(
             [
@@ -7800,6 +8216,85 @@ class AgentLoopTests(unittest.TestCase):
         self.assertTrue(
             any("unsupported tools" in str(item.get("content", "")) for item in client.calls[1]["messages"])
         )
+
+    def test_tool_call_gate_declines_fetch_url_for_guessed_url(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 30,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 0,
+                    "eval_duration": 0,
+                    "total_duration": 150_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {"function": {"name": "fetch_url", "arguments": {"url": "https://example.com/dante"}}}
+                        ],
+                    },
+                },
+                {
+                    "prompt_eval_count": 8,
+                    "prompt_eval_duration": 50_000_000,
+                    "eval_count": 1,
+                    "eval_duration": 10_000_000,
+                    "message": {"content": "NO"},
+                },
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 80_000_000,
+                    "message": {"content": "I should search the web instead of fetching a guessed URL."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("search online for information about Dante Alighieri")
+        self.assertIn("search the web", result.content)
+        self.assertEqual(registry.called, [])
+        self.assertEqual(len(client.calls), 3)
+        self.assertIn("Proposed tool call: fetch_url", client.calls[1]["messages"][1]["content"])
+
+    def test_tool_call_gate_allows_fetch_url_when_model_confirms(self) -> None:
+        client = FakeClient(
+            [
+                {
+                    "prompt_eval_count": 30,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 0,
+                    "eval_duration": 0,
+                    "total_duration": 150_000_000,
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {"function": {"name": "fetch_url", "arguments": {"url": "https://example.com/dante"}}}
+                        ],
+                    },
+                },
+                {
+                    "prompt_eval_count": 8,
+                    "prompt_eval_duration": 50_000_000,
+                    "eval_count": 1,
+                    "eval_duration": 10_000_000,
+                    "message": {"content": "YES"},
+                },
+                {
+                    "prompt_eval_count": 20,
+                    "prompt_eval_duration": 100_000_000,
+                    "eval_count": 12,
+                    "eval_duration": 80_000_000,
+                    "message": {"content": "Fetched result reviewed."},
+                },
+            ]
+        )
+        registry = FakeRegistry()
+        agent = AgentLoop(client=client, registry=registry, max_loops=4)
+        result = agent.run_turn("search online for information about Dante Alighieri")
+        self.assertIn("Fetched result", result.content)
+        self.assertEqual(registry.called, [("fetch_url", {"url": "https://example.com/dante"})])
+        self.assertEqual(len(client.calls), 3)
 
     def test_binary_analysis_blocks_guessed_read_file_until_candidate_is_listed(self) -> None:
         client = FakeClient(

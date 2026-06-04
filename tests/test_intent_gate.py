@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from orbit.core.intent.gate import intent_gate_decision, intent_gate_messages, parse_intent_gate_reply, should_confirm_tool_route
+from orbit.core.intent.model_gate import fetch_url_matches_recent_search_result
+from orbit.core.intent.tool_gate import tool_gate_decision, tool_gate_messages
 from orbit.core.tools.router import route_tool_categories
 
 
@@ -70,6 +72,74 @@ class IntentGateTests(unittest.TestCase):
         self.assertIs(parse_intent_gate_reply("maybe"), None)
         self.assertTrue(parse_intent_gate_reply("YES"))
         self.assertFalse(parse_intent_gate_reply("NO"))
+
+    def test_tool_gate_confirms_fetch_url_without_user_url(self) -> None:
+        prompt = "search online for information about Dante Alighieri"
+        route = route_tool_categories(prompt)
+        decision = tool_gate_decision(
+            user_input=prompt,
+            route=route,
+            tool_name="fetch_url",
+            arguments={"url": "https://example.com/dante"},
+        )
+        self.assertTrue(decision.confirm)
+        self.assertEqual(decision.reason, "fetch_url without explicit user URL")
+
+    def test_tool_gate_does_not_confirm_clear_list_files(self) -> None:
+        prompt = "list all files in this workspace"
+        route = route_tool_categories(prompt)
+        decision = tool_gate_decision(
+            user_input=prompt,
+            route=route,
+            tool_name="list_files",
+            arguments={"path": "."},
+        )
+        self.assertFalse(decision.confirm)
+
+    def test_tool_gate_messages_are_yes_no_only(self) -> None:
+        prompt = "search online for information about Dante Alighieri"
+        route = route_tool_categories(prompt)
+        messages = tool_gate_messages(
+            user_input=prompt,
+            route=route,
+            tool_name="fetch_url",
+            arguments={"url": "https://example.com/dante"},
+            reason="fetch_url without explicit user URL",
+        )
+        self.assertIn("Answer only YES or NO", messages[0]["content"])
+        self.assertIn("Proposed tool call: fetch_url", messages[1]["content"])
+
+    def test_fetch_url_matches_recent_search_result_before_next_user_turn(self) -> None:
+        messages = [
+            {"role": "user", "content": "search online for information about Dante"},
+            {
+                "role": "tool",
+                "tool_name": "search_web",
+                "content": '{"results": [{"url": "https://example.com/dante"}]}',
+            },
+        ]
+        self.assertTrue(
+            fetch_url_matches_recent_search_result(
+                {"url": "https://example.com/dante"},
+                messages,
+            )
+        )
+
+    def test_fetch_url_does_not_match_search_result_from_previous_user_turn(self) -> None:
+        messages = [
+            {
+                "role": "tool",
+                "tool_name": "search_web",
+                "content": '{"results": [{"url": "https://example.com/dante"}]}',
+            },
+            {"role": "user", "content": "now answer from memory"},
+        ]
+        self.assertFalse(
+            fetch_url_matches_recent_search_result(
+                {"url": "https://example.com/dante"},
+                messages,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,0 @@
-FROM gemma4:e2b
-
-# Tuned for a 6-core / 12-thread CPU machine.
-PARAMETER temperature 0
-PARAMETER num_ctx 8192
-PARAMETER num_thread 6
-PARAMETER num_batch 96

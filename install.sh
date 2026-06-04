@@ -6,7 +6,7 @@ INSTALL_DIR="${ORBIT_INSTALL_DIR:-$HOME/.local/share/orbit}"
 BIN_DIR="${ORBIT_BIN_DIR:-$HOME/.local/bin}"
 CONFIG_DIR="$HOME/.orbit"
 CONFIG_FILE="$CONFIG_DIR/config.json"
-MODEL_NAME="${ORBIT_MODEL_NAME:-gemma4:e2b-fast-t6-c8k}"
+MODEL_NAME="${ORBIT_MODEL_NAME:-gemma4:e2b-c8k}"
 
 info() {
     printf '%s\n' "$*"

@@ -341,7 +341,7 @@ _LOCAL_FILE_READ_ACTION_TOKENS = frozenset(
     }
 )
 _WORKSPACE_INSPECTION_TOKENS = frozenset(
-    {"workspace", "workdir", "directory", "folder", "repo", "repository", "project", "progetto", "cartella"}
+    {"workspace", "workdir", "directory", "folder", "root", "repo", "repository", "project", "progetto", "cartella"}
 )
 _WORKSPACE_OPERATION_TOKENS = frozenset(
     {
@@ -480,6 +480,12 @@ def _intent_rules() -> tuple[IntentRule, ...]:
             intent_class=INTENT_CLASS_CODEBASE_INSPECTION,
             reason="operational workspace inspection hints",
             matcher=lambda text: _looks_like_operational_workspace_inspection_request(text),
+        ),
+        IntentRule(
+            intent=INTENT_TEXT_DOCUMENT_ANALYSIS,
+            intent_class=INTENT_CLASS_WORKSPACE_DISCOVERY,
+            reason="workspace listing hints",
+            matcher=lambda text: _looks_like_workspace_listing_request(text),
         ),
         IntentRule(
             intent=INTENT_TEXT_DOCUMENT_ANALYSIS,
@@ -715,6 +721,9 @@ def _looks_like_local_filesystem_metadata_request(intent_text: _IntentText) -> b
         "bytes",
         "mtime",
         "modified",
+        "updated",
+        "changed",
+        "change",
         "modification",
         "newest",
         "latest",
@@ -737,7 +746,7 @@ def _looks_like_local_filesystem_metadata_request(intent_text: _IntentText) -> b
         "permesso",
         "esiste",
     }
-    workspace_tokens = {"workspace", "workdir", "directory", "folder", "cartella", "progetto", "project"}
+    workspace_tokens = {"workspace", "workdir", "directory", "folder", "root", "cartella", "progetto", "project"}
     if not (intent_text.token_set & metadata_tokens):
         return False
     if _looks_like_binary_triage_request(intent_text):
@@ -1050,6 +1059,12 @@ def _looks_like_discursive_file_or_encoding_statement(intent_text: _IntentText) 
     text = intent_text.text
     if _looks_like_text_path_request(intent_text):
         return False
+    if (
+        intent_text.token_set & _WORKSPACE_INSPECTION_TOKENS
+        and intent_text.token_set & _WORKSPACE_OPERATION_TOKENS
+        and any(term in text for term in ("inside", "content", "contents", "contains", "contain", "root"))
+    ):
+        return False
     file_or_encoding_terms = {"file", "files", "filesystem", "filesystems", "base64", "encoding", "decoding", "codifica", "decodifica"}
     if not (intent_text.token_set & file_or_encoding_terms):
         return False
@@ -1072,6 +1087,8 @@ def _looks_like_discursive_web_statement(intent_text: _IntentText) -> bool:
     text = intent_text.text
     if not (intent_text.token_set & {"web", "internet", "search", "lookup", "online", "browser", "browsing", "ricerca", "cercare"}):
         return False
+    if _explicitly_forbids_browsing(intent_text):
+        return True
     if _has_explicit_web_url(intent_text) or _looks_like_explicit_web_lookup_request(intent_text):
         return False
     discussion_markers = (
@@ -1099,6 +1116,8 @@ def _looks_like_discursive_web_statement(intent_text: _IntentText) -> bool:
 
 
 def _looks_like_explicit_web_lookup_request(intent_text: _IntentText) -> bool:
+    if _explicitly_forbids_browsing(intent_text):
+        return False
     text = intent_text.text
     explicit_phrases = (
         "search online",
@@ -1124,6 +1143,26 @@ def _looks_like_explicit_web_lookup_request(intent_text: _IntentText) -> bool:
     if any(phrase in text for phrase in explicit_phrases):
         return True
     return bool(intent_text.token_set & {"latest", "recent", "current", "today", "news", "weather", "forecast", "ultime", "recente", "recenti", "attuale", "oggi", "notizie", "meteo", "previsioni"})
+
+
+def _explicitly_forbids_browsing(intent_text: _IntentText) -> bool:
+    text = intent_text.text
+    blockers = (
+        "without browsing",
+        "without searching",
+        "without web search",
+        "do not browse",
+        "don't browse",
+        "do not search",
+        "don't search",
+        "no browsing",
+        "no web search",
+        "senza navigare",
+        "senza cercare online",
+        "non cercare online",
+        "non usare il web",
+    )
+    return any(blocker in text for blocker in blockers)
 
 
 def _looks_like_codebase_inspection_request(intent_text: _IntentText) -> bool:
@@ -1152,6 +1191,21 @@ def _looks_like_operational_workspace_inspection_request(intent_text: _IntentTex
     if not (token_set & _WORKSPACE_OPERATION_TOKENS):
         return False
     return bool(token_set & _WORKSPACE_CODE_CONTEXT_TOKENS)
+
+
+def _looks_like_workspace_listing_request(intent_text: _IntentText) -> bool:
+    if _looks_like_file_edit_request(intent_text):
+        return False
+    token_set = intent_text.token_set
+    if token_set & {"version", "versione", "release"}:
+        return False
+    if _looks_like_local_filesystem_metadata_request(intent_text):
+        return False
+    if not (token_set & _WORKSPACE_INSPECTION_TOKENS):
+        return False
+    if not (token_set & {"show", "list", "display", "what", "which", "inside", "contain", "contains", "content", "contents", "files", "directories", "folders", "elenca", "mostra", "quali"}):
+        return False
+    return True
 
 
 def _looks_like_workspace_security_search_request(intent_text: _IntentText) -> bool:

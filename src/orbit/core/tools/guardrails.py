@@ -263,6 +263,8 @@ def seed_directory_discovery(
 ) -> None:
     if route.intent != INTENT_TEXT_DOCUMENT_ANALYSIS:
         return
+    if _asks_for_filesystem_metadata(user_input.lower()):
+        return
     if not _needs_directory_discovery(user_input):
         return
     target_path = _directory_listing_target_from_recent_listing(
@@ -316,11 +318,11 @@ def seed_filesystem_metadata(
     path = _extract_explicit_text_path(user_input)
     recursive = False
     if path is None:
-        workspace_hints = ("workspace", "workdir", "directory", "folder", "cartella", "progetto", "project")
+        workspace_hints = ("workspace", "workdir", "directory", "folder", "root", "cartella", "progetto", "project")
         if not any(hint in lowered for hint in workspace_hints):
             return
         path = "."
-        recursive = any(hint in lowered for hint in ("newest", "latest", "oldest", "recente", "recenti", "nuovo"))
+        recursive = any(hint in lowered for hint in ("newest", "latest", "oldest", "changed", "updated", "recente", "recenti", "nuovo"))
     _seed_guardrail_tool(
         name="stat_path",
         arguments={"path": path, "recursive": recursive},
@@ -346,13 +348,16 @@ def seed_workspace_file_classification(
 ) -> None:
     if route.intent not in {INTENT_TEXT_DOCUMENT_ANALYSIS, INTENT_CODEBASE_INSPECTION}:
         return
-    if not _asks_for_workspace_file_classification(user_input.lower()):
+    lowered = user_input.lower()
+    if _asks_for_workspace_security_scan(lowered):
+        return
+    if not _asks_for_workspace_file_classification(lowered):
         return
     if has_recent_tool_result(messages, "list_files"):
         return
     _seed_guardrail_tool(
         name="list_files",
-        arguments={"path": ".", "recursive": False, "max_entries": 80},
+        arguments={"path": ".", "recursive": False, "max_entries": 12},
         route=route,
         registry=registry,
         messages=messages,
@@ -375,13 +380,16 @@ def seed_workspace_file_presence_check(
 ) -> None:
     if route.intent not in {INTENT_TEXT_DOCUMENT_ANALYSIS, INTENT_CODEBASE_INSPECTION}:
         return
-    if not _asks_for_workspace_file_presence(user_input.lower()):
+    lowered = user_input.lower()
+    if _asks_for_workspace_security_scan(lowered):
+        return
+    if not _asks_for_workspace_file_presence(lowered):
         return
     if has_recent_tool_result(messages, "list_files"):
         return
     _seed_guardrail_tool(
         name="list_files",
-        arguments={"path": ".", "recursive": False, "max_entries": 80},
+        arguments={"path": ".", "recursive": False, "max_entries": 12},
         route=route,
         registry=registry,
         messages=messages,
@@ -1254,6 +1262,13 @@ def _asks_for_workspace_security_scan(lowered: str) -> bool:
 
 def _review_text_has_security_evidence(text: str) -> bool:
     lowered = text.lower()
+    if (
+        "no concrete vulnerability" in lowered
+        or "no concrete security" in lowered
+        or "nessuna vulnerabilità concreta" in lowered
+        or "nessuna vulnerabilita concreta" in lowered
+    ):
+        return False
     security_terms = (
         "security",
         "vulnerability",
@@ -1517,7 +1532,7 @@ def _format_file_metadata_result(result: dict[str, Any], lowered_input: str) -> 
         size = result.get("size_bytes")
         if isinstance(size, int):
             parts.append(f"size: {size} bytes")
-    if any(hint in lowered_input for hint in ("modified", "modification", "mtime", "modificato", "modifica", "recente")):
+    if any(hint in lowered_input for hint in ("modified", "modification", "mtime", "changed", "change", "modificato", "modifica", "recente")):
         modified = result.get("modified_at")
         if isinstance(modified, str) and modified:
             parts.append(f"modified: {modified}")
@@ -1545,7 +1560,7 @@ def _format_directory_metadata_result(result: dict[str, Any], lowered_input: str
     file_count = result.get("file_count")
     dir_count = result.get("dir_count")
     count = result.get("total_entries", result.get("count"))
-    wants_newest = any(hint in lowered_input for hint in ("newest", "latest", "recente", "recenti", "nuovo"))
+    wants_newest = any(hint in lowered_input for hint in ("newest", "latest", "changed", "updated", "recente", "recenti", "nuovo"))
     wants_oldest = any(hint in lowered_input for hint in ("oldest", "meno recente"))
     wants_files = any(hint in lowered_input for hint in ("file", "files"))
     if wants_newest or wants_oldest:
@@ -1647,6 +1662,7 @@ def _asks_for_filesystem_metadata(lowered_input: str) -> bool:
         "stat",
         "size",
         "modified",
+        "updated",
         "modification",
         "mtime",
         "newest",

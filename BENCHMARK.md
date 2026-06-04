@@ -6,14 +6,14 @@ Use this after runtime, routing, compaction, guardrail, media, or tool changes:
 
 ```bash
 python3 -m unittest discover -s tests -q
-PYTHONPATH=src python3 -m orbit --workdir workdir --model gemma4:e2b-fast-t6-c8k --debug-timing "list all files and directories in the current workspace"
+PYTHONPATH=src python3 -m orbit --workdir workdir --model gemma4:e2b-c8k --debug-timing "list all files and directories in the current workspace"
 ```
 
 `--debug-timing` prints bounded route, intent-gate, tool, and model timings. It is off by default.
 
 ## Method
 
-- Target model: `gemma4:e2b-fast-t6-c8k`.
+- Target model: `gemma4:e2b-c8k`.
 - Target context: `8192`.
 - Prompt source: [PROMPTS.md](PROMPTS.md).
 - Run prompts sequentially, one at a time.
@@ -23,19 +23,37 @@ PYTHONPATH=src python3 -m orbit --workdir workdir --model gemma4:e2b-fast-t6-c8k
 - Treat `src: local` as a valid fast path when Orbit can answer from bounded local evidence without another model call.
 - Skill prompts may depend on a local fixture workdir; do not publish fixture contents in benchmark notes.
 
-## Current model profile
+## Current model profiles
 
 ```bash
-ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
+ollama create gemma4:e2b-c8k -f Modelfile.gemma4-e2b-c8k
+ollama create gemma4:e2b-c4k -f Modelfile.gemma4-e2b-c4k
 ```
 
 ```text
 FROM gemma4:e2b
+
+# Main profile used for the benchmark on an Intel NUC 10 class CPU-only machine:
+# Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM.
 PARAMETER temperature 0
 PARAMETER num_ctx 8192
 PARAMETER num_thread 6
 PARAMETER num_batch 96
 ```
+
+```text
+FROM gemma4:e2b
+
+# Conservative profile used on an Intel Xeon E3-1275 v6 CPU-only machine:
+# 4 physical cores / 8 threads, about 16 GB RAM.
+# Also use this when the c8k profile crashes the Ollama runner with GGML scheduler errors.
+PARAMETER temperature 0
+PARAMETER num_ctx 4096
+PARAMETER num_thread 4
+PARAMETER num_batch 64
+```
+
+If Ollama fails with `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)`, rerun with `gemma4:e2b-c4k` before changing Orbit runtime behavior.
 
 Recommended Ollama server settings must be applied to the server process:
 

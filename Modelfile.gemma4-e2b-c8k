@@ -1,0 +1,8 @@
+FROM gemma4:e2b
+
+# Main CPU-only profile used on an Intel NUC 10 class machine:
+# Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM.
+PARAMETER temperature 0
+PARAMETER num_ctx 8192
+PARAMETER num_thread 6
+PARAMETER num_batch 96

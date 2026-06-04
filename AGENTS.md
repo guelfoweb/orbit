@@ -254,33 +254,50 @@ Minimum test coverage:
 
 ## Configuration
 
-Recommended model profile:
+Recommended model profiles:
 
 ```text
-Modelfile.gemma4-e2b-fast-t6-c8k
+Modelfile.gemma4-e2b-c8k
+Modelfile.gemma4-e2b-c4k
 ```
 
 ```text
 FROM gemma4:e2b
 
-# Tuned for a 6-core / 12-thread CPU machine.
+# Main profile used on an Intel NUC 10 class CPU-only machine:
+# Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM.
 PARAMETER temperature 0
 PARAMETER num_ctx 8192
 PARAMETER num_thread 6
 PARAMETER num_batch 96
 ```
 
-Create it with:
+```text
+FROM gemma4:e2b
+
+# Conservative profile used on an Intel Xeon E3-1275 v6 CPU-only machine:
+# 4 physical cores / 8 threads, about 16 GB RAM.
+# Also use this when the c8k profile crashes the Ollama runner with GGML scheduler errors.
+PARAMETER temperature 0
+PARAMETER num_ctx 4096
+PARAMETER num_thread 4
+PARAMETER num_batch 64
+```
+
+Create them with:
 
 ```bash
-ollama create gemma4:e2b-fast-t6-c8k -f Modelfile.gemma4-e2b-fast-t6-c8k
+ollama create gemma4:e2b-c8k -f Modelfile.gemma4-e2b-c8k
+ollama create gemma4:e2b-c4k -f Modelfile.gemma4-e2b-c4k
 ```
 
 Run:
 
 ```bash
-orbit --model gemma4:e2b-fast-t6-c8k
+orbit --model gemma4:e2b-c8k
 ```
+
+If Ollama fails with `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)`, try `gemma4:e2b-c4k`.
 
 User config:
 
@@ -295,7 +312,7 @@ Supported config keys:
 
 ```json
 {
-  "model": "gemma4:e2b-fast-t6-c8k",
+  "model": "gemma4:e2b-c8k",
   "host": "http://127.0.0.1:11434",
   "workdir": ".",
   "timeout": 300,

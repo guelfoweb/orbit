@@ -453,6 +453,7 @@ def local_codebase_review_result(
     if not read_results:
         return None
     english = prefers_english_output(lowered)
+    security_review = _asks_for_security_review(user_input)
     review_targets = code_review_target_paths(recent_listed_file_paths(messages, limit=40))
     if not review_targets:
         review_targets = code_review_target_paths(
@@ -478,18 +479,22 @@ def local_codebase_review_result(
                 break
         if len(findings) >= 3:
             break
+        if security_review:
+            continue
         finding = infer_code_review_finding(result, english=english)
         if finding is not None:
             findings.append(finding)
         if len(findings) >= 3:
             break
-    if len(findings) < 3:
+    if len(findings) < 3 and not security_review:
         for finding in infer_cross_file_review_findings(merged_results, english=english):
             if finding in findings:
                 continue
             findings.append(finding)
             if len(findings) >= 3:
                 break
+    if security_review and not findings:
+        return _no_concrete_security_finding(merged_results or read_results, english=english)
     if not findings:
         if _asks_for_explanatory_codebase_bug_analysis(user_input):
             return None
@@ -501,6 +506,65 @@ def local_codebase_review_result(
             return "\n".join(f"- Preliminary review target: `{path}` should be inspected before claiming bug findings." for path in targets)
         return "\n".join(f"- Target preliminare di review: `{path}` va ispezionato prima di affermare bug concreti." for path in targets)
     return "\n".join(findings[:3])
+
+
+def _asks_for_security_review(user_input: str) -> bool:
+    lowered = user_input.lower()
+    return any(
+        hint in lowered
+        for hint in (
+            "security",
+            "vulnerability",
+            "vulnerabilities",
+            "vuln",
+            "vulns",
+            "insecure",
+            "exploit",
+            "exploitable",
+            "cve",
+            "injection",
+            "xss",
+            "csrf",
+            "rce",
+            "traversal",
+            "auth bypass",
+            "sicurezza",
+            "vulnerabilità",
+            "vulnerabilita",
+            "vulnerabile",
+            "insicuro",
+            "falla",
+            "falle",
+        )
+    )
+
+
+def _no_concrete_security_finding(results: list[dict[str, Any]], *, english: bool) -> str | None:
+    inspected: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        path = result.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        normalized = normalize_relative_path(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        start_line = result.get("start_line")
+        returned_lines = result.get("returned_lines")
+        if isinstance(start_line, int) and isinstance(returned_lines, int) and returned_lines > 0:
+            end_line = start_line + returned_lines - 1
+            inspected.append(f"`{normalized}:{start_line}-{end_line}`")
+        else:
+            inspected.append(f"`{normalized}`")
+        if len(inspected) >= 3:
+            break
+    if not inspected:
+        return None
+    target_text = ", ".join(inspected)
+    if english:
+        return f"No concrete vulnerability found in the inspected portions. Inspected evidence: {target_text}."
+    return f"Nessuna vulnerabilità concreta trovata nelle porzioni ispezionate. Evidenza ispezionata: {target_text}."
 
 
 def codebase_review_reply_handling(
