@@ -204,12 +204,11 @@ The probe sends consecutive chat turns with a stable prefix and reports prompt t
 
 Example output shape:
 
-```text
-turn | prompt | cached | cache% | pf/s | gen/s | wall | finish
-1 | 1119 | 6 | 1% | 12.2 | 2.8 | 101.1s | stop
-2 | 1172 | 1115 | 95% | 8.8 | 2.9 | 18.4s | stop
-3 | 1228 | 1168 | 95% | 9.8 | 3.0 | 12.1s | stop
-```
+| turn | prompt | cached | cache | pf/s | gen/s | wall | finish |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 1 | 1119 | 6 | 1% | 12.2 | 2.8 | 101.1s | stop |
+| 2 | 1172 | 1115 | 95% | 8.8 | 2.9 | 18.4s | stop |
+| 3 | 1228 | 1168 | 95% | 9.8 | 3.0 | 12.1s | stop |
 
 Tool-loop cache probe:
 
