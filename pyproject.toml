@@ -1,25 +1,17 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "orbit"
-version = "0.1.0"
-description = "Simple interactive local-tool REPL for Ollama tool calling"
+version = "0.0.1"
+description = "Minimal experimental Orbit runtime for llama-server."
 readme = "README.md"
-license = { file = "LICENSE" }
-requires-python = ">=3.10"
-dependencies = ["ollama>=0.6.0", "Pillow>=10.0.0", "pypdf>=4.0.0", "rich>=13.0.0"]
+requires-python = ">=3.11"
+dependencies = []
 
 [project.scripts]
 orbit = "orbit.terminal.cli:main"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-include-package-data = false
-
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-orbit = ["builtins/**/SKILL.md"]

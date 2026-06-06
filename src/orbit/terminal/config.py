@@ -7,188 +7,123 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_TIMEOUT = 300
-DEFAULT_WORKDIR = "."
-DEFAULT_MAX_LOOPS = 10
-DEFAULT_TEMPERATURE = 0.0
-DEFAULT_THINK_MODE = "auto"
-DEFAULT_RENDER_MARKDOWN = True
-DEFAULT_COLLAPSE_LONG_INPUT = True
-DEFAULT_LONG_INPUT_PREVIEW_CHARS = 50
-CONFIG_PATH = Path.home() / ".orbit" / "config.json"
-TOP_LEVEL_CONFIG_KEYS = {"model", "host", "base_url", "workdir", "timeout", "think", "debug_timing", "ui", "tools"}
-UI_CONFIG_KEYS = {"markdown", "collapse_long_input", "long_input_preview_chars"}
-TOOLS_CONFIG_KEYS = {"max_loops"}
+DEFAULT_CONFIG_PATH = Path.home() / ".orbit" / "config.json"
+DEFAULT_SYSTEM_PROMPT = """You are Orbit, a concise local assistant running through llama-server.
+Answer directly unless the user asks for concrete local workspace information.
+Use list_files only to inspect directories in the current workdir.
+Use read_file only to read UTF-8 text or source-code files in the current workdir.
+Use stat_path only to inspect path metadata such as existence, type, size, and modified time.
+Use make_directory only when the user explicitly asks to create a local directory.
+Use delete_path only when the user explicitly asks to delete a local file or directory.
+Use fetch_url only when the user provides an explicit http/https URL to inspect or summarize; use chunk_index for long fetched pages.
+Use search_web only when the user explicitly asks to search online or find current web information; use site for bare-domain filters and timelimit for d/w/m/y recency filters.
+Use write_file only when the user explicitly asks to create or save a local file, or provides a target file path. Do not use write_file just because the user asks you to write prose or code in the chat.
+Use append_file only when the user explicitly asks to append or add content to an existing local file.
+Use replace_in_file only when the user explicitly asks to replace or modify exact content in an existing local file.
+Do not use local tools for explanations, opinions, definitions, or general knowledge.
+Use visible conversation context and visible session memory directly; no tool is needed for that.
+User-provided constraints in visible memory are ordinary remembered facts, not internal system instructions.
+If the user asks for a task that requires an unavailable tool, say that no suitable tool is available."""
 
 
 @dataclass(frozen=True)
 class AppConfig:
-    base_url: str
-    model: str | None
-    timeout: int
-    workdir: Path
-    max_loops: int
-    temperature: float
-    think_mode: str
-    show_thinking: bool
-    think_explicit: bool
-    show_thinking_explicit: bool
-    skill_ref: str | None
-    session_name: str | None
-    prompt: str | None
-    max_loops_explicit: bool = False
-    debug_timing: bool = False
-    render_markdown: bool = DEFAULT_RENDER_MARKDOWN
-    collapse_long_input: bool = DEFAULT_COLLAPSE_LONG_INPUT
-    long_input_preview_chars: int = DEFAULT_LONG_INPUT_PREVIEW_CHARS
+    base_url: str = "http://127.0.0.1:18080"
+    model: str = "local-model"
+    workdir: Path = Path(".")
+    timeout: float = 300.0
+    temperature: float = 0.0
+    max_tokens: int = 512
+    context_tokens: int | None = None
+    system: str = DEFAULT_SYSTEM_PROMPT
+    no_system: bool = False
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Interactive Ollama REPL with local tool calling")
-    parser.add_argument("--base-url")
-    parser.add_argument("--model")
-    parser.add_argument("--timeout", type=int)
-    parser.add_argument("--workdir")
-    parser.add_argument("--max-loops", type=int)
+def add_config_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to optional JSON config file.")
+    parser.add_argument("--base-url", help="llama-server base URL.")
+    parser.add_argument("--model", help="Model name sent to llama-server.")
+    parser.add_argument("--workdir", help="Working directory used for session identity.")
+    parser.add_argument("--timeout", type=float, help="HTTP timeout in seconds.")
     parser.add_argument("--temperature", type=float)
-    parser.add_argument("--think", choices=("auto", "on", "off"))
-    parser.add_argument("--show-thinking", action="store_true", default=None)
-    parser.add_argument("--debug-timing", action="store_true", default=None)
-    parser.add_argument("--skill")
-    parser.add_argument("--session")
-    parser.add_argument("prompt", nargs="*")
-    return parser
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--context-tokens", type=int, help="Override runtime context estimate for testing/benchmarking.")
+    parser.add_argument("--system")
+    parser.add_argument("--no-system", action="store_true", help="Do not send the default system prompt.")
 
 
-def parse_config(argv: list[str] | None = None, *, config_path: Path | None = None) -> AppConfig:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    argv = argv or []
-    file_config = load_user_config(CONFIG_PATH if config_path is None else config_path)
-    base_url = args.base_url or _config_str(file_config, "base_url") or _config_str(file_config, "host") or DEFAULT_BASE_URL
-    model = args.model or _config_str(file_config, "model")
-    timeout = args.timeout if args.timeout is not None else _config_int(file_config, "timeout", DEFAULT_TIMEOUT)
-    workdir_raw = args.workdir or _config_str(file_config, "workdir") or DEFAULT_WORKDIR
-    max_loops = args.max_loops if args.max_loops is not None else _config_nested_int(file_config, "tools", "max_loops", DEFAULT_MAX_LOOPS)
-    temperature = args.temperature if args.temperature is not None else DEFAULT_TEMPERATURE
-    think_mode = args.think or _config_str(file_config, "think") or DEFAULT_THINK_MODE
-    if think_mode not in {"auto", "on", "off"}:
-        raise ValueError("config key 'think' must be one of: auto, on, off")
-    show_thinking = bool(args.show_thinking)
-    debug_timing = (
-        bool(args.debug_timing)
-        if args.debug_timing is not None
-        else _config_bool(file_config, "debug_timing", False)
+def load_app_config(args: argparse.Namespace) -> AppConfig:
+    values = _read_config_file(Path(args.config))
+    config = AppConfig(
+        base_url=_str_value(values, "base_url", AppConfig.base_url),
+        model=_str_value(values, "model", AppConfig.model),
+        workdir=Path(_str_value(values, "workdir", str(AppConfig.workdir))).expanduser().resolve(),
+        timeout=_float_value(values, "timeout", AppConfig.timeout),
+        temperature=_float_value(values, "temperature", AppConfig.temperature),
+        max_tokens=_int_value(values, "max_tokens", AppConfig.max_tokens),
+        context_tokens=_optional_int_value(values, "context_tokens"),
+        system=_str_value(values, "system", AppConfig.system),
+        no_system=_bool_value(values, "no_system", AppConfig.no_system),
     )
-    render_markdown = _config_nested_bool(file_config, "ui", "markdown", DEFAULT_RENDER_MARKDOWN)
-    collapse_long_input = _config_nested_bool(
-        file_config, "ui", "collapse_long_input", DEFAULT_COLLAPSE_LONG_INPUT
-    )
-    long_input_preview_chars = _config_nested_int(
-        file_config, "ui", "long_input_preview_chars", DEFAULT_LONG_INPUT_PREVIEW_CHARS
-    )
-    workdir = Path(workdir_raw).expanduser().resolve()
-    if not workdir.exists():
-        raise ValueError(f"workdir not found: {workdir}")
-    if not workdir.is_dir():
-        raise ValueError(f"workdir is not a directory: {workdir}")
-    think_explicit = "--think" in argv or "think" in file_config
-    show_thinking_explicit = "--show-thinking" in argv
-    max_loops_explicit = "--max-loops" in argv or _has_nested_config_key(file_config, "tools", "max_loops")
     return AppConfig(
-        base_url=base_url,
-        model=model,
-        timeout=max(1, timeout),
-        workdir=workdir,
-        max_loops=max(1, max_loops),
-        max_loops_explicit=max_loops_explicit,
-        temperature=temperature,
-        think_mode=think_mode,
-        show_thinking=show_thinking,
-        think_explicit=think_explicit,
-        show_thinking_explicit=show_thinking_explicit,
-        skill_ref=args.skill,
-        session_name=args.session,
-        prompt=" ".join(args.prompt).strip() or None,
-        debug_timing=debug_timing,
-        render_markdown=render_markdown,
-        collapse_long_input=collapse_long_input,
-        long_input_preview_chars=max(1, long_input_preview_chars),
+        base_url=args.base_url if args.base_url is not None else config.base_url,
+        model=args.model if args.model is not None else config.model,
+        workdir=Path(args.workdir).expanduser().resolve() if args.workdir is not None else config.workdir,
+        timeout=args.timeout if args.timeout is not None else config.timeout,
+        temperature=args.temperature if args.temperature is not None else config.temperature,
+        max_tokens=args.max_tokens if args.max_tokens is not None else config.max_tokens,
+        context_tokens=args.context_tokens if args.context_tokens is not None else config.context_tokens,
+        system=args.system if args.system is not None else config.system,
+        no_system=args.no_system or config.no_system,
     )
 
 
-def load_user_config(path: Path) -> dict[str, Any]:
+def _read_config_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"cannot read config file {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid config JSON at {path}: {exc.msg}") from exc
-    if not isinstance(raw, dict):
-        raise ValueError(f"config must be a JSON object: {path}")
-    _validate_config_keys(raw, path=path)
-    return raw
+        raise ValueError(f"invalid JSON config file {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"invalid config file {path}: root value must be an object")
+    return data
 
 
-def _validate_config_keys(config: dict[str, Any], *, path: Path) -> None:
-    unknown = sorted(set(config) - TOP_LEVEL_CONFIG_KEYS)
-    if unknown:
-        raise ValueError(f"unknown config key in {path}: {unknown[0]}")
-    for section, allowed in (("ui", UI_CONFIG_KEYS), ("tools", TOOLS_CONFIG_KEYS)):
-        value = config.get(section)
-        if value is None:
-            continue
-        if not isinstance(value, dict):
-            raise ValueError(f"config key '{section}' must be an object")
-        section_unknown = sorted(set(value) - allowed)
-        if section_unknown:
-            raise ValueError(f"unknown config key in '{section}': {section_unknown[0]}")
+def _str_value(values: dict[str, Any], key: str, default: str) -> str:
+    value = values.get(key, default)
+    if not isinstance(value, str):
+        raise ValueError(f"invalid config key {key}: expected string")
+    return value
 
 
-def _config_str(config: dict[str, Any], key: str) -> str | None:
-    value = config.get(key)
+def _float_value(values: dict[str, Any], key: str, default: float) -> float:
+    value = values.get(key, default)
+    if not isinstance(value, int | float):
+        raise ValueError(f"invalid config key {key}: expected number")
+    return float(value)
+
+
+def _int_value(values: dict[str, Any], key: str, default: int) -> int:
+    value = values.get(key, default)
+    if not isinstance(value, int):
+        raise ValueError(f"invalid config key {key}: expected integer")
+    return value
+
+
+def _optional_int_value(values: dict[str, Any], key: str) -> int | None:
+    value = values.get(key)
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise ValueError(f"config key '{key}' must be a string")
+    if not isinstance(value, int):
+        raise ValueError(f"invalid config key {key}: expected integer")
     return value
 
 
-def _config_bool(config: dict[str, Any], key: str, default: bool) -> bool:
-    value = config.get(key, default)
+def _bool_value(values: dict[str, Any], key: str, default: bool) -> bool:
+    value = values.get(key, default)
     if not isinstance(value, bool):
-        raise ValueError(f"config key '{key}' must be a boolean")
+        raise ValueError(f"invalid config key {key}: expected boolean")
     return value
-
-
-def _config_int(config: dict[str, Any], key: str, default: int) -> int:
-    value = config.get(key, default)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"config key '{key}' must be an integer")
-    return value
-
-
-def _config_nested_bool(config: dict[str, Any], section: str, key: str, default: bool) -> bool:
-    nested = config.get(section)
-    if nested is None:
-        return default
-    value = nested.get(key, default)
-    if not isinstance(value, bool):
-        raise ValueError(f"config key '{section}.{key}' must be a boolean")
-    return value
-
-
-def _config_nested_int(config: dict[str, Any], section: str, key: str, default: int) -> int:
-    nested = config.get(section)
-    if nested is None:
-        return default
-    value = nested.get(key, default)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"config key '{section}.{key}' must be an integer")
-    return value
-
-
-def _has_nested_config_key(config: dict[str, Any], section: str, key: str) -> bool:
-    nested = config.get(section)
-    return isinstance(nested, dict) and key in nested

@@ -1,343 +1,137 @@
 # AGENTS.md
 
-## Purpose
+## Scope
 
-`orbit` is a minimal Python CLI for Ollama with an interactive REPL and local tool calling.
+This repository contains the new `orbit` CLI built around `llama.cpp` / `llama-server`.
 
-Current version: `0.1.0`
+The tool name remains `orbit`. The repository directory may be temporary.
 
-Internal notes must stay out of the public repository unless they are intentionally documented.
+## Hard rules
 
-Permanent constraints:
+- Keep the runtime small, readable, and easy to debug.
+- Do not turn Orbit into a generic agent framework.
+- Do not add deterministic fast paths for user tasks.
+- The model must decide whether to use available tools.
+- The runtime may enforce safety, size, context, and tool-contract boundaries.
+- Prefer standard-library Python unless a dependency has clear value.
+- Keep one-shot, REPL, backend, runtime, tools, and terminal UI separated.
+- Do not reintroduce Ollama-specific logic in this codebase.
+- Do not expose broad shell, editing, web, PDF, or browser tools until explicitly designed.
+- After runtime/tool/session changes, run unit tests.
 
-- Keep the code easy to read.
-- Keep the agent loop stable.
-- Keep side effects predictable.
-- Keep testing and debugging straightforward.
+## Backend
 
-## Backend And Runtime
+- Supported backend: local `llama-server`.
+- API style: OpenAI-compatible chat completions.
+- Default base URL: `http://127.0.0.1:18080`.
+- Primary target model: `gemma4:12b`.
+- Reasoning should be disabled at server startup for the current baseline.
+- Context profiles are provided by helper scripts, not hidden runtime magic.
 
-- Supported backend: local Ollama HTTP API.
-- Main endpoint: `http://127.0.0.1:11434`.
-- API endpoint: `/api/chat`.
-- Preferred Python client: official `ollama` package.
-- The main path must use Ollama native tool calling.
-- A limited fallback is allowed for tool calls returned as JSON/text.
-- `orbit` is built and tuned primarily around `gemma4:e2b`.
-- Other Gemma4 profiles are best-effort and are not guaranteed to behave with the same reliability.
-- If `--model` is omitted, use the first model already running from `/api/ps`.
-- If no model is running and `--model` is omitted, fail with a clear error.
-- Timeout must be configurable from the CLI and timeout errors must suggest increasing it.
+## Tools
 
-## Operating Modes
+Currently exposed tools:
 
-- Interactive REPL is the default mode.
-- One-shot mode is enabled by passing a positional prompt.
-- Optional skills can be loaded with `--skill` or REPL slash commands.
-- Sessions live under `~/.orbit/sessions`.
-- CLI, runtime bootstrap, and terminal rendering must remain separated.
-
-Minimum agent loop:
-
-1. Append the user message to history.
-2. Call Ollama with `messages` and `tools`.
-3. Execute each tool call locally.
-4. Reinject each result as `role: tool`.
-5. Stop on a final assistant reply without tool calls.
-6. Retry once on an empty reply.
-7. Fail with a clear error after two empty replies in the same turn.
-
-## Sessions And Skills
-
-Sessions:
-
-- If `--session` is omitted in interactive mode, look for sessions matching the current `workdir`.
-- If multiple sessions exist, show session name, first user prompt line, and a new-session option.
-- Session names must derive stably from `workdir`, with an incremental suffix when needed.
-- Persist at least: `messages`, active skill, and `workdir`.
-- Changing skill on an existing session must not load incompatible old messages.
-- `/reset` must persist the empty session immediately.
-- `/compact` must persist the compacted session immediately.
-- There must be a way to clear all sessions for the current `workdir`.
-
-Skills:
-
-- Supported format: `SKILL.md`.
-- Supported lookup: skill name, directory containing `SKILL.md`, or direct file path.
-- Default roots: `~/.orbit/skills` and `./skills`.
-- The active skill is appended to the system prompt.
-- If no skill is selected, automatically load `orbit-default`.
-- Changing skill must reset the current session.
-
-## Supported Tools
-
-Local tools:
-
-- `read_file`
 - `list_files`
+- `read_file`
 - `stat_path`
-- `replace_in_file`
+- `make_directory`
+- `delete_path`
+- `fetch_url`
+- `search_web`
 - `write_file`
 - `append_file`
-- `bash`
-- `search_web`
-- `fetch_url`
-
-New tools are allowed only when they are:
-
-- small and bounded
-- explicit in their parameters
-- limited in risk surface
-- covered by unit tests
-
-## Guardrails
-
-- All filesystem access must remain confined to `--workdir`.
-- Paths outside the logical root must be rejected.
-- `read_file` must enforce line and character limits.
-- `replace_in_file` must operate only on existing UTF-8 text files.
-- Ambiguous replacements must be rejected unless explicitly requested.
-- `write_file` and `append_file` must enforce size limits.
-- The first overwrite attempt on an unread existing file must be rejected with a `read_file` hint.
-- `bash` must use `shell=False`.
-- `bash` must not allow redirects, chaining, subshells, or equivalent operators.
-- Minimal pipelines are allowed only to benign allowlisted filters.
-- `bash` must block destructive commands or commands incoherent with the task.
-- `rm` is allowed only for targets confined to `workdir`.
-- `search_web` must return structured and bounded results, never raw HTML.
-- `fetch_url` must accept only explicit `http`/`https` URLs and return structured bounded output.
-
-## Architecture
-
-Required structure:
-
-- `orbit/core/`: agent loop, Ollama client, compaction, runtime, sessions, policy, context budget, loop guard, parser, and shared message/model helpers
-- `orbit/core/intent/`: intent routing, intent signals, and model-assisted intent gate
-- `orbit/core/guardrails/`: bounded guardrail helpers by domain: chat, documents, factual lookup, file edits, patterns, review, vision, and audio
-- `orbit/core/tools/`: tool routing, runtime tool guardrails, tool-call parsing, execution policy, and tool session state
-- `orbit/core/policy/`: turn policy, retry prompts, and policy helpers
-- `orbit/core/binary/`: binary and static-analysis guardrails
-- `orbit/tooling/`: registry and local tools by domain
-- `orbit/terminal/`: CLI, config, history, and text rendering
-
-Key responsibilities:
-
-- `terminal/cli.py`: thin entrypoint
-- `terminal/config.py`: config parsing and validation
-- `core/runtime.py`: bootstrap, skill, session, and persistence
-- `terminal/history.py`: REPL history
-- `terminal/ui.py`: help, tools, status, and rendering
-- `core/events.py`: typed events between loop, runtime, and UI
-- `core/agent.py`: agent loop and turn metrics
-- `core/tools/router.py`: tool subset exposed to the model
-- `core/tools/guardrails.py`: runtime constraints without bloating the main loop
-- `core/tools/call_parser.py`: fallback parsing for near-valid JSON/text tool calls
-- `core/tools/session_state.py` and `core/tools/execution_policy.py`: read-before-write, dedup, trust decay, and rehydration
-- `core/intent/router.py`: semantic intent classification
-- `core/intent/gate.py`: model-assisted YES/NO confirmation for risky ambiguous tool routes
-- `core/intent/signals.py`: reusable intent signal helpers
-- `core/policy/context.py`: context pressure thresholds and profiles
-- `core/policy/loop.py`: repeated tool-call history and matching
-- `core/messages.py`: pure helpers over messages
-- `core/model/guidance.py` and `core/model/payloads.py`: model-facing guidance and payload compaction helpers
-- `core/guardrails/*.py`: domain-specific guardrails used by `core/tools/guardrails.py` and `core/agent.py`
-- `core/compaction.py`: session compaction
-- `core/policy/turn.py`: explicit turn state classification
-- `core/policy/prompts.py` and `core/policy/helpers.py`: turn retry prompts and small policy helpers
-- `core/binary/guardrails.py` and `core/binary/static_analysis.py`: binary/static analysis helpers
-- `tooling/common.py`, `tooling/filesystem.py`, `tooling/shell.py`, `tooling/web.py`: domain tool implementations
+- `replace_in_file`
 
 Rules:
 
-- If the selected model does not advertise `tools`, warn and degrade to chat-only.
-- Do not recentralize logic in `terminal/cli.py`.
-- `orbit` may expose `--think on|off|auto` and `--show-thinking`.
-- `--debug-timing` may expose bounded timing diagnostics but must remain off by default.
-- Do not expose all tools for vague prompts on the main Gemma runtime.
-- Clear intents should keep fast direct routing; ambiguous, high-risk, or unsupported actions should pass through the YES/NO intent gate before exposing tools.
-- The intent gate must answer only whether Orbit should proceed with available local tools; it must not perform the task itself.
+- Tools are exposed only in interactive text mode.
+- No deterministic routing before tool use.
+- `read_file` reads UTF-8 text/source files only.
+- `stat_path` returns compact metadata only: existence, type, size, and modified time.
+- `make_directory` creates only directories confined to `workdir`.
+- `delete_path` deletes only paths confined to `workdir`; non-empty directories require `recursive=true`.
+- `delete_path` must refuse to delete the `workdir` root.
+- `fetch_url` accepts only explicit http/https URLs and returns bounded extracted text, never raw HTML.
+- `search_web` returns bounded structured results only: title, URL, and snippet.
+- `search_web` optional `site` filters must be bare domains; optional `timelimit` must be one of d/w/m/y.
+- `write_file` creates new UTF-8 text/source files only; it must not overwrite existing paths.
+- `write_file` must not create parent directories implicitly.
+- `write_file` is for explicit save/create-file requests, not ordinary chat requests to write prose or code.
+- `append_file` appends UTF-8 text to existing text/source files only; it must not create missing files.
+- `append_file` is for explicit append/add-to-file requests only.
+- `replace_in_file` replaces exactly one unique literal UTF-8 text fragment in an existing text/source file.
+- `replace_in_file` must reject zero-match and multi-match replacements.
+- `replace_in_file` is for explicit replace/modify-file requests only.
+- Long fetched pages use `fetch_url` with `chunk_index`; web content must not be silently saved into the workdir.
+- Do not present a first fetched chunk as a complete summary of a long document.
+- PDFs, images, audio, archives, and binary files must be rejected by `read_file`.
+- Complete `read_file` is limited to 256 KB.
+- Larger text/source files use `read_file` with `chunk_index`.
+- Chunk mode is limited to 1 MB files, 12k chars default chunk size, 24k chars max, and 3 chunk reads per user turn.
+- Unknown tools must fail clearly.
+
+## Session memory
+
+Orbit uses model-driven session memory refresh for long sessions.
+
+Rules:
+
+- The model generates the memory.
+- The internal memory request must not be saved as a visible session turn.
+- Memory refresh must run without tools.
+- Rebuilt history keeps:
+  - system prompt
+  - model-generated session memory
+  - recent verbatim tail
+- If memory generation is empty, attempts tool calls, fails, or does not reduce context, keep the original history unchanged.
+- Avoid back-to-back memory refreshes; a successful refresh must enter a short message-count cooldown.
+- Memory refresh events must show before/after estimated tokens, saved ratio, elapsed seconds, and threshold/window.
+- Default memory refresh threshold is 85% of the configured context estimate; lower it only with benchmark evidence.
+- Do not summarize user prompts at ingestion time.
+- Do not replace the current turn with a rewritten prompt.
 
 ## UX
 
-- Use classic terminal UX, not a full-screen TUI.
-- Persistent history should support arrow up/down when `readline` is available.
-- Local artifacts live under `~/.orbit`.
-- Errors must be short and readable.
-- One `Ctrl+C` interrupts the current turn/input; two close interrupts exit.
+- Classic terminal UX only.
+- No full-screen TUI.
+- Errors must be short and concrete.
+- Prompt history should use `readline` when available, support arrow up/down, persist by workdir, and avoid duplicates.
+- Slash commands must not be stored in prompt history.
+- `/status` should expose useful runtime state without becoming noisy.
+- `/tools` must show only currently exposed model tools.
+- `/max-tokens` may adjust output token budget for following turns, runtime-only.
+- Interactive final assistant responses should stream when supported by the backend.
+- Streaming must not break tool-call parsing or duplicate the final response.
+- Ctrl+C during streaming must interrupt the current turn, rollback partial messages, and return to the prompt without exiting.
+- Tool phases should emit compact dim events, including tool name and result size.
+- Tool event format is `<tool_name> <json_args>` followed by ` └ <tool_name> <result_chars> chars`.
+- Show a dim elapsed-time indicator before the first streamed token.
+- Keep one blank line between prompt and assistant response.
+- Keep one blank line between assistant response and the dim metrics footer.
+- Prefer resolved model names in status/footer; do not show SHA ids when reliable local metadata can map them.
 
-Minimum slash commands:
+## Tests
 
-- `/compact`
-- `/debug`
-- `/exit`
-- `/help`
-- `/reset`
-- `/sessions clear`
-- `/skill clear | list | show | use <ref>`
-- `/status`
-- `/think on|off|auto`
-- `/thinking on|off`
-- `/tools`
-
-UX rules:
-
-- Unknown slash commands must never be sent to the model.
-- `/skill clear` restores the default skill.
-- `/debug` shows the last-turn debug summary; `/debug last` may remain as a hidden compatibility alias but should not be advertised.
-- `/status` shows current runtime state: model, capabilities, context usage, session, workdir, skill, tools, and thinking state.
-- `/compact` must use hybrid compaction with both message-count and context-budget thresholds.
-- The per-turn status line must show at least: model, context window with percentage, token flow with prefill/generation speeds, message count, response source, and media preprocessing when applicable.
-- Very long user input may be visually collapsed as `[text N chars]` without changing the real content sent to the model.
-
-## Compaction And Turn Policy
-
-Compaction:
-
-- Must be reliable even if the model fails.
-- Must start from a deterministic and fast local structure.
-- The model may only refine the local summary.
-- If the model fails, returns empty content, or tries a tool call, use the local fallback immediately.
-- Must replace old messages with one structured operational summary.
-- Must keep recent messages verbatim.
-- Must prioritize durable requests, findings, tool activity, previous compacted memory, touched paths, and next step.
-- Before appending a large tool result, estimate projected pressure; if it would create hard pressure, compact first, then append the tool result.
-
-Turn policy:
-
-- Main cases must be classified explicitly, not with scattered branching.
-- Loop, runtime, and renderer must communicate through typed events, not implicit event strings.
-- Distinguish at least: final answer, tool phase, empty-reply retry, double-empty abort, repeated-tool abort, and max-loop stop.
-- Context pressure must be preemptive with at least `soft` and `hard` levels.
-- Initial thresholds must be conservative and adjustable by model family/size when needed.
-
-## Dependencies And Testing
-
-- Prefer the standard library when sufficient, except for the official Ollama client.
-- Avoid extra dependencies without clear value.
-- `Pillow` is allowed for bounded local image normalization in the vision path.
-- `pypdf` is allowed for bounded local PDF text extraction; `pdftotext`/`strings` may remain fallback extractors.
-- `ffmpeg`/`ffprobe` are required for bounded local audio normalization and chunking; audio prompts must fail clearly if they are missing.
-- Packaging must stay minimal.
-
-Minimum test coverage:
-
-- base agent loop
-- JSON fallback tool-call parsing
-- empty-reply retry
-- double-empty abort
-- session compaction
-- skill resolution
-- path confinement
-- file read limits
-- shell operator blocking
-- simple `bash` execution
-- context/model metadata parsing
-- vision image normalization
-- audio path detection and chunking
-- tool-result compaction pressure
-
-## Evolution Rules
-
-- Do not turn the project into a general framework.
-- Do not introduce browser automation or generic scraping outside bounded tools.
-- If a model handles tool calls poorly, fix prompt, limits, and guardrails before complicating architecture.
-- If a feature increases loop complexity, prefer a small bounded tool over implicit core logic.
-- Never route or remediate based on one exact observed user prompt.
-- Use reusable signals: tokens, request structure, intent classes, and behavior classes.
-- Keep routing fixes semantic: distinguish explanation/opinion/learning prompts from operational tool requests.
-- Discursive mentions of tools, commands, file systems, encoding, web search, or malware analysis must not expose tools unless the request is operational.
-- Regression prompts must be checked in both Italian and English when the fix affects language behavior.
-- Remediations must work coherently in both languages.
-- After every relevant fix, run unit tests and at least one real test with the target model.
-- Avoid fixes overly localized to language, dataset, path, filename, or a single development case.
-- When a concrete defect appears, fix the class of problem, not just the observed example.
-
-## Configuration
-
-Recommended model profiles:
-
-```text
-Modelfile.gemma4-e2b-c8k
-Modelfile.gemma4-e2b-c4k
-```
-
-```text
-FROM gemma4:e2b
-
-# Main profile used on an Intel NUC 10 class CPU-only machine:
-# Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM.
-PARAMETER temperature 0
-PARAMETER num_ctx 8192
-PARAMETER num_thread 6
-PARAMETER num_batch 96
-```
-
-```text
-FROM gemma4:e2b
-
-# Conservative profile used on an Intel Xeon E3-1275 v6 CPU-only machine:
-# 4 physical cores / 8 threads, about 16 GB RAM.
-# Also use this when the c8k profile crashes the Ollama runner with GGML scheduler errors.
-PARAMETER temperature 0
-PARAMETER num_ctx 4096
-PARAMETER num_thread 4
-PARAMETER num_batch 64
-```
-
-Create them with:
+Minimum checks before considering a change safe:
 
 ```bash
-ollama create gemma4:e2b-c8k -f Modelfile.gemma4-e2b-c8k
-ollama create gemma4:e2b-c4k -f Modelfile.gemma4-e2b-c4k
+python3 -m unittest discover -s tests -q
 ```
 
-Run:
+When `llama-server` is running, also run at least one real smoke test for the changed area.
 
-```bash
-orbit --model gemma4:e2b-c8k
-```
+Keep manual regression prompts in `PROMPTS.md`. The file should stay short and focused on currently supported behavior.
 
-If Ollama fails with `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)`, try `gemma4:e2b-c4k`.
+## Benchmark discipline
 
-User config:
+- Use `scripts/bench-kv-cache.py` before changing cache-related server flags.
+- Use `scripts/bench-tool-cache.py` before changing tool-loop payloads, schemas, or cache behavior.
+- Use `scripts/bench-continuation-cache.py` to compare no-tool continuation against tool-loop continuation.
+- Use `scripts/bench-raw-cache.py --mode all` to distinguish Orbit runtime effects from raw `llama-server` behavior.
+- Run `scripts/bench-memory-refresh.sh` on real sessions and record prompt tokens, cached tokens, and prefill speed before/after refresh.
+- Keep explicit `llama-server` slot/cache management out of the core runtime unless benchmarks justify it.
 
-- Optional config path: `~/.orbit/config.json`.
-- If the file is missing, Orbit must keep the same CLI defaults.
-- CLI flags must override matching config values when a matching flag exists.
-- Keep the config small and limited to runtime/UI defaults.
-- Do not store prompt policy, project-specific behavior, session state, or skill content in the global config.
-- `orbit-default` remains the automatic default skill and should not need to be duplicated in config.
+## Todo
 
-Supported config keys:
-
-```json
-{
-  "model": "gemma4:e2b-c8k",
-  "host": "http://127.0.0.1:11434",
-  "workdir": ".",
-  "timeout": 300,
-  "think": "off",
-  "debug_timing": false,
-  "ui": {
-    "markdown": true,
-    "collapse_long_input": true,
-    "long_input_preview_chars": 50
-  },
-  "tools": {
-    "max_loops": 10
-  }
-}
-```
-
-Ollama server performance notes:
-
-- If Ollama runs as a systemd service, environment variables exported before `orbit` do not configure the server.
-- Put `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE=-1`, and optionally `OLLAMA_MAX_LOADED_MODELS=1` in the `ollama.service` drop-in, then run `daemon-reload` and restart Ollama.
-- If launching `ollama serve` manually, export those variables before `ollama serve`, not before `orbit`.
-- On CPU-only systems, power profile/governor can affect throughput more than `num_ctx`, `num_thread`, or `num_batch`.
-
-## Regression Prompts
-
-Keep the curated prompt suite in [PROMPTS.md](PROMPTS.md).
-
-Run the benchmark instructions in [BENCHMARK.md](BENCHMARK.md) after runtime, routing, guardrail, compaction, or tool changes.
+- Keep tool surface limited until `list_files`, `read_file`, `stat_path`, and session memory are stable.

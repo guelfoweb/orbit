@@ -1,462 +1,321 @@
 # orbit
 
-Orbit is a minimal local CLI for Ollama tool calling.
+Minimal local CLI for `llama-server`, focused on prompt cache, continuation, and multimodal local inference.
 
-It is an experimental project focused on small local Gemma4 runtimes, not a general-purpose agent framework.
+The current baseline targets `gemma4:12b` through `llama.cpp`/`llama-server` on CPU-only hardware.
 
-It provides an interactive REPL, persistent sessions, a small set of bounded local tools, optional skills, and explicit local vision/audio paths. The runtime is designed to stay lean: low prompt overhead, narrow tool exposure, bounded loops, and compact context handling.
+## Status
 
-Orbit is developed primarily around `gemma4:e2b`, using a tuned Ollama profile called:
+Early prototype:
 
-```text
-gemma4:e2b-c8k
-```
+- Text chat through `llama-server` OpenAI-compatible API.
+- One-shot local image input through `--image`.
+- One-shot local audio input through `--audio`.
+- In-memory interactive conversation.
+- Streaming assistant output in interactive mode.
+- Local config file support.
+- Minimal session persistence.
+- Native tool-call loop with bounded `list_files`, `read_file`, `stat_path`, `fetch_url`, and `search_web`.
+- Model-driven session memory refresh for long interactive sessions.
+- No dependency beyond the Python standard library.
 
-Other `gemma4` profiles may work, but they are best-effort and are not guaranteed to behave with the same reliability.
+## Start llama-server
 
-## Requirements
-
-- Linux is the primary supported environment. macOS may work, but it is currently best-effort and not part of the tested target. Windows is not supported.
-- Python 3.10+
-- Git
-- Ollama running locally
-- A Gemma4 model with tool-call support
-- `ffmpeg` and `ffprobe` only if you want audio support
-- `pypdf` is installed automatically with Orbit and is used for bounded PDF text extraction
-
-Install optional audio dependencies on Debian/Ubuntu/Linux Mint:
+Main profile for `gemma4:12b` reusing the GGUF blob already downloaded by Ollama:
 
 ```bash
-sudo apt install ffmpeg
+llama-server \
+  -m /usr/share/ollama/.ollama/models/blobs/sha256-1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606 \
+  --mmproj /usr/share/ollama/.ollama/models/blobs/sha256-675ad6e68101ca9413ec806855c452362f0213f2dfc5800996b086fdb8119842 \
+  -c 8192 \
+  -t 6 \
+  -b 128 \
+  -ub 128 \
+  -np 1 \
+  --reasoning off \
+  --cache-ram 8192 \
+  --host 127.0.0.1 \
+  --port 18080
 ```
 
-## Install
-
-Install Orbit CLI:
+Or use the bundled helper:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guelfoweb/orbit/main/install.sh | sh
+scripts/start-gemma4-12b.sh
 ```
 
-The installer:
-
-- clones or updates the repository in `~/.local/share/orbit`
-- creates `~/.local/share/orbit/.venv`
-- installs the Python package
-- links the executable to `~/.local/bin/orbit`
-- creates `~/.orbit/config.json` only if it does not already exist
-- does not create or download Ollama models
-
-If `orbit` is not found after installation, make sure `~/.local/bin` is in your `PATH`.
-
-## Set up gemma4:e2b
-
-After installing Orbit, create the local model profiles from the local checkout:
+A conservative 4K context helper is available if 8K is unstable on smaller machines:
 
 ```bash
-~/.local/share/orbit/tune-e2b.sh
+scripts/start-gemma4-12b-c4k.sh
 ```
 
-The script:
-
-- checks that `ollama` is installed
-- pulls `gemma4:e2b` if missing
-- creates `gemma4:e2b-c8k` from `Modelfile.gemma4-e2b-c8k`
-- creates `gemma4:e2b-c4k` from `Modelfile.gemma4-e2b-c4k`
-- prints the final launch command
-
-This creates two Ollama profiles that share the same base model, so they do not duplicate the full model storage:
-
-| Profile | Target machine | When to use |
-| --- | --- | --- |
-| `gemma4:e2b-c8k` | Intel NUC 10 class CPU-only machine, Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM | Default Orbit profile and benchmark target |
-| `gemma4:e2b-c4k` | Intel Xeon E3-1275 v6 CPU-only machine, 4 physical cores / 8 threads, about 16 GB RAM | Conservative fallback for smaller machines or Ollama GGML scheduler crashes |
-
-Manual setup is also possible:
+The start helpers share the same implementation and accept conservative environment overrides for local experiments:
 
 ```bash
-ollama create gemma4:e2b-c8k -f Modelfile.gemma4-e2b-c8k
-ollama create gemma4:e2b-c4k -f Modelfile.gemma4-e2b-c4k
+THREADS=6 BATCH_SIZE=128 UBATCH_SIZE=128 CACHE_RAM=8192 scripts/start-gemma4-12b-c8k.sh
 ```
 
-Profile details:
+Prompt caching is enabled in Orbit requests. `llama-server` also enables prompt caching by default. Keep `CACHE_REUSE` unset unless you are benchmarking it explicitly:
 
-`Modelfile.gemma4-e2b-c8k`
-
-```text
-FROM gemma4:e2b
-
-# Intel i7-10710U, 6 physical cores / 12 threads, 64 GB RAM.
-PARAMETER temperature 0
-PARAMETER num_ctx 8192
-PARAMETER num_thread 6
-PARAMETER num_batch 96
+```bash
+CACHE_REUSE=256 scripts/start-gemma4-12b-c8k.sh
 ```
 
-`Modelfile.gemma4-e2b-c4k`
-
-```text
-FROM gemma4:e2b
-
-# Intel Xeon E3-1275 v6, 4 physical cores / 8 threads, about 16 GB RAM.
-PARAMETER temperature 0
-PARAMETER num_ctx 4096
-PARAMETER num_thread 4
-PARAMETER num_batch 64
-```
+Compare cache changes with `scripts/bench-kv-cache.py` before keeping them.
 
 ## Run
 
-Start Orbit:
-
 ```bash
-orbit --model gemma4:e2b-c8k
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+
+orbit --base-url http://127.0.0.1:18080 "Say who you are in one short sentence."
 ```
 
-If `gemma4:e2b-c8k` fails at startup or on the first prompt with an Ollama error like:
+Interactive mode:
+
+```bash
+orbit --base-url http://127.0.0.1:18080
+```
+
+Interactive sessions are persisted under `~/.orbit/sessions` and keyed by `--workdir`.
+
+Prompt history is persisted under `~/.orbit/history` when `readline` is available. Use arrow up/down to recall previous prompts. Slash commands are not stored and duplicate prompts are collapsed.
+
+Long interactive sessions are shortened automatically when the estimated transcript approaches context pressure. Orbit asks the model, internally and without tools, to produce a durable session memory. The internal request is not saved as a normal user-visible turn. The rebuilt session keeps:
 
 ```text
-llama-server process has terminated: GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS) failed
+system prompt
+model-generated session memory
+recent verbatim tail
 ```
 
-try the conservative profile:
+If the model returns an empty memory, tries a tool call, or the rebuilt session would not be smaller, Orbit keeps the original session unchanged.
 
-```bash
-orbit --model gemma4:e2b-c4k
-```
+The default memory-refresh threshold is 85% of Orbit's configured context estimate. This keeps CPU-only sessions from compacting too aggressively.
 
-That error comes from the Ollama/llama.cpp runner, not from Orbit. It usually means the current model profile is too aggressive for the machine or runner combination. The first values to reduce are `num_ctx` and `num_batch`.
-
-If `~/.orbit/config.json` already defines the model, you can simply run:
-
-```bash
-orbit
-```
-
-Run inside a specific workspace:
-
-```bash
-orbit --workdir /path/to/workspace
-```
-
-Run a one-shot prompt:
-
-```bash
-orbit "list all files in the current workspace"
-```
-
-Use a skill:
-
-```bash
-orbit --workdir . --skill notes
-```
-
-A skill can be:
-
-- a name resolved from `~/.orbit/skills` or `./skills`
-- a directory containing `SKILL.md`
-- a direct path to `SKILL.md`
-
-## User config
-
-Orbit can load default options from:
+When a refresh happens, Orbit prints a compact metric line:
 
 ```text
-~/.orbit/config.json
+memory: 2090->320 est. tokens | saved 1770 (85%) | 238.7s | threshold 1360/1600
 ```
 
-The file is optional. CLI flags override matching config values.
-
-Recommended config:
-
-```json
-{
-  "model": "gemma4:e2b-c8k",
-  "host": "http://127.0.0.1:11434",
-  "workdir": ".",
-  "timeout": 300,
-  "think": "off",
-  "debug_timing": false,
-  "ui": {
-    "markdown": true,
-    "collapse_long_input": true,
-    "long_input_preview_chars": 50
-  },
-  "tools": {
-    "max_loops": 10
-  }
-}
-```
-
-Keep project-specific behavior in skills, not in this global config. The bundled `orbit-default` skill is loaded automatically when no skill is selected.
-
-## Ollama performance notes
-
-Runtime environment variables must be set on the Ollama server process, not only before launching Orbit.
-
-If Ollama runs as a systemd service, exporting these variables in the same shell used to start `orbit` has no effect on the already-running server. In that case, configure the service itself.
-
-Recommended CPU-only settings:
+Interactive commands:
 
 ```text
-OLLAMA_NUM_PARALLEL=1
-OLLAMA_KEEP_ALIVE=-1
-OLLAMA_MAX_LOADED_MODELS=1
+/health          Check llama-server health.
+/help            Show commands.
+/max-tokens      Show current output token limit.
+/max-tokens <n>  Set output token limit for following turns.
+/reset           Clear current conversation and saved session.
+/status          Show runtime, session, and backend capabilities.
+/tools           Show available local tools.
+/exit            Exit interactive mode.
 ```
 
-Check the active service configuration:
-
-```bash
-systemctl cat ollama
-systemctl show ollama -p Environment
-```
-
-If the environment only shows `PATH=...`, the recommended Ollama settings are not active.
-
-Create a systemd drop-in:
-
-```bash
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null <<'EOF'
-[Service]
-Environment="OLLAMA_NUM_PARALLEL=1"
-Environment="OLLAMA_KEEP_ALIVE=-1"
-Environment="OLLAMA_MAX_LOADED_MODELS=1"
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl restart ollama
-```
-
-Verify that the override is loaded:
-
-```bash
-systemctl cat ollama
-systemctl show ollama -p Environment
-```
-
-The output should include:
-
-```text
-# /etc/systemd/system/ollama.service.d/override.conf
-[Service]
-Environment="OLLAMA_NUM_PARALLEL=1"
-Environment="OLLAMA_KEEP_ALIVE=-1"
-Environment="OLLAMA_MAX_LOADED_MODELS=1"
-```
-
-Check the loaded model:
-
-```bash
-curl -s http://127.0.0.1:11434/api/ps | jq
-```
-
-Example CPU-only output:
-
-```json
-{
-  "models": [
-    {
-      "name": "gemma4:e2b-c8k",
-      "model": "gemma4:e2b-c8k",
-      "size": 7679746272,
-      "details": {
-        "format": "gguf",
-        "family": "gemma4",
-        "families": ["gemma4"],
-        "parameter_size": "5.1B",
-        "quantization_level": "Q4_K_M"
-      },
-      "expires_at": "2318-09-09T17:43:43.936212989+02:00",
-      "size_vram": 0,
-      "context_length": 8192
-    }
-  ]
-}
-```
-
-On laptops and NUC-class machines, CPU governor or power profile can affect throughput more than `num_ctx`, `num_thread`, or `num_batch`.
-
-## Local tools
-
-Orbit exposes only a narrow tool subset for each turn.
+`/max-tokens <n>` changes only the current interactive runtime. It does not rewrite the config file or session.
 
 Available local tools:
 
-- `read_file`
-- `list_files`
-- `stat_path`
-- `replace_in_file`
-- `write_file`
-- `append_file`
-- `bash`
-- `search_web`
-- `fetch_url`
+```text
+list_files
+read_file
+stat_path
+make_directory
+delete_path
+fetch_url
+search_web
+write_file
+append_file
+replace_in_file
+```
 
-## Safety
+Tools are exposed only to the model in interactive text mode. There are no deterministic fast paths: if the model does not call a tool, Orbit answers normally.
 
-Orbit can read and modify files inside the configured `workdir` and can run bounded shell commands through guarded tool calls.
+Interactive assistant responses stream as tokens arrive. Tool-call turns remain compatible with streaming: Orbit may first receive a tool call, execute the bounded local tool, then stream the final assistant response.
 
-Use it only inside workspaces you control. Keep the `workdir` narrow, review file edits before trusting them, and do not point Orbit at directories containing secrets unless that is explicitly part of the task.
+While waiting for the first streamed token, the terminal shows a dim `Working` indicator with a spinner and elapsed time. Tool phases are shown as compact dim events, including tool result size. Tool results above 10k characters are marked as `large context`. The final metrics footer is also dimmed, includes total turn time, and is separated from the assistant response.
 
-The guardrails reduce risk, but they do not make local agentic execution risk-free.
+`read_file` is intentionally limited to bounded UTF-8 text and source-code files. PDFs, images, audio, archives, and binary files are rejected by the tool contract.
 
-Tool access is bounded:
+`stat_path` returns compact metadata for a path inside the workdir: existence, type, size in bytes, and modified time. It uses Python filesystem APIs, not OS-specific shell commands.
 
-- filesystem access is confined to `--workdir`
-- file reads enforce line and character limits
-- writes are size-limited
-- overwriting unread existing files is guarded
-- `bash` uses `shell=False`
-- shell operators, redirects, chaining, and common destructive commands are blocked
-- web search and URL fetches return structured bounded text, not raw unbounded HTML
+`make_directory` creates one directory inside the workdir, including missing parents. It refuses paths outside the workdir and does not replace existing files.
+
+`delete_path` deletes one file or directory inside the workdir. Non-empty directories require `recursive=true`, and the workdir root is always refused.
+
+`fetch_url` accepts only explicit `http`/`https` URLs. It uses a browser-like user-agent, bounded downloads, content-type filtering, and conservative HTML-to-text extraction. It never returns raw HTML. Long fetched pages use explicit `chunk_index` reads, without saving files to the workdir.
+
+`search_web` is for explicit web search requests. It returns a small structured result list with title, URL, and snippet. It does not expose raw search HTML. Optional `site` filters accept bare domains only, and optional `timelimit` accepts `d`, `w`, `m`, or `y`.
+
+`write_file` creates new UTF-8 text/source files only. It requires an explicit target path, refuses to overwrite existing paths, does not create parent directories implicitly, and is not used for normal chat answers such as "write a poem" or "write code" unless the user asks to save a file.
+
+`append_file` appends UTF-8 text to existing text/source files only. It never creates missing files and is used only for explicit append/add-to-file requests.
+
+`replace_in_file` replaces one unique exact UTF-8 text fragment in an existing text/source file. It does not use regex, refuses ambiguous matches, and is used only for explicit replace/modify-file requests.
+
+If a UTF-8 text/source file is too large for a complete `read_file`, the model may call `read_file` again with `chunk_index` to read real bounded chunks. Orbit does not summarize chunks deterministically: the model receives the actual chunk text and decides how to continue.
+
+Current read limits:
+
+```text
+complete read: up to 256 KB
+chunk mode: files up to 1 MB
+chunk size: 12k chars by default, 24k chars max
+chunk calls: max 3 per user turn
+```
+
+Current fetch limits:
+
+```text
+download: up to 512 KB
+extracted text: up to 256k chars
+chunk size: 6k chars by default, 24k chars max
+chunk calls: max 3 explicit chunk reads per user turn
+```
+
+Long web documents:
+
+For long URLs, `fetch_url` returns `chunk_index`, `total_chunks`, and the current character range. A complete summary should be built progressively by reading additional chunks. Orbit does not save fetched pages into the workdir and does not pretend that the first chunk represents the whole document.
+
+Tool-call smoke test:
+
+```bash
+scripts/smoke-tools.sh
+```
+
+Memory-refresh benchmark:
+
+```bash
+scripts/bench-memory-refresh.sh
+```
+
+The benchmark uses `--context-tokens` to lower Orbit's runtime context estimate without changing the server context window.
+
+KV-cache probe:
+
+```bash
+scripts/bench-kv-cache.py
+```
+
+The probe sends consecutive chat turns with a stable prefix and reports prompt tokens, cached tokens, prefill speed, generation speed, wall time, and stop reason.
+
+Example output shape:
+
+```text
+turn | prompt | cached | cache% | pf/s | gen/s | wall | finish
+1 | 1119 | 6 | 1% | 12.2 | 2.8 | 101.1s | stop
+2 | 1172 | 1115 | 95% | 8.8 | 2.9 | 18.4s | stop
+3 | 1228 | 1168 | 95% | 9.8 | 3.0 | 12.1s | stop
+```
+
+Tool-loop cache probe:
+
+```bash
+scripts/bench-tool-cache.py
+```
+
+This reports cache metrics for each model call inside tool turns, separating tool-call selection from the final answer after tool results are injected. Use `--include-large` only when you intentionally want to measure slow chunked reads.
+
+Continuation comparison probe:
+
+```bash
+scripts/bench-continuation-cache.py
+```
+
+This compares no-tool chat turns with tool-call turns using the same Orbit runtime metrics. Use it to distinguish generic chat-template continuation behavior from tool-specific cache misses.
+
+Raw cache probe:
+
+```bash
+scripts/bench-raw-cache.py --mode all
+```
+
+This bypasses Orbit runtime and calls `llama-server` directly. It compares raw multi-message chat, raw tool replay, and a monolithic single-message transcript. Use it to distinguish Orbit behavior from server/template/cache-matching behavior.
+
+Manual regression prompts are kept in [PROMPTS.md](PROMPTS.md).
+
+Optional config:
+
+```bash
+mkdir -p ~/.orbit
+cat > ~/.orbit/config.json <<'JSON'
+{
+  "base_url": "http://127.0.0.1:18080",
+  "model": "gemma4:12b",
+  "workdir": ".",
+  "timeout": 300,
+  "temperature": 0,
+  "max_tokens": 512
+}
+JSON
+```
+
+Then run:
+
+```bash
+orbit "Say who you are in one short sentence."
+```
+
+CLI flags override config values.
 
 ## Vision
 
-Orbit can inspect explicit local image paths:
+Attach one or more local images to a one-shot prompt:
 
-```text
-describe the image images/cat.png
-compare two images: image1.png and image2.jpg
+```bash
+orbit --image path/to/image.jpg "Describe this image in one short sentence."
 ```
 
-Supported formats:
+Supported image types: JPEG, PNG, and WebP. The active `llama-server` must be started with a compatible multimodal projector.
 
-- `png`
-- `jpg`
-- `jpeg`
-- `webp`
-- `bmp`
-- `gif`
+Vision smoke test:
 
-Images are normalized before being sent to Ollama: RGB conversion, alpha flattening, and conservative resizing for large inputs.
+```bash
+IMAGE=path/to/image.jpg scripts/smoke-vision.sh
+```
 
 ## Audio
 
-Orbit can inspect explicit local audio paths:
-
-```text
-transcribe audio/voice-sample.wav
-summarize audio/voice-sample.wav in one sentence
-```
-
-Supported source formats:
-
-- `wav`
-- `mp3`
-- `m4a`
-- `flac`
-- `ogg`
-
-Audio requires `ffmpeg` and `ffprobe`. Files are normalized to WAV PCM 16-bit, mono, 16 kHz, and split into 5 second chunks before being sent to the model.
-
-If `ffmpeg` or `ffprobe` is missing, Orbit fails clearly instead of sending unstable raw audio to Ollama.
-
-## Sessions
-
-Sessions are stored under:
-
-```text
-~/.orbit/sessions/
-```
-
-On interactive startup, Orbit looks for existing sessions matching the current `workdir`. If more than one exists, it lets you choose one or start a new session.
-
-Useful commands:
-
-- `/reset`: reset the current session
-- `/compact`: compact older context into a structured memory summary
-- `/sessions clear`: delete sessions for the current `workdir`
-
-## Skills
-
-Skills are optional `SKILL.md` instruction files.
-
-Default lookup roots:
-
-- `~/.orbit/skills`
-- `./skills`
-
-Useful commands:
-
-- `/skill list`
-- `/skill show`
-- `/skill use <ref>`
-- `/skill clear`
-
-`/skill clear` restores the bundled `orbit-default` skill.
-
-## Interactive commands
-
-- `/help`
-- `/tools`
-- `/status`
-- `/debug`
-- `/skill clear | list | show | use <ref>`
-- `/think on|off|auto`
-- `/thinking on|off`
-- `/compact`
-- `/reset`
-- `/sessions clear`
-- `/exit`
-
-Input history is persisted in:
-
-```text
-~/.orbit/history
-```
-
-Very long pasted prompts are visually collapsed in the terminal as `[text N chars]`, but the full original text is still sent to the model.
-
-## Routing and intent gate
-
-Orbit does not expose every tool on every turn.
-
-The runtime first classifies the user request, then exposes only the smallest useful tool subset. Ambiguous high-risk routes can pass through a strict YES/NO intent gate before tools are shown to the model.
-
-Turn flow:
-
-```text
-prompt -> intent routing -> optional intent gate -> minimal tool subset -> model
-```
-
-Examples:
-
-- `show me how grep works` stays chat/knowledge and does not expose `bash`.
-- `tell me about file systems` stays chat/knowledge and does not expose filesystem tools.
-- `decode this string "Y2lhbw==" from base64` uses a bounded local transform.
-- `search online for information about Dante Alighieri` exposes web tools only.
-- `read README.md` exposes filesystem tools only.
-- `compare image1.png and image2.jpg` uses the bounded vision path.
-
-The goal is to reduce ambiguity for small local models: fewer exposed tools, fewer wrong tool calls, fewer loops, and lower token waste.
-
-## Benchmark hardware
-
-The current regression benchmarks were run on a CPU-only Intel NUC 10 class machine:
-
-- Intel Core i7-10710U
-- 6 cores / 12 threads
-- 64 GB RAM
-- no GPU acceleration
-- Ollama serving the model from system RAM
-
-See [BENCHMARK.md](BENCHMARK.md) for the current prompt suite and observed timings.
-
-## Project layout
-
-- `src/orbit/core/`: agent loop, Ollama client, runtime, sessions, routing, compaction, guardrails
-- `src/orbit/tooling/`: local tool registry and tool implementations
-- `src/orbit/terminal/`: CLI, config parsing, history, and terminal rendering
-
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-## Test
-
-Run the unit test suite:
+Attach one or more local audio files to a one-shot prompt:
 
 ```bash
-python3 -m unittest discover -s tests -q
+orbit --audio path/to/audio.wav "Transcribe this audio."
 ```
+
+Supported audio types: WAV and MP3. Audio support in `llama.cpp` is experimental and slower than text or image prompts.
+
+Audio smoke test:
+
+```bash
+AUDIO=path/to/audio.wav scripts/smoke-audio.sh
+```
+
+## Benchmark
+
+Run the same small prompt suite against the active `llama-server`:
+
+```bash
+scripts/bench-chat.sh
+```
+
+Run the slower long-prefix cache check:
+
+```bash
+CACHE_BENCH=1 scripts/bench-chat.sh
+```
+
+Run the persisted-session check:
+
+```bash
+scripts/bench-session.sh
+```
+
+## Design rules
+
+- Start chat-only.
+- Add one capability at a time.
+- Measure prompt cache and continuation before adding tools.
+- Keep the runtime small, explicit, and easy to test.

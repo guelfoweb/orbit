@@ -1,47 +1,73 @@
-# PROMPTS
+# PROMPTS.md
 
-## Strategic suite
+Curated manual regression prompts for Orbit on `llama-server`.
 
-1. `list all files and directories in the current workspace`
-2. `inspect the workspace and tell me which files appear to contain source code, configuration, or documentation.`
-3. `decode this string "Y2lhbw==" from base64`
-4. `read the file text/summary.txt and summarize its purpose in two sentences`
-5. `what is the size and modified time of agent.py?`
-6. `tell me how many files exist in the workspace and what the newest file is.`
-7. `review agent.py for vulnerabilities and security issues`
-8. `summarize the article in italian at this link: https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html explain the central thesis and key messages`
-9. `compare two images: images/vision-test-1.png and images/vision-test-2.jpg and tell me the differences`
-10. `search online for information about Dante Alighieri`
-11. `Does this page mention "transumanesimo"? https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html`
-12. `Does this page talk about human dignity and freedom in the age of artificial intelligence? https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html`
+Run from the repository root:
 
-## Strong prompts
+```bash
+HOME_DIR="$(mktemp -d)" HOME="$HOME_DIR" orbit --model gemma4:12b --workdir .
+```
 
-1. `Inspect the workspace, identify the three most relevant files for understanding this project, read them, and give me a concise technical assessment with one concrete risk and one improvement suggestion.`
-2. `Compare images/vision-test-1.png and images/vision-test-2.jpg. Mention subject differences and any visible text.`
-3. `Read text/divina_commedia_inferno_canto1.txt, summarize it in exactly 4 lines, and make sure the summary is faithful to the text without inventing any details.`
-4. `Search the workspace for anything that looks like a security issue, then explain whether the issue is in code, configuration, or documentation. If you cannot prove it, say so explicitly.`
-5. `Answer this only after checking the available tools and the current workspace state: what is the newest file in the workspace, what is its modified time, and how did you determine it?`
-6. `What text is visible in images/vision-test-2.jpg? If text is unclear, say unclear. Also say what animal is shown.`
-7. `Compare two images: images/vision-test-1.png and images/vision-test-2.jpg. Mention subject differences and any visible text.`
-8. `transcribe audio/voice-sample-16k-mono.wav`
-9. `summarize audio/voice-sample.wav in one sentence`
+Use a clean temporary `HOME` for regression runs to avoid old sessions affecting timing or behavior.
 
-## Ambiguous intent prompts
+Before long summaries, optionally raise the output budget:
 
-1. `tell me about malware analysis`
-2. `ask me something about malware analysis, C2 or IoC`
-3. `malware analysis is useful for extracting IoCs quickly. What do you think?`
-4. `change the conclusion`
-5. `what do you think about web search in LLMs?`
-6. `who is Dante Alighieri?`
-7. `show me how grep works`
-8. `tell me about file systems`
-9. `tell me about base64 encoding`
-10. `use the tool to send an email to test@example.com`
+```text
+/max-tokens 1024
+```
 
-## Skill prompts
+## Core prompts
 
-Run with `--skill task-notes` and a workspace containing `Daily.md`.
+1. `hi, who are you?`
 
-1. `Read Daily.md. Extract all open tasks marked with "- [ ]", then analyze them semantically: group them by Work and Personal, identify overdue tasks, recurring tasks, and suggest the top 3 priorities for today. Use only evidence from Daily.md.`
+Expected: normal chat answer, no tool call, streamed output, footer shows `model: gemma4:12b`.
+
+2. `tell me what grep is used for, but do not run any command`
+
+Expected: conceptual explanation, no local tool use.
+
+3. `list files and directories in this workdir`
+
+Expected: model uses `list_files`; answer lists repository entries.
+
+4. `read README.md and summarize the project in two concise sentences`
+
+Expected: model uses `read_file`; answer summarizes Orbit, not raw file dump.
+
+5. `read AGENTS.md and tell me the three strictest runtime rules`
+
+Expected: model uses `read_file`; answer extracts concrete rules from the file.
+
+6. `what is the current max token limit?`
+
+Expected: no tool call; either answers from context if known or suggests `/max-tokens`. Then test `/max-tokens`.
+
+7. `/max-tokens 2048`
+
+Expected: command handled locally; output `max_tokens: 2048`; next `/status` reflects it.
+
+8. `write a short explanation of local LLM inference in 12 bullet points`
+
+Expected: streamed output; no `stop: length` with raised max tokens.
+
+9. `read a large UTF-8 text file if present and explain how Orbit should handle it`
+
+Expected: if no suitable file exists, model should not invent contents; if a large file exists, it should use `read_file` chunk mode.
+
+10. `start answering a long explanation, then interrupt with Ctrl+C`
+
+Expected: stream stops, Orbit prints `interrupted`, rolls back the partial turn, and returns to `>`.
+
+## Memory refresh prompt
+
+Use only when intentionally testing session memory because it can be slow on CPU-only hardware:
+
+```bash
+CONTEXT_TOKENS=1600 MAX_TOKENS=64 scripts/bench-memory-refresh.sh
+```
+
+Expected: when refresh happens, Orbit prints a line like:
+
+```text
+memory: 1081->280 est. tokens | saved 801 (74%) | 227.0s | threshold 1200/1600
+```
