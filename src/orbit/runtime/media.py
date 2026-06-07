@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ SUPPORTED_IMAGE_TYPES = {
     "image/png",
     "image/webp",
 }
+SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,7 @@ SUPPORTED_AUDIO_TYPES = {
     "audio/wave": "wav",
     "audio/x-wav": "wav",
 }
+SUPPORTED_AUDIO_SUFFIXES = {".mp3", ".wav"}
 
 
 def load_image(path: str) -> ImageInput:
@@ -83,3 +86,49 @@ def load_audio(path: str) -> AudioInput:
         format=audio_format,
         data=base64.b64encode(audio_path.read_bytes()).decode("ascii"),
     )
+
+
+def load_referenced_media(prompt: str, *, workdir: Path) -> tuple[list[ImageInput], list[AudioInput]]:
+    images: list[ImageInput] = []
+    audios: list[AudioInput] = []
+    seen: set[Path] = set()
+    for candidate in _media_path_candidates(prompt):
+        path = _resolve_inside_workdir(candidate, workdir=workdir)
+        if path is None or path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        suffix = path.suffix.lower()
+        if suffix in SUPPORTED_IMAGE_SUFFIXES:
+            images.append(load_image(str(path)))
+        elif suffix in SUPPORTED_AUDIO_SUFFIXES:
+            audios.append(load_audio(str(path)))
+    return images, audios
+
+
+def _media_path_candidates(prompt: str) -> list[str]:
+    try:
+        tokens = shlex.split(prompt)
+    except ValueError:
+        tokens = prompt.split()
+    candidates: list[str] = []
+    for token in tokens:
+        cleaned = token.strip(" \t\r\n.,;:()[]{}<>\"'")
+        suffix = Path(cleaned).suffix.lower()
+        if suffix in SUPPORTED_IMAGE_SUFFIXES or suffix in SUPPORTED_AUDIO_SUFFIXES:
+            candidates.append(cleaned)
+    return candidates
+
+
+def _resolve_inside_workdir(path: str, *, workdir: Path) -> Path | None:
+    if not path:
+        return None
+    root = workdir.expanduser().resolve()
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return resolved

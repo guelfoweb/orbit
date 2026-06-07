@@ -13,10 +13,17 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.terminal.cli import build_parser
-from orbit.terminal.config import load_app_config
+from orbit.terminal.config import DEFAULT_SYSTEM_PROMPT, load_app_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_default_system_prompt_allows_attached_media_answers(self) -> None:
+        self.assertIn("Attached image/audio => answer normally", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("Never emit raw tool-call syntax", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn('{"_route":"FILESYSTEM","tool":"<tool>"}', DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("Never answer file contents from memory", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("Common args: path, pattern, command, url, query, content.", DEFAULT_SYSTEM_PROMPT)
+
     def test_missing_config_uses_defaults(self) -> None:
         args = _parse("--config", "/tmp/orbit-missing-config.json")
 

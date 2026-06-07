@@ -23,10 +23,22 @@ def help_text() -> str:
             "/max-tokens <n>   Set output token limit for following turns.",
             "/reset            Clear current conversation and saved session.",
             "/status           Show runtime, session, and backend capabilities.",
-            "/tools            Show available local tools.",
+            "/tools            Show available tool backends.",
             "/exit             Exit interactive mode.",
         ]
     )
+
+
+def tools_text(backend: LlamaServerBackend) -> str:
+    server_tools = _server_tool_names(backend)
+    orbit_tools = _orbit_only_tool_names(server_tools)
+    lines = []
+    if server_tools:
+        lines.append("llama-server: " + ", ".join(server_tools))
+    else:
+        lines.append("llama-server: unavailable")
+    lines.append("orbit-only: " + (", ".join(orbit_tools) if orbit_tools else "none"))
+    return "\n".join(lines)
 
 
 def runtime_status(runtime: ChatRuntime, config: AppConfig, backend: LlamaServerBackend) -> str:
@@ -43,7 +55,8 @@ def runtime_status(runtime: ChatRuntime, config: AppConfig, backend: LlamaServer
         f"estimated_context_tokens: {estimate_message_tokens(runtime.messages)}",
         f"system: {'off' if config.no_system else 'on'}",
         f"workdir: {config.workdir}",
-        f"tools: {', '.join(tool_names())}",
+        f"tools_llama_server: {_format_server_tools(backend)}",
+        f"tools_orbit_only: {', '.join(_orbit_only_tool_names(_server_tool_names(backend))) or 'none'}",
     ]
     if info:
         lines.extend(
@@ -95,3 +108,26 @@ def _format_bytes(value: int | None) -> str:
     if value >= 1024**2:
         return f"{value / 1024**2:.1f} MiB"
     return f"{value} B"
+
+
+def _format_server_tools(backend: LlamaServerBackend) -> str:
+    names = _server_tool_names(backend)
+    return ", ".join(names) if names else "unavailable"
+
+
+def _server_tool_names(backend: LlamaServerBackend) -> list[str]:
+    names = []
+    for item in backend.server_tools():
+        name = item.get("tool")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return sorted(names)
+
+
+def _orbit_only_tool_names(server_tools: list[str]) -> list[str]:
+    hidden = set(server_tools)
+    if "exec_shell_command" in server_tools:
+        hidden.update({"stat_path"})
+    if "edit_file" in server_tools or "apply_diff" in server_tools:
+        hidden.update({"append_file", "replace_in_file"})
+    return [name for name in tool_names() if name not in hidden]

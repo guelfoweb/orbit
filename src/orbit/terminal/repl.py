@@ -7,16 +7,13 @@ from dataclasses import dataclass
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.sessions import SessionStore
-from orbit.runtime.tools import tool_names
-from orbit.terminal.commands import help_text, reset_session, runtime_status, set_max_tokens
+from orbit.terminal.commands import help_text, reset_session, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.config import AppConfig
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
+from orbit.terminal.tool_events import format_tool_result_event
 from orbit.terminal.theme import dim
-
-
-LARGE_TOOL_RESULT_CHARS = 10_000
 
 
 @dataclass
@@ -61,14 +58,17 @@ class Repl:
         started = time.monotonic()
         renderer.start()
         try:
-            result = self.runtime.ask_with_tools(
+            result = self.runtime.ask_auto(
                 prompt,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 workdir=self.config.workdir,
                 on_final_delta=renderer.write,
                 on_tool_call=lambda name, args: renderer.event(f"{name} {args}", restart_timer=False),
-                on_tool_result=lambda name, chars: renderer.event(_format_tool_result_event(name, chars), trailing_blank_line=True),
+                on_tool_result=lambda name, chars, source: renderer.event(
+                    format_tool_result_event(name, chars, source),
+                    trailing_blank_line=True,
+                ),
             )
         except KeyboardInterrupt:
             renderer.finish()
@@ -120,7 +120,7 @@ class Repl:
             print(runtime_status(self.runtime, self.config, self.backend))
             return True
         if command == "/tools":
-            print("\n".join(tool_names()))
+            print(tools_text(self.backend))
             return True
         print(f"unknown command: {command}", file=sys.stderr)
         return True
@@ -138,8 +138,3 @@ class Repl:
     def _save_history(self) -> None:
         if self.history:
             self.history.save()
-
-
-def _format_tool_result_event(name: str, chars: int) -> str:
-    suffix = " | large context" if chars >= LARGE_TOOL_RESULT_CHARS else ""
-    return f" └ {name} {chars} chars{suffix}"

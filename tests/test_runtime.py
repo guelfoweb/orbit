@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
+from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
 
 
@@ -37,6 +38,59 @@ class FakeBackend:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_exec_shell_wc_result_is_not_list_like(self) -> None:
+        messages: list[Message] = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_shell_command",
+                            "arguments": {"command": "wc -l text/summary.txt"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "exec_shell_command",
+                "content": "2 text/summary.txt",
+            },
+        ]
+
+        self.assertFalse(_has_list_like_tool_result(messages))
+
+    def test_exec_shell_ls_result_is_list_like(self) -> None:
+        messages: list[Message] = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "name": "exec_shell_command",
+                        "function": {
+                            "name": "exec_shell_command",
+                            "arguments": {"command": "ls -F"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "exec_shell_command",
+                "content": "README.md\nsrc/",
+            },
+        ]
+
+        self.assertTrue(_has_list_like_tool_result(messages))
+
     def test_ask_with_image_builds_openai_multimodal_content(self) -> None:
         backend = FakeBackend()
         runtime = ChatRuntime(backend=backend, system_prompt=None)
@@ -128,6 +182,560 @@ class ToolCallingBackend:
 
 
 class ToolRuntimeTests(unittest.TestCase):
+    def test_ask_auto_returns_chat_without_tools(self) -> None:
+        class ChatOnlyBackend:
+            def __init__(self) -> None:
+                self.tools_seen: list[object] = []
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.tools_seen.append(tools)
+                self.messages_seen.append(messages)
+                content = '{"_route":"CHAT"}' if len(self.messages_seen) == 1 else "chat answer"
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ChatOnlyBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto("hello", temperature=0, max_tokens=32, workdir=Path("."))
+
+        self.assertEqual(result.content, "chat answer")
+        self.assertEqual(backend.tools_seen, [None, None])
+        self.assertIn("Classify the latest user request", backend.messages_seen[0][0]["content"])
+        self.assertIn("Do not emit route JSON", backend.messages_seen[1][0]["content"])
+        self.assertEqual(runtime.messages[-1]["content"], "chat answer")
+
+    def test_ask_auto_emits_short_probe_chat_response(self) -> None:
+        class StreamingChatBackend:
+            def __init__(self) -> None:
+                self.max_tokens_seen: list[int] = []
+                self.tools = object()
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.max_tokens_seen.append(max_tokens)
+                self.tools = tools
+                return ChatResult(
+                    content="chat answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
+                raise AssertionError("short probe answer should not need streaming retry")
+
+        emitted: list[str] = []
+        backend = StreamingChatBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto("hello", temperature=0, max_tokens=512, workdir=Path("."), on_final_delta=emitted.append)
+
+        self.assertEqual(result.content, "chat answer")
+        self.assertEqual(emitted, ["chat answer"])
+        self.assertEqual(backend.max_tokens_seen, [64])
+        self.assertIsNone(backend.tools)
+
+    def test_ask_auto_streams_full_answer_after_truncated_probe(self) -> None:
+        class StreamingRetryBackend:
+            def __init__(self) -> None:
+                self.chat_max_tokens: list[int] = []
+                self.stream_max_tokens: list[int] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_max_tokens.append(max_tokens)
+                return ChatResult(
+                    content="partial",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=64,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
+                assert on_delta is not None
+                self.stream_max_tokens.append(max_tokens)
+                on_delta("full ")
+                on_delta("answer")
+                return ChatResult(
+                    content="full answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        emitted: list[str] = []
+        backend = StreamingRetryBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto("write a longer answer", temperature=0, max_tokens=512, workdir=Path("."), on_final_delta=emitted.append)
+
+        self.assertEqual(result.content, "full answer")
+        self.assertEqual(emitted, ["full ", "answer"])
+        self.assertEqual(backend.chat_max_tokens, [64])
+        self.assertEqual(backend.stream_max_tokens, [512])
+
+    def test_ask_auto_retries_empty_chat_response_once(self) -> None:
+        class EmptyThenAnswerBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"CHAT"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=3,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=3,
+                        completion_tokens=0,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="retry answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = EmptyThenAnswerBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto("hello", temperature=0, max_tokens=64, workdir=Path("."))
+
+        self.assertEqual(result.content, "retry answer")
+        self.assertEqual(backend.calls, 3)
+
+    def test_ask_auto_double_empty_returns_clear_error(self) -> None:
+        class AlwaysEmptyBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    content = '{"_route":"CHAT"}'
+                    completion_tokens = 1
+                else:
+                    content = ""
+                    completion_tokens = 0
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=completion_tokens,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = AlwaysEmptyBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto("hello", temperature=0, max_tokens=64, workdir=Path("."))
+
+        self.assertEqual(result.finish_reason, "empty_response")
+        self.assertIn("empty response twice", result.content)
+        self.assertEqual(backend.calls, 3)
+
+    def test_ask_auto_empty_tool_selection_falls_back_to_final_model_answer(self) -> None:
+        class EmptyToolSelectionBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    content = '{"_route":"FILESYSTEM"}'
+                    completion_tokens = 7
+                elif self.calls in {2, 3}:
+                    content = ""
+                    completion_tokens = 0
+                else:
+                    content = "fallback final answer"
+                    completion_tokens = 3
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=completion_tokens,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = EmptyToolSelectionBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto("read a large file if present", temperature=0, max_tokens=64, workdir=Path("."))
+
+        self.assertEqual(result.content, "fallback final answer")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNone(backend.tools_seen[0])
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[3])
+
+    def test_ask_auto_converts_generic_route_tool_call_inside_tool_loop(self) -> None:
+        class GenericRouteToolCallBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=3,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[
+                            {
+                                "id": "raw-tool-call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "call",
+                                    "arguments": '{"_route": "FILESYSTEM", "tool": "list_files"}',
+                                },
+                            }
+                        ],
+                        prompt_tokens=3,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="listed files",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("x", encoding="utf-8")
+            backend = GenericRouteToolCallBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_auto("list files if needed", temperature=0, max_tokens=64, workdir=workdir)
+
+        self.assertEqual(result.content, "listed files")
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(tool_messages[0]["name"], "list_files")
+        self.assertIn("note.txt", tool_messages[0]["content"])
+
+    def test_ask_auto_routes_to_filesystem_tools(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tool_names_seen: list[tuple[str, ...]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "list_files", "arguments": "{\"path\":\".\"}"},
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("x", encoding="utf-8")
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto("show files", temperature=0, max_tokens=32, workdir=workdir)
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(backend.tool_names_seen[0], ())
+        self.assertEqual(backend.tool_names_seen[1], ("list_files", "read_file", "exec_shell_command"))
+        self.assertNotIn('{"_route":"FILESYSTEM"}', [message.get("content") for message in runtime.messages])
+
+    def test_ask_auto_uses_preferred_route_tool_when_valid(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tool_names_seen: list[tuple[str, ...]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM","tool":"read_file"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "read_file", "arguments": "{\"path\":\"note.txt\"}"},
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("x", encoding="utf-8")
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto("read note.txt", temperature=0, max_tokens=32, workdir=workdir)
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(backend.tool_names_seen[0], ())
+        self.assertEqual(backend.tool_names_seen[1], ("read_file",))
+
+    def test_ask_auto_executes_route_json_with_arguments_without_tool_selection_round(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tool_names_seen: list[tuple[str, ...]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM","tool":"read_file","path":"note.txt"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("x", encoding="utf-8")
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto("read note.txt", temperature=0, max_tokens=32, workdir=workdir)
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(backend.calls, 2)
+        self.assertEqual(backend.tool_names_seen[0], ())
+        self.assertEqual(backend.tool_names_seen[1], ())
+
+    def test_ask_auto_media_route_without_path_returns_clear_error(self) -> None:
+        class MediaRouteBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                return ChatResult(
+                    content='{"_route":"MEDIA"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = MediaRouteBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_auto("describe the image", temperature=0, max_tokens=32, workdir=workdir)
+
+        self.assertIn("no local image/audio path", result.content)
+        self.assertEqual(backend.calls, 1)
+
+    def test_ask_auto_attaches_referenced_media_without_route(self) -> None:
+        class DirectMediaBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages: list[Message] = []
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages = messages
+                self.tools_seen.append(tools)
+                return ChatResult(
+                    content="direct media answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=6,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "tiny.png").write_bytes(png_bytes)
+            backend = DirectMediaBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_auto("describe tiny.png", temperature=0, max_tokens=32, workdir=workdir)
+
+        self.assertEqual(result.content, "direct media answer")
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(backend.tools_seen, [None])
+        self.assertEqual(backend.messages[0]["content"], "Answer using the attached image/audio.")
+        user_content = backend.messages[1]["content"]
+        self.assertIsInstance(user_content, list)
+        self.assertEqual(user_content[1]["type"], "image_url")
+
     def test_ask_with_tools_reinjects_tool_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
@@ -180,6 +788,59 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "done")
         self.assertEqual(backend.messages[-2]["role"], "tool")
         self.assertIn("http/https", backend.messages[-2]["content"])
+
+    def test_ask_with_tools_caps_fetch_url_final_answer(self) -> None:
+        class FetchBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.max_tokens_seen: list[int] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.max_tokens_seen.append(max_tokens)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "fetch_url", "arguments": "{\"url\":\"ftp://example.test\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="short web synthesis",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=20,
+                    completion_tokens=4,
+                    cached_tokens=10,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FetchBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            result = runtime.ask_with_tools(
+                "summarize URL",
+                temperature=0,
+                max_tokens=512,
+                workdir=Path(tmp),
+                tool_names=("fetch_url",),
+            )
+
+        self.assertEqual(result.content, "short web synthesis")
+        self.assertEqual(backend.max_tokens_seen, [96, 72])
 
     def test_ask_with_tools_can_write_new_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -410,7 +1071,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
     def test_ask_with_tools_emits_tool_call_event(self) -> None:
         events: list[tuple[str, str]] = []
-        results: list[tuple[str, int]] = []
+        results: list[tuple[str, int, str]] = []
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello", encoding="utf-8")
@@ -423,11 +1084,11 @@ class ToolRuntimeTests(unittest.TestCase):
                 max_tokens=32,
                 workdir=workdir,
                 on_tool_call=lambda name, args: events.append((name, args)),
-                on_tool_result=lambda name, chars: results.append((name, chars)),
+                on_tool_result=lambda name, chars, source: results.append((name, chars, source)),
             )
 
         self.assertEqual(events, [("read_file", "{\"path\":\"note.txt\"}")])
-        self.assertEqual(results, [("read_file", 5)])
+        self.assertEqual(results, [("read_file", 5, "orbit")])
 
     def test_ask_with_tools_emits_model_step_metrics(self) -> None:
         steps = []
@@ -479,8 +1140,28 @@ class ToolRuntimeTests(unittest.TestCase):
 
         result = runtime.ask_with_tools("list", temperature=0, max_tokens=32, workdir=Path("."))
 
-        self.assertEqual(result.finish_reason, "repeated_tool_call")
-        self.assertIn("repeated tool call", result.content)
+        self.assertEqual(result.finish_reason, "tool_calls")
+
+    def test_ask_with_tools_only_executes_allowed_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = ToolCallingBackend(tool_name="write_file", arguments="{\"path\":\"note.txt\",\"content\":\"hello\"}")
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "read note",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                tool_names=("list_files", "read_file", "stat_path"),
+            )
+
+            self.assertFalse((workdir / "note.txt").exists())
+
+        self.assertEqual(result.content, "done")
+        tool_messages = [message for message in backend.messages if message.get("role") == "tool"]
+        self.assertTrue(tool_messages)
+        self.assertIn("tool not available for this turn: write_file", tool_messages[-1]["content"])
 
 
 if __name__ == "__main__":

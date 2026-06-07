@@ -1,0 +1,2 @@
+AI safety is a critical area of research.
+Alignment techniques aim to ensure AI systems act in accordance with human values.

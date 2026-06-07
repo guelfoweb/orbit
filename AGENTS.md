@@ -30,25 +30,31 @@ The tool name remains `orbit`. The repository directory may be temporary.
 
 ## Tools
 
-Currently exposed tools:
+Preferred model-facing tools:
 
-- `list_files`
 - `read_file`
-- `stat_path`
+- `write_file`
+- `file_glob_search`
+- `grep_search`
+- `exec_shell_command`
+- `edit_file`
+- `apply_diff`
+- `get_datetime`
+
+Orbit-only tools where `llama-server` has no equivalent:
+
 - `make_directory`
 - `delete_path`
 - `fetch_url`
 - `search_web`
-- `write_file`
-- `append_file`
-- `replace_in_file`
 
 Rules:
 
 - Tools are exposed only in interactive text mode.
-- No deterministic routing before tool use.
+- Route selection must be model-driven before tool exposure.
+- No deterministic task fast paths.
 - `read_file` reads UTF-8 text/source files only.
-- `stat_path` returns compact metadata only: existence, type, size, and modified time.
+- Metadata inspection should prefer bounded native shell commands when available.
 - `make_directory` creates only directories confined to `workdir`.
 - `delete_path` deletes only paths confined to `workdir`; non-empty directories require `recursive=true`.
 - `delete_path` must refuse to delete the `workdir` root.
@@ -58,11 +64,7 @@ Rules:
 - `write_file` creates new UTF-8 text/source files only; it must not overwrite existing paths.
 - `write_file` must not create parent directories implicitly.
 - `write_file` is for explicit save/create-file requests, not ordinary chat requests to write prose or code.
-- `append_file` appends UTF-8 text to existing text/source files only; it must not create missing files.
-- `append_file` is for explicit append/add-to-file requests only.
-- `replace_in_file` replaces exactly one unique literal UTF-8 text fragment in an existing text/source file.
-- `replace_in_file` must reject zero-match and multi-match replacements.
-- `replace_in_file` is for explicit replace/modify-file requests only.
+- `edit_file` and `apply_diff` must use Orbit guardrail schemas, not broad raw server schemas.
 - Long fetched pages use `fetch_url` with `chunk_index`; web content must not be silently saved into the workdir.
 - Do not present a first fetched chunk as a complete summary of a long document.
 - PDFs, images, audio, archives, and binary files must be rejected by `read_file`.
@@ -134,4 +136,4 @@ Keep manual regression prompts in `PROMPTS.md`. The file should stay short and f
 
 ## Todo
 
-- Keep tool surface limited until `list_files`, `read_file`, `stat_path`, and session memory are stable.
+- Keep tool surface limited while native server tools and Orbit-only fallbacks are validated.

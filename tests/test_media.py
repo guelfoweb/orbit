@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.runtime.media import load_audio, load_image
+from orbit.runtime.media import load_audio, load_image, load_referenced_media
 
 
 class MediaTests(unittest.TestCase):
@@ -50,6 +50,43 @@ class MediaTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 load_audio(str(path))
+
+    def test_load_referenced_media_finds_workdir_image(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP8z8AARQAFFwH+"
+            "qH8nNwAAAABJRU5ErkJggg=="
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "images").mkdir()
+            (workdir / "images" / "tiny.png").write_bytes(png_bytes)
+
+            images, audios = load_referenced_media("describe images/tiny.png", workdir=workdir)
+
+        self.assertEqual(len(images), 1)
+        self.assertEqual(audios, [])
+
+    def test_load_referenced_media_allows_trailing_sentence_punctuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "voice.wav").write_bytes(b"RIFFxxxxWAVE")
+
+            images, audios = load_referenced_media("transcribe voice.wav.", workdir=workdir)
+
+        self.assertEqual(images, [])
+        self.assertEqual(len(audios), 1)
+
+    def test_load_referenced_media_ignores_paths_outside_workdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            outside = Path(tmp) / "outside.png"
+            workdir.mkdir()
+            outside.write_bytes(b"not a real png")
+
+            images, audios = load_referenced_media(f"describe {outside}", workdir=workdir)
+
+        self.assertEqual(images, [])
+        self.assertEqual(audios, [])
 
 
 if __name__ == "__main__":

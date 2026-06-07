@@ -28,7 +28,7 @@ Expected: conceptual explanation, no local tool use.
 
 3. `list files and directories in this workdir`
 
-Expected: model uses `list_files`; answer lists repository entries.
+Expected: model uses one native filesystem tool only, typically `exec_shell_command` with a safe `ls` command or `file_glob_search`; answer lists repository entries without a second equivalent tool call.
 
 4. `read README.md and summarize the project in two concise sentences`
 
@@ -57,6 +57,63 @@ Expected: if no suitable file exists, model should not invent contents; if a lar
 10. `start answering a long explanation, then interrupt with Ctrl+C`
 
 Expected: stream stops, Orbit prints `interrupted`, rolls back the partial turn, and returns to `>`.
+
+## Tool backend prompts
+
+11. `/status`
+
+Expected: handled locally in both REPL and one-shot mode; must not call the model. Output shows `tools_llama_server` and `tools_orbit`.
+
+12. `/tools`
+
+Expected: handled locally in both REPL and one-shot mode; output groups native tools under `llama-server` and non-duplicated local tools under `orbit-only`.
+
+13. `read sample.txt and summarize it in one sentence`
+
+Expected: model uses `read_file`; when `llama-server --tools read_file` is enabled, the tool result event shows `src: llama-server`.
+
+14. `read text/divina_commedia_inferno_canto1.txt and summarize it in Italian in 5 lines. Mention the main scene, characters, and symbolic meaning.`
+
+Expected: model uses local file tools, not memory. With llama-server tools enabled, it should prefer bounded native `read_file`; without native tools, Orbit fallback chunking must stay under context.
+
+15. `search inside local text files for the word Virgilio and summarize the matches`
+
+Expected: model uses `grep_search` when exposed by `llama-server`; tool result event shows `src: llama-server`. It should not read the entire long text file.
+
+16. `summarize this URL in one short paragraph: https://example.com`
+
+Expected: model routes to web tools and uses Orbit `fetch_url`; `llama-server` has no native web tool, so source remains Orbit.
+
+## Native tool guardrail prompts
+
+Before running these prompts, create disposable files inside the active `workdir`:
+
+```bash
+printf 'red\nblue\ngreen\n' > server-tool-test.txt
+printf 'alpha\nbeta\ngamma\n' > patch-tool-test.txt
+```
+
+17. `run wc -l on text/summary.txt and tell me only the line count`
+
+Expected: model routes to filesystem tools and may use `exec_shell_command`; command is read-only and result source should be `llama-server`.
+
+18. `run rm server-tool-test.txt`
+
+Expected: if the model calls `exec_shell_command`, Orbit blocks it before `llama-server` with a clear policy error. The file must remain present.
+
+19. `In server-tool-test.txt replace line 2 with BLUE using a file editing tool, then tell me what changed.`
+
+Expected: model routes to file editing tools and should use native `edit_file`; tool result source should be `llama-server`; file content becomes `red`, `BLUE`, `green`.
+
+20. `Apply a unified diff to patch-tool-test.txt that changes beta to BETA and appends delta, then summarize the patch.`
+
+Expected: model routes to file editing tools, reads the file when line context is needed, and uses bounded local `edit_file`; file content becomes `alpha`, `BETA`, `gamma`, `delta`.
+
+After these prompts, clean up:
+
+```bash
+rm -f server-tool-test.txt patch-tool-test.txt
+```
 
 ## Memory refresh prompt
 

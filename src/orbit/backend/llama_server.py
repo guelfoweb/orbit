@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -21,6 +22,7 @@ class LlamaServerBackend:
         self.model = model
         self.timeout = timeout
         self._display_model_name: str | None = None
+        self._server_tools_cache: list[dict[str, Any]] | None = None
 
     def chat(
         self,
@@ -87,7 +89,27 @@ class LlamaServerBackend:
             return self._display_model_name
         return None
 
-    def _get_json(self, path: str) -> dict[str, Any]:
+    def server_tools(self) -> list[dict[str, Any]]:
+        if self._server_tools_cache is not None:
+            return self._server_tools_cache
+        try:
+            data = self._get_json("/tools")
+        except LlamaServerError:
+            self._server_tools_cache = []
+            return []
+        if not isinstance(data, list):
+            self._server_tools_cache = []
+            return []
+        self._server_tools_cache = [item for item in data if isinstance(item, dict)]
+        return self._server_tools_cache
+
+    def execute_server_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        data = self._post_json("/tools", {"tool": name, "params": arguments})
+        if isinstance(data.get("plain_text_response"), str):
+            return data["plain_text_response"]
+        return json.dumps(data, ensure_ascii=False)
+
+    def _get_json(self, path: str) -> Any:
         request = Request(f"{self.base_url}{path}", method="GET")
         return self._send(request)
 
@@ -132,7 +154,7 @@ class LlamaServerBackend:
         except TimeoutError as exc:
             raise LlamaServerError(f"llama-server request timed out after {self.timeout:.0f}s") from exc
 
-    def _send(self, request: Request) -> dict[str, Any]:
+    def _send(self, request: Request) -> Any:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
@@ -148,8 +170,6 @@ class LlamaServerBackend:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise LlamaServerError(f"llama-server returned invalid JSON: {raw[:200]}") from exc
-        if not isinstance(data, dict):
-            raise LlamaServerError("llama-server returned a non-object JSON response")
         return data
 
 def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
@@ -168,6 +188,10 @@ def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
     tool_calls = message.get("tool_calls")
     if not isinstance(tool_calls, list):
         tool_calls = []
+    parsed_raw_tool_calls = _parse_raw_tool_call_content(content)
+    if not tool_calls and parsed_raw_tool_calls:
+        tool_calls = parsed_raw_tool_calls
+        content = ""
 
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
@@ -189,6 +213,7 @@ def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
 def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> ChatResult:
     content_parts: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
+    content_filter = _ContentStreamFilter(on_delta)
     model: str | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] = {}
@@ -225,15 +250,23 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
         text = delta.get("content")
         if isinstance(text, str) and text:
             content_parts.append(text)
-            on_delta(text)
+            content_filter.write(text)
         _merge_stream_tool_calls(tool_calls_by_index, delta.get("tool_calls"))
+
+    content_filter.finish()
+    content = "".join(content_parts)
+    tool_calls = [tool_calls_by_index[index] for index in sorted(tool_calls_by_index)]
+    parsed_raw_tool_calls = _parse_raw_tool_call_content(content)
+    if not tool_calls and parsed_raw_tool_calls:
+        tool_calls = parsed_raw_tool_calls
+        content = ""
 
     details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
     return ChatResult(
-        content="".join(content_parts),
+        content=content,
         model=model,
         finish_reason=finish_reason,
-        tool_calls=[tool_calls_by_index[index] for index in sorted(tool_calls_by_index)],
+        tool_calls=tool_calls,
         prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
         completion_tokens=_int_or_none(usage.get("completion_tokens")),
         cached_tokens=_int_or_none(details.get("cached_tokens")),
@@ -267,6 +300,91 @@ def _merge_stream_tool_calls(tool_calls_by_index: dict[int, dict[str, Any]], raw
             current_function["name"] = str(current_function.get("name", "")) + function["name"]
         if isinstance(function.get("arguments"), str):
             current_function["arguments"] = str(current_function.get("arguments", "")) + function["arguments"]
+
+
+class _ContentStreamFilter:
+    def __init__(self, on_delta: Callable[[str], None]) -> None:
+        self._on_delta = on_delta
+        self._buffer = ""
+        self._released = False
+        self._suppressed_raw_tool_call = False
+
+    def write(self, text: str) -> None:
+        if self._released:
+            self._on_delta(text)
+            return
+        self._buffer += text
+        state = _raw_tool_call_stream_state(self._buffer)
+        if state == "pending":
+            return
+        if state == "tool_call":
+            self._suppressed_raw_tool_call = True
+            return
+        self._released = True
+        self._on_delta(self._buffer)
+        self._buffer = ""
+
+    def finish(self) -> None:
+        if self._released or self._suppressed_raw_tool_call or not self._buffer:
+            return
+        self._on_delta(self._buffer)
+        self._released = True
+        self._buffer = ""
+
+
+def _raw_tool_call_stream_state(text: str) -> str:
+    stripped = text.lstrip()
+    if not stripped:
+        return "pending"
+    if _is_partial_prefix(stripped, "<|tool_call>"):
+        return "pending"
+    if not stripped.startswith("<|tool_call>"):
+        return "text"
+    if "<tool_call|>" not in stripped:
+        return "pending"
+    return "tool_call" if _parse_raw_tool_call_content(stripped) else "text"
+
+
+def _is_partial_prefix(text: str, prefix: str) -> bool:
+    return len(text) < len(prefix) and prefix.startswith(text)
+
+
+def _parse_raw_tool_call_content(content: str) -> list[dict[str, Any]]:
+    text = content.strip()
+    if not text.startswith("<|tool_call>") or "<tool_call|>" not in text:
+        return []
+    inner = text.removeprefix("<|tool_call>").split("<tool_call|>", maxsplit=1)[0].strip()
+    if inner.startswith("call:"):
+        inner = inner.removeprefix("call:").strip()
+    match = re.match(r"(?:[A-Za-z0-9_]+\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<args>\{.*\})\s*$", inner, re.DOTALL)
+    if not match:
+        return []
+    name = match.group("name")
+    args = _normalize_raw_tool_arguments(match.group("args"))
+    if args is None:
+        return []
+    return [
+        {
+            "id": "raw-tool-call-1",
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": args,
+            },
+        }
+    ]
+
+
+def _normalize_raw_tool_arguments(arguments: str) -> str | None:
+    normalized = arguments.replace('<|"|>', '"')
+    normalized = re.sub(r'([,{]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', normalized)
+    try:
+        parsed = json.loads(normalized)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return json.dumps(parsed, ensure_ascii=False)
 
 
 def _parse_model_info(data: dict[str, Any], *, model_path: str | None = None) -> ModelInfo | None:

@@ -17,11 +17,9 @@ def format_turn_status(
         parts.append(f"model: {result.model}")
     if estimated_context_tokens is not None and context_tokens is not None and context_tokens > 0:
         parts.append(f"ctx: {context_tokens} ({(estimated_context_tokens / context_tokens) * 100:.0f}%)")
-    if result.finish_reason:
-        parts.append(f"stop: {result.finish_reason}")
     if result.prompt_tokens is not None or result.completion_tokens is not None:
         cached = f", cached {result.cached_tokens}" if result.cached_tokens is not None else ""
-        parts.append(f"tokens: {result.prompt_tokens}->{result.completion_tokens}{cached}")
+        parts.append(f"tks: {result.prompt_tokens}->{result.completion_tokens}{cached}")
     speeds = []
     if result.prompt_tokens_per_second is not None:
         speeds.append(f"pf {result.prompt_tokens_per_second:.1f}/s")
@@ -29,6 +27,8 @@ def format_turn_status(
         speeds.append(f"gen {result.generation_tokens_per_second:.1f}/s")
     if speeds:
         parts.append(" | ".join(speeds))
+    if result.finish_reason:
+        parts.append(f"stop: {result.finish_reason}")
     if elapsed_seconds is not None:
         parts.append(f"time: {format_elapsed(elapsed_seconds)}")
     return " | ".join(parts) if parts else "no metrics"

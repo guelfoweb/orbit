@@ -64,6 +64,42 @@ class StreamingRendererTests(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("Working (0s - Ctrl+C to interrupt)", output)
 
+    def test_wait_timer_stops_before_first_delta(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(interval=0.01)
+            renderer.start()
+            time.sleep(0.02)
+            renderer.write("hello")
+            time.sleep(0.03)
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        after_delta = stream.getvalue().split("hello", 1)[1]
+        self.assertNotIn("Working", after_delta)
+
+    def test_restarted_timer_stops_before_later_delta(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(interval=0.01)
+            renderer.start()
+            renderer.write('{"_route":"WEB"}')
+            renderer.event('search_web {"query":"x"}')
+            time.sleep(0.02)
+            renderer.write("final answer")
+            time.sleep(0.03)
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        after_final = stream.getvalue().split("final answer", 1)[1]
+        self.assertNotIn("Working", after_final)
+
 
 if __name__ == "__main__":
     unittest.main()

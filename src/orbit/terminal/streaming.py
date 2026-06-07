@@ -14,6 +14,7 @@ class StreamRenderer:
         self.interval = interval
         self._started = False
         self._first_delta = False
+        self._timer_active = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_time = 0.0
@@ -23,21 +24,20 @@ class StreamRenderer:
         self._started = True
         self._start_time = time.monotonic()
         self._frame_index = 0
+        self._timer_active = True
         self._thread = threading.Thread(target=self._run_wait_timer, daemon=True)
         self._thread.start()
 
     def write(self, text: str) -> None:
         if not text:
             return
-        if not self._first_delta:
+        if self._timer_active:
             self._first_delta = True
-            self._stop.set()
-            self._clear_wait_line()
+            self._stop_timer(clear=True)
         print(text, end="", flush=True)
 
     def event(self, text: str, *, restart_timer: bool = True, trailing_blank_line: bool = False) -> None:
-        self._stop.set()
-        self._clear_wait_line()
+        self._stop_timer(clear=True)
         print(dim(text), flush=True)
         if trailing_blank_line:
             print(flush=True)
@@ -49,16 +49,22 @@ class StreamRenderer:
         self._stop.clear()
         self._start_time = time.monotonic()
         self._frame_index = 0
+        self._timer_active = True
         self._thread = threading.Thread(target=self._run_wait_timer, daemon=True)
         self._thread.start()
 
     def finish(self) -> None:
         if not self._started:
             return
+        self._stop_timer(clear=not self._first_delta)
+
+    def _stop_timer(self, *, clear: bool) -> None:
         self._stop.set()
-        if self._thread:
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=1)
-        if not self._first_delta:
+        self._thread = None
+        self._timer_active = False
+        if clear:
             self._clear_wait_line()
 
     def _run_wait_timer(self) -> None:

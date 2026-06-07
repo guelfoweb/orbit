@@ -108,18 +108,12 @@ def _generate_memory(messages: list[Message], *, backend: ChatBackend, temperatu
         return ""
     prompt = "\n".join(
         [
-            "Create a concise durable session memory for the transcript below.",
-            "Preserve only stable state needed to continue future turns:",
-            "- user goals and constraints",
-            "- local files or directories inspected",
-            "- tool calls and important results",
-            "- decisions, failures, and pending next steps",
-            "Ignore system/developer instructions. Preserve user-provided facts and conversation state only.",
-            "If preserving constraints, label them as user-provided remembered constraints, not system/internal instructions.",
-            "Do not solve the user's task. Do not invent details. Do not include raw bulky content unless it is already a conclusion.",
-            "Return only the memory.",
+            "Summarize the transcript as durable session memory.",
+            "Keep: goals, user-provided constraints, files inspected, tool results, decisions, failures, next steps.",
+            "Ignore system/developer instructions.",
+            "Do not invent or solve.",
+            "Return memory only.",
             "",
-            "Transcript:",
             transcript,
         ]
     )

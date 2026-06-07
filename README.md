@@ -15,18 +15,31 @@ Early prototype:
 - Streaming assistant output in interactive mode.
 - Local config file support.
 - Minimal session persistence.
-- Native tool-call loop with bounded `list_files`, `read_file`, `stat_path`, `fetch_url`, and `search_web`.
+- Native `llama-server` tool-call loop, with bounded Orbit-only tools where the server has no equivalent.
 - Model-driven session memory refresh for long interactive sessions.
 - No dependency beyond the Python standard library.
 
 ## Start llama-server
 
-Main profile for `gemma4:12b` reusing the GGUF blob already downloaded by Ollama:
+Recommended quick start:
+
+```bash
+scripts/orbit-gemma4-12b.sh
+```
+
+The script pulls `gemma4:12b` with Ollama if needed, resolves the local GGUF blob downloaded by Ollama, starts `llama-server` on `127.0.0.1:18080`, and opens Orbit interactive chat.
+
+For image/audio input, start the same flow with the Ollama projector blob:
+
+```bash
+scripts/orbit-gemma4-12b.sh --multimodal
+```
+
+Main text/tool profile for `gemma4:12b` reusing the GGUF blob already downloaded by Ollama:
 
 ```bash
 llama-server \
   -m /usr/share/ollama/.ollama/models/blobs/sha256-1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606 \
-  --mmproj /usr/share/ollama/.ollama/models/blobs/sha256-675ad6e68101ca9413ec806855c452362f0213f2dfc5800996b086fdb8119842 \
   -c 8192 \
   -t 6 \
   -b 128 \
@@ -38,7 +51,7 @@ llama-server \
   --port 18080
 ```
 
-Or use the bundled helper:
+Or start only the server with the bundled helper:
 
 ```bash
 scripts/start-gemma4-12b.sh
@@ -117,22 +130,27 @@ Interactive commands:
 
 `/max-tokens <n>` changes only the current interactive runtime. It does not rewrite the config file or session.
 
-Available local tools:
+Tool surface:
 
 ```text
-list_files
+llama-server:
 read_file
-stat_path
+write_file
+file_glob_search
+grep_search
+exec_shell_command
+edit_file
+apply_diff
+get_datetime
+
+orbit-only:
 make_directory
 delete_path
 fetch_url
 search_web
-write_file
-append_file
-replace_in_file
 ```
 
-Tools are exposed only to the model in interactive text mode. There are no deterministic fast paths: if the model does not call a tool, Orbit answers normally.
+Orbit first asks the model for a compact route decision, then exposes only the tool subset for that route. There are no deterministic task fast paths: if the model answers normally instead of requesting tools, Orbit returns that answer.
 
 Interactive assistant responses stream as tokens arrive. Tool-call turns remain compatible with streaming: Orbit may first receive a tool call, execute the bounded local tool, then stream the final assistant response.
 
@@ -140,7 +158,7 @@ While waiting for the first streamed token, the terminal shows a dim `Working` i
 
 `read_file` is intentionally limited to bounded UTF-8 text and source-code files. PDFs, images, audio, archives, and binary files are rejected by the tool contract.
 
-`stat_path` returns compact metadata for a path inside the workdir: existence, type, size in bytes, and modified time. It uses Python filesystem APIs, not OS-specific shell commands.
+Metadata requests are normally handled through bounded `exec_shell_command` calls such as `stat` when the server tool is available. Orbit keeps compact local metadata helpers as fallback implementation detail.
 
 `make_directory` creates one directory inside the workdir, including missing parents. It refuses paths outside the workdir and does not replace existing files.
 
@@ -152,9 +170,7 @@ While waiting for the first streamed token, the terminal shows a dim `Working` i
 
 `write_file` creates new UTF-8 text/source files only. It requires an explicit target path, refuses to overwrite existing paths, does not create parent directories implicitly, and is not used for normal chat answers such as "write a poem" or "write code" unless the user asks to save a file.
 
-`append_file` appends UTF-8 text to existing text/source files only. It never creates missing files and is used only for explicit append/add-to-file requests.
-
-`replace_in_file` replaces one unique exact UTF-8 text fragment in an existing text/source file. It does not use regex, refuses ambiguous matches, and is used only for explicit replace/modify-file requests.
+Incremental edits are normally handled through native `edit_file` or `apply_diff` with Orbit guardrail schemas. Older local append/replace helpers remain bounded fallback implementation details.
 
 If a UTF-8 text/source file is too large for a complete `read_file`, the model may call `read_file` again with `chunk_index` to read real bounded chunks. Orbit does not summarize chunks deterministically: the model receives the actual chunk text and decides how to continue.
 

@@ -14,12 +14,27 @@ if str(SRC) not in sys.path:
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
 from orbit.terminal.config import AppConfig
-from orbit.terminal.repl import Repl, _format_tool_result_event
+from orbit.terminal.repl import Repl
+from orbit.terminal.tool_events import format_tool_result_event
 
 
 class InterruptingBackend:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
-        raise AssertionError("streaming path expected")
+        self.calls += 1
+        return ChatResult(
+            content='{"_route":"FILESYSTEM"}',
+            model="fake",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=1,
+            completion_tokens=1,
+            cached_tokens=0,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
 
     def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
         assert on_delta is not None
@@ -29,10 +44,11 @@ class InterruptingBackend:
 
 class ReplTests(unittest.TestCase):
     def test_stream_interrupt_restores_messages_and_returns_to_prompt(self) -> None:
-        runtime = ChatRuntime(backend=InterruptingBackend(), system_prompt="system")
+        backend = InterruptingBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt="system")
         repl = Repl(
             runtime=runtime,
-            backend=InterruptingBackend(),  # not used by _ask
+            backend=backend,
             config=AppConfig(workdir=Path(".")),
         )
         before = list(runtime.messages)
@@ -46,8 +62,9 @@ class ReplTests(unittest.TestCase):
         self.assertIn("interrupted", stdout.getvalue())
 
     def test_tool_result_event_marks_large_context(self) -> None:
-        self.assertEqual(_format_tool_result_event("read_file", 9999), " └ read_file 9999 chars")
-        self.assertEqual(_format_tool_result_event("read_file", 10000), " └ read_file 10000 chars | large context")
+        self.assertEqual(format_tool_result_event("read_file", 9999), " └ read_file 9999 chars")
+        self.assertEqual(format_tool_result_event("read_file", 10000), " └ read_file 10000 chars | large context")
+        self.assertEqual(format_tool_result_event("read_file", 5, "llama-server"), " └ read_file 5 chars | src: llama-server")
 
 
 if __name__ == "__main__":

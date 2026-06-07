@@ -7,18 +7,18 @@ if [ "$#" -ne 1 ]; then
 fi
 
 CTX_SIZE="$1"
-MODEL_BLOB="/usr/share/ollama/.ollama/models/blobs/sha256-1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606"
-MMPROJ_BLOB="/usr/share/ollama/.ollama/models/blobs/sha256-675ad6e68101ca9413ec806855c452362f0213f2dfc5800996b086fdb8119842"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# shellcheck source=ollama-gemma4-12b.sh
+. "$SCRIPT_DIR/ollama-gemma4-12b.sh"
 
 if ! command -v llama-server >/dev/null 2>&1; then
   echo "error: llama-server not found in PATH" >&2
   exit 1
 fi
 
-if [ ! -r "$MODEL_BLOB" ]; then
-  echo "error: Gemma4 12B model blob not found: $MODEL_BLOB" >&2
-  exit 1
-fi
+ensure_ollama_model
+MODEL_BLOB="$(model_blob_from_manifest)"
 
 set -- \
   -m "$MODEL_BLOB" \
@@ -29,12 +29,9 @@ set -- \
   -np "${PARALLEL_SLOTS:-1}" \
   --reasoning off \
   --cache-ram "${CACHE_RAM:-8192}" \
+  --tools "${LLAMA_SERVER_TOOLS:-read_file,write_file,file_glob_search,grep_search,get_datetime,exec_shell_command,edit_file,apply_diff}" \
   --host "${HOST:-127.0.0.1}" \
   --port "${PORT:-18080}"
-
-if [ -r "$MMPROJ_BLOB" ]; then
-  set -- "$@" --mmproj "$MMPROJ_BLOB"
-fi
 
 if [ "${CACHE_REUSE:-}" != "" ]; then
   set -- "$@" --cache-reuse "$CACHE_REUSE"

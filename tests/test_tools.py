@@ -202,14 +202,15 @@ class ToolTests(unittest.TestCase):
 
         self.assertIn("escapes workdir", result.content)
 
-    def test_read_file_large_file_suggests_chunk_index(self) -> None:
+    def test_read_file_large_file_returns_initial_chunk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "large.txt").write_text("x" * (257 * 1024), encoding="utf-8")
 
             result = execute_tool("read_file", {"path": "large.txt"}, workdir=workdir)
 
-        self.assertIn("chunk_index", result.content)
+        self.assertIn("large_file_excerpt: true", result.content)
+        self.assertIn("content:", result.content)
 
     def test_read_file_chunk_mode_returns_real_chunk_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,8 +232,8 @@ class ToolTests(unittest.TestCase):
         self.assertIn("chunk_chars too large", result.content)
 
     def test_read_file_chunk_limits_are_cpu_friendly(self) -> None:
-        self.assertEqual(DEFAULT_CHUNK_CHARS, 12_000)
-        self.assertEqual(MAX_CHUNK_CHARS, 24_000)
+        self.assertEqual(DEFAULT_CHUNK_CHARS, 6_000)
+        self.assertEqual(MAX_CHUNK_CHARS, 12_000)
 
     def test_read_file_schema_keeps_chunk_index_optional(self) -> None:
         read_file = next(tool for tool in tool_definitions() if tool["function"]["name"] == "read_file")
@@ -254,6 +255,11 @@ class ToolTests(unittest.TestCase):
         defined = tuple(tool["function"]["name"] for tool in tool_definitions())
 
         self.assertEqual(tool_names(), defined)
+
+    def test_tool_definitions_can_be_filtered_by_name(self) -> None:
+        defined = tuple(tool["function"]["name"] for tool in tool_definitions(("list_files", "read_file")))
+
+        self.assertEqual(defined, ("list_files", "read_file"))
 
     def test_search_web_empty_query_is_rejected_before_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

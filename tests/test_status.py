@@ -33,7 +33,7 @@ class StatusTests(unittest.TestCase):
 
         self.assertIn("model: gemma4", status)
         self.assertIn("stop: stop", status)
-        self.assertIn("tokens: 10->3, cached 8", status)
+        self.assertIn("tks: 10->3, cached 8", status)
         self.assertIn("pf 12.5/s", status)
         self.assertIn("gen 3.4/s", status)
 
@@ -71,6 +71,7 @@ class StatusTests(unittest.TestCase):
 
         self.assertIn("time: 34s", format_turn_status(result, elapsed_seconds=34))
         self.assertIn("time: 1m 19s", format_turn_status(result, elapsed_seconds=79))
+        self.assertTrue(format_turn_status(result, elapsed_seconds=34).endswith("stop: stop | time: 34s"))
 
     def test_dim_wraps_text_in_ansi_escape(self) -> None:
         self.assertEqual(dim("model: gemma4"), "\033[2mmodel: gemma4\033[0m")

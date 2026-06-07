@@ -37,7 +37,7 @@ python3 -m http.server "$WEB_PORT" --bind 127.0.0.1 --directory "$WORKDIR" >/dev
 WEB_PID="$!"
 trap 'kill "$WEB_PID" 2>/dev/null || true' EXIT
 
-printf '\n## operational prompt should use list_files\n'
+printf '\n## operational prompt should use one filesystem tool\n'
 printf 'list files in this directory\n/exit\n' \
   | env HOME="$HOME_DIR" "$ORBIT" \
       --workdir "$WORKDIR" \
@@ -58,7 +58,7 @@ printf 'read note.txt and summarize it in one short sentence\n/exit\n' \
       --model "$MODEL" \
       --max-tokens 96
 
-printf '\n## stat_path should inspect metadata without shell commands\n'
+printf '\n## metadata prompt should inspect file metadata\n'
 printf 'what is the size and modified time of note.txt?\n/exit\n' \
   | env HOME="$HOME_DIR" "$ORBIT" \
       --workdir "$WORKDIR" \
