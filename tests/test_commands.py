@@ -48,7 +48,7 @@ class CommandTests(unittest.TestCase):
         backend = FakeStatusBackend()
         runtime = ChatRuntime(backend=backend, system_prompt=None)
 
-        status = runtime_status(runtime, AppConfig(model="gemma4:12b"), backend)
+        status = runtime_status(runtime, AppConfig(), backend)
 
         self.assertIn("tools_llama_server: grep_search, read_file", status)
         self.assertIn("tools_orbit_only:", status)

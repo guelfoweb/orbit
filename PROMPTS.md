@@ -5,7 +5,7 @@ Curated manual regression prompts for Orbit on `llama-server`.
 Run from the repository root:
 
 ```bash
-HOME_DIR="$(mktemp -d)" HOME="$HOME_DIR" orbit --model gemma4:12b --workdir .
+HOME_DIR="$(mktemp -d)" HOME="$HOME_DIR" orbit --workdir .
 ```
 
 Use a clean temporary `HOME` for regression runs to avoid old sessions affecting timing or behavior.

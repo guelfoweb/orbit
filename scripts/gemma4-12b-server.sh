@@ -128,7 +128,7 @@ start_server() {
       exit 1
     fi
     echo "llama-server already running at $BASE_URL"
-    echo "run Orbit with: orbit --base-url $BASE_URL --model $MODEL_ALIAS"
+    echo "run Orbit with: orbit --base-url $BASE_URL"
     return 0
   fi
 
@@ -181,7 +181,7 @@ $MMPROJ_BLOB"
   echo "$!" >"$PID_FILE"
   wait_for_server
   echo "ready"
-  echo "run Orbit with: orbit --base-url $BASE_URL --model $MODEL_ALIAS"
+  echo "run Orbit with: orbit --base-url $BASE_URL"
 }
 
 stop_server() {
@@ -233,6 +233,11 @@ status_server() {
 if [ "$#" -lt 1 ]; then
   usage
   exit 2
+fi
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  usage
+  exit 0
 fi
 
 COMMAND="$1"

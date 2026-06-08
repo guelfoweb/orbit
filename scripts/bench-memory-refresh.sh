@@ -2,7 +2,6 @@
 set -eu
 
 ORBIT="${ORBIT:-.venv/bin/orbit}"
-MODEL="${MODEL:-gemma4:12b}"
 HOME_DIR="${HOME_DIR:-$(mktemp -d)}"
 WORKDIR="${WORKDIR:-$(mktemp -d)}"
 CONTEXT_TOKENS="${CONTEXT_TOKENS:-1600}"
@@ -30,7 +29,6 @@ PY
 
 /usr/bin/time -f 'wall: %e s' env HOME="$HOME_DIR" "$ORBIT" \
   --workdir "$WORKDIR" \
-  --model "$MODEL" \
   --context-tokens "$CONTEXT_TOKENS" \
   --max-tokens "$MAX_TOKENS" \
   < "$prompt_file"

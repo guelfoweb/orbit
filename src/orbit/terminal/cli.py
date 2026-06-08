@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    backend = LlamaServerBackend(base_url=config.base_url, model=config.model, timeout=config.timeout)
+    backend = LlamaServerBackend(base_url=config.base_url, timeout=config.timeout)
     model_info = backend.model_info()
     context_tokens = config.context_tokens or (model_info.context_length if model_info else None)
     if args.prompt:

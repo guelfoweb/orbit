@@ -38,10 +38,12 @@ Recommended quick start:
 
 ```bash
 scripts/gemma4-12b-server.sh start
-orbit --base-url http://127.0.0.1:18080 --model gemma4:12b
+orbit --base-url http://127.0.0.1:18080
 ```
 
 The script pulls `gemma4:12b` with Ollama if needed, resolves the local GGUF blob downloaded by Ollama, starts `llama-server` on `127.0.0.1:18080` in background, and returns the terminal so Orbit can be launched from the same shell.
+
+Orbit does not select model weights at runtime. The model is selected when `llama-server` starts with `-m`; Orbit uses the model exposed by the server API and shows the resolved served name in status/footer output.
 
 For image/audio input, start the server with the Ollama projector blob:
 

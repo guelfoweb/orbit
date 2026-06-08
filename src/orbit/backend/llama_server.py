@@ -17,10 +17,11 @@ class LlamaServerError(RuntimeError):
 
 
 class LlamaServerBackend:
-    def __init__(self, *, base_url: str, model: str, timeout: float) -> None:
+    def __init__(self, *, base_url: str, timeout: float, model: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self._model_info_cache: ModelInfo | None = None
         self._display_model_name: str | None = None
         self._server_tools_cache: list[dict[str, Any]] | None = None
 
@@ -34,7 +35,7 @@ class LlamaServerBackend:
     ) -> ChatResult:
         payload = build_chat_payload(
             ChatPayloadOptions(
-                model=self.model,
+                model=self.request_model_name(),
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -55,7 +56,7 @@ class LlamaServerBackend:
     ) -> ChatResult:
         payload = build_chat_payload(
             ChatPayloadOptions(
-                model=self.model,
+                model=self.request_model_name(),
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -73,12 +74,15 @@ class LlamaServerBackend:
         return data.get("status") == "ok"
 
     def model_info(self) -> ModelInfo | None:
+        if self._model_info_cache is not None:
+            return self._model_info_cache
         try:
             data = self._get_json("/v1/models")
         except LlamaServerError:
             return None
         props = self._props_or_empty()
-        return _parse_model_info(data, model_path=_str_or_none(props.get("model_path")))
+        self._model_info_cache = _parse_model_info(data, model_path=_str_or_none(props.get("model_path")))
+        return self._model_info_cache
 
     def display_model_name(self) -> str | None:
         if self._display_model_name:
@@ -88,6 +92,11 @@ class LlamaServerBackend:
             self._display_model_name = info.id
             return self._display_model_name
         return None
+
+    def request_model_name(self) -> str:
+        if self.model:
+            return self.model
+        return self.display_model_name() or "local-model"
 
     def server_tools(self) -> list[dict[str, Any]]:
         if self._server_tools_cache is not None:

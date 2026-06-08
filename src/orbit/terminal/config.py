@@ -21,7 +21,6 @@ MAX_CONTEXT_TOKENS = 262_144
 @dataclass(frozen=True)
 class AppConfig:
     base_url: str = "http://127.0.0.1:18080"
-    model: str = "local-model"
     workdir: Path = Path(".")
     timeout: float = 300.0
     temperature: float = 0.0
@@ -34,7 +33,6 @@ class AppConfig:
 def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to optional JSON config file.")
     parser.add_argument("--base-url", help="llama-server base URL.")
-    parser.add_argument("--model", help="Model name sent to llama-server.")
     parser.add_argument("--workdir", help="Working directory used for session identity.")
     parser.add_argument("--timeout", type=float, help="HTTP timeout in seconds.")
     parser.add_argument("--temperature", type=float)
@@ -48,7 +46,6 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
     values = _read_config_file(Path(args.config))
     config = AppConfig(
         base_url=_str_value(values, "base_url", AppConfig.base_url),
-        model=_str_value(values, "model", AppConfig.model),
         workdir=Path(_str_value(values, "workdir", str(AppConfig.workdir))).expanduser().resolve(),
         timeout=_ranged_float_value(
             values,
@@ -76,7 +73,6 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
     )
     return AppConfig(
         base_url=args.base_url if args.base_url is not None else config.base_url,
-        model=args.model if args.model is not None else config.model,
         workdir=Path(args.workdir).expanduser().resolve() if args.workdir is not None else config.workdir,
         timeout=_validate_optional_float_range(
             args.timeout,

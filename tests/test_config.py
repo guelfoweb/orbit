@@ -30,7 +30,6 @@ class ConfigTests(unittest.TestCase):
         config = load_app_config(args)
 
         self.assertEqual(config.base_url, "http://127.0.0.1:18080")
-        self.assertEqual(config.model, "local-model")
         self.assertEqual(config.workdir, Path(".").resolve())
         self.assertEqual(config.max_tokens, 512)
         self.assertIsNone(config.context_tokens)
@@ -42,7 +41,6 @@ class ConfigTests(unittest.TestCase):
                 json.dumps(
                     {
                         "base_url": "http://127.0.0.1:19090",
-                        "model": "gemma4:12b",
                         "workdir": str(Path(tmp)),
                         "timeout": 120,
                         "temperature": 0,
@@ -57,7 +55,6 @@ class ConfigTests(unittest.TestCase):
             config = load_app_config(_parse("--config", str(path)))
 
         self.assertEqual(config.base_url, "http://127.0.0.1:19090")
-        self.assertEqual(config.model, "gemma4:12b")
         self.assertEqual(config.workdir, Path(tmp).resolve())
         self.assertEqual(config.timeout, 120.0)
         self.assertEqual(config.max_tokens, 512)
@@ -67,14 +64,12 @@ class ConfigTests(unittest.TestCase):
     def test_cli_flags_override_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            path.write_text(json.dumps({"model": "from-config", "workdir": "/tmp", "max_tokens": 128}), encoding="utf-8")
+            path.write_text(json.dumps({"workdir": "/tmp", "max_tokens": 128}), encoding="utf-8")
 
             config = load_app_config(
                 _parse(
                     "--config",
                     str(path),
-                    "--model",
-                    "from-cli",
                     "--workdir",
                     str(ROOT),
                     "--max-tokens",
@@ -84,10 +79,18 @@ class ConfigTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(config.model, "from-cli")
         self.assertEqual(config.workdir, ROOT.resolve())
         self.assertEqual(config.max_tokens, 64)
         self.assertEqual(config.context_tokens, 2048)
+
+    def test_legacy_model_config_key_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"model": "legacy", "workdir": str(ROOT)}), encoding="utf-8")
+
+            config = load_app_config(_parse("--config", str(path)))
+
+        self.assertEqual(config.workdir, ROOT.resolve())
 
     def test_config_rejects_operational_values_outside_safe_ranges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +103,10 @@ class ConfigTests(unittest.TestCase):
     def test_cli_flags_reject_operational_values_outside_safe_ranges(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_tokens"):
             load_app_config(_parse("--max-tokens", "4"))
+
+    def test_cli_no_longer_accepts_model_flag(self) -> None:
+        with self.assertRaises(SystemExit):
+            _parse("--model", "gemma4:12b")
 
 
 def _parse(*args: str) -> argparse.Namespace:

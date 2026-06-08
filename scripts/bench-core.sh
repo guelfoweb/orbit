@@ -2,7 +2,6 @@
 set -eu
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:18080}"
-MODEL="${MODEL:-gemma4:12b}"
 WORKDIR="${WORKDIR:-workdir}"
 ORBIT_BIN="${ORBIT_BIN:-.venv/bin/orbit}"
 TIMEOUT="${TIMEOUT:-600}"
@@ -22,7 +21,6 @@ run_prompt() {
   echo "$prompt"
   HOME="$home_dir" "$ORBIT_BIN" \
     --base-url "$BASE_URL" \
-    --model "$MODEL" \
     --workdir "$WORKDIR" \
     --timeout "$TIMEOUT" \
     --max-tokens "$MAX_TOKENS" \

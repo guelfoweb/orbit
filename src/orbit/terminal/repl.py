@@ -131,7 +131,7 @@ class Repl:
         self.session.save(
             messages=self.runtime.messages,
             workdir=self.config.workdir,
-            model=self.config.model,
+            model=self.backend.display_model_name() or "unknown",
             base_url=self.config.base_url,
         )
 

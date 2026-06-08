@@ -43,7 +43,7 @@ def tools_text(backend: LlamaServerBackend) -> str:
 
 def runtime_status(runtime: ChatRuntime, config: AppConfig, backend: LlamaServerBackend) -> str:
     info = backend.model_info()
-    display_model = (info.id if info and info.id else None) or backend.display_model_name() or config.model
+    display_model = (info.id if info and info.id else None) or backend.display_model_name() or "unknown"
     lines = [
         f"base_url: {config.base_url}",
         f"server: {'ok' if backend.health() else 'unavailable'}",
