@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.backend.llama_server import LlamaServerError
+from orbit.runtime.edit_guardrails import apply_local_edit_file
 from orbit.runtime.tool_backends import HybridToolExecutor
 
 
@@ -42,6 +44,28 @@ class FakeServerTools:
                     "function": {
                         "name": "grep_search",
                         "description": "server grep",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            },
+            {
+                "tool": "file_glob_search",
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "file_glob_search",
+                        "description": "server glob",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            },
+            {
+                "tool": "write_file",
+                "definition": {
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "description": "server write",
                         "parameters": {"type": "object"},
                     },
                 },
@@ -273,6 +297,72 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "llama-server")
         self.assertEqual(backend.executed[0][1]["command"], f"cd {shlex.quote(str(workdir.resolve()))} && cat note.txt")
 
+    def test_exec_shell_allows_free_memory_readout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            workdir = Path(tmp)
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            execution = executor.execute("exec_shell_command", {"command": "free -h"}, chunk_budget={})
+
+        self.assertEqual(execution.source, "llama-server")
+        self.assertEqual(backend.executed[0][1]["command"], f"cd {shlex.quote(str(workdir.resolve()))} && free -h")
+
+    def test_exec_shell_allows_lscpu_readout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            workdir = Path(tmp)
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            execution = executor.execute("exec_shell_command", {"command": "lscpu"}, chunk_budget={})
+
+        self.assertEqual(execution.source, "llama-server")
+        self.assertEqual(backend.executed[0][1]["command"], f"cd {shlex.quote(str(workdir.resolve()))} && lscpu")
+
+    def test_exec_shell_allows_read_only_system_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            workdir = Path(tmp)
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            commands = ["uname -a", "hostname", "uptime -p", "whoami", "id -u", "date -I", "lsblk -f"]
+            for command in commands:
+                with self.subTest(command=command):
+                    execution = executor.execute("exec_shell_command", {"command": command}, chunk_budget={})
+                    self.assertEqual(execution.source, "llama-server")
+
+        self.assertEqual([item[1]["command"] for item in backend.executed], [f"cd {shlex.quote(str(workdir.resolve()))} && {command}" for command in commands])
+
+    def test_exec_shell_allows_bounded_process_and_network_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            workdir = Path(tmp)
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            commands = ["ps aux", "pgrep -a python", "ip -brief addr", "ip addr show", "ip route", "ss -tulpen"]
+            for command in commands:
+                with self.subTest(command=command):
+                    execution = executor.execute("exec_shell_command", {"command": command}, chunk_budget={})
+                    self.assertEqual(execution.source, "llama-server")
+
+        self.assertEqual([item[1]["command"] for item in backend.executed], [f"cd {shlex.quote(str(workdir.resolve()))} && {command}" for command in commands])
+
     def test_exec_shell_blocks_shell_operators_before_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             backend = FakeServerTools()
@@ -303,6 +393,53 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("command not allowed", execution.result.content)
         self.assertEqual(backend.executed, [])
 
+    def test_exec_shell_blocks_active_network_and_state_commands_before_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            commands = ["curl https://example.com", "wget https://example.com", "ping 127.0.0.1", "nc -z 127.0.0.1 80", "systemctl status"]
+            for command in commands:
+                with self.subTest(command=command):
+                    execution = executor.execute("exec_shell_command", {"command": command}, chunk_budget={})
+                    self.assertEqual(execution.source, "orbit")
+                    self.assertIn("command not allowed", execution.result.content)
+
+        self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_blocks_unsafe_diagnostic_forms_before_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            blocked = {
+                "date +%s": "arguments not allowed for date",
+                "find . -exec echo": "find option not allowed",
+                "ip link set lo down": "ip allows only",
+                "ip route get 1.1.1.1": "ip allows only",
+                "ps -eo pid,cmd": "ps allows only",
+                "pgrep -u root python": "flag not allowed",
+                "pgrep ../../secret": "unsafe pgrep pattern",
+                "ss -K dst 127.0.0.1": "flag not allowed",
+                "ss --help": "flag not allowed",
+                "ls -R": "flag not allowed",
+            }
+            for command, expected in blocked.items():
+                with self.subTest(command=command):
+                    execution = executor.execute("exec_shell_command", {"command": command}, chunk_budget={})
+                    self.assertEqual(execution.source, "orbit")
+                    self.assertIn(expected, execution.result.content)
+
+        self.assertEqual(backend.executed, [])
+
     def test_exec_shell_blocks_paths_outside_workdir_before_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             backend = FakeServerTools()
@@ -316,6 +453,53 @@ class HybridToolExecutorTests(unittest.TestCase):
 
         self.assertEqual(execution.source, "orbit")
         self.assertIn("path escapes workdir", execution.result.content)
+        self.assertEqual(backend.executed, [])
+
+    def test_server_read_file_blocks_symlink_escape_before_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "work"
+            outside = root / "secret.txt"
+            workdir.mkdir()
+            outside.write_text("secret", encoding="utf-8")
+            link = workdir / "link.txt"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink not available: {exc}")
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=workdir,
+                allowed_tool_names=("read_file",),
+            )
+
+            execution = executor.execute("read_file", {"path": "link.txt"}, chunk_budget={})
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("path escapes workdir", execution.result.content)
+        self.assertEqual(backend.executed, [])
+
+    def test_server_file_tools_block_absolute_path_escape_before_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("read_file", "grep_search", "file_glob_search", "write_file"),
+            )
+
+            for name, arguments in {
+                "read_file": {"path": "/etc/passwd"},
+                "grep_search": {"path": "/etc", "pattern": "root"},
+                "file_glob_search": {"path": "/etc", "include": "*.conf"},
+                "write_file": {"path": "/tmp/outside.txt", "content": "x"},
+            }.items():
+                with self.subTest(name=name):
+                    execution = executor.execute(name, arguments, chunk_budget={})
+                    self.assertEqual(execution.source, "orbit")
+                    self.assertIn("path escapes workdir", execution.result.content)
+
         self.assertEqual(backend.executed, [])
 
     def test_edit_file_definition_uses_orbit_guardrail_schema(self) -> None:
@@ -355,6 +539,28 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertEqual(backend.executed, [])
         self.assertEqual(content, "alpha\nBETA\n")
+
+    def test_local_edit_file_keeps_original_when_atomic_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            target = workdir / "note.txt"
+            target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+            with patch("orbit.runtime.edit_guardrails.os.replace", side_effect=OSError("simulated failure")):
+                result = apply_local_edit_file(
+                    {
+                        "path": "note.txt",
+                        "changes": [{"mode": "replace", "line_start": 2, "line_end": 2, "content": "BETA"}],
+                    },
+                    workdir=workdir,
+                )
+
+            content = target.read_text(encoding="utf-8")
+            leftovers = [path for path in workdir.iterdir() if path.name != "note.txt"]
+
+        self.assertIn("cannot write edited file atomically", result)
+        self.assertEqual(content, "alpha\nbeta\n")
+        self.assertEqual(leftovers, [])
 
     def test_edit_file_normalizes_append_after_last_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

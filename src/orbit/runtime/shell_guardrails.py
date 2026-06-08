@@ -11,16 +11,47 @@ DEFAULT_SHELL_OUTPUT_BYTES = 12_000
 MAX_SHELL_OUTPUT_BYTES = 12_000
 
 _SHELL_META_CHARS = frozenset("|&;<>`$\\\n\r")
-_ALLOWED_COMMANDS = frozenset({"pwd", "ls", "find", "du", "df", "wc", "head", "tail", "file", "stat", "cat"})
+_FILE_COMMANDS = frozenset({"pwd", "ls", "find", "du", "df", "wc", "head", "tail", "file", "stat", "cat"})
+_SYSTEM_INFO_COMMANDS = frozenset({"uname", "hostname", "uptime", "whoami", "id", "date"})
+_HARDWARE_INFO_COMMANDS = frozenset({"free", "lscpu", "lsblk"})
+_PROCESS_INFO_COMMANDS = frozenset({"ps", "pgrep"})
+_NETWORK_INFO_COMMANDS = frozenset({"ip", "ss"})
+_ALLOWED_COMMANDS = (
+    _FILE_COMMANDS | _SYSTEM_INFO_COMMANDS | _HARDWARE_INFO_COMMANDS | _PROCESS_INFO_COMMANDS | _NETWORK_INFO_COMMANDS
+)
 _ALLOWED_SIMPLE_FLAGS = {
     "ls": frozenset({"-1", "-a", "-l", "-h", "-F", "-la", "-al", "-lh", "-hl", "-lah", "-lha", "-alh", "-ahl", "-hal", "-hla"}),
     "du": frozenset({"-s", "-h", "-sh", "-hs"}),
     "df": frozenset({"-h", "-k", "-m"}),
+    "free": frozenset({"-h", "-b", "-k", "-m", "-g"}),
+    "lscpu": frozenset(),
+    "lsblk": frozenset({"-f", "-J", "-p"}),
+    "uname": frozenset({"-a", "-s", "-r", "-m", "-n", "-p", "-o"}),
+    "hostname": frozenset(),
+    "uptime": frozenset({"-p", "-s"}),
+    "whoami": frozenset(),
+    "id": frozenset({"-u", "-g"}),
+    "date": frozenset({"-I", "-R", "-u"}),
+    "ss": frozenset({"-t", "-u", "-l", "-n", "-p", "-a", "-e", "-r", "-tulpen", "-tulpn", "-tunlp", "-ltnp", "-lntu"}),
     "wc": frozenset({"-l", "-w", "-c", "-m"}),
     "file": frozenset({"-b"}),
     "stat": frozenset({"-c"}),
     "cat": frozenset(),
 }
+_NO_PATH_ARGUMENT_COMMANDS = frozenset(
+    {
+        "free",
+        "lscpu",
+        "lsblk",
+        "uname",
+        "hostname",
+        "uptime",
+        "whoami",
+        "id",
+        "date",
+        "ss",
+    }
+)
 
 
 def exec_shell_definition() -> dict[str, Any]:
@@ -30,7 +61,8 @@ def exec_shell_definition() -> dict[str, Any]:
             "name": "exec_shell_command",
             "description": (
                 "Run one bounded read-only command in workdir. "
-                "Allowed: pwd, ls, find, du, df, wc, head, tail, file, stat, cat. "
+                "Allowed: pwd, ls, find, du, df, free, lscpu, lsblk, uname, hostname, uptime, "
+                "whoami, id, date, ps, pgrep, ip, ss, wc, head, tail, file, stat, cat. "
                 "Use ls -F for listing. No ls -R, shell operators, or outside paths."
             ),
             "parameters": {
@@ -87,6 +119,12 @@ def _validate_command_tokens(command: str, args: list[str]) -> str | None:
         return _validate_find(args)
     if command in {"head", "tail"}:
         return _validate_head_tail(args)
+    if command == "ip":
+        return _validate_ip(args)
+    if command == "ps":
+        return _validate_ps(args)
+    if command == "pgrep":
+        return _validate_pgrep(args)
     if command in _ALLOWED_SIMPLE_FLAGS:
         return _validate_simple_command(command, args)
     return "error: command not configured"
@@ -110,6 +148,8 @@ def _validate_simple_command(command: str, args: list[str]) -> str | None:
             if token not in allowed_flags:
                 return f"error: flag not allowed for {command}: {token}"
             continue
+        if command in _NO_PATH_ARGUMENT_COMMANDS:
+            return f"error: arguments not allowed for {command}: {token}"
         path_error = _validate_relative_path_token(token)
         if path_error:
             return path_error
@@ -172,6 +212,52 @@ def _validate_head_tail(args: list[str]) -> str | None:
     return None
 
 
+def _validate_ip(args: list[str]) -> str | None:
+    allowed_forms = {
+        ("addr",),
+        ("addr", "show"),
+        ("address",),
+        ("address", "show"),
+        ("route",),
+        ("route", "show"),
+        ("-brief", "addr"),
+        ("-brief", "addr", "show"),
+        ("-brief", "address"),
+        ("-brief", "address", "show"),
+        ("-br", "addr"),
+        ("-br", "addr", "show"),
+        ("-br", "address"),
+        ("-br", "address", "show"),
+    }
+    if tuple(args) in allowed_forms:
+        return None
+    return "error: ip allows only local addr/address/route diagnostics"
+
+
+def _validate_ps(args: list[str]) -> str | None:
+    if not args or args in (["-e"], ["-ef"], ["aux"]):
+        return None
+    return "error: ps allows only no arguments, -e, -ef, or aux"
+
+
+def _validate_pgrep(args: list[str]) -> str | None:
+    if not args:
+        return "error: pgrep requires one pattern"
+    allowed_flags = frozenset({"-a", "-f", "-l"})
+    pattern_count = 0
+    for token in args:
+        if token.startswith("-"):
+            if token not in allowed_flags:
+                return f"error: flag not allowed for pgrep: {token}"
+            continue
+        if _unsafe_process_pattern(token):
+            return "error: unsafe pgrep pattern"
+        pattern_count += 1
+    if pattern_count != 1:
+        return "error: pgrep requires exactly one pattern"
+    return None
+
+
 def _validate_relative_path_token(token: str) -> str | None:
     if not token or token.startswith("~"):
         return f"error: unsafe path token: {token}"
@@ -183,6 +269,10 @@ def _validate_relative_path_token(token: str) -> str | None:
 
 def _unsafe_pattern(pattern: str) -> bool:
     return not pattern or "/" in pattern or "\\" in pattern or ".." in pattern
+
+
+def _unsafe_process_pattern(pattern: str) -> bool:
+    return len(pattern) > 80 or _unsafe_pattern(pattern)
 
 
 def _int_suffix(value: str, *, maximum: int) -> int | None:

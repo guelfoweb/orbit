@@ -89,6 +89,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.max_tokens, 64)
         self.assertEqual(config.context_tokens, 2048)
 
+    def test_config_rejects_operational_values_outside_safe_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"timeout": 0, "max_tokens": 4, "context_tokens": 128}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "timeout"):
+                load_app_config(_parse("--config", str(path)))
+
+    def test_cli_flags_reject_operational_values_outside_safe_ranges(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_tokens"):
+            load_app_config(_parse("--max-tokens", "4"))
+
 
 def _parse(*args: str) -> argparse.Namespace:
     return build_parser().parse_args(list(args))

@@ -16,13 +16,21 @@ class ModelStepMetrics:
     prompt_tokens_per_second: float | None
     generation_tokens_per_second: float | None
     tool_calls: int
+    retry_reason: str | None = None
 
     @classmethod
-    def from_result(cls, *, loop: int, result: ChatResult) -> ModelStepMetrics:
+    def from_result(
+        cls,
+        *,
+        loop: int,
+        result: ChatResult,
+        phase: str | None = None,
+        retry_reason: str | None = None,
+    ) -> ModelStepMetrics:
         tool_calls = len(result.tool_calls)
         return cls(
             loop=loop,
-            phase="tool_call" if tool_calls else "final",
+            phase=phase or ("tool_call" if tool_calls else "final"),
             finish_reason=result.finish_reason,
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
@@ -30,6 +38,7 @@ class ModelStepMetrics:
             prompt_tokens_per_second=result.prompt_tokens_per_second,
             generation_tokens_per_second=result.generation_tokens_per_second,
             tool_calls=tool_calls,
+            retry_reason=retry_reason,
         )
 
 

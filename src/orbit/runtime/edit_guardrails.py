@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -159,8 +161,46 @@ def apply_local_edit_file(arguments: dict[str, Any], *, workdir: Path) -> str:
         updated += "\n"
     if len(updated.encode("utf-8")) > MAX_TEXT_FILE_BYTES_AFTER_REPLACE:
         return f"error: edited file too large: max {MAX_TEXT_FILE_BYTES_AFTER_REPLACE} bytes"
-    target.write_text(updated, encoding="utf-8")
+    write_error = _atomic_write_text(target, updated)
+    if write_error:
+        return write_error
     return f"edited {target.name}: {len(changes)} change(s)"
+
+
+def _atomic_write_text(target: Path, content: str) -> str | None:
+    tmp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
+            tmp_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, target)
+        tmp_name = None
+        _fsync_directory(target.parent)
+    except OSError as exc:
+        if tmp_name:
+            try:
+                Path(tmp_name).unlink()
+            except OSError:
+                pass
+        return f"error: cannot write edited file atomically: {exc}"
+    return None
+
+
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _edit_sort_key(change: dict[str, Any]) -> int:

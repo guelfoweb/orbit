@@ -166,6 +166,26 @@ class ToolTests(unittest.TestCase):
 
         self.assertIn("escapes workdir", result.content)
 
+    def test_delete_path_rejects_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "work"
+            outside = root / "secret.txt"
+            workdir.mkdir()
+            outside.write_text("secret", encoding="utf-8")
+            link = workdir / "link.txt"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink not available: {exc}")
+
+            result = execute_tool("delete_path", {"path": "link.txt"}, workdir=workdir)
+
+            self.assertTrue(outside.exists())
+            self.assertTrue(link.is_symlink())
+
+        self.assertIn("escapes workdir", result.content)
+
     def test_read_file_reads_utf8_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
@@ -199,6 +219,23 @@ class ToolTests(unittest.TestCase):
             workdir.mkdir()
 
             result = execute_tool("read_file", {"path": "../secret.txt"}, workdir=workdir)
+
+        self.assertIn("escapes workdir", result.content)
+
+    def test_read_file_rejects_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "work"
+            outside = root / "secret.txt"
+            workdir.mkdir()
+            outside.write_text("secret", encoding="utf-8")
+            link = workdir / "link.txt"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink not available: {exc}")
+
+            result = execute_tool("read_file", {"path": "link.txt"}, workdir=workdir)
 
         self.assertIn("escapes workdir", result.content)
 
@@ -305,6 +342,25 @@ class ToolTests(unittest.TestCase):
             workdir.mkdir()
 
             result = execute_tool("write_file", {"path": "../note.md", "content": "x"}, workdir=workdir)
+
+        self.assertIn("escapes workdir", result.content)
+
+    def test_write_file_rejects_symlink_parent_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "work"
+            outside = root / "outside"
+            workdir.mkdir()
+            outside.mkdir()
+            link = workdir / "linkdir"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink not available: {exc}")
+
+            result = execute_tool("write_file", {"path": "linkdir/note.txt", "content": "x"}, workdir=workdir)
+
+            self.assertFalse((outside / "note.txt").exists())
 
         self.assertIn("escapes workdir", result.content)
 

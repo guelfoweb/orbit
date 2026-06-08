@@ -65,10 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     session = SessionStore.for_workdir(config.workdir)
+    session_messages, session_warning = session.load_with_warning()
+    if session_warning:
+        print(dim(session_warning), file=sys.stderr)
     runtime = ChatRuntime(
         backend=backend,
         system_prompt=None if config.no_system else config.system,
-        messages=session.load() or [],
+        messages=session_messages or [],
         context_tokens=context_tokens,
     )
     history = PromptHistory.for_workdir(config.workdir)

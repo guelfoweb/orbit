@@ -25,18 +25,24 @@ class SessionStore:
         return cls(root / f"{resolved.name}-{digest}.json")
 
     def load(self) -> list[Message] | None:
+        messages, _warning = self.load_with_warning()
+        return messages
+
+    def load_with_warning(self) -> tuple[list[Message] | None, str | None]:
         if not self.path.exists():
-            return None
+            return None, None
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        except OSError as exc:
+            return None, f"warning: cannot read session {self.path}: {exc}"
+        except json.JSONDecodeError as exc:
+            return None, f"warning: ignoring corrupt session {self.path}: {exc}"
         messages = data.get("messages") if isinstance(data, dict) else None
         if not isinstance(messages, list):
-            return None
+            return None, f"warning: ignoring invalid session {self.path}: missing messages"
         if not all(_is_message(message) for message in messages):
-            return None
-        return messages
+            return None, f"warning: ignoring invalid session {self.path}: malformed message"
+        return messages, None
 
     def save(self, *, messages: list[Message], workdir: Path, model: str, base_url: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

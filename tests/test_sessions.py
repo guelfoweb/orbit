@@ -37,6 +37,34 @@ class SessionStoreTests(unittest.TestCase):
 
             self.assertIsNone(store.load())
 
+    def test_load_with_warning_reports_corrupt_session_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            store = SessionStore.for_workdir(workdir, root=Path(tmp) / "sessions")
+            store.path.parent.mkdir(parents=True)
+            store.path.write_text("{not-json", encoding="utf-8")
+
+            messages, warning = store.load_with_warning()
+
+        self.assertIsNone(messages)
+        self.assertIsNotNone(warning)
+        self.assertIn("corrupt session", warning or "")
+
+    def test_load_with_warning_reports_invalid_session_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            store = SessionStore.for_workdir(workdir, root=Path(tmp) / "sessions")
+            store.path.parent.mkdir(parents=True)
+            store.path.write_text('{"messages": [{"role": "tool", "content": "x"}]}', encoding="utf-8")
+
+            messages, warning = store.load_with_warning()
+
+        self.assertIsNone(messages)
+        self.assertIsNotNone(warning)
+        self.assertIn("invalid session", warning or "")
+
 
 if __name__ == "__main__":
     unittest.main()

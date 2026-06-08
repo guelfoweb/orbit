@@ -6,8 +6,9 @@ The current baseline targets `gemma4:12b` through `llama.cpp`/`llama-server` on 
 
 ## Status
 
-Early prototype:
+Stable local runtime:
 
+- Current release line: `1.0.0`.
 - Text chat through `llama-server` OpenAI-compatible API.
 - One-shot local image input through `--image`.
 - One-shot local audio input through `--audio`.
@@ -19,27 +20,61 @@ Early prototype:
 - Model-driven session memory refresh for long interactive sessions.
 - No dependency beyond the Python standard library.
 
+Orbit is developed and tested primarily on Linux with local `llama-server`. macOS may work if `llama-server`, Ollama, and the required model files are available. Windows is not a target environment.
+
+## Requirements
+
+- Python 3.11 or newer.
+- `llama-server` available in `PATH`.
+- Ollama available in `PATH` for the bundled Gemma 4 12B server helper.
+- A local `gemma4:12b` Ollama model, or network access for `ollama pull gemma4:12b`.
+- Optional multimodal support requires the Ollama projector blob for `gemma4:12b`.
+
 ## Start llama-server
+
+The helper scripts below are available from a source checkout or source distribution. The installed CLI entrypoint is `orbit`.
 
 Recommended quick start:
 
 ```bash
-scripts/orbit-gemma4-12b.sh
+scripts/gemma4-12b-server.sh start
+orbit --base-url http://127.0.0.1:18080 --model gemma4:12b
 ```
 
-The script pulls `gemma4:12b` with Ollama if needed, resolves the local GGUF blob downloaded by Ollama, starts `llama-server` on `127.0.0.1:18080`, and opens Orbit interactive chat.
+The script pulls `gemma4:12b` with Ollama if needed, resolves the local GGUF blob downloaded by Ollama, starts `llama-server` on `127.0.0.1:18080` in background, and returns the terminal so Orbit can be launched from the same shell.
 
-For image/audio input, start the same flow with the Ollama projector blob:
+For image/audio input, start the server with the Ollama projector blob:
 
 ```bash
-scripts/orbit-gemma4-12b.sh --multimodal
+scripts/gemma4-12b-server.sh start --multimodal
 ```
 
-Main text/tool profile for `gemma4:12b` reusing the GGUF blob already downloaded by Ollama:
+Stop the background server when finished:
+
+```bash
+scripts/gemma4-12b-server.sh stop
+```
+
+Check server status:
+
+```bash
+scripts/gemma4-12b-server.sh status
+```
+
+Common recovery cases:
+
+- `llama-server not found in PATH`: install or build `llama.cpp`, then ensure `llama-server` is on `PATH`.
+- `ollama not found in PATH`: install Ollama or manually pull `gemma4:12b` on a machine where Ollama is available.
+- `Ollama manifest not found after pull`: run `ollama pull gemma4:12b`, then retry the script.
+- `blob not found in Ollama manifest`: remove the broken local Ollama model and pull `gemma4:12b` again.
+- `existing llama-server ... is not multimodal`: stop the current server before restarting with `start --multimodal`.
+- `llama-server is running ... but not from this script pid file`: another process owns the endpoint. Stop it manually or change `PORT`/`BASE_URL`.
+
+Main text/tool profile for `gemma4:12b`:
 
 ```bash
 llama-server \
-  -m /usr/share/ollama/.ollama/models/blobs/sha256-1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606 \
+  -m <ollama-gemma4-12b-gguf-blob> \
   -c 8192 \
   -t 6 \
   -b 128 \
@@ -47,32 +82,21 @@ llama-server \
   -np 1 \
   --reasoning off \
   --cache-ram 8192 \
+  --tools read_file,write_file,file_glob_search,grep_search,get_datetime,exec_shell_command,edit_file,apply_diff \
   --host 127.0.0.1 \
   --port 18080
 ```
 
-Or start only the server with the bundled helper:
+The server helper accepts conservative environment overrides for local experiments:
 
 ```bash
-scripts/start-gemma4-12b.sh
-```
-
-A conservative 4K context helper is available if 8K is unstable on smaller machines:
-
-```bash
-scripts/start-gemma4-12b-c4k.sh
-```
-
-The start helpers share the same implementation and accept conservative environment overrides for local experiments:
-
-```bash
-THREADS=6 BATCH_SIZE=128 UBATCH_SIZE=128 CACHE_RAM=8192 scripts/start-gemma4-12b-c8k.sh
+THREADS=6 BATCH_SIZE=128 UBATCH_SIZE=128 CACHE_RAM=8192 scripts/gemma4-12b-server.sh start
 ```
 
 Prompt caching is enabled in Orbit requests. `llama-server` also enables prompt caching by default. Keep `CACHE_REUSE` unset unless you are benchmarking it explicitly:
 
 ```bash
-CACHE_REUSE=256 scripts/start-gemma4-12b-c8k.sh
+CACHE_REUSE=256 scripts/gemma4-12b-server.sh start
 ```
 
 Compare cache changes with `scripts/bench-kv-cache.py` before keeping them.
@@ -85,6 +109,14 @@ python3 -m venv .venv
 pip install -e .
 
 orbit --base-url http://127.0.0.1:18080 "Say who you are in one short sentence."
+```
+
+Post-install smoke checks:
+
+```bash
+orbit --version
+orbit --base-url http://127.0.0.1:18080 /health
+orbit --base-url http://127.0.0.1:18080 /tools
 ```
 
 Interactive mode:

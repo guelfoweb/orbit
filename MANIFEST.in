@@ -1,0 +1,6 @@
+include AGENTS.md
+include BENCHMARK.md
+include PROMPTS.md
+include QUANTIZATION.md
+recursive-include scripts *.py *.sh
+recursive-include text *.txt

@@ -88,6 +88,24 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(images, [])
         self.assertEqual(audios, [])
 
+    def test_load_referenced_media_ignores_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "work"
+            outside = root / "outside.png"
+            workdir.mkdir()
+            outside.write_bytes(b"not a real png")
+            link = workdir / "outside.png"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink not available: {exc}")
+
+            images, audios = load_referenced_media("describe outside.png", workdir=workdir)
+
+        self.assertEqual(images, [])
+        self.assertEqual(audios, [])
+
 
 if __name__ == "__main__":
     unittest.main()

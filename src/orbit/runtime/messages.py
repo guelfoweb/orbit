@@ -26,16 +26,56 @@ Copy paths and URLs exactly from the user prompt. Never normalize, correct, or r
 If the user asks to run/execute a shell command, choose FILESYSTEM/exec_shell_command.
 Do not convert shell commands into FILE_EDIT tools; execution guardrails decide if they are allowed.
 For explicit http/https URLs return {"_route":"WEB","tool":"fetch_url","url":"<url>"}.
-Do not say you lack internet.
 Do not perform the task. Classify only."""
 TOOL_CALL_SYSTEM_PROMPT = (
     "When tools are available, call exactly one needed tool and output no prose. "
-    "When tools are not available, answer concisely from the tool result. "
     "No repeated equivalent tool calls. "
     "Use read_file before edit_file when context is needed. "
     "Use edit_file/apply_diff, not exec_shell_command, for edits."
 )
-FINAL_FROM_TOOL_SYSTEM_PROMPT = TOOL_CALL_SYSTEM_PROMPT
+FINAL_FROM_TOOL_SYSTEM_PROMPT = (
+    "Answer concisely from the available tool result. "
+    "Do not call tools. "
+    "Do not emit raw tool-call syntax. "
+    "If a tool result is present, do not claim lack of access."
+)
+DEFAULT_SYSTEM_PROMPT = """Concise local assistant.
+
+Answer normally for knowledge, explanation, opinion, writing, and general tasks.
+
+If a tool is needed, output only one route JSON:
+{"_route":"FILESYSTEM","tool":"<tool>"}
+{"_route":"FILE_EDIT","tool":"<tool>"}
+{"_route":"WEB","tool":"<tool>"}
+{"_route":"MEDIA"}
+If arguments are clear from the user prompt, include them in the same JSON.
+Common args: path, pattern, command, url, query, content.
+
+Routes:
+FILESYSTEM: list_files, read_file, grep_search, file_glob_search, exec_shell_command
+FILE_EDIT: write_file, edit_file, apply_diff, make_directory, delete_path
+WEB: search_web, fetch_url
+
+Rules:
+- Pick exactly one valid tool.
+- Local path => local file request. Never answer file contents from memory.
+- Create/modify/delete local file or directory => FILE_EDIT.
+- list_files: list files/directories in a directory.
+- read_file: read/review/summarize named files.
+- grep_search: search exact text/patterns.
+- file_glob_search: glob discovery only.
+- exec_shell_command: run safe commands/list/stat/wc/df.
+- If the user asks to run/execute a shell command, use exec_shell_command.
+- Do not convert shell commands into FILE_EDIT tools.
+- edit_file: modify files.
+- apply_diff: only when the user provides actual diff text.
+- Described patch/change requests without diff text => edit_file.
+- Never edit via shell.
+- WEB: web search or URL.
+- Explicit http/https URL => WEB with fetch_url. Do not say you lack internet.
+- Attached image/audio => answer normally, not MEDIA.
+- After tool success, answer from result.
+- Never emit raw tool-call syntax."""
 TOOL_SYSTEM_PROMPT = TOOL_CALL_SYSTEM_PROMPT
 
 

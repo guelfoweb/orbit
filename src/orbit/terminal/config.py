@@ -6,45 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT
+
 
 DEFAULT_CONFIG_PATH = Path.home() / ".orbit" / "config.json"
-DEFAULT_SYSTEM_PROMPT = """Concise local assistant.
-
-Answer normally for knowledge, explanation, opinion, writing, and general tasks.
-
-If a tool is needed, output only one route JSON:
-{"_route":"FILESYSTEM","tool":"<tool>"}
-{"_route":"FILE_EDIT","tool":"<tool>"}
-{"_route":"WEB","tool":"<tool>"}
-{"_route":"MEDIA"}
-If arguments are clear from the user prompt, include them in the same JSON.
-Common args: path, pattern, command, url, query, content.
-
-Routes:
-FILESYSTEM: list_files, read_file, grep_search, file_glob_search, exec_shell_command
-FILE_EDIT: write_file, edit_file, apply_diff, make_directory, delete_path
-WEB: search_web, fetch_url
-
-Rules:
-- Pick exactly one valid tool.
-- Local path => local file request. Never answer file contents from memory.
-- Create/modify/delete local file or directory => FILE_EDIT.
-- list_files: list files/directories in a directory.
-- read_file: read/review/summarize named files.
-- grep_search: search exact text/patterns.
-- file_glob_search: glob discovery only.
-- exec_shell_command: run safe commands/list/stat/wc/df.
-- If the user asks to run/execute a shell command, use exec_shell_command.
-- Do not convert shell commands into FILE_EDIT tools.
-- edit_file: modify files.
-- apply_diff: only when the user provides actual diff text.
-- Described patch/change requests without diff text => edit_file.
-- Never edit via shell.
-- WEB: web search or URL.
-- Explicit http/https URL => WEB with fetch_url. Do not say you lack internet.
-- Attached image/audio => answer normally, not MEDIA.
-- After tool success, answer from result.
-- Never emit raw tool-call syntax."""
+MIN_TIMEOUT_SECONDS = 1.0
+MAX_TIMEOUT_SECONDS = 3600.0
+MIN_MAX_TOKENS = 32
+MAX_MAX_TOKENS = 4096
+MIN_CONTEXT_TOKENS = 512
+MAX_CONTEXT_TOKENS = 262_144
 
 
 @dataclass(frozen=True)
@@ -79,10 +50,27 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         base_url=_str_value(values, "base_url", AppConfig.base_url),
         model=_str_value(values, "model", AppConfig.model),
         workdir=Path(_str_value(values, "workdir", str(AppConfig.workdir))).expanduser().resolve(),
-        timeout=_float_value(values, "timeout", AppConfig.timeout),
+        timeout=_ranged_float_value(
+            values,
+            "timeout",
+            AppConfig.timeout,
+            minimum=MIN_TIMEOUT_SECONDS,
+            maximum=MAX_TIMEOUT_SECONDS,
+        ),
         temperature=_float_value(values, "temperature", AppConfig.temperature),
-        max_tokens=_int_value(values, "max_tokens", AppConfig.max_tokens),
-        context_tokens=_optional_int_value(values, "context_tokens"),
+        max_tokens=_ranged_int_value(
+            values,
+            "max_tokens",
+            AppConfig.max_tokens,
+            minimum=MIN_MAX_TOKENS,
+            maximum=MAX_MAX_TOKENS,
+        ),
+        context_tokens=_optional_ranged_int_value(
+            values,
+            "context_tokens",
+            minimum=MIN_CONTEXT_TOKENS,
+            maximum=MAX_CONTEXT_TOKENS,
+        ),
         system=_str_value(values, "system", AppConfig.system),
         no_system=_bool_value(values, "no_system", AppConfig.no_system),
     )
@@ -90,10 +78,31 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         base_url=args.base_url if args.base_url is not None else config.base_url,
         model=args.model if args.model is not None else config.model,
         workdir=Path(args.workdir).expanduser().resolve() if args.workdir is not None else config.workdir,
-        timeout=args.timeout if args.timeout is not None else config.timeout,
+        timeout=_validate_optional_float_range(
+            args.timeout,
+            "timeout",
+            minimum=MIN_TIMEOUT_SECONDS,
+            maximum=MAX_TIMEOUT_SECONDS,
+        )
+        if args.timeout is not None
+        else config.timeout,
         temperature=args.temperature if args.temperature is not None else config.temperature,
-        max_tokens=args.max_tokens if args.max_tokens is not None else config.max_tokens,
-        context_tokens=args.context_tokens if args.context_tokens is not None else config.context_tokens,
+        max_tokens=_validate_optional_int_range(
+            args.max_tokens,
+            "max_tokens",
+            minimum=MIN_MAX_TOKENS,
+            maximum=MAX_MAX_TOKENS,
+        )
+        if args.max_tokens is not None
+        else config.max_tokens,
+        context_tokens=_validate_optional_int_range(
+            args.context_tokens,
+            "context_tokens",
+            minimum=MIN_CONTEXT_TOKENS,
+            maximum=MAX_CONTEXT_TOKENS,
+        )
+        if args.context_tokens is not None
+        else config.context_tokens,
         system=args.system if args.system is not None else config.system,
         no_system=args.no_system or config.no_system,
     )
@@ -127,19 +136,55 @@ def _float_value(values: dict[str, Any], key: str, default: float) -> float:
     return float(value)
 
 
-def _int_value(values: dict[str, Any], key: str, default: int) -> int:
+def _ranged_float_value(
+    values: dict[str, Any],
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    return _validate_optional_float_range(_float_value(values, key, default), key, minimum=minimum, maximum=maximum)
+
+
+def _ranged_int_value(
+    values: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
     value = values.get(key, default)
     if not isinstance(value, int):
         raise ValueError(f"invalid config key {key}: expected integer")
-    return value
+    return _validate_optional_int_range(value, key, minimum=minimum, maximum=maximum)
 
 
-def _optional_int_value(values: dict[str, Any], key: str) -> int | None:
+def _optional_ranged_int_value(
+    values: dict[str, Any],
+    key: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int | None:
     value = values.get(key)
     if value is None:
         return None
     if not isinstance(value, int):
         raise ValueError(f"invalid config key {key}: expected integer")
+    return _validate_optional_int_range(value, key, minimum=minimum, maximum=maximum)
+
+
+def _validate_optional_float_range(value: float, key: str, *, minimum: float, maximum: float) -> float:
+    if value < minimum or value > maximum:
+        raise ValueError(f"invalid config key {key}: expected value between {minimum:g} and {maximum:g}")
+    return value
+
+
+def _validate_optional_int_range(value: int, key: str, *, minimum: int, maximum: int) -> int:
+    if value < minimum or value > maximum:
+        raise ValueError(f"invalid config key {key}: expected value between {minimum} and {maximum}")
     return value
 
 

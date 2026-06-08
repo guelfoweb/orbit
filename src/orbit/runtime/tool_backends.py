@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from orbit.backend.llama_server import LlamaServerError
 from orbit.runtime.edit_guardrails import prepare_apply_diff, prepare_edit_file
+from orbit.runtime.file_tools import resolve_inside_workdir
 from orbit.runtime.shell_guardrails import prepare_exec_shell_command
 from orbit.runtime.tools import ToolResult, execute_tool, tool_definitions
 
@@ -243,8 +244,11 @@ def _server_arguments(name: str, arguments: dict[str, Any], *, workdir: Path) ->
     if name in {"file_glob_search", "grep_search"} and not path:
         updated["path"] = str(workdir.resolve())
         return updated
-    if isinstance(path, str) and path and not Path(path).is_absolute():
-        updated["path"] = str((workdir / path).resolve())
+    if isinstance(path, str) and path:
+        target_or_error = resolve_inside_workdir(path, workdir=workdir)
+        if isinstance(target_or_error, str):
+            return target_or_error
+        updated["path"] = str(target_or_error)
     return updated
 
 

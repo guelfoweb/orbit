@@ -22,6 +22,7 @@ find_ollama_models_dir() {
 ensure_ollama_model() {
   if ! command -v ollama >/dev/null 2>&1; then
     echo "error: ollama not found in PATH. Install Ollama, then run: ollama pull $OLLAMA_MODEL" >&2
+    echo "recovery: start the server helper again after Ollama is installed and $OLLAMA_MODEL is available" >&2
     return 1
   fi
 
@@ -40,6 +41,7 @@ blob_from_manifest() {
   manifest="$models_dir/$OLLAMA_MANIFEST_REL"
   if [ ! -r "$manifest" ]; then
     echo "error: Ollama manifest not found after pull: $manifest" >&2
+    echo "recovery: run 'ollama pull $OLLAMA_MODEL' and retry" >&2
     return 1
   fi
 

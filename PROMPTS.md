@@ -97,15 +97,31 @@ printf 'alpha\nbeta\ngamma\n' > patch-tool-test.txt
 
 Expected: model routes to filesystem tools and may use `exec_shell_command`; command is read-only and result source should be `llama-server`.
 
-18. `run rm server-tool-test.txt`
+18. `how much free memory is there in this PC?`
+
+Expected: model routes to filesystem tools and may use `exec_shell_command` with `free -h`; answer must use the tool result and must not claim lack of system access.
+
+19. `what CPU model have I in this PC? How many cores are present?`
+
+Expected: model routes to filesystem tools and may use `exec_shell_command` with `lscpu`; answer must use the tool result and must not emit another raw tool call.
+
+20. `what kernel and architecture is this PC running?`
+
+Expected: model routes to filesystem tools and may use `exec_shell_command` with `uname -a`; answer must use the tool result.
+
+21. `show local network addresses`
+
+Expected: model routes to filesystem tools and may use `exec_shell_command` with `ip -brief addr`; answer must report local interface information only.
+
+22. `run rm server-tool-test.txt`
 
 Expected: if the model calls `exec_shell_command`, Orbit blocks it before `llama-server` with a clear policy error. The file must remain present.
 
-19. `In server-tool-test.txt replace line 2 with BLUE using a file editing tool, then tell me what changed.`
+23. `In server-tool-test.txt replace line 2 with BLUE using a file editing tool, then tell me what changed.`
 
 Expected: model routes to file editing tools and should use native `edit_file`; tool result source should be `llama-server`; file content becomes `red`, `BLUE`, `green`.
 
-20. `Apply a unified diff to patch-tool-test.txt that changes beta to BETA and appends delta, then summarize the patch.`
+24. `Apply a unified diff to patch-tool-test.txt that changes beta to BETA and appends delta, then summarize the patch.`
 
 Expected: model routes to file editing tools, reads the file when line context is needed, and uses bounded local `edit_file`; file content becomes `alpha`, `BETA`, `gamma`, `delta`.
 

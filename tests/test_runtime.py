@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
+from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT
 from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
 
@@ -135,7 +136,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(steps), 1)
         self.assertEqual(steps[0].loop, 1)
-        self.assertEqual(steps[0].phase, "final")
+        self.assertEqual(steps[0].phase, "chat_final")
         self.assertEqual(steps[0].prompt_tokens, 1)
         self.assertEqual(steps[0].cached_tokens, 0)
 
@@ -731,7 +732,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "direct media answer")
         self.assertEqual(backend.calls, 1)
         self.assertEqual(backend.tools_seen, [None])
-        self.assertEqual(backend.messages[0]["content"], "Answer using the attached image/audio.")
+        self.assertEqual(backend.messages[0]["content"], MEDIA_SYSTEM_PROMPT)
         user_content = backend.messages[1]["content"]
         self.assertIsInstance(user_content, list)
         self.assertEqual(user_content[1]["type"], "image_url")
@@ -841,6 +842,169 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "short web synthesis")
         self.assertEqual(backend.max_tokens_seen, [96, 72])
+
+    def test_ask_with_tools_retries_raw_tool_call_in_final_answer(self) -> None:
+        class RawToolCallFinalBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"lscpu\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content='<|tool_call>call:exec_shell_command{"command":"grep cpu /proc/cpuinfo"}<tool_call|>',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=20,
+                        completion_tokens=4,
+                        cached_tokens=10,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="CPU information from tool result",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=22,
+                    completion_tokens=5,
+                    cached_tokens=10,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = RawToolCallFinalBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            steps = []
+            result = runtime.ask_with_tools(
+                "what cpu do I have?",
+                temperature=0,
+                max_tokens=512,
+                workdir=Path(tmp),
+                tool_names=("exec_shell_command",),
+                on_model_step=steps.append,
+            )
+
+        self.assertEqual(result.content, "CPU information from tool result")
+        self.assertEqual(backend.calls, 3)
+        self.assertEqual(steps[-1].phase, "final_from_tool_retry")
+        self.assertEqual(steps[-1].retry_reason, "raw_tool_call")
+
+    def test_ask_with_tools_traces_tool_call_retry_in_final_answer(self) -> None:
+        class ToolCallFinalBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"pwd\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"ls\"}"},
+                            }
+                        ],
+                        prompt_tokens=20,
+                        completion_tokens=4,
+                        cached_tokens=10,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="final answer from first tool result",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=22,
+                    completion_tokens=5,
+                    cached_tokens=10,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = ToolCallFinalBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            steps = []
+            result = runtime.ask_with_tools(
+                "show current directory",
+                temperature=0,
+                max_tokens=512,
+                workdir=Path(tmp),
+                tool_names=("exec_shell_command",),
+                on_model_step=steps.append,
+            )
+
+        self.assertEqual(result.content, "final answer from first tool result")
+        self.assertEqual(backend.calls, 3)
+        self.assertEqual(steps[-1].phase, "final_from_tool_retry")
+        self.assertEqual(steps[-1].retry_reason, "tool_call_in_final")
+
+    def test_final_from_tool_uses_final_prompt_not_tool_call_prompt(self) -> None:
+        class PromptCaptureBackend(ToolCallingBackend):
+            def __init__(self) -> None:
+                super().__init__(tool_name="read_file", arguments="{\"path\":\"note.txt\"}")
+                self.system_prompts: list[str] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                system = messages[0].get("content") if messages and messages[0].get("role") == "system" else None
+                if isinstance(system, str):
+                    self.system_prompts.append(system)
+                return super().chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("hello", encoding="utf-8")
+            backend = PromptCaptureBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="system")
+
+            runtime.ask_with_tools("read note", temperature=0, max_tokens=32, workdir=workdir, tool_names=("read_file",))
+
+        self.assertEqual(backend.system_prompts[-1], FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertNotIn("When tools are available", backend.system_prompts[-1])
 
     def test_ask_with_tools_can_write_new_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

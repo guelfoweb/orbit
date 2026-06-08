@@ -140,7 +140,7 @@ class ChatRuntime:
         route_messages = with_route_system_prompt(self.messages)
         first = self.backend.chat(route_messages, temperature=temperature, max_tokens=route_max_tokens)
         if on_model_step:
-            on_model_step(ModelStepMetrics.from_result(loop=1, result=first))
+            on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
         route_content = first.content
         decision = parse_route_decision_from_tool_calls(first.tool_calls) or parse_route_decision(route_content)
         if decision is None:
@@ -156,7 +156,7 @@ class ChatRuntime:
                         on_delta=on_final_delta,
                     )
                 if on_model_step:
-                    on_model_step(ModelStepMetrics.from_result(loop=2, result=first))
+                    on_model_step(ModelStepMetrics.from_result(loop=2, result=first, phase="chat_final_retry"))
             if _is_empty_final_response(first):
                 retried_empty_final = True
                 first = self._chat_final(
@@ -367,15 +367,15 @@ class ChatRuntime:
                 )
             last_result = result
             if on_model_step:
-                on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result))
+                on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
             if result.finish_reason == "length" and not result.tool_calls:
                 result = self.backend.chat(call_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
                 if on_model_step:
-                    on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result))
+                    on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
             if not result.tool_calls and _is_empty_final_response(result):
                 result = self.backend.chat(call_messages, temperature=temperature, max_tokens=tool_max_tokens, tools=tools)
                 if on_model_step:
-                    on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result))
+                    on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
                 if not result.tool_calls and _is_empty_final_response(result):
                     return self._chat_final(
                         with_chat_system_prompt(self.messages),
@@ -517,11 +517,10 @@ class ChatRuntime:
                 on_delta=on_final_delta,
             )
         if on_model_step:
-            on_model_step(ModelStepMetrics.from_result(loop=loop, result=result))
+            on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
         length_retry_allowed = on_final_delta is None and (large_file_excerpt or web_fetch_result)
-        if result.tool_calls or (not result.content and result.finish_reason == "stop") or (
-            length_retry_allowed and result.finish_reason == "length"
-        ):
+        retry_reason = _final_from_tool_retry_reason(result, length_retry_allowed=length_retry_allowed)
+        if retry_reason is not None:
             retry_messages = [
                 *call_messages,
                 {
@@ -542,7 +541,14 @@ class ChatRuntime:
                     on_delta=on_final_delta,
                 )
             if on_model_step:
-                on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=result))
+                on_model_step(
+                    ModelStepMetrics.from_result(
+                        loop=loop + 1,
+                        result=result,
+                        phase="final_from_tool_retry",
+                        retry_reason=retry_reason,
+                    )
+                )
         self.messages.append({"role": "assistant", "content": result.content})
         return result
 
@@ -563,7 +569,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
         )
         if on_model_step:
-            on_model_step(ModelStepMetrics.from_result(loop=loop, result=result))
+            on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="chat_final"))
         if not _is_empty_final_response(result):
             return result
 
@@ -574,7 +580,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
         )
         if on_model_step:
-            on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=retry))
+            on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=retry, phase="chat_final_retry"))
         if not _is_empty_final_response(retry):
             return retry
 
@@ -709,6 +715,22 @@ def _is_list_shell_command(command: str | None) -> bool:
 
 def _is_empty_final_response(result: ChatResult) -> bool:
     return not result.tool_calls and result.finish_reason == "stop" and not result.content.strip()
+
+
+def _final_from_tool_retry_reason(result: ChatResult, *, length_retry_allowed: bool) -> str | None:
+    if result.tool_calls:
+        return "tool_call_in_final"
+    if _contains_raw_tool_call(result.content):
+        return "raw_tool_call"
+    if not result.content and result.finish_reason == "stop":
+        return "empty_final"
+    if length_retry_allowed and result.finish_reason == "length":
+        return "length"
+    return None
+
+
+def _contains_raw_tool_call(content: str) -> bool:
+    return "<|tool_call>" in content or "<tool_call|>" in content
 
 
 def _all_tool_calls_allowed(tool_calls: list[dict[str, object]], allowed_tool_names: tuple[str, ...]) -> bool:

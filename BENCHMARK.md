@@ -5,10 +5,10 @@ Manual benchmark prompts for Orbit on a warm `llama-server`.
 Start the default server first:
 
 ```bash
-scripts/orbit-gemma4-12b.sh --multimodal
+scripts/gemma4-12b-server.sh start --multimodal
 ```
 
-In another terminal, run:
+Then run:
 
 ```bash
 scripts/bench-core.sh
