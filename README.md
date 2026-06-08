@@ -8,7 +8,7 @@ The current baseline targets `gemma4:12b` through `llama.cpp`/`llama-server` on 
 
 Stable local runtime:
 
-- Current release line: `1.0.0`.
+- Current release line: `0.0.1`.
 - Text chat through `llama-server` OpenAI-compatible API.
 - One-shot local image input through `--image`.
 - One-shot local audio input through `--audio`.
