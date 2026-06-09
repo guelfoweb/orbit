@@ -34,6 +34,7 @@ class StatusTests(unittest.TestCase):
         self.assertIn("model: gemma4", status)
         self.assertIn("stop: stop", status)
         self.assertIn("tks: 10->3, cached 8", status)
+        self.assertIn("cache: 80%", status)
         self.assertIn("pf 12.5/s", status)
         self.assertIn("gen 3.4/s", status)
 

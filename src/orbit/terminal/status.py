@@ -20,6 +20,8 @@ def format_turn_status(
     if result.prompt_tokens is not None or result.completion_tokens is not None:
         cached = f", cached {result.cached_tokens}" if result.cached_tokens is not None else ""
         parts.append(f"tks: {result.prompt_tokens}->{result.completion_tokens}{cached}")
+    if result.prompt_tokens and result.cached_tokens is not None:
+        parts.append(f"cache: {(result.cached_tokens / result.prompt_tokens) * 100:.0f}%")
     speeds = []
     if result.prompt_tokens_per_second is not None:
         speeds.append(f"pf {result.prompt_tokens_per_second:.1f}/s")

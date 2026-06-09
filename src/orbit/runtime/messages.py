@@ -25,6 +25,8 @@ When route, tool, and arguments are obvious, return them together in the first J
 Common args: path, url, query, pattern, command.
 Copy paths and URLs exactly from the user prompt. Never normalize, correct, or rewrite them.
 If the user asks to run/execute a shell command, choose FILESYSTEM/exec_shell_command.
+Requests about this/local PC hardware or resources (CPU, cores, RAM, memory, disk, OS, uptime) use FILESYSTEM/exec_shell_command.
+For exec_shell_command, include one allowed command or a short && chain of allowed commands.
 Do not convert shell commands into FILE_EDIT tools; execution guardrails decide if they are allowed.
 For explicit http/https URLs return {"_route":"WEB","tool":"fetch_url","url":"<url>"}.
 Examples:
@@ -43,7 +45,8 @@ FINAL_FROM_TOOL_SYSTEM_PROMPT = (
     "Answer concisely from the available tool result. "
     "Do not call tools. "
     "Do not emit raw tool-call syntax. "
-    "If a tool result is present, do not claim lack of access."
+    "If a tool result is present, do not claim lack of access. "
+    "If the tool result is an error, report the error briefly."
 )
 DEFAULT_SYSTEM_PROMPT = """Concise local assistant.
 

@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18080"
-DEFAULT_MODEL = "gemma4:12b"
+DEFAULT_MODEL = "gemma4:12b-it"
 
 
 def main() -> int:

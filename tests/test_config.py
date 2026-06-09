@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.terminal.cli import build_parser
+from orbit.runtime.messages import ROUTE_SYSTEM_PROMPT
 from orbit.terminal.config import DEFAULT_SYSTEM_PROMPT, load_app_config
 
 
@@ -23,6 +24,11 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('{"_route":"FILESYSTEM","tool":"<tool>"}', DEFAULT_SYSTEM_PROMPT)
         self.assertIn("Never answer file contents from memory", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("Common args: path, pattern, command, url, query, content.", DEFAULT_SYSTEM_PROMPT)
+
+    def test_route_system_prompt_routes_local_hardware_queries_to_shell(self) -> None:
+        self.assertIn("this/local PC hardware or resources", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("FILESYSTEM/exec_shell_command", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("short && chain of allowed commands", ROUTE_SYSTEM_PROMPT)
 
     def test_missing_config_uses_defaults(self) -> None:
         args = _parse("--config", "/tmp/orbit-missing-config.json")

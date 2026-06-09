@@ -64,6 +64,32 @@ class StreamingRendererTests(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("Working (0s - Ctrl+C to interrupt)", output)
 
+    def test_wait_timer_prints_prefill_progress_when_estimated(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(interval=0.01, prefill_estimate_seconds=10)
+            renderer.start()
+            time.sleep(0.02)
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("Working (0s, pf ~1% - Ctrl+C to interrupt)", output)
+
+    def test_wait_timer_prints_prefill_token_progress_when_estimated(self) -> None:
+        renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
+
+        self.assertIn("pf ~500/1000 tk", renderer._working_status(5))
+        self.assertIn("preparing generation", renderer._working_status(10))
+
+    def test_wait_timer_prints_prefill_finalizing_after_estimate(self) -> None:
+        renderer = StreamRenderer(prefill_estimate_seconds=10)
+
+        self.assertIn("preparing generation", renderer._working_status(10))
+
     def test_wait_timer_stops_before_first_delta(self) -> None:
         stream = io.StringIO()
         original = sys.stdout

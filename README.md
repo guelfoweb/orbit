@@ -2,7 +2,7 @@
 
 Minimal local CLI for `llama-server`, focused on prompt cache, continuation, and multimodal local inference.
 
-The current baseline targets `gemma4:12b` through `llama.cpp`/`llama-server` on CPU-only hardware.
+The current baseline targets `gemma4:12b-it` through `llama.cpp`/`llama-server` on CPU-only hardware.
 
 ## Status
 
@@ -20,15 +20,14 @@ Stable local runtime:
 - Model-driven session memory refresh for long interactive sessions.
 - No dependency beyond the Python standard library.
 
-Orbit is developed and tested primarily on Linux with local `llama-server`. macOS may work if `llama-server`, Ollama, and the required model files are available. Windows is not a target environment.
+Orbit is developed and tested primarily on Linux with local `llama-server`. macOS may work if `llama-server` and the required model files are available. Windows is not a target environment.
 
 ## Requirements
 
 - Python 3.11 or newer.
 - `llama-server` available in `PATH`.
-- Ollama available in `PATH` for the bundled Gemma 4 12B server helper.
-- A local `gemma4:12b` Ollama model, or network access for `ollama pull gemma4:12b`.
-- Optional multimodal support requires the Ollama projector blob for `gemma4:12b`.
+- A local `gemma-4-12B-it-Q4_K_M.gguf` model file, or `MODEL_PATH` pointing to it.
+- Optional multimodal support requires `mmproj-gemma-4-12B-it-Q8_0.gguf`, or `MMPROJ_PATH` pointing to it.
 
 ## Start llama-server
 
@@ -41,11 +40,11 @@ scripts/gemma4-12b-server.sh start
 orbit --base-url http://127.0.0.1:18080
 ```
 
-The script pulls `gemma4:12b` with Ollama if needed, resolves the local GGUF blob downloaded by Ollama, starts `llama-server` on `127.0.0.1:18080` in background, and returns the terminal so Orbit can be launched from the same shell.
+The script resolves the local `gemma-4-12B-it-Q4_K_M.gguf` file, starts `llama-server` on `127.0.0.1:18080` in background, and returns the terminal so Orbit can be launched from the same shell.
 
 Orbit does not select model weights at runtime. The model is selected when `llama-server` starts with `-m`; Orbit uses the model exposed by the server API and shows the resolved served name in status/footer output.
 
-For image/audio input, start the server with the Ollama projector blob:
+For image/audio input, start the server with the matching multimodal projector:
 
 ```bash
 scripts/gemma4-12b-server.sh start --multimodal
@@ -66,17 +65,16 @@ scripts/gemma4-12b-server.sh status
 Common recovery cases:
 
 - `llama-server not found in PATH`: install or build `llama.cpp`, then ensure `llama-server` is on `PATH`.
-- `ollama not found in PATH`: install Ollama or manually pull `gemma4:12b` on a machine where Ollama is available.
-- `Ollama manifest not found after pull`: run `ollama pull gemma4:12b`, then retry the script.
-- `blob not found in Ollama manifest`: remove the broken local Ollama model and pull `gemma4:12b` again.
+- `gemma-4-12B-it-Q4_K_M.gguf not found`: set `MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf`.
+- `multimodal projector not found`: set `MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf`.
 - `existing llama-server ... is not multimodal`: stop the current server before restarting with `start --multimodal`.
 - `llama-server is running ... but not from this script pid file`: another process owns the endpoint. Stop it manually or change `PORT`/`BASE_URL`.
 
-Main text/tool profile for `gemma4:12b`:
+Main text/tool profile for `gemma4:12b-it`:
 
 ```bash
 llama-server \
-  -m <ollama-gemma4-12b-gguf-blob> \
+  -m <gemma-4-12B-it-Q4_K_M.gguf> \
   -c 8192 \
   -t 6 \
   -b 128 \
@@ -95,13 +93,7 @@ The server helper accepts conservative environment overrides for local experimen
 THREADS=6 BATCH_SIZE=128 UBATCH_SIZE=128 CACHE_RAM=8192 scripts/gemma4-12b-server.sh start
 ```
 
-Prompt caching is enabled in Orbit requests. `llama-server` also enables prompt caching by default. Keep `CACHE_REUSE` unset unless you are benchmarking it explicitly:
-
-```bash
-CACHE_REUSE=256 scripts/gemma4-12b-server.sh start
-```
-
-Compare cache changes with `scripts/bench-kv-cache.py` before keeping them.
+Prompt caching is enabled in Orbit requests. `llama-server` also enables prompt caching by default. Compare cache-related server flag changes with `scripts/bench-kv-cache.py` before keeping them.
 
 ## Run
 
@@ -293,7 +285,7 @@ mkdir -p ~/.orbit
 cat > ~/.orbit/config.json <<'JSON'
 {
   "base_url": "http://127.0.0.1:18080",
-  "model": "gemma4:12b",
+  "model": "gemma4:12b-it",
   "workdir": ".",
   "timeout": 300,
   "temperature": 0,

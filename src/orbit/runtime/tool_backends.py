@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from orbit.backend.llama_server import LlamaServerError
 from orbit.runtime.edit_guardrails import prepare_apply_diff, prepare_edit_file
 from orbit.runtime.file_tools import resolve_inside_workdir
-from orbit.runtime.shell_guardrails import prepare_exec_shell_command
+from orbit.runtime.shell_guardrails import exec_shell_should_run_locally, prepare_exec_shell_command
 from orbit.runtime.tools import ToolResult, execute_tool, tool_definitions
 
 
@@ -253,6 +253,8 @@ def _server_arguments(name: str, arguments: dict[str, Any], *, workdir: Path) ->
 
 
 def _prefer_orbit_tool(name: str, arguments: dict[str, Any], *, workdir: Path) -> bool:
+    if name == "exec_shell_command":
+        return exec_shell_should_run_locally(arguments)
     if name == "edit_file":
         return True
     if name != "read_file":

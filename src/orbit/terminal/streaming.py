@@ -10,8 +10,16 @@ SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
 
 
 class StreamRenderer:
-    def __init__(self, *, interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        *,
+        interval: float = 1.0,
+        prefill_estimate_seconds: float | None = None,
+        prefill_estimate_tokens: int | None = None,
+    ) -> None:
         self.interval = interval
+        self._prefill_estimate_seconds = prefill_estimate_seconds
+        self._prefill_estimate_tokens = prefill_estimate_tokens
         self._started = False
         self._first_delta = False
         self._timer_active = False
@@ -72,13 +80,33 @@ class StreamRenderer:
             elapsed = time.monotonic() - self._start_time
             frame = SPINNER_FRAMES[self._frame_index % len(SPINNER_FRAMES)]
             self._frame_index += 1
-            print(f"\r{dim(f'{frame} Working ({format_elapsed(elapsed)} - Ctrl+C to interrupt)')}", end="", flush=True)
+            print(f"\r{dim(f'{frame} Working ({self._working_status(elapsed)} - Ctrl+C to interrupt)')}", end="", flush=True)
             self._stop.wait(self.interval)
 
     @staticmethod
     def _clear_wait_line() -> None:
         columns = _terminal_columns()
         print("\r" + (" " * max(1, columns - 1)) + "\r", end="", flush=True)
+
+    def set_prefill_estimate(self, seconds: float | None, tokens: int | None = None) -> None:
+        self._prefill_estimate_seconds = seconds
+        self._prefill_estimate_tokens = tokens
+
+    def _working_status(self, elapsed: float) -> str:
+        parts = [format_elapsed(elapsed)]
+        if self._prefill_estimate_seconds and self._prefill_estimate_seconds >= 1:
+            progress = max(1, int((elapsed / self._prefill_estimate_seconds) * 100))
+            if self._prefill_estimate_tokens and self._prefill_estimate_tokens > 0:
+                current = min(self._prefill_estimate_tokens, max(1, int((progress / 100) * self._prefill_estimate_tokens)))
+                label = (
+                    "preparing generation"
+                    if current >= self._prefill_estimate_tokens
+                    else f"pf ~{current}/{self._prefill_estimate_tokens} tk"
+                )
+            else:
+                label = "preparing generation" if progress >= 95 else f"pf ~{progress}%"
+            parts.append(label)
+        return ", ".join(parts)
 
 
 def _terminal_columns() -> int:

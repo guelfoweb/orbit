@@ -327,6 +327,27 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "llama-server")
         self.assertEqual(backend.executed[0][1]["command"], f"cd {shlex.quote(str(workdir.resolve()))} && lscpu")
 
+    def test_exec_shell_allows_short_chain_of_allowed_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            workdir = Path(tmp)
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            execution = executor.execute(
+                "exec_shell_command",
+                {"command": "pwd && pwd"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertEqual(backend.executed, [])
+        self.assertNotIn("error:", execution.result.content)
+        self.assertGreaterEqual(execution.result.content.count(str(workdir.resolve())), 2)
+
     def test_exec_shell_allows_read_only_system_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             backend = FakeServerTools()
@@ -376,6 +397,21 @@ class HybridToolExecutorTests(unittest.TestCase):
 
         self.assertEqual(execution.source, "orbit")
         self.assertIn("shell operators", execution.result.content)
+        self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_blocks_single_ampersand_before_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            execution = executor.execute("exec_shell_command", {"command": "ls & pwd"}, chunk_budget={})
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("only && is allowed", execution.result.content)
         self.assertEqual(backend.executed, [])
 
     def test_exec_shell_blocks_disallowed_commands_before_server(self) -> None:

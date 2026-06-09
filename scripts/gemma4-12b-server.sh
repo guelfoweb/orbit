@@ -4,13 +4,12 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
-# shellcheck source=lib/ollama-gemma4-12b.sh
-. "$SCRIPT_DIR/lib/ollama-gemma4-12b.sh"
-
 BASE_URL="${BASE_URL:-http://127.0.0.1:18080}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18080}"
-MODEL_ALIAS="${MODEL_ALIAS:-gemma4:12b}"
+MODEL_ALIAS="${MODEL_ALIAS:-gemma4:12b-it}"
+MODEL_PATH="${MODEL_PATH:-}"
+MMPROJ_PATH="${MMPROJ_PATH:-}"
 CTX_SIZE="${CTX_SIZE:-8192}"
 THREADS="${THREADS:-6}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
@@ -29,28 +28,90 @@ usage: scripts/gemma4-12b-server.sh start [--multimodal]
        scripts/gemma4-12b-server.sh stop
        scripts/gemma4-12b-server.sh status
 
-Starts/stops llama-server for the tuned gemma4:12b Orbit profile.
+Starts/stops llama-server for the tuned Gemma 4 12B instruction-tuned Orbit profile.
 
 Prerequisites:
   llama-server must be available in PATH
-  ollama must be available in PATH to pull/resolve gemma4:12b
-  gemma4:12b must be present locally or pullable with ollama
+  gemma-4-12B-it-Q4_K_M.gguf must be available locally
+  optional multimodal support requires mmproj-gemma-4-12B-it-Q8_0.gguf
 
 start       run llama-server in background and return the terminal
 stop        stop the background server started by this script
 status      show whether the configured endpoint is healthy
 
 Environment overrides:
-  HOST PORT BASE_URL CTX_SIZE THREADS BATCH_SIZE UBATCH_SIZE CACHE_RAM
+  MODEL_PATH MMPROJ_PATH HOST PORT BASE_URL CTX_SIZE THREADS BATCH_SIZE UBATCH_SIZE CACHE_RAM
   PARALLEL_SLOTS LLAMA_SERVER_TOOLS ORBIT_STATE_DIR PID_FILE LOG_FILE
 
 Common recovery:
   llama-server not found        install/build llama.cpp and add llama-server to PATH
-  ollama not found              install Ollama or run ollama pull gemma4:12b elsewhere
-  blob/manifest not found       run: ollama pull gemma4:12b
+  model not found               set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
+  projector not found           set MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf
   existing non-multimodal server stop it before start --multimodal
   server without pid file       stop the owning process manually or change PORT/BASE_URL
 EOF
+}
+
+first_existing_file() {
+  for path in "$@"; do
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_huggingface_file() {
+  pattern="$1"
+  for path in $pattern; do
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_model_path() {
+  if [ "$MODEL_PATH" != "" ]; then
+    if [ -f "$MODEL_PATH" ]; then
+      printf '%s\n' "$MODEL_PATH"
+      return 0
+    fi
+    echo "error: MODEL_PATH does not exist: $MODEL_PATH" >&2
+    return 1
+  fi
+  first_existing_file \
+    "$HOME/LAB/models/gemma4-12b/gemma4-12B-it-Q4_K_M.gguf" \
+    "$HOME/LAB/models/gemma-4-12B-it-Q4_K_M.gguf" \
+    "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/44ee90c4b61e888ac5b318a54ec7a94df61e9cd7/gemma-4-12B-it-Q4_K_M.gguf" \
+    || find_huggingface_file "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/gemma-4-12B-it-Q4_K_M.gguf" \
+    || {
+      echo "error: gemma-4-12B-it-Q4_K_M.gguf not found" >&2
+      echo "recovery: set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf" >&2
+      return 1
+    }
+}
+
+resolve_mmproj_path() {
+  if [ "$MMPROJ_PATH" != "" ]; then
+    if [ -f "$MMPROJ_PATH" ]; then
+      printf '%s\n' "$MMPROJ_PATH"
+      return 0
+    fi
+    echo "error: MMPROJ_PATH does not exist: $MMPROJ_PATH" >&2
+    return 1
+  fi
+  first_existing_file \
+    "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/44ee90c4b61e888ac5b318a54ec7a94df61e9cd7/mmproj-gemma-4-12B-it-Q8_0.gguf" \
+    "$HOME/LAB/models/gemma4-12b/gemma4-12B-it-mmproj-BF16.gguf" \
+    || find_huggingface_file "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/mmproj-gemma-4-12B-it-Q8_0.gguf" \
+    || {
+      echo "error: multimodal projector not found" >&2
+      echo "recovery: set MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf" >&2
+      return 1
+    }
 }
 
 health_ok() {
@@ -133,8 +194,7 @@ start_server() {
   fi
 
   mkdir -p "$STATE_DIR"
-  ensure_ollama_model
-  MODEL_BLOB="$(model_blob_from_manifest)"
+  MODEL_BLOB="$(resolve_model_path)"
 
   SERVER_ARGS="
 -m
@@ -163,7 +223,7 @@ $PORT
 $LLAMA_SERVER_TOOLS"
 
   if [ "$MULTIMODAL" -eq 1 ]; then
-    MMPROJ_BLOB="$(projector_blob_from_manifest)"
+    MMPROJ_BLOB="$(resolve_mmproj_path)"
     SERVER_ARGS="$SERVER_ARGS
 --mmproj
 $MMPROJ_BLOB"

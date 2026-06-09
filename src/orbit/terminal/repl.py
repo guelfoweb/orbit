@@ -10,6 +10,7 @@ from orbit.runtime.sessions import SessionStore
 from orbit.terminal.commands import help_text, reset_session, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.config import AppConfig
 from orbit.terminal.history import PromptHistory
+from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_result_event
@@ -23,6 +24,7 @@ class Repl:
     config: AppConfig
     session: SessionStore | None = None
     history: PromptHistory | None = None
+    prompt_tokens_per_second: float | None = None
 
     def run(self) -> int:
         if self.history:
@@ -52,7 +54,14 @@ class Repl:
             self._ask(prompt)
 
     def _ask(self, prompt: str) -> None:
-        renderer = StreamRenderer()
+        renderer = StreamRenderer(
+            prefill_estimate_seconds=estimate_prefill_seconds(
+                self.runtime.messages,
+                prompt,
+                prompt_tokens_per_second=self.prompt_tokens_per_second,
+            ),
+            prefill_estimate_tokens=estimate_prefill_tokens(self.runtime.messages, prompt),
+        )
         checkpoint = len(self.runtime.messages)
         print()
         started = time.monotonic()
@@ -69,6 +78,7 @@ class Repl:
                     format_tool_result_event(name, chars, source),
                     trailing_blank_line=True,
                 ),
+                on_model_step=self._record_model_step,
             )
         except KeyboardInterrupt:
             renderer.finish()
@@ -98,6 +108,10 @@ class Repl:
             ),
             flush=True,
         )
+
+    def _record_model_step(self, metrics) -> None:
+        if metrics.prompt_tokens_per_second is not None and metrics.prompt_tokens_per_second > 0:
+            self.prompt_tokens_per_second = metrics.prompt_tokens_per_second
 
     def _handle_command(self, command: str) -> bool:
         if command == "/exit":

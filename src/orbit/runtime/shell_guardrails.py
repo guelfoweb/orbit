@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -9,8 +10,9 @@ DEFAULT_SHELL_TIMEOUT = 10
 MAX_SHELL_TIMEOUT = 15
 DEFAULT_SHELL_OUTPUT_BYTES = 12_000
 MAX_SHELL_OUTPUT_BYTES = 12_000
+MAX_CHAINED_COMMANDS = 4
 
-_SHELL_META_CHARS = frozenset("|&;<>`$\\\n\r")
+_SHELL_META_CHARS = frozenset("|;<>`$\\\n\r")
 _FILE_COMMANDS = frozenset({"pwd", "ls", "find", "du", "df", "wc", "head", "tail", "file", "stat", "cat"})
 _SYSTEM_INFO_COMMANDS = frozenset({"uname", "hostname", "uptime", "whoami", "id", "date"})
 _HARDWARE_INFO_COMMANDS = frozenset({"free", "lscpu", "lsblk"})
@@ -63,7 +65,7 @@ def exec_shell_definition() -> dict[str, Any]:
                 "Run one bounded read-only command in workdir. "
                 "Allowed: pwd, ls, find, du, df, free, lscpu, lsblk, uname, hostname, uptime, "
                 "whoami, id, date, ps, pgrep, ip, ss, wc, head, tail, file, stat, cat. "
-                "Use ls -F for listing. No ls -R, shell operators, or outside paths."
+                "Use ls -F for listing. Only && may chain allowed commands. No ls -R or outside paths."
             ),
             "parameters": {
                 "type": "object",
@@ -88,28 +90,92 @@ def prepare_exec_shell_command(arguments: dict[str, Any], *, workdir: Path) -> d
     raw_command = arguments.get("command")
     if not isinstance(raw_command, str) or not raw_command.strip():
         return "error: exec_shell_command requires a non-empty command string"
-    if any(char in raw_command for char in _SHELL_META_CHARS):
-        return "error: shell operators, redirects, variables, escapes, and multi-line commands are not allowed"
-    try:
-        tokens = shlex.split(raw_command)
-    except ValueError as exc:
-        return f"error: invalid shell command syntax: {exc}"
-    if not tokens:
-        return "error: exec_shell_command requires a command"
-    command = tokens[0]
-    if command not in _ALLOWED_COMMANDS:
-        return f"error: command not allowed: {command}"
-    validation_error = _validate_command_tokens(command, tokens[1:])
-    if validation_error:
-        return validation_error
+    command_tokens, error = _validated_command_tokens(raw_command)
+    if error:
+        return error
+    safe_command = _join_command_tokens(command_tokens)
     timeout = _bounded_int(arguments.get("timeout"), default=DEFAULT_SHELL_TIMEOUT, maximum=MAX_SHELL_TIMEOUT)
     output_size = _bounded_int(arguments.get("max_output_size"), default=DEFAULT_SHELL_OUTPUT_BYTES, maximum=MAX_SHELL_OUTPUT_BYTES)
-    safe_command = shlex.join(tokens)
     return {
         "command": f"cd {shlex.quote(str(workdir.resolve()))} && {safe_command}",
         "timeout": timeout,
         "max_output_size": output_size,
     }
+
+
+def execute_exec_shell_command(arguments: dict[str, Any], *, workdir: Path) -> str:
+    raw_command = arguments.get("command")
+    if not isinstance(raw_command, str) or not raw_command.strip():
+        return "error: exec_shell_command requires a non-empty command string"
+    command_tokens, error = _validated_command_tokens(raw_command)
+    if error:
+        return error
+    timeout = _bounded_int(arguments.get("timeout"), default=DEFAULT_SHELL_TIMEOUT, maximum=MAX_SHELL_TIMEOUT)
+    output_size = _bounded_int(arguments.get("max_output_size"), default=DEFAULT_SHELL_OUTPUT_BYTES, maximum=MAX_SHELL_OUTPUT_BYTES)
+    output_parts: list[str] = []
+    for tokens in command_tokens:
+        try:
+            completed = subprocess.run(
+                tokens,
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"error: exec_shell_command failed: {exc}"
+        if completed.stdout:
+            output_parts.append(completed.stdout.rstrip())
+        if completed.stderr:
+            output_parts.append(completed.stderr.rstrip())
+        if completed.returncode != 0:
+            output_parts.append(f"error: command exited with status {completed.returncode}: {shlex.join(tokens)}")
+            break
+    content = "\n".join(part for part in output_parts if part)
+    if not content:
+        return ""
+    encoded = content.encode("utf-8", errors="replace")
+    if len(encoded) <= output_size:
+        return content
+    return encoded[:output_size].decode("utf-8", errors="replace") + "\n[truncated]"
+
+
+def exec_shell_should_run_locally(arguments: dict[str, Any]) -> bool:
+    raw_command = arguments.get("command")
+    return isinstance(raw_command, str) and "&&" in raw_command
+
+
+def _validated_command_tokens(raw_command: str) -> tuple[list[list[str]], str | None]:
+    if any(char in raw_command for char in _SHELL_META_CHARS):
+        return [], "error: shell operators, redirects, variables, escapes, and multi-line commands are not allowed"
+    if "&" in raw_command.replace("&&", ""):
+        return [], "error: only && is allowed for chaining shell commands"
+    parts = [part.strip() for part in raw_command.split("&&")]
+    if any(not part for part in parts):
+        return [], "error: empty command in shell command chain"
+    if len(parts) > MAX_CHAINED_COMMANDS:
+        return [], f"error: too many chained shell commands: max {MAX_CHAINED_COMMANDS}"
+    prepared: list[list[str]] = []
+    for part in parts:
+        try:
+            tokens = shlex.split(part)
+        except ValueError as exc:
+            return [], f"error: invalid shell command syntax: {exc}"
+        if not tokens:
+            return [], "error: exec_shell_command requires a command"
+        command = tokens[0]
+        if command not in _ALLOWED_COMMANDS:
+            return [], f"error: command not allowed: {command}"
+        validation_error = _validate_command_tokens(command, tokens[1:])
+        if validation_error:
+            return [], validation_error
+        prepared.append(tokens)
+    return prepared, None
+
+
+def _join_command_tokens(command_tokens: list[list[str]]) -> str:
+    return " && ".join(shlex.join(tokens) for tokens in command_tokens)
 
 
 def _validate_command_tokens(command: str, args: list[str]) -> str | None:

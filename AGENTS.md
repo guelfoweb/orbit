@@ -24,7 +24,7 @@ The tool name remains `orbit`. The repository directory may be temporary.
 - Supported backend: local `llama-server`.
 - API style: OpenAI-compatible chat completions.
 - Default base URL: `http://127.0.0.1:18080`.
-- Primary target model: `gemma4:12b`.
+- Primary target model: `gemma4:12b-it`.
 - Reasoning should be disabled at server startup for the current baseline.
 - Context profiles are provided by helper scripts, not hidden runtime magic.
 

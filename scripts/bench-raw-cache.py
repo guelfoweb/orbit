@@ -27,7 +27,7 @@ from raw_chat import (
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18080"
-DEFAULT_MODEL = "gemma4:12b"
+DEFAULT_MODEL = "gemma4:12b-it"
 SYSTEM_PROMPT = "You are a concise local assistant. Keep answers short."
 
 

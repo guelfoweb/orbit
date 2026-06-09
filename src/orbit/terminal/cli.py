@@ -11,6 +11,7 @@ from orbit.runtime.media import load_audio, load_image
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.config import add_config_arguments, load_app_config
 from orbit.terminal.history import PromptHistory
+from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
 from orbit.terminal.repl import Repl
 from orbit.terminal.commands import help_text, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.status import estimate_context_status_tokens, format_turn_status
@@ -111,7 +112,10 @@ def _run_one_shot(
     max_tokens: int,
     workdir,
 ) -> int:
-    renderer = StreamRenderer()
+    renderer = StreamRenderer(
+        prefill_estimate_seconds=estimate_prefill_seconds(runtime.messages, prompt),
+        prefill_estimate_tokens=estimate_prefill_tokens(runtime.messages, prompt),
+    )
     started = time.monotonic()
     print()
     renderer.start()

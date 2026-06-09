@@ -33,7 +33,7 @@ from orbit.runtime.web import (
     search_web,
 )
 from orbit.runtime.edit_guardrails import apply_diff_definition, apply_local_edit_file, edit_file_definition
-from orbit.runtime.shell_guardrails import exec_shell_definition
+from orbit.runtime.shell_guardrails import exec_shell_definition, execute_exec_shell_command
 
 
 MAX_CHUNK_CALLS_PER_TURN = 3
@@ -324,7 +324,7 @@ def execute_tool(
             ),
         )
     if name == "exec_shell_command":
-        return ToolResult(name=name, content="error: exec_shell_command requires llama-server built-in tool support")
+        return ToolResult(name=name, content=execute_exec_shell_command(parsed, workdir=workdir))
     if name == "write_file":
         return ToolResult(name=name, content=write_file(parsed.get("path"), parsed.get("content"), workdir=workdir))
     if name == "append_file":
