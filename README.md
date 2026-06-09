@@ -117,7 +117,7 @@ llama-server \
   -m <gemma-4-12B-it-Q4_K_M.gguf> \
   -c 8192 \
   -t 6 \
-  -b 128 \
+  -b 256 \
   -ub 128 \
   -np 1 \
   --reasoning off \
@@ -130,7 +130,7 @@ llama-server \
 The server helper accepts conservative environment overrides for local experiments:
 
 ```bash
-THREADS=6 BATCH_SIZE=128 UBATCH_SIZE=128 CACHE_RAM=8192 scripts/gemma4-12b-server.sh start
+THREADS=6 BATCH_SIZE=256 UBATCH_SIZE=128 CACHE_RAM=8192 scripts/gemma4-12b-server.sh start
 ```
 
 Prompt caching is enabled in Orbit requests. `llama-server` also enables prompt caching by default. Compare cache-related server flag changes with `scripts/bench-kv-cache.py` before keeping them.
