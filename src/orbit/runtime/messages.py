@@ -21,11 +21,17 @@ ROUTE_SYSTEM_PROMPT = """Classify the latest user request for Orbit. Return only
 {"_route":"MEDIA"}
 
 Use CHAT for conversation, explanation, opinion, writing, or general knowledge.
-Include obvious arguments in the same JSON: path, url, query, pattern, command.
+When route, tool, and arguments are obvious, return them together in the first JSON object.
+Common args: path, url, query, pattern, command.
 Copy paths and URLs exactly from the user prompt. Never normalize, correct, or rewrite them.
 If the user asks to run/execute a shell command, choose FILESYSTEM/exec_shell_command.
 Do not convert shell commands into FILE_EDIT tools; execution guardrails decide if they are allowed.
 For explicit http/https URLs return {"_route":"WEB","tool":"fetch_url","url":"<url>"}.
+Examples:
+list all files in this workdir -> {"_route":"FILESYSTEM","tool":"list_files","path":"."}
+read agent.py -> {"_route":"FILESYSTEM","tool":"read_file","path":"agent.py"}
+summarize https://example.com -> {"_route":"WEB","tool":"fetch_url","url":"https://example.com"}
+search online for Dante Alighieri -> {"_route":"WEB","tool":"search_web","query":"Dante Alighieri"}
 Do not perform the task. Classify only."""
 TOOL_CALL_SYSTEM_PROMPT = (
     "When tools are available, call exactly one needed tool and output no prose. "
