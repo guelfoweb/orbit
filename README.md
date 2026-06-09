@@ -29,6 +29,46 @@ Orbit is developed and tested primarily on Linux with local `llama-server`. macO
 - A local `gemma-4-12B-it-Q4_K_M.gguf` model file, or `MODEL_PATH` pointing to it.
 - Optional multimodal support requires `mmproj-gemma-4-12B-it-Q8_0.gguf`, or `MMPROJ_PATH` pointing to it.
 
+## Download model files
+
+Orbit does not download model weights automatically. Download the Gemma 4 12B instruction-tuned GGUF files first, then start `llama-server`.
+
+Recommended layout:
+
+```bash
+mkdir -p ~/LAB/models/gemma4-12b
+```
+
+With `huggingface-cli`:
+
+```bash
+huggingface-cli download ggml-org/gemma-4-12B-it-GGUF \
+  gemma-4-12B-it-Q4_K_M.gguf \
+  mmproj-gemma-4-12B-it-Q8_0.gguf \
+  --local-dir ~/LAB/models/gemma4-12b \
+  --local-dir-use-symlinks False
+```
+
+Or with direct downloads:
+
+```bash
+wget -O ~/LAB/models/gemma4-12b/gemma-4-12B-it-Q4_K_M.gguf \
+  https://huggingface.co/ggml-org/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf
+
+wget -O ~/LAB/models/gemma4-12b/mmproj-gemma-4-12B-it-Q8_0.gguf \
+  https://huggingface.co/ggml-org/gemma-4-12B-it-GGUF/resolve/main/mmproj-gemma-4-12B-it-Q8_0.gguf
+```
+
+If files are stored elsewhere, pass explicit paths:
+
+```bash
+MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf scripts/gemma4-12b-server.sh start
+
+MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf \
+MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf \
+scripts/gemma4-12b-server.sh start --multimodal
+```
+
 ## Start llama-server
 
 The helper scripts below are available from a source checkout or source distribution. The installed CLI entrypoint is `orbit`.
