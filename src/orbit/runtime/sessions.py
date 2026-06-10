@@ -69,4 +69,12 @@ def _is_message(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     role = value.get("role")
-    return role in {"system", "user", "assistant"} and "content" in value
+    if role in {"system", "user", "assistant"}:
+        return "content" in value
+    if role == "tool":
+        return (
+            isinstance(value.get("tool_call_id"), str)
+            and isinstance(value.get("name"), str)
+            and "content" in value
+        )
+    return False
