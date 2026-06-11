@@ -33,8 +33,14 @@ class CliTests(unittest.TestCase):
         completed = _run_cli("", "/tools")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("llama-server:", completed.stdout)
-        self.assertIn("orbit-only:", completed.stdout)
+        self.assertIn("tools: off", completed.stdout)
+        self.assertIn("/tools files = read/inspect local files", completed.stdout)
+        self.assertIn("/tools web   = search/fetch URLs", completed.stdout)
+        self.assertNotIn("/tools time", completed.stdout)
+        self.assertNotIn("Groups:", completed.stdout)
+        self.assertNotIn("Single tools:", completed.stdout)
+        self.assertNotIn("llama-server:", completed.stdout)
+        self.assertNotIn("orbit-only:", completed.stdout)
 
     def test_one_shot_max_tokens_command_does_not_call_model(self) -> None:
         completed = _run_cli("", "/max-tokens 2048")

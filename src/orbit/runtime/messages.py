@@ -15,17 +15,19 @@ MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
 ROUTE_SYSTEM_PROMPT = """Classify the latest user request for Orbit. Return only one JSON object.
 
 {"_route":"CHAT"}
-{"_route":"FILESYSTEM","tool":"list_files|read_file|grep_search|file_glob_search|exec_shell_command"}
+{"_route":"FILESYSTEM","tool":"list_files|read_file|grep_search|file_glob_search|exec_shell_command|get_datetime"}
 {"_route":"FILE_EDIT","tool":"write_file|edit_file|apply_diff|make_directory|delete_path"}
 {"_route":"WEB","tool":"search_web|fetch_url"}
 {"_route":"MEDIA"}
 
 Use CHAT for conversation, explanation, opinion, writing, or general knowledge.
+Use CHAT for follow-up questions about previous answers or tool results unless the user explicitly asks for a new local/web operation.
 When route, tool, and arguments are obvious, return them together in the first JSON object.
 Common args: path, url, query, pattern, command.
 Copy paths and URLs exactly from the user prompt. Never normalize, correct, or rewrite them.
 If the user asks to run/execute a shell command, choose FILESYSTEM/exec_shell_command.
 Requests about this/local PC hardware or resources (CPU, cores, RAM, memory, disk, OS, uptime) use FILESYSTEM/exec_shell_command.
+Current date/time requests use FILESYSTEM/get_datetime.
 For exec_shell_command, choose enough allowed read-only commands to answer the request; use a short && chain when one command would be incomplete. No pipes, redirects, or grep filters.
 Do not convert shell commands into FILE_EDIT tools; execution guardrails decide if they are allowed.
 For explicit http/https URLs return {"_route":"WEB","tool":"fetch_url","url":"<url>"}.
@@ -61,7 +63,7 @@ If arguments are clear from the user prompt, include them in the same JSON.
 Common args: path, pattern, command, url, query, content.
 
 Routes:
-FILESYSTEM: list_files, read_file, grep_search, file_glob_search, exec_shell_command
+FILESYSTEM: list_files, read_file, grep_search, file_glob_search, exec_shell_command, get_datetime
 FILE_EDIT: write_file, edit_file, apply_diff, make_directory, delete_path
 WEB: search_web, fetch_url
 
@@ -74,6 +76,7 @@ Rules:
 - grep_search: search exact text/patterns.
 - file_glob_search: glob discovery only.
 - exec_shell_command: run safe commands/list/stat/wc/df.
+- get_datetime: current date/time.
 - If the user asks to run/execute a shell command, use exec_shell_command.
 - Do not convert shell commands into FILE_EDIT tools.
 - edit_file: modify files.

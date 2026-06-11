@@ -265,7 +265,7 @@ class RouteRequestTests(unittest.TestCase):
     def test_route_tool_names_are_bounded(self) -> None:
         self.assertEqual(
             route_tool_names(ToolRoute.FILESYSTEM),
-            ("list_files", "read_file", "file_glob_search", "grep_search", "exec_shell_command"),
+            ("list_files", "read_file", "file_glob_search", "grep_search", "exec_shell_command", "get_datetime"),
         )
         self.assertIn("write_file", route_tool_names(ToolRoute.FILE_EDIT))
         self.assertIn("edit_file", route_tool_names(ToolRoute.FILE_EDIT))
@@ -276,6 +276,13 @@ class RouteRequestTests(unittest.TestCase):
         self.assertNotIn("append_file", route_tool_names(ToolRoute.FILE_EDIT))
         self.assertNotIn("replace_in_file", route_tool_names(ToolRoute.FILE_EDIT))
         self.assertEqual(route_tool_names(ToolRoute.WEB), ("fetch_url", "search_web"))
+
+    def test_parse_route_decision_accepts_datetime_tool(self) -> None:
+        decision = parse_route_decision('{"_route":"FILESYSTEM","tool":"get_datetime"}')
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision_tool_names(decision), ("get_datetime",))
 
     def test_route_stream_state_detects_complete_route(self) -> None:
         self.assertEqual(route_stream_state('{"_route":"WEB"}'), "route")

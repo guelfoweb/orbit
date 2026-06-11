@@ -167,7 +167,12 @@ def read_file(path: Any, *, arguments: dict[str, Any], workdir: Path) -> str:
         return "error: file is not valid UTF-8 text"
 
     if len(text) > MAX_READ_CHARS:
-        return text[:MAX_READ_CHARS] + f"\n... truncated, {len(text) - MAX_READ_CHARS} more characters"
+        return read_chunk(
+            path,
+            chunk_index=arguments.get("chunk_index", 0),
+            chunk_chars=arguments.get("chunk_chars", DEFAULT_CHUNK_CHARS),
+            workdir=workdir,
+        )
     return text if text else "(empty file)"
 
 

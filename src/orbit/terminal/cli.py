@@ -18,6 +18,7 @@ from orbit.terminal.status import estimate_context_status_tokens, format_turn_st
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.theme import dim
 from orbit.terminal.tool_events import format_tool_result_event
+from orbit.terminal.tool_mode import allowed_tool_names_for_spec, tools_are_enabled
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             workdir=config.workdir,
+            tools=config.tools,
         )
     if args.image or args.audio:
         print("error: --image/--audio require a one-shot prompt", file=sys.stderr)
@@ -89,9 +91,9 @@ def _handle_one_shot_command(
     if not command.startswith("/"):
         return None
     if command == "/status":
-        return runtime_status(runtime, config, backend)
+        return runtime_status(runtime, config, backend, tools_mode=config.tools)
     if command == "/tools":
-        return tools_text(backend)
+        return tools_text(config.tools)
     if command == "/health":
         return "llama-server: ok" if backend.health() else "llama-server: unavailable"
     if command == "/help":
@@ -111,6 +113,7 @@ def _run_one_shot(
     temperature: float,
     max_tokens: int,
     workdir,
+    tools: str,
 ) -> int:
     renderer = StreamRenderer(
         prefill_estimate_seconds=estimate_prefill_seconds(runtime.messages, prompt),
@@ -131,12 +134,20 @@ def _run_one_shot(
                 audios=audios,
                 on_final_delta=renderer.write,
             )
+        elif not tools_are_enabled(tools):
+            result = runtime.ask_chat(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=renderer.write,
+            )
         else:
             result = runtime.ask_auto(
                 prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 workdir=workdir,
+                allowed_tool_names=allowed_tool_names_for_spec(tools),
                 on_final_delta=renderer.write,
                 on_tool_call=lambda name, args: renderer.event(f"{name} {args}", restart_timer=False),
                 on_tool_result=lambda name, chars, source: renderer.event(

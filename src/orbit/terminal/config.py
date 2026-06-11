@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT
+from orbit.terminal.tool_mode import ToolSpec, normalize_tool_spec
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".orbit" / "config.json"
@@ -16,6 +17,7 @@ MIN_MAX_TOKENS = 32
 MAX_MAX_TOKENS = 4096
 MIN_CONTEXT_TOKENS = 512
 MAX_CONTEXT_TOKENS = 262_144
+DEFAULT_TOOLS = "off"
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class AppConfig:
     context_tokens: int | None = None
     system: str = DEFAULT_SYSTEM_PROMPT
     no_system: bool = False
+    tools: ToolSpec = DEFAULT_TOOLS
 
 
 def add_config_arguments(parser: argparse.ArgumentParser) -> None:
@@ -40,6 +43,7 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--context-tokens", type=int, help="Override runtime context estimate for testing/benchmarking.")
     parser.add_argument("--system")
     parser.add_argument("--no-system", action="store_true", help="Do not send the default system prompt.")
+    parser.add_argument("--tools", help="Initial tool mode: off, on, files, edit, web, shell, or comma-separated groups.")
 
 
 def load_app_config(args: argparse.Namespace) -> AppConfig:
@@ -70,6 +74,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         ),
         system=_str_value(values, "system", AppConfig.system),
         no_system=_bool_value(values, "no_system", AppConfig.no_system),
+        tools=_tool_spec_value(values),
     )
     return AppConfig(
         base_url=args.base_url if args.base_url is not None else config.base_url,
@@ -101,6 +106,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         else config.context_tokens,
         system=args.system if args.system is not None else config.system,
         no_system=args.no_system or config.no_system,
+        tools=normalize_tool_spec(args.tools) if args.tools is not None else config.tools,
     )
 
 
@@ -189,3 +195,10 @@ def _bool_value(values: dict[str, Any], key: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"invalid config key {key}: expected boolean")
     return value
+
+
+def _tool_spec_value(values: dict[str, Any]) -> ToolSpec:
+    value = values.get("tool_mode", values.get("tools", DEFAULT_TOOLS))
+    if isinstance(value, dict):
+        value = DEFAULT_TOOLS
+    return normalize_tool_spec(value, key="tool_mode")

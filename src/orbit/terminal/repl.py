@@ -18,6 +18,7 @@ from orbit.terminal.prompt_preview import compact_prompt_preview, is_long_text_p
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_result_event
+from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
 from orbit.terminal.theme import dim, yellow_dim
 
 
@@ -33,11 +34,17 @@ class Repl:
     history: PromptHistory | None = None
     prompt_tokens_per_second: float | None = None
     can_continue: bool = False
+    tools_mode: ToolSpec | None = None
+
+    def __post_init__(self) -> None:
+        if self.tools_mode is None:
+            self.tools_mode = self.config.tools
 
     def run(self) -> int:
         if self.history:
             self.history.load()
         print("orbit interactive mode. Type /help for commands.")
+        print(f"tools: {self.tools_mode}")
         while True:
             try:
                 prompt = _read_prompt_input().strip()
@@ -86,19 +93,29 @@ class Repl:
         started = time.monotonic()
         renderer.start()
         try:
-            result = self.runtime.ask_auto(
-                prompt,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                workdir=self.config.workdir,
-                on_final_delta=renderer.write,
-                on_tool_call=lambda name, args: renderer.event(f"{name} {args}", restart_timer=False),
-                on_tool_result=lambda name, chars, source: renderer.event(
-                    format_tool_result_event(name, chars, source),
-                    trailing_blank_line=True,
-                ),
-                on_model_step=self._record_model_step,
-            )
+            if tools_are_enabled(self.tools_mode or "off"):
+                result = self.runtime.ask_auto(
+                    prompt,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    workdir=self.config.workdir,
+                    allowed_tool_names=allowed_tool_names_for_spec(self.tools_mode or "off"),
+                    on_final_delta=renderer.write,
+                    on_tool_call=lambda name, args: renderer.event(f"{name} {args}", restart_timer=False),
+                    on_tool_result=lambda name, chars, source: renderer.event(
+                        format_tool_result_event(name, chars, source),
+                        trailing_blank_line=True,
+                    ),
+                    on_model_step=self._record_model_step,
+                )
+            else:
+                result = self.runtime.ask_chat(
+                    prompt,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    on_final_delta=renderer.write,
+                    on_model_step=self._record_model_step,
+                )
         except KeyboardInterrupt:
             renderer.finish()
             self.runtime.restore_message_count(checkpoint)
@@ -165,10 +182,10 @@ class Repl:
             print(message)
             return True
         if command == "/status":
-            print(runtime_status(self.runtime, self.config, self.backend))
+            print(runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode))
             return True
-        if command == "/tools":
-            print(tools_text(self.backend))
+        if command == "/tools" or command.startswith("/tools "):
+            print(self._handle_tools_command(command))
             return True
         print(f"unknown command: {command}", file=sys.stderr)
         return True
@@ -181,6 +198,18 @@ class Repl:
         self.can_continue = False
         self.session = SessionStore.new_for_workdir(self.config.workdir)
         return f"sessions cleared: {removed}"
+
+    def _handle_tools_command(self, command: str) -> str:
+        value = command.removeprefix("/tools").strip().lower()
+        if not value:
+            return tools_text(self.tools_mode)
+        try:
+            self.tools_mode = normalize_tool_spec(value)
+        except ValueError:
+            return f"error: usage: /tools [{USAGE}]"
+        if self.tools_mode:
+            return f"tools: {self.tools_mode}"
+        return f"error: usage: /tools [{USAGE}]"
 
     def _continue_last_answer(self) -> None:
         if not self.can_continue:

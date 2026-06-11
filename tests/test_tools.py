@@ -24,6 +24,7 @@ from orbit.runtime.tools import (
     tool_names,
     execute_tool,
 )
+from orbit.runtime.file_tools import MAX_READ_CHARS
 from orbit.runtime.web import MAX_FETCH_CHUNK_CALLS_PER_TURN
 
 
@@ -258,6 +259,18 @@ class ToolTests(unittest.TestCase):
 
         self.assertIn("chunk_index: 1", result.content)
         self.assertIn("total_chunks:", result.content)
+
+    def test_read_file_medium_file_returns_chunk_with_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "medium.py").write_text("print('x')\n" * 500, encoding="utf-8")
+
+            result = execute_tool("read_file", {"path": "medium.py"}, workdir=workdir)
+
+        self.assertIn("chunk_index: 0", result.content)
+        self.assertIn("total_chunks:", result.content)
+        self.assertIn("content:", result.content)
+        self.assertGreater(len(result.content), MAX_READ_CHARS)
 
     def test_read_file_chunk_mode_rejects_oversized_chunk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

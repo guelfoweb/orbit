@@ -47,14 +47,37 @@ class InterruptingBackend:
         on_delta("partial")
         raise KeyboardInterrupt
 
+    def server_tools(self):
+        return []
+
 
 class CountingRuntime(ChatRuntime):
     def __init__(self) -> None:
         super().__init__(backend=InterruptingBackend(), system_prompt=None)
         self.ask_calls = 0
+        self.ask_auto_calls = 0
+        self.ask_chat_calls = 0
+        self.last_allowed_tool_names = None
 
     def ask_auto(self, *args, **kwargs) -> ChatResult:
         self.ask_calls += 1
+        self.ask_auto_calls += 1
+        self.last_allowed_tool_names = kwargs.get("allowed_tool_names")
+        return ChatResult(
+            content="ok",
+            model="fake",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=1,
+            completion_tokens=1,
+            cached_tokens=0,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+    def ask_chat(self, *args, **kwargs) -> ChatResult:
+        self.ask_calls += 1
+        self.ask_chat_calls += 1
         return ChatResult(
             content="ok",
             model="fake",
@@ -219,6 +242,65 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(runtime.ask_calls, 1)
         self.assertIn("continued", stdout.getvalue())
         self.assertFalse(repl.can_continue)
+
+    def test_tools_are_off_by_default_and_chat_path_is_used(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            repl._ask("hello")
+
+        self.assertEqual(repl.tools_mode, "off")
+        self.assertEqual(runtime.ask_chat_calls, 1)
+        self.assertEqual(runtime.ask_auto_calls, 0)
+
+    def test_tools_on_uses_auto_tool_path(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        repl.tools_mode = "on"
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            repl._ask("list files")
+
+        self.assertEqual(runtime.ask_auto_calls, 1)
+        self.assertEqual(runtime.ask_chat_calls, 0)
+        self.assertIsNone(runtime.last_allowed_tool_names)
+
+    def test_tools_files_uses_restricted_tool_path(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        repl.tools_mode = "files"
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            repl._ask("list files")
+
+        self.assertEqual(runtime.ask_auto_calls, 1)
+        self.assertEqual(runtime.last_allowed_tool_names, ("list_files", "read_file", "stat_path", "file_glob_search", "grep_search"))
+
+    def test_tools_command_toggles_interactive_mode(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+
+        self.assertIn("tools: off", repl._handle_tools_command("/tools"))
+        self.assertEqual(repl._handle_tools_command("/tools on"), "tools: on")
+        self.assertEqual(repl.tools_mode, "on")
+        self.assertIn("tools: on", repl._handle_tools_command("/tools"))
+        self.assertEqual(repl._handle_tools_command("/tools files,web"), "tools: files,web")
+        self.assertEqual(repl.tools_mode, "files,web")
+        self.assertEqual(repl._handle_tools_command("/tools off"), "tools: off")
+        self.assertEqual(repl.tools_mode, "off")
+        self.assertEqual(
+            repl._handle_tools_command("/tools bad"),
+            "error: usage: /tools [off|on|files|edit|web|shell|group[,group...]]",
+        )
+        self.assertEqual(
+            repl._handle_tools_command("/tools read_file"),
+            "error: usage: /tools [off|on|files|edit|web|shell|group[,group...]]",
+        )
+        self.assertEqual(
+            repl._handle_tools_command("/tools time"),
+            "error: usage: /tools [off|on|files|edit|web|shell|group[,group...]]",
+        )
 
     def test_sessions_clear_can_be_cancelled(self) -> None:
         runtime = CountingRuntime()

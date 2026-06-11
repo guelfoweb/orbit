@@ -208,7 +208,8 @@ class HybridToolExecutorTests(unittest.TestCase):
 
         self.assertEqual(execution.source, "orbit")
         self.assertEqual(backend.executed, [])
-        self.assertIn("truncated", execution.result.content)
+        self.assertIn("chunk_index: 0", execution.result.content)
+        self.assertIn("total_chunks:", execution.result.content)
 
     def test_blocks_tool_outside_turn_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

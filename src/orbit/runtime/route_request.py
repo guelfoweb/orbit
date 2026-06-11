@@ -334,7 +334,7 @@ def route_tool_names(route: ToolRoute, prompt: str | None = None) -> tuple[str, 
     if route == ToolRoute.CHAT:
         return ()
     if route == ToolRoute.FILESYSTEM:
-        return ("list_files", "read_file", "file_glob_search", "grep_search", "exec_shell_command")
+        return ("list_files", "read_file", "file_glob_search", "grep_search", "exec_shell_command", "get_datetime")
     if route == ToolRoute.FILE_EDIT:
         return (
             "read_file",

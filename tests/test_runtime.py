@@ -155,6 +155,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Continue exactly", runtime.messages[-2]["content"])
         self.assertEqual(runtime.messages[-1]["role"], "assistant")
 
+    def test_ask_chat_uses_chat_prompt_without_tools(self) -> None:
+        class ChatBackend:
+            def __init__(self) -> None:
+                self.messages: list[Message] = []
+                self.tools_seen = object()
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.messages = messages
+                self.tools_seen = tools
+                return ChatResult(
+                    content="chat",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ChatBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+        result = runtime.ask_chat("hello", temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "chat")
+        self.assertIsNone(backend.tools_seen)
+        self.assertIn("Do not emit route JSON", backend.messages[0]["content"])
+
 
 class ToolCallingBackend:
     def __init__(self, tool_name: str = "list_files", arguments: str = "{\"path\":\".\"}") -> None:
@@ -198,6 +228,131 @@ class ToolCallingBackend:
 
 
 class ToolRuntimeTests(unittest.TestCase):
+    def test_ask_auto_respects_allowed_tool_subset(self) -> None:
+        class FilesystemRouteBackend:
+            def __init__(self) -> None:
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.tools_seen.append(tools)
+                return ChatResult(
+                    content='{"_route":"FILESYSTEM","tool":"read_file","path":"README.md"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = FilesystemRouteBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto(
+            "read README.md",
+            temperature=0,
+            max_tokens=32,
+            workdir=Path("."),
+            allowed_tool_names=("search_web", "fetch_url"),
+        )
+
+        self.assertEqual(result.finish_reason, "unsupported_route")
+        self.assertIn("no suitable tool", result.content)
+        self.assertEqual(backend.tools_seen, [None])
+
+    def test_ask_auto_does_not_downgrade_file_edit_to_read_only_tool(self) -> None:
+        class FileEditRouteBackend:
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                return ChatResult(
+                    content='{"_route":"FILE_EDIT","tool":"write_file","path":"note.txt","content":"hello"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        runtime = ChatRuntime(backend=FileEditRouteBackend(), system_prompt=None)
+
+        result = runtime.ask_auto(
+            "create note.txt",
+            temperature=0,
+            max_tokens=32,
+            workdir=Path("."),
+            allowed_tool_names=("list_files", "read_file", "stat_path", "file_glob_search", "grep_search"),
+        )
+
+        self.assertEqual(result.finish_reason, "unsupported_route")
+        self.assertIn("no suitable tool", result.content)
+
+    def test_ask_auto_allows_datetime_tool_when_time_group_is_enabled(self) -> None:
+        class TimeRouteBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen = None
+
+            def server_tools(self):
+                return [
+                    {
+                        "tool": "get_datetime",
+                        "definition": {
+                            "type": "function",
+                            "function": {
+                                "name": "get_datetime",
+                                "description": "Get current local date/time.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        },
+                    }
+                ]
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=3,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                self.tools_seen = tools
+                return ChatResult(
+                    content="time answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=4,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = TimeRouteBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto(
+            "what time is it?",
+            temperature=0,
+            max_tokens=32,
+            workdir=Path("."),
+            allowed_tool_names=("get_datetime",),
+        )
+
+        tool_names = [tool["function"]["name"] for tool in backend.tools_seen]
+        self.assertEqual(result.content, "time answer")
+        self.assertEqual(tool_names, ["get_datetime"])
+
     def test_ask_auto_returns_chat_without_tools(self) -> None:
         class ChatOnlyBackend:
             def __init__(self) -> None:
@@ -1120,6 +1275,9 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "done")
         self.assertIsNotNone(runtime.last_memory_refresh)
         self.assertTrue(runtime.last_memory_refresh.changed)
+        self.assertIs(runtime.last_memory_refresh_attempt, runtime.last_memory_refresh)
+        self.assertEqual(runtime.memory_refreshes, 1)
+        self.assertGreater(runtime.total_memory_tokens_saved, 0)
 
     def test_memory_refresh_cooldown_avoids_back_to_back_refresh(self) -> None:
         class MemoryThenAnswerBackend:
@@ -1162,6 +1320,7 @@ class ToolRuntimeTests(unittest.TestCase):
         runtime.ask_with_tools("continue again", temperature=0, max_tokens=32, workdir=Path("."))
 
         self.assertEqual(backend.memory_calls, 1)
+        self.assertEqual(runtime.memory_refreshes, 1)
 
     def test_ask_with_tools_streams_final_text(self) -> None:
         class StreamingBackend:

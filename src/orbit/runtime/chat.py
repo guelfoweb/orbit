@@ -35,7 +35,8 @@ from orbit.runtime.route_request import (
 from orbit.runtime.results import error_result
 from orbit.runtime.session_memory import MemoryRefresh, maybe_refresh_memory, should_refresh_for_append
 from orbit.runtime.tool_backends import HybridToolExecutor
-from orbit.runtime.tool_calls import execute_tool_call, tool_call_signature
+from orbit.runtime.tool_calls import execute_tool_call
+from orbit.runtime.tool_loop_state import ToolLoopState
 from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
 from orbit.runtime.tools import tool_names as all_tool_names
 from orbit.runtime.turn_trace import ModelStepMetrics
@@ -54,6 +55,9 @@ class ChatRuntime:
     last_memory_refresh: MemoryRefresh | None = None
     last_memory_refresh_message_count: int | None = None
     memory_refresh_cooldown_messages: int = 4
+    memory_refreshes: int = 0
+    total_memory_tokens_saved: int = 0
+    last_memory_refresh_attempt: MemoryRefresh | None = None
 
     def __post_init__(self) -> None:
         if not self.messages and self.system_prompt:
@@ -73,6 +77,29 @@ class ChatRuntime:
         self.messages.append({"role": "user", "content": message_content(prompt, images or [], audios or [])})
         result = self._chat_final(
             self.messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_final_delta=on_final_delta,
+            on_model_step=on_model_step,
+            loop=1,
+        )
+        self.messages.append({"role": "assistant", "content": result.content})
+        return result
+
+    def ask_chat(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_tokens: int,
+        on_final_delta: Callable[[str], None] | None = None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+    ) -> ChatResult:
+        self.last_memory_refresh = None
+        self.refresh_memory_if_needed(temperature=temperature)
+        self.messages.append({"role": "user", "content": prompt})
+        result = self._chat_final(
+            with_chat_system_prompt(self.messages),
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
@@ -148,6 +175,7 @@ class ChatRuntime:
         on_tool_call: Callable[[str, str], None] | None = None,
         on_tool_result: Callable[[str, int, str], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        allowed_tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
         self.last_memory_refresh = None
         self.refresh_memory_if_needed(temperature=temperature)
@@ -212,6 +240,12 @@ class ChatRuntime:
             self.messages.append({"role": "assistant", "content": result.content})
             return result
         if decision.route == ToolRoute.MEDIA:
+            if allowed_tool_names is not None:
+                result = _unsupported_tool_mode_result(first)
+                self.messages.append({"role": "assistant", "content": result.content})
+                if on_final_delta:
+                    on_final_delta(result.content)
+                return result
             return self._ask_referenced_media(
                 prompt,
                 temperature=temperature,
@@ -222,18 +256,13 @@ class ChatRuntime:
                 route_result=first,
             )
         tools = decision_tool_names(decision, prompt)
+        if allowed_tool_names is not None:
+            allowed = set(allowed_tool_names)
+            tools = tuple(tool for tool in tools if tool in allowed)
+            if decision.route == ToolRoute.FILE_EDIT and not _has_edit_capability(tools):
+                tools = ()
         if not tools:
-            result = ChatResult(
-                content="error: no suitable tool is available for this request",
-                model=first.model,
-                finish_reason="unsupported_route",
-                tool_calls=[],
-                prompt_tokens=first.prompt_tokens,
-                completion_tokens=first.completion_tokens,
-                cached_tokens=first.cached_tokens,
-                prompt_tokens_per_second=first.prompt_tokens_per_second,
-                generation_tokens_per_second=first.generation_tokens_per_second,
-            )
+            result = _unsupported_tool_mode_result(first)
             self.messages.append({"role": "assistant", "content": result.content})
             if on_final_delta:
                 on_final_delta(result.content)
@@ -344,37 +373,32 @@ class ChatRuntime:
         )
         tools = executor.tool_definitions()
         last_result: ChatResult | None = None
-        chunk_budget = {"read_file_chunks": 0, "fetch_url_chunks": 0}
-        seen_tool_calls: set[tuple[str, str]] = set()
-        tool_rounds = 0
-        tool_round_limit = _tool_round_limit(allowed_tool_names)
-        used_tool_call_prompt = False
+        state = ToolLoopState(allowed_tool_names)
         if initial_tool_calls:
             calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
-            tool_rounds += 1
+            state.increment_round()
             self.messages.append(assistant_tool_call_message("", calls))
             for tool_call in calls:
-                signature = tool_call_signature(tool_call)
-                seen_tool_calls.add(signature)
+                signature = state.mark_tool_call(tool_call)
                 if on_tool_call:
                     on_tool_call(*signature)
-                execution = execute_tool_call(tool_call, chunk_budget=chunk_budget, executor=executor)
+                execution = execute_tool_call(tool_call, chunk_budget=state.chunk_budget, executor=executor)
                 tool_result = execution.result
                 if on_tool_result:
                     on_tool_result(tool_result.name, len(tool_result.content), execution.source)
                 self.messages.append(tool_result_message(tool_call, tool_result))
-            if tool_rounds >= tool_round_limit:
+            if state.round_limit_reached():
                 return self._answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
                     on_model_step=on_model_step,
-                    loop=tool_rounds + 1,
-                    use_tool_prompt=used_tool_call_prompt,
+                    loop=state.tool_rounds + 1,
+                    use_tool_prompt=state.used_tool_call_prompt,
                 )
         for loop_index in range(1, max_loops + 1):
             call_messages = with_tool_call_system_prompt(self.messages)
-            used_tool_call_prompt = True
+            state.used_tool_call_prompt = True
             tool_max_tokens = _bounded_internal_max_tokens(max_tokens, TOOL_CALL_MAX_TOKENS)
             if on_final_delta is None:
                 result = self.backend.chat(call_messages, temperature=temperature, max_tokens=tool_max_tokens, tools=tools)
@@ -417,24 +441,23 @@ class ChatRuntime:
             self.messages.append(assistant_tool_call_message(result.content, result.tool_calls))
             if not result.tool_calls:
                 return result
-            tool_rounds += 1
+            state.increment_round()
             for tool_call in result.tool_calls:
-                signature = tool_call_signature(tool_call)
-                if signature in seen_tool_calls:
+                if state.has_seen_tool_call(tool_call):
                     return self._answer_from_tool_results(
                         temperature=temperature,
                         max_tokens=max_tokens,
                         on_final_delta=on_final_delta,
                         on_model_step=on_model_step,
                         loop=loop_index + 1,
-                        use_tool_prompt=used_tool_call_prompt,
+                        use_tool_prompt=state.used_tool_call_prompt,
                     )
-                seen_tool_calls.add(signature)
+                signature = state.mark_tool_call(tool_call)
                 if on_tool_call:
                     on_tool_call(*signature)
                 execution = execute_tool_call(
                     tool_call,
-                    chunk_budget=chunk_budget,
+                    chunk_budget=state.chunk_budget,
                     executor=executor,
                 )
                 tool_result = execution.result
@@ -443,14 +466,14 @@ class ChatRuntime:
                 if should_refresh_for_append(self.messages, tool_result.content, context_tokens=self.context_tokens):
                     self.refresh_memory_if_needed(temperature=temperature, force=True)
                 self.messages.append(tool_result_message(tool_call, tool_result))
-            if tool_rounds >= tool_round_limit:
+            if state.round_limit_reached():
                 return self._answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
                     on_model_step=on_model_step,
                     loop=loop_index + 1,
-                    use_tool_prompt=used_tool_call_prompt,
+                    use_tool_prompt=state.used_tool_call_prompt,
                 )
         return last_result or ChatResult(
             content="error: tool loop did not produce a response",
@@ -570,6 +593,7 @@ class ChatRuntime:
         self.messages.clear()
         self.last_memory_refresh = None
         self.last_memory_refresh_message_count = None
+        self.last_memory_refresh_attempt = None
         if self.system_prompt:
             self.messages.append({"role": "system", "content": self.system_prompt})
 
@@ -594,6 +618,9 @@ class ChatRuntime:
         if result.changed:
             self.last_memory_refresh = result
             self.last_memory_refresh_message_count = len(self.messages)
+            self.memory_refreshes += 1
+            self.total_memory_tokens_saved += max(0, result.estimated_tokens_before - result.estimated_tokens_after)
+        self.last_memory_refresh_attempt = result
         return result.changed
 
     def _memory_refresh_in_cooldown(self) -> bool:
@@ -606,13 +633,26 @@ def _bounded_internal_max_tokens(max_tokens: int, internal_max: int) -> int:
     return max(1, min(max_tokens, internal_max))
 
 
-def _tool_round_limit(tool_names: tuple[str, ...]) -> int:
-    edit_tools = {"write_file", "edit_file", "apply_diff", "make_directory", "delete_path"}
-    return 2 if edit_tools.intersection(tool_names) else 1
-
-
 def _is_empty_final_response(result: ChatResult) -> bool:
     return not result.tool_calls and result.finish_reason == "stop" and not result.content.strip()
+
+
+def _unsupported_tool_mode_result(result: ChatResult) -> ChatResult:
+    return ChatResult(
+        content="error: no suitable tool is available for this request",
+        model=result.model,
+        finish_reason="unsupported_route",
+        tool_calls=[],
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        cached_tokens=result.cached_tokens,
+        prompt_tokens_per_second=result.prompt_tokens_per_second,
+        generation_tokens_per_second=result.generation_tokens_per_second,
+    )
+
+
+def _has_edit_capability(tool_names: tuple[str, ...]) -> bool:
+    return bool({"write_file", "edit_file", "apply_diff", "make_directory", "delete_path"}.intersection(tool_names))
 
 
 def _all_tool_calls_allowed(tool_calls: list[dict[str, object]], allowed_tool_names: tuple[str, ...]) -> bool:
