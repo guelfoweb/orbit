@@ -466,7 +466,10 @@ class ChatRuntime:
         call_messages = with_final_tool_system_prompt(self.messages) if use_tool_prompt else self.messages
         large_file_excerpt = _has_large_file_excerpt(self.messages)
         web_fetch_result = _has_web_fetch_tool_result(self.messages)
+        web_search_result = _has_tool_result(self.messages, "search_web")
         list_like_result = _has_list_like_tool_result(self.messages)
+        shell_result = _has_tool_result(self.messages, "exec_shell_command")
+        read_file_result = _has_tool_result(self.messages, "read_file")
         if large_file_excerpt:
             call_messages = [
                 *call_messages,
@@ -476,6 +479,20 @@ class ChatRuntime:
                         "Use the available large-file excerpt only. "
                         "Answer in at most five short bullets, each under twelve words. Do not quote long passages. "
                         "Do not request more chunks unless the user explicitly asked for exhaustive analysis."
+                    ),
+                },
+            ]
+        elif web_search_result:
+            call_messages = [
+                *call_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Use only the search results already available. "
+                        "Answer in at most four short bullets. "
+                        "Keep the main facts and cite source names only when useful. "
+                        "Do not add background beyond the results. "
+                        "Expand only if the user asks for more detail."
                     ),
                 },
             ]
@@ -498,6 +515,32 @@ class ChatRuntime:
             call_messages = [
                 *call_messages,
                 {"role": "user", "content": "Return only the listed names, compactly. No categories or explanations."},
+            ]
+        elif shell_result:
+            call_messages = [
+                *call_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Use only the command output. "
+                        "Return at most six compact findings. "
+                        "Preserve important numbers and names. "
+                        "Do not explain generic concepts. Expand only if asked."
+                    ),
+                },
+            ]
+        elif read_file_result:
+            call_messages = [
+                *call_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Use only the file content. "
+                        "Respect any requested length. "
+                        "If no length is requested, answer concisely. "
+                        "Expand only if asked."
+                    ),
+                },
             ]
         if large_file_excerpt:
             final_max_tokens = min(max_tokens, LARGE_FILE_FINAL_MAX_TOKENS)
@@ -660,10 +703,14 @@ def _has_large_file_excerpt(messages: list[Message]) -> bool:
 
 
 def _has_web_fetch_tool_result(messages: list[Message]) -> bool:
+    return _has_tool_result(messages, "fetch_url")
+
+
+def _has_tool_result(messages: list[Message], name: str) -> bool:
     for message in reversed(messages):
         if message.get("role") != "tool":
             continue
-        return message.get("name") == "fetch_url"
+        return message.get("name") == name
     return False
 
 

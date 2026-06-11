@@ -2,6 +2,12 @@
 
 Manual benchmark prompts for Orbit on a warm `llama-server`.
 
+This benchmark set is the regression suite for the current runtime behavior.
+The software performance tuning line is closed: future changes to routing,
+tool selection, final-answer policy, prompt payloads, tool payloads, or cache
+behavior should be accepted only with strong measured evidence and no
+functional regression.
+
 Start the default server first:
 
 ```bash

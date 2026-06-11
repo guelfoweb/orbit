@@ -127,6 +127,10 @@ Keep manual regression prompts in `PROMPTS.md`. The file should stay short and f
 
 ## Benchmark discipline
 
+- The software performance tuning line is closed.
+- Keep the current benchmark set as the regression suite.
+- Do not change routing, tool selection, final-answer policy, prompts, tool payloads, or cache behavior for performance unless a benchmark shows a strong, comparable benefit.
+- In the absence of strong measurement evidence, do not touch observable behavior.
 - Use `scripts/bench-kv-cache.py` before changing cache-related server flags.
 - Use `scripts/bench-tool-cache.py` before changing tool-loop payloads, schemas, or cache behavior.
 - Use `scripts/bench-continuation-cache.py` to compare no-tool continuation against tool-loop continuation.
