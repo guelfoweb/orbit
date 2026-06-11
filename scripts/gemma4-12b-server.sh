@@ -7,9 +7,11 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 BASE_URL="${BASE_URL:-http://127.0.0.1:18080}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18080}"
+LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-llama-server}"
 MODEL_ALIAS="${MODEL_ALIAS:-gemma4:12b-it}"
 MODEL_PATH="${MODEL_PATH:-}"
 MMPROJ_PATH="${MMPROJ_PATH:-}"
+MTP_DRAFT_PATH="${MTP_DRAFT_PATH:-}"
 CTX_SIZE="${CTX_SIZE:-8192}"
 THREADS="${THREADS:-6}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
@@ -21,10 +23,11 @@ STATE_DIR="${ORBIT_STATE_DIR:-$HOME/.orbit}"
 PID_FILE="${PID_FILE:-$STATE_DIR/gemma4-12b-server.pid}"
 LOG_FILE="${LOG_FILE:-$STATE_DIR/gemma4-12b-server.log}"
 MULTIMODAL=0
+MTP=0
 
 usage() {
   cat <<'EOF'
-usage: scripts/gemma4-12b-server.sh start [--multimodal]
+usage: scripts/gemma4-12b-server.sh start [--multimodal] [--mtp]
        scripts/gemma4-12b-server.sh stop
        scripts/gemma4-12b-server.sh status
 
@@ -34,19 +37,23 @@ Prerequisites:
   llama-server must be available in PATH
   gemma-4-12B-it-Q4_K_M.gguf must be available locally
   optional multimodal support requires mmproj-gemma-4-12B-it-Q8_0.gguf
+  optional MTP support requires a compatible llama.cpp build and gemma-4-12B-it-MTP-Q8_0.gguf
 
 start       run llama-server in background and return the terminal
 stop        stop the background server started by this script
 status      show whether the configured endpoint is healthy
 
 Environment overrides:
-  MODEL_PATH MMPROJ_PATH HOST PORT BASE_URL CTX_SIZE THREADS BATCH_SIZE UBATCH_SIZE CACHE_RAM
-  PARALLEL_SLOTS LLAMA_SERVER_TOOLS ORBIT_STATE_DIR PID_FILE LOG_FILE
+  LLAMA_SERVER_BIN MODEL_PATH MMPROJ_PATH MTP_DRAFT_PATH HOST PORT BASE_URL CTX_SIZE
+  THREADS BATCH_SIZE UBATCH_SIZE CACHE_RAM PARALLEL_SLOTS LLAMA_SERVER_TOOLS
+  ORBIT_STATE_DIR PID_FILE LOG_FILE
 
 Common recovery:
   llama-server not found        install/build llama.cpp and add llama-server to PATH
   model not found               set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
   projector not found           set MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf
+  MTP draft not found           set MTP_DRAFT_PATH=/path/to/gemma-4-12B-it-MTP-Q8_0.gguf
+  MTP unsupported               set LLAMA_SERVER_BIN=/path/to/compatible/llama-server
   existing non-multimodal server stop it before start --multimodal
   server without pid file       stop the owning process manually or change PORT/BASE_URL
 EOF
@@ -114,6 +121,26 @@ resolve_mmproj_path() {
     }
 }
 
+resolve_mtp_draft_path() {
+  if [ "$MTP_DRAFT_PATH" != "" ]; then
+    if [ -f "$MTP_DRAFT_PATH" ]; then
+      printf '%s\n' "$MTP_DRAFT_PATH"
+      return 0
+    fi
+    echo "error: MTP_DRAFT_PATH does not exist: $MTP_DRAFT_PATH" >&2
+    return 1
+  fi
+  first_existing_file \
+    "$HOME/LAB/models/gemma-4-12B-it-MTP-Q8_0.gguf" \
+    "$HOME/LAB/models/gemma4-12b/gemma-4-12B-it-MTP-Q8_0.gguf" \
+    || find_huggingface_file "$HOME/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/*/gemma-4-12B-it-MTP-Q8_0.gguf" \
+    || {
+      echo "error: gemma-4-12B-it-MTP-Q8_0.gguf not found" >&2
+      echo "recovery: set MTP_DRAFT_PATH=/path/to/gemma-4-12B-it-MTP-Q8_0.gguf" >&2
+      return 1
+    }
+}
+
 health_ok() {
   python3 - "$BASE_URL" <<'PY'
 from __future__ import annotations
@@ -177,9 +204,10 @@ pid_running() {
 }
 
 start_server() {
-  if ! command -v llama-server >/dev/null 2>&1; then
-    echo "error: llama-server not found in PATH" >&2
+  if ! command -v "$LLAMA_SERVER_BIN" >/dev/null 2>&1; then
+    echo "error: llama-server not found: $LLAMA_SERVER_BIN" >&2
     echo "install/build llama.cpp and ensure llama-server is available before starting this profile" >&2
+    echo "recovery: set LLAMA_SERVER_BIN=/path/to/llama-server" >&2
     exit 1
   fi
   if health_ok; then
@@ -229,14 +257,23 @@ $LLAMA_SERVER_TOOLS"
 $MMPROJ_BLOB"
   fi
 
+  if [ "$MTP" -eq 1 ]; then
+    MTP_DRAFT_BLOB="$(resolve_mtp_draft_path)"
+    SERVER_ARGS="$SERVER_ARGS
+--spec-type
+draft-mtp
+--model-draft
+$MTP_DRAFT_BLOB"
+  fi
+
   echo "starting llama-server for $MODEL_ALIAS at $BASE_URL"
   echo "log: $LOG_FILE"
   if command -v setsid >/dev/null 2>&1; then
     # shellcheck disable=SC2086
-    setsid llama-server $SERVER_ARGS >"$LOG_FILE" 2>&1 < /dev/null &
+    setsid "$LLAMA_SERVER_BIN" $SERVER_ARGS >"$LOG_FILE" 2>&1 < /dev/null &
   else
     # shellcheck disable=SC2086
-    nohup llama-server $SERVER_ARGS >"$LOG_FILE" 2>&1 < /dev/null &
+    nohup "$LLAMA_SERVER_BIN" $SERVER_ARGS >"$LOG_FILE" 2>&1 < /dev/null &
   fi
   echo "$!" >"$PID_FILE"
   wait_for_server
@@ -307,6 +344,10 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --multimodal)
       MULTIMODAL=1
+      shift
+      ;;
+    --mtp)
+      MTP=1
       shift
       ;;
     --help|-h)

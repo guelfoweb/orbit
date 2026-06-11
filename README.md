@@ -126,6 +126,15 @@ If you need a custom model path:
 MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf scripts/gemma4-12b-server.sh start
 ```
 
+Optional MTP speculative decoding requires a compatible `llama-server` build
+and a matching draft model:
+
+```bash
+LLAMA_SERVER_BIN=/path/to/compatible/llama-server \
+MTP_DRAFT_PATH=/path/to/gemma-4-12B-it-MTP-Q8_0.gguf \
+scripts/gemma4-12b-server.sh start --mtp
+```
+
 ## Run orbit
 
 Interactive mode:

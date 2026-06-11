@@ -61,6 +61,64 @@ llama-server \
 
 These defaults were chosen for stability on CPU-only systems. Faster machines can raise `THREADS`, `BATCH_SIZE`, `UBATCH_SIZE`, and `CACHE_RAM`, but changes should be benchmarked instead of assumed.
 
+## MTP speculative decoding
+
+MTP speculative decoding was tested as an optional `llama.cpp` profile, not as
+the default baseline.
+
+The tested implementation came from:
+
+```text
+Repository: https://github.com/qualcomm/llama.cpp
+Branch: gemma-4-support-smaller-assistants
+```
+
+The tested server profile kept the same CPU-oriented settings used by the
+baseline:
+
+```bash
+THREADS=6
+BATCH_SIZE=256
+UBATCH_SIZE=128
+CACHE_RAM=8192
+CTX_SIZE=8192
+PARALLEL_SLOTS=1
+```
+
+The only relevant difference was enabling the draft MTP model:
+
+```bash
+llama-server \
+  -m <gemma-4-12B-it-Q4_K_M.gguf> \
+  --spec-type draft-mtp \
+  --model-draft <gemma-4-12B-it-MTP-Q8_0.gguf> \
+  -c 8192 \
+  -t 6 \
+  -b 256 \
+  -ub 128 \
+  -np 1 \
+  --reasoning off \
+  --cache-ram 8192
+```
+
+Observed CPU-only benchmark results:
+
+| Prompt | No MTP | MTP | Wall-time delta |
+| --- | ---: | ---: | ---: |
+| `hi, who are you?` | `pf 12.5/s`, `gen 3.5/s`, `11s` | `pf 16.5/s`, `gen 7.1/s`, `6s` | ~45% faster |
+| `tell me who designed you` | `pf 17.0/s`, `gen 4.2/s`, `6s` | `pf 15.5/s`, `gen 6.7/s`, `5s` | ~17% faster |
+| `search online for information about Agenzia per l'Italia Digitale` | `pf 10.7/s`, `gen 3.0/s`, `1m56s` | `pf 11.3/s`, `gen 4.1/s`, `1m28s` | ~24% faster |
+| `what configuration does this computer have?` | `pf 10.4/s`, `gen 3.2/s`, `3m00s` | `pf 11.8/s`, `gen 4.6/s`, `2m26s` | ~19% faster |
+
+The main gain was higher generation throughput. Prefill did not change as much,
+which is expected: MTP helps most when the final answer has enough generated
+tokens to amortize the extra draft model work.
+
+Because this depends on a fork/branch rather than the default upstream
+`llama.cpp` baseline, it should be treated as an optional experimental profile
+until the required Gemma 4 assistant support is available in the normal build
+path.
+
 ## Tool exposure
 
 Orbit starts with tools disabled.
