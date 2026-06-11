@@ -21,10 +21,12 @@ class FakeBackend:
     def __init__(self) -> None:
         self.messages: list[Message] = []
         self.calls = 0
+        self.tools = None
 
     def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
         self.calls += 1
         self.messages = messages
+        self.tools = tools
         return ChatResult(
             content="ok",
             model="fake",
@@ -139,6 +141,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(steps[0].phase, "chat_final")
         self.assertEqual(steps[0].prompt_tokens, 1)
         self.assertEqual(steps[0].cached_tokens, 0)
+
+    def test_continue_last_response_uses_chat_without_tools(self) -> None:
+        backend = FakeBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+        runtime.messages.append({"role": "assistant", "content": "partial answer"})
+
+        result = runtime.continue_last_response(temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "ok")
+        self.assertIsNone(getattr(backend, "tools", None))
+        self.assertEqual(runtime.messages[-2]["role"], "user")
+        self.assertIn("Continue exactly", runtime.messages[-2]["content"])
+        self.assertEqual(runtime.messages[-1]["role"], "assistant")
 
 
 class ToolCallingBackend:

@@ -24,7 +24,7 @@ _ALLOWED_COMMANDS = (
 _ALLOWED_SIMPLE_FLAGS = {
     "ls": frozenset({"-1", "-a", "-l", "-h", "-F", "-la", "-al", "-lh", "-hl", "-lah", "-lha", "-alh", "-ahl", "-hal", "-hla"}),
     "du": frozenset({"-s", "-h", "-sh", "-hs"}),
-    "df": frozenset({"-h", "-k", "-m"}),
+    "df": frozenset({"-h", "-k", "-m", "--total"}),
     "free": frozenset({"-h", "-b", "-k", "-m", "-g"}),
     "lscpu": frozenset(),
     "lsblk": frozenset({"-f", "-J", "-p"}),
@@ -65,7 +65,8 @@ def exec_shell_definition() -> dict[str, Any]:
                 "Run one bounded read-only command in workdir. "
                 "Allowed: pwd, ls, find, du, df, free, lscpu, lsblk, uname, hostname, uptime, "
                 "whoami, id, date, ps, pgrep, ip, ss, wc, head, tail, file, stat, cat. "
-                "Use ls -F for listing. Only && may chain allowed commands. No ls -R or outside paths."
+                "Use ls -F for listing. Use a short && chain when multiple read-only commands are needed. "
+                "No pipes, redirects, grep filters, ls -R, or outside paths."
             ),
             "parameters": {
                 "type": "object",

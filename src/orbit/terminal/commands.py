@@ -17,11 +17,13 @@ MAX_MAX_TOKENS = 4096
 def help_text() -> str:
     return "\n".join(
         [
+            "/continue        Continue the last answer if it reached max_tokens.",
             "/health           Check llama-server health.",
             "/help             Show this help.",
             "/max-tokens       Show current output token limit.",
             "/max-tokens <n>   Set output token limit for following turns.",
             "/reset            Clear current conversation and saved session.",
+            "/sessions clear   Delete all saved sessions for this workdir.",
             "/status           Show runtime, session, and backend capabilities.",
             "/tools            Show available tool backends.",
             "/exit             Exit interactive mode.",

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sys
 import time
+import select
+import re
+from shutil import get_terminal_size
 from dataclasses import dataclass
 
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
@@ -11,10 +14,14 @@ from orbit.terminal.commands import help_text, reset_session, runtime_status, se
 from orbit.terminal.config import AppConfig
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
+from orbit.terminal.prompt_preview import compact_prompt_preview, is_long_text_prompt
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_result_event
-from orbit.terminal.theme import dim
+from orbit.terminal.theme import dim, yellow_dim
+
+
+PASTE_BADGE_PATTERN = re.compile(r"(\[text \d+ chars #[0-9a-f]{8}\])$")
 
 
 @dataclass
@@ -25,6 +32,7 @@ class Repl:
     session: SessionStore | None = None
     history: PromptHistory | None = None
     prompt_tokens_per_second: float | None = None
+    can_continue: bool = False
 
     def run(self) -> int:
         if self.history:
@@ -32,7 +40,7 @@ class Repl:
         print("orbit interactive mode. Type /help for commands.")
         while True:
             try:
-                prompt = input("> ").strip()
+                prompt = _read_prompt_input().strip()
             except EOFError:
                 self._save_history()
                 print()
@@ -48,6 +56,17 @@ class Repl:
                     continue
                 self._save_history()
                 return 0
+            if self.history:
+                resolution = self.history.resolve_prompt(prompt)
+                if resolution.missing_full_text:
+                    print("error: full pasted text is unavailable for this history entry", file=sys.stderr)
+                    continue
+                if resolution.prompt != prompt:
+                    prompt = resolution.prompt
+                else:
+                    _replace_long_input_echo(prompt)
+            else:
+                _replace_long_input_echo(prompt)
             if self.history:
                 self.history.add(prompt)
                 self.history.save()
@@ -94,6 +113,10 @@ class Repl:
         self._save_session()
         elapsed = time.monotonic() - started
         print("\n\n", end="", flush=True)
+        self._print_turn_footer(result, elapsed_seconds=elapsed)
+
+    def _print_turn_footer(self, result, *, elapsed_seconds: float) -> None:
+        self.can_continue = result.finish_reason == "length"
         if self.runtime.last_memory_refresh:
             refresh = self.runtime.last_memory_refresh
             print(dim(format_memory_refresh(refresh)), flush=True)
@@ -101,13 +124,17 @@ class Repl:
             dim(
                 format_turn_status(
                     result,
-                    elapsed_seconds=elapsed,
+                    elapsed_seconds=elapsed_seconds,
                     estimated_context_tokens=estimate_context_status_tokens(self.runtime.messages),
                     context_tokens=self.runtime.context_tokens,
                 )
             ),
             flush=True,
         )
+        if result.finish_reason == "length":
+            print(dim("output stopped because max_tokens was reached"), flush=True)
+            print(dim("/continue       continue the answer"), flush=True)
+            print(dim("/max-tokens N   increase output budget"), flush=True)
 
     def _record_model_step(self, metrics) -> None:
         if metrics.prompt_tokens_per_second is not None and metrics.prompt_tokens_per_second > 0:
@@ -116,11 +143,18 @@ class Repl:
     def _handle_command(self, command: str) -> bool:
         if command == "/exit":
             return False
+        if command == "/continue":
+            self._continue_last_answer()
+            return True
         if command == "/help":
             print(help_text())
             return True
         if command == "/reset":
             print(reset_session(self.runtime, self.session))
+            self.can_continue = False
+            return True
+        if command == "/sessions clear":
+            print(self._clear_workdir_sessions())
             return True
         if command == "/health":
             print("llama-server: ok" if self.backend.health() else "llama-server: unavailable")
@@ -139,6 +173,21 @@ class Repl:
         print(f"unknown command: {command}", file=sys.stderr)
         return True
 
+    def _clear_workdir_sessions(self) -> str:
+        if not _confirm_clear_sessions():
+            return "sessions clear cancelled"
+        removed = SessionStore.clear_for_workdir(self.config.workdir)
+        self.runtime.reset()
+        self.can_continue = False
+        self.session = SessionStore.new_for_workdir(self.config.workdir)
+        return f"sessions cleared: {removed}"
+
+    def _continue_last_answer(self) -> None:
+        if not self.can_continue:
+            print("error: no truncated answer to continue", file=sys.stderr)
+            return
+        self._ask_continue()
+
     def _save_session(self) -> None:
         if not self.session:
             return
@@ -152,3 +201,91 @@ class Repl:
     def _save_history(self) -> None:
         if self.history:
             self.history.save()
+
+    def _ask_continue(self) -> None:
+        renderer = StreamRenderer(
+            prefill_estimate_seconds=estimate_prefill_seconds(
+                self.runtime.messages,
+                "",
+                prompt_tokens_per_second=self.prompt_tokens_per_second,
+            ),
+            prefill_estimate_tokens=estimate_prefill_tokens(self.runtime.messages, ""),
+        )
+        checkpoint = len(self.runtime.messages)
+        print()
+        started = time.monotonic()
+        renderer.start()
+        try:
+            result = self.runtime.continue_last_response(
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                on_final_delta=renderer.write,
+                on_model_step=self._record_model_step,
+            )
+        except KeyboardInterrupt:
+            renderer.finish()
+            self.runtime.restore_message_count(checkpoint)
+            print(dim("interrupted"), flush=True)
+            return
+        except LlamaServerError as exc:
+            renderer.finish()
+            self.runtime.restore_message_count(checkpoint)
+            print(f"error: {exc}", file=sys.stderr)
+            return
+        renderer.finish()
+        self._save_session()
+        elapsed = time.monotonic() - started
+        print("\n\n", end="", flush=True)
+        self._print_turn_footer(result, elapsed_seconds=elapsed)
+
+
+def _replace_long_input_echo(prompt: str) -> None:
+    if not is_long_text_prompt(prompt) or not sys.stdout.isatty():
+        return
+    preview = colorize_paste_preview(compact_prompt_preview(prompt, multiline=True))
+    columns = max(20, get_terminal_size((80, 20)).columns)
+    visual_rows = max(1, (len("> ") + len(prompt)) // columns + 1)
+    print(f"\x1b[{visual_rows}F\x1b[J> {preview}", flush=True)
+
+
+def colorize_paste_preview(preview: str) -> str:
+    return PASTE_BADGE_PATTERN.sub(lambda match: yellow_dim(match.group(1)), preview)
+
+
+def _read_prompt_input() -> str:
+    first_line = input("> ")
+    return _read_available_paste_tail(first_line)
+
+
+def _read_available_paste_tail(first_line: str, *, timeout: float = 0.01, require_tty: bool = True) -> str:
+    if require_tty and not sys.stdin.isatty():
+        return first_line
+    try:
+        fileno = sys.stdin.fileno()
+    except (AttributeError, OSError):
+        return first_line
+    lines = [first_line]
+    while True:
+        try:
+            ready, _, _ = select.select([fileno], [], [], timeout)
+        except (OSError, ValueError):
+            break
+        if not ready:
+            break
+        line = sys.stdin.readline()
+        if line == "":
+            break
+        lines.append(line.rstrip("\n"))
+        timeout = 0.0
+    return "\n".join(lines)
+
+
+def _confirm_clear_sessions() -> bool:
+    if not sys.stdin.isatty():
+        return True
+    try:
+        answer = input("Delete all saved sessions for this workdir? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in {"y", "yes"}

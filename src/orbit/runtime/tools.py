@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orbit.runtime.tool_arguments import parse_tool_arguments
 from orbit.runtime.file_tools import (
     DEFAULT_CHUNK_CHARS,
     MAX_APPEND_CHARS,
@@ -282,7 +282,7 @@ def execute_tool(
 ) -> ToolResult:
     if name not in TOOL_NAMES:
         return ToolResult(name=name, content=f"error: unknown tool: {name}")
-    parsed = _parse_arguments(arguments)
+    parsed = parse_tool_arguments(arguments)
     if isinstance(parsed, str):
         return ToolResult(name=name, content=parsed)
     if name == "list_files":
@@ -350,17 +350,3 @@ def execute_tool(
             )
         chunk_budget["read_file_chunks"] = used + 1
     return ToolResult(name=name, content=read_file(parsed.get("path"), arguments=parsed, workdir=workdir))
-
-
-def _parse_arguments(arguments: str | dict[str, Any]) -> dict[str, Any] | str:
-    if isinstance(arguments, dict):
-        return arguments
-    if not isinstance(arguments, str) or not arguments.strip():
-        return {}
-    try:
-        parsed = json.loads(arguments)
-    except json.JSONDecodeError as exc:
-        return f"error: invalid JSON tool arguments: {exc}"
-    if not isinstance(parsed, dict):
-        return "error: tool arguments must be a JSON object"
-    return parsed

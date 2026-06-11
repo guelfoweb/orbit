@@ -358,7 +358,7 @@ class HybridToolExecutorTests(unittest.TestCase):
                 allowed_tool_names=("exec_shell_command",),
             )
 
-            commands = ["uname -a", "hostname", "uptime -p", "whoami", "id -u", "date -I", "lsblk -f"]
+            commands = ["uname -a", "hostname", "uptime -p", "whoami", "id -u", "date -I", "lsblk -f", "df -h --total"]
             for command in commands:
                 with self.subTest(command=command):
                     execution = executor.execute("exec_shell_command", {"command": command}, chunk_budget={})
@@ -394,6 +394,21 @@ class HybridToolExecutorTests(unittest.TestCase):
             )
 
             execution = executor.execute("exec_shell_command", {"command": "printf x | wc -c"}, chunk_budget={})
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("shell operators", execution.result.content)
+        self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_blocks_grep_pipe_for_df_total_before_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_command",),
+            )
+
+            execution = executor.execute("exec_shell_command", {"command": "df -h --total | grep total"}, chunk_budget={})
 
         self.assertEqual(execution.source, "orbit")
         self.assertIn("shell operators", execution.result.content)

@@ -12,7 +12,7 @@ if str(SRC) not in sys.path:
 from orbit.backend.base import ChatResult
 from orbit.runtime.session_memory import MemoryRefresh
 from orbit.terminal.status import format_memory_refresh, format_turn_status
-from orbit.terminal.theme import dim
+from orbit.terminal.theme import dim, yellow_dim
 
 
 class StatusTests(unittest.TestCase):
@@ -76,6 +76,7 @@ class StatusTests(unittest.TestCase):
 
     def test_dim_wraps_text_in_ansi_escape(self) -> None:
         self.assertEqual(dim("model: gemma4"), "\033[2mmodel: gemma4\033[0m")
+        self.assertEqual(yellow_dim("[text 10 chars #12345678]"), "\033[2m\033[33m[text 10 chars #12345678]\033[0m")
 
     def test_format_memory_refresh_includes_savings_timing_and_threshold(self) -> None:
         status = format_memory_refresh(

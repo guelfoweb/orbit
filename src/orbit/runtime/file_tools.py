@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orbit.runtime.path_guardrails import BINARY_OR_SPECIAL_EXTENSIONS, TEXT_EXTENSIONS, resolve_inside_workdir
+
 
 MAX_LIST_ITEMS = 200
 MAX_READ_BYTES = 256 * 1024
@@ -18,71 +20,6 @@ MAX_CHUNK_FILE_BYTES = 1024 * 1024
 DEFAULT_CHUNK_CHARS = 6_000
 DEFAULT_LARGE_FILE_INITIAL_CHARS = 500
 MAX_CHUNK_CHARS = 12_000
-
-TEXT_EXTENSIONS = {
-    ".bat",
-    ".bib",
-    ".c",
-    ".conf",
-    ".cpp",
-    ".cs",
-    ".css",
-    ".csv",
-    ".dart",
-    ".go",
-    ".h",
-    ".hpp",
-    ".html",
-    ".java",
-    ".js",
-    ".json",
-    ".jsx",
-    ".kt",
-    ".log",
-    ".lua",
-    ".md",
-    ".php",
-    ".properties",
-    ".ps1",
-    ".py",
-    ".r",
-    ".rb",
-    ".rs",
-    ".scala",
-    ".sh",
-    ".sql",
-    ".swift",
-    ".tex",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".txt",
-    ".vue",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
-
-BINARY_OR_SPECIAL_EXTENSIONS = {
-    ".7z",
-    ".bmp",
-    ".doc",
-    ".docx",
-    ".flac",
-    ".gif",
-    ".gz",
-    ".jpeg",
-    ".jpg",
-    ".mp3",
-    ".ogg",
-    ".pdf",
-    ".png",
-    ".tar",
-    ".wav",
-    ".webp",
-    ".zip",
-}
-
 
 def list_files(path: Any, *, workdir: Path) -> str:
     if not isinstance(path, str):
@@ -464,13 +401,3 @@ def load_text_file(path: Any, *, workdir: Path, max_bytes: int) -> tuple[Path, s
     except UnicodeDecodeError:
         return "error: file is not valid UTF-8 text"
     return target, text
-
-
-def resolve_inside_workdir(path: str, *, workdir: Path) -> Path | str:
-    root = workdir.expanduser().resolve()
-    target = (root / path).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError:
-        return "error: path escapes workdir"
-    return target

@@ -5,13 +5,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from orbit.runtime.file_tools import (
+from orbit.runtime.path_guardrails import (
     BINARY_OR_SPECIAL_EXTENSIONS,
-    MAX_REPLACE_CHARS,
-    MAX_TEXT_FILE_BYTES_AFTER_REPLACE,
     TEXT_EXTENSIONS,
     resolve_inside_workdir,
+    validate_existing_file_path,
 )
+from orbit.runtime.file_tools import MAX_REPLACE_CHARS, MAX_TEXT_FILE_BYTES_AFTER_REPLACE
 
 
 MAX_EDIT_CHANGES = 20
@@ -238,15 +238,10 @@ def prepare_apply_diff(arguments: dict[str, Any], *, workdir: Path, server_cwd: 
 
 
 def _validate_existing_text_file(path: str, *, workdir: Path) -> Path | str:
-    target_or_error = resolve_inside_workdir(path, workdir=workdir)
+    target_or_error = validate_existing_file_path(path, workdir=workdir)
     if isinstance(target_or_error, str):
         return target_or_error
-    target = target_or_error
-    if not target.exists():
-        return f"error: path not found: {path}"
-    if not target.is_file():
-        return f"error: path is not a file: {path}"
-    return _validate_text_target(target)
+    return _validate_text_target(target_or_error)
 
 
 def _validate_text_target(target: Path) -> Path | str:

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from orbit.backend.llama_server import LlamaServerError
 from orbit.runtime.edit_guardrails import prepare_apply_diff, prepare_edit_file
-from orbit.runtime.file_tools import resolve_inside_workdir
+from orbit.runtime.path_guardrails import resolve_inside_workdir
 from orbit.runtime.shell_guardrails import exec_shell_should_run_locally, prepare_exec_shell_command
+from orbit.runtime.tool_arguments import parse_tool_arguments
 from orbit.runtime.tools import ToolResult, execute_tool, tool_definitions
 
 
@@ -91,7 +91,7 @@ class HybridToolExecutor:
     ) -> ToolExecution:
         if name not in self.allowed_tool_names:
             return ToolExecution(ToolResult(name=name, content=f"error: tool not available for this turn: {name}"), "orbit")
-        parsed = _parse_arguments(arguments)
+        parsed = parse_tool_arguments(arguments)
         if isinstance(parsed, str):
             return ToolExecution(ToolResult(name=name, content=parsed), "orbit")
         if _prefer_orbit_tool(name, parsed, workdir=self.workdir):
@@ -214,20 +214,6 @@ def _tool_definition(
 
 def _schema(schema_type: str) -> dict[str, str]:
     return {"type": schema_type}
-
-
-def _parse_arguments(arguments: str | dict[str, Any]) -> dict[str, Any] | str:
-    if isinstance(arguments, dict):
-        return arguments
-    if not isinstance(arguments, str) or not arguments.strip():
-        return {}
-    try:
-        parsed = json.loads(arguments)
-    except json.JSONDecodeError as exc:
-        return f"error: invalid JSON tool arguments: {exc}"
-    if not isinstance(parsed, dict):
-        return "error: tool arguments must be a JSON object"
-    return parsed
 
 
 def _server_arguments(name: str, arguments: dict[str, Any], *, workdir: Path) -> dict[str, Any] | str:

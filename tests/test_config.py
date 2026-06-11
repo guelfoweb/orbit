@@ -28,7 +28,8 @@ class ConfigTests(unittest.TestCase):
     def test_route_system_prompt_routes_local_hardware_queries_to_shell(self) -> None:
         self.assertIn("this/local PC hardware or resources", ROUTE_SYSTEM_PROMPT)
         self.assertIn("FILESYSTEM/exec_shell_command", ROUTE_SYSTEM_PROMPT)
-        self.assertIn("short && chain of allowed commands", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("choose enough allowed read-only commands", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("short && chain", ROUTE_SYSTEM_PROMPT)
 
     def test_missing_config_uses_defaults(self) -> None:
         args = _parse("--config", "/tmp/orbit-missing-config.json")

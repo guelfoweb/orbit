@@ -8,12 +8,12 @@ from orbit import __version__
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.media import load_audio, load_image
-from orbit.runtime.sessions import SessionStore
 from orbit.terminal.config import add_config_arguments, load_app_config
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
 from orbit.terminal.repl import Repl
 from orbit.terminal.commands import help_text, runtime_status, set_max_tokens, tools_text
+from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import estimate_context_status_tokens, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.theme import dim
@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --image/--audio require a one-shot prompt", file=sys.stderr)
         return 1
 
-    session = SessionStore.for_workdir(config.workdir)
+    session = select_interactive_session(config.workdir)
     session_messages, session_warning = session.load_with_warning()
     if session_warning:
         print(dim(session_warning), file=sys.stderr)

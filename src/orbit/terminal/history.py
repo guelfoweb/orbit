@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from dataclasses import dataclass
 from pathlib import Path
+
+from orbit.terminal.prompt_preview import compact_prompt_preview, is_compact_prompt_preview
 
 
 DEFAULT_HISTORY_ROOT = Path.home() / ".orbit" / "history"
 LEGACY_HISTORY_NAME = "default.history"
 MAX_HISTORY_ITEMS = 500
+FULL_HISTORY_SUFFIX = ".full.jsonl"
+
+
+@dataclass(frozen=True)
+class PromptResolution:
+    prompt: str
+    missing_full_text: bool = False
 
 
 class PromptHistory:
@@ -36,8 +47,10 @@ class PromptHistory:
         prompt = prompt.strip()
         if not prompt or prompt.startswith("/") or self.readline is None:
             return
-        self._remove_existing(prompt)
-        self.readline.add_history(prompt)
+        history_item = self._history_item(prompt)
+        self._remove_existing(history_item)
+        self.readline.add_history(history_item)
+        self._remember_full_prompt(history_item, prompt)
         self._trim_readline_history()
 
     def save(self) -> None:
@@ -78,6 +91,18 @@ class PromptHistory:
         for item in items[-MAX_HISTORY_ITEMS:]:
             self.readline.add_history(item)
 
+    def resolve(self, prompt: str) -> str:
+        return self.resolve_prompt(prompt).prompt
+
+    def resolve_prompt(self, prompt: str) -> PromptResolution:
+        prompt = prompt.strip()
+        if prompt and is_compact_prompt_preview(prompt):
+            full_prompt = self._full_prompt_for_preview(prompt)
+            if full_prompt is None:
+                return PromptResolution(prompt=prompt, missing_full_text=True)
+            return PromptResolution(prompt=full_prompt)
+        return PromptResolution(prompt=prompt)
+
     def _trim_readline_history(self) -> None:
         items = self._history_items()
         if len(items) <= MAX_HISTORY_ITEMS:
@@ -94,6 +119,52 @@ class PromptHistory:
             if isinstance(item, str) and item:
                 items.append(item)
         return items
+
+    def _history_item(self, prompt: str) -> str:
+        return compact_prompt_preview(prompt)
+
+    def _full_history_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}{FULL_HISTORY_SUFFIX}")
+
+    def _remember_full_prompt(self, history_item: str, prompt: str) -> None:
+        if history_item == prompt:
+            return
+        if not self._ensure_parent_dir():
+            return
+        path = self._full_history_path()
+        records = [record for record in self._full_prompt_records() if record.get("preview") != history_item]
+        records.append({"preview": history_item, "prompt": prompt})
+        records = records[-MAX_HISTORY_ITEMS:]
+        try:
+            path.write_text(
+                "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    def _full_prompt_for_preview(self, preview: str) -> str | None:
+        for record in reversed(self._full_prompt_records()):
+            if record.get("preview") == preview and isinstance(record.get("prompt"), str):
+                return record["prompt"]
+        return None
+
+    def _full_prompt_records(self) -> list[dict[str, str]]:
+        path = self._full_history_path()
+        if not path.exists():
+            return []
+        records: list[dict[str, str]] = []
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and isinstance(record.get("preview"), str) and isinstance(record.get("prompt"), str):
+                    records.append({"preview": record["preview"], "prompt": record["prompt"]})
+        except OSError:
+            return []
+        return records
 
 
 def dedupe_prompts(prompts: list[str]) -> list[str]:

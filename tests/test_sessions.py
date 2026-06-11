@@ -37,6 +37,68 @@ class SessionStoreTests(unittest.TestCase):
 
             self.assertIsNone(store.load())
 
+    def test_new_for_workdir_creates_distinct_session_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            root = Path(tmp) / "sessions"
+
+            first = SessionStore.new_for_workdir(workdir, root=root)
+            second = SessionStore.new_for_workdir(workdir, root=root)
+
+            self.assertNotEqual(first.path, SessionStore.for_workdir(workdir, root=root).path)
+            self.assertNotEqual(first.path, second.path)
+
+    def test_list_for_workdir_returns_saved_sessions_with_first_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            root = Path(tmp) / "sessions"
+            legacy = SessionStore.for_workdir(workdir, root=root)
+            current = SessionStore.new_for_workdir(workdir, root=root)
+            legacy.save(messages=[{"role": "user", "content": "old prompt"}], workdir=workdir, model="m", base_url="u")
+            current.save(messages=[{"role": "user", "content": "new prompt"}], workdir=workdir, model="m", base_url="u")
+
+            summaries = SessionStore.list_for_workdir(workdir, root=root)
+
+            self.assertEqual(len(summaries), 2)
+            self.assertEqual(summaries[0].first_prompt, "new prompt")
+            self.assertEqual(summaries[1].first_prompt, "old prompt")
+
+    def test_list_for_workdir_ignores_corrupt_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            root = Path(tmp) / "sessions"
+            valid = SessionStore.new_for_workdir(workdir, root=root)
+            corrupt = SessionStore.for_workdir(workdir, root=root)
+            valid.save(messages=[{"role": "user", "content": "hello"}], workdir=workdir, model="m", base_url="u")
+            corrupt.path.parent.mkdir(parents=True, exist_ok=True)
+            corrupt.path.write_text("{bad-json", encoding="utf-8")
+
+            summaries = SessionStore.list_for_workdir(workdir, root=root)
+
+            self.assertEqual([summary.first_prompt for summary in summaries], ["hello"])
+
+    def test_clear_for_workdir_removes_all_matching_sessions_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            workdir = Path(tmp) / "work"
+            other_workdir = Path(tmp) / "other"
+            workdir.mkdir()
+            other_workdir.mkdir()
+            first = SessionStore.for_workdir(workdir, root=root)
+            second = SessionStore.new_for_workdir(workdir, root=root)
+            other = SessionStore.for_workdir(other_workdir, root=root)
+            for store, prompt in ((first, "one"), (second, "two"), (other, "other")):
+                store.save(messages=[{"role": "user", "content": prompt}], workdir=workdir, model="m", base_url="u")
+
+            removed = SessionStore.clear_for_workdir(workdir, root=root)
+
+            self.assertEqual(removed, 2)
+            self.assertEqual(SessionStore.list_for_workdir(workdir, root=root), [])
+            self.assertIsNotNone(other.load())
+
     def test_load_with_warning_reports_corrupt_session_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "work"

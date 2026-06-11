@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-import shlex
 from dataclasses import dataclass, field
 from typing import Callable
 
 from orbit.backend import ChatBackend, ChatResult
 from orbit.backend.base import Message
+from orbit.runtime.final_policy import (
+    build_final_tool_policy,
+    final_from_tool_retry_reason,
+    final_tool_retry_instruction,
+    final_tool_retry_max_tokens,
+    has_list_like_tool_result as _has_list_like_tool_result,
+)
 from orbit.runtime.media import AudioInput, ImageInput, load_referenced_media
 from orbit.runtime.messages import (
     message_content,
@@ -29,17 +35,14 @@ from orbit.runtime.route_request import (
 from orbit.runtime.results import error_result
 from orbit.runtime.session_memory import MemoryRefresh, maybe_refresh_memory, should_refresh_for_append
 from orbit.runtime.tool_backends import HybridToolExecutor
-from orbit.runtime.tool_calls import execute_tool_call, tool_call_id, tool_call_signature
+from orbit.runtime.tool_calls import execute_tool_call, tool_call_signature
+from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
 from orbit.runtime.tools import tool_names as all_tool_names
 from orbit.runtime.turn_trace import ModelStepMetrics
 
 
 ROUTE_MAX_TOKENS = 64
 TOOL_CALL_MAX_TOKENS = 96
-FINAL_FROM_TOOL_MIN_TOKENS = 256
-LARGE_FILE_FINAL_MAX_TOKENS = 128
-WEB_FETCH_FINAL_MAX_TOKENS = 72
-LIST_FINAL_MAX_TOKENS = 96
 
 
 @dataclass
@@ -68,6 +71,31 @@ class ChatRuntime:
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
     ) -> ChatResult:
         self.messages.append({"role": "user", "content": message_content(prompt, images or [], audios or [])})
+        result = self._chat_final(
+            self.messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_final_delta=on_final_delta,
+            on_model_step=on_model_step,
+            loop=1,
+        )
+        self.messages.append({"role": "assistant", "content": result.content})
+        return result
+
+    def continue_last_response(
+        self,
+        *,
+        temperature: float,
+        max_tokens: int,
+        on_final_delta: Callable[[str], None] | None = None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+    ) -> ChatResult:
+        self.messages.append(
+            {
+                "role": "user",
+                "content": "Continue exactly from where the previous answer stopped. Do not repeat already written text.",
+            }
+        )
         result = self._chat_final(
             self.messages,
             temperature=temperature,
@@ -324,7 +352,7 @@ class ChatRuntime:
         if initial_tool_calls:
             calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
             tool_rounds += 1
-            self.messages.append({"role": "assistant", "content": "", "tool_calls": calls})
+            self.messages.append(assistant_tool_call_message("", calls))
             for tool_call in calls:
                 signature = tool_call_signature(tool_call)
                 seen_tool_calls.add(signature)
@@ -334,14 +362,7 @@ class ChatRuntime:
                 tool_result = execution.result
                 if on_tool_result:
                     on_tool_result(tool_result.name, len(tool_result.content), execution.source)
-                self.messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call_id(tool_call),
-                        "name": tool_result.name,
-                        "content": tool_result.content,
-                    }
-                )
+                self.messages.append(tool_result_message(tool_call, tool_result))
             if tool_rounds >= tool_round_limit:
                 return self._answer_from_tool_results(
                     temperature=temperature,
@@ -393,10 +414,7 @@ class ChatRuntime:
                 route_tool_call = route_like_tool_call(result.content, allowed_tool_names)
                 if route_tool_call is not None:
                     result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
-            assistant_message: Message = {"role": "assistant", "content": result.content}
-            if result.tool_calls:
-                assistant_message["tool_calls"] = result.tool_calls
-            self.messages.append(assistant_message)
+            self.messages.append(assistant_tool_call_message(result.content, result.tool_calls))
             if not result.tool_calls:
                 return result
             tool_rounds += 1
@@ -424,14 +442,7 @@ class ChatRuntime:
                     on_tool_result(tool_result.name, len(tool_result.content), execution.source)
                 if should_refresh_for_append(self.messages, tool_result.content, context_tokens=self.context_tokens):
                     self.refresh_memory_if_needed(temperature=temperature, force=True)
-                self.messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call_id(tool_call),
-                        "name": tool_result.name,
-                        "content": tool_result.content,
-                    }
-                )
+                self.messages.append(tool_result_message(tool_call, tool_result))
             if tool_rounds >= tool_round_limit:
                 return self._answer_from_tool_results(
                     temperature=temperature,
@@ -464,116 +475,22 @@ class ChatRuntime:
         use_tool_prompt: bool,
     ) -> ChatResult:
         call_messages = with_final_tool_system_prompt(self.messages) if use_tool_prompt else self.messages
-        large_file_excerpt = _has_large_file_excerpt(self.messages)
-        web_fetch_result = _has_web_fetch_tool_result(self.messages)
-        web_search_result = _has_tool_result(self.messages, "search_web")
-        list_like_result = _has_list_like_tool_result(self.messages)
-        shell_result = _has_tool_result(self.messages, "exec_shell_command")
-        read_file_result = _has_tool_result(self.messages, "read_file")
-        if large_file_excerpt:
-            call_messages = [
-                *call_messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "Use the available large-file excerpt only. "
-                        "Answer in at most five short bullets, each under twelve words. Do not quote long passages. "
-                        "Do not request more chunks unless the user explicitly asked for exhaustive analysis."
-                    ),
-                },
-            ]
-        elif web_search_result:
-            call_messages = [
-                *call_messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "Use only the search results already available. "
-                        "Answer in at most four short bullets. "
-                        "Keep the main facts and cite source names only when useful. "
-                        "Do not add background beyond the results. "
-                        "Expand only if the user asks for more detail."
-                    ),
-                },
-            ]
-        elif web_fetch_result:
-            call_messages = [
-                *call_messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "Use only the fetched page text already available. "
-                        "Write exactly two concise bullets. "
-                        "Use the requested language; if unspecified, use the fetched page language. "
-                        "Focus on the central thesis and key messages. "
-                        "Each bullet must be under eighteen words. No introduction. Stop after the second bullet. "
-                        "Do not request more chunks unless the user explicitly asked for exhaustive analysis."
-                    ),
-                },
-            ]
-        elif list_like_result:
-            call_messages = [
-                *call_messages,
-                {"role": "user", "content": "Return only the listed names, compactly. No categories or explanations."},
-            ]
-        elif shell_result:
-            call_messages = [
-                *call_messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "Use only the command output. "
-                        "Return at most six compact findings. "
-                        "Preserve important numbers and names. "
-                        "Do not explain generic concepts. Expand only if asked."
-                    ),
-                },
-            ]
-        elif read_file_result:
-            call_messages = [
-                *call_messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "Use only the file content. "
-                        "Respect any requested length. "
-                        "If no length is requested, answer concisely. "
-                        "Expand only if asked."
-                    ),
-                },
-            ]
-        if large_file_excerpt:
-            final_max_tokens = min(max_tokens, LARGE_FILE_FINAL_MAX_TOKENS)
-        elif web_fetch_result:
-            final_max_tokens = min(max_tokens, WEB_FETCH_FINAL_MAX_TOKENS)
-        elif list_like_result:
-            final_max_tokens = min(max_tokens, LIST_FINAL_MAX_TOKENS)
-        else:
-            final_max_tokens = max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS)
+        policy = build_final_tool_policy(call_messages, max_tokens=max_tokens, streamed=on_final_delta is not None)
         if on_final_delta is None:
-            result = self.backend.chat(call_messages, temperature=temperature, max_tokens=final_max_tokens)
+            result = self.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
         else:
             result = self.backend.chat_stream(
-                call_messages,
+                policy.messages,
                 temperature=temperature,
-                max_tokens=final_max_tokens,
+                max_tokens=policy.max_tokens,
                 on_delta=on_final_delta,
             )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
-        length_retry_allowed = on_final_delta is None and (large_file_excerpt or web_fetch_result)
-        retry_reason = _final_from_tool_retry_reason(result, length_retry_allowed=length_retry_allowed)
+        retry_reason = final_from_tool_retry_reason(result, length_retry_allowed=policy.length_retry_allowed)
         if retry_reason is not None:
-            retry_messages = [
-                *call_messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "Do not call tools. Provide a shorter final answer from the available tool result now."
-                    ),
-                },
-            ]
-            retry_max_tokens = min(max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS), WEB_FETCH_FINAL_MAX_TOKENS if web_fetch_result else max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS))
+            retry_messages = [*policy.messages, final_tool_retry_instruction()]
+            retry_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)
             if on_final_delta is None:
                 result = self.backend.chat(retry_messages, temperature=temperature, max_tokens=retry_max_tokens)
             else:
@@ -694,90 +611,8 @@ def _tool_round_limit(tool_names: tuple[str, ...]) -> int:
     return 2 if edit_tools.intersection(tool_names) else 1
 
 
-def _has_large_file_excerpt(messages: list[Message]) -> bool:
-    for message in reversed(messages):
-        if message.get("role") == "tool":
-            content = message.get("content")
-            return isinstance(content, str) and "large_file_excerpt: true" in content
-    return False
-
-
-def _has_web_fetch_tool_result(messages: list[Message]) -> bool:
-    return _has_tool_result(messages, "fetch_url")
-
-
-def _has_tool_result(messages: list[Message], name: str) -> bool:
-    for message in reversed(messages):
-        if message.get("role") != "tool":
-            continue
-        return message.get("name") == name
-    return False
-
-
-def _has_list_like_tool_result(messages: list[Message]) -> bool:
-    last_shell_command = _last_exec_shell_command(messages)
-    for message in reversed(messages):
-        if message.get("role") != "tool":
-            continue
-        name = message.get("name")
-        if name in {"list_files", "file_glob_search"}:
-            return True
-        if name == "exec_shell_command":
-            return _is_list_shell_command(last_shell_command)
-        return False
-    return False
-
-
-def _last_exec_shell_command(messages: list[Message]) -> str | None:
-    for message in reversed(messages):
-        calls = message.get("tool_calls")
-        if not isinstance(calls, list):
-            continue
-        for tool_call in reversed(calls):
-            if not isinstance(tool_call, dict):
-                continue
-            function = tool_call.get("function")
-            if not isinstance(function, dict) or function.get("name") != "exec_shell_command":
-                continue
-            arguments = function.get("arguments")
-            if not isinstance(arguments, dict):
-                continue
-            command = arguments.get("command")
-            if isinstance(command, str):
-                return command
-    return None
-
-
-def _is_list_shell_command(command: str | None) -> bool:
-    if not command:
-        return False
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
-    if not tokens:
-        return False
-    return tokens[0] in {"ls", "find"}
-
-
 def _is_empty_final_response(result: ChatResult) -> bool:
     return not result.tool_calls and result.finish_reason == "stop" and not result.content.strip()
-
-
-def _final_from_tool_retry_reason(result: ChatResult, *, length_retry_allowed: bool) -> str | None:
-    if result.tool_calls:
-        return "tool_call_in_final"
-    if _contains_raw_tool_call(result.content):
-        return "raw_tool_call"
-    if not result.content and result.finish_reason == "stop":
-        return "empty_final"
-    if length_retry_allowed and result.finish_reason == "length":
-        return "length"
-    return None
-
-
-def _contains_raw_tool_call(content: str) -> bool:
-    return "<|tool_call>" in content or "<tool_call|>" in content
 
 
 def _all_tool_calls_allowed(tool_calls: list[dict[str, object]], allowed_tool_names: tuple[str, ...]) -> bool:

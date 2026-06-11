@@ -99,12 +99,12 @@ class StreamRenderer:
             if self._prefill_estimate_tokens and self._prefill_estimate_tokens > 0:
                 current = min(self._prefill_estimate_tokens, max(1, int((progress / 100) * self._prefill_estimate_tokens)))
                 label = (
-                    "preparing generation"
+                    "processing prompt"
                     if current >= self._prefill_estimate_tokens
                     else f"pf ~{current}/{self._prefill_estimate_tokens} tk"
                 )
             else:
-                label = "preparing generation" if progress >= 95 else f"pf ~{progress}%"
+                label = "processing prompt" if progress >= 95 else f"pf ~{progress}%"
             parts.append(label)
         return ", ".join(parts)
 

@@ -26,7 +26,7 @@ Common args: path, url, query, pattern, command.
 Copy paths and URLs exactly from the user prompt. Never normalize, correct, or rewrite them.
 If the user asks to run/execute a shell command, choose FILESYSTEM/exec_shell_command.
 Requests about this/local PC hardware or resources (CPU, cores, RAM, memory, disk, OS, uptime) use FILESYSTEM/exec_shell_command.
-For exec_shell_command, include one allowed command or a short && chain of allowed commands.
+For exec_shell_command, choose enough allowed read-only commands to answer the request; use a short && chain when one command would be incomplete. No pipes, redirects, or grep filters.
 Do not convert shell commands into FILE_EDIT tools; execution guardrails decide if they are allowed.
 For explicit http/https URLs return {"_route":"WEB","tool":"fetch_url","url":"<url>"}.
 Examples:

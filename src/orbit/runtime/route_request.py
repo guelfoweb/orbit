@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from orbit.runtime.tool_arguments import parse_tool_arguments_or_empty
+
 
 class ToolRoute(StrEnum):
     CHAT = "CHAT"
@@ -34,7 +36,7 @@ def parse_route_decision_from_tool_calls(tool_calls: list[dict[str, Any]]) -> Ro
         name = function.get("name")
         if not isinstance(name, str):
             continue
-        args = _parse_tool_call_arguments(function.get("arguments"))
+        args = parse_tool_arguments_or_empty(function.get("arguments"))
         route = _route_from_name(name)
         if route is None:
             route = _route_for_tool_name(name)
@@ -60,7 +62,7 @@ def route_tool_call_from_tool_calls(
         name = function.get("name")
         if not isinstance(name, str):
             continue
-        args = _parse_tool_call_arguments(function.get("arguments"))
+        args = parse_tool_arguments_or_empty(function.get("arguments"))
         if name in allowed:
             return _tool_call(name, args)
         route = _route_from_name(name)
@@ -134,18 +136,6 @@ def _route_for_tool_name(name: str) -> ToolRoute | None:
         if name in route_tool_names(route):
             return route
     return None
-
-
-def _parse_tool_call_arguments(arguments: Any) -> dict[str, Any]:
-    if isinstance(arguments, dict):
-        return arguments
-    if not isinstance(arguments, str) or not arguments.strip():
-        return {}
-    try:
-        parsed = json.loads(arguments)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _parse_route_json_object(content: str) -> dict[str, Any] | None:
