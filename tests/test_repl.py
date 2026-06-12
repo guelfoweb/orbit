@@ -21,9 +21,11 @@ from orbit.terminal.config import AppConfig
 from orbit.terminal.history import PromptHistory, _load_readline
 from orbit.terminal.prompt_preview import compact_prompt_preview
 from orbit.terminal.repl_input import (
+    clear_input_echo,
     colorize_paste_preview,
     colorize_user_prompt,
     read_available_paste_tail,
+    replace_input_echo,
     should_replace_input_echo,
     strip_bracketed_paste_markers,
     visual_row_count,
@@ -289,6 +291,24 @@ class ReplTests(unittest.TestCase):
         self.assertTrue(should_replace_input_echo("first line\nsecond line"))
         self.assertTrue(should_replace_input_echo("x" * 801))
 
+    def test_short_prompt_echo_is_not_redrawn(self) -> None:
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            replace_input_echo("single short line")
+
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_slash_command_echo_can_be_cleared(self) -> None:
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            with mock.patch.object(stdout, "isatty", return_value=True):
+                clear_input_echo("/tools shell-full")
+
+        self.assertIn("\x1b[", stdout.getvalue())
+        self.assertTrue(stdout.getvalue().endswith("\x1b[J"))
+
     def test_colorize_paste_preview_highlights_only_badge(self) -> None:
         preview = "Lorem ipsum...\n[text 5108 chars #a1b2c3d4]"
 
@@ -421,8 +441,25 @@ class ReplTests(unittest.TestCase):
         )
         shell_full_output = repl._handle_tools_command("/tools shell-full")
         self.assertIn("warning: shell-full is unrestricted", shell_full_output)
+        self.assertIn("\033[31mwarning: shell-full", shell_full_output)
         self.assertIn("delete files", shell_full_output)
         self.assertIn("isolated lab", shell_full_output)
+
+    def test_tools_slash_command_is_handled_locally_in_repl_loop(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        stdout = io.StringIO()
+
+        with (
+            mock.patch("builtins.input", side_effect=["/tools shell-full", EOFError]),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = repl.run()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(runtime.ask_calls, 0)
+        self.assertEqual(repl.tools_mode, "shell-full")
+        self.assertIn("tools: shell-full", stdout.getvalue())
 
     def test_sessions_clear_can_be_cancelled(self) -> None:
         runtime = CountingRuntime()

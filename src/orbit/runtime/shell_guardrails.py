@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -11,8 +12,23 @@ MAX_SHELL_TIMEOUT = 15
 DEFAULT_SHELL_OUTPUT_BYTES = 12_000
 MAX_SHELL_OUTPUT_BYTES = 12_000
 MAX_CHAINED_COMMANDS = 4
+SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
+SHELL_FULL_CONTRACT_RETRY_PROMPT = (
+    "The previous shell-full command was rejected because it only listed metadata. "
+    "Use the available exec_shell_full_command tool now to inspect source/content/string evidence. "
+    "Return only the tool call."
+)
 
 _SHELL_META_CHARS = frozenset("|;<>`$\\\n\r")
+_ANALYSIS_PROMPT_RE = re.compile(
+    r"\b(analy[sz]e|analysis|review|inspect|vulnerab|exploit|malware|dropper|c2|ioc|reverse|decompil|static)\b",
+    re.IGNORECASE,
+)
+_METADATA_ONLY_RE = re.compile(r"^\s*(?:ls|file|stat)(?:\s|$)", re.IGNORECASE)
+_CONTENT_EVIDENCE_RE = re.compile(
+    r"\b(?:cat|sed|head|tail|grep|rg|strings|python3?|node|jq|awk|xxd|hexdump|readelf|objdump|jadx|apktool)\b",
+    re.IGNORECASE,
+)
 _FILE_COMMANDS = frozenset({"pwd", "ls", "find", "du", "df", "wc", "head", "tail", "file", "stat", "cat"})
 _SYSTEM_INFO_COMMANDS = frozenset({"uname", "hostname", "uptime", "whoami", "id", "date"})
 _HARDWARE_INFO_COMMANDS = frozenset({"free", "lscpu", "lsblk"})
@@ -197,6 +213,26 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path)
     if len(encoded) <= output_size:
         return content
     return encoded[:output_size].decode("utf-8", errors="replace") + "\n[truncated]"
+
+
+def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str | None) -> str | None:
+    raw_command = arguments.get("command")
+    if not isinstance(raw_command, str) or not user_prompt:
+        return None
+    if not _ANALYSIS_PROMPT_RE.search(user_prompt):
+        return None
+    if _CONTENT_EVIDENCE_RE.search(raw_command):
+        return None
+    if _METADATA_ONLY_RE.search(raw_command):
+        return (
+            f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, not only metadata/listing. "
+            "Use a bounded command such as sed/head/grep/strings on the target file."
+        )
+    return None
+
+
+def is_shell_full_contract_error(content: str) -> bool:
+    return content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX)
 
 
 def exec_shell_should_run_locally(arguments: dict[str, Any]) -> bool:

@@ -900,6 +900,182 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.tool_names_seen[0], ())
         self.assertEqual(backend.tool_names_seen[1], ("exec_shell_full_command",))
 
+    def test_shell_full_analysis_metadata_only_command_gets_one_model_retry(self) -> None:
+        class ShellFullAnalysisBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+                self.second_call_last_message: Message | None = None
+                self.third_call_last_message: Message | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM","tool":"exec_shell_full_command","command":"ls -R samples/"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    self.second_call_last_message = messages[-1]
+                    return ChatResult(
+                        content="I do not have access to the file content.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=8,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    self.third_call_last_message = messages[-1]
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": "{\"command\":\"sed -n '1,80p' samples/vulnerable_service.py\"}",
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="vulnerability found from source evidence",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            samples = workdir / "samples"
+            samples.mkdir()
+            (samples / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            backend = ShellFullAnalysisBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "analyze the samples/vulnerable_service.py file and report vulnerabilities",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "vulnerability found from source evidence")
+        self.assertEqual(backend.calls, 5)
+        self.assertEqual(backend.tools_seen[0], None)
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNotNone(backend.tools_seen[3])
+        self.assertEqual(backend.tools_seen[4], None)
+        self.assertIsNotNone(backend.second_call_last_message)
+        self.assertIn("content/source/string evidence", backend.second_call_last_message["content"])
+        self.assertIsNotNone(backend.third_call_last_message)
+        self.assertIn("Return only the tool call", backend.third_call_last_message["content"])
+
+    def test_shell_full_allows_multiple_successive_command_rounds(self) -> None:
+        class MultiShellFullBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    tool_call = {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat sample.txt\"}"},
+                    }
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[tool_call],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    tool_call = {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"grep -n vulnerable sample.txt\"}"},
+                    }
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[tool_call],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="final answer from multiple shell results",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "sample.txt").write_text("vulnerable=true\n", encoding="utf-8")
+            backend = MultiShellFullBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "analyze sample.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "final answer from multiple shell results")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNotNone(backend.tools_seen[0])
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[3])
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 2)
+
     def test_tool_call_json_parse_error_retries_with_compact_json_instruction(self) -> None:
         class JsonErrorBackend:
             def __init__(self) -> None:
@@ -1181,7 +1357,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"ls -l note.txt\"}"},
+                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"ls -l note.txt\"}"},
                             }
                         ],
                         prompt_tokens=10,
@@ -1221,11 +1397,11 @@ class ToolRuntimeTests(unittest.TestCase):
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools(
-                "analyze note.txt",
+                "show note.txt metadata",
                 temperature=0,
                 max_tokens=32,
                 workdir=workdir,
-                tool_names=("exec_shell_full_command",),
+                tool_names=("exec_shell_command",),
             )
 
         self.assertEqual(result.content, "final from tool result")

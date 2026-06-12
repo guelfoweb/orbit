@@ -35,6 +35,7 @@ from orbit.runtime.route_request import (
 )
 from orbit.runtime.results import error_result
 from orbit.runtime.session_memory import MemoryRefresh, maybe_refresh_memory, should_refresh_for_append
+from orbit.runtime.shell_guardrails import SHELL_FULL_CONTRACT_RETRY_PROMPT, is_shell_full_contract_error
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_calls import execute_tool_call
 from orbit.runtime.tool_loop_state import ToolLoopState
@@ -386,10 +387,14 @@ class ChatRuntime:
             backend=self.backend if hasattr(self.backend, "server_tools") else None,
             workdir=workdir,
             allowed_tool_names=allowed_tool_names,
+            user_prompt=_last_user_text(self.messages),
         )
         tools = executor.tool_definitions()
         last_result: ChatResult | None = None
         state = ToolLoopState(allowed_tool_names)
+        contract_retry_pending = False
+        shell_full_enabled = "exec_shell_full_command" in allowed_tool_names
+        suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
         if initial_tool_calls:
             calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
             state.increment_round()
@@ -400,10 +405,12 @@ class ChatRuntime:
                     on_tool_call(*signature)
                 execution = execute_tool_call(tool_call, chunk_budget=state.chunk_budget, executor=executor)
                 tool_result = execution.result
+                if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
+                    contract_retry_pending = True
                 if on_tool_result:
                     on_tool_result(tool_result.name, len(tool_result.content), execution.source)
                 self.messages.append(tool_result_message(tool_call, tool_result))
-            if state.round_limit_reached():
+            if state.round_limit_reached() and not contract_retry_pending:
                 return self._answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -416,16 +423,38 @@ class ChatRuntime:
             call_messages = with_tool_call_system_prompt(self.messages)
             state.used_tool_call_prompt = True
             tool_max_tokens = _bounded_internal_max_tokens(max_tokens, TOOL_CALL_MAX_TOKENS)
+            tool_delta_callback = suppress_tool_delta if shell_full_enabled and (state.tool_rounds > 0 or contract_retry_pending) else on_final_delta
             result = self._chat_tool_call_once(
                 call_messages,
                 temperature=temperature,
                 max_tokens=tool_max_tokens,
                 tools=tools,
-                on_final_delta=on_final_delta,
+                on_final_delta=tool_delta_callback,
             )
             last_result = result
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
+            if contract_retry_pending and not result.tool_calls:
+                retry_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_CONTRACT_RETRY_PROMPT}]
+                result = self._chat_tool_call_once(
+                    retry_messages,
+                    temperature=temperature,
+                    max_tokens=tool_max_tokens,
+                    tools=tools,
+                    on_final_delta=suppress_tool_delta,
+                )
+                last_result = result
+                contract_retry_pending = False
+                if on_model_step:
+                    on_model_step(
+                        ModelStepMetrics.from_result(
+                            loop=loop_index + 1,
+                            result=result,
+                            phase="tool_call_retry" if result.tool_calls else None,
+                        )
+                    )
+            elif result.tool_calls:
+                contract_retry_pending = False
             if result.finish_reason == "length" and not result.tool_calls and state.tool_rounds > 0:
                 return self._answer_from_tool_results(
                     temperature=temperature,
@@ -462,6 +491,15 @@ class ChatRuntime:
                     result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
             self.messages.append(assistant_tool_call_message(result.content, result.tool_calls))
             if not result.tool_calls:
+                if state.tool_rounds > 0 and shell_full_enabled:
+                    return self._answer_from_tool_results(
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        on_final_delta=on_final_delta,
+                        on_model_step=on_model_step,
+                        loop=loop_index + 1,
+                        use_tool_prompt=state.used_tool_call_prompt,
+                    )
                 return result
             state.increment_round()
             for tool_call in result.tool_calls:
@@ -483,12 +521,14 @@ class ChatRuntime:
                     executor=executor,
                 )
                 tool_result = execution.result
+                if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
+                    contract_retry_pending = True
                 if on_tool_result:
                     on_tool_result(tool_result.name, len(tool_result.content), execution.source)
                 if should_refresh_for_append(self.messages, tool_result.content, context_tokens=self.context_tokens):
                     self.refresh_memory_if_needed(temperature=temperature, force=True)
                 self.messages.append(tool_result_message(tool_call, tool_result))
-            if state.round_limit_reached():
+            if state.round_limit_reached() and not contract_retry_pending:
                 return self._answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -745,6 +785,15 @@ def _all_tool_calls_allowed(tool_calls: list[dict[str, object]], allowed_tool_na
         if not isinstance(name, str) or name not in allowed:
             return False
     return True
+
+
+def _last_user_text(messages: list[Message]) -> str | None:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        return content if isinstance(content, str) else None
+    return None
 
 
 def _is_tool_argument_json_error(exc: RuntimeError) -> bool:

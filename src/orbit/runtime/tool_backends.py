@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from orbit.backend.llama_server import LlamaServerError
 from orbit.runtime.edit_guardrails import prepare_apply_diff, prepare_edit_file
 from orbit.runtime.path_guardrails import resolve_inside_workdir
-from orbit.runtime.shell_guardrails import exec_shell_should_run_locally, prepare_exec_shell_command
+from orbit.runtime.shell_guardrails import exec_shell_should_run_locally, prepare_exec_shell_command, validate_shell_full_contract
 from orbit.runtime.tool_arguments import parse_tool_arguments
 from orbit.runtime.tools import ToolResult, execute_tool, tool_definitions
 
@@ -50,12 +50,14 @@ class HybridToolExecutor:
         backend: ServerToolBackend | None,
         workdir: Path,
         allowed_tool_names: tuple[str, ...],
+        user_prompt: str | None = None,
         prefer_server: bool = True,
         server_allowlist: frozenset[str] = LLAMA_SERVER_SAFE_TOOLS,
     ) -> None:
         self.backend = backend
         self.workdir = workdir
         self.allowed_tool_names = allowed_tool_names
+        self.user_prompt = user_prompt
         self.prefer_server = prefer_server
         self.server_allowlist = server_allowlist
         self._server_tools: dict[str, dict[str, Any]] | None = None
@@ -94,6 +96,10 @@ class HybridToolExecutor:
         parsed = parse_tool_arguments(arguments)
         if isinstance(parsed, str):
             return ToolExecution(ToolResult(name=name, content=parsed), "orbit")
+        if name == "exec_shell_full_command":
+            contract_error = validate_shell_full_contract(parsed, user_prompt=self.user_prompt)
+            if contract_error:
+                return ToolExecution(ToolResult(name=name, content=contract_error), "orbit")
         if _prefer_orbit_tool(name, parsed, workdir=self.workdir):
             return ToolExecution(execute_tool(name, parsed, workdir=self.workdir, chunk_budget=chunk_budget), "orbit")
         if self._should_use_server(name):

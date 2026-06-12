@@ -13,13 +13,13 @@ from orbit.terminal.config import AppConfig
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
-from orbit.terminal.repl_input import read_prompt_input, replace_input_echo
+from orbit.terminal.repl_input import clear_input_echo, read_prompt_input, replace_input_echo
 from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
-from orbit.terminal.theme import dim
+from orbit.terminal.theme import danger, dim
 
 
 @dataclass
@@ -60,6 +60,7 @@ class Repl:
             if not prompt:
                 continue
             if prompt.startswith("/"):
+                clear_input_echo(prompt)
                 if self._handle_command(prompt):
                     continue
                 self._save_history()
@@ -223,8 +224,10 @@ class Repl:
             if "shell-full" in self.tools_mode.split(","):
                 return (
                     f"tools: {self.tools_mode}\n"
-                    "warning: shell-full is unrestricted. Commands may read, modify, delete files, execute programs, or access network. "
-                    "Use only in an isolated lab."
+                    + danger(
+                        "warning: shell-full is unrestricted. Commands may read, modify, delete files, execute programs, or access network. "
+                        "Use only in an isolated lab."
+                    )
                 )
             return f"tools: {self.tools_mode}"
         return f"error: usage: /tools [{USAGE}]"

@@ -440,6 +440,45 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.result.content.strip(), "1")
         self.assertEqual(backend.executed, [])
 
+    def test_exec_shell_full_blocks_metadata_only_analysis_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+                user_prompt="analyze samples/vulnerable_service.py for vulnerabilities",
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "ls -R samples/"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("require content/source/string evidence", execution.result.content)
+        self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_full_allows_listing_when_not_analysis_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+                user_prompt="list the samples directory",
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "ls -R ."},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertNotIn("require content/source/string evidence", execution.result.content)
+
     def test_exec_shell_full_definition_warns_to_quote_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executor = HybridToolExecutor(

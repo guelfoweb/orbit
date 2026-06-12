@@ -63,6 +63,24 @@ class FinalPolicyTests(unittest.TestCase):
 
         self.assertTrue(has_list_like_tool_result(messages))
 
+    def test_shell_full_policy_is_evidence_based_and_compact(self) -> None:
+        messages = [{"role": "tool", "name": "exec_shell_full_command", "content": "source evidence"}]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertIn("shell-full output", policy.messages[-1]["content"])
+        self.assertIn("up to six evidence-based findings", policy.messages[-1]["content"])
+        self.assertIn("practical exploit impact", policy.messages[-1]["content"])
+        self.assertIn("Do not include generic methodology", policy.messages[-1]["content"])
+
+    def test_safe_shell_policy_keeps_system_output_instruction(self) -> None:
+        messages = [{"role": "tool", "name": "exec_shell_command", "content": "system output"}]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertIn("Use only the command output", policy.messages[-1]["content"])
+        self.assertNotIn("shell-full output", policy.messages[-1]["content"])
+
     def test_final_retry_reason_detects_raw_tool_call(self) -> None:
         result = ChatResult(
             content="<|tool_call>call:x{}<tool_call|>",

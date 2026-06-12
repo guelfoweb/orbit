@@ -20,13 +20,23 @@ def read_prompt_input() -> str:
 
 
 def replace_input_echo(prompt: str) -> None:
+    if not should_replace_input_echo(prompt):
+        return
     if not sys.stdout.isatty():
         return
-    preview = compact_prompt_preview(prompt, multiline=True) if should_replace_input_echo(prompt) else prompt
+    preview = compact_prompt_preview(prompt, multiline=True)
     rendered = colorize_user_prompt(f"> {preview}")
     columns = max(20, get_terminal_size((80, 20)).columns)
     visual_rows = visual_row_count(f"> {prompt}", columns=columns)
     print(f"\x1b[{visual_rows}F\x1b[J{rendered}", flush=True)
+
+
+def clear_input_echo(prompt: str) -> None:
+    if not sys.stdout.isatty():
+        return
+    columns = max(20, get_terminal_size((80, 20)).columns)
+    visual_rows = visual_row_count(f"> {prompt}", columns=columns)
+    print(f"\x1b[{visual_rows}F\x1b[J", end="", flush=True)
 
 
 def should_replace_input_echo(prompt: str) -> bool:

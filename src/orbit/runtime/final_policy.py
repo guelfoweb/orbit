@@ -26,7 +26,8 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
     web_fetch_result = has_web_fetch_tool_result(messages)
     web_search_result = has_tool_result(messages, "search_web")
     list_like_result = has_list_like_tool_result(messages)
-    shell_result = has_tool_result(messages, "exec_shell_command") or has_tool_result(messages, "exec_shell_full_command")
+    shell_full_result = has_tool_result(messages, "exec_shell_full_command")
+    shell_result = has_tool_result(messages, "exec_shell_command") or shell_full_result
     read_file_result = has_tool_result(messages, "read_file")
     call_messages = messages
     if large_file_excerpt:
@@ -74,6 +75,20 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
         call_messages = [
             *call_messages,
             {"role": "user", "content": "Return only the listed names, compactly. No categories or explanations."},
+        ]
+    elif shell_full_result:
+        call_messages = [
+            *call_messages,
+            {
+                "role": "user",
+                "content": (
+                    "Use only the shell-full output. "
+                    "Answer concisely in up to six evidence-based findings. "
+                    "For each finding, name the affected function/file and practical exploit impact when available. "
+                    "Do not include generic methodology, disclaimers, or remediation unless asked. "
+                    "Expand only if asked."
+                ),
+            },
         ]
     elif shell_result:
         call_messages = [

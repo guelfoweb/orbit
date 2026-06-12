@@ -30,6 +30,16 @@ class ToolLoopStateTests(unittest.TestCase):
         state.increment_round()
         self.assertTrue(state.round_limit_reached())
 
+    def test_shell_full_allows_four_rounds(self) -> None:
+        state = ToolLoopState(("exec_shell_full_command",))
+
+        self.assertEqual(state.round_limit, 4)
+        for _ in range(3):
+            state.increment_round()
+            self.assertFalse(state.round_limit_reached())
+        state.increment_round()
+        self.assertTrue(state.round_limit_reached())
+
     def test_tracks_repeated_tool_calls(self) -> None:
         state = ToolLoopState(("read_file",))
         tool_call = {"id": "call-1", "function": {"name": "read_file", "arguments": {"path": "a.txt"}}}
