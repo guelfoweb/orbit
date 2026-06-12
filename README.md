@@ -265,6 +265,46 @@ workdir. It can run pipes, redirects, malware tooling, decompilers, network
 commands, writes, deletes, and commands that access paths outside the workdir.
 Use it only in a disposable lab environment.
 
+## Shell-full mode
+
+`shell-full` is an explicit lab mode for tasks that cannot be handled by the
+bounded read-only shell tool.
+
+Use it for isolated analysis workflows where the model may need arbitrary local
+commands, for example static inspection with tools such as `strings`, `file`,
+`readelf`, `objdump`, `jadx`, `apktool`, or other utilities available on the
+host.
+
+Enable it only when you want to give the model unrestricted shell access:
+
+```text
+/tools shell-full
+```
+
+Important boundaries:
+
+- It is disabled by default.
+- It is not included in `/tools on`.
+- It runs from the configured `--workdir`.
+- It may read, write, delete, execute programs, access the network, and access paths outside `--workdir`.
+- Orbit still applies timeout and output-size limits.
+- The runtime does not sandbox or validate commands in this mode.
+
+Recommended usage:
+
+```bash
+orbit --workdir workdir
+```
+
+```text
+/tools shell-full
+Inspect samples/suspicious_dropper_demo.js without executing it. Return suspicious URLs, IPs, encoded payloads, or execution-related strings.
+```
+
+Do not use `shell-full` on a normal working directory unless you accept the
+risk. Use a disposable lab directory for malware analysis, reverse engineering,
+or commands with side effects.
+
 ## Safety boundaries
 
 - Tools are opt-in by group.
