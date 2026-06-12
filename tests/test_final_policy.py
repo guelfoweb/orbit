@@ -80,6 +80,23 @@ class FinalPolicyTests(unittest.TestCase):
 
         self.assertEqual(reason, "raw_tool_call")
 
+    def test_final_retry_reason_detects_empty_length_even_when_length_retry_disabled(self) -> None:
+        result = ChatResult(
+            content="",
+            model="m",
+            finish_reason="length",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+        reason = final_from_tool_retry_reason(result, length_retry_allowed=False)
+
+        self.assertEqual(reason, "empty_length")
+
     def test_final_tool_retry_instruction_is_unchanged(self) -> None:
         self.assertEqual(
             final_tool_retry_instruction()["content"],

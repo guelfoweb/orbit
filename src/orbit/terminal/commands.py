@@ -25,7 +25,7 @@ def help_text() -> str:
         ("/reset", "Clear current conversation and saved session."),
         ("/sessions clear", "Delete all saved sessions for this workdir."),
         ("/status [ctx]", "Show runtime status or estimated context usage."),
-        ("/tools [spec]", "Show or set tools: off, on, files, edit, web, shell."),
+        ("/tools [spec]", "Show or set tools: off, on, files, edit, web, shell, shell-full."),
         ("/exit", "Exit interactive mode."),
     ]
     width = max(len(command) for command, _ in commands) + 2
@@ -43,6 +43,7 @@ def tools_text(current: ToolSpec | None = None) -> str:
             "  /tools edit  = create/modify/delete files or directories",
             "  /tools web   = search/fetch URLs",
             "  /tools shell = read-only local/system commands",
+            "  /tools shell-full = DANGEROUS unrestricted local shell",
         ]
     )
     return "\n".join(lines)

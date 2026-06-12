@@ -158,11 +158,11 @@ def _compact_server_definition(name: str) -> dict[str, Any] | None:
     if name == "file_glob_search":
         return _tool_definition(
             "file_glob_search",
-            "Find files by glob under path.",
+            "Find files by one simple glob under path. No brace expansion; use list_files for multiple name alternatives.",
             {
-                "path": _schema("string"),
-                "include": _schema("string"),
-                "exclude": _schema("string"),
+                "path": _schema("string", "Directory to search, for example text or ."),
+                "include": _schema("string", "Single include glob, for example *commedia*"),
+                "exclude": _schema("string", "Optional single exclude glob"),
             },
             ["path"],
         )
@@ -212,8 +212,11 @@ def _tool_definition(
     }
 
 
-def _schema(schema_type: str) -> dict[str, str]:
-    return {"type": schema_type}
+def _schema(schema_type: str, description: str | None = None) -> dict[str, str]:
+    schema = {"type": schema_type}
+    if description:
+        schema["description"] = description
+    return schema
 
 
 def _server_arguments(name: str, arguments: dict[str, Any], *, workdir: Path) -> dict[str, Any] | str:
@@ -241,7 +244,7 @@ def _server_arguments(name: str, arguments: dict[str, Any], *, workdir: Path) ->
 def _prefer_orbit_tool(name: str, arguments: dict[str, Any], *, workdir: Path) -> bool:
     if name == "exec_shell_command":
         return exec_shell_should_run_locally(arguments)
-    if name == "edit_file":
+    if name in {"write_file", "edit_file"}:
         return True
     if name != "read_file":
         return False

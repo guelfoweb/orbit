@@ -13,6 +13,7 @@ from orbit.runtime.route_request import (
     RouteStreamFilter,
     ToolRoute,
     decision_tool_names,
+    default_route_tool_names,
     parse_route_decision,
     parse_route_decision_from_tool_calls,
     parse_tool_route,
@@ -37,13 +38,21 @@ class RouteRequestTests(unittest.TestCase):
         self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
         self.assertEqual(decision_tool_names(decision), ("file_glob_search",))
 
+    def test_shell_full_is_explicit_only(self) -> None:
+        decision = parse_route_decision('{"_route":"FILESYSTEM","tool":"exec_shell_full_command"}')
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision_tool_names(decision), ("exec_shell_full_command",))
+        self.assertNotIn("exec_shell_full_command", default_route_tool_names(ToolRoute.FILESYSTEM))
+
     def test_parse_route_decision_ignores_invalid_preferred_tool(self) -> None:
         decision = parse_route_decision('{"_route":"FILESYSTEM","tool":"write_file"}')
 
         self.assertIsNotNone(decision)
         assert decision is not None
         self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
-        self.assertEqual(decision_tool_names(decision), route_tool_names(ToolRoute.FILESYSTEM))
+        self.assertEqual(decision_tool_names(decision), default_route_tool_names(ToolRoute.FILESYSTEM))
 
     def test_refine_decision_for_prompt_uses_read_then_edit_for_described_patch_request(self) -> None:
         decision = refine_decision_for_prompt(
@@ -265,7 +274,15 @@ class RouteRequestTests(unittest.TestCase):
     def test_route_tool_names_are_bounded(self) -> None:
         self.assertEqual(
             route_tool_names(ToolRoute.FILESYSTEM),
-            ("list_files", "read_file", "file_glob_search", "grep_search", "exec_shell_command", "get_datetime"),
+            (
+                "list_files",
+                "read_file",
+                "file_glob_search",
+                "grep_search",
+                "exec_shell_command",
+                "exec_shell_full_command",
+                "get_datetime",
+            ),
         )
         self.assertIn("write_file", route_tool_names(ToolRoute.FILE_EDIT))
         self.assertIn("edit_file", route_tool_names(ToolRoute.FILE_EDIT))

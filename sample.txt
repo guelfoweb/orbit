@@ -1,1 +1,0 @@
-Orbit is a local CLI assistant used for testing file tools.

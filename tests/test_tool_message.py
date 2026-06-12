@@ -19,7 +19,23 @@ class ToolMessageTests(unittest.TestCase):
 
         message = assistant_tool_call_message("", tool_calls)
 
-        self.assertEqual(message, {"role": "assistant", "content": "", "tool_calls": tool_calls})
+        self.assertEqual(
+            message,
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "function": {"name": "read_file", "arguments": '{"path":"a.txt"}'}}],
+            },
+        )
+
+    def test_assistant_tool_call_message_sanitizes_malformed_arguments(self) -> None:
+        tool_calls = [{"id": "call-1", "function": {"name": "exec_shell_full_command", "arguments": '{"command":"unterminated'}}]
+
+        message = assistant_tool_call_message("", tool_calls)
+
+        arguments = message["tool_calls"][0]["function"]["arguments"]  # type: ignore[index]
+        self.assertIn("invalid_arguments", arguments)
+        self.assertTrue(arguments.startswith("{"))
 
     def test_assistant_tool_call_message_omits_empty_tool_calls(self) -> None:
         message = assistant_tool_call_message("done", [])

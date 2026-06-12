@@ -22,6 +22,7 @@ from orbit.terminal.history import PromptHistory, _load_readline
 from orbit.terminal.prompt_preview import compact_prompt_preview
 from orbit.terminal.repl_input import (
     colorize_paste_preview,
+    colorize_user_prompt,
     read_available_paste_tail,
     should_replace_input_echo,
     strip_bracketed_paste_markers,
@@ -297,6 +298,17 @@ class ReplTests(unittest.TestCase):
         self.assertIn("\033[2m\033[33m[text 5108 chars #a1b2c3d4]\033[0m", colored)
         self.assertNotIn("\033[2m\033[33mLorem", colored)
 
+    def test_colorize_user_prompt_accents_prompt_text(self) -> None:
+        colored = colorize_user_prompt("> hello")
+
+        self.assertEqual(colored, "\033[36m> hello\033[0m")
+
+    def test_colorize_user_prompt_keeps_paste_badge_yellow(self) -> None:
+        colored = colorize_user_prompt("> Lorem...\n[text 5108 chars #a1b2c3d4]")
+
+        self.assertIn("\033[36m> Lorem...\n\033[0m", colored)
+        self.assertIn("\033[2m\033[33m[text 5108 chars #a1b2c3d4]\033[0m", colored)
+
     def test_length_footer_suggests_continue_and_max_tokens(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
@@ -368,7 +380,9 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(runtime.ask_auto_calls, 1)
         self.assertEqual(runtime.ask_chat_calls, 0)
-        self.assertIsNone(runtime.last_allowed_tool_names)
+        self.assertIsNotNone(runtime.last_allowed_tool_names)
+        self.assertIn("exec_shell_command", runtime.last_allowed_tool_names)
+        self.assertNotIn("exec_shell_full_command", runtime.last_allowed_tool_names)
 
     def test_tools_files_uses_restricted_tool_path(self) -> None:
         runtime = CountingRuntime()
@@ -395,16 +409,20 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(repl.tools_mode, "off")
         self.assertEqual(
             repl._handle_tools_command("/tools bad"),
-            "error: usage: /tools [off|on|files|edit|web|shell|group[,group...]]",
+            "error: usage: /tools [off|on|files|edit|web|shell|shell-full|group[,group...]]",
         )
         self.assertEqual(
             repl._handle_tools_command("/tools read_file"),
-            "error: usage: /tools [off|on|files|edit|web|shell|group[,group...]]",
+            "error: usage: /tools [off|on|files|edit|web|shell|shell-full|group[,group...]]",
         )
         self.assertEqual(
             repl._handle_tools_command("/tools time"),
-            "error: usage: /tools [off|on|files|edit|web|shell|group[,group...]]",
+            "error: usage: /tools [off|on|files|edit|web|shell|shell-full|group[,group...]]",
         )
+        shell_full_output = repl._handle_tools_command("/tools shell-full")
+        self.assertIn("warning: shell-full is unrestricted", shell_full_output)
+        self.assertIn("delete files", shell_full_output)
+        self.assertIn("isolated lab", shell_full_output)
 
     def test_sessions_clear_can_be_cancelled(self) -> None:
         runtime = CountingRuntime()

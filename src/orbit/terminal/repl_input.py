@@ -6,7 +6,7 @@ import sys
 from shutil import get_terminal_size
 
 from orbit.terminal.prompt_preview import compact_prompt_preview, is_long_text_prompt
-from orbit.terminal.theme import yellow_dim
+from orbit.terminal.theme import accent, yellow_dim
 
 
 PASTE_BADGE_PATTERN = re.compile(r"(\[text \d+ chars #[0-9a-f]{8}\])$")
@@ -20,12 +20,13 @@ def read_prompt_input() -> str:
 
 
 def replace_input_echo(prompt: str) -> None:
-    if not should_replace_input_echo(prompt) or not sys.stdout.isatty():
+    if not sys.stdout.isatty():
         return
-    preview = colorize_paste_preview(compact_prompt_preview(prompt, multiline=True))
+    preview = compact_prompt_preview(prompt, multiline=True) if should_replace_input_echo(prompt) else prompt
+    rendered = colorize_user_prompt(f"> {preview}")
     columns = max(20, get_terminal_size((80, 20)).columns)
     visual_rows = visual_row_count(f"> {prompt}", columns=columns)
-    print(f"\x1b[{visual_rows}F\x1b[J> {preview}", flush=True)
+    print(f"\x1b[{visual_rows}F\x1b[J{rendered}", flush=True)
 
 
 def should_replace_input_echo(prompt: str) -> bool:
@@ -34,6 +35,13 @@ def should_replace_input_echo(prompt: str) -> bool:
 
 def colorize_paste_preview(preview: str) -> str:
     return PASTE_BADGE_PATTERN.sub(lambda match: yellow_dim(match.group(1)), preview)
+
+
+def colorize_user_prompt(text: str) -> str:
+    match = PASTE_BADGE_PATTERN.search(text)
+    if not match:
+        return accent(text)
+    return accent(text[: match.start(1)]) + yellow_dim(match.group(1))
 
 
 def read_available_paste_tail(

@@ -130,6 +130,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("/tools edit  = create/modify/delete files or directories", output)
         self.assertIn("/tools web   = search/fetch URLs", output)
         self.assertIn("/tools shell = read-only local/system commands", output)
+        self.assertIn("/tools shell-full = DANGEROUS unrestricted local shell", output)
         self.assertNotIn("/tools time", output)
         self.assertNotIn("Single tools:", output)
         self.assertNotIn("/tools read_file,grep_search", output)

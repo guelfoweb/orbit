@@ -33,7 +33,7 @@ from orbit.runtime.web import (
     search_web,
 )
 from orbit.runtime.edit_guardrails import apply_diff_definition, apply_local_edit_file, edit_file_definition
-from orbit.runtime.shell_guardrails import exec_shell_definition, execute_exec_shell_command
+from orbit.runtime.shell_guardrails import exec_shell_definition, exec_shell_full_definition, execute_exec_shell_command, execute_exec_shell_full_command
 
 
 MAX_CHUNK_CALLS_PER_TURN = 3
@@ -54,16 +54,22 @@ TOOL_NAMES = (
     "fetch_url",
     "search_web",
     "exec_shell_command",
+    "exec_shell_full_command",
     "write_file",
     "append_file",
     "replace_in_file",
     "edit_file",
     "apply_diff",
 )
+DEFAULT_TOOL_NAMES = tuple(name for name in TOOL_NAMES if name != "exec_shell_full_command")
 
 
 def tool_names() -> tuple[str, ...]:
     return TOOL_NAMES
+
+
+def default_tool_names() -> tuple[str, ...]:
+    return DEFAULT_TOOL_NAMES
 
 
 def tool_definitions(names: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
@@ -204,6 +210,7 @@ def tool_definitions(names: tuple[str, ...] | None = None) -> list[dict[str, Any
             },
         },
         exec_shell_definition(),
+        exec_shell_full_definition(),
         {
             "type": "function",
             "function": {
@@ -325,6 +332,8 @@ def execute_tool(
         )
     if name == "exec_shell_command":
         return ToolResult(name=name, content=execute_exec_shell_command(parsed, workdir=workdir))
+    if name == "exec_shell_full_command":
+        return ToolResult(name=name, content=execute_exec_shell_full_command(parsed, workdir=workdir))
     if name == "write_file":
         return ToolResult(name=name, content=write_file(parsed.get("path"), parsed.get("content"), workdir=workdir))
     if name == "append_file":

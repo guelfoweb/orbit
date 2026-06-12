@@ -220,6 +220,12 @@ class Repl:
         except ValueError:
             return f"error: usage: /tools [{USAGE}]"
         if self.tools_mode:
+            if "shell-full" in self.tools_mode.split(","):
+                return (
+                    f"tools: {self.tools_mode}\n"
+                    "warning: shell-full is unrestricted. Commands may read, modify, delete files, execute programs, or access network. "
+                    "Use only in an isolated lab."
+                )
             return f"tools: {self.tools_mode}"
         return f"error: usage: /tools [{USAGE}]"
 

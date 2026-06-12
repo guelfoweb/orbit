@@ -26,7 +26,8 @@ def edit_file_definition() -> dict[str, Any]:
             "name": "edit_file",
             "description": (
                 "Apply small line edits to one existing UTF-8 file in workdir. "
-                "Modes: replace, delete, append. Lines are 1-based."
+                "Modes: replace, delete, append. Lines are 1-based. "
+                "For appending at end of file, use line_start=-1 and line_end=-1."
             ),
             "parameters": {
                 "type": "object",

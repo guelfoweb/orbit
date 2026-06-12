@@ -43,7 +43,7 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--context-tokens", type=int, help="Override runtime context estimate for testing/benchmarking.")
     parser.add_argument("--system")
     parser.add_argument("--no-system", action="store_true", help="Do not send the default system prompt.")
-    parser.add_argument("--tools", help="Initial tool mode: off, on, files, edit, web, shell, or comma-separated groups.")
+    parser.add_argument("--tools", help="Initial tool mode: off, on, files, edit, web, shell, shell-full, or comma-separated groups.")
 
 
 def load_app_config(args: argparse.Namespace) -> AppConfig:

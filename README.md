@@ -26,21 +26,29 @@ Orbit stays model-driven: the model decides when tools are needed. The runtime o
 
 Optional multimodal support requires the matching `mmproj-gemma-4-12B-it-Q8_0.gguf` projector.
 
-## Install llama.cpp
+## Quick start
 
-Build `llama.cpp` for CPU-only use:
+Follow these steps in order.
+
+### 1. Install system packages
+
+On Debian/Ubuntu-like systems, install the basic build tools first:
+
+```bash
+sudo apt update
+sudo apt install -y git cmake build-essential python3 python3-venv
+```
+
+### 2. Build llama.cpp
+
+Clone and build `llama.cpp` for CPU-only use:
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
 cmake -B build -DGGML_NATIVE=ON -DGGML_BLAS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
 cmake --build build --config Release -j"$(nproc)"
-```
-
-Optionally add the binaries to `PATH`:
-
-```bash
-export PATH=/path/to/llama.cpp/build/bin:$PATH
+export PATH="$PWD/build/bin:$PATH"
 ```
 
 Verify:
@@ -49,48 +57,32 @@ Verify:
 llama-server --version
 ```
 
-## Download the model
+### 3. Download the model
 
 Use `llama-server` once to download the expected GGUF file:
 
 ```bash
-llama-server -hf ggml-org/gemma-4-12B-it-GGUF \
-  --hf-file gemma-4-12B-it-Q4_K_M.gguf
+llama-server -hf ggml-org/gemma-4-12B-it-GGUF --hf-file gemma-4-12B-it-Q4_K_M.gguf
 ```
 
-Stop it with `Ctrl+C` after the download finishes.
+This command downloads the model and starts a temporary server. After the
+download completes, stop it with `Ctrl+C`.
 
-Orbit's server helper automatically searches the default Hugging Face cache path:
+### 4. Install Orbit
 
-```text
-~/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/<snapshot>/gemma-4-12B-it-Q4_K_M.gguf
-```
-
-If the model is elsewhere, set:
+Clone this repository and install the CLI:
 
 ```bash
-MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
-```
-
-## Install orbit
-
-From the repository root:
-
-```bash
+git clone https://github.com/guelfoweb/orbit.git
+cd orbit
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
 ```
 
-Check:
+### 5. Start Orbit
 
-```bash
-orbit --version
-```
-
-## Start the server
-
-Use the helper script:
+Start the tuned local server:
 
 ```bash
 scripts/gemma4-12b-server.sh start
@@ -102,42 +94,91 @@ Then start Orbit:
 orbit
 ```
 
-The helper starts `llama-server` on:
+Inside Orbit, tools start disabled. Enable only what you need:
 
 ```text
-http://127.0.0.1:18080
+/tools files
 ```
 
-Stop the server:
+If something fails, run:
+
+```bash
+scripts/gemma4-12b-server.sh status
+tail -n 80 ~/.orbit/gemma4-12b-server.log
+```
+
+## Model paths
+
+Orbit's server helper automatically searches the default Hugging Face cache path
+created by `llama-server -hf`:
+
+```text
+~/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/<snapshot>/gemma-4-12B-it-Q4_K_M.gguf
+```
+
+If the model is elsewhere, set:
+
+```bash
+MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
+```
+
+The helper starts `llama-server` on `http://127.0.0.1:18080`.
+
+Stop it with:
 
 ```bash
 scripts/gemma4-12b-server.sh stop
 ```
 
-Check status:
+Check status with:
 
 ```bash
 scripts/gemma4-12b-server.sh status
 ```
 
-If you need a custom model path:
+If you need a custom model path at startup:
 
 ```bash
 MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf scripts/gemma4-12b-server.sh start
 ```
 
-Optional MTP speculative decoding requires a compatible `llama-server` build
-and a matching draft model:
+## Optional MTP
+
+MTP speculative decoding is optional. Skip it for the first run.
+
+It requires a compatible `llama-server` build and a separate draft model.
+The draft model is not downloaded with the main `ggml-org` model.
+
+Download the tested draft model from the Unsloth repository:
+
+```bash
+llama-server -hf unsloth/gemma-4-12b-it-GGUF \
+  --hf-file MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+```
+
+This command downloads the draft model and may try to start a temporary server.
+After the download completes, stop it with `Ctrl+C`.
+
+The helper automatically searches the default Hugging Face cache path:
+
+```text
+~/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/<snapshot>/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+```
+
+Then start the server with MTP:
 
 ```bash
 scripts/gemma4-12b-server.sh start --mtp
 ```
 
+See [MTP speculative decoding](PERFORMANCE.md#mtp-speculative-decoding)
+for the tested fork/branch and benchmark notes.
+
 Override the detected paths if needed:
 
 ```bash
 LLAMA_SERVER_BIN=/path/to/compatible/llama-server \
-MTP_DRAFT_PATH=/path/to/gemma-4-12B-it-MTP-Q8_0.gguf \
+MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf \
 scripts/gemma4-12b-server.sh start --mtp
 ```
 
@@ -176,13 +217,16 @@ orbit --base-url http://127.0.0.1:18080
 ## Interactive commands
 
 ```text
-/health          Check llama-server health.
-/help            Show commands.
-/max-tokens [n]  Show or set output token limit for following turns.
-/reset           Clear current conversation and saved session.
-/status          Show runtime, session, and backend capabilities.
-/tools [spec]    Show or set tools: off, on, files, edit, web, shell.
-/exit            Exit interactive mode.
+/compact [tools]  Compact conversation memory or old tool results.
+/continue         Continue the last answer if it reached max_tokens.
+/health           Check llama-server health.
+/help             Show this help.
+/max-tokens [n]   Show or set output token limit for following turns.
+/reset            Clear current conversation and saved session.
+/sessions clear   Delete all saved sessions for this workdir.
+/status [ctx]     Show runtime status or estimated context usage.
+/tools [spec]     Show or set tools: off, on, files, edit, web, shell, shell-full.
+/exit             Exit interactive mode.
 ```
 
 `/max-tokens <n>` affects only the current runtime. It does not rewrite config or session files.
@@ -200,6 +244,7 @@ prefill. Enable only the tool groups needed for the current task.
 /tools edit  = create/modify/delete files or directories
 /tools web   = search/fetch URLs
 /tools shell = read-only local/system commands
+/tools shell-full = DANGEROUS unrestricted local shell
 ```
 
 Examples:
@@ -209,9 +254,16 @@ Examples:
 /tools files
 /tools files,web
 /tools on
+/tools shell-full
 ```
 
-`off` keeps Orbit in chat-only mode. `on` enables all supported groups.
+`off` keeps Orbit in chat-only mode. `on` enables all standard safe groups.
+`shell-full` is not included in `on`; it must be enabled explicitly.
+
+`shell-full` gives the model unrestricted local shell access from the configured
+workdir. It can run pipes, redirects, malware tooling, decompilers, network
+commands, writes, deletes, and commands that access paths outside the workdir.
+Use it only in a disposable lab environment.
 
 ## Safety boundaries
 
@@ -222,6 +274,7 @@ Examples:
 - `write_file` creates new files only and refuses overwrites.
 - `edit_file` and `apply_diff` are bounded edit paths.
 - `exec_shell_command` is allowlisted and read-only oriented.
+- `exec_shell_full_command` is available only through `/tools shell-full` and is unrestricted except for timeout/output limits.
 - `fetch_url` accepts explicit `http`/`https` URLs and returns extracted text, not raw HTML.
 - Long files and long fetched pages use explicit chunk reads.
 
@@ -235,6 +288,8 @@ chunk calls: max 3 per user turn
 ```
 
 ## Images and audio
+
+Images and audio are optional. Skip this section for normal text usage.
 
 Start the server with multimodal support:
 
@@ -309,6 +364,7 @@ python3 -m unittest discover -s tests -q
 
 Manual regression prompts are kept in [PROMPTS.md](PROMPTS.md).
 
-Benchmark helpers are available under `scripts/` for cache, tool-loop, continuation, memory-refresh, and chat timing checks.
+The public regression benchmark is available as `scripts/bench-core.sh`.
+It uses the repository `workdir/` fixture by default.
 
 Performance design notes are kept in [PERFORMANCE.md](PERFORMANCE.md).

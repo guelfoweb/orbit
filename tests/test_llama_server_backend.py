@@ -146,6 +146,28 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(result.tool_calls[0]["function"]["name"], "exec_shell_command")
         self.assertEqual(result.tool_calls[0]["function"]["arguments"], '{"command": "cat server-tool-test.txt"}')
 
+    def test_parse_chat_result_converts_raw_tool_call_with_inner_quotes(self) -> None:
+        result = _parse_chat_result(
+            {
+                "model": "gemma4",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": '<|tool_call>call:exec_shell_full_command{command:<|"|>strings -a samples/suspicious_dropper_demo.js && grep -E "http://|https://|[0-9]{1,3}\\.[0-9]{1,3}" samples/suspicious_dropper_demo.js | sort | uniq<|"|>}<tool_call|>',
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result.content, "")
+        self.assertEqual(result.tool_calls[0]["function"]["name"], "exec_shell_full_command")
+        self.assertEqual(
+            result.tool_calls[0]["function"]["arguments"],
+            '{"command": "strings -a samples/suspicious_dropper_demo.js && grep -E \\"http://|https://|[0-9]{1,3}\\\\.[0-9]{1,3}\\" samples/suspicious_dropper_demo.js | sort | uniq"}',
+        )
+
     def test_parse_model_info_extracts_capabilities_and_meta(self) -> None:
         info = _parse_model_info(
             {
@@ -239,6 +261,24 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(result.content, "")
         self.assertEqual(result.tool_calls[0]["function"]["name"], "exec_shell_command")
         self.assertEqual(result.tool_calls[0]["function"]["arguments"], '{"command": "cat server-tool-test.txt"}')
+
+    def test_parse_chat_stream_suppresses_embedded_raw_tool_call_content(self) -> None:
+        emitted: list[str] = []
+
+        result = _parse_chat_stream(
+            FakeStream(
+                [
+                    'data: {"choices":[{"delta":{"content":"Need more. <|tool_"},"finish_reason":null}]}\n',
+                    'data: {"choices":[{"delta":{"content":"call>call:read_file{path:<|\\"|>samples/suspicious_dropper_demo.js<|\\"|>}<tool_call|> Done."},"finish_reason":"stop"}]}\n',
+                    "data: [DONE]\n",
+                ]
+            ),
+            on_delta=emitted.append,
+        )
+
+        self.assertEqual("".join(emitted), "Need more.  Done.")
+        self.assertIn("<|tool_call>", result.content)
+        self.assertEqual(result.tool_calls, [])
 
 
 if __name__ == "__main__":

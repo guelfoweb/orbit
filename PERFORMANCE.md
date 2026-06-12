@@ -91,7 +91,7 @@ The only relevant difference was enabling the draft MTP model:
 llama-server \
   -m <gemma-4-12B-it-Q4_K_M.gguf> \
   --spec-type draft-mtp \
-  --model-draft <gemma-4-12B-it-MTP-Q8_0.gguf> \
+  --model-draft <gemma-4-12b-it-Q8_0-MTP.gguf> \
   -c 8192 \
   -t 6 \
   -b 256 \
@@ -404,28 +404,15 @@ The user sees progress immediately, even when CPU-only inference is slow.
 
 ## Benchmark discipline
 
-Orbit includes benchmark helpers under `scripts/`.
-
-Useful checks:
+Orbit keeps one public regression benchmark helper:
 
 ```bash
-scripts/bench-chat.sh
 scripts/bench-core.sh
-scripts/bench-kv-cache.py
-scripts/bench-tool-cache.py
-scripts/bench-continuation-cache.py
-scripts/bench-raw-cache.py --mode all
-scripts/bench-memory-refresh.sh
 ```
 
-These benchmarks separate:
-
-- raw `llama-server` behavior
-- Orbit runtime overhead
-- prompt-cache reuse
-- tool-loop cost
-- final-answer generation cost
-- memory refresh impact
+It exercises chat, file listing, short reads, longer reads, grep, and URL fetch
+through the normal CLI path. Deeper profiling should be done with temporary
+local scripts or manual measurements, not permanent project scripts.
 
 New performance changes should show measurable benefit before they are kept.
 

@@ -18,9 +18,7 @@ _SYSTEM_INFO_COMMANDS = frozenset({"uname", "hostname", "uptime", "whoami", "id"
 _HARDWARE_INFO_COMMANDS = frozenset({"free", "lscpu", "lsblk"})
 _PROCESS_INFO_COMMANDS = frozenset({"ps", "pgrep"})
 _NETWORK_INFO_COMMANDS = frozenset({"ip", "ss"})
-_ALLOWED_COMMANDS = (
-    _FILE_COMMANDS | _SYSTEM_INFO_COMMANDS | _HARDWARE_INFO_COMMANDS | _PROCESS_INFO_COMMANDS | _NETWORK_INFO_COMMANDS
-)
+_ALLOWED_COMMANDS = _FILE_COMMANDS | _SYSTEM_INFO_COMMANDS | _HARDWARE_INFO_COMMANDS | _PROCESS_INFO_COMMANDS | _NETWORK_INFO_COMMANDS
 _ALLOWED_SIMPLE_FLAGS = {
     "ls": frozenset({"-1", "-a", "-l", "-h", "-F", "-la", "-al", "-lh", "-hl", "-lah", "-lha", "-alh", "-ahl", "-hal", "-hla"}),
     "du": frozenset({"-s", "-h", "-sh", "-hs"}),
@@ -57,17 +55,42 @@ _NO_PATH_ARGUMENT_COMMANDS = frozenset(
 
 
 def exec_shell_definition() -> dict[str, Any]:
+    return _shell_definition(
+        "exec_shell_command",
+        (
+            "Run one bounded read-only command in workdir. "
+            "Allowed: pwd, ls, find, du, df, free, lscpu, lsblk, uname, hostname, uptime, "
+            "whoami, id, date, ps, pgrep, ip, ss, wc, head, tail, file, stat, cat. "
+            "Use ls -F for listing. Use a short && chain when multiple read-only commands are needed. "
+            "No pipes, redirects, ls -R, extraction, binary analysis, or outside paths."
+        ),
+    )
+
+
+def exec_shell_full_definition() -> dict[str, Any]:
+    return _shell_definition(
+        "exec_shell_full_command",
+        (
+            "DANGEROUS: run an unrestricted local shell command from workdir. "
+            "Use only when this tool is explicitly available for the current turn. "
+            "Do not require the user to repeat shell-full in the prompt. "
+            "Commands may read, write, delete, execute programs, access network, or access paths outside workdir. "
+            "Use one single-line command string only; no comments or script blocks. "
+            "For analysis requests, collect direct evidence from content/strings/source, not only metadata such as ls or file. "
+            "For external tools, verify availability with command -v when needed. "
+            "Any path containing whitespace MUST be one double-quoted shell argument. "
+            "Example: strings -a samples/suspicious_dropper_demo.js | grep -E \"http|https\". "
+            "The runtime only enforces timeout and output-size limits."
+        ),
+    )
+
+
+def _shell_definition(name: str, description: str) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
-            "name": "exec_shell_command",
-            "description": (
-                "Run one bounded read-only command in workdir. "
-                "Allowed: pwd, ls, find, du, df, free, lscpu, lsblk, uname, hostname, uptime, "
-                "whoami, id, date, ps, pgrep, ip, ss, wc, head, tail, file, stat, cat. "
-                "Use ls -F for listing. Use a short && chain when multiple read-only commands are needed. "
-                "No pipes, redirects, grep filters, ls -R, or outside paths."
-            ),
+            "name": name,
+            "description": description,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -133,6 +156,40 @@ def execute_exec_shell_command(arguments: dict[str, Any], *, workdir: Path) -> s
         if completed.returncode != 0:
             output_parts.append(f"error: command exited with status {completed.returncode}: {shlex.join(tokens)}")
             break
+    content = "\n".join(part for part in output_parts if part)
+    if not content:
+        return ""
+    encoded = content.encode("utf-8", errors="replace")
+    if len(encoded) <= output_size:
+        return content
+    return encoded[:output_size].decode("utf-8", errors="replace") + "\n[truncated]"
+
+
+def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path) -> str:
+    raw_command = arguments.get("command")
+    if not isinstance(raw_command, str) or not raw_command.strip():
+        return "error: exec_shell_full_command requires a non-empty command string"
+    timeout = _bounded_int(arguments.get("timeout"), default=DEFAULT_SHELL_TIMEOUT, maximum=MAX_SHELL_TIMEOUT)
+    output_size = _bounded_int(arguments.get("max_output_size"), default=DEFAULT_SHELL_OUTPUT_BYTES, maximum=MAX_SHELL_OUTPUT_BYTES)
+    try:
+        completed = subprocess.run(
+            raw_command,
+            cwd=workdir,
+            shell=True,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"error: exec_shell_full_command failed: {exc}"
+    output_parts = []
+    if completed.stdout:
+        output_parts.append(completed.stdout.rstrip())
+    if completed.stderr:
+        output_parts.append(completed.stderr.rstrip())
+    if completed.returncode != 0:
+        output_parts.append(f"error: command exited with status {completed.returncode}")
     content = "\n".join(part for part in output_parts if part)
     if not content:
         return ""
@@ -328,6 +385,8 @@ def _validate_pgrep(args: list[str]) -> str | None:
 def _validate_relative_path_token(token: str) -> str | None:
     if not token or token.startswith("~"):
         return f"error: unsafe path token: {token}"
+    if any(char in token for char in "|;<>`$\\"):
+        return f"error: unsafe path token: {token}"
     path = Path(token)
     if path.is_absolute() or ".." in path.parts:
         return f"error: path escapes workdir: {token}"
@@ -342,12 +401,12 @@ def _unsafe_process_pattern(pattern: str) -> bool:
     return len(pattern) > 80 or _unsafe_pattern(pattern)
 
 
-def _int_suffix(value: str, *, maximum: int) -> int | None:
+def _int_suffix(value: str, *, maximum: int, minimum: int = 0) -> int | None:
     try:
         parsed = int(value)
     except ValueError:
         return None
-    if parsed < 0 or parsed > maximum:
+    if parsed < minimum or parsed > maximum:
         return None
     return parsed
 

@@ -15,7 +15,7 @@ MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
 ROUTE_SYSTEM_PROMPT = """Classify the latest user request for Orbit. Return only one JSON object.
 
 {"_route":"CHAT"}
-{"_route":"FILESYSTEM","tool":"list_files|read_file|grep_search|file_glob_search|exec_shell_command|get_datetime"}
+{"_route":"FILESYSTEM","tool":"list_files|read_file|grep_search|file_glob_search|exec_shell_command|exec_shell_full_command|get_datetime"}
 {"_route":"FILE_EDIT","tool":"write_file|edit_file|apply_diff|make_directory|delete_path"}
 {"_route":"WEB","tool":"search_web|fetch_url"}
 {"_route":"MEDIA"}
@@ -25,23 +25,49 @@ Use CHAT for follow-up questions about previous answers or tool results unless t
 When route, tool, and arguments are obvious, return them together in the first JSON object.
 Common args: path, url, query, pattern, command.
 Copy paths and URLs exactly from the user prompt. Never normalize, correct, or rewrite them.
-If the user asks to run/execute a shell command, choose FILESYSTEM/exec_shell_command.
+For file_glob_search, use one simple glob only; no brace expansion. Use list_files for multiple name alternatives.
+If the user asks to run/execute a normal safe shell command, choose FILESYSTEM/exec_shell_command.
+If shell-full is available and the user requests unrestricted shell, malware tooling, decompilation, pipes, redirects, or arbitrary commands, choose FILESYSTEM/exec_shell_full_command.
+For shell-full analysis requests, choose a command that inspects content, strings, or source evidence; do not stop at ls/file metadata.
+For content-based edits without explicit line numbers, return FILE_EDIT with tools ["read_file","edit_file"].
+For exec_shell_full_command, any path containing whitespace MUST be one double-quoted shell argument.
+For exec_shell_full_command, use one single-line command string only; no comments or script blocks.
+For external tools, verify availability with command -v when needed.
+Example command arg: strings -a samples/suspicious_dropper_demo.js | grep -E "http|https"
+Requests about specs/specifications/configuration of this/local computer, PC, or machine use FILESYSTEM/exec_shell_command.
 Requests about this/local PC hardware or resources (CPU, cores, RAM, memory, disk, OS, uptime) use FILESYSTEM/exec_shell_command.
+For this/local computer specs, do not ask for photos, brand, or model; use local system tools.
 Current date/time requests use FILESYSTEM/get_datetime.
-For exec_shell_command, choose enough allowed read-only commands to answer the request; use a short && chain when one command would be incomplete. No pipes, redirects, or grep filters.
+For exec_shell_command, choose enough allowed read-only commands to answer the request; use a short && chain when one command would be incomplete. No pipes, redirects, or grep filters. For line counts use wc -l file, never wc -l < file.
 Do not convert shell commands into FILE_EDIT tools; execution guardrails decide if they are allowed.
 For explicit http/https URLs return {"_route":"WEB","tool":"fetch_url","url":"<url>"}.
 Examples:
 list all files in this workdir -> {"_route":"FILESYSTEM","tool":"list_files","path":"."}
 read agent.py -> {"_route":"FILESYSTEM","tool":"read_file","path":"agent.py"}
+replace beta with BETA in note.txt -> {"_route":"FILE_EDIT","tools":["read_file","edit_file"],"path":"note.txt"}
 summarize https://example.com -> {"_route":"WEB","tool":"fetch_url","url":"https://example.com"}
 search online for Dante Alighieri -> {"_route":"WEB","tool":"search_web","query":"Dante Alighieri"}
 Do not perform the task. Classify only."""
 TOOL_CALL_SYSTEM_PROMPT = (
     "When tools are available, call exactly one needed tool and output no prose. "
+    "Available tools have already been enabled by the user for this turn. "
     "No repeated equivalent tool calls. "
+    "Tool arguments must be valid compact JSON. "
+    "No comments, no multi-line scripts, no literal newlines inside string values. "
+    "For shell commands, use one single-line command string only. "
+    "For safe shell, no pipes or redirects; for line counts use wc -l file, not wc -l < file. "
+    "For external tools, verify availability with command -v when needed. "
+    "For shell commands, any path containing whitespace MUST be one double-quoted shell argument. "
+    "Example: strings -a samples/suspicious_dropper_demo.js | grep -E \"http|https\". "
     "Use read_file before edit_file when context is needed. "
+    "For edit_file append at end, use JSON like {\"path\":\"file.txt\",\"changes\":[{\"mode\":\"append\",\"line_start\":-1,\"line_end\":-1,\"content\":\"text\"}]}. "
     "Use edit_file/apply_diff, not exec_shell_command, for edits."
+)
+TOOL_CALL_JSON_RETRY_PROMPT = (
+    "The previous tool call had invalid JSON arguments. "
+    "Return exactly one tool call now. "
+    "Arguments must be valid compact JSON. "
+    "For shell command, use one single-line command string only: no comments, no literal newlines."
 )
 FINAL_FROM_TOOL_SYSTEM_PROMPT = (
     "Answer concisely from the available tool result. "
@@ -63,7 +89,7 @@ If arguments are clear from the user prompt, include them in the same JSON.
 Common args: path, pattern, command, url, query, content.
 
 Routes:
-FILESYSTEM: list_files, read_file, grep_search, file_glob_search, exec_shell_command, get_datetime
+FILESYSTEM: list_files, read_file, grep_search, file_glob_search, exec_shell_command, exec_shell_full_command, get_datetime
 FILE_EDIT: write_file, edit_file, apply_diff, make_directory, delete_path
 WEB: search_web, fetch_url
 
@@ -74,12 +100,16 @@ Rules:
 - list_files: list files/directories in a directory.
 - read_file: read/review/summarize named files.
 - grep_search: search exact text/patterns.
-- file_glob_search: glob discovery only.
-- exec_shell_command: run safe commands/list/stat/wc/df.
+- file_glob_search: one simple glob only; no brace expansion. Use list_files for multiple name alternatives.
+- exec_shell_command: run safe allowlisted commands/list/stat/wc/df.
+- For safe shell line counts use wc -l file, never wc -l < file.
+- exec_shell_full_command: dangerous unrestricted local shell when explicitly available.
 - get_datetime: current date/time.
-- If the user asks to run/execute a shell command, use exec_shell_command.
+- If the user asks to run/execute a normal safe shell command, use exec_shell_command.
+- If shell-full is available and the user requests unrestricted shell, malware tooling, decompilation, pipes, redirects, or arbitrary commands, use exec_shell_full_command.
 - Do not convert shell commands into FILE_EDIT tools.
 - edit_file: modify files.
+- Content-based edits without explicit line numbers need read_file and edit_file.
 - apply_diff: only when the user provides actual diff text.
 - Described patch/change requests without diff text => edit_file.
 - Never edit via shell.

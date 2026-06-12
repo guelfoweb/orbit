@@ -12,7 +12,7 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
-from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT
+from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
 from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
 
@@ -289,6 +289,46 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.finish_reason, "unsupported_route")
         self.assertIn("no suitable tool", result.content)
+
+    def test_ask_auto_allows_file_edit_route_when_shell_full_is_enabled(self) -> None:
+        class FileEditShellFullBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    content = '{"_route":"FILE_EDIT"}'
+                else:
+                    content = "use shell-full"
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = FileEditShellFullBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto(
+            "create then remove lab directory",
+            temperature=0,
+            max_tokens=32,
+            workdir=Path("."),
+            allowed_tool_names=("exec_shell_full_command",),
+        )
+
+        self.assertEqual(result.content, "use shell-full")
+        tool_names = [tool["function"]["name"] for tool in backend.tools_seen[1]]  # type: ignore[index]
+        self.assertEqual(tool_names, ["exec_shell_full_command"])
 
     def test_ask_auto_allows_datetime_tool_when_time_group_is_enabled(self) -> None:
         class TimeRouteBackend:
@@ -726,6 +766,208 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.tool_names_seen[1], ("list_files", "read_file", "exec_shell_command"))
         self.assertNotIn('{"_route":"FILESYSTEM"}', [message.get("content") for message in runtime.messages])
 
+    def test_ask_auto_allows_shell_full_after_generic_filesystem_route_when_enabled(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tool_names_seen: list[tuple[str, ...]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"printf ok\"}"},
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "try to analyze it with apktool",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(backend.tool_names_seen[0], ())
+        self.assertEqual(backend.tool_names_seen[1], ("exec_shell_full_command",))
+
+    def test_ask_auto_allows_shell_full_when_safe_shell_route_is_not_enabled(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tool_names_seen: list[tuple[str, ...]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM","tool":"exec_shell_command"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"printf ok\"}"},
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "tell me the specs of this computer",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command", "list_files", "read_file"),
+            )
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(backend.tool_names_seen[0], ())
+        self.assertEqual(backend.tool_names_seen[1], ("exec_shell_full_command",))
+
+    def test_tool_call_json_parse_error_retries_with_compact_json_instruction(self) -> None:
+        class JsonErrorBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"_route":"FILESYSTEM"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    raise RuntimeError("llama-server HTTP 500: Failed to parse tool call arguments as JSON")
+                if self.calls == 3:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"printf ok\"}"},
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = JsonErrorBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "try to analyze it with apktool",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(backend.messages_seen[2][-1]["content"], TOOL_CALL_JSON_RETRY_PROMPT)
+
     def test_ask_auto_uses_preferred_route_tool_when_valid(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
@@ -920,6 +1162,77 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.calls, 2)
         self.assertEqual(backend.messages[-2]["role"], "tool")
         self.assertIn("file.txt", backend.messages[-2]["content"])
+
+    def test_ask_with_tools_retries_empty_length_final_after_tool_result(self) -> None:
+        class EmptyLengthFinalBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"ls -l note.txt\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=20,
+                        completion_tokens=96,
+                        cached_tokens=10,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="final from tool result",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=25,
+                    completion_tokens=4,
+                    cached_tokens=12,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("x", encoding="utf-8")
+            backend = EmptyLengthFinalBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "analyze note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "final from tool result")
+        self.assertEqual(backend.calls, 3)
+        self.assertIsNotNone(backend.tools_seen[0])
+        self.assertIsNone(backend.tools_seen[1])
+        self.assertIsNone(backend.tools_seen[2])
 
     def test_ask_with_tools_can_read_text_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

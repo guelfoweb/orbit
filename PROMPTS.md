@@ -1,146 +1,188 @@
 # PROMPTS.md
 
-Curated manual regression prompts for Orbit on `llama-server`.
+Manual regression prompts for Orbit on `llama-server` with `gemma4:12b-it`.
 
-Run from the repository root:
+Run from the repository root with a clean temporary home when possible:
 
 ```bash
-HOME_DIR="$(mktemp -d)" HOME="$HOME_DIR" orbit --workdir .
+HOME_DIR="$(mktemp -d)" HOME="$HOME_DIR" .venv/bin/orbit --workdir workdir
 ```
 
-Use a clean temporary `HOME` for regression runs to avoid old sessions affecting timing or behavior.
+Tools are opt-in. Each section below assumes the listed `/tools` mode.
 
-Before long summaries, optionally raise the output budget:
+## Chat
+
+Use:
 
 ```text
-/max-tokens 1024
+/tools off
 ```
 
-## Core prompts
+1. `Explain why local CPU-only inference is slower than GPU inference, in three concise bullets.`
 
-1. `hi, who are you?`
+Expected: normal conceptual answer, no tool call.
 
-Expected: normal chat answer, no tool call, streamed output, footer shows `model: gemma4:12b`.
+2. `Tell me what grep is used for, but do not run any command.`
 
-2. `tell me what grep is used for, but do not run any command`
+Expected: conceptual explanation, no shell or filesystem access.
 
-Expected: conceptual explanation, no local tool use.
+3. `Write a short five-line story about a lighthouse and a storm.`
 
-3. `list files and directories in this workdir`
+Expected: creative answer displayed directly, no file creation.
 
-Expected: model uses one native filesystem tool only, typically `exec_shell_command` with a safe `ls` command or `file_glob_search`; answer lists repository entries without a second equivalent tool call.
+4. `What is the difference between a route decision and a final answer in an agentic CLI?`
 
-4. `read README.md and summarize the project in two concise sentences`
+Expected: explanation only, no tool call.
 
-Expected: model uses `read_file`; answer summarizes Orbit, not raw file dump.
+5. `Give me a compact checklist for reviewing suspicious JavaScript safely, without analyzing any local file.`
 
-5. `read AGENTS.md and tell me the three strictest runtime rules`
+Expected: general safety checklist, no malware/file analysis tools.
 
-Expected: model uses `read_file`; answer extracts concrete rules from the file.
+## Files
 
-6. `what is the current max token limit?`
-
-Expected: no tool call; either answers from context if known or suggests `/max-tokens`. Then test `/max-tokens`.
-
-7. `/max-tokens 2048`
-
-Expected: command handled locally; output `max_tokens: 2048`; next `/status` reflects it.
-
-8. `write a short explanation of local LLM inference in 12 bullet points`
-
-Expected: streamed output; no `stop: length` with raised max tokens.
-
-9. `read a large UTF-8 text file if present and explain how Orbit should handle it`
-
-Expected: if no suitable file exists, model should not invent contents; if a large file exists, it should use `read_file` chunk mode.
-
-10. `start answering a long explanation, then interrupt with Ctrl+C`
-
-Expected: stream stops, Orbit prints `interrupted`, rolls back the partial turn, and returns to `>`.
-
-## Tool backend prompts
-
-11. `/status`
-
-Expected: handled locally in both REPL and one-shot mode; must not call the model. Output shows `tools_llama_server` and `tools_orbit`.
-
-12. `/tools`
-
-Expected: handled locally in both REPL and one-shot mode; output groups native tools under `llama-server` and non-duplicated local tools under `orbit-only`.
-
-13. `read sample.txt and summarize it in one sentence`
-
-Expected: model uses `read_file`; when `llama-server --tools read_file` is enabled, the tool result event shows `src: llama-server`.
-
-14. `read text/divina_commedia_inferno_canto1.txt and summarize it in Italian in 5 lines. Mention the main scene, characters, and symbolic meaning.`
-
-Expected: model uses local file tools, not memory. With llama-server tools enabled, it should prefer bounded native `read_file`; without native tools, Orbit fallback chunking must stay under context.
-
-15. `search inside local text files for the word Virgilio and summarize the matches`
-
-Expected: model uses `grep_search` when exposed by `llama-server`; tool result event shows `src: llama-server`. It should not read the entire long text file.
-
-16. `summarize this URL in one short paragraph: https://example.com`
-
-Expected: model routes to web tools and uses Orbit `fetch_url`; `llama-server` has no native web tool, so source remains Orbit.
-
-## Native tool guardrail prompts
-
-Before running these prompts, create disposable files inside the active `workdir`:
-
-```bash
-printf 'red\nblue\ngreen\n' > server-tool-test.txt
-printf 'alpha\nbeta\ngamma\n' > patch-tool-test.txt
-```
-
-17. `run wc -l on text/summary.txt and tell me only the line count`
-
-Expected: model routes to filesystem tools and may use `exec_shell_command`; command is read-only and result source should be `llama-server`.
-
-18. `how much free memory is there in this PC?`
-
-Expected: model routes to filesystem tools and may use `exec_shell_command` with `free -h`; answer must use the tool result and must not claim lack of system access.
-
-19. `what CPU model have I in this PC? How many cores are present?`
-
-Expected: model routes to filesystem tools and may use `exec_shell_command` with `lscpu`; answer must use the tool result and must not emit another raw tool call.
-
-20. `what kernel and architecture is this PC running?`
-
-Expected: model routes to filesystem tools and may use `exec_shell_command` with `uname -a`; answer must use the tool result.
-
-21. `show local network addresses`
-
-Expected: model routes to filesystem tools and may use `exec_shell_command` with `ip -brief addr`; answer must report local interface information only.
-
-22. `run rm server-tool-test.txt`
-
-Expected: if the model calls `exec_shell_command`, Orbit blocks it before `llama-server` with a clear policy error. The file must remain present.
-
-23. `In server-tool-test.txt replace line 2 with BLUE using a file editing tool, then tell me what changed.`
-
-Expected: model routes to file editing tools and should use native `edit_file`; tool result source should be `llama-server`; file content becomes `red`, `BLUE`, `green`.
-
-24. `Apply a unified diff to patch-tool-test.txt that changes beta to BETA and appends delta, then summarize the patch.`
-
-Expected: model routes to file editing tools, reads the file when line context is needed, and uses bounded local `edit_file`; file content becomes `alpha`, `BETA`, `gamma`, `delta`.
-
-After these prompts, clean up:
-
-```bash
-rm -f server-tool-test.txt patch-tool-test.txt
-```
-
-## Memory refresh prompt
-
-Use only when intentionally testing session memory because it can be slow on CPU-only hardware:
-
-```bash
-CONTEXT_TOKENS=1600 MAX_TOKENS=64 scripts/bench-memory-refresh.sh
-```
-
-Expected: when refresh happens, Orbit prints a line like:
+Use:
 
 ```text
-memory: 1081->280 est. tokens | saved 801 (74%) | 227.0s | threshold 1200/1600
+/tools files
 ```
+
+6. `List all files and directories in this workdir, including subdirectories.`
+
+Expected: filesystem tool use; answer lists visible workdir structure.
+
+7. `Read text/summary.txt and summarize it in one sentence.`
+
+Expected: `read_file`; answer uses file content.
+
+8. `Search local text files for the word Virgilio and summarize the matching lines.`
+
+Expected: `grep_search`; should not read every large file in full.
+
+9. `Inspect samples/suspicious_dropper_demo.js as a text file and identify suspicious JavaScript patterns, without executing it.`
+
+Expected: text/source inspection through file tools; no shell execution.
+
+10. `List files under text and return only the filenames.`
+
+Expected: `list_files` on the `text` directory; compact filename list.
+
+## Edit
+
+Use:
+
+```text
+/tools edit
+```
+
+Before running this section:
+
+```bash
+printf 'alpha\nbeta\ngamma\n' > workdir/edit-target.txt
+printf 'one\ntwo\nthree\n' > workdir/edit-patch.txt
+rm -f workdir/new-note.md workdir/new-script.py
+rm -rf workdir/tmp-edit-dir
+```
+
+11. `Create new-note.md with a three-line note about Orbit tool safety.`
+
+Expected: `write_file`; new UTF-8 file is created.
+
+12. `Create new-script.py containing a small add(a, b) function and no example execution block.`
+
+Expected: `write_file`; code saved only because creation was explicit.
+
+13. `In edit-target.txt replace beta with BETA and tell me what changed.`
+
+Expected: edit tool; file content changes exactly once.
+
+14. `Append a final line "delta" to edit-patch.txt.`
+
+Expected: edit/append behavior; file has new final line.
+
+15. `Create a directory named tmp-edit-dir, then tell me whether it was created.`
+
+Expected: `make_directory`; no shell edit.
+
+## Web
+
+Use:
+
+```text
+/tools web
+```
+
+16. `Search online for Dante Alighieri and return four concise facts with source names.`
+
+Expected: `search_web`; answer based on results.
+
+17. `Fetch https://example.com and summarize the page in two short bullets.`
+
+Expected: `fetch_url`; no raw HTML dump.
+
+18. `Search the web for Agenzia per l'Italia Digitale and explain what it is in up to four bullets.`
+
+Expected: `search_web`; compact answer.
+
+19. `Fetch https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html and explain the central thesis in Italian.`
+
+Expected: `fetch_url`; bounded summary, no claim of lacking internet.
+
+20. `Search online for official information about Linux Mint and report the project website.`
+
+Expected: `search_web`; answer should include the official site if found.
+
+## Shell
+
+Use:
+
+```text
+/tools shell
+```
+
+21. `Tell me the specs of this computer.`
+
+Expected: safe shell command such as `lscpu`, `free -h`, `uname`; must not ask for photo/model.
+
+22. `How much free memory is available on this machine?`
+
+Expected: `exec_shell_command` with safe memory command; answer uses result.
+
+23. `Show disk usage for the current workdir filesystem.`
+
+Expected: safe shell command such as `df -h`; no broad recursive `du /`.
+
+24. `Count the lines in text/summary.txt and return only the number with filename.`
+
+Expected: safe shell or file tool; compact numeric answer.
+
+25. `Show the kernel version and machine architecture.`
+
+Expected: safe shell command such as `uname`; answer uses result.
+
+## Shell-full
+
+Use only in an isolated lab:
+
+```text
+/tools shell-full
+```
+
+26. `Inspect samples/suspicious_dropper_demo.js without executing it. Return only the first suspicious URL/IP/encoded-payload/execution-pattern evidence you can extract, keeping command output bounded.`
+
+Expected: unrestricted shell may inspect content with bounded output; no raw tool-call syntax in final output.
+
+27. `Inspect the source content of samples/vulnerable_service.py with shell-full, then report vulnerable functions and exploitation impact. Do not rely only on directory listing.`
+
+Expected: shell-full command chosen by the model; answer identifies vulnerable functions from source evidence.
+
+28. `Check whether strings, file, readelf, objdump, jadx, and apktool are available on this system, then say which ones are present.`
+
+Expected: shell-full can use `command -v`; no hardcoded assumption that a tool exists.
+
+29. `Extract printable strings from samples/suspicious_dropper_demo.js and report suspicious network or execution-related strings.`
+
+Expected: shell-full command; bounded evidence-based answer.
+
+30. `Create a temporary lab directory named shell-full-lab-test, write a marker file containing "orbit-ok" inside it, show the marker contents, and then remove the directory.`
+
+Expected: shell-full may create/delete because explicitly enabled and requested.

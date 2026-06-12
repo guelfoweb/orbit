@@ -231,7 +231,18 @@ def _parse_raw_tool_call_route(text: str) -> ToolRoute | None:
         return ToolRoute.WEB
     if "MEDIA" in normalized:
         return ToolRoute.MEDIA
-    if any(name in text for name in ("list_files", "read_file", "stat_path", "file_glob_search", "grep_search", "exec_shell_command")):
+    if any(
+        name in text
+        for name in (
+            "list_files",
+            "read_file",
+            "stat_path",
+            "file_glob_search",
+            "grep_search",
+            "exec_shell_command",
+            "exec_shell_full_command",
+        )
+    ):
         return ToolRoute.FILESYSTEM
     if any(name in text for name in ("write_file", "append_file", "replace_in_file", "make_directory", "delete_path")):
         return ToolRoute.FILE_EDIT
@@ -334,7 +345,15 @@ def route_tool_names(route: ToolRoute, prompt: str | None = None) -> tuple[str, 
     if route == ToolRoute.CHAT:
         return ()
     if route == ToolRoute.FILESYSTEM:
-        return ("list_files", "read_file", "file_glob_search", "grep_search", "exec_shell_command", "get_datetime")
+        return (
+            "list_files",
+            "read_file",
+            "file_glob_search",
+            "grep_search",
+            "exec_shell_command",
+            "exec_shell_full_command",
+            "get_datetime",
+        )
     if route == ToolRoute.FILE_EDIT:
         return (
             "read_file",
@@ -353,7 +372,14 @@ def decision_tool_names(decision: RouteDecision, prompt: str | None = None) -> t
     decision = refine_decision_for_prompt(decision, prompt)
     if decision.tool_names:
         return decision.tool_names
-    return route_tool_names(decision.route, prompt)
+    return default_route_tool_names(decision.route, prompt)
+
+
+def default_route_tool_names(route: ToolRoute, prompt: str | None = None) -> tuple[str, ...]:
+    names = route_tool_names(route, prompt)
+    if route == ToolRoute.FILESYSTEM:
+        return tuple(name for name in names if name != "exec_shell_full_command")
+    return names
 
 
 def refine_decision_for_prompt(decision: RouteDecision, prompt: str | None) -> RouteDecision:

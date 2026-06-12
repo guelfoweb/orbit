@@ -30,7 +30,7 @@ run_prompt() {
 
 run_prompt "chat" "hi, who are you? Answer in one short sentence."
 run_prompt "list files" "list files and directories in this workdir"
-run_prompt "small read" "read sample.txt and summarize it in one sentence"
+run_prompt "small read" "read text/summary.txt and summarize it in one sentence"
 run_prompt "long read" "read text/divina_commedia_inferno_canto1.txt and summarize it in Italian in 5 lines"
 run_prompt "grep search" "search inside local text files for the word Virgilio and summarize the matches"
 run_prompt "web url" "summarize this URL in one short paragraph: https://example.com"

@@ -26,7 +26,7 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
     web_fetch_result = has_web_fetch_tool_result(messages)
     web_search_result = has_tool_result(messages, "search_web")
     list_like_result = has_list_like_tool_result(messages)
-    shell_result = has_tool_result(messages, "exec_shell_command")
+    shell_result = has_tool_result(messages, "exec_shell_command") or has_tool_result(messages, "exec_shell_full_command")
     read_file_result = has_tool_result(messages, "read_file")
     call_messages = messages
     if large_file_excerpt:
@@ -151,6 +151,8 @@ def final_from_tool_retry_reason(result: ChatResult, *, length_retry_allowed: bo
         return "raw_tool_call"
     if not result.content and result.finish_reason == "stop":
         return "empty_final"
+    if not result.content.strip() and result.finish_reason == "length":
+        return "empty_length"
     if length_retry_allowed and result.finish_reason == "length":
         return "length"
     return None
@@ -188,7 +190,7 @@ def has_list_like_tool_result(messages: list[Message]) -> bool:
         name = message.get("name")
         if name in {"list_files", "file_glob_search"}:
             return True
-        if name == "exec_shell_command":
+        if name in {"exec_shell_command", "exec_shell_full_command"}:
             return is_list_shell_command(last_shell_command)
         return False
     return False
@@ -203,7 +205,7 @@ def last_exec_shell_command(messages: list[Message]) -> str | None:
             if not isinstance(tool_call, dict):
                 continue
             function = tool_call.get("function")
-            if not isinstance(function, dict) or function.get("name") != "exec_shell_command":
+            if not isinstance(function, dict) or function.get("name") not in {"exec_shell_command", "exec_shell_full_command"}:
                 continue
             arguments = function.get("arguments")
             if not isinstance(arguments, dict):

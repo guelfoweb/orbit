@@ -17,6 +17,7 @@ The tool name remains `orbit`. The repository directory may be temporary.
 - Keep one-shot, REPL, backend, runtime, tools, and terminal UI separated.
 - Do not reintroduce Ollama-specific logic in this codebase.
 - Do not expose broad shell, editing, web, PDF, or browser tools until explicitly designed.
+- Broad shell access is allowed only through explicit `shell-full` mode and must stay disabled by default.
 - After runtime/tool/session changes, run unit tests.
 
 ## Backend
@@ -37,6 +38,7 @@ Preferred model-facing tools:
 - `file_glob_search`
 - `grep_search`
 - `exec_shell_command`
+- `exec_shell_full_command`
 - `edit_file`
 - `apply_diff`
 - `get_datetime`
@@ -72,6 +74,7 @@ Rules:
 - Larger text/source files use `read_file` with `chunk_index`.
 - Chunk mode is limited to 1 MB files, 12k chars default chunk size, 24k chars max, and 3 chunk reads per user turn.
 - Unknown tools must fail clearly.
+- `shell-full` is dangerous unrestricted local shell access. It must not be included in default `on` tool mode.
 
 ## Session memory
 
@@ -131,11 +134,8 @@ Keep manual regression prompts in `PROMPTS.md`. The file should stay short and f
 - Keep the current benchmark set as the regression suite.
 - Do not change routing, tool selection, final-answer policy, prompts, tool payloads, or cache behavior for performance unless a benchmark shows a strong, comparable benefit.
 - In the absence of strong measurement evidence, do not touch observable behavior.
-- Use `scripts/bench-kv-cache.py` before changing cache-related server flags.
-- Use `scripts/bench-tool-cache.py` before changing tool-loop payloads, schemas, or cache behavior.
-- Use `scripts/bench-continuation-cache.py` to compare no-tool continuation against tool-loop continuation.
-- Use `scripts/bench-raw-cache.py --mode all` to distinguish Orbit runtime effects from raw `llama-server` behavior.
-- Run `scripts/bench-memory-refresh.sh` on real sessions and record prompt tokens, cached tokens, and prefill speed before/after refresh.
+- Use `scripts/bench-core.sh` as the public regression benchmark.
+- For deeper profiling, prefer temporary local scripts or manual measurements rather than adding permanent helper scripts.
 - Keep explicit `llama-server` slot/cache management out of the core runtime unless benchmarks justify it.
 
 ## Todo

@@ -7,16 +7,19 @@ FILES_TOOL_NAMES = ("list_files", "read_file", "stat_path", "file_glob_search", 
 EDIT_TOOL_NAMES = ("read_file", "write_file", "edit_file", "apply_diff", "make_directory", "delete_path")
 WEB_TOOL_NAMES = ("search_web", "fetch_url")
 SHELL_TOOL_NAMES = ("exec_shell_command", "get_datetime")
+SHELL_FULL_TOOL_NAMES = ("exec_shell_full_command",)
+DEFAULT_ON_TOOL_NAMES = FILES_TOOL_NAMES + EDIT_TOOL_NAMES + WEB_TOOL_NAMES + SHELL_TOOL_NAMES
 
 TOOL_GROUPS: dict[str, tuple[str, ...]] = {
     "files": FILES_TOOL_NAMES,
     "edit": EDIT_TOOL_NAMES,
     "web": WEB_TOOL_NAMES,
     "shell": SHELL_TOOL_NAMES,
+    "shell-full": SHELL_FULL_TOOL_NAMES,
 }
 
 SPECIAL_TOOL_SPECS = ("off", "on")
-USAGE = "off|on|files|edit|web|shell|group[,group...]"
+USAGE = "off|on|files|edit|web|shell|shell-full|group[,group...]"
 
 
 def normalize_tool_spec(value: object, *, key: str = "tools") -> ToolSpec:
@@ -45,7 +48,7 @@ def allowed_tool_names_for_spec(spec: ToolSpec) -> tuple[str, ...] | None:
     if spec == "off":
         return ()
     if spec == "on":
-        return None
+        return tuple(dict.fromkeys(DEFAULT_ON_TOOL_NAMES))
     names: list[str] = []
     for part in spec.split(","):
         names.extend(TOOL_GROUPS[part])

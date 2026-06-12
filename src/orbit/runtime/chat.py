@@ -14,6 +14,7 @@ from orbit.runtime.final_policy import (
 )
 from orbit.runtime.media import AudioInput, ImageInput, load_referenced_media
 from orbit.runtime.messages import (
+    TOOL_CALL_JSON_RETRY_PROMPT,
     message_content,
     with_chat_system_prompt,
     with_final_tool_system_prompt,
@@ -43,7 +44,7 @@ from orbit.runtime.tool_result_compaction import (
     compact_tool_results,
     persistent_messages as persistent_tool_result_messages,
 )
-from orbit.runtime.tools import tool_names as all_tool_names
+from orbit.runtime.tools import default_tool_names
 from orbit.runtime.turn_trace import ModelStepMetrics
 
 
@@ -264,7 +265,17 @@ class ChatRuntime:
         if allowed_tool_names is not None:
             allowed = set(allowed_tool_names)
             tools = tuple(tool for tool in tools if tool in allowed)
-            if decision.route == ToolRoute.FILE_EDIT and not _has_edit_capability(tools):
+            if (
+                not tools
+                and decision.route in {ToolRoute.FILESYSTEM, ToolRoute.FILE_EDIT}
+                and "exec_shell_full_command" in allowed
+            ):
+                tools = ("exec_shell_full_command",)
+            if (
+                decision.route == ToolRoute.FILE_EDIT
+                and "exec_shell_full_command" not in tools
+                and not _has_edit_capability(tools)
+            ):
                 tools = ()
         if not tools:
             result = _unsupported_tool_mode_result(first)
@@ -370,7 +381,7 @@ class ChatRuntime:
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
     ) -> ChatResult:
-        allowed_tool_names = tool_names or all_tool_names()
+        allowed_tool_names = tool_names or default_tool_names()
         executor = HybridToolExecutor(
             backend=self.backend if hasattr(self.backend, "server_tools") else None,
             workdir=workdir,
@@ -405,19 +416,25 @@ class ChatRuntime:
             call_messages = with_tool_call_system_prompt(self.messages)
             state.used_tool_call_prompt = True
             tool_max_tokens = _bounded_internal_max_tokens(max_tokens, TOOL_CALL_MAX_TOKENS)
-            if on_final_delta is None:
-                result = self.backend.chat(call_messages, temperature=temperature, max_tokens=tool_max_tokens, tools=tools)
-            else:
-                result = self.backend.chat_stream(
-                    call_messages,
-                    temperature=temperature,
-                    max_tokens=tool_max_tokens,
-                    tools=tools,
-                    on_delta=on_final_delta,
-                )
+            result = self._chat_tool_call_once(
+                call_messages,
+                temperature=temperature,
+                max_tokens=tool_max_tokens,
+                tools=tools,
+                on_final_delta=on_final_delta,
+            )
             last_result = result
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
+            if result.finish_reason == "length" and not result.tool_calls and state.tool_rounds > 0:
+                return self._answer_from_tool_results(
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_model_step=on_model_step,
+                    loop=loop_index + 1,
+                    use_tool_prompt=state.used_tool_call_prompt,
+                )
             if result.finish_reason == "length" and not result.tool_calls:
                 result = self.backend.chat(call_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
                 if on_model_step:
@@ -594,6 +611,39 @@ class ChatRuntime:
             on_delta=on_final_delta,
         )
 
+    def _chat_tool_call_once(
+        self,
+        messages: list[Message],
+        *,
+        temperature: float,
+        max_tokens: int,
+        tools: list[dict[str, object]],
+        on_final_delta: Callable[[str], None] | None,
+    ) -> ChatResult:
+        try:
+            if on_final_delta is None:
+                return self.backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+            return self.backend.chat_stream(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                on_delta=on_final_delta,
+            )
+        except RuntimeError as exc:
+            if not _is_tool_argument_json_error(exc):
+                raise
+        retry_messages = [*messages, {"role": "system", "content": TOOL_CALL_JSON_RETRY_PROMPT}]
+        if on_final_delta is None:
+            return self.backend.chat(retry_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+        return self.backend.chat_stream(
+            retry_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            on_delta=on_final_delta,
+        )
+
     def reset(self) -> None:
         self.messages.clear()
         self.last_memory_refresh = None
@@ -695,3 +745,8 @@ def _all_tool_calls_allowed(tool_calls: list[dict[str, object]], allowed_tool_na
         if not isinstance(name, str) or name not in allowed:
             return False
     return True
+
+
+def _is_tool_argument_json_error(exc: RuntimeError) -> bool:
+    text = str(exc)
+    return "Failed to parse tool call arguments as JSON" in text

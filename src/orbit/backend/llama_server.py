@@ -315,30 +315,49 @@ class _ContentStreamFilter:
     def __init__(self, on_delta: Callable[[str], None]) -> None:
         self._on_delta = on_delta
         self._buffer = ""
-        self._released = False
-        self._suppressed_raw_tool_call = False
+        self._suppressing_raw_tool_call = False
 
     def write(self, text: str) -> None:
-        if self._released:
-            self._on_delta(text)
-            return
         self._buffer += text
-        state = _raw_tool_call_stream_state(self._buffer)
-        if state == "pending":
-            return
-        if state == "tool_call":
-            self._suppressed_raw_tool_call = True
-            return
-        self._released = True
-        self._on_delta(self._buffer)
-        self._buffer = ""
+        self._flush(complete=False)
 
     def finish(self) -> None:
-        if self._released or self._suppressed_raw_tool_call or not self._buffer:
+        self._flush(complete=True)
+
+    def _flush(self, *, complete: bool) -> None:
+        while self._buffer:
+            if self._suppressing_raw_tool_call:
+                end = self._buffer.find("<tool_call|>")
+                if end < 0:
+                    if complete:
+                        self._buffer = ""
+                    return
+                self._buffer = self._buffer[end + len("<tool_call|>") :]
+                self._suppressing_raw_tool_call = False
+                continue
+
+            start = self._buffer.find("<|tool_call>")
+            if start == 0:
+                end = self._buffer.find("<tool_call|>")
+                if end < 0:
+                    if complete:
+                        self._buffer = ""
+                    else:
+                        self._suppressing_raw_tool_call = True
+                    return
+                self._buffer = self._buffer[end + len("<tool_call|>") :]
+                continue
+            if start > 0:
+                self._on_delta(self._buffer[:start])
+                self._buffer = self._buffer[start:]
+                continue
+
+            keep = 0 if complete else _raw_tool_call_prefix_suffix_len(self._buffer)
+            emit_len = len(self._buffer) - keep
+            if emit_len > 0:
+                self._on_delta(self._buffer[:emit_len])
+                self._buffer = self._buffer[emit_len:]
             return
-        self._on_delta(self._buffer)
-        self._released = True
-        self._buffer = ""
 
 
 def _raw_tool_call_stream_state(text: str) -> str:
@@ -356,6 +375,15 @@ def _raw_tool_call_stream_state(text: str) -> str:
 
 def _is_partial_prefix(text: str, prefix: str) -> bool:
     return len(text) < len(prefix) and prefix.startswith(text)
+
+
+def _raw_tool_call_prefix_suffix_len(text: str) -> int:
+    marker = "<|tool_call>"
+    max_len = min(len(text), len(marker) - 1)
+    for length in range(max_len, 0, -1):
+        if marker.startswith(text[-length:]):
+            return length
+    return 0
 
 
 def _parse_raw_tool_call_content(content: str) -> list[dict[str, Any]]:
@@ -385,6 +413,9 @@ def _parse_raw_tool_call_content(content: str) -> list[dict[str, Any]]:
 
 
 def _normalize_raw_tool_arguments(arguments: str) -> str | None:
+    raw_string_args = _normalize_raw_tool_string_argument(arguments)
+    if raw_string_args is not None:
+        return raw_string_args
     normalized = arguments.replace('<|"|>', '"')
     normalized = re.sub(r'([,{]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', normalized)
     try:
@@ -394,6 +425,17 @@ def _normalize_raw_tool_arguments(arguments: str) -> str | None:
     if not isinstance(parsed, dict):
         return None
     return json.dumps(parsed, ensure_ascii=False)
+
+
+def _normalize_raw_tool_string_argument(arguments: str) -> str | None:
+    match = re.match(
+        r'^\{\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*<\|"\|>(?P<value>.*)<\|"\|>\s*\}\s*$',
+        arguments,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+    return json.dumps({match.group("key"): match.group("value")}, ensure_ascii=False)
 
 
 def _parse_model_info(data: dict[str, Any], *, model_path: str | None = None) -> ModelInfo | None:

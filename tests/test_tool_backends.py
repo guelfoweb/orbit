@@ -211,6 +211,23 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("chunk_index: 0", execution.result.content)
         self.assertIn("total_chunks:", execution.result.content)
 
+    def test_write_file_always_uses_orbit_guardrails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("original", encoding="utf-8")
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=workdir,
+                allowed_tool_names=("write_file",),
+            )
+
+            execution = executor.execute("write_file", {"path": "note.txt", "content": "replacement"}, chunk_budget={})
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertEqual(backend.executed, [])
+        self.assertIn("refusing to overwrite", execution.result.content)
+
     def test_blocks_tool_outside_turn_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executor = HybridToolExecutor(
@@ -241,13 +258,17 @@ class HybridToolExecutorTests(unittest.TestCase):
             executor = HybridToolExecutor(
                 backend=FakeServerTools(),
                 workdir=Path(tmp),
-                allowed_tool_names=("read_file", "grep_search"),
+                allowed_tool_names=("read_file", "grep_search", "file_glob_search"),
             )
 
             definitions = {tool["function"]["name"]: tool["function"] for tool in executor.tool_definitions()}
 
         self.assertEqual(definitions["read_file"]["description"], "Read file text, optionally by 1-based lines.")
         self.assertEqual(definitions["grep_search"]["description"], "Search regex in files.")
+        self.assertIn("No brace expansion", definitions["file_glob_search"]["description"])
+        glob_properties = definitions["file_glob_search"]["parameters"]["properties"]
+        self.assertIn("Directory to search", glob_properties["path"]["description"])
+        self.assertIn("Single include glob", glob_properties["include"]["description"])
 
     def test_exec_shell_definition_uses_orbit_guardrail_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,6 +420,44 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertIn("shell operators", execution.result.content)
         self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_full_allows_unrestricted_shell_when_explicitly_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "printf x | wc -c"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertEqual(execution.result.content.strip(), "1")
+        self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_full_definition_warns_to_quote_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            definition = executor.tool_definitions()[0]
+
+        self.assertEqual(definition["function"]["name"], "exec_shell_full_command")
+        self.assertIn("explicitly available for the current turn", definition["function"]["description"])
+        self.assertIn("Do not require the user to repeat shell-full", definition["function"]["description"])
+        self.assertIn("collect direct evidence", definition["function"]["description"])
+        self.assertIn("path containing whitespace MUST be one double-quoted shell argument", definition["function"]["description"])
+        self.assertIn("Use one single-line command string only", definition["function"]["description"])
+        self.assertIn("For external tools, verify availability with command -v", definition["function"]["description"])
+        self.assertIn("samples/suspicious_dropper_demo.js", definition["function"]["description"])
 
     def test_exec_shell_blocks_grep_pipe_for_df_total_before_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -565,6 +624,7 @@ class HybridToolExecutorTests(unittest.TestCase):
             descriptions = {tool["function"]["name"]: tool["function"]["description"] for tool in executor.tool_definitions()}
 
         self.assertIn("existing UTF-8", descriptions["edit_file"])
+        self.assertIn("line_start=-1", descriptions["edit_file"])
         self.assertIn("in workdir", descriptions["apply_diff"])
         self.assertNotEqual(descriptions["edit_file"], "raw edit")
         self.assertNotEqual(descriptions["apply_diff"], "raw diff")

@@ -20,6 +20,7 @@ from orbit.runtime.tools import (
     MAX_TEXT_FILE_BYTES_AFTER_APPEND,
     MAX_TEXT_FILE_BYTES_AFTER_REPLACE,
     MAX_WRITE_CHARS,
+    default_tool_names,
     tool_definitions,
     tool_names,
     execute_tool,
@@ -305,6 +306,10 @@ class ToolTests(unittest.TestCase):
         defined = tuple(tool["function"]["name"] for tool in tool_definitions())
 
         self.assertEqual(tool_names(), defined)
+
+    def test_default_tool_names_exclude_shell_full(self) -> None:
+        self.assertIn("exec_shell_command", default_tool_names())
+        self.assertNotIn("exec_shell_full_command", default_tool_names())
 
     def test_tool_definitions_can_be_filtered_by_name(self) -> None:
         defined = tuple(tool["function"]["name"] for tool in tool_definitions(("list_files", "read_file")))

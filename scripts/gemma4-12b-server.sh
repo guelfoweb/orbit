@@ -8,11 +8,11 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:18080}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18080}"
 LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-llama-server}"
-MTP_LLAMA_SERVER_BIN="${MTP_LLAMA_SERVER_BIN:-$HOME/LAB/llama.cpp-gemma4-mtp-qualcomm/build/bin/llama-server}"
+MTP_LLAMA_SERVER_BIN="${MTP_LLAMA_SERVER_BIN:-}"
 MODEL_ALIAS="${MODEL_ALIAS:-gemma4:12b-it}"
 MODEL_PATH="${MODEL_PATH:-}"
 MMPROJ_PATH="${MMPROJ_PATH:-}"
-MTP_DRAFT_PATH="${MTP_DRAFT_PATH:-$HOME/LAB/models/gemma-4-12B-it-MTP-Q8_0.gguf}"
+MTP_DRAFT_PATH="${MTP_DRAFT_PATH:-}"
 CTX_SIZE="${CTX_SIZE:-8192}"
 THREADS="${THREADS:-6}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
@@ -38,7 +38,7 @@ Prerequisites:
   llama-server must be available in PATH
   gemma-4-12B-it-Q4_K_M.gguf must be available locally
   optional multimodal support requires mmproj-gemma-4-12B-it-Q8_0.gguf
-  optional MTP support requires a compatible llama.cpp build and gemma-4-12B-it-MTP-Q8_0.gguf
+  optional MTP support requires a compatible llama.cpp build and gemma-4-12b-it-Q8_0-MTP.gguf
 
 start       run llama-server in background and return the terminal
 stop        stop the background server started by this script
@@ -53,7 +53,7 @@ Common recovery:
   llama-server not found        install/build llama.cpp and add llama-server to PATH
   model not found               set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
   projector not found           set MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf
-  MTP draft not found           set MTP_DRAFT_PATH=/path/to/gemma-4-12B-it-MTP-Q8_0.gguf
+  MTP draft not found           set MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf
   MTP unsupported               set LLAMA_SERVER_BIN=/path/to/compatible/llama-server
   existing non-multimodal server stop it before start --multimodal
   server without pid file       stop the owning process manually or change PORT/BASE_URL
@@ -61,19 +61,9 @@ EOF
 }
 
 select_llama_server_bin() {
-  if [ "$MTP" -eq 1 ] && [ "$LLAMA_SERVER_BIN" = "llama-server" ] && [ -x "$MTP_LLAMA_SERVER_BIN" ]; then
+  if [ "$MTP" -eq 1 ] && [ "$LLAMA_SERVER_BIN" = "llama-server" ] && [ "$MTP_LLAMA_SERVER_BIN" != "" ] && [ -x "$MTP_LLAMA_SERVER_BIN" ]; then
     LLAMA_SERVER_BIN="$MTP_LLAMA_SERVER_BIN"
   fi
-}
-
-first_existing_file() {
-  for path in "$@"; do
-    if [ -f "$path" ]; then
-      printf '%s\n' "$path"
-      return 0
-    fi
-  done
-  return 1
 }
 
 find_huggingface_file() {
@@ -96,11 +86,7 @@ resolve_model_path() {
     echo "error: MODEL_PATH does not exist: $MODEL_PATH" >&2
     return 1
   fi
-  first_existing_file \
-    "$HOME/LAB/models/gemma4-12b/gemma4-12B-it-Q4_K_M.gguf" \
-    "$HOME/LAB/models/gemma-4-12B-it-Q4_K_M.gguf" \
-    "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/44ee90c4b61e888ac5b318a54ec7a94df61e9cd7/gemma-4-12B-it-Q4_K_M.gguf" \
-    || find_huggingface_file "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/gemma-4-12B-it-Q4_K_M.gguf" \
+  find_huggingface_file "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/gemma-4-12B-it-Q4_K_M.gguf" \
     || {
       echo "error: gemma-4-12B-it-Q4_K_M.gguf not found" >&2
       echo "recovery: set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf" >&2
@@ -117,10 +103,7 @@ resolve_mmproj_path() {
     echo "error: MMPROJ_PATH does not exist: $MMPROJ_PATH" >&2
     return 1
   fi
-  first_existing_file \
-    "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/44ee90c4b61e888ac5b318a54ec7a94df61e9cd7/mmproj-gemma-4-12B-it-Q8_0.gguf" \
-    "$HOME/LAB/models/gemma4-12b/gemma4-12B-it-mmproj-BF16.gguf" \
-    || find_huggingface_file "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/mmproj-gemma-4-12B-it-Q8_0.gguf" \
+  find_huggingface_file "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/mmproj-gemma-4-12B-it-Q8_0.gguf" \
     || {
       echo "error: multimodal projector not found" >&2
       echo "recovery: set MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf" >&2
@@ -137,13 +120,11 @@ resolve_mtp_draft_path() {
     echo "error: MTP_DRAFT_PATH does not exist: $MTP_DRAFT_PATH" >&2
     return 1
   fi
-  first_existing_file \
-    "$HOME/LAB/models/gemma-4-12B-it-MTP-Q8_0.gguf" \
-    "$HOME/LAB/models/gemma4-12b/gemma-4-12B-it-MTP-Q8_0.gguf" \
+  find_huggingface_file "$HOME/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/*/MTP/gemma-4-12b-it-Q8_0-MTP.gguf" \
     || find_huggingface_file "$HOME/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/*/gemma-4-12B-it-MTP-Q8_0.gguf" \
     || {
-      echo "error: gemma-4-12B-it-MTP-Q8_0.gguf not found" >&2
-      echo "recovery: set MTP_DRAFT_PATH=/path/to/gemma-4-12B-it-MTP-Q8_0.gguf" >&2
+      echo "error: gemma-4-12b-it-Q8_0-MTP.gguf not found" >&2
+      echo "recovery: set MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf" >&2
       return 1
     }
 }
