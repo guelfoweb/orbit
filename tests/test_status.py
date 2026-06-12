@@ -55,7 +55,30 @@ class StatusTests(unittest.TestCase):
             context_tokens=8192,
         )
 
-        self.assertIn("model: gemma4 | ctx: 8192 (27%) | stop: stop", status)
+        self.assertIn("model: gemma4 | ctx: 2212/8192 (27%) | stop: stop", status)
+
+    def test_format_turn_status_includes_context_pressure(self) -> None:
+        result = ChatResult(
+            content="hello",
+            model="gemma4",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+        moderate = format_turn_status(result, estimated_context_tokens=4280, context_tokens=8192)
+        high = format_turn_status(result, estimated_context_tokens=5900, context_tokens=8192)
+        refresh = format_turn_status(result, estimated_context_tokens=7000, context_tokens=8192)
+
+        self.assertIn("ctx: 4280/8192 (52%)", moderate)
+        self.assertIn("pressure: moderate", moderate)
+        self.assertIn("ctx: 5900/8192 (72%)", high)
+        self.assertIn("pressure: high | consider /compact tools", high)
+        self.assertIn("pressure: memory refresh", refresh)
 
     def test_format_turn_status_includes_elapsed_time(self) -> None:
         result = ChatResult(

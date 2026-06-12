@@ -38,6 +38,11 @@ from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_calls import execute_tool_call
 from orbit.runtime.tool_loop_state import ToolLoopState
 from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
+from orbit.runtime.tool_result_compaction import (
+    ToolResultCompactionReport,
+    compact_tool_results,
+    persistent_messages as persistent_tool_result_messages,
+)
 from orbit.runtime.tools import tool_names as all_tool_names
 from orbit.runtime.turn_trace import ModelStepMetrics
 
@@ -596,6 +601,31 @@ class ChatRuntime:
         self.last_memory_refresh_attempt = None
         if self.system_prompt:
             self.messages.append({"role": "system", "content": self.system_prompt})
+
+    def compact_old_tool_results(self, *, temperature: float) -> ToolResultCompactionReport:
+        return compact_tool_results(self.messages, backend=self.backend, temperature=temperature)
+
+    def compact_memory_now(self, *, temperature: float) -> MemoryRefresh:
+        before_count = len(self.messages)
+        result = maybe_refresh_memory(
+            self.messages,
+            backend=self.backend,
+            context_tokens=self.context_tokens,
+            temperature=temperature,
+            force=True,
+        )
+        if result.changed:
+            self.last_memory_refresh = result
+            self.last_memory_refresh_message_count = len(self.messages)
+            self.memory_refreshes += 1
+            self.total_memory_tokens_saved += max(0, result.estimated_tokens_before - result.estimated_tokens_after)
+        elif len(self.messages) != before_count:
+            self.messages[:] = self.messages[:before_count]
+        self.last_memory_refresh_attempt = result
+        return result
+
+    def persistent_messages(self) -> list[Message]:
+        return persistent_tool_result_messages(self.messages)
 
     def restore_message_count(self, count: int) -> None:
         if count < 0:

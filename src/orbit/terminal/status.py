@@ -16,7 +16,10 @@ def format_turn_status(
     if result.model:
         parts.append(f"model: {result.model}")
     if estimated_context_tokens is not None and context_tokens is not None and context_tokens > 0:
-        parts.append(f"ctx: {context_tokens} ({(estimated_context_tokens / context_tokens) * 100:.0f}%)")
+        pressure = _context_pressure(estimated_context_tokens, context_tokens)
+        parts.append(f"ctx: {estimated_context_tokens}/{context_tokens} ({(estimated_context_tokens / context_tokens) * 100:.0f}%)")
+        if pressure:
+            parts.append(f"pressure: {pressure}")
     if result.prompt_tokens is not None or result.completion_tokens is not None:
         cached = f", cached {result.cached_tokens}" if result.cached_tokens is not None else ""
         parts.append(f"tks: {result.prompt_tokens}->{result.completion_tokens}{cached}")
@@ -57,3 +60,14 @@ def _saved_ratio(before: int, saved: int) -> float:
     if before <= 0:
         return 0.0
     return (saved / before) * 100.0
+
+
+def _context_pressure(estimated_context_tokens: int, context_tokens: int) -> str | None:
+    ratio = estimated_context_tokens / context_tokens
+    if ratio >= 0.85:
+        return "memory refresh"
+    if ratio >= 0.70:
+        return "high | consider /compact tools"
+    if ratio >= 0.50:
+        return "moderate"
+    return None

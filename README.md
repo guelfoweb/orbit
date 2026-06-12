@@ -130,6 +130,12 @@ Optional MTP speculative decoding requires a compatible `llama-server` build
 and a matching draft model:
 
 ```bash
+scripts/gemma4-12b-server.sh start --mtp
+```
+
+Override the detected paths if needed:
+
+```bash
 LLAMA_SERVER_BIN=/path/to/compatible/llama-server \
 MTP_DRAFT_PATH=/path/to/gemma-4-12B-it-MTP-Q8_0.gguf \
 scripts/gemma4-12b-server.sh start --mtp

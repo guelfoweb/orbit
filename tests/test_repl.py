@@ -18,9 +18,17 @@ from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.config import AppConfig
-from orbit.terminal.history import PromptHistory
+from orbit.terminal.history import PromptHistory, _load_readline
 from orbit.terminal.prompt_preview import compact_prompt_preview
-from orbit.terminal.repl import Repl, _read_available_paste_tail, colorize_paste_preview
+from orbit.terminal.repl_input import (
+    colorize_paste_preview,
+    read_available_paste_tail,
+    should_replace_input_echo,
+    strip_bracketed_paste_markers,
+    visual_row_count,
+)
+from orbit.terminal.repl import Repl
+from orbit.terminal.session_preview import format_recent_session_messages
 from orbit.terminal.tool_events import format_tool_result_event
 
 
@@ -109,6 +117,55 @@ class CountingRuntime(ChatRuntime):
 
 
 class ReplTests(unittest.TestCase):
+    def test_readline_enables_bracketed_paste_when_available(self) -> None:
+        fake_readline = mock.Mock()
+        with mock.patch.dict(sys.modules, {"readline": fake_readline}):
+            loaded = _load_readline()
+
+        self.assertIs(loaded, fake_readline)
+        fake_readline.parse_and_bind.assert_called_with("set enable-bracketed-paste on")
+
+    def test_run_banner_is_dim_and_existing_session_preview_is_shown(self) -> None:
+        runtime = CountingRuntime()
+        runtime.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+        ]
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        stdout = io.StringIO()
+
+        with (
+            mock.patch("builtins.input", side_effect=EOFError),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = repl.run()
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("\033[2morbit interactive mode. Type /help for commands.\033[0m", output)
+        self.assertIn("\033[2mtools: off\033[0m", output)
+        self.assertIn("recent session context:", output)
+        self.assertIn("user: first question", output)
+        self.assertIn("assistant: first answer", output)
+
+    def test_recent_session_preview_uses_last_four_non_system_messages(self) -> None:
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "four"},
+            {"role": "user", "content": "five"},
+        ]
+
+        preview = format_recent_session_messages(messages)
+
+        self.assertEqual(len(preview), 4)
+        self.assertNotIn("one", "\n".join(preview))
+        self.assertIn("assistant: two", preview[0])
+        self.assertIn("user: five", preview[-1])
+
     def test_stream_interrupt_restores_messages_and_returns_to_prompt(self) -> None:
         backend = InterruptingBackend()
         runtime = ChatRuntime(backend=backend, system_prompt="system")
@@ -165,11 +222,44 @@ class ReplTests(unittest.TestCase):
             os.close(write_fd)
             with os.fdopen(read_fd, "r", encoding="utf-8") as fake_stdin:
                 sys.stdin = fake_stdin
-                prompt = _read_available_paste_tail("first line", timeout=0.0, require_tty=False)
+                prompt = read_available_paste_tail("first line", timeout=0.0, require_tty=False)
         finally:
             sys.stdin = original_stdin
 
         self.assertEqual(prompt, "first line\nsecond line\nthird line")
+
+    def test_multiline_paste_preserves_blank_and_middle_lines(self) -> None:
+        read_fd, write_fd = os.pipe()
+        original_stdin = sys.stdin
+        tail = (
+            "\n"
+            "\u201cSolo 3 parole: non sei solo\u201d\n"
+            "\n"
+            "is not:\n"
+            "\n"
+            "\u201cJust 3 words: you are not alone\u201d\n"
+            "\n"
+            "but:\n"
+            "\n"
+            "\u201cJust 4 words: you are not alone.\u201d\n"
+        )
+        try:
+            os.write(write_fd, tail.encode("utf-8"))
+            os.close(write_fd)
+            with os.fdopen(read_fd, "r", encoding="utf-8") as fake_stdin:
+                sys.stdin = fake_stdin
+                prompt = read_available_paste_tail(
+                    "the correct translation of:",
+                    timeout=0.0,
+                    idle_polls=1,
+                    require_tty=False,
+                )
+        finally:
+            sys.stdin = original_stdin
+
+        self.assertIn("\u201cSolo 3 parole: non sei solo\u201d", prompt)
+        self.assertIn("\u201cJust 3 words: you are not alone\u201d", prompt)
+        self.assertTrue(prompt.endswith("\u201cJust 4 words: you are not alone.\u201d"))
 
     def test_prompt_without_available_tail_stays_unchanged(self) -> None:
         read_fd, write_fd = os.pipe()
@@ -178,11 +268,25 @@ class ReplTests(unittest.TestCase):
             os.close(write_fd)
             with os.fdopen(read_fd, "r", encoding="utf-8") as fake_stdin:
                 sys.stdin = fake_stdin
-                prompt = _read_available_paste_tail("single line", timeout=0.0, require_tty=False)
+                prompt = read_available_paste_tail("single line", timeout=0.0, require_tty=False)
         finally:
             sys.stdin = original_stdin
 
         self.assertEqual(prompt, "single line")
+
+    def test_bracketed_paste_markers_are_stripped(self) -> None:
+        prompt = strip_bracketed_paste_markers("\x1b[200~first\nsecond\x1b[201~")
+
+        self.assertEqual(prompt, "first\nsecond")
+
+    def test_visual_row_count_handles_multiline_input(self) -> None:
+        self.assertEqual(visual_row_count("> one\ntwo", columns=80), 2)
+        self.assertEqual(visual_row_count("> " + ("x" * 81), columns=80), 2)
+
+    def test_input_echo_redraw_triggers_for_multiline_or_long_text(self) -> None:
+        self.assertFalse(should_replace_input_echo("single short line"))
+        self.assertTrue(should_replace_input_echo("first line\nsecond line"))
+        self.assertTrue(should_replace_input_echo("x" * 801))
 
     def test_colorize_paste_preview_highlights_only_badge(self) -> None:
         preview = "Lorem ipsum...\n[text 5108 chars #a1b2c3d4]"

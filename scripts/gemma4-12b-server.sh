@@ -8,10 +8,11 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:18080}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18080}"
 LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-llama-server}"
+MTP_LLAMA_SERVER_BIN="${MTP_LLAMA_SERVER_BIN:-$HOME/LAB/llama.cpp-gemma4-mtp-qualcomm/build/bin/llama-server}"
 MODEL_ALIAS="${MODEL_ALIAS:-gemma4:12b-it}"
 MODEL_PATH="${MODEL_PATH:-}"
 MMPROJ_PATH="${MMPROJ_PATH:-}"
-MTP_DRAFT_PATH="${MTP_DRAFT_PATH:-}"
+MTP_DRAFT_PATH="${MTP_DRAFT_PATH:-$HOME/LAB/models/gemma-4-12B-it-MTP-Q8_0.gguf}"
 CTX_SIZE="${CTX_SIZE:-8192}"
 THREADS="${THREADS:-6}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
@@ -44,9 +45,9 @@ stop        stop the background server started by this script
 status      show whether the configured endpoint is healthy
 
 Environment overrides:
-  LLAMA_SERVER_BIN MODEL_PATH MMPROJ_PATH MTP_DRAFT_PATH HOST PORT BASE_URL CTX_SIZE
-  THREADS BATCH_SIZE UBATCH_SIZE CACHE_RAM PARALLEL_SLOTS LLAMA_SERVER_TOOLS
-  ORBIT_STATE_DIR PID_FILE LOG_FILE
+  LLAMA_SERVER_BIN MTP_LLAMA_SERVER_BIN MODEL_PATH MMPROJ_PATH MTP_DRAFT_PATH HOST PORT
+  BASE_URL CTX_SIZE THREADS BATCH_SIZE UBATCH_SIZE CACHE_RAM PARALLEL_SLOTS
+  LLAMA_SERVER_TOOLS ORBIT_STATE_DIR PID_FILE LOG_FILE
 
 Common recovery:
   llama-server not found        install/build llama.cpp and add llama-server to PATH
@@ -57,6 +58,12 @@ Common recovery:
   existing non-multimodal server stop it before start --multimodal
   server without pid file       stop the owning process manually or change PORT/BASE_URL
 EOF
+}
+
+select_llama_server_bin() {
+  if [ "$MTP" -eq 1 ] && [ "$LLAMA_SERVER_BIN" = "llama-server" ] && [ -x "$MTP_LLAMA_SERVER_BIN" ]; then
+    LLAMA_SERVER_BIN="$MTP_LLAMA_SERVER_BIN"
+  fi
 }
 
 first_existing_file() {
@@ -204,6 +211,7 @@ pid_running() {
 }
 
 start_server() {
+  select_llama_server_bin
   if ! command -v "$LLAMA_SERVER_BIN" >/dev/null 2>&1; then
     echo "error: llama-server not found: $LLAMA_SERVER_BIN" >&2
     echo "install/build llama.cpp and ensure llama-server is available before starting this profile" >&2

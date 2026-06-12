@@ -18,9 +18,11 @@ from orbit.terminal.config import AppConfig
 
 class CommandTests(unittest.TestCase):
     def test_help_mentions_max_tokens(self) -> None:
+        self.assertIn("/compact [tools]", help_text())
         self.assertIn("/max-tokens [n]", help_text())
         self.assertIn("/continue", help_text())
         self.assertIn("/sessions clear", help_text())
+        self.assertIn("/status [ctx]", help_text())
         self.assertIn("/tools [spec]", help_text())
 
     def test_set_max_tokens_without_value_reports_current_value(self) -> None:

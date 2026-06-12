@@ -189,4 +189,8 @@ def _load_readline() -> object | None:
         readline.set_history_length(MAX_HISTORY_ITEMS)
     except Exception:
         pass
+    try:
+        readline.parse_and_bind("set enable-bracketed-paste on")
+    except Exception:
+        pass
     return readline

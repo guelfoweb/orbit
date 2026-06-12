@@ -2,27 +2,24 @@ from __future__ import annotations
 
 import sys
 import time
-import select
-import re
-from shutil import get_terminal_size
 from dataclasses import dataclass
 
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.sessions import SessionStore
+from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
 from orbit.terminal.commands import help_text, reset_session, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.config import AppConfig
+from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
-from orbit.terminal.prompt_preview import compact_prompt_preview, is_long_text_prompt
+from orbit.terminal.repl_input import read_prompt_input, replace_input_echo
+from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
-from orbit.terminal.theme import dim, yellow_dim
-
-
-PASTE_BADGE_PATTERN = re.compile(r"(\[text \d+ chars #[0-9a-f]{8}\])$")
+from orbit.terminal.theme import dim
 
 
 @dataclass
@@ -43,11 +40,15 @@ class Repl:
     def run(self) -> int:
         if self.history:
             self.history.load()
-        print("orbit interactive mode. Type /help for commands.")
-        print(f"tools: {self.tools_mode}")
+        print(dim("orbit interactive mode. Type /help for commands."))
+        print(dim(f"tools: {self.tools_mode}"))
+        if has_existing_session_context(self.runtime.messages):
+            print(dim("recent session context:"))
+            for line in format_recent_session_messages(self.runtime.messages):
+                print(dim(line))
         while True:
             try:
-                prompt = _read_prompt_input().strip()
+                prompt = read_prompt_input().strip()
             except EOFError:
                 self._save_history()
                 print()
@@ -71,9 +72,9 @@ class Repl:
                 if resolution.prompt != prompt:
                     prompt = resolution.prompt
                 else:
-                    _replace_long_input_echo(prompt)
+                    replace_input_echo(prompt)
             else:
-                _replace_long_input_echo(prompt)
+                replace_input_echo(prompt)
             if self.history:
                 self.history.add(prompt)
                 self.history.save()
@@ -170,6 +171,14 @@ class Repl:
             print(reset_session(self.runtime, self.session))
             self.can_continue = False
             return True
+        if command == "/compact":
+            print(format_memory_compaction_report(self.runtime.compact_memory_now(temperature=self.config.temperature)))
+            self._save_session()
+            return True
+        if command == "/compact tools":
+            print(format_tool_compaction_report(self.runtime.compact_old_tool_results(temperature=self.config.temperature)))
+            self._save_session()
+            return True
         if command == "/sessions clear":
             print(self._clear_workdir_sessions())
             return True
@@ -183,6 +192,9 @@ class Repl:
             return True
         if command == "/status":
             print(runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode))
+            return True
+        if command in {"/status ctx", "/status context"}:
+            print(context_status_text(self.runtime.messages, context_tokens=self.runtime.context_tokens))
             return True
         if command == "/tools" or command.startswith("/tools "):
             print(self._handle_tools_command(command))
@@ -221,7 +233,7 @@ class Repl:
         if not self.session:
             return
         self.session.save(
-            messages=self.runtime.messages,
+            messages=self.runtime.persistent_messages(),
             workdir=self.config.workdir,
             model=self.backend.display_model_name() or "unknown",
             base_url=self.config.base_url,
@@ -266,47 +278,6 @@ class Repl:
         elapsed = time.monotonic() - started
         print("\n\n", end="", flush=True)
         self._print_turn_footer(result, elapsed_seconds=elapsed)
-
-
-def _replace_long_input_echo(prompt: str) -> None:
-    if not is_long_text_prompt(prompt) or not sys.stdout.isatty():
-        return
-    preview = colorize_paste_preview(compact_prompt_preview(prompt, multiline=True))
-    columns = max(20, get_terminal_size((80, 20)).columns)
-    visual_rows = max(1, (len("> ") + len(prompt)) // columns + 1)
-    print(f"\x1b[{visual_rows}F\x1b[J> {preview}", flush=True)
-
-
-def colorize_paste_preview(preview: str) -> str:
-    return PASTE_BADGE_PATTERN.sub(lambda match: yellow_dim(match.group(1)), preview)
-
-
-def _read_prompt_input() -> str:
-    first_line = input("> ")
-    return _read_available_paste_tail(first_line)
-
-
-def _read_available_paste_tail(first_line: str, *, timeout: float = 0.01, require_tty: bool = True) -> str:
-    if require_tty and not sys.stdin.isatty():
-        return first_line
-    try:
-        fileno = sys.stdin.fileno()
-    except (AttributeError, OSError):
-        return first_line
-    lines = [first_line]
-    while True:
-        try:
-            ready, _, _ = select.select([fileno], [], [], timeout)
-        except (OSError, ValueError):
-            break
-        if not ready:
-            break
-        line = sys.stdin.readline()
-        if line == "":
-            break
-        lines.append(line.rstrip("\n"))
-        timeout = 0.0
-    return "\n".join(lines)
 
 
 def _confirm_clear_sessions() -> bool:

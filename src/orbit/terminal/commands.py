@@ -16,19 +16,20 @@ MAX_MAX_TOKENS = 4096
 
 
 def help_text() -> str:
-    return "\n".join(
-        [
-            "/continue        Continue the last answer if it reached max_tokens.",
-            "/health           Check llama-server health.",
-            "/help             Show this help.",
-            "/max-tokens [n]   Show or set output token limit for following turns.",
-            "/reset            Clear current conversation and saved session.",
-            "/sessions clear   Delete all saved sessions for this workdir.",
-            "/status           Show runtime, session, and backend capabilities.",
-            "/tools [spec]     Show or set tools: off, on, files, edit, web, shell.",
-            "/exit             Exit interactive mode.",
-        ]
-    )
+    commands = [
+        ("/compact [tools]", "Compact conversation memory or old tool results."),
+        ("/continue", "Continue the last answer if it reached max_tokens."),
+        ("/health", "Check llama-server health."),
+        ("/help", "Show this help."),
+        ("/max-tokens [n]", "Show or set output token limit for following turns."),
+        ("/reset", "Clear current conversation and saved session."),
+        ("/sessions clear", "Delete all saved sessions for this workdir."),
+        ("/status [ctx]", "Show runtime status or estimated context usage."),
+        ("/tools [spec]", "Show or set tools: off, on, files, edit, web, shell."),
+        ("/exit", "Exit interactive mode."),
+    ]
+    width = max(len(command) for command, _ in commands) + 2
+    return "\n".join(f"{command:<{width}}{description}" for command, description in commands)
 
 
 def tools_text(current: ToolSpec | None = None) -> str:

@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
+
+
+class PayloadTests(unittest.TestCase):
+    def test_build_chat_payload_strips_internal_message_metadata(self) -> None:
+        payload = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-1",
+                        "name": "read_file",
+                        "content": "compact",
+                        "_orbit_original_tool_content": "verbatim",
+                        "_orbit_tool_compaction": {"before_tokens": 100},
+                    }
+                ],
+                temperature=0,
+                max_tokens=32,
+            )
+        )
+
+        self.assertEqual(
+            payload["messages"],
+            [{"role": "tool", "tool_call_id": "call-1", "name": "read_file", "content": "compact"}],
+        )
+
+if __name__ == "__main__":
+    unittest.main()

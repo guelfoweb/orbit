@@ -9,6 +9,7 @@ from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.media import load_audio, load_image
 from orbit.terminal.config import add_config_arguments, load_app_config
+from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
 from orbit.terminal.repl import Repl
@@ -92,6 +93,10 @@ def _handle_one_shot_command(
         return None
     if command == "/status":
         return runtime_status(runtime, config, backend, tools_mode=config.tools)
+    if command in {"/status ctx", "/status context"}:
+        return context_status_text(runtime.messages, context_tokens=runtime.context_tokens)
+    if command == "/compact" or command == "/compact tools":
+        return "error: /compact is available only in interactive mode"
     if command == "/tools":
         return tools_text(config.tools)
     if command == "/health":

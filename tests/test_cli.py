@@ -29,6 +29,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("messages: 1", completed.stdout)
         self.assertNotIn("model: fake", completed.stdout)
 
+    def test_one_shot_status_context_command_does_not_call_model(self) -> None:
+        completed = _run_cli("", "/status ctx")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("Context\n-------", completed.stdout)
+        self.assertIn("Token estimate\n--------------", completed.stdout)
+        self.assertIn("Message count\n-------------", completed.stdout)
+        self.assertIn("system:", completed.stdout)
+        self.assertNotIn("model: fake", completed.stdout)
+
     def test_one_shot_tools_command_does_not_call_model(self) -> None:
         completed = _run_cli("", "/tools")
 
@@ -48,6 +58,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIn("max_tokens: 2048", completed.stdout)
 
+    def test_one_shot_compact_command_is_interactive_only(self) -> None:
+        completed = _run_cli("", "/compact")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("error: /compact is available only in interactive mode", completed.stdout)
+
     def test_repl_status_command_does_not_call_model(self) -> None:
         completed = _run_cli("/status\n/exit\n")
 
@@ -57,6 +73,20 @@ class CliTests(unittest.TestCase):
         self.assertIn("server:", completed.stdout)
         self.assertIn("messages: 1", completed.stdout)
         self.assertIn("workdir:", completed.stdout)
+
+    def test_repl_status_context_command_does_not_call_model(self) -> None:
+        completed = _run_cli("/status ctx\n/exit\n")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("orbit interactive mode", completed.stdout)
+        self.assertIn("Context\n-------", completed.stdout)
+        self.assertIn("tool_result:", completed.stdout)
+
+    def test_status_context_alias_still_works(self) -> None:
+        completed = _run_cli("", "/status context")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("Context\n-------", completed.stdout)
 
     def test_repl_unknown_command_is_not_sent_to_model(self) -> None:
         completed = _run_cli("/unknown\n/exit\n")
