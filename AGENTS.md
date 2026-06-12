@@ -13,10 +13,11 @@ The tool name remains `orbit`. The repository directory may be temporary.
 - Do not add deterministic fast paths for user tasks.
 - The model must decide whether to use available tools.
 - The runtime may enforce safety, size, context, and tool-contract boundaries.
+- `workdir/` is a public regression fixture and must stay safe to publish.
 - Prefer standard-library Python unless a dependency has clear value.
 - Keep one-shot, REPL, backend, runtime, tools, and terminal UI separated.
 - Do not reintroduce Ollama-specific logic in this codebase.
-- Do not expose broad shell, editing, web, PDF, or browser tools until explicitly designed.
+- Do not expose broad shell, PDF, or browser tools until explicitly designed.
 - Broad shell access is allowed only through explicit `shell-full` mode and must stay disabled by default.
 - After runtime/tool/session changes, run unit tests.
 
@@ -52,7 +53,7 @@ Orbit-only tools where `llama-server` has no equivalent:
 
 Rules:
 
-- Tools are exposed only in interactive text mode.
+- Text tools are exposed only when enabled by tool mode.
 - Route selection must be model-driven before tool exposure.
 - No deterministic task fast paths.
 - `read_file` reads UTF-8 text/source files only.
@@ -72,7 +73,7 @@ Rules:
 - PDFs, images, audio, archives, and binary files must be rejected by `read_file`.
 - Complete `read_file` is limited to 256 KB.
 - Larger text/source files use `read_file` with `chunk_index`.
-- Chunk mode is limited to 1 MB files, 12k chars default chunk size, 24k chars max, and 3 chunk reads per user turn.
+- Chunk mode is limited to 1 MB files, 6k chars default chunk size, 12k chars max, and 3 chunk reads per user turn.
 - Unknown tools must fail clearly.
 - `shell-full` is dangerous unrestricted local shell access. It must not be included in default `on` tool mode.
 
@@ -126,7 +127,7 @@ python3 -m unittest discover -s tests -q
 
 When `llama-server` is running, also run at least one real smoke test for the changed area.
 
-Keep manual regression prompts in `PROMPTS.md`. The file should stay short and focused on currently supported behavior.
+Keep manual regression prompts in `docs/PROMPTS.md`. The file should stay short and focused on currently supported behavior.
 
 ## Benchmark discipline
 
@@ -135,6 +136,7 @@ Keep manual regression prompts in `PROMPTS.md`. The file should stay short and f
 - Do not change routing, tool selection, final-answer policy, prompts, tool payloads, or cache behavior for performance unless a benchmark shows a strong, comparable benefit.
 - In the absence of strong measurement evidence, do not touch observable behavior.
 - Use `scripts/bench-core.sh` as the public regression benchmark.
+- `scripts/bench-core.sh` uses the repository `workdir/` fixture by default.
 - For deeper profiling, prefer temporary local scripts or manual measurements rather than adding permanent helper scripts.
 - Keep explicit `llama-server` slot/cache management out of the core runtime unless benchmarks justify it.
 

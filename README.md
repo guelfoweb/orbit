@@ -171,7 +171,7 @@ Then start the server with MTP:
 scripts/gemma4-12b-server.sh start --mtp
 ```
 
-See [MTP speculative decoding](PERFORMANCE.md#mtp-speculative-decoding)
+See [MTP speculative decoding](docs/PERFORMANCE.md#mtp-speculative-decoding)
 for the tested fork/branch and benchmark notes.
 
 Override the detected paths if needed:
@@ -362,9 +362,9 @@ CLI flags override config values.
 python3 -m unittest discover -s tests -q
 ```
 
-Manual regression prompts are kept in [PROMPTS.md](PROMPTS.md).
+Manual regression prompts are kept in [docs/PROMPTS.md](docs/PROMPTS.md).
 
 The public regression benchmark is available as `scripts/bench-core.sh`.
 It uses the repository `workdir/` fixture by default.
 
-Performance design notes are kept in [PERFORMANCE.md](PERFORMANCE.md).
+Performance design notes are kept in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
