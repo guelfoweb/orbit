@@ -17,7 +17,7 @@ MAX_MAX_TOKENS = 4096
 
 def help_text() -> str:
     commands = [
-        ("/compact [tools]", "Compact conversation memory or old tool results."),
+        ("/compact [tools]", "Compact memory; use tools for old tool results."),
         ("/continue", "Continue the last answer if it reached max_tokens."),
         ("/health", "Check llama-server health."),
         ("/help", "Show this help."),
@@ -25,7 +25,7 @@ def help_text() -> str:
         ("/reset", "Clear current conversation and saved session."),
         ("/sessions clear", "Delete all saved sessions for this workdir."),
         ("/status [ctx]", "Show runtime status or estimated context usage."),
-        ("/tools [spec]", "Show or set tools: off, on, files, edit, web, shell, shell-full."),
+        ("/tools [off|on]", "Show or set shell tool access."),
         ("/exit", "Exit interactive mode."),
     ]
     width = max(len(command) for command, _ in commands) + 2
@@ -63,11 +63,8 @@ def tools_text(current: ToolSpec | None = None) -> str:
     lines.extend(
         [
             "Use:",
-            "  /tools files = read/inspect local files",
-            "  /tools edit  = create/modify/delete files or directories",
-            "  /tools web   = search/fetch URLs",
-            "  /tools shell = read-only local/system commands",
-            "  /tools shell-full = DANGEROUS unrestricted local shell",
+            "  /tools off = chat only",
+            "  /tools on  = unrestricted local shell for files, web, edits, system, and automation",
         ]
     )
     return "\n".join(lines)
@@ -105,8 +102,7 @@ def runtime_status(
         "Tools",
         "-------",
         f"tools_mode: {_format_tools_mode(tools_mode)}",
-        f"tools_llama_server: {_format_server_tools(backend)}",
-        f"tools_orbit_only: {', '.join(_orbit_only_tool_names(_server_tool_names(backend))) or 'none'}",
+        f"model_tools: {', '.join(tool_names())}",
         "",
         "Memory",
         "-------",
@@ -211,11 +207,6 @@ def _format_bytes(value: int | None) -> str:
     return f"{value} B"
 
 
-def _format_server_tools(backend: LlamaServerBackend) -> str:
-    names = _server_tool_names(backend)
-    return ", ".join(names) if names else "unavailable"
-
-
 def _server_tool_names(backend: LlamaServerBackend) -> list[str]:
     names = []
     for item in backend.server_tools():
@@ -223,12 +214,3 @@ def _server_tool_names(backend: LlamaServerBackend) -> list[str]:
         if isinstance(name, str) and name:
             names.append(name)
     return sorted(names)
-
-
-def _orbit_only_tool_names(server_tools: list[str]) -> list[str]:
-    hidden = set(server_tools)
-    if "exec_shell_command" in server_tools:
-        hidden.update({"stat_path"})
-    if "edit_file" in server_tools or "apply_diff" in server_tools:
-        hidden.update({"append_file", "replace_in_file"})
-    return [name for name in tool_names() if name not in hidden]

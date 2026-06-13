@@ -20,15 +20,22 @@ from orbit.runtime.final_policy import (
 
 class FinalPolicyTests(unittest.TestCase):
     def test_list_like_policy_uses_compact_names_instruction(self) -> None:
-        messages = [{"role": "tool", "name": "list_files", "content": "a\nb"}]
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "exec_shell_full_command", "arguments": {"command": "ls -F"}}}],
+            },
+            {"role": "tool", "name": "exec_shell_full_command", "content": "a\nb"},
+        ]
 
         policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
 
         self.assertEqual(policy.max_tokens, 96)
         self.assertIn("Return only the listed names", policy.messages[-1]["content"])
 
-    def test_fetch_policy_caps_tokens_and_allows_length_retry_when_not_streamed(self) -> None:
-        messages = [{"role": "tool", "name": "fetch_url", "content": "content"}]
+    def test_html_cleaned_policy_caps_tokens_and_allows_length_retry_when_not_streamed(self) -> None:
+        messages = [{"role": "tool", "name": "exec_shell_full_command", "content": "shell_output_html_cleaned: true\ntext:\ncontent"}]
 
         policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
 
@@ -37,8 +44,8 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertTrue(policy.web_fetch_result)
         self.assertIn("Write exactly two concise bullets", policy.messages[-1]["content"])
 
-    def test_fetch_policy_disables_length_retry_when_streamed(self) -> None:
-        messages = [{"role": "tool", "name": "fetch_url", "content": "content"}]
+    def test_html_cleaned_policy_disables_length_retry_when_streamed(self) -> None:
+        messages = [{"role": "tool", "name": "exec_shell_full_command", "content": "shell_output_html_cleaned: true\ntext:\ncontent"}]
 
         policy = build_final_tool_policy(messages, max_tokens=512, streamed=True)
 
@@ -52,13 +59,32 @@ class FinalPolicyTests(unittest.TestCase):
                 "tool_calls": [
                     {
                         "function": {
-                            "name": "exec_shell_command",
+                            "name": "exec_shell_full_command",
                             "arguments": {"command": "ls -F"},
                         }
                     }
                 ],
             },
-            {"role": "tool", "name": "exec_shell_command", "content": "a\nb"},
+            {"role": "tool", "name": "exec_shell_full_command", "content": "a\nb"},
+        ]
+
+        self.assertTrue(has_list_like_tool_result(messages))
+
+    def test_shell_list_command_is_detected_with_serialized_arguments(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": '{"command":"ls -F"}',
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "name": "exec_shell_full_command", "content": "a\nb"},
         ]
 
         self.assertTrue(has_list_like_tool_result(messages))
@@ -72,14 +98,6 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("up to six evidence-based findings", policy.messages[-1]["content"])
         self.assertIn("practical exploit impact", policy.messages[-1]["content"])
         self.assertIn("Do not include generic methodology", policy.messages[-1]["content"])
-
-    def test_safe_shell_policy_keeps_system_output_instruction(self) -> None:
-        messages = [{"role": "tool", "name": "exec_shell_command", "content": "system output"}]
-
-        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
-
-        self.assertIn("Use only the command output", policy.messages[-1]["content"])
-        self.assertNotIn("shell-full output", policy.messages[-1]["content"])
 
     def test_final_retry_reason_detects_raw_tool_call(self) -> None:
         result = ChatResult(

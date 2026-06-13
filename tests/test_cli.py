@@ -53,8 +53,10 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         self.assertIn("tools: off", completed.stdout)
-        self.assertIn("/tools files = read/inspect local files", completed.stdout)
-        self.assertIn("/tools web   = search/fetch URLs", completed.stdout)
+        self.assertIn("/tools off = chat only", completed.stdout)
+        self.assertIn("/tools on  = unrestricted local shell", completed.stdout)
+        self.assertNotIn("/tools files", completed.stdout)
+        self.assertNotIn("/tools web", completed.stdout)
         self.assertNotIn("/tools time", completed.stdout)
         self.assertNotIn("Groups:", completed.stdout)
         self.assertNotIn("Single tools:", completed.stdout)

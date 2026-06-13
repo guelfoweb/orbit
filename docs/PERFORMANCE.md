@@ -153,36 +153,29 @@ profile. MTP itself remains optional and experimental.
 Orbit starts with tools disabled.
 
 This is a performance choice as much as a safety choice. When tools are off,
-Orbit avoids sending tool schemas and skips the tool loop, reducing new tokens
-introduced during prefill. The user explicitly enables only the groups needed
-for the current task.
+Orbit avoids sending the shell tool schema and skips the tool loop, reducing new
+tokens introduced during prefill. The user explicitly enables tools only when a
+task needs local files, URLs, editing, system inspection, or automation.
 
-Users enable tools by group:
+Users enable or disable the shell tool:
 
 ```text
-/tools files
-/tools edit
-/tools web
-/tools shell
-/tools files,web
+/tools off
 /tools on
 ```
 
-This keeps the model from seeing unnecessary tools on ordinary chat turns.
+`/tools on` exposes only `exec_shell_full_command`.
 
 The main benefit is not just safety. It also reduces ambiguity and token cost.
-A smaller tool surface makes it less likely that the model chooses the wrong
-tool, enters a tool loop, or spends extra tokens deciding among irrelevant
-capabilities.
+A single tool surface makes it less likely that the model chooses between
+irrelevant capabilities or spends extra tokens deciding among duplicate tools.
 
 In practical terms, tools off means no tool schemas are sent to the model for
 ordinary chat. This directly reduces prompt size and prefill work.
 
-`shell-full` is intentionally excluded from normal `on` mode. It is a dangerous
-lab mode for unrestricted shell workflows such as reverse engineering,
-malware-style static analysis, and custom local tooling. It can be powerful, but
-it is also higher-risk and usually more expensive because it may need multiple
-tool rounds.
+The shell tool is unrestricted and therefore remains disabled by default. It can
+be powerful, but it is also higher-risk and can be more expensive because it may
+need multiple command rounds.
 
 ## Model-driven routing
 
@@ -208,7 +201,7 @@ summarize https://example.com
 
 Orbit still validates the selected route and only exposes tools allowed by the current `/tools` mode.
 
-## Route completeness
+## Command completeness
 
 A useful route is not only the route label. The best case is:
 
@@ -219,7 +212,7 @@ route + tool + arguments
 For example:
 
 ```text
-{"_route":"FILESYSTEM","tool":"list_files","path":"."}
+{"command":"find . -maxdepth 2 -print"}
 ```
 
 This is the case that produced the measured improvement:
@@ -312,11 +305,10 @@ Orbit avoids silently injecting large data into the model.
 
 Important boundaries:
 
-- `read_file` reads UTF-8 text/source files only.
-- Complete file reads are bounded.
-- Larger files use explicit chunks.
-- Fetched web pages are extracted to text and chunked.
-- Binary files, PDFs, archives, images, and audio are rejected by `read_file`.
+- Shell execution is bounded by timeout and output-size limits.
+- `cat` on large UTF-8 text/source files is converted into a bounded structured excerpt.
+- HTML output from commands such as `curl` is converted to readable text before reinjection.
+- Binary files, PDFs, archives, images, and audio are not parsed by the internal text reader.
 
 Long inputs are handled through real model-visible chunks, not local deterministic summaries.
 
@@ -326,37 +318,32 @@ slower if the active context is dominated by tool results or long assistant
 answers. This is why Orbit exposes context status and provides explicit
 compaction commands instead of hiding context growth.
 
-## File chunking
+## Large file handling
 
-For medium and large text/source files, `read_file` returns chunk metadata:
+For larger text/source files, `cat` output can be replaced by structured metadata:
 
 ```text
 path: chat.py
-chunk_index: 0
-total_chunks: 5
-chars: 0-6000 of 28134
+large_file_excerpt: true
+chars: 0-500 of 28134
 content:
 ...
 ```
 
-This gives the model enough real content to analyze while making the remaining available context explicit.
-
-Chunk reads are bounded per turn. This prevents accidental long loops while still letting the model request more content when needed.
+This gives the model real content without injecting the full file into the active context.
 
 ## Web content handling
 
-`fetch_url` does not return raw HTML.
+Orbit no longer exposes a dedicated web fetch tool. When the model uses shell
+commands such as `curl`, HTML output can be post-processed into readable text.
 
-It applies:
+The runtime applies:
 
-- explicit `http`/`https` only
-- browser-like user-agent
-- content-type checks
-- bounded download size
 - conservative HTML-to-text extraction
-- chunk metadata for long pages
+- bounded reinjection
 
-Long web documents are processed progressively. Orbit does not save fetched pages into the workdir and does not pretend that the first chunk represents the full document.
+Orbit does not save fetched pages into the workdir and does not pretend that a
+bounded shell result represents the full document.
 
 ## Tool result compactness
 
@@ -364,10 +351,9 @@ Tool results are kept compact and structured.
 
 Examples:
 
-- `search_web` returns bounded title, URL, and snippet.
-- `list_files` returns bounded directory entries.
-- `exec_shell_command` output is bounded.
-- `read_file` provides chunk metadata and real text.
+- shell output is bounded
+- large `cat` output becomes a structured excerpt
+- HTML output becomes readable text
 
 Orbit does not synthesize tool results locally. It only bounds and structures them before passing them to the model.
 
@@ -394,17 +380,15 @@ Controls include:
 
 - maximum tool rounds per task
 - repeated tool-call detection
-- chunk-read budget
-- fetch chunk budget
 - timeout enforcement
 - unsupported route handling
 
 When a loop limit is reached, Orbit moves to the final inference using the content already available.
 
-Most tool groups use tight round limits. `shell-full` has a larger explicit
-budget because lab analysis may legitimately require sequential commands such
-as inspecting source, grepping indicators, checking tool availability, or
-running local analyzers. Repeated equivalent calls are still detected.
+The shell tool has an explicit round budget because lab analysis may
+legitimately require sequential commands such as inspecting source, grepping
+indicators, checking tool availability, or running local analyzers. Repeated
+equivalent calls are still detected.
 
 ## Session memory
 
@@ -492,8 +476,8 @@ Orbit avoids optimizations that would make behavior brittle:
 - no generic browser tool
 - no silent local summarization of long text
 
-Broad shell access exists only as explicit `shell-full` mode and should be used
-in isolated lab workdirs.
+Broad shell access exists only after `/tools on` and should be used in isolated
+lab workdirs.
 
 The runtime can enforce boundaries, but the model remains responsible for reasoning, tool selection, and final answers.
 

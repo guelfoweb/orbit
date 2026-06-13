@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
@@ -17,7 +17,7 @@ from orbit.terminal.repl_input import clear_input_echo, read_prompt_input, repla
 from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
-from orbit.terminal.tool_events import format_tool_result_event
+from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
 from orbit.terminal.theme import danger, dim
 
@@ -32,6 +32,7 @@ class Repl:
     prompt_tokens_per_second: float | None = None
     can_continue: bool = False
     tools_mode: ToolSpec | None = None
+    queued_prompts: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.tools_mode is None:
@@ -48,7 +49,7 @@ class Repl:
                 print(dim(line))
         while True:
             try:
-                prompt = read_prompt_input().strip()
+                prompt = self._read_next_prompt().strip()
             except EOFError:
                 self._save_history()
                 print()
@@ -81,6 +82,11 @@ class Repl:
                 self.history.save()
             self._ask(prompt)
 
+    def _read_next_prompt(self) -> str:
+        if self.queued_prompts:
+            return self.queued_prompts.pop(0)
+        return read_prompt_input()
+
     def _ask(self, prompt: str) -> None:
         renderer = StreamRenderer(
             prefill_estimate_seconds=estimate_prefill_seconds(
@@ -103,9 +109,9 @@ class Repl:
                     workdir=self.config.workdir,
                     allowed_tool_names=allowed_tool_names_for_spec(self.tools_mode or "off"),
                     on_final_delta=renderer.write,
-                    on_tool_call=lambda name, args: renderer.event(f"{name} {args}", restart_timer=False),
-                    on_tool_result=lambda name, chars, source: renderer.event(
-                        format_tool_result_event(name, chars, source),
+                    on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
+                    on_tool_result=lambda name, chars, source, content: renderer.event(
+                        format_tool_result_event(name, chars, source, content),
                         trailing_blank_line=True,
                     ),
                     on_model_step=self._record_model_step,
@@ -221,11 +227,11 @@ class Repl:
         except ValueError:
             return f"error: usage: /tools [{USAGE}]"
         if self.tools_mode:
-            if "shell-full" in self.tools_mode.split(","):
+            if self.tools_mode == "on":
                 return (
                     f"tools: {self.tools_mode}\n"
                     + danger(
-                        "warning: shell-full is unrestricted. Commands may read, modify, delete files, execute programs, or access network. "
+                        "warning: tools on gives the model unrestricted local shell access. Commands may read, modify, delete files, execute programs, or access network. "
                         "Use only in an isolated lab."
                     )
                 )

@@ -1,7 +1,28 @@
 from __future__ import annotations
 
+import os
+import platform
+from pathlib import Path
+
 from orbit.backend.base import Message
 from orbit.runtime.media import AudioInput, ImageInput
+
+
+def _detect_os() -> str:
+    name = platform.system().lower()
+    if name == "darwin":
+        return "macos"
+    if name in {"linux", "windows"}:
+        return name
+    return name or "unknown"
+
+
+def _detect_shell() -> str:
+    if _detect_os() == "windows":
+        comspec = os.environ.get("COMSPEC")
+        return Path(comspec).name if comspec else "powershell"
+    shell = os.environ.get("SHELL")
+    return Path(shell).name if shell else "sh"
 
 
 CHAT_SYSTEM_PROMPT = (
@@ -12,56 +33,30 @@ CHAT_SYSTEM_PROMPT = (
     "Do not emit route JSON or raw tool-call syntax."
 )
 MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
-ROUTE_SYSTEM_PROMPT = """Classify the latest user request for Orbit. Return only one JSON object.
+_COMMAND_SYSTEM_TEMPLATE = """Answer normally unless shell is needed.
+Shell tasks: files/edit/create/append/delete, system, URLs/web/search/fetch, execution, analysis.
+Return valid one-line JSON only:
 
-{"_route":"CHAT"}
-{"_route":"FILESYSTEM","tool":"list_files|read_file|grep_search|file_glob_search|exec_shell_command|exec_shell_full_command|get_datetime"}
-{"_route":"FILE_EDIT","tool":"write_file|edit_file|apply_diff|make_directory|delete_path"}
-{"_route":"WEB","tool":"search_web|fetch_url"}
-{"_route":"MEDIA"}
+{{"command":"..."}}
 
-Use CHAT for conversation, explanation, opinion, writing, or general knowledge.
-Use CHAT for follow-up questions about previous answers or tool results unless the user explicitly asks for a new local/web operation.
-When route, tool, and arguments are obvious, return them together in the first JSON object.
-Common args: path, url, query, pattern, command.
-Copy paths and URLs exactly from the user prompt. Never normalize, correct, or rewrite them.
-For file_glob_search, use one simple glob only; no brace expansion. Use list_files for multiple name alternatives.
-If the user asks to run/execute a normal safe shell command, choose FILESYSTEM/exec_shell_command.
-If shell-full is available and the user requests unrestricted shell, malware tooling, decompilation, pipes, redirects, or arbitrary commands, choose FILESYSTEM/exec_shell_full_command.
-For shell-full analysis requests, choose a command that inspects content, strings, or source evidence; do not stop at ls/file metadata.
-For content-based edits without explicit line numbers, return FILE_EDIT with tools ["read_file","edit_file"].
-For exec_shell_full_command, any path containing whitespace MUST be one double-quoted shell argument.
-For exec_shell_full_command, use one single-line command string only; no comments or script blocks.
-For external tools, verify availability with command -v when needed.
-Example command arg: strings -a samples/suspicious_dropper_demo.js | grep -E "http|https"
-Requests about specs/specifications/configuration of this/local computer, PC, or machine use FILESYSTEM/exec_shell_command.
-Requests about this/local PC hardware or resources (CPU, cores, RAM, memory, disk, OS, uptime) use FILESYSTEM/exec_shell_command.
-For this/local computer specs, do not ask for photos, brand, or model; use local system tools.
-Current date/time requests use FILESYSTEM/get_datetime.
-For exec_shell_command, choose enough allowed read-only commands to answer the request; use a short && chain when one command would be incomplete. No pipes, redirects, or grep filters. For line counts use wc -l file, never wc -l < file.
-Do not convert shell commands into FILE_EDIT tools; execution guardrails decide if they are allowed.
-For explicit http/https URLs return {"_route":"WEB","tool":"fetch_url","url":"<url>"}.
-Examples:
-list all files in this workdir -> {"_route":"FILESYSTEM","tool":"list_files","path":"."}
-read agent.py -> {"_route":"FILESYSTEM","tool":"read_file","path":"agent.py"}
-replace beta with BETA in note.txt -> {"_route":"FILE_EDIT","tools":["read_file","edit_file"],"path":"note.txt"}
-summarize https://example.com -> {"_route":"WEB","tool":"fetch_url","url":"https://example.com"}
-search online for Dante Alighieri -> {"_route":"WEB","tool":"search_web","query":"Dante Alighieri"}
-Do not perform the task. Classify only."""
+Environment: OS={os_name}; shell={shell_name}.
+
+Use native commands in workdir. Use curl for URLs. Quote spaced paths.
+
+Do not claim no access for local/system/web.
+Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
+
+Example:
+specs of this computer -> {{"command":"uname -a; lscpu; free -h; df -h"}}
+
+For analysis, prefer content, source, binaries, strings, logs, archives, or fetched data, not metadata."""
+ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shell_name=_detect_shell())
 TOOL_CALL_SYSTEM_PROMPT = (
-    "When tools are available, call exactly one needed tool and output no prose. "
-    "Available tools have already been enabled by the user for this turn. "
-    "No repeated equivalent tool calls. "
-    "Tool arguments must be valid compact JSON. "
-    "No comments, no multi-line scripts, no literal newlines inside string values. "
-    "For shell commands, use one single-line command string only. "
-    "For safe shell, no pipes or redirects; for line counts use wc -l file, not wc -l < file. "
-    "For external tools, verify availability with command -v when needed. "
-    "For shell commands, any path containing whitespace MUST be one double-quoted shell argument. "
-    "Example: strings -a samples/suspicious_dropper_demo.js | grep -E \"http|https\". "
-    "Use read_file before edit_file when context is needed. "
-    "For edit_file append at end, use JSON like {\"path\":\"file.txt\",\"changes\":[{\"mode\":\"append\",\"line_start\":-1,\"line_end\":-1,\"content\":\"text\"}]}. "
-    "Use edit_file/apply_diff, not exec_shell_command, for edits."
+    "Call exec_shell_full_command exactly once and output no prose. "
+    "Use one compact one-line shell command. "
+    "Use curl for URLs when content is needed. "
+    "Quote paths containing spaces. "
+    "For analysis, collect direct evidence from content/source/strings/logs/archives/fetched data."
 )
 TOOL_CALL_JSON_RETRY_PROMPT = (
     "The previous tool call had invalid JSON arguments. "
@@ -76,48 +71,7 @@ FINAL_FROM_TOOL_SYSTEM_PROMPT = (
     "If a tool result is present, do not claim lack of access. "
     "If the tool result is an error, report the error briefly."
 )
-DEFAULT_SYSTEM_PROMPT = """Concise local assistant.
-
-Answer normally for knowledge, explanation, opinion, writing, and general tasks.
-
-If a tool is needed, output only one route JSON:
-{"_route":"FILESYSTEM","tool":"<tool>"}
-{"_route":"FILE_EDIT","tool":"<tool>"}
-{"_route":"WEB","tool":"<tool>"}
-{"_route":"MEDIA"}
-If arguments are clear from the user prompt, include them in the same JSON.
-Common args: path, pattern, command, url, query, content.
-
-Routes:
-FILESYSTEM: list_files, read_file, grep_search, file_glob_search, exec_shell_command, exec_shell_full_command, get_datetime
-FILE_EDIT: write_file, edit_file, apply_diff, make_directory, delete_path
-WEB: search_web, fetch_url
-
-Rules:
-- Pick exactly one valid tool.
-- Local path => local file request. Never answer file contents from memory.
-- Create/modify/delete local file or directory => FILE_EDIT.
-- list_files: list files/directories in a directory.
-- read_file: read/review/summarize named files.
-- grep_search: search exact text/patterns.
-- file_glob_search: one simple glob only; no brace expansion. Use list_files for multiple name alternatives.
-- exec_shell_command: run safe allowlisted commands/list/stat/wc/df.
-- For safe shell line counts use wc -l file, never wc -l < file.
-- exec_shell_full_command: dangerous unrestricted local shell when explicitly available.
-- get_datetime: current date/time.
-- If the user asks to run/execute a normal safe shell command, use exec_shell_command.
-- If shell-full is available and the user requests unrestricted shell, malware tooling, decompilation, pipes, redirects, or arbitrary commands, use exec_shell_full_command.
-- Do not convert shell commands into FILE_EDIT tools.
-- edit_file: modify files.
-- Content-based edits without explicit line numbers need read_file and edit_file.
-- apply_diff: only when the user provides actual diff text.
-- Described patch/change requests without diff text => edit_file.
-- Never edit via shell.
-- WEB: web search or URL.
-- Explicit http/https URL => WEB with fetch_url. Do not say you lack internet.
-- Attached image/audio => answer normally, not MEDIA.
-- After tool success, answer from result.
-- Never emit raw tool-call syntax."""
+DEFAULT_SYSTEM_PROMPT = ROUTE_SYSTEM_PROMPT
 TOOL_SYSTEM_PROMPT = TOOL_CALL_SYSTEM_PROMPT
 
 
@@ -144,7 +98,7 @@ def with_media_system_prompt(messages: list[Message]) -> list[Message]:
     return [{"role": "system", "content": MEDIA_SYSTEM_PROMPT}, *copied]
 
 
-def with_route_system_prompt(messages: list[Message]) -> list[Message]:
+def with_command_system_prompt(messages: list[Message]) -> list[Message]:
     copied = [dict(message) for message in messages]
     if copied and copied[0].get("role") == "system":
         copied[0]["content"] = ROUTE_SYSTEM_PROMPT

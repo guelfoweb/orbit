@@ -21,12 +21,10 @@ class ToolLoopStateTests(unittest.TestCase):
         state.increment_round()
         self.assertTrue(state.round_limit_reached())
 
-    def test_edit_tools_allow_two_rounds(self) -> None:
+    def test_removed_edit_tools_use_default_round_limit(self) -> None:
         state = ToolLoopState(("edit_file",))
 
-        self.assertEqual(state.round_limit, 2)
-        state.increment_round()
-        self.assertFalse(state.round_limit_reached())
+        self.assertEqual(state.round_limit, 1)
         state.increment_round()
         self.assertTrue(state.round_limit_reached())
 

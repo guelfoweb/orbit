@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from orbit.runtime.tool_calls import tool_call_signature
 
 
-EDIT_TOOL_ROUND_LIMIT = 2
 SHELL_FULL_ROUND_LIMIT = 4
 DEFAULT_TOOL_ROUND_LIMIT = 1
 
@@ -13,18 +12,15 @@ DEFAULT_TOOL_ROUND_LIMIT = 1
 @dataclass
 class ToolLoopState:
     allowed_tool_names: tuple[str, ...]
-    chunk_budget: dict[str, int] = field(default_factory=lambda: {"read_file_chunks": 0, "fetch_url_chunks": 0})
+    chunk_budget: dict[str, int] = field(default_factory=dict)
     seen_tool_calls: set[tuple[str, str]] = field(default_factory=set)
     tool_rounds: int = 0
     used_tool_call_prompt: bool = False
 
     @property
     def round_limit(self) -> int:
-        edit_tools = {"write_file", "edit_file", "apply_diff", "make_directory", "delete_path"}
         if "exec_shell_full_command" in self.allowed_tool_names:
             return SHELL_FULL_ROUND_LIMIT
-        if edit_tools.intersection(self.allowed_tool_names):
-            return EDIT_TOOL_ROUND_LIMIT
         return DEFAULT_TOOL_ROUND_LIMIT
 
     def increment_round(self) -> None:

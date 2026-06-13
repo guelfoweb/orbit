@@ -51,7 +51,7 @@ class RuntimeTests(unittest.TestCase):
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "exec_shell_command",
+                            "name": "exec_shell_full_command",
                             "arguments": {"command": "wc -l text/summary.txt"},
                         },
                     }
@@ -60,7 +60,7 @@ class RuntimeTests(unittest.TestCase):
             {
                 "role": "tool",
                 "tool_call_id": "call-1",
-                "name": "exec_shell_command",
+                "name": "exec_shell_full_command",
                 "content": "2 text/summary.txt",
             },
         ]
@@ -76,9 +76,9 @@ class RuntimeTests(unittest.TestCase):
                     {
                         "id": "call-1",
                         "type": "function",
-                        "name": "exec_shell_command",
+                        "name": "exec_shell_full_command",
                         "function": {
-                            "name": "exec_shell_command",
+                            "name": "exec_shell_full_command",
                             "arguments": {"command": "ls -F"},
                         },
                     }
@@ -87,7 +87,7 @@ class RuntimeTests(unittest.TestCase):
             {
                 "role": "tool",
                 "tool_call_id": "call-1",
-                "name": "exec_shell_command",
+                "name": "exec_shell_full_command",
                 "content": "README.md\nsrc/",
             },
         ]
@@ -187,7 +187,7 @@ class RuntimeTests(unittest.TestCase):
 
 
 class ToolCallingBackend:
-    def __init__(self, tool_name: str = "list_files", arguments: str = "{\"path\":\".\"}") -> None:
+    def __init__(self, tool_name: str = "exec_shell_full_command", arguments: str = "{\"command\":\"ls -F\"}") -> None:
         self.messages: list[Message] = []
         self.calls = 0
         self.tool_name = tool_name
@@ -227,6 +227,12 @@ class ToolCallingBackend:
         )
 
 
+def _last_tool_message(runtime: ChatRuntime) -> Message:
+    tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+    assert tool_messages
+    return tool_messages[-1]
+
+
 class ToolRuntimeTests(unittest.TestCase):
     def test_ask_auto_respects_allowed_tool_subset(self) -> None:
         class FilesystemRouteBackend:
@@ -236,7 +242,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.tools_seen.append(tools)
                 return ChatResult(
-                    content='{"_route":"FILESYSTEM","tool":"read_file","path":"README.md"}',
+                    content='{"command":"cat README.md"}',
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -258,7 +264,7 @@ class ToolRuntimeTests(unittest.TestCase):
             allowed_tool_names=("search_web", "fetch_url"),
         )
 
-        self.assertEqual(result.finish_reason, "unsupported_route")
+        self.assertEqual(result.finish_reason, "unsupported_command")
         self.assertIn("no suitable tool", result.content)
         self.assertEqual(backend.tools_seen, [None])
 
@@ -266,7 +272,7 @@ class ToolRuntimeTests(unittest.TestCase):
         class FileEditRouteBackend:
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 return ChatResult(
-                    content='{"_route":"FILE_EDIT","tool":"write_file","path":"note.txt","content":"hello"}',
+                    content='{"command":"printf hello > note.txt"}',
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -287,10 +293,10 @@ class ToolRuntimeTests(unittest.TestCase):
             allowed_tool_names=("list_files", "read_file", "stat_path", "file_glob_search", "grep_search"),
         )
 
-        self.assertEqual(result.finish_reason, "unsupported_route")
+        self.assertEqual(result.finish_reason, "unsupported_command")
         self.assertIn("no suitable tool", result.content)
 
-    def test_ask_auto_allows_file_edit_route_when_shell_full_is_enabled(self) -> None:
+    def test_ask_auto_allows_file_edit_command_when_shell_full_is_enabled(self) -> None:
         class FileEditShellFullBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -300,7 +306,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.calls += 1
                 self.tools_seen.append(tools)
                 if self.calls == 1:
-                    content = '{"_route":"FILE_EDIT"}'
+                    content = '{"command":"mkdir -p lab && rmdir lab"}'
                 else:
                     content = "use shell-full"
                 return ChatResult(
@@ -327,10 +333,50 @@ class ToolRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(result.content, "use shell-full")
-        tool_names = [tool["function"]["name"] for tool in backend.tools_seen[1]]  # type: ignore[index]
-        self.assertEqual(tool_names, ["exec_shell_full_command"])
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(tool_messages[-1]["name"], "exec_shell_full_command")
 
-    def test_ask_auto_allows_datetime_tool_when_time_group_is_enabled(self) -> None:
+    def test_ask_auto_allows_web_command_when_shell_full_is_enabled(self) -> None:
+        class WebShellFullBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    content = '{"command":"curl https://example.com"}'
+                else:
+                    content = "use shell-full"
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=3,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = WebShellFullBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto(
+            "read https://example.com",
+            temperature=0,
+            max_tokens=32,
+            workdir=Path("."),
+            allowed_tool_names=("exec_shell_full_command",),
+        )
+
+        self.assertEqual(result.content, "use shell-full")
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(tool_messages[-1]["name"], "exec_shell_full_command")
+
+    def test_ask_auto_uses_shell_command_for_datetime_when_tools_are_enabled(self) -> None:
         class TimeRouteBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -355,7 +401,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.calls += 1
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM"}',
+                        content='{"command":"printf ok"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -386,12 +432,11 @@ class ToolRuntimeTests(unittest.TestCase):
             temperature=0,
             max_tokens=32,
             workdir=Path("."),
-            allowed_tool_names=("get_datetime",),
+            allowed_tool_names=("exec_shell_full_command",),
         )
 
-        tool_names = [tool["function"]["name"] for tool in backend.tools_seen]
         self.assertEqual(result.content, "time answer")
-        self.assertEqual(tool_names, ["get_datetime"])
+        self.assertIsNone(backend.tools_seen)
 
     def test_ask_auto_returns_chat_without_tools(self) -> None:
         class ChatOnlyBackend:
@@ -402,7 +447,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.tools_seen.append(tools)
                 self.messages_seen.append(messages)
-                content = '{"_route":"CHAT"}' if len(self.messages_seen) == 1 else "chat answer"
+                content = 'chat answer' if len(self.messages_seen) == 1 else "chat answer"
                 return ChatResult(
                     content=content,
                     model="fake",
@@ -421,9 +466,8 @@ class ToolRuntimeTests(unittest.TestCase):
         result = runtime.ask_auto("hello", temperature=0, max_tokens=32, workdir=Path("."))
 
         self.assertEqual(result.content, "chat answer")
-        self.assertEqual(backend.tools_seen, [None, None])
-        self.assertIn("Classify the latest user request", backend.messages_seen[0][0]["content"])
-        self.assertIn("Do not emit route JSON", backend.messages_seen[1][0]["content"])
+        self.assertEqual(backend.tools_seen, [None])
+        self.assertIn('{"command":"..."}', backend.messages_seen[0][0]["content"])
         self.assertEqual(runtime.messages[-1]["content"], "chat answer")
 
     def test_ask_auto_emits_short_probe_chat_response(self) -> None:
@@ -458,7 +502,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "chat answer")
         self.assertEqual(emitted, ["chat answer"])
-        self.assertEqual(backend.max_tokens_seen, [64])
+        self.assertEqual(backend.max_tokens_seen, [128])
         self.assertIsNone(backend.tools)
 
     def test_ask_auto_streams_full_answer_after_truncated_probe(self) -> None:
@@ -506,7 +550,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "full answer")
         self.assertEqual(emitted, ["full ", "answer"])
-        self.assertEqual(backend.chat_max_tokens, [64])
+        self.assertEqual(backend.chat_max_tokens, [128])
         self.assertEqual(backend.stream_max_tokens, [512])
 
     def test_ask_auto_retries_empty_chat_response_once(self) -> None:
@@ -516,19 +560,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
-                if self.calls == 1:
-                    return ChatResult(
-                        content='{"_route":"CHAT"}',
-                        model="fake",
-                        finish_reason="stop",
-                        tool_calls=[],
-                        prompt_tokens=3,
-                        completion_tokens=1,
-                        cached_tokens=0,
-                        prompt_tokens_per_second=None,
-                        generation_tokens_per_second=None,
-                    )
-                if self.calls == 2:
+                if self.calls in {1, 2}:
                     return ChatResult(
                         content="",
                         model="fake",
@@ -567,12 +599,8 @@ class ToolRuntimeTests(unittest.TestCase):
 
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
-                if self.calls == 1:
-                    content = '{"_route":"CHAT"}'
-                    completion_tokens = 1
-                else:
-                    content = ""
-                    completion_tokens = 0
+                content = ""
+                completion_tokens = 0
                 return ChatResult(
                     content=content,
                     model="fake",
@@ -604,11 +632,8 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.calls += 1
                 self.tools_seen.append(tools)
                 if self.calls == 1:
-                    content = '{"_route":"FILESYSTEM"}'
+                    content = '{"command":"printf ok"}'
                     completion_tokens = 7
-                elif self.calls in {2, 3}:
-                    content = ""
-                    completion_tokens = 0
                 else:
                     content = "fallback final answer"
                     completion_tokens = 3
@@ -630,13 +655,11 @@ class ToolRuntimeTests(unittest.TestCase):
         result = runtime.ask_auto("read a large file if present", temperature=0, max_tokens=64, workdir=Path("."))
 
         self.assertEqual(result.content, "fallback final answer")
-        self.assertEqual(backend.calls, 4)
+        self.assertEqual(backend.calls, 2)
         self.assertIsNone(backend.tools_seen[0])
-        self.assertIsNotNone(backend.tools_seen[1])
-        self.assertIsNotNone(backend.tools_seen[2])
-        self.assertIsNone(backend.tools_seen[3])
+        self.assertIsNone(backend.tools_seen[1])
 
-    def test_ask_auto_converts_generic_route_tool_call_inside_tool_loop(self) -> None:
+    def test_ask_auto_converts_generic_command_tool_call_inside_tool_loop(self) -> None:
         class GenericRouteToolCallBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -645,7 +668,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.calls += 1
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM"}',
+                        content='{"command":"printf ok"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -666,7 +689,7 @@ class ToolRuntimeTests(unittest.TestCase):
                                 "type": "function",
                                 "function": {
                                     "name": "call",
-                                    "arguments": '{"_route": "FILESYSTEM", "tool": "list_files"}',
+                                    "arguments": '{"command":"ls -F"}',
                                 },
                             }
                         ],
@@ -699,10 +722,9 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "listed files")
         tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
         self.assertEqual(len(tool_messages), 1)
-        self.assertEqual(tool_messages[0]["name"], "list_files")
-        self.assertIn("note.txt", tool_messages[0]["content"])
+        self.assertEqual(tool_messages[0]["name"], "exec_shell_full_command")
 
-    def test_ask_auto_routes_to_filesystem_tools(self) -> None:
+    def test_ask_auto_commands_to_filesystem_tools(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -713,7 +735,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM"}',
+                        content='{"command":"printf ok"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -763,10 +785,10 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "done")
         self.assertEqual(backend.tool_names_seen[0], ())
-        self.assertEqual(backend.tool_names_seen[1], ("list_files", "read_file", "exec_shell_command"))
-        self.assertNotIn('{"_route":"FILESYSTEM"}', [message.get("content") for message in runtime.messages])
+        self.assertEqual(backend.tool_names_seen[1], ())
+        self.assertNotIn('{"command":"printf ok"}', [message.get("content") for message in runtime.messages])
 
-    def test_ask_auto_allows_shell_full_after_generic_filesystem_route_when_enabled(self) -> None:
+    def test_ask_auto_allows_shell_full_after_generic_filesystem_command_when_enabled(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -777,7 +799,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM"}',
+                        content='{"command":"printf ok"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -831,9 +853,9 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "done")
         self.assertEqual(backend.tool_names_seen[0], ())
-        self.assertEqual(backend.tool_names_seen[1], ("exec_shell_full_command",))
+        self.assertEqual(backend.tool_names_seen[1], ())
 
-    def test_ask_auto_allows_shell_full_when_safe_shell_route_is_not_enabled(self) -> None:
+    def test_ask_auto_allows_shell_full_when_safe_shell_command_is_not_enabled(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -844,7 +866,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM","tool":"exec_shell_command"}',
+                        content='{"command":"printf ok"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -898,7 +920,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "done")
         self.assertEqual(backend.tool_names_seen[0], ())
-        self.assertEqual(backend.tool_names_seen[1], ("exec_shell_full_command",))
+        self.assertEqual(backend.tool_names_seen[1], ())
 
     def test_shell_full_analysis_metadata_only_command_gets_one_model_retry(self) -> None:
         class ShellFullAnalysisBackend:
@@ -913,7 +935,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.tools_seen.append(tools)
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM","tool":"exec_shell_full_command","command":"ls -R samples/"}',
+                        content='{"command":"ls -R samples/"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -1076,8 +1098,8 @@ class ToolRuntimeTests(unittest.TestCase):
         tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
         self.assertEqual(len(tool_messages), 2)
 
-    def test_tool_call_json_parse_error_retries_with_compact_json_instruction(self) -> None:
-        class JsonErrorBackend:
+    def test_complete_command_json_skips_tool_call_json_retry_round(self) -> None:
+        class CompleteCommandBackend:
             def __init__(self) -> None:
                 self.calls = 0
                 self.messages_seen: list[list[Message]] = []
@@ -1087,31 +1109,11 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.messages_seen.append(messages)
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM"}',
+                        content='{"command":"printf ok"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
                         prompt_tokens=5,
-                        completion_tokens=1,
-                        cached_tokens=0,
-                        prompt_tokens_per_second=None,
-                        generation_tokens_per_second=None,
-                    )
-                if self.calls == 2:
-                    raise RuntimeError("llama-server HTTP 500: Failed to parse tool call arguments as JSON")
-                if self.calls == 3:
-                    return ChatResult(
-                        content="",
-                        model="fake",
-                        finish_reason="tool_calls",
-                        tool_calls=[
-                            {
-                                "id": "call-1",
-                                "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"printf ok\"}"},
-                            }
-                        ],
-                        prompt_tokens=6,
                         completion_tokens=1,
                         cached_tokens=0,
                         prompt_tokens_per_second=None,
@@ -1130,7 +1132,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 )
 
         with tempfile.TemporaryDirectory() as tmp:
-            backend = JsonErrorBackend()
+            backend = CompleteCommandBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="route system")
 
             result = runtime.ask_auto(
@@ -1142,9 +1144,10 @@ class ToolRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages_seen[2][-1]["content"], TOOL_CALL_JSON_RETRY_PROMPT)
+        self.assertEqual(backend.calls, 2)
+        self.assertNotIn(TOOL_CALL_JSON_RETRY_PROMPT, [message.get("content") for messages in backend.messages_seen for message in messages])
 
-    def test_ask_auto_uses_preferred_route_tool_when_valid(self) -> None:
+    def test_ask_auto_uses_preferred_command_tool_when_valid(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -1155,7 +1158,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM","tool":"read_file"}',
+                        content='{"command":"cat note.txt"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -1174,7 +1177,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "read_file", "arguments": "{\"path\":\"note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=6,
@@ -1205,9 +1208,9 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "done")
         self.assertEqual(backend.tool_names_seen[0], ())
-        self.assertEqual(backend.tool_names_seen[1], ("read_file",))
+        self.assertEqual(backend.tool_names_seen[1], ())
 
-    def test_ask_auto_executes_route_json_with_arguments_without_tool_selection_round(self) -> None:
+    def test_ask_auto_executes_command_json_without_tool_selection_round(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -1218,7 +1221,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"_route":"FILESYSTEM","tool":"read_file","path":"note.txt"}',
+                        content='{"command":"cat note.txt"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -1253,7 +1256,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.tool_names_seen[0], ())
         self.assertEqual(backend.tool_names_seen[1], ())
 
-    def test_ask_auto_media_route_without_path_returns_clear_error(self) -> None:
+    def test_ask_auto_media_without_path_is_normal_chat_without_command_json(self) -> None:
         class MediaRouteBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -1261,7 +1264,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
                 return ChatResult(
-                    content='{"_route":"MEDIA"}',
+                    content='media requested',
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -1279,10 +1282,10 @@ class ToolRuntimeTests(unittest.TestCase):
 
             result = runtime.ask_auto("describe the image", temperature=0, max_tokens=32, workdir=workdir)
 
-        self.assertIn("no local image/audio path", result.content)
+        self.assertEqual(result.content, "media requested")
         self.assertEqual(backend.calls, 1)
 
-    def test_ask_auto_attaches_referenced_media_without_route(self) -> None:
+    def test_ask_auto_attaches_referenced_media_without_command_json(self) -> None:
         class DirectMediaBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -1335,9 +1338,9 @@ class ToolRuntimeTests(unittest.TestCase):
             result = runtime.ask_with_tools("list files", temperature=0, max_tokens=32, workdir=workdir)
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.calls, 2)
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("file.txt", backend.messages[-2]["content"])
+        self.assertEqual(backend.calls, 3)
+        tool_message = _last_tool_message(runtime)
+        self.assertIn("file.txt", tool_message["content"])
 
     def test_ask_with_tools_retries_empty_length_final_after_tool_result(self) -> None:
         class EmptyLengthFinalBackend:
@@ -1357,7 +1360,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"ls -l note.txt\"}"},
+                            "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"ls -l note.txt\"}"},
                             }
                         ],
                         prompt_tokens=10,
@@ -1401,53 +1404,53 @@ class ToolRuntimeTests(unittest.TestCase):
                 temperature=0,
                 max_tokens=32,
                 workdir=workdir,
-                tool_names=("exec_shell_command",),
+                tool_names=("exec_shell_full_command",),
             )
 
         self.assertEqual(result.content, "final from tool result")
         self.assertEqual(backend.calls, 3)
         self.assertIsNotNone(backend.tools_seen[0])
-        self.assertIsNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[1])
         self.assertIsNone(backend.tools_seen[2])
 
     def test_ask_with_tools_can_read_text_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello from file", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="read_file", arguments="{\"path\":\"note.txt\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("read note.txt", temperature=0, max_tokens=32, workdir=workdir)
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("hello from file", backend.messages[-2]["content"])
+        tool_message = _last_tool_message(runtime)
+        self.assertIn("hello from file", tool_message["content"])
 
     def test_ask_with_tools_can_stat_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="stat_path", arguments="{\"path\":\"note.txt\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"stat note.txt && wc -c note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("stat note.txt", temperature=0, max_tokens=32, workdir=workdir)
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("type: file", backend.messages[-2]["content"])
-        self.assertIn("size_bytes: 5", backend.messages[-2]["content"])
+        tool_message = _last_tool_message(runtime)
+        self.assertIn("note.txt", tool_message["content"])
+        self.assertIn("5 note.txt", tool_message["content"])
 
     def test_ask_with_tools_can_reinject_fetch_url_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            backend = ToolCallingBackend(tool_name="fetch_url", arguments="{\"url\":\"ftp://example.test\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"printf '<html><body>Hello web</body></html>'\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("fetch a URL", temperature=0, max_tokens=32, workdir=workdir)
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("http/https", backend.messages[-2]["content"])
+        tool_message = _last_tool_message(runtime)
+        self.assertIn("Hello web", tool_message["content"])
 
     def test_ask_with_tools_caps_fetch_url_final_answer(self) -> None:
         class FetchBackend:
@@ -1467,7 +1470,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "fetch_url", "arguments": "{\"url\":\"ftp://example.test\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"printf '<html><body>Hello web</body></html>'\"}"},
                             }
                         ],
                         prompt_tokens=10,
@@ -1496,11 +1499,11 @@ class ToolRuntimeTests(unittest.TestCase):
                 temperature=0,
                 max_tokens=512,
                 workdir=Path(tmp),
-                tool_names=("fetch_url",),
+                tool_names=("exec_shell_full_command",),
             )
 
         self.assertEqual(result.content, "short web synthesis")
-        self.assertEqual(backend.max_tokens_seen, [96, 72])
+        self.assertEqual(backend.max_tokens_seen, [96, 96, 72])
 
     def test_ask_with_tools_retries_raw_tool_call_in_final_answer(self) -> None:
         class RawToolCallFinalBackend:
@@ -1518,7 +1521,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"lscpu\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"lscpu\"}"},
                             }
                         ],
                         prompt_tokens=10,
@@ -1529,7 +1532,7 @@ class ToolRuntimeTests(unittest.TestCase):
                     )
                 if self.calls == 2:
                     return ChatResult(
-                        content='<|tool_call>call:exec_shell_command{"command":"grep cpu /proc/cpuinfo"}<tool_call|>',
+                        content='<|tool_call>call:exec_shell_full_command{"command":"grep cpu /proc/cpuinfo"}<tool_call|>',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -1560,14 +1563,13 @@ class ToolRuntimeTests(unittest.TestCase):
                 temperature=0,
                 max_tokens=512,
                 workdir=Path(tmp),
-                tool_names=("exec_shell_command",),
+                tool_names=("exec_shell_full_command",),
                 on_model_step=steps.append,
             )
 
         self.assertEqual(result.content, "CPU information from tool result")
-        self.assertEqual(backend.calls, 3)
-        self.assertEqual(steps[-1].phase, "final_from_tool_retry")
-        self.assertEqual(steps[-1].retry_reason, "raw_tool_call")
+        self.assertEqual(backend.calls, 4)
+        self.assertEqual(steps[-1].phase, "final_from_tool")
 
     def test_ask_with_tools_traces_tool_call_retry_in_final_answer(self) -> None:
         class ToolCallFinalBackend:
@@ -1585,7 +1587,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"pwd\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"pwd\"}"},
                             }
                         ],
                         prompt_tokens=10,
@@ -1603,7 +1605,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-2",
                                 "type": "function",
-                                "function": {"name": "exec_shell_command", "arguments": "{\"command\":\"ls\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"ls\"}"},
                             }
                         ],
                         prompt_tokens=20,
@@ -1633,19 +1635,18 @@ class ToolRuntimeTests(unittest.TestCase):
                 temperature=0,
                 max_tokens=512,
                 workdir=Path(tmp),
-                tool_names=("exec_shell_command",),
+                tool_names=("exec_shell_full_command",),
                 on_model_step=steps.append,
             )
 
         self.assertEqual(result.content, "final answer from first tool result")
-        self.assertEqual(backend.calls, 3)
-        self.assertEqual(steps[-1].phase, "final_from_tool_retry")
-        self.assertEqual(steps[-1].retry_reason, "tool_call_in_final")
+        self.assertEqual(backend.calls, 4)
+        self.assertEqual(steps[-1].phase, "final_from_tool")
 
     def test_final_from_tool_uses_final_prompt_not_tool_call_prompt(self) -> None:
         class PromptCaptureBackend(ToolCallingBackend):
             def __init__(self) -> None:
-                super().__init__(tool_name="read_file", arguments="{\"path\":\"note.txt\"}")
+                super().__init__(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
                 self.system_prompts: list[str] = []
 
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
@@ -1660,7 +1661,7 @@ class ToolRuntimeTests(unittest.TestCase):
             backend = PromptCaptureBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="system")
 
-            runtime.ask_with_tools("read note", temperature=0, max_tokens=32, workdir=workdir, tool_names=("read_file",))
+            runtime.ask_with_tools("read note", temperature=0, max_tokens=32, workdir=workdir, tool_names=("exec_shell_full_command",))
 
         self.assertEqual(backend.system_prompts[-1], FINAL_FROM_TOOL_SYSTEM_PROMPT)
         self.assertNotIn("When tools are available", backend.system_prompts[-1])
@@ -1668,7 +1669,7 @@ class ToolRuntimeTests(unittest.TestCase):
     def test_ask_with_tools_can_write_new_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            backend = ToolCallingBackend(tool_name="write_file", arguments="{\"path\":\"note.txt\",\"content\":\"hello\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"printf hello > note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("create note.txt", temperature=0, max_tokens=32, workdir=workdir)
@@ -1676,14 +1677,13 @@ class ToolRuntimeTests(unittest.TestCase):
             self.assertEqual((workdir / "note.txt").read_text(encoding="utf-8"), "hello")
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("created: true", backend.messages[-2]["content"])
+        self.assertEqual(_last_tool_message(runtime)["content"], "")
 
     def test_ask_with_tools_can_append_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("first\n", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="append_file", arguments="{\"path\":\"note.txt\",\"content\":\"second\\n\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"printf 'second\\n' >> note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("append note.txt", temperature=0, max_tokens=32, workdir=workdir)
@@ -1691,14 +1691,13 @@ class ToolRuntimeTests(unittest.TestCase):
             self.assertEqual((workdir / "note.txt").read_text(encoding="utf-8"), "first\nsecond\n")
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("appended: true", backend.messages[-2]["content"])
+        self.assertEqual(_last_tool_message(runtime)["content"], "")
 
     def test_ask_with_tools_can_replace_unique_text_in_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello old world\n", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="replace_in_file", arguments="{\"path\":\"note.txt\",\"old\":\"old\",\"new\":\"new\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"sed -i 's/old/new/' note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("replace old", temperature=0, max_tokens=32, workdir=workdir)
@@ -1706,21 +1705,21 @@ class ToolRuntimeTests(unittest.TestCase):
             self.assertEqual((workdir / "note.txt").read_text(encoding="utf-8"), "hello new world\n")
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("replaced: true", backend.messages[-2]["content"])
+        self.assertEqual(_last_tool_message(runtime)["content"], "")
 
     def test_ask_with_tools_can_read_file_chunk_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "large.txt").write_text("abcdef" * 50000, encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="read_file", arguments="{\"path\":\"large.txt\",\"chunk_index\":1,\"chunk_chars\":2}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat large.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("read chunk", temperature=0, max_tokens=32, workdir=workdir)
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(backend.messages[-2]["role"], "tool")
-        self.assertIn("chunk_index: 1", backend.messages[-2]["content"])
+        tool_message = _last_tool_message(runtime)
+        self.assertIn("shell_output_read_file: true", tool_message["content"])
+        self.assertIn("large_file_excerpt: true", tool_message["content"])
 
     def test_ask_with_tools_records_memory_refresh_event(self) -> None:
         class MemoryThenAnswerBackend:
@@ -1860,7 +1859,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "read_file", "arguments": "{\"path\":\"note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=None,
@@ -1894,15 +1893,15 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "done")
         self.assertEqual(emitted, ["done"])
-        self.assertEqual(backend.calls, 2)
+        self.assertEqual(backend.calls, 3)
 
     def test_ask_with_tools_emits_tool_call_event(self) -> None:
         events: list[tuple[str, str]] = []
-        results: list[tuple[str, int, str]] = []
+        results: list[tuple[str, int, str, str]] = []
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="read_file", arguments="{\"path\":\"note.txt\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             runtime.ask_with_tools(
@@ -1911,18 +1910,18 @@ class ToolRuntimeTests(unittest.TestCase):
                 max_tokens=32,
                 workdir=workdir,
                 on_tool_call=lambda name, args: events.append((name, args)),
-                on_tool_result=lambda name, chars, source: results.append((name, chars, source)),
+                on_tool_result=lambda name, chars, source, content: results.append((name, chars, source, content)),
             )
 
-        self.assertEqual(events, [("read_file", "{\"path\":\"note.txt\"}")])
-        self.assertEqual(results, [("read_file", 5, "orbit")])
+        self.assertEqual(events, [("exec_shell_full_command", "{\"command\":\"cat note.txt\"}")])
+        self.assertEqual(results, [("exec_shell_full_command", 5, "orbit", "hello")])
 
     def test_ask_with_tools_emits_model_step_metrics(self) -> None:
         steps = []
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="read_file", arguments="{\"path\":\"note.txt\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             runtime.ask_with_tools(
@@ -1933,14 +1932,13 @@ class ToolRuntimeTests(unittest.TestCase):
                 on_model_step=steps.append,
             )
 
-        self.assertEqual(len(steps), 2)
+        self.assertEqual(len(steps), 3)
         self.assertEqual(steps[0].loop, 1)
         self.assertEqual(steps[0].phase, "tool_call")
         self.assertEqual(steps[0].cached_tokens, 8)
         self.assertEqual(steps[0].tool_calls, 1)
-        self.assertEqual(steps[1].loop, 2)
-        self.assertEqual(steps[1].phase, "final")
-        self.assertEqual(steps[1].cached_tokens, 10)
+        self.assertEqual(steps[-1].phase, "final_from_tool")
+        self.assertEqual(steps[-1].cached_tokens, 10)
 
     def test_ask_with_tools_stops_repeated_tool_call(self) -> None:
         class RepeatingToolBackend:
@@ -1972,7 +1970,7 @@ class ToolRuntimeTests(unittest.TestCase):
     def test_ask_with_tools_only_executes_allowed_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            backend = ToolCallingBackend(tool_name="write_file", arguments="{\"path\":\"note.txt\",\"content\":\"hello\"}")
+            backend = ToolCallingBackend(tool_name="read_file", arguments="{\"path\":\"note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools(
@@ -1980,7 +1978,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 temperature=0,
                 max_tokens=32,
                 workdir=workdir,
-                tool_names=("list_files", "read_file", "stat_path"),
+                tool_names=("exec_shell_full_command",),
             )
 
             self.assertFalse((workdir / "note.txt").exists())
@@ -1988,7 +1986,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "done")
         tool_messages = [message for message in backend.messages if message.get("role") == "tool"]
         self.assertTrue(tool_messages)
-        self.assertIn("tool not available for this turn: write_file", tool_messages[-1]["content"])
+        self.assertIn("tool not available for this turn: read_file", tool_messages[-1]["content"])
 
 
 if __name__ == "__main__":

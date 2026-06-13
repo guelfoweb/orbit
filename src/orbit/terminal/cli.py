@@ -18,7 +18,7 @@ from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import estimate_context_status_tokens, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.theme import dim
-from orbit.terminal.tool_events import format_tool_result_event
+from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import allowed_tool_names_for_spec, tools_are_enabled
 
 
@@ -158,9 +158,9 @@ def _run_one_shot(
                 workdir=workdir,
                 allowed_tool_names=allowed_tool_names_for_spec(tools),
                 on_final_delta=renderer.write,
-                on_tool_call=lambda name, args: renderer.event(f"{name} {args}", restart_timer=False),
-                on_tool_result=lambda name, chars, source: renderer.event(
-                    format_tool_result_event(name, chars, source),
+                on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
+                on_tool_result=lambda name, chars, source, content: renderer.event(
+                    format_tool_result_event(name, chars, source, content),
                     trailing_blank_line=True,
                 ),
             )

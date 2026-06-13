@@ -19,19 +19,19 @@ from orbit.runtime.messages import (
     with_chat_system_prompt,
     with_final_tool_system_prompt,
     with_media_system_prompt,
-    with_route_system_prompt,
+    with_command_system_prompt,
     with_tool_call_system_prompt,
 )
 from dataclasses import replace
 
-from orbit.runtime.route_request import (
+from orbit.runtime.command_request import (
     ToolRoute,
     decision_tool_names,
-    parse_route_decision,
-    parse_route_decision_from_tool_calls,
-    route_like_tool_call,
-    route_tool_call_from_content,
-    route_tool_call_from_tool_calls,
+    parse_command_decision,
+    parse_command_decision_from_tool_calls,
+    command_like_tool_call,
+    command_tool_call_from_content,
+    command_tool_call_from_tool_calls,
 )
 from orbit.runtime.results import error_result
 from orbit.runtime.session_memory import MemoryRefresh, maybe_refresh_memory, should_refresh_for_append
@@ -49,7 +49,7 @@ from orbit.runtime.tools import default_tool_names
 from orbit.runtime.turn_trace import ModelStepMetrics
 
 
-ROUTE_MAX_TOKENS = 64
+ROUTE_MAX_TOKENS = 128
 TOOL_CALL_MAX_TOKENS = 96
 
 
@@ -151,7 +151,7 @@ class ChatRuntime:
         max_loops: int = 10,
         on_final_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
-        on_tool_result: Callable[[str, int, str], None] | None = None,
+        on_tool_result: Callable[[str, int, str, str], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
         tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
@@ -180,7 +180,7 @@ class ChatRuntime:
         max_loops: int = 10,
         on_final_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
-        on_tool_result: Callable[[str, int, str], None] | None = None,
+        on_tool_result: Callable[[str, int, str, str], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
         allowed_tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
@@ -197,15 +197,15 @@ class ChatRuntime:
         if media_result is not None:
             return media_result
         self.messages.append({"role": "user", "content": prompt})
-        route_max_tokens = _bounded_internal_max_tokens(max_tokens, ROUTE_MAX_TOKENS)
+        command_max_tokens = _bounded_internal_max_tokens(max_tokens, ROUTE_MAX_TOKENS)
         streamed_final_retry = False
         retried_empty_final = False
-        route_messages = with_route_system_prompt(self.messages)
-        first = self.backend.chat(route_messages, temperature=temperature, max_tokens=route_max_tokens)
+        command_messages = with_command_system_prompt(self.messages)
+        first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
-        route_content = first.content
-        decision = parse_route_decision_from_tool_calls(first.tool_calls) or parse_route_decision(route_content)
+        command_content = first.content
+        decision = parse_command_decision_from_tool_calls(first.tool_calls) or parse_command_decision(command_content)
         if decision is None:
             if first.finish_reason == "length":
                 if on_final_delta is None:
@@ -260,7 +260,7 @@ class ChatRuntime:
                 workdir=workdir,
                 on_final_delta=on_final_delta,
                 on_model_step=on_model_step,
-                route_result=first,
+                command_result=first,
             )
         tools = decision_tool_names(decision, prompt)
         if allowed_tool_names is not None:
@@ -268,16 +268,10 @@ class ChatRuntime:
             tools = tuple(tool for tool in tools if tool in allowed)
             if (
                 not tools
-                and decision.route in {ToolRoute.FILESYSTEM, ToolRoute.FILE_EDIT}
+                and decision.route in {ToolRoute.FILESYSTEM, ToolRoute.FILE_EDIT, ToolRoute.WEB}
                 and "exec_shell_full_command" in allowed
             ):
                 tools = ("exec_shell_full_command",)
-            if (
-                decision.route == ToolRoute.FILE_EDIT
-                and "exec_shell_full_command" not in tools
-                and not _has_edit_capability(tools)
-            ):
-                tools = ()
         if not tools:
             result = _unsupported_tool_mode_result(first)
             self.messages.append({"role": "assistant", "content": result.content})
@@ -295,8 +289,8 @@ class ChatRuntime:
             on_model_step=on_model_step,
             tool_names=tools,
             initial_tool_calls=(
-                route_tool_call_from_tool_calls(first.tool_calls, tools)
-                or route_tool_call_from_content(route_content, tools)
+                command_tool_call_from_tool_calls(first.tool_calls, tools)
+                or command_tool_call_from_content(command_content, tools)
             ),
         )
 
@@ -338,18 +332,18 @@ class ChatRuntime:
         workdir,
         on_final_delta: Callable[[str], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
-        route_result: ChatResult,
+        command_result: ChatResult,
     ) -> ChatResult:
         try:
             images, audios = load_referenced_media(prompt, workdir=workdir)
         except ValueError as exc:
-            result = error_result(str(exc), route_result)
+            result = error_result(str(exc), command_result)
             self.messages.append({"role": "assistant", "content": result.content})
             if on_final_delta:
                 on_final_delta(result.content)
             return result
         if not images and not audios:
-            result = error_result("error: MEDIA route requested but no local image/audio path was found in the prompt", route_result)
+            result = error_result("error: MEDIA route requested but no local image/audio path was found in the prompt", command_result)
             self.messages.append({"role": "assistant", "content": result.content})
             if on_final_delta:
                 on_final_delta(result.content)
@@ -377,7 +371,7 @@ class ChatRuntime:
         max_loops: int,
         on_final_delta: Callable[[str], None] | None,
         on_tool_call: Callable[[str, str], None] | None,
-        on_tool_result: Callable[[str, int, str], None] | None,
+        on_tool_result: Callable[[str, int, str, str], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
@@ -408,8 +402,17 @@ class ChatRuntime:
                 if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
                     contract_retry_pending = True
                 if on_tool_result:
-                    on_tool_result(tool_result.name, len(tool_result.content), execution.source)
+                    on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
                 self.messages.append(tool_result_message(tool_call, tool_result))
+            if not contract_retry_pending:
+                return self._answer_from_tool_results(
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_model_step=on_model_step,
+                    loop=state.tool_rounds + 1,
+                    use_tool_prompt=state.used_tool_call_prompt,
+                )
             if state.round_limit_reached() and not contract_retry_pending:
                 return self._answer_from_tool_results(
                     temperature=temperature,
@@ -482,11 +485,11 @@ class ChatRuntime:
                         loop=loop_index + 2,
                     )
             if result.tool_calls and not _all_tool_calls_allowed(result.tool_calls, allowed_tool_names):
-                route_tool_call = route_tool_call_from_tool_calls(result.tool_calls, allowed_tool_names)
+                route_tool_call = command_tool_call_from_tool_calls(result.tool_calls, allowed_tool_names)
                 if route_tool_call is not None:
                     result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
             if not result.tool_calls:
-                route_tool_call = route_like_tool_call(result.content, allowed_tool_names)
+                route_tool_call = command_like_tool_call(result.content, allowed_tool_names)
                 if route_tool_call is not None:
                     result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
             self.messages.append(assistant_tool_call_message(result.content, result.tool_calls))
@@ -524,7 +527,7 @@ class ChatRuntime:
                 if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
                     contract_retry_pending = True
                 if on_tool_result:
-                    on_tool_result(tool_result.name, len(tool_result.content), execution.source)
+                    on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
                 if should_refresh_for_append(self.messages, tool_result.content, context_tokens=self.context_tokens):
                     self.refresh_memory_if_needed(temperature=temperature, force=True)
                 self.messages.append(tool_result_message(tool_call, tool_result))
@@ -761,7 +764,7 @@ def _unsupported_tool_mode_result(result: ChatResult) -> ChatResult:
     return ChatResult(
         content="error: no suitable tool is available for this request",
         model=result.model,
-        finish_reason="unsupported_route",
+        finish_reason="unsupported_command",
         tool_calls=[],
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
@@ -769,10 +772,6 @@ def _unsupported_tool_mode_result(result: ChatResult) -> ChatResult:
         prompt_tokens_per_second=result.prompt_tokens_per_second,
         generation_tokens_per_second=result.generation_tokens_per_second,
     )
-
-
-def _has_edit_capability(tool_names: tuple[str, ...]) -> bool:
-    return bool({"write_file", "edit_file", "apply_diff", "make_directory", "delete_path"}.intersection(tool_names))
 
 
 def _all_tool_calls_allowed(tool_calls: list[dict[str, object]], allowed_tool_names: tuple[str, ...]) -> bool:

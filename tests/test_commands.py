@@ -19,11 +19,13 @@ from orbit.terminal.config import AppConfig
 class CommandTests(unittest.TestCase):
     def test_help_mentions_max_tokens(self) -> None:
         self.assertIn("/compact [tools]", help_text())
+        self.assertNotIn("Compact conversation memory or old tool results.", help_text())
         self.assertIn("/max-tokens [n]", help_text())
         self.assertIn("/continue", help_text())
         self.assertIn("/sessions clear", help_text())
         self.assertIn("/status [ctx]", help_text())
-        self.assertIn("/tools [spec]", help_text())
+        self.assertIn("/tools [off|on]", help_text())
+        self.assertNotIn("Show or set tools: off or on.", help_text())
 
     def test_set_max_tokens_without_value_reports_current_value(self) -> None:
         config = AppConfig(max_tokens=512)
@@ -62,12 +64,12 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Memory\n-------", status)
         self.assertIn("Model\n-------", status)
         self.assertIn("tools_mode: n/a", status)
-        self.assertIn("tools_llama_server: grep_search, read_file", status)
-        self.assertIn("tools_orbit_only:", status)
+        self.assertIn("model_tools: exec_shell_full_command", status)
         self.assertIn("memory_refresh_threshold: 6963/8192", status)
         self.assertIn("memory_refreshes: 0", status)
         self.assertIn("last_refresh_outcome: none", status)
-        self.assertNotIn("tools_orbit:", status)
+        self.assertNotIn("tools_llama_server:", status)
+        self.assertNotIn("tools_orbit_only:", status)
 
     def test_runtime_status_shows_memory_refresh_observability(self) -> None:
         backend = FakeStatusBackend()
@@ -118,20 +120,19 @@ class CommandTests(unittest.TestCase):
         backend = FakeStatusBackend()
         runtime = ChatRuntime(backend=backend, system_prompt=None)
 
-        status = runtime_status(runtime, AppConfig(), backend, tools_mode="files,web")
+        status = runtime_status(runtime, AppConfig(), backend, tools_mode="on")
 
-        self.assertIn("tools_mode: files,web", status)
+        self.assertIn("tools_mode: on", status)
 
     def test_tools_text_shows_user_selectable_specs_only(self) -> None:
         output = tools_text("off")
 
         self.assertIn("tools: off", output)
-        self.assertIn("/tools files = read/inspect local files", output)
-        self.assertIn("/tools edit  = create/modify/delete files or directories", output)
-        self.assertIn("/tools web   = search/fetch URLs", output)
-        self.assertIn("/tools shell = read-only local/system commands", output)
-        self.assertIn("/tools shell-full = DANGEROUS unrestricted local shell", output)
-        self.assertNotIn("/tools time", output)
+        self.assertIn("/tools off = chat only", output)
+        self.assertIn("/tools on  = unrestricted local shell", output)
+        self.assertNotIn("/tools files", output)
+        self.assertNotIn("/tools web", output)
+        self.assertNotIn("/tools shell-full", output)
         self.assertNotIn("Single tools:", output)
         self.assertNotIn("/tools read_file,grep_search", output)
         self.assertNotIn("llama-server:", output)

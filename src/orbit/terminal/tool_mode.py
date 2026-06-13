@@ -3,23 +3,11 @@ from __future__ import annotations
 
 ToolSpec = str
 
-FILES_TOOL_NAMES = ("list_files", "read_file", "stat_path", "file_glob_search", "grep_search")
-EDIT_TOOL_NAMES = ("read_file", "write_file", "edit_file", "apply_diff", "make_directory", "delete_path")
-WEB_TOOL_NAMES = ("search_web", "fetch_url")
-SHELL_TOOL_NAMES = ("exec_shell_command", "get_datetime")
 SHELL_FULL_TOOL_NAMES = ("exec_shell_full_command",)
-DEFAULT_ON_TOOL_NAMES = FILES_TOOL_NAMES + EDIT_TOOL_NAMES + WEB_TOOL_NAMES + SHELL_TOOL_NAMES
-
-TOOL_GROUPS: dict[str, tuple[str, ...]] = {
-    "files": FILES_TOOL_NAMES,
-    "edit": EDIT_TOOL_NAMES,
-    "web": WEB_TOOL_NAMES,
-    "shell": SHELL_TOOL_NAMES,
-    "shell-full": SHELL_FULL_TOOL_NAMES,
-}
+DEFAULT_ON_TOOL_NAMES = SHELL_FULL_TOOL_NAMES
 
 SPECIAL_TOOL_SPECS = ("off", "on")
-USAGE = "off|on|files|edit|web|shell|shell-full|group[,group...]"
+USAGE = "off|on"
 
 
 def normalize_tool_spec(value: object, *, key: str = "tools") -> ToolSpec:
@@ -30,14 +18,8 @@ def normalize_tool_spec(value: object, *, key: str = "tools") -> ToolSpec:
         raise ValueError(f"invalid config key {key}: expected non-empty tool spec")
     if raw in SPECIAL_TOOL_SPECS:
         return raw
-    parts = tuple(part.strip() for part in raw.split(",") if part.strip())
-    if not parts:
-        raise ValueError(f"invalid config key {key}: expected non-empty tool spec")
-    invalid = [part for part in parts if part not in TOOL_GROUPS]
-    if invalid:
-        allowed = ", ".join((*SPECIAL_TOOL_SPECS, *TOOL_GROUPS.keys()))
-        raise ValueError(f"invalid config key {key}: unsupported value {invalid[0]!r}; expected one of {allowed}")
-    return ",".join(dict.fromkeys(parts))
+    allowed = ", ".join(SPECIAL_TOOL_SPECS)
+    raise ValueError(f"invalid config key {key}: unsupported value {raw!r}; expected one of {allowed}")
 
 
 def tools_are_enabled(spec: ToolSpec) -> bool:
@@ -49,7 +31,4 @@ def allowed_tool_names_for_spec(spec: ToolSpec) -> tuple[str, ...] | None:
         return ()
     if spec == "on":
         return tuple(dict.fromkeys(DEFAULT_ON_TOOL_NAMES))
-    names: list[str] = []
-    for part in spec.split(","):
-        names.extend(TOOL_GROUPS[part])
-    return tuple(dict.fromkeys(names))
+    return ()

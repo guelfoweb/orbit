@@ -2,7 +2,7 @@
 
 Minimal local agentic CLI for `llama.cpp` / `llama-server`.
 
-Orbit is designed around `gemma4:12b-it`, local execution, prompt-cache awareness, streaming output, bounded tools, and CPU-only usability.
+Orbit is designed around `gemma4:12b-it`, local execution, prompt-cache awareness, streaming output, and CPU-only usability.
 
 It is developed and tested primarily on Linux. macOS may work if `llama-server` and the model files are available. Windows is not a target environment.
 
@@ -10,8 +10,8 @@ It is developed and tested primarily on Linux. macOS may work if `llama-server` 
 
 - Chat with a local `llama-server` model.
 - Stream assistant responses in the terminal.
-- Enable or disable tool groups at runtime.
-- Read, inspect, edit, search, fetch URLs, and run bounded read-only shell commands.
+- Enable or disable unrestricted shell tools at runtime.
+- Let the model use the local shell for files, web fetches, edits, system inspection, and automation when tools are enabled.
 - Attach local images or audio files in one-shot mode when the server is started with multimodal support.
 - Keep lightweight sessions and prompt history under `~/.orbit`.
 
@@ -121,10 +121,10 @@ Then start Orbit:
 orbit
 ```
 
-Inside Orbit, tools start disabled. Enable only what you need:
+Inside Orbit, tools start disabled. Enable shell tools only when you need local or web operations:
 
 ```text
-/tools files
+/tools on
 ```
 
 If something fails, run:
@@ -228,45 +228,41 @@ orbit --base-url http://127.0.0.1:18080
 /reset            Clear current conversation and saved session.
 /sessions clear   Delete all saved sessions for this workdir.
 /status [ctx]     Show runtime status or estimated context usage.
-/tools [spec]     Show or set tools: off, on, files, edit, web, shell, shell-full.
+/tools [spec]     Show or set tools: off or on.
 /exit             Exit interactive mode.
 ```
 
 `/max-tokens <n>` affects only the current runtime. It does not rewrite config or session files.
 
-## Tool modes
+## Tool mode
 
 Orbit starts chat-only unless configured otherwise.
 
 This is intentional. With tools off, Orbit does not send tool schemas and does
 not enter the tool loop, so ordinary chat turns are lighter and cheaper during
-prefill. Enable only the tool groups needed for the current task.
+prefill.
+
+This experimental branch has a single operational mode:
 
 ```text
-/tools files = read/inspect local files
-/tools edit  = create/modify/delete files or directories
-/tools web   = search/fetch URLs
-/tools shell = read-only local/system commands
-/tools shell-full = DANGEROUS unrestricted local shell
+/tools off = chat only
+/tools on  = unrestricted local shell for files, web, edits, system, and automation
 ```
 
 Examples:
 
 ```text
 /tools off
-/tools files
-/tools files,web
 /tools on
-/tools shell-full
 ```
 
-`off` keeps Orbit in chat-only mode. `on` enables all standard safe groups.
-`shell-full` is not included in `on`; it must be enabled explicitly.
+`off` keeps Orbit in chat-only mode. `on` exposes only one model-facing tool:
+`exec_shell_full_command`.
 
-`shell-full` gives the model unrestricted local shell access from the configured
-workdir. It can run pipes, redirects, malware tooling, decompilers, network
-commands, writes, deletes, and commands that access paths outside the workdir.
-Use it only in a disposable lab environment.
+When tools are on, the model can run arbitrary shell commands from the
+configured workdir. Commands may read, write, delete, execute programs, access
+the network, and access paths outside the workdir. Use this mode only in a
+disposable lab environment.
 
 ## Common usage profiles
 
@@ -276,22 +272,11 @@ For ordinary chat, keep tools disabled:
 /tools off
 ```
 
-For local notes, source files, and documentation:
+For local files, URLs, shell automation, system inspection, edits, or isolated
+analysis work:
 
 ```text
-/tools files
-```
-
-For web lookups and URL summaries:
-
-```text
-/tools web
-```
-
-For isolated lab work that really needs unrestricted shell access:
-
-```text
-/tools shell-full
+/tools on
 ```
 
 If a session starts feeling slow, check the active context:
@@ -306,58 +291,35 @@ When old tool results dominate the context, compact only those results:
 /compact tools
 ```
 
-## Shell-full mode
+## Shell tool mode
 
-`shell-full` is an explicit lab mode for tasks that cannot be handled by the
-bounded read-only shell tool.
+`/tools on` is an explicit lab mode for tasks that need local commands.
+It runs from the configured `--workdir`.
 
-Use it for isolated analysis workflows where the model may need arbitrary local
-commands, for example static inspection with tools such as `strings`, `file`,
-`readelf`, `objdump`, `jadx`, `apktool`, or other utilities available on the
-host.
-
-Enable it only when you want to give the model unrestricted shell access:
-
-```text
-/tools shell-full
-```
-
-Important boundaries:
-
-- It is disabled by default.
-- It is not included in `/tools on`.
-- It runs from the configured `--workdir`.
-- It may read, write, delete, execute programs, access the network, and access paths outside `--workdir`.
-- Orbit still applies timeout and output-size limits.
-- The runtime does not sandbox or validate commands in this mode.
-
-Recommended usage:
+Recommended startup:
 
 ```bash
 orbit --workdir workdir
 ```
 
 ```text
-/tools shell-full
+/tools on
 Inspect samples/suspicious_dropper_demo.js without executing it. Return suspicious URLs, IPs, encoded payloads, or execution-related strings.
 ```
 
-Do not use `shell-full` on a normal working directory unless you accept the
-risk. Use a disposable lab directory for malware analysis, reverse engineering,
-or commands with side effects.
+Do not use `/tools on` on a normal working directory unless you accept the risk.
+Use a disposable lab directory for malware analysis, reverse engineering, or
+commands with side effects.
 
 ## Safety boundaries
 
-- Tools are opt-in by group.
-- Local paths are confined to the configured `--workdir`.
-- `read_file` accepts UTF-8 text/source files only.
-- PDFs, images, audio, archives, and binary files are rejected by `read_file`.
-- `write_file` creates new files only and refuses overwrites.
-- `edit_file` and `apply_diff` are bounded edit paths.
-- `exec_shell_command` is allowlisted and read-only oriented.
-- `exec_shell_full_command` is available only through `/tools shell-full` and is unrestricted except for timeout/output limits.
-- `fetch_url` accepts explicit `http`/`https` URLs and returns extracted text, not raw HTML.
-- Long files and long fetched pages use explicit chunk reads.
+- Tools are off by default.
+- `/tools on` exposes only `exec_shell_full_command`.
+- `exec_shell_full_command` is unrestricted except for timeout/output limits.
+- The runtime does not sandbox or validate shell commands in this mode.
+- Shell commands run from the configured `--workdir`, but may access paths outside it.
+- Web content is fetched by shell commands such as `curl` when the model decides it is needed.
+- Long files and long web pages are currently handled by shell output limits; future work may add shell-callable Orbit helpers for chunked reads and extracted web text.
 
 Current read limits:
 

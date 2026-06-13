@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shlex
 from dataclasses import dataclass
 
@@ -23,12 +24,9 @@ class FinalToolPolicy:
 
 def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streamed: bool) -> FinalToolPolicy:
     large_file_excerpt = has_large_file_excerpt(messages)
-    web_fetch_result = has_web_fetch_tool_result(messages)
-    web_search_result = has_tool_result(messages, "search_web")
+    web_fetch_result = has_html_cleaned_tool_result(messages)
     list_like_result = has_list_like_tool_result(messages)
     shell_full_result = has_tool_result(messages, "exec_shell_full_command")
-    shell_result = has_tool_result(messages, "exec_shell_command") or shell_full_result
-    read_file_result = has_tool_result(messages, "read_file")
     call_messages = messages
     if large_file_excerpt:
         call_messages = [
@@ -39,20 +37,6 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
                     "Use the available large-file excerpt only. "
                     "Answer in at most five short bullets, each under twelve words. Do not quote long passages. "
                     "Do not request more chunks unless the user explicitly asked for exhaustive analysis."
-                ),
-            },
-        ]
-    elif web_search_result:
-        call_messages = [
-            *call_messages,
-            {
-                "role": "user",
-                "content": (
-                    "Use only the search results already available. "
-                    "Answer in at most four short bullets. "
-                    "Keep the main facts and cite source names only when useful. "
-                    "Do not add background beyond the results. "
-                    "Expand only if the user asks for more detail."
                 ),
             },
         ]
@@ -86,32 +70,6 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
                     "Answer concisely in up to six evidence-based findings. "
                     "For each finding, name the affected function/file and practical exploit impact when available. "
                     "Do not include generic methodology, disclaimers, or remediation unless asked. "
-                    "Expand only if asked."
-                ),
-            },
-        ]
-    elif shell_result:
-        call_messages = [
-            *call_messages,
-            {
-                "role": "user",
-                "content": (
-                    "Use only the command output. "
-                    "Return at most six compact findings. "
-                    "Preserve important numbers and names. "
-                    "Do not explain generic concepts. Expand only if asked."
-                ),
-            },
-        ]
-    elif read_file_result:
-        call_messages = [
-            *call_messages,
-            {
-                "role": "user",
-                "content": (
-                    "Use only the file content. "
-                    "Respect any requested length. "
-                    "If no length is requested, answer concisely. "
                     "Expand only if asked."
                 ),
             },
@@ -185,8 +143,13 @@ def has_large_file_excerpt(messages: list[Message]) -> bool:
     return False
 
 
-def has_web_fetch_tool_result(messages: list[Message]) -> bool:
-    return has_tool_result(messages, "fetch_url")
+def has_html_cleaned_tool_result(messages: list[Message]) -> bool:
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        return isinstance(content, str) and "shell_output_html_cleaned: true" in content
+    return False
 
 
 def has_tool_result(messages: list[Message], name: str) -> bool:
@@ -198,20 +161,18 @@ def has_tool_result(messages: list[Message], name: str) -> bool:
 
 
 def has_list_like_tool_result(messages: list[Message]) -> bool:
-    last_shell_command = last_exec_shell_command(messages)
+    last_shell_command = last_shell_full_command(messages)
     for message in reversed(messages):
         if message.get("role") != "tool":
             continue
         name = message.get("name")
-        if name in {"list_files", "file_glob_search"}:
-            return True
-        if name in {"exec_shell_command", "exec_shell_full_command"}:
+        if name == "exec_shell_full_command":
             return is_list_shell_command(last_shell_command)
         return False
     return False
 
 
-def last_exec_shell_command(messages: list[Message]) -> str | None:
+def last_shell_full_command(messages: list[Message]) -> str | None:
     for message in reversed(messages):
         calls = message.get("tool_calls")
         if not isinstance(calls, list):
@@ -220,9 +181,14 @@ def last_exec_shell_command(messages: list[Message]) -> str | None:
             if not isinstance(tool_call, dict):
                 continue
             function = tool_call.get("function")
-            if not isinstance(function, dict) or function.get("name") not in {"exec_shell_command", "exec_shell_full_command"}:
+            if not isinstance(function, dict) or function.get("name") != "exec_shell_full_command":
                 continue
             arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    continue
             if not isinstance(arguments, dict):
                 continue
             command = arguments.get("command")

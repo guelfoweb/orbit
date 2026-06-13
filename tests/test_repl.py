@@ -33,7 +33,7 @@ from orbit.terminal.repl_input import (
 )
 from orbit.terminal.repl import Repl
 from orbit.terminal.session_preview import format_recent_session_messages
-from orbit.terminal.tool_events import format_tool_result_event
+from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 
 
 class InterruptingBackend:
@@ -43,7 +43,7 @@ class InterruptingBackend:
     def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
         self.calls += 1
         return ChatResult(
-            content='{"_route":"FILESYSTEM"}',
+            content='{"command":"ls -F"}',
             model="fake",
             finish_reason="stop",
             tool_calls=[],
@@ -191,7 +191,19 @@ class ReplTests(unittest.TestCase):
     def test_tool_result_event_marks_large_context(self) -> None:
         self.assertEqual(format_tool_result_event("read_file", 9999), " └ read_file 9999 chars")
         self.assertEqual(format_tool_result_event("read_file", 10000), " └ read_file 10000 chars | large context")
-        self.assertEqual(format_tool_result_event("read_file", 5, "llama-server"), " └ read_file 5 chars | src: llama-server")
+        self.assertEqual(format_tool_result_event("read_file", 5, "orbit"), " └ read_file 5 chars")
+        self.assertEqual(format_tool_call_event("exec_shell_full_command", '{"command":"ls"}'), 'shell {"command":"ls"}')
+        self.assertEqual(format_tool_result_event("exec_shell_full_command", 45), " └ shell 45 chars")
+        chunk_content = "\n".join(
+            [
+                "shell_output_read_file: true",
+                "chunk_index: 0",
+                "total_chunks: 3",
+                "content:",
+                "hello",
+            ]
+        )
+        self.assertEqual(format_tool_result_event("exec_shell_full_command", 200, content=chunk_content), " └ chunk 1/3 200 chars")
 
     def test_unresolved_history_preview_is_not_sent_to_model(self) -> None:
         long_prompt = "Copied history " + ("x" * 900)
@@ -415,49 +427,47 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(runtime.ask_auto_calls, 1)
         self.assertEqual(runtime.ask_chat_calls, 0)
         self.assertIsNotNone(runtime.last_allowed_tool_names)
-        self.assertIn("exec_shell_command", runtime.last_allowed_tool_names)
-        self.assertNotIn("exec_shell_full_command", runtime.last_allowed_tool_names)
+        self.assertEqual(runtime.last_allowed_tool_names, ("exec_shell_full_command",))
 
-    def test_tools_files_uses_restricted_tool_path(self) -> None:
+    def test_repl_reads_queued_prompt_before_new_input(self) -> None:
         runtime = CountingRuntime()
-        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
-        repl.tools_mode = "files"
+        repl = Repl(
+            runtime=runtime,
+            backend=runtime.backend,
+            config=AppConfig(workdir=Path(".")),
+            queued_prompts=["queued prompt"],
+        )
 
-        with contextlib.redirect_stdout(io.StringIO()):
-            repl._ask("list files")
+        with mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=AssertionError("should not read input")):
+            prompt = repl._read_next_prompt()
 
-        self.assertEqual(runtime.ask_auto_calls, 1)
-        self.assertEqual(runtime.last_allowed_tool_names, ("list_files", "read_file", "stat_path", "file_glob_search", "grep_search"))
+        self.assertEqual(prompt, "queued prompt")
+        self.assertEqual(repl.queued_prompts, [])
 
     def test_tools_command_toggles_interactive_mode(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
 
         self.assertIn("tools: off", repl._handle_tools_command("/tools"))
-        self.assertEqual(repl._handle_tools_command("/tools on"), "tools: on")
+        tools_on = repl._handle_tools_command("/tools on")
+        self.assertIn("tools: on", tools_on)
+        self.assertIn("warning: tools on", tools_on)
         self.assertEqual(repl.tools_mode, "on")
         self.assertIn("tools: on", repl._handle_tools_command("/tools"))
-        self.assertEqual(repl._handle_tools_command("/tools files,web"), "tools: files,web")
-        self.assertEqual(repl.tools_mode, "files,web")
         self.assertEqual(repl._handle_tools_command("/tools off"), "tools: off")
         self.assertEqual(repl.tools_mode, "off")
         self.assertEqual(
             repl._handle_tools_command("/tools bad"),
-            "error: usage: /tools [off|on|files|edit|web|shell|shell-full|group[,group...]]",
+            "error: usage: /tools [off|on]",
         )
         self.assertEqual(
             repl._handle_tools_command("/tools read_file"),
-            "error: usage: /tools [off|on|files|edit|web|shell|shell-full|group[,group...]]",
+            "error: usage: /tools [off|on]",
         )
         self.assertEqual(
             repl._handle_tools_command("/tools time"),
-            "error: usage: /tools [off|on|files|edit|web|shell|shell-full|group[,group...]]",
+            "error: usage: /tools [off|on]",
         )
-        shell_full_output = repl._handle_tools_command("/tools shell-full")
-        self.assertIn("warning: shell-full is unrestricted", shell_full_output)
-        self.assertIn("\033[31mwarning: shell-full", shell_full_output)
-        self.assertIn("delete files", shell_full_output)
-        self.assertIn("isolated lab", shell_full_output)
 
     def test_tools_slash_command_is_handled_locally_in_repl_loop(self) -> None:
         runtime = CountingRuntime()
@@ -465,15 +475,15 @@ class ReplTests(unittest.TestCase):
         stdout = io.StringIO()
 
         with (
-            mock.patch("builtins.input", side_effect=["/tools shell-full", EOFError]),
+            mock.patch("builtins.input", side_effect=["/tools on", EOFError]),
             contextlib.redirect_stdout(stdout),
         ):
             code = repl.run()
 
         self.assertEqual(code, 0)
         self.assertEqual(runtime.ask_calls, 0)
-        self.assertEqual(repl.tools_mode, "shell-full")
-        self.assertIn("tools: shell-full", stdout.getvalue())
+        self.assertEqual(repl.tools_mode, "on")
+        self.assertIn("tools: on", stdout.getvalue())
 
     def test_sessions_clear_can_be_cancelled(self) -> None:
         runtime = CountingRuntime()

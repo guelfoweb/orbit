@@ -114,7 +114,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = stream
             renderer = StreamRenderer(interval=0.01)
             renderer.start()
-            renderer.write('{"_route":"WEB"}')
+            renderer.write('{"command":"curl https://example.com"}')
             renderer.event('search_web {"query":"x"}')
             time.sleep(0.02)
             renderer.write("final answer")

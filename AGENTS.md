@@ -17,8 +17,8 @@ The tool name remains `orbit`. The repository directory may be temporary.
 - Prefer standard-library Python unless a dependency has clear value.
 - Keep one-shot, REPL, backend, runtime, tools, and terminal UI separated.
 - Do not reintroduce Ollama-specific logic in this codebase.
-- Do not expose broad shell, PDF, or browser tools until explicitly designed.
-- Broad shell access is allowed only through explicit `shell-full` mode and must stay disabled by default.
+- Do not expose PDF or browser tools until explicitly designed.
+- Broad shell access is allowed only through explicit tools-on mode and must stay disabled by default.
 - After runtime/tool/session changes, run unit tests.
 
 ## Backend
@@ -32,50 +32,24 @@ The tool name remains `orbit`. The repository directory may be temporary.
 
 ## Tools
 
-Preferred model-facing tools:
+Model-facing tools:
 
-- `read_file`
-- `write_file`
-- `file_glob_search`
-- `grep_search`
-- `exec_shell_command`
 - `exec_shell_full_command`
-- `edit_file`
-- `apply_diff`
-- `get_datetime`
-
-Orbit-only tools where `llama-server` has no equivalent:
-
-- `make_directory`
-- `delete_path`
-- `fetch_url`
-- `search_web`
 
 Rules:
 
-- Text tools are exposed only when enabled by tool mode.
-- Route selection must be model-driven before tool exposure.
+- Tools are exposed only when enabled by tool mode.
+- Command selection must be model-driven before tool exposure.
 - No deterministic task fast paths.
-- `read_file` reads UTF-8 text/source files only.
-- Metadata inspection should prefer bounded native shell commands when available.
-- `make_directory` creates only directories confined to `workdir`.
-- `delete_path` deletes only paths confined to `workdir`; non-empty directories require `recursive=true`.
-- `delete_path` must refuse to delete the `workdir` root.
-- `fetch_url` accepts only explicit http/https URLs and returns bounded extracted text, never raw HTML.
-- `search_web` returns bounded structured results only: title, URL, and snippet.
-- `search_web` optional `site` filters must be bare domains; optional `timelimit` must be one of d/w/m/y.
-- `write_file` creates new UTF-8 text/source files only; it must not overwrite existing paths.
-- `write_file` must not create parent directories implicitly.
-- `write_file` is for explicit save/create-file requests, not ordinary chat requests to write prose or code.
-- `edit_file` and `apply_diff` must use Orbit guardrail schemas, not broad raw server schemas.
-- Long fetched pages use `fetch_url` with `chunk_index`; web content must not be silently saved into the workdir.
-- Do not present a first fetched chunk as a complete summary of a long document.
-- PDFs, images, audio, archives, and binary files must be rejected by `read_file`.
-- Complete `read_file` is limited to 256 KB.
-- Larger text/source files use `read_file` with `chunk_index`.
-- Chunk mode is limited to 1 MB files, 6k chars default chunk size, 12k chars max, and 3 chunk reads per user turn.
+- `exec_shell_full_command` is unrestricted local shell access.
+- The runtime enforces timeout/output-size limits around shell execution.
+- For analysis prompts, metadata-only commands such as `ls`, `file`, or `stat` must trigger a model retry asking for direct content/source/string evidence.
+- `cat` on large UTF-8 text/source files may be post-processed through the internal bounded reader.
+- HTML emitted by shell commands such as `curl` may be converted to readable text before reinjection.
+- Web content must not be silently saved into the workdir.
+- Do not present a first bounded shell result as a complete summary of a long document.
 - Unknown tools must fail clearly.
-- `shell-full` is dangerous unrestricted local shell access. It must not be included in default `on` tool mode.
+- Tools remain off by default. `/tools on` exposes only `exec_shell_full_command`.
 
 ## Session memory
 
