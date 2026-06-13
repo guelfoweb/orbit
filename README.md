@@ -65,10 +65,22 @@ Verify:
 llama-server --version
 ```
 
-This step is required before any model download command, because the helper uses
-`llama-server -hf` to fetch GGUF files into the Hugging Face cache.
+This step is required before any model download command, because Orbit's helper
+uses `llama-server -hf` to fetch GGUF files into the Hugging Face cache.
 
-### 3. Download the model
+### 3. Install Orbit
+
+Clone this repository and install the CLI:
+
+```bash
+git clone https://github.com/guelfoweb/orbit.git
+cd orbit
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+```
+
+### 4. Download the model
 
 Use the Orbit helper to download the expected GGUF file into the standard
 Hugging Face cache:
@@ -84,18 +96,6 @@ llama-server -hf ggml-org/gemma-4-12B-it-GGUF --hf-file gemma-4-12B-it-Q4_K_M.gg
 ```
 
 If `llama-server` starts after the download, stop it with `Ctrl+C`.
-
-### 4. Install Orbit
-
-Clone this repository and install the CLI:
-
-```bash
-git clone https://github.com/guelfoweb/orbit.git
-cd orbit
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
-```
 
 ### 5. Start Orbit
 
