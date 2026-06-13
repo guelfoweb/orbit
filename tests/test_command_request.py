@@ -128,6 +128,20 @@ class RouteRequestTests(unittest.TestCase):
         self.assertEqual(tool_call["function"]["name"], "exec_shell_full_command")
         self.assertEqual(tool_call["function"]["arguments"], '{"command": "curl https://example.com"}')
 
+    def test_command_tool_call_from_tool_calls_rejects_alias_without_command(self) -> None:
+        tool_call = command_tool_call_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": '{"path":"README.md"}'},
+                }
+            ],
+            ("exec_shell_full_command",),
+        )
+
+        self.assertIsNone(tool_call)
+
     def test_tool_names_for_decision_are_bounded(self) -> None:
         self.assertEqual(tool_names_for_decision(ToolRoute.FILESYSTEM), ("exec_shell_full_command",))
         self.assertEqual(tool_names_for_decision(ToolRoute.FILE_EDIT), ())

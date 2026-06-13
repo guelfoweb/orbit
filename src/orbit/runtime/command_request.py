@@ -60,8 +60,6 @@ def command_tool_call_from_tool_calls(
         args = parse_tool_arguments_or_empty(function.get("arguments"))
         if _has_command(args):
             return _tool_call("exec_shell_full_command", {"command": args["command"]})
-        if name in SHELL_TOOL_ALIASES:
-            return _tool_call("exec_shell_full_command", args)
     return None
 
 
