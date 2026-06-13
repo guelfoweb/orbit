@@ -100,6 +100,15 @@ If `llama-server` starts after the download, stop it with `Ctrl+C`.
 
 ### 5. Start Orbit
 
+Optionally inspect a suggested CPU profile for your machine:
+
+```bash
+scripts/suggest-server-profile.sh
+```
+
+If you want to use the suggested profile, export the printed values before
+starting the server.
+
 Start the tuned local server:
 
 ```bash
