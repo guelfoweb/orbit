@@ -26,23 +26,33 @@ LOG_FILE="${LOG_FILE:-$STATE_DIR/gemma4-12b-server.log}"
 MULTIMODAL=0
 MTP=0
 
+MAIN_MODEL_REPO="ggml-org/gemma-4-12B-it-GGUF"
+MAIN_MODEL_FILE="gemma-4-12B-it-Q4_K_M.gguf"
+MTP_MODEL_REPO="unsloth/gemma-4-12b-it-GGUF"
+MTP_MODEL_FILE="MTP/gemma-4-12b-it-Q8_0-MTP.gguf"
+
 usage() {
   cat <<'EOF'
 usage: scripts/gemma4-12b-server.sh start [--multimodal] [--mtp]
        scripts/gemma4-12b-server.sh stop
        scripts/gemma4-12b-server.sh status
+       scripts/gemma4-12b-server.sh download [--mtp]
 
 Starts/stops llama-server for the tuned Gemma 4 12B instruction-tuned Orbit profile.
 
 Prerequisites:
-  llama-server must be available in PATH
+  a llama.cpp fork/branch compatible with Gemma 4 must be built before download/start
+  tested fork: https://github.com/qualcomm/llama.cpp
+  tested branch: gemma-4-support-smaller-assistants
+  llama-server from that build should be available in PATH
   gemma-4-12B-it-Q4_K_M.gguf must be available locally
   optional multimodal support requires mmproj-gemma-4-12B-it-Q8_0.gguf
-  optional MTP support requires a compatible llama.cpp build and gemma-4-12b-it-Q8_0-MTP.gguf
+  optional MTP support also requires gemma-4-12b-it-Q8_0-MTP.gguf
 
 start       run llama-server in background and return the terminal
 stop        stop the background server started by this script
 status      show whether the configured endpoint is healthy
+download    download model files into the standard Hugging Face cache
 
 Environment overrides:
   LLAMA_SERVER_BIN MTP_LLAMA_SERVER_BIN MODEL_PATH MMPROJ_PATH MTP_DRAFT_PATH HOST PORT
@@ -50,19 +60,42 @@ Environment overrides:
   LLAMA_SERVER_TOOLS ORBIT_STATE_DIR PID_FILE LOG_FILE
 
 Common recovery:
-  llama-server not found        install/build llama.cpp and add llama-server to PATH
-  model not found               set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
+  llama-server not found        build the tested fork and add llama-server to PATH
+  model not found               run: scripts/gemma4-12b-server.sh download
   projector not found           set MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf
-  MTP draft not found           set MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf
-  MTP unsupported               set LLAMA_SERVER_BIN=/path/to/compatible/llama-server
+  MTP draft not found           run: scripts/gemma4-12b-server.sh download --mtp
+  MTP unsupported               set MTP_LLAMA_SERVER_BIN=/path/to/compatible/llama-server
+                                tested fork: https://github.com/qualcomm/llama.cpp
+                                branch: gemma-4-support-smaller-assistants
   existing non-multimodal server stop it before start --multimodal
   server without pid file       stop the owning process manually or change PORT/BASE_URL
 EOF
 }
 
+default_mtp_llama_server_bin() {
+  for path in \
+    "$HOME/LAB/llama.cpp-gemma4/build/bin/llama-server" \
+    "$HOME/LAB/llama.cpp-gemma4-mtp-qualcomm/build/bin/llama-server" \
+    "$HOME/llama.cpp-gemma4/build/bin/llama-server" \
+    "$HOME/llama.cpp-gemma4-mtp-qualcomm/build/bin/llama-server" \
+    "$ROOT_DIR/../llama.cpp-gemma4/build/bin/llama-server" \
+    "$ROOT_DIR/../llama.cpp-gemma4-mtp-qualcomm/build/bin/llama-server"
+  do
+    if [ -x "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
 select_llama_server_bin() {
-  if [ "$MTP" -eq 1 ] && [ "$LLAMA_SERVER_BIN" = "llama-server" ] && [ "$MTP_LLAMA_SERVER_BIN" != "" ] && [ -x "$MTP_LLAMA_SERVER_BIN" ]; then
-    LLAMA_SERVER_BIN="$MTP_LLAMA_SERVER_BIN"
+  if [ "$MTP" -eq 1 ] && [ "$LLAMA_SERVER_BIN" = "llama-server" ]; then
+    if [ "$MTP_LLAMA_SERVER_BIN" != "" ] && [ -x "$MTP_LLAMA_SERVER_BIN" ]; then
+      LLAMA_SERVER_BIN="$MTP_LLAMA_SERVER_BIN"
+    elif detected="$(default_mtp_llama_server_bin)"; then
+      LLAMA_SERVER_BIN="$detected"
+    fi
   fi
 }
 
@@ -89,7 +122,8 @@ resolve_model_path() {
   find_huggingface_file "$HOME/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/gemma-4-12B-it-Q4_K_M.gguf" \
     || {
       echo "error: gemma-4-12B-it-Q4_K_M.gguf not found" >&2
-      echo "recovery: set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf" >&2
+      echo "recovery: run scripts/gemma4-12b-server.sh download" >&2
+      echo "or set MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf" >&2
       return 1
     }
 }
@@ -124,9 +158,30 @@ resolve_mtp_draft_path() {
     || find_huggingface_file "$HOME/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/*/gemma-4-12B-it-MTP-Q8_0.gguf" \
     || {
       echo "error: gemma-4-12b-it-Q8_0-MTP.gguf not found" >&2
-      echo "recovery: set MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf" >&2
+      echo "recovery: run scripts/gemma4-12b-server.sh download --mtp" >&2
+      echo "or set MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf" >&2
       return 1
     }
+}
+
+download_with_llama_server() {
+  repo="$1"
+  file="$2"
+  if ! command -v "$LLAMA_SERVER_BIN" >/dev/null 2>&1; then
+    echo "error: llama-server not found: $LLAMA_SERVER_BIN" >&2
+    echo "recovery: build llama.cpp and export PATH=/path/to/llama.cpp/build/bin:\$PATH" >&2
+    exit 1
+  fi
+  echo "downloading $file from $repo"
+  echo "if llama-server starts after the download, stop it with Ctrl+C"
+  "$LLAMA_SERVER_BIN" -hf "$repo" --hf-file "$file"
+}
+
+download_models() {
+  download_with_llama_server "$MAIN_MODEL_REPO" "$MAIN_MODEL_FILE"
+  if [ "$MTP" -eq 1 ]; then
+    download_with_llama_server "$MTP_MODEL_REPO" "$MTP_MODEL_FILE"
+  fi
 }
 
 health_ok() {
@@ -360,6 +415,9 @@ case "$COMMAND" in
     ;;
   status)
     status_server
+    ;;
+  download)
+    download_models
     ;;
   --help|-h|help)
     usage

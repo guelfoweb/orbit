@@ -12,6 +12,8 @@ The goal is not maximum theoretical throughput. The goal is practical end-to-end
 - Context window: 8192 tokens.
 - Runtime style: model-driven routing and final answers.
 - Tools: enabled only by explicit user-selected groups.
+- Recommended `llama.cpp` build: Gemma 4 compatible fork/branch documented in
+  the README.
 
 Orbit does not replace the model's reasoning with deterministic task answers. The runtime optimizes what the model sees, when tools are exposed, how much context is injected, and when boundaries are enforced.
 
@@ -63,8 +65,36 @@ These defaults were chosen for stability on CPU-only systems. Faster machines ca
 
 ## MTP speculative decoding
 
-MTP speculative decoding was tested as an optional `llama.cpp` profile, not as
-the default baseline.
+MTP speculative decoding is optional.
+
+The recommended `llama.cpp` build is the same Gemma 4 compatible fork used for
+normal mode. MTP only adds a draft model and speculative decoding flags; it does
+not change Orbit's runtime philosophy.
+
+In practical terms, MTP is speculative decoding:
+
+1. The main Gemma 4 12B model remains the authority for the final output.
+2. A smaller/specialized draft model proposes upcoming tokens in advance.
+3. The main model verifies the proposed tokens.
+4. Correct draft tokens can be accepted in batches.
+5. Incorrect draft tokens are discarded and generation continues normally.
+
+This can increase generation throughput because the main model does not always
+need to generate one token at a time. When the draft model predicts well, the
+main model validates multiple tokens more efficiently than producing each one
+sequentially.
+
+MTP mostly helps the generation phase (`gen/s`). It does not significantly
+reduce prefill cost (`pf/s`), because prefill is dominated by processing the
+input prompt, tool schemas, conversation context, and tool results.
+
+Operational tradeoffs:
+
+- It requires a compatible `llama-server` build.
+- It requires an additional draft model file.
+- It uses more memory than the baseline profile.
+- It is most useful when the final answer generates enough tokens to amortize
+  the extra draft-model work.
 
 The tested implementation came from:
 
@@ -115,9 +145,8 @@ which is expected: MTP helps most when the final answer has enough generated
 tokens to amortize the extra draft model work.
 
 Because this depends on a fork/branch rather than the default upstream
-`llama.cpp` baseline, it should be treated as an optional experimental profile
-until the required Gemma 4 assistant support is available in the normal build
-path.
+`llama.cpp` baseline, the build should be treated as part of the tested Orbit
+profile. MTP itself remains optional and experimental.
 
 ## Tool exposure
 
@@ -145,6 +174,15 @@ The main benefit is not just safety. It also reduces ambiguity and token cost.
 A smaller tool surface makes it less likely that the model chooses the wrong
 tool, enters a tool loop, or spends extra tokens deciding among irrelevant
 capabilities.
+
+In practical terms, tools off means no tool schemas are sent to the model for
+ordinary chat. This directly reduces prompt size and prefill work.
+
+`shell-full` is intentionally excluded from normal `on` mode. It is a dangerous
+lab mode for unrestricted shell workflows such as reverse engineering,
+malware-style static analysis, and custom local tooling. It can be powerful, but
+it is also higher-risk and usually more expensive because it may need multiple
+tool rounds.
 
 ## Model-driven routing
 
@@ -282,6 +320,12 @@ Important boundaries:
 
 Long inputs are handled through real model-visible chunks, not local deterministic summaries.
 
+Context pressure can affect latency before the context window is close to full.
+On CPU-only systems, a session around 50% of the context window can already feel
+slower if the active context is dominated by tool results or long assistant
+answers. This is why Orbit exposes context status and provides explicit
+compaction commands instead of hiding context growth.
+
 ## File chunking
 
 For medium and large text/source files, `read_file` returns chunk metadata:
@@ -335,6 +379,8 @@ Orbit uses category-specific final-answer instructions after tool results:
 
 - Web search: concise bullets, expand only if asked.
 - Shell output: compact findings, preserve numbers and names.
+- Shell-full output: evidence-based findings, function/file and exploit impact
+  when available, no generic methodology unless asked.
 - File reads: respect requested length, otherwise answer concisely.
 - Lists: return listed names compactly.
 
@@ -354,6 +400,11 @@ Controls include:
 - unsupported route handling
 
 When a loop limit is reached, Orbit moves to the final inference using the content already available.
+
+Most tool groups use tight round limits. `shell-full` has a larger explicit
+budget because lab analysis may legitimately require sequential commands such
+as inspecting source, grepping indicators, checking tool availability, or
+running local analyzers. Repeated equivalent calls are still detected.
 
 ## Session memory
 
@@ -437,9 +488,12 @@ Orbit avoids optimizations that would make behavior brittle:
 - no deterministic answers for normal user tasks
 - no hidden web-to-file save path
 - no automatic continuation after `finish=length`
-- no broad shell access
+- no broad shell access by default
 - no generic browser tool
 - no silent local summarization of long text
+
+Broad shell access exists only as explicit `shell-full` mode and should be used
+in isolated lab workdirs.
 
 The runtime can enforce boundaries, but the model remains responsible for reasoning, tool selection, and final answers.
 

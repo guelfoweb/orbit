@@ -41,11 +41,19 @@ sudo apt install -y git cmake build-essential python3 python3-venv
 
 ### 2. Build llama.cpp
 
-Clone and build `llama.cpp` for CPU-only use:
+Orbit is tested with a Gemma 4 compatible `llama.cpp` fork:
+
+```text
+https://github.com/qualcomm/llama.cpp
+branch: gemma-4-support-smaller-assistants
+```
+
+Use this build for both normal mode and optional MTP mode:
 
 ```bash
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
+git clone https://github.com/qualcomm/llama.cpp.git llama.cpp-gemma4
+cd llama.cpp-gemma4
+git checkout gemma-4-support-smaller-assistants
 cmake -B build -DGGML_NATIVE=ON -DGGML_BLAS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
 cmake --build build --config Release -j"$(nproc)"
 export PATH="$PWD/build/bin:$PATH"
@@ -57,16 +65,25 @@ Verify:
 llama-server --version
 ```
 
+This step is required before any model download command, because the helper uses
+`llama-server -hf` to fetch GGUF files into the Hugging Face cache.
+
 ### 3. Download the model
 
-Use `llama-server` once to download the expected GGUF file:
+Use the Orbit helper to download the expected GGUF file into the standard
+Hugging Face cache:
+
+```bash
+scripts/gemma4-12b-server.sh download
+```
+
+Internally this uses:
 
 ```bash
 llama-server -hf ggml-org/gemma-4-12B-it-GGUF --hf-file gemma-4-12B-it-Q4_K_M.gguf
 ```
 
-This command downloads the model and starts a temporary server. After the
-download completes, stop it with `Ctrl+C`.
+If `llama-server` starts after the download, stop it with `Ctrl+C`.
 
 ### 4. Install Orbit
 
@@ -146,18 +163,27 @@ MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf scripts/gemma4-12b-server.sh star
 
 MTP speculative decoding is optional. Skip it for the first run.
 
-It requires a compatible `llama-server` build and a separate draft model.
+It requires:
+
+- the Gemma 4 compatible `llama-server` built above;
+- the main `gemma-4-12B-it-Q4_K_M.gguf` model;
+- the separate draft `gemma-4-12b-it-Q8_0-MTP.gguf` model.
+
 The draft model is not downloaded with the main `ggml-org` model.
 
-Download the tested draft model from the Unsloth repository:
+Download the main model and the tested draft model:
 
 ```bash
-llama-server -hf unsloth/gemma-4-12b-it-GGUF \
-  --hf-file MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+scripts/gemma4-12b-server.sh download --mtp
 ```
 
-This command downloads the draft model and may try to start a temporary server.
-After the download completes, stop it with `Ctrl+C`.
+The draft model comes from the Unsloth repository:
+
+```bash
+llama-server -hf unsloth/gemma-4-12b-it-GGUF --hf-file MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+```
+
+If `llama-server` starts after the download, stop it with `Ctrl+C`.
 
 The helper automatically searches the default Hugging Face cache path:
 
@@ -171,13 +197,21 @@ Then start the server with MTP:
 scripts/gemma4-12b-server.sh start --mtp
 ```
 
+For MTP, the helper uses `MTP_LLAMA_SERVER_BIN` when provided. It also checks
+common local build paths such as:
+
+```text
+~/LAB/llama.cpp-gemma4/build/bin/llama-server
+~/LAB/llama.cpp-gemma4-mtp-qualcomm/build/bin/llama-server
+```
+
 See [MTP speculative decoding](docs/PERFORMANCE.md#mtp-speculative-decoding)
 for the tested fork/branch and benchmark notes.
 
 Override the detected paths if needed:
 
 ```bash
-LLAMA_SERVER_BIN=/path/to/compatible/llama-server \
+MTP_LLAMA_SERVER_BIN=/path/to/compatible/llama-server \
 MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf \
 scripts/gemma4-12b-server.sh start --mtp
 ```
@@ -391,8 +425,10 @@ CLI flags override config values.
 ## Troubleshooting
 
 - `llama-server not found in PATH`: build `llama.cpp` and export `PATH=/path/to/llama.cpp/build/bin:$PATH`.
-- `gemma-4-12B-it-Q4_K_M.gguf not found`: download with `llama-server -hf ... --hf-file ...` or set `MODEL_PATH`.
+- `gemma-4-12B-it-Q4_K_M.gguf not found`: run `scripts/gemma4-12b-server.sh download` or set `MODEL_PATH`.
 - `multimodal projector not found`: set `MMPROJ_PATH`.
+- `MTP draft not found`: run `scripts/gemma4-12b-server.sh download --mtp` or set `MTP_DRAFT_PATH`.
+- `unknown model architecture: gemma4-assistant`: use a compatible MTP fork via `MTP_LLAMA_SERVER_BIN`.
 - `existing llama-server is not multimodal`: stop it, then restart with `start --multimodal`.
 - Another process owns the port: stop it or change `PORT` / `BASE_URL`.
 
