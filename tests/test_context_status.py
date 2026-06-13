@@ -9,7 +9,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.terminal.context_status import context_status_text, count_messages_by_type, estimate_context_breakdown
+from orbit.terminal.context_status import (
+    ContextBreakdown,
+    context_recommendation,
+    context_status_text,
+    count_messages_by_type,
+    estimate_context_breakdown,
+)
 
 
 class ContextStatusTests(unittest.TestCase):
@@ -73,6 +79,24 @@ class ContextStatusTests(unittest.TestCase):
         self.assertIn("user:", output)
         self.assertIn("assistant:", output)
         self.assertIn("tool_result:", output)
+        self.assertIn("Recommendation\n--------------", output)
+        self.assertIn("context is healthy", output)
+
+    def test_context_recommendation_flags_dominant_tool_results(self) -> None:
+        recommendation = context_recommendation(
+            ContextBreakdown(system=200, user=50, assistant=100, tool_result=550),
+            window=1600,
+        )
+
+        self.assertIn("/compact tools", recommendation)
+
+    def test_context_recommendation_flags_high_pressure_without_tool_dominance(self) -> None:
+        recommendation = context_recommendation(
+            ContextBreakdown(system=500, user=500, assistant=700, tool_result=100),
+            window=2400,
+        )
+
+        self.assertIn("/reset", recommendation)
 
 
 if __name__ == "__main__":

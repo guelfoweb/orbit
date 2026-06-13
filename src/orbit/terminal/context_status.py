@@ -67,6 +67,10 @@ def context_status_text(messages: list[dict[str, object]], *, context_tokens: in
         f"assistant: {message_breakdown.assistant}",
         f"tool_result: {message_breakdown.tool_result}",
         f"other: {message_breakdown.other}",
+        "",
+        "Recommendation",
+        "--------------",
+        context_recommendation(breakdown, window=window),
     ]
     return "\n".join(lines)
 
@@ -153,3 +157,24 @@ def _percent(value: int, total: int) -> str:
     if total <= 0:
         return "0%"
     return f"{(value / total) * 100:.0f}%"
+
+
+def context_recommendation(breakdown: ContextBreakdown, *, window: int) -> str:
+    total = breakdown.total
+    if total <= 0 or window <= 0:
+        return "context is empty"
+    usage = total / window
+    tool_ratio = breakdown.tool_result / total if total else 0.0
+    if usage >= 0.85:
+        if tool_ratio >= 0.50:
+            return "memory refresh is near; consider /compact tools because tool results dominate"
+        return "memory refresh is near; consider /compact or /reset before starting a different task"
+    if usage >= 0.70:
+        if tool_ratio >= 0.50:
+            return "context pressure is high; consider /compact tools"
+        return "context pressure is high; consider /reset for a new task"
+    if usage >= 0.50:
+        if tool_ratio >= 0.60:
+            return "context pressure is moderate; consider /compact tools if the task is changing"
+        return "context pressure is moderate; continue if this is the same task"
+    return "context is healthy"

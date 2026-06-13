@@ -87,16 +87,11 @@ def exec_shell_full_definition() -> dict[str, Any]:
     return _shell_definition(
         "exec_shell_full_command",
         (
-            "DANGEROUS: run an unrestricted local shell command from workdir. "
-            "Use only when this tool is explicitly available for the current turn. "
-            "Do not require the user to repeat shell-full in the prompt. "
-            "Commands may read, write, delete, execute programs, access network, or access paths outside workdir. "
-            "Use one single-line command string only; no comments or script blocks. "
-            "For analysis requests, collect direct evidence from content/strings/source, not only metadata such as ls or file. "
-            "For external tools, verify availability with command -v when needed. "
-            "Any path containing whitespace MUST be one double-quoted shell argument. "
-            "Example: strings -a samples/suspicious_dropper_demo.js | grep -E \"http|https\". "
-            "The runtime only enforces timeout and output-size limits."
+            "Unrestricted local shell. May read, write, delete, execute, and access network. "
+            "Use whatever commands are needed to complete the task. "
+            "For analysis, prefer direct evidence from content, source, binaries, strings, logs, archives, and fetched data, not only metadata. "
+            "For URLs, use curl when content is needed. "
+            "Quote paths containing spaces."
         ),
     )
 

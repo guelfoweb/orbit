@@ -202,7 +202,7 @@ orbit "Say who you are in one short sentence."
 Health check:
 
 ```bash
-orbit /health
+orbit --health
 ```
 
 Show tool modes:
@@ -267,6 +267,44 @@ Examples:
 workdir. It can run pipes, redirects, malware tooling, decompilers, network
 commands, writes, deletes, and commands that access paths outside the workdir.
 Use it only in a disposable lab environment.
+
+## Common usage profiles
+
+For ordinary chat, keep tools disabled:
+
+```text
+/tools off
+```
+
+For local notes, source files, and documentation:
+
+```text
+/tools files
+```
+
+For web lookups and URL summaries:
+
+```text
+/tools web
+```
+
+For isolated lab work that really needs unrestricted shell access:
+
+```text
+/tools shell-full
+```
+
+If a session starts feeling slow, check the active context:
+
+```text
+/status ctx
+```
+
+When old tool results dominate the context, compact only those results:
+
+```text
+/compact tools
+```
 
 ## Shell-full mode
 

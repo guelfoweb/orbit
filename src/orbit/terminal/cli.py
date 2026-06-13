@@ -13,7 +13,7 @@ from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
 from orbit.terminal.repl import Repl
-from orbit.terminal.commands import help_text, runtime_status, set_max_tokens, tools_text
+from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import estimate_context_status_tokens, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("prompt", nargs="*", help="Prompt for one-shot mode. Omit for interactive mode.")
     parser.add_argument("--image", action="append", default=[], help="Attach a local image to a one-shot prompt.")
     parser.add_argument("--audio", action="append", default=[], help="Attach a local WAV or MP3 audio file to a one-shot prompt.")
+    parser.add_argument("--health", action="store_true", help="Check llama-server connectivity and model metadata.")
     add_config_arguments(parser)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -41,6 +42,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     backend = LlamaServerBackend(base_url=config.base_url, timeout=config.timeout)
+    if args.health:
+        print(health_text(backend, config))
+        return 0
     model_info = backend.model_info()
     context_tokens = config.context_tokens or (model_info.context_length if model_info else None)
     if args.prompt:
@@ -100,7 +104,7 @@ def _handle_one_shot_command(
     if command == "/tools":
         return tools_text(config.tools)
     if command == "/health":
-        return "llama-server: ok" if backend.health() else "llama-server: unavailable"
+        return health_text(backend, config)
     if command == "/help":
         return help_text()
     if command == "/max-tokens" or command.startswith("/max-tokens "):

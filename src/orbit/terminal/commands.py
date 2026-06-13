@@ -32,6 +32,30 @@ def help_text() -> str:
     return "\n".join(f"{command:<{width}}{description}" for command, description in commands)
 
 
+def health_text(backend: LlamaServerBackend, config: AppConfig) -> str:
+    healthy = backend.health()
+    lines = [
+        "Health",
+        "------",
+        f"base_url: {config.base_url}",
+        f"server: {'ok' if healthy else 'unavailable'}",
+    ]
+    if not healthy:
+        lines.append("hint: start llama-server before launching Orbit")
+        return "\n".join(lines)
+    info = backend.model_info()
+    display_model = (info.id if info and info.id else None) or backend.display_model_name() or "unknown"
+    server_tools = _server_tool_names(backend)
+    lines.extend(
+        [
+            f"model: {display_model}",
+            f"context: {info.context_length if info and info.context_length is not None else 'unknown'}",
+            f"server_tools: {len(server_tools)} available",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def tools_text(current: ToolSpec | None = None) -> str:
     lines = []
     if current is not None:

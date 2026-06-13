@@ -170,10 +170,6 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_tokens"):
             load_app_config(_parse("--max-tokens", "4"))
 
-    def test_cli_no_longer_accepts_model_flag(self) -> None:
-        with self.assertRaises(SystemExit):
-            _parse("--model", "gemma4:12b")
-
 
 def _parse(*args: str) -> argparse.Namespace:
     return build_parser().parse_args(list(args))

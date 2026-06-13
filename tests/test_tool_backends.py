@@ -490,13 +490,12 @@ class HybridToolExecutorTests(unittest.TestCase):
             definition = executor.tool_definitions()[0]
 
         self.assertEqual(definition["function"]["name"], "exec_shell_full_command")
-        self.assertIn("explicitly available for the current turn", definition["function"]["description"])
-        self.assertIn("Do not require the user to repeat shell-full", definition["function"]["description"])
-        self.assertIn("collect direct evidence", definition["function"]["description"])
-        self.assertIn("path containing whitespace MUST be one double-quoted shell argument", definition["function"]["description"])
-        self.assertIn("Use one single-line command string only", definition["function"]["description"])
-        self.assertIn("For external tools, verify availability with command -v", definition["function"]["description"])
-        self.assertIn("samples/suspicious_dropper_demo.js", definition["function"]["description"])
+        self.assertIn("Unrestricted local shell", definition["function"]["description"])
+        self.assertIn("May read, write, delete, execute, and access network", definition["function"]["description"])
+        self.assertIn("Use whatever commands are needed", definition["function"]["description"])
+        self.assertIn("prefer direct evidence", definition["function"]["description"])
+        self.assertIn("For URLs, use curl when content is needed", definition["function"]["description"])
+        self.assertIn("Quote paths containing spaces", definition["function"]["description"])
 
     def test_exec_shell_blocks_grep_pipe_for_df_total_before_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

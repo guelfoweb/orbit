@@ -39,6 +39,15 @@ class CliTests(unittest.TestCase):
         self.assertIn("system:", completed.stdout)
         self.assertNotIn("model: fake", completed.stdout)
 
+    def test_health_flag_does_not_enter_chat(self) -> None:
+        completed = _run_cli("", "--health")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("Health\n------", completed.stdout)
+        self.assertIn("base_url: http://127.0.0.1:18080", completed.stdout)
+        self.assertIn("server:", completed.stdout)
+        self.assertNotIn("orbit interactive mode", completed.stdout)
+
     def test_one_shot_tools_command_does_not_call_model(self) -> None:
         completed = _run_cli("", "/tools")
 

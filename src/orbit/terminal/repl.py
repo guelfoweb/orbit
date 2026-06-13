@@ -8,7 +8,7 @@ from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
-from orbit.terminal.commands import help_text, reset_session, runtime_status, set_max_tokens, tools_text
+from orbit.terminal.commands import health_text, help_text, reset_session, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.config import AppConfig
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
@@ -184,7 +184,7 @@ class Repl:
             print(self._clear_workdir_sessions())
             return True
         if command == "/health":
-            print("llama-server: ok" if self.backend.health() else "llama-server: unavailable")
+            print(health_text(self.backend, self.config))
             return True
         if command == "/max-tokens" or command.startswith("/max-tokens "):
             value = command.removeprefix("/max-tokens").strip()
