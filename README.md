@@ -48,7 +48,7 @@ https://github.com/qualcomm/llama.cpp
 branch: gemma-4-support-smaller-assistants
 ```
 
-Use this build for both normal mode and optional MTP mode:
+Use this build for Orbit and MTP speculative decoding:
 
 ```bash
 git clone https://github.com/qualcomm/llama.cpp.git llama.cpp-gemma4
@@ -82,17 +82,18 @@ pip install -e .
 
 ### 4. Download the model
 
-Use the Orbit helper to download the expected GGUF file into the standard
-Hugging Face cache:
+Use the Orbit helper to download the main GGUF model and the MTP draft model
+into the standard Hugging Face cache:
 
 ```bash
-scripts/gemma4-12b-server.sh download
+scripts/gemma4-12b-server.sh download --mtp
 ```
 
 Internally this uses:
 
 ```bash
 llama-server -hf ggml-org/gemma-4-12B-it-GGUF --hf-file gemma-4-12B-it-Q4_K_M.gguf
+llama-server -hf unsloth/gemma-4-12b-it-GGUF --hf-file MTP/gemma-4-12b-it-Q8_0-MTP.gguf
 ```
 
 If `llama-server` starts after the download, stop it with `Ctrl+C`.
@@ -102,7 +103,7 @@ If `llama-server` starts after the download, stop it with `Ctrl+C`.
 Start the tuned local server:
 
 ```bash
-scripts/gemma4-12b-server.sh start
+scripts/gemma4-12b-server.sh start --mtp
 ```
 
 Then start Orbit:
@@ -126,17 +127,19 @@ tail -n 80 ~/.orbit/gemma4-12b-server.log
 
 ## Model paths
 
-Orbit's server helper automatically searches the default Hugging Face cache path
-created by `llama-server -hf`:
+Orbit's server helper automatically searches the default Hugging Face cache
+paths created by `llama-server -hf`:
 
 ```text
 ~/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/<snapshot>/gemma-4-12B-it-Q4_K_M.gguf
+~/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/<snapshot>/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
 ```
 
-If the model is elsewhere, set:
+If the model files are elsewhere, set:
 
 ```bash
 MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
+MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf
 ```
 
 The helper starts `llama-server` on `http://127.0.0.1:18080`.
@@ -156,65 +159,22 @@ scripts/gemma4-12b-server.sh status
 If you need a custom model path at startup:
 
 ```bash
-MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf scripts/gemma4-12b-server.sh start
-```
-
-## Optional MTP
-
-MTP speculative decoding is optional. Skip it for the first run.
-
-It requires:
-
-- the Gemma 4 compatible `llama-server` built above;
-- the main `gemma-4-12B-it-Q4_K_M.gguf` model;
-- the separate draft `gemma-4-12b-it-Q8_0-MTP.gguf` model.
-
-The draft model is not downloaded with the main `ggml-org` model.
-
-Download the main model and the tested draft model:
-
-```bash
-scripts/gemma4-12b-server.sh download --mtp
-```
-
-The draft model comes from the Unsloth repository:
-
-```bash
-llama-server -hf unsloth/gemma-4-12b-it-GGUF --hf-file MTP/gemma-4-12b-it-Q8_0-MTP.gguf
-```
-
-If `llama-server` starts after the download, stop it with `Ctrl+C`.
-
-The helper automatically searches the default Hugging Face cache path:
-
-```text
-~/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/<snapshot>/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
-```
-
-Then start the server with MTP:
-
-```bash
+MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf \
+MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf \
 scripts/gemma4-12b-server.sh start --mtp
 ```
-
-For MTP, the helper uses `MTP_LLAMA_SERVER_BIN` when provided. It also checks
-common local build paths such as:
-
-```text
-~/LAB/llama.cpp-gemma4/build/bin/llama-server
-~/LAB/llama.cpp-gemma4-mtp-qualcomm/build/bin/llama-server
-```
-
-See [MTP speculative decoding](docs/PERFORMANCE.md#mtp-speculative-decoding)
-for the tested fork/branch and benchmark notes.
 
 Override the detected paths if needed:
 
 ```bash
+MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf \
 MTP_LLAMA_SERVER_BIN=/path/to/compatible/llama-server \
 MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf \
 scripts/gemma4-12b-server.sh start --mtp
 ```
+
+See [MTP speculative decoding](docs/PERFORMANCE.md#mtp-speculative-decoding)
+for benchmark notes.
 
 ## Run orbit
 
