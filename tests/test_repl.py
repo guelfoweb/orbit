@@ -24,6 +24,7 @@ from orbit.terminal.repl_input import (
     clear_input_echo,
     colorize_paste_preview,
     colorize_user_prompt,
+    input_prompt,
     read_available_paste_tail,
     replace_input_echo,
     should_replace_input_echo,
@@ -328,6 +329,19 @@ class ReplTests(unittest.TestCase):
 
         self.assertIn("\033[36m> Lorem...\n\033[0m", colored)
         self.assertIn("\033[2m\033[33m[text 5108 chars #a1b2c3d4]\033[0m", colored)
+
+    def test_input_prompt_is_plain_without_tty(self) -> None:
+        with mock.patch("sys.stdout.isatty", return_value=False):
+            self.assertEqual(input_prompt(), "> ")
+
+    def test_input_prompt_uses_readline_safe_color_on_tty(self) -> None:
+        with mock.patch("sys.stdout.isatty", return_value=True):
+            prompt = input_prompt()
+
+        self.assertIn("\001", prompt)
+        self.assertIn("\002", prompt)
+        self.assertIn("\033[36m", prompt)
+        self.assertIn("> ", prompt)
 
     def test_length_footer_suggests_continue_and_max_tokens(self) -> None:
         runtime = CountingRuntime()

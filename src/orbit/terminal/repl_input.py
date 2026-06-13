@@ -6,17 +6,25 @@ import sys
 from shutil import get_terminal_size
 
 from orbit.terminal.prompt_preview import compact_prompt_preview, is_long_text_prompt
-from orbit.terminal.theme import accent, yellow_dim
+from orbit.terminal.theme import CYAN, RESET, accent, yellow_dim
 
 
 PASTE_BADGE_PATTERN = re.compile(r"(\[text \d+ chars #[0-9a-f]{8}\])$")
 BRACKETED_PASTE_START = "\x1b[200~"
 BRACKETED_PASTE_END = "\x1b[201~"
+READLINE_IGNORE_START = "\001"
+READLINE_IGNORE_END = "\002"
 
 
 def read_prompt_input() -> str:
-    first_line = input("> ")
+    first_line = input(input_prompt())
     return read_available_paste_tail(first_line)
+
+
+def input_prompt() -> str:
+    if not sys.stdout.isatty():
+        return "> "
+    return f"{READLINE_IGNORE_START}{CYAN}{READLINE_IGNORE_END}> {READLINE_IGNORE_START}{RESET}{READLINE_IGNORE_END}"
 
 
 def replace_input_echo(prompt: str) -> None:
