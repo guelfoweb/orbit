@@ -243,7 +243,7 @@ This is intentional. With tools off, Orbit does not send tool schemas and does
 not enter the tool loop, so ordinary chat turns are lighter and cheaper during
 prefill.
 
-This experimental branch has a single operational mode:
+Orbit currently has a single operational tool mode:
 
 ```text
 /tools off = chat only
@@ -415,3 +415,5 @@ The public regression benchmark is available as `scripts/bench-core.sh`.
 It uses the repository `workdir/` fixture by default.
 
 Performance design notes are kept in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+Runtime techniques are kept in [docs/TECHNIQUES.md](docs/TECHNIQUES.md).

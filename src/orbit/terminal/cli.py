@@ -7,11 +7,12 @@ import time
 from orbit import __version__
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
+from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.media import load_audio, load_image
 from orbit.terminal.config import add_config_arguments, load_app_config
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
-from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens
+from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens, estimate_prefill_tokens_after_tool_result
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, TOOL_PREFILL_PROFILE, PrefillEstimator, prefill_profile_for_phase
 from orbit.terminal.repl import Repl
 from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, tools_text
@@ -126,8 +127,10 @@ def _run_one_shot(
     tools: str,
 ) -> int:
     prefill_estimator = PrefillEstimator()
-    prefill_tokens = estimate_prefill_tokens(runtime.messages, prompt)
-    prefill_profile = TOOL_PREFILL_PROFILE if tools_are_enabled(tools) else CHAT_PREFILL_PROFILE
+    tools_enabled = tools_are_enabled(tools)
+    system_prompt = ROUTE_SYSTEM_PROMPT if tools_enabled else CHAT_SYSTEM_PROMPT
+    prefill_tokens = estimate_prefill_tokens(runtime.messages, prompt, system_prompt=system_prompt)
+    prefill_profile = TOOL_PREFILL_PROFILE if tools_enabled else CHAT_PREFILL_PROFILE
     prefill_seconds = prefill_estimator.estimate_seconds(prefill_tokens, profile=prefill_profile)
     renderer = StreamRenderer(
         prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
@@ -148,7 +151,7 @@ def _run_one_shot(
                 audios=audios,
                 on_final_delta=renderer.write,
             )
-        elif not tools_are_enabled(tools):
+        elif not tools_enabled:
             result = runtime.ask_chat(
                 prompt,
                 temperature=temperature,
@@ -164,9 +167,14 @@ def _run_one_shot(
                 allowed_tool_names=allowed_tool_names_for_spec(tools),
                 on_final_delta=renderer.write,
                 on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
-                on_tool_result=lambda name, chars, source, content: renderer.event(
-                    format_tool_result_event(name, chars, source, content),
-                    trailing_blank_line=True,
+                on_tool_result=lambda name, chars, source, content: _show_tool_result(
+                    renderer,
+                    runtime,
+                    prefill_estimator,
+                    name,
+                    chars,
+                    source,
+                    content,
                 ),
             )
     except KeyboardInterrupt:
@@ -185,7 +193,7 @@ def _run_one_shot(
     prefill_estimator.update(
         prompt_tokens=result.prompt_tokens,
         prompt_tokens_per_second=result.prompt_tokens_per_second,
-        profile=prefill_profile_for_phase("final_from_tool" if tools_are_enabled(tools) else "chat_final"),
+        profile=prefill_profile_for_phase("final_from_tool" if tools_enabled else "chat_final"),
     )
     elapsed = time.monotonic() - started
     print("\n\n", end="", flush=True)
@@ -207,6 +215,14 @@ def _visible_prefill_seconds(seconds: float | None) -> float | None:
     if seconds is None or seconds < MIN_PREFILL_ESTIMATE_SECONDS:
         return None
     return seconds
+
+
+def _show_tool_result(renderer, runtime, prefill_estimator, name: str, chars: int, source: str | None, content: str | None) -> None:
+    if content is not None:
+        tokens = estimate_prefill_tokens_after_tool_result(runtime.messages, content)
+        seconds = prefill_estimator.estimate_seconds(tokens, profile=prefill_profile_for_phase("final_from_tool"))
+        renderer.set_prefill_estimate(_visible_prefill_seconds(seconds), tokens)
+    renderer.event(format_tool_result_event(name, chars, source, content), trailing_blank_line=True)
 
 
 if __name__ == "__main__":

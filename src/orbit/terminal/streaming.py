@@ -7,6 +7,7 @@ from orbit.terminal.theme import dim
 
 
 SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
+PREFILL_COMPLETION_LABEL = "waiting for model..."
 
 
 class StreamRenderer:
@@ -80,7 +81,8 @@ class StreamRenderer:
             elapsed = time.monotonic() - self._start_time
             frame = SPINNER_FRAMES[self._frame_index % len(SPINNER_FRAMES)]
             self._frame_index += 1
-            print(f"\r{dim(f'{frame} Working ({self._working_status(elapsed)} - Ctrl+C to interrupt)')}", end="", flush=True)
+            line = dim(f"{frame} Working ({self._working_status(elapsed)} - Ctrl+C to interrupt)")
+            print(f"\r{_pad_to_terminal_width(line)}", end="", flush=True)
             self._stop.wait(self.interval)
 
     @staticmethod
@@ -99,12 +101,12 @@ class StreamRenderer:
             if self._prefill_estimate_tokens and self._prefill_estimate_tokens > 0:
                 current = min(self._prefill_estimate_tokens, max(1, int((progress / 100) * self._prefill_estimate_tokens)))
                 label = (
-                    "processing prompt"
+                    PREFILL_COMPLETION_LABEL
                     if current >= self._prefill_estimate_tokens
                     else f"pf ~{current}/{self._prefill_estimate_tokens} tk"
                 )
             else:
-                label = "processing prompt" if progress >= 95 else f"pf ~{progress}%"
+                label = PREFILL_COMPLETION_LABEL if progress >= 95 else f"pf ~{progress}%"
             parts.append(label)
         return ", ".join(parts)
 
@@ -114,6 +116,15 @@ def _terminal_columns() -> int:
         return max(20, int(__import__("shutil").get_terminal_size((80, 20)).columns))
     except Exception:
         return 80
+
+
+def _pad_to_terminal_width(text: str) -> str:
+    columns = _terminal_columns()
+    return text + (" " * max(0, columns - _visible_len(text) - 1))
+
+
+def _visible_len(text: str) -> int:
+    return len(__import__("re").sub(r"\x1b\[[0-9;]*m", "", text))
 
 
 def format_elapsed(seconds: float) -> str:

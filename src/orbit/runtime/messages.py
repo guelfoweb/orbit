@@ -25,13 +25,7 @@ def _detect_shell() -> str:
     return Path(shell).name if shell else "sh"
 
 
-CHAT_SYSTEM_PROMPT = (
-    "Concise local assistant. "
-    "Answer normally for conversation, explanation, opinion, writing, and general knowledge. "
-    "If a local file task lacks a specific path and no tool is available, ask for the path in one sentence. "
-    "Do not claim you lack local filesystem access and do not explain generic file-processing best practices unless asked. "
-    "Do not emit route JSON or raw tool-call syntax."
-)
+CHAT_SYSTEM_PROMPT = "Answer normally for conversation, explanation, writing, opinion, and general knowledge."
 MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
 _COMMAND_SYSTEM_TEMPLATE = """Answer normally unless shell is needed.
 Shell tasks: files/edit/create/append/delete, system, URLs/web/search/fetch, execution, analysis.

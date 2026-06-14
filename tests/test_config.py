@@ -13,7 +13,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.terminal.cli import build_parser
-from orbit.runtime.messages import ROUTE_SYSTEM_PROMPT, TOOL_CALL_SYSTEM_PROMPT
+from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT, TOOL_CALL_SYSTEM_PROMPT
+from orbit.runtime.session_memory import estimate_text_tokens
 from orbit.terminal.config import DEFAULT_SYSTEM_PROMPT, load_app_config
 from orbit.terminal.tool_mode import allowed_tool_names_for_spec
 
@@ -34,6 +35,12 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("explicit URLs: curl", ROUTE_SYSTEM_PROMPT)
         self.assertIn("Quote spaced paths", ROUTE_SYSTEM_PROMPT)
         self.assertIn("not metadata", ROUTE_SYSTEM_PROMPT)
+
+    def test_chat_system_prompt_is_short_and_non_operational(self) -> None:
+        self.assertLess(estimate_text_tokens(CHAT_SYSTEM_PROMPT), 30)
+        self.assertIn("Answer normally", CHAT_SYSTEM_PROMPT)
+        self.assertNotIn('{"command"', CHAT_SYSTEM_PROMPT)
+        self.assertNotIn("orbit-web-search", CHAT_SYSTEM_PROMPT)
 
     def test_tool_call_prompt_mentions_quoted_shell_paths(self) -> None:
         self.assertIn("Call exec_shell_full_command exactly once", TOOL_CALL_SYSTEM_PROMPT)

@@ -183,7 +183,8 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "chat")
         self.assertIsNone(backend.tools_seen)
-        self.assertIn("Do not emit route JSON", backend.messages[0]["content"])
+        self.assertIn("Answer normally", backend.messages[0]["content"])
+        self.assertNotIn('{"command"', backend.messages[0]["content"])
 
 
 class ToolCallingBackend:

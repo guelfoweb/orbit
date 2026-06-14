@@ -6,13 +6,14 @@ from dataclasses import dataclass, field
 
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
+from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
 from orbit.terminal.commands import health_text, help_text, reset_session, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.config import AppConfig
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
-from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens
+from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens, estimate_prefill_tokens_after_tool_result
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE, PrefillEstimator, prefill_profile_for_phase
 from orbit.terminal.repl_input import clear_input_echo, read_prompt_input, replace_input_echo
 from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
@@ -89,8 +90,10 @@ class Repl:
         return read_prompt_input()
 
     def _ask(self, prompt: str) -> None:
-        prefill_tokens = estimate_prefill_tokens(self.runtime.messages, prompt)
-        prefill_profile = _prefill_profile_for_turn(self.runtime.messages, tools_enabled=tools_are_enabled(self.tools_mode or "off"))
+        tools_enabled = tools_are_enabled(self.tools_mode or "off")
+        system_prompt = ROUTE_SYSTEM_PROMPT if tools_enabled else CHAT_SYSTEM_PROMPT
+        prefill_tokens = estimate_prefill_tokens(self.runtime.messages, prompt, system_prompt=system_prompt)
+        prefill_profile = _prefill_profile_for_turn(self.runtime.messages, tools_enabled=tools_enabled)
         prefill_seconds = self.prefill_estimator.estimate_seconds(prefill_tokens, profile=prefill_profile)
         renderer = StreamRenderer(
             prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
@@ -110,10 +113,7 @@ class Repl:
                     allowed_tool_names=allowed_tool_names_for_spec(self.tools_mode or "off"),
                     on_final_delta=renderer.write,
                     on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
-                    on_tool_result=lambda name, chars, source, content: renderer.event(
-                        format_tool_result_event(name, chars, source, content),
-                        trailing_blank_line=True,
-                    ),
+                    on_tool_result=lambda name, chars, source, content: self._show_tool_result(renderer, name, chars, source, content),
                     on_model_step=self._record_model_step,
                 )
             else:
@@ -167,6 +167,13 @@ class Repl:
             prompt_tokens_per_second=metrics.prompt_tokens_per_second,
             profile=prefill_profile_for_phase(metrics.phase),
         )
+
+    def _show_tool_result(self, renderer: StreamRenderer, name: str, chars: int, source: str | None, content: str | None) -> None:
+        if content is not None:
+            tokens = estimate_prefill_tokens_after_tool_result(self.runtime.messages, content)
+            seconds = self.prefill_estimator.estimate_seconds(tokens, profile=FINAL_FROM_TOOL_PREFILL_PROFILE)
+            renderer.set_prefill_estimate(_visible_prefill_seconds(seconds), tokens)
+        renderer.event(format_tool_result_event(name, chars, source, content), trailing_blank_line=True)
 
     def _handle_command(self, command: str) -> bool:
         if command == "/exit":

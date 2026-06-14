@@ -89,8 +89,8 @@ Rules:
 - Interactive final assistant responses should stream when supported by the backend.
 - Streaming must not break tool-call parsing or duplicate the final response.
 - Ctrl+C during streaming must interrupt the current turn, rollback partial messages, and return to the prompt without exiting.
-- Tool phases should emit compact dim events, including tool name and result size.
-- Tool event format is `<tool_name> <json_args>` followed by ` └ <tool_name> <result_chars> chars`.
+- Tool phases should emit compact dim events, including display tool name and result size.
+- Tool event format is `exec <json_args>` followed by ` └ <result_chars> chars -> model`.
 - Show a dim elapsed-time indicator before the first streamed token.
 - Keep one blank line between prompt and assistant response.
 - Keep one blank line between assistant response and the dim metrics footer.
@@ -121,4 +121,4 @@ Keep manual regression prompts in `docs/PROMPTS.md`. The file should stay short 
 
 ## Todo
 
-- Keep tool surface limited while native server tools and Orbit-only fallbacks are validated.
+- Keep the tool surface limited and explicit.

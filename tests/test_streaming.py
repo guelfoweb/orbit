@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.terminal.streaming import StreamRenderer, format_elapsed
+from orbit.terminal.streaming import StreamRenderer, _pad_to_terminal_width, format_elapsed
 
 
 class StreamingRendererTests(unittest.TestCase):
@@ -83,12 +83,17 @@ class StreamingRendererTests(unittest.TestCase):
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
 
         self.assertIn("pf ~500/1000 tk", renderer._working_status(5))
-        self.assertIn("processing prompt", renderer._working_status(10))
+        self.assertIn("waiting for model...", renderer._working_status(10))
 
     def test_wait_timer_prints_prefill_finalizing_after_estimate(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10)
 
-        self.assertIn("processing prompt", renderer._working_status(10))
+        self.assertIn("waiting for model...", renderer._working_status(10))
+
+    def test_wait_line_is_padded_to_clear_previous_content(self) -> None:
+        padded = _pad_to_terminal_width("\033[2mshort\033[0m")
+
+        self.assertGreater(len(padded), len("\033[2mshort\033[0m"))
 
     def test_wait_timer_stops_before_first_delta(self) -> None:
         stream = io.StringIO()
