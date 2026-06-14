@@ -22,8 +22,8 @@ def format_tool_result_event(name: str, chars: int, source: str | None = None, c
     suffix = " | large context" if chars >= LARGE_TOOL_RESULT_CHARS else ""
     chunk = _chunk_label(content)
     if chunk:
-        return f" └ {chunk} {chars} chars{suffix}"
-    return f" └ {chars} chars{suffix}"
+        return f" └ {chunk} {chars} chars -> model{suffix}"
+    return f" └ {chars} chars -> model{suffix}"
 
 
 def _chunk_label(content: str | None) -> str | None:

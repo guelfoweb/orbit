@@ -189,11 +189,11 @@ class ReplTests(unittest.TestCase):
         self.assertIn("interrupted", stdout.getvalue())
 
     def test_tool_result_event_marks_large_context(self) -> None:
-        self.assertEqual(format_tool_result_event("read_file", 9999), " └ 9999 chars")
-        self.assertEqual(format_tool_result_event("read_file", 10000), " └ 10000 chars | large context")
-        self.assertEqual(format_tool_result_event("read_file", 5, "orbit"), " └ 5 chars")
+        self.assertEqual(format_tool_result_event("read_file", 9999), " └ 9999 chars -> model")
+        self.assertEqual(format_tool_result_event("read_file", 10000), " └ 10000 chars -> model | large context")
+        self.assertEqual(format_tool_result_event("read_file", 5, "orbit"), " └ 5 chars -> model")
         self.assertEqual(format_tool_call_event("exec_shell_full_command", '{"command":"ls"}'), 'exec {"command":"ls"}')
-        self.assertEqual(format_tool_result_event("exec_shell_full_command", 45), " └ 45 chars")
+        self.assertEqual(format_tool_result_event("exec_shell_full_command", 45), " └ 45 chars -> model")
         chunk_content = "\n".join(
             [
                 "shell_output_read_file: true",
@@ -203,7 +203,7 @@ class ReplTests(unittest.TestCase):
                 "hello",
             ]
         )
-        self.assertEqual(format_tool_result_event("exec_shell_full_command", 200, content=chunk_content), " └ chunk 1/3 200 chars")
+        self.assertEqual(format_tool_result_event("exec_shell_full_command", 200, content=chunk_content), " └ chunk 1/3 200 chars -> model")
 
     def test_unresolved_history_preview_is_not_sent_to_model(self) -> None:
         long_prompt = "Copied history " + ("x" * 900)
