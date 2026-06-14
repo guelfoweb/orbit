@@ -319,8 +319,9 @@ commands with side effects.
 - `exec_shell_full_command` is unrestricted except for timeout/output limits.
 - The runtime does not sandbox or validate shell commands in this mode.
 - Shell commands run from the configured `--workdir`, but may access paths outside it.
-- Web content is fetched by shell commands such as `curl` when the model decides it is needed.
-- Long files and long web pages are currently handled by shell output limits; future work may add shell-callable Orbit helpers for chunked reads and extracted web text.
+- Generic web search uses the internal shell command `orbit-web-search "query"` when the model decides it is needed.
+- Explicit URLs are fetched by shell commands such as `curl`.
+- Long files and long web pages are handled by bounded shell output and post-processing.
 
 Current read limits:
 

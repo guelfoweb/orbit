@@ -48,6 +48,7 @@ Rules:
 - Commands that read or analyze local PDFs may be post-processed through text extraction.
 - PDF text extraction must prefer `pdftotext`; if unavailable, fallback to filtered `strings`.
 - PDF support is text-only: no OCR and no raw PDF reinjection.
+- Generic web search should use `orbit-web-search "query"`; explicit URLs should use `curl`.
 - HTML emitted by shell commands such as `curl` may be converted to readable text before reinjection.
 - If the user asks for HTML/page source analysis, preserve source-like HTML instead of converting it to readable text.
 - Web content must not be silently saved into the workdir.

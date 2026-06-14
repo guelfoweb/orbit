@@ -10,7 +10,7 @@ from typing import Any
 
 from orbit.runtime.file_tools import MAX_CHUNK_FILE_BYTES, MAX_READ_CHARS, read_file
 from orbit.runtime.path_guardrails import resolve_inside_workdir
-from orbit.runtime.web import html_to_text
+from orbit.runtime.web import html_to_text, search_web
 
 
 DEFAULT_SHELL_TIMEOUT = 10
@@ -33,7 +33,7 @@ _ANALYSIS_PROMPT_RE = re.compile(
 )
 _METADATA_ONLY_RE = re.compile(r"^\s*(?:ls|file|stat)(?:\s|$)", re.IGNORECASE)
 _CONTENT_EVIDENCE_RE = re.compile(
-    r"\b(?:cat|sed|head|tail|grep|rg|strings|pdftotext|python3?|node|jq|awk|xxd|hexdump|readelf|objdump|jadx|apktool)\b",
+    r"\b(?:cat|sed|head|tail|grep|rg|strings|pdftotext|python3?|node|jq|awk|xxd|hexdump|readelf|objdump|jadx|apktool|orbit-web-search)\b",
     re.IGNORECASE,
 )
 _HTML_SOURCE_PROMPT_RE = re.compile(
@@ -51,7 +51,7 @@ def exec_shell_full_definition() -> dict[str, Any]:
                 "Local shell confined to the current workdir. May read, write, delete, execute, and access network. "
                 "Use whatever commands are needed to complete the task. "
                 "For analysis, prefer direct evidence from content, source, binaries, strings, logs, archives, and fetched data, not only metadata. "
-                "For URLs, use curl when content is needed. "
+                'For generic web search, use orbit-web-search "query"; for explicit URLs, use curl. '
                 "Quote paths containing spaces."
             ),
             "parameters": {
@@ -77,6 +77,9 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
     timeout = _bounded_int(arguments.get("timeout"), default=DEFAULT_SHELL_TIMEOUT, maximum=MAX_SHELL_TIMEOUT)
     output_size = _bounded_int(arguments.get("max_output_size"), default=DEFAULT_SHELL_OUTPUT_BYTES, maximum=MAX_SHELL_OUTPUT_BYTES)
     resolved_workdir = workdir.expanduser().resolve()
+    web_search_result = _run_orbit_web_search(raw_command)
+    if web_search_result is not None:
+        return _bounded_text(web_search_result, output_size)
     pdf_result = _read_pdf_target(raw_command, workdir=workdir)
     if pdf_result is not None:
         return _bounded_text(pdf_result, output_size)
@@ -132,6 +135,21 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
 
 def is_shell_full_contract_error(content: str) -> bool:
     return content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX)
+
+
+def _run_orbit_web_search(raw_command: str) -> str | None:
+    try:
+        tokens = shlex.split(raw_command)
+    except ValueError as exc:
+        if raw_command.strip().startswith("orbit-web-search"):
+            return f"error: invalid orbit-web-search command: {exc}"
+        return None
+    if not tokens or tokens[0] != "orbit-web-search":
+        return None
+    query = " ".join(tokens[1:]).strip()
+    if not query:
+        return "error: orbit-web-search requires a query"
+    return search_web(query)
 
 
 def _postprocess_shell_full_output(

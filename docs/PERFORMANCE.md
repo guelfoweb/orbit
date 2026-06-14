@@ -307,6 +307,7 @@ Important boundaries:
 
 - Shell execution is bounded by timeout and output-size limits.
 - `cat` on large UTF-8 text/source files is converted into a bounded structured excerpt.
+- Generic web search uses `orbit-web-search "query"` and returns bounded structured results.
 - HTML output from commands such as `curl` is converted to readable text before reinjection.
 - Binary files, PDFs, archives, images, and audio are not parsed by the internal text reader.
 
@@ -334,11 +335,14 @@ This gives the model real content without injecting the full file into the activ
 
 ## Web content handling
 
-Orbit no longer exposes a dedicated web fetch tool. When the model uses shell
-commands such as `curl`, HTML output can be post-processed into readable text.
+Orbit no longer exposes a broad dedicated web tool. Generic searches go through
+the internal shell command `orbit-web-search "query"`. Explicit URLs are fetched
+with shell commands such as `curl`, and HTML output can be post-processed into
+readable text.
 
 The runtime applies:
 
+- bounded structured search results
 - conservative HTML-to-text extraction
 - bounded reinjection
 

@@ -41,7 +41,7 @@ Return valid one-line JSON only:
 
 Environment: OS={os_name}; shell={shell_name}.
 
-Use given paths exactly. Use native commands in workdir. Use curl for URLs. Quote spaced paths.
+Use given paths exactly. Use native commands in workdir. Generic web search: orbit-web-search "query"; explicit URLs: curl. Quote spaced paths.
 
 Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
@@ -54,7 +54,7 @@ ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shel
 TOOL_CALL_SYSTEM_PROMPT = (
     "Call exec_shell_full_command exactly once and output no prose. "
     "Use one compact one-line shell command. "
-    "Use curl for URLs when content is needed. "
+    'Use orbit-web-search "query" for generic web search; use curl for explicit URLs. '
     "Quote paths containing spaces. "
     "For analysis, collect direct evidence from content/source/strings/logs/archives/fetched data."
 )

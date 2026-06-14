@@ -54,7 +54,8 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command"])
         description = definitions[0]["function"]["description"]
         self.assertIn("Local shell confined to the current workdir", description)
-        self.assertIn("For URLs, use curl when content is needed", description)
+        self.assertIn("orbit-web-search", description)
+        self.assertIn("explicit URLs", description)
         self.assertIn("Quote paths containing spaces", description)
 
     def test_ignores_server_tools(self) -> None:
@@ -90,6 +91,43 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertEqual(execution.result.content.strip(), "1")
         self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_full_runs_internal_web_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = FakeServerTools()
+            executor = HybridToolExecutor(
+                backend=backend,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            with patch("orbit.runtime.shell_guardrails.search_web", return_value="web_search_results: true\nquery: Dante"):
+                execution = executor.execute(
+                    "exec_shell_full_command",
+                    {"command": 'orbit-web-search "Dante"'},
+                    chunk_budget={},
+                )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("web_search_results: true", execution.result.content)
+        self.assertEqual(backend.executed, [])
+
+    def test_exec_shell_full_rejects_empty_internal_web_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "orbit-web-search"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("requires a query", execution.result.content)
 
     def test_exec_shell_full_rejects_unavailable_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

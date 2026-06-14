@@ -93,11 +93,11 @@ Expected: shell command creates the directory and reports the result.
 
 16. `Search online for Dante Alighieri and return four concise facts with source names.`
 
-Expected: shell command uses an available network/search method; answer is based on retrieved evidence.
+Expected: shell command uses `orbit-web-search "Dante Alighieri"` or an equivalent query; answer is based on bounded structured search results.
 
 17. `Fetch https://example.com and summarize the page in two short bullets.`
 
-Expected: shell command fetches the URL; HTML is not dumped raw in the final answer.
+Expected: shell command uses `curl` or an equivalent explicit URL fetch; HTML is not dumped raw in the final answer.
 
 18. `Search the web for Agenzia per l'Italia Digitale and explain what it is in up to four bullets.`
 
@@ -109,7 +109,7 @@ Expected: bounded shell fetch; no claim of lacking internet.
 
 20. `Search online for official information about Linux Mint and report the project website.`
 
-Expected: shell command retrieves evidence and reports the official site if found.
+Expected: shell command uses `orbit-web-search "Linux Mint official information"` or an equivalent query and reports the official site if found.
 
 21. `Tell me the specs of this computer.`
 

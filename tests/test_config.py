@@ -22,21 +22,24 @@ class ConfigTests(unittest.TestCase):
     def test_default_system_prompt_allows_attached_media_answers(self) -> None:
         self.assertIn("Answer normally unless shell is needed", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("Environment: OS=", DEFAULT_SYSTEM_PROMPT)
-        self.assertIn("Use curl for URLs", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("orbit-web-search", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("explicit URLs: curl", DEFAULT_SYSTEM_PROMPT)
 
     def test_command_system_prompt_sends_local_hardware_queries_to_shell(self) -> None:
         self.assertIn('{"command":"..."}', ROUTE_SYSTEM_PROMPT)
         self.assertIn("Return valid one-line JSON only", ROUTE_SYSTEM_PROMPT)
         self.assertIn("Use native commands", ROUTE_SYSTEM_PROMPT)
         self.assertIn("Environment: OS=", ROUTE_SYSTEM_PROMPT)
-        self.assertIn("Use curl for URLs", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("orbit-web-search", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("explicit URLs: curl", ROUTE_SYSTEM_PROMPT)
         self.assertIn("Quote spaced paths", ROUTE_SYSTEM_PROMPT)
         self.assertIn("not metadata", ROUTE_SYSTEM_PROMPT)
 
     def test_tool_call_prompt_mentions_quoted_shell_paths(self) -> None:
         self.assertIn("Call exec_shell_full_command exactly once", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("one-line shell command", TOOL_CALL_SYSTEM_PROMPT)
-        self.assertIn("Use curl for URLs when content is needed", TOOL_CALL_SYSTEM_PROMPT)
+        self.assertIn("orbit-web-search", TOOL_CALL_SYSTEM_PROMPT)
+        self.assertIn("explicit URLs", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("Quote paths containing spaces", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("collect direct evidence", TOOL_CALL_SYSTEM_PROMPT)
 

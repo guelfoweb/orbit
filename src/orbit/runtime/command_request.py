@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from orbit.runtime.tool_arguments import parse_tool_arguments_or_empty
 
 SHELL_TOOL_ALIASES = {"exec_shell_full_command", "shell"}
+WEB_SEARCH_TOOL_ALIASES = {"orbit-web-search"}
 
 
 class ToolRoute(StrEnum):
@@ -41,6 +43,8 @@ def parse_command_decision_from_tool_calls(tool_calls: list[dict[str, Any]]) -> 
         args = parse_tool_arguments_or_empty(function.get("arguments"))
         if _has_command(args) or name in SHELL_TOOL_ALIASES:
             return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
+        if name in WEB_SEARCH_TOOL_ALIASES and _web_search_command_from_args(args):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
     return None
 
 
@@ -60,6 +64,10 @@ def command_tool_call_from_tool_calls(
         args = parse_tool_arguments_or_empty(function.get("arguments"))
         if _has_command(args):
             return _tool_call("exec_shell_full_command", {"command": args["command"]})
+        if name in WEB_SEARCH_TOOL_ALIASES:
+            command = _web_search_command_from_args(args)
+            if command:
+                return _tool_call("exec_shell_full_command", {"command": command})
     return None
 
 
@@ -69,6 +77,9 @@ def command_tool_call_from_content(
 ) -> dict[str, Any] | None:
     if "exec_shell_full_command" not in set(allowed_tool_names):
         return None
+    raw_command = _extract_raw_tool_call_command(content)
+    if raw_command:
+        return _tool_call("exec_shell_full_command", {"command": raw_command})
     value = _parse_command_json_object(content) or _extract_last_json_object(content) or _extract_loose_command_object(content)
     if not _has_command(value):
         return None
@@ -190,9 +201,38 @@ def command_like_tool_call(content: str, allowed_tool_names: tuple[str, ...]) ->
 def _parse_raw_tool_call_decision(text: str) -> ToolRoute | None:
     if "<|tool_call>" not in text:
         return None
+    if _extract_raw_tool_call_command(text):
+        return ToolRoute.FILESYSTEM
     if "exec_shell_full_command" in text or "call:shell" in text or "command" in text:
         return ToolRoute.FILESYSTEM
     return None
+
+
+def _extract_raw_tool_call_command(content: str) -> str | None:
+    text = content.replace('<|"|>', '"')
+    match = re.search(
+        r"<\|tool_call\>\s*call:(?P<name>[A-Za-z0-9_-]+)\s*(?P<args>\{.*?\})\s*<tool_call\|>",
+        text,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return None
+    name = match.group("name")
+    value = _parse_command_json_object(match.group("args")) or _extract_last_json_object(match.group("args"))
+    if name in SHELL_TOOL_ALIASES and _has_command(value):
+        return value["command"]
+    if name in WEB_SEARCH_TOOL_ALIASES:
+        return _web_search_command_from_args(value)
+    return None
+
+
+def _web_search_command_from_args(value: dict[str, Any] | None) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    query = value.get("query") or value.get("q")
+    if not isinstance(query, str) or not query.strip():
+        return None
+    return f"orbit-web-search {shlex.quote(query.strip())}"
 
 
 def _parse_command_json_object(content: str) -> dict[str, Any] | None:
