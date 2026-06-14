@@ -15,7 +15,9 @@ from orbit.runtime.shell_guardrails import (
     is_shell_full_contract_error,
     is_shell_full_execution_error,
     shell_repair_prompt,
+    should_verify_shell_mutation,
 )
+from orbit.runtime.tool_arguments import parse_tool_arguments_or_empty
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_calls import execute_tool_call
 from orbit.runtime.tool_loop_state import ToolLoopState
@@ -58,8 +60,74 @@ def run_tool_loop(
     shell_error_final_pending = False
     shell_repair_prompt_pending: str | None = None
     shell_repair_retries = 0
+    mutation_verification_pending = False
+    mutation_verification_repair_pending = False
+    mutation_verification_repair_used = False
     shell_full_enabled = "exec_shell_full_command" in allowed_tool_names
     suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
+
+    def update_state_after_tool_result(
+        tool_call: dict[str, object],
+        tool_result,
+        *,
+        is_mutation_verification: bool,
+        is_mutation_verification_repair: bool,
+    ) -> None:
+        nonlocal contract_retry_pending
+        nonlocal mutation_verification_pending
+        nonlocal mutation_verification_repair_pending
+        nonlocal mutation_verification_repair_used
+        nonlocal shell_empty_result_check_pending
+        nonlocal shell_empty_result_check_used
+        nonlocal shell_error_final_pending
+        nonlocal shell_repair_prompt_pending
+        nonlocal shell_repair_retries
+
+        if tool_result.name != "exec_shell_full_command":
+            return
+        if is_shell_full_contract_error(tool_result.content):
+            contract_retry_pending = True
+            return
+        if is_shell_full_execution_error(tool_result.content):
+            if is_mutation_verification:
+                if (
+                    is_repairable_shell_error(tool_result.content)
+                    and not mutation_verification_repair_used
+                ):
+                    mutation_verification_repair_used = True
+                    mutation_verification_repair_pending = True
+                    runtime.mutation_verification_repairs += 1
+                    shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
+                    return
+                runtime.mutation_verification_failures += 1
+                shell_error_final_pending = True
+                return
+            if is_mutation_verification_repair:
+                runtime.mutation_verification_failures += 1
+                shell_error_final_pending = True
+                return
+            if is_repairable_shell_error(tool_result.content) and shell_repair_retries < MAX_SHELL_REPAIR_RETRIES:
+                shell_repair_retries += 1
+                shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
+                return
+            shell_error_final_pending = True
+            return
+        if tool_result.content.strip():
+            return
+        if is_mutation_verification or is_mutation_verification_repair:
+            runtime.mutation_verification_failures += 1
+            shell_error_final_pending = True
+            return
+        command = _shell_command_from_tool_call(tool_call)
+        if (
+            command
+            and not shell_empty_result_check_used
+            and should_verify_shell_mutation(command, user_prompt=_last_user_text(runtime.messages))
+        ):
+            shell_empty_result_check_pending = True
+            shell_empty_result_check_used = True
+            mutation_verification_pending = True
+            runtime.mutation_verifications += 1
     if initial_tool_calls:
         calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
         state.increment_round()
@@ -70,21 +138,12 @@ def run_tool_loop(
                 on_tool_call(*signature)
             execution = execute_tool_call(tool_call, chunk_budget=state.chunk_budget, executor=executor)
             tool_result = execution.result
-            if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
-                contract_retry_pending = True
-            elif (
-                tool_result.name == "exec_shell_full_command"
-                and is_shell_full_execution_error(tool_result.content)
-                and is_repairable_shell_error(tool_result.content)
-                and shell_repair_retries < MAX_SHELL_REPAIR_RETRIES
-            ):
-                shell_repair_retries += 1
-                shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
-            elif tool_result.name == "exec_shell_full_command" and is_shell_full_execution_error(tool_result.content):
-                shell_error_final_pending = True
-            elif tool_result.name == "exec_shell_full_command" and not shell_empty_result_check_used and not tool_result.content.strip():
-                shell_empty_result_check_pending = True
-                shell_empty_result_check_used = True
+            update_state_after_tool_result(
+                tool_call,
+                tool_result,
+                is_mutation_verification=False,
+                is_mutation_verification_repair=False,
+            )
             if on_tool_result:
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
             runtime.messages.append(tool_result_message(tool_call, tool_result))
@@ -110,6 +169,8 @@ def run_tool_loop(
             )
     for loop_index in range(1, max_loops + 1):
         call_messages = with_tool_call_system_prompt(runtime.messages)
+        executing_mutation_verification = mutation_verification_pending
+        executing_mutation_verification_repair = mutation_verification_repair_pending
         if shell_repair_prompt_pending is not None:
             call_messages = [*call_messages, {"role": "user", "content": shell_repair_prompt_pending}]
         elif shell_empty_result_check_pending:
@@ -152,6 +213,10 @@ def run_tool_loop(
             shell_repair_prompt_pending = None
         if shell_empty_result_check_pending:
             shell_empty_result_check_pending = False
+        if mutation_verification_pending:
+            mutation_verification_pending = False
+        if mutation_verification_repair_pending:
+            mutation_verification_repair_pending = False
         if result.finish_reason == "length" and not result.tool_calls and state.tool_rounds > 0:
             return runtime._answer_from_tool_results(
                 temperature=temperature,
@@ -218,21 +283,12 @@ def run_tool_loop(
                 executor=executor,
             )
             tool_result = execution.result
-            if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
-                contract_retry_pending = True
-            elif (
-                tool_result.name == "exec_shell_full_command"
-                and is_shell_full_execution_error(tool_result.content)
-                and is_repairable_shell_error(tool_result.content)
-                and shell_repair_retries < MAX_SHELL_REPAIR_RETRIES
-            ):
-                shell_repair_retries += 1
-                shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
-            elif tool_result.name == "exec_shell_full_command" and is_shell_full_execution_error(tool_result.content):
-                shell_error_final_pending = True
-            elif tool_result.name == "exec_shell_full_command" and not shell_empty_result_check_used and not tool_result.content.strip():
-                shell_empty_result_check_pending = True
-                shell_empty_result_check_used = True
+            update_state_after_tool_result(
+                tool_call,
+                tool_result,
+                is_mutation_verification=executing_mutation_verification,
+                is_mutation_verification_repair=executing_mutation_verification_repair,
+            )
             if on_tool_result:
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
             if should_refresh_for_append(runtime.messages, tool_result.content, context_tokens=runtime.context_tokens):
@@ -296,3 +352,14 @@ def _last_user_text(messages: list[Message]) -> str | None:
         content = message.get("content")
         return content if isinstance(content, str) else None
     return None
+
+
+def _shell_command_from_tool_call(tool_call: dict[str, object]) -> str | None:
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        return None
+    if function.get("name") != "exec_shell_full_command":
+        return None
+    args = parse_tool_arguments_or_empty(function.get("arguments"))
+    command = args.get("command") if isinstance(args, dict) else None
+    return command if isinstance(command, str) and command.strip() else None

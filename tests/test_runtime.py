@@ -16,7 +16,7 @@ from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
 from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
-from orbit.runtime.shell_guardrails import SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT
+from orbit.runtime.shell_guardrails import SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT, should_verify_shell_mutation
 
 
 class FakeBackend:
@@ -1392,6 +1392,330 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(backend.tools_seen[2])
         self.assertIsNone(backend.tools_seen[3])
         self.assertEqual(backend.messages_seen[1][-1]["content"], SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
+        self.assertEqual(runtime.mutation_verifications, 1)
+        self.assertEqual(runtime.mutation_verification_repairs, 0)
+        self.assertEqual(runtime.mutation_verification_failures, 0)
+
+    def test_mutation_verification_sed_noop_requests_direct_evidence(self) -> None:
+        class SedNoopBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "sed -i 's|<title>.*</title>|<title>test</title>|' index.html"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content=json.dumps({"command": "perl -0ne 'print $1 if m|<title>\\s*(.*?)\\s*</title>|s' index.html"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="verification inspected",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="not confirmed",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "index.html").write_text("<title>\nOld\n</title>\n", encoding="utf-8")
+            runtime = ChatRuntime(backend=SedNoopBackend(), system_prompt="route system")
+
+            result = runtime.ask_auto(
+                'sostituisci il title di index.html con "test"',
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "not confirmed")
+        self.assertEqual(runtime.mutation_verifications, 1)
+        self.assertEqual(runtime.mutation_verification_failures, 0)
+
+    def test_mutation_verification_rename_noop_requests_verification(self) -> None:
+        class RenameNoopBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "mv note.txt note.txt 2>/dev/null || true"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content=json.dumps({"command": "ls -l note.txt"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="checked rename",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="rename inspected",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("alpha", encoding="utf-8")
+            runtime = ChatRuntime(backend=RenameNoopBackend(), system_prompt="route system")
+            runtime.ask_auto(
+                "rename note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(runtime.mutation_verifications, 1)
+
+    def test_mutation_verification_create_file_not_created(self) -> None:
+        class CreateMissingBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "touch missing/note.txt 2>/dev/null || true"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content=json.dumps({"command": "test -f missing/note.txt && echo exists || echo missing"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="checked create",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="create not confirmed",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=CreateMissingBackend(), system_prompt="route system")
+            result = runtime.ask_auto(
+                "create missing/note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "create not confirmed")
+        self.assertEqual(runtime.mutation_verifications, 1)
+
+    def test_mutation_verification_failed_then_repair_succeeds(self) -> None:
+        class VerificationRepairBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                commands = {
+                    1: "printf alpha > note.txt",
+                    2: "grep '[' note.txt",
+                    3: "cat note.txt",
+                }
+                if self.calls in commands:
+                    return ChatResult(
+                        content=json.dumps({"command": commands[self.calls]}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="verified after repair",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=VerificationRepairBackend(), system_prompt="route system")
+            result = runtime.ask_auto(
+                "write alpha into note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "verified after repair")
+        self.assertEqual(runtime.mutation_verifications, 1)
+        self.assertEqual(runtime.mutation_verification_repairs, 1)
+        self.assertEqual(runtime.mutation_verification_failures, 0)
+
+    def test_mutation_verification_failed_then_repair_fails(self) -> None:
+        class VerificationRepairFailsBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                commands = {
+                    1: "printf alpha > note.txt",
+                    2: "grep '[' note.txt",
+                    3: "grep '[a-' note.txt",
+                }
+                if self.calls in commands:
+                    return ChatResult(
+                        content=json.dumps({"command": commands[self.calls]}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="verification failed",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=VerificationRepairFailsBackend(), system_prompt="route system")
+            result = runtime.ask_auto(
+                "write alpha into note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "verification failed")
+        self.assertEqual(runtime.mutation_verifications, 1)
+        self.assertEqual(runtime.mutation_verification_repairs, 1)
+        self.assertEqual(runtime.mutation_verification_failures, 1)
+
+    def test_mutation_detection_covers_sql_update_without_format_specific_runtime_validation(self) -> None:
+        self.assertTrue(
+            should_verify_shell_mutation(
+                "sqlite3 app.db 'update users set name=\"x\" where id=999'",
+                user_prompt="update the user",
+            )
+        )
 
     def test_shell_full_allows_multiple_successive_command_rounds(self) -> None:
         class MultiShellFullBackend:

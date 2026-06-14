@@ -44,6 +44,10 @@ Rules:
 - `exec_shell_full_command` is unrestricted local shell access.
 - The runtime enforces timeout/output-size limits around shell execution.
 - For analysis prompts, metadata-only commands such as `ls`, `file`, or `stat` must trigger a model retry asking for direct content/source/string evidence.
+- Failed shell commands may enter a model-driven repair loop using bounded exit code, stdout, and stderr evidence.
+- Shell repair must stay generic: no command/utility whitelist; skip only clearly environmental failures such as permission, filesystem, memory, DNS, or timeout errors.
+- Mutating shell commands that exit successfully with no output may trigger one model-driven verification command.
+- Mutation verification must not validate domain-specific formats in runtime; the model must produce evidence of the changed value or state.
 - `cat` on large UTF-8 text/source files may be post-processed through the internal bounded reader.
 - Commands that read or analyze local PDFs may be post-processed through text extraction.
 - PDF text extraction must prefer `pdftotext`; if unavailable, fallback to filtered `strings`.
@@ -84,6 +88,7 @@ Rules:
 - Prompt history should use `readline` when available, support arrow up/down, persist by workdir, and avoid duplicates.
 - Slash commands must not be stored in prompt history.
 - `/status` should expose useful runtime state without becoming noisy.
+- `/status` should include shell repair/mutation verification counters when present.
 - `/tools` must show only currently exposed model tools.
 - `/max-tokens` may adjust output token budget for following turns, runtime-only.
 - Interactive final assistant responses should stream when supported by the backend.

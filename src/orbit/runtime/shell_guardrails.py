@@ -29,10 +29,11 @@ SHELL_FULL_CONTRACT_RETRY_PROMPT = (
     "Return only the tool call."
 )
 SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT = (
-    "The previous shell command returned no output. "
-    "If it modified files or state, verify the requested effect with one exec_shell_full_command that prints the changed value; "
-    "do not print only matching names, tags, or field labels. "
-    "otherwise return no tool call."
+    "The command succeeded but produced no output.\n\n"
+    "Verify that the requested change actually occurred.\n\n"
+    "The verification command must print direct evidence of the changed value or state, not only metadata.\n\n"
+    "Return only JSON:\n\n"
+    '{"command":"..."}'
 )
 
 
@@ -53,6 +54,14 @@ _CONTENT_EVIDENCE_RE = re.compile(
 )
 _HTML_SOURCE_PROMPT_RE = re.compile(
     r"\b(?:html\s+source|source\s+html|page\s+source|source\s+code|sorgente|codice\s+html|html\s+code)\b",
+    re.IGNORECASE,
+)
+_READ_ONLY_PROMPT_RE = re.compile(
+    r"^\s*(?:read|show|list|tell|display|print|count|search|find|grep|summari[sz]e|explain|describe)\b",
+    re.IGNORECASE,
+)
+_MUTATION_PROMPT_RE = re.compile(
+    r"\b(?:create|write|edit|modify|replace|append|delete|remove|rename|move|copy|install|commit|update|insert|drop|alter)\b",
     re.IGNORECASE,
 )
 
@@ -207,6 +216,12 @@ def is_repairable_shell_error(content: str) -> bool:
     if any(marker in combined for marker in non_repairable):
         return False
     return True
+
+
+def should_verify_shell_mutation(command: str, *, user_prompt: str | None) -> bool:
+    if user_prompt and _READ_ONLY_PROMPT_RE.search(user_prompt) and not _MUTATION_PROMPT_RE.search(user_prompt):
+        return False
+    return _is_mutating_shell_command(command)
 
 
 def shell_repair_prompt(content: str) -> str:
@@ -400,6 +415,46 @@ def _is_search_command(raw_command: str) -> bool:
     except ValueError:
         return False
     return bool(tokens and tokens[0] in {"ag", "grep", "rg"})
+
+
+def _is_mutating_shell_command(command: str) -> bool:
+    if _has_shell_write_operator(command):
+        return True
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return any(marker in command for marker in (">", ">>", "| tee", " -i", "--in-place"))
+    if not tokens:
+        return False
+    words = [Path(token).name for token in tokens if token not in {"sudo", "env", "command", "xargs"}]
+    if not words:
+        return False
+    primary = words[0]
+    if primary in {"cp", "install", "ln", "mkdir", "mv", "rm", "rmdir", "tee", "touch", "truncate"}:
+        return True
+    if primary in {"chmod", "chgrp", "chown", "setfacl"}:
+        return True
+    if primary == "sed" and any(token == "-i" or token.startswith("-i") or token == "--in-place" for token in tokens[1:]):
+        return True
+    if primary == "perl" and any("i" in token and token.startswith("-") for token in tokens[1:]):
+        return True
+    if primary == "git" and len(words) > 1 and words[1] in {"add", "am", "apply", "checkout", "clean", "commit", "merge", "mv", "rebase", "reset", "restore", "rm", "stash", "switch"}:
+        return True
+    if primary == "sqlite3" and re.search(r"\b(?:alter|create|delete|drop|insert|replace|update)\b", command, re.IGNORECASE):
+        return True
+    if primary in {"bash", "dash", "fish", "sh", "zsh", "python", "python3", "node", "ruby"}:
+        return _has_shell_write_operator(command) or re.search(r"\b(?:open|write_text|write_bytes|remove|rename|unlink|mkdir)\b", command) is not None
+    if len(words) > 1 and words[1] in {"install", "update", "add", "remove"} and primary in {"apt", "apt-get", "brew", "cargo", "npm", "pip", "pip3", "uv"}:
+        return True
+    return False
+
+
+def _has_shell_write_operator(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return ">" in command
+    return any(token in {">", ">>", "2>", "2>>", "&>", "&>>"} for token in tokens) or bool(re.search(r"(^|[^<>])>{1,2}[^&]", command))
 
 
 def _looks_like_html(content: str) -> bool:

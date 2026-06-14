@@ -56,6 +56,9 @@ class ChatRuntime:
     memory_refreshes: int = 0
     total_memory_tokens_saved: int = 0
     last_memory_refresh_attempt: MemoryRefresh | None = None
+    mutation_verifications: int = 0
+    mutation_verification_repairs: int = 0
+    mutation_verification_failures: int = 0
 
     def __post_init__(self) -> None:
         if not self.messages and self.system_prompt:

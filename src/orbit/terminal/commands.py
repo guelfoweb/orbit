@@ -107,6 +107,12 @@ def runtime_status(
         "Memory",
         "-------",
         *_memory_status_lines(runtime),
+        "",
+        "Mutation verification",
+        "-------",
+        f"mutation_verifications: {runtime.mutation_verifications}",
+        f"mutation_verification_repairs: {runtime.mutation_verification_repairs}",
+        f"mutation_verification_failures: {runtime.mutation_verification_failures}",
     ]
     if info:
         lines.extend(
