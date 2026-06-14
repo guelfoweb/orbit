@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
 from pathlib import Path
@@ -15,6 +16,7 @@ from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
 from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
+from orbit.runtime.shell_guardrails import SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT
 
 
 class FakeBackend:
@@ -1020,6 +1022,376 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn("content/source/string evidence", backend.second_call_last_message["content"])
         self.assertIsNotNone(backend.third_call_last_message)
         self.assertIn("Return only the tool call", backend.third_call_last_message["content"])
+
+    def test_shell_full_failed_initial_command_gets_one_model_retry(self) -> None:
+        class FailedShellCommandBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "sed -i 's/<title>.*</title>/<title>test</title>/' index.html"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps(
+                                        {"command": "perl -0pi -e 's|<title>.*?</title>|<title>test</title>|s' index.html"}
+                                    ),
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="no further tool call",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="title updated",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "index.html").write_text("<html><head><title>\nOld\n</title></head></html>\n", encoding="utf-8")
+            backend = FailedShellCommandBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                'sostituisci il title della pagina con "test"',
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            content = (workdir / "index.html").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "title updated")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNone(backend.tools_seen[0])
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[3])
+        retry_prompt = backend.messages_seen[1][-1]["content"]
+        self.assertIn("The previous shell command failed.", retry_prompt)
+        self.assertIn("Exit code:", retry_prompt)
+        self.assertIn("STDOUT:", retry_prompt)
+        self.assertIn("STDERR:", retry_prompt)
+        self.assertIn('{"command":"..."}', retry_prompt)
+        self.assertIn("<title>test</title>", content)
+
+    def test_shell_full_non_repairable_error_does_not_retry(self) -> None:
+        class NonRepairableBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "printf 'permission denied' >&2; exit 1"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="reported failure",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = NonRepairableBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "run a command",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "reported failure")
+        self.assertEqual(backend.calls, 2)
+        self.assertIsNone(backend.tools_seen[0])
+        self.assertIsNone(backend.tools_seen[1])
+
+    def test_shell_full_generic_nonzero_error_gets_repair_retry(self) -> None:
+        class GenericErrorBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "printf 'custom parser exploded at token 7' >&2; exit 2"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content=json.dumps({"command": "printf repaired"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="repaired",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = GenericErrorBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "run custom command",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "repaired")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNone(backend.tools_seen[0])
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[3])
+        retry_prompt = backend.messages_seen[1][-1]["content"]
+        self.assertIn("Exit code: 2", retry_prompt)
+        self.assertIn("custom parser exploded at token 7", retry_prompt)
+
+    def test_shell_full_repair_loop_stops_after_two_failed_retries(self) -> None:
+        class AlwaysFailingBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls <= 3:
+                    commands = {
+                        1: "grep '[' note.txt",
+                        2: "grep '[[' note.txt",
+                        3: "grep '[a-' note.txt",
+                    }
+                    return ChatResult(
+                        content=json.dumps({"command": commands[self.calls]}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="final failure report",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("alpha\n", encoding="utf-8")
+            backend = AlwaysFailingBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "search note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "final failure report")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNone(backend.tools_seen[0])
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[3])
+
+    def test_shell_full_empty_initial_result_gets_one_model_verification_chance(self) -> None:
+        class EmptyShellResultBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "printf beta > note.txt"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat note.txt"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="no further tool call",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="note updated",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = EmptyShellResultBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "write beta into note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            content = (workdir / "note.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "note updated")
+        self.assertEqual(content, "beta")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNone(backend.tools_seen[0])
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[3])
+        self.assertEqual(backend.messages_seen[1][-1]["content"], SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
 
     def test_shell_full_allows_multiple_successive_command_rounds(self) -> None:
         class MultiShellFullBackend:

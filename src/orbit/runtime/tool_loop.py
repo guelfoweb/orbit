@@ -8,7 +8,14 @@ from orbit.backend.base import Message
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
 from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
 from orbit.runtime.session_memory import should_refresh_for_append
-from orbit.runtime.shell_guardrails import SHELL_FULL_CONTRACT_RETRY_PROMPT, is_shell_full_contract_error
+from orbit.runtime.shell_guardrails import (
+    SHELL_FULL_CONTRACT_RETRY_PROMPT,
+    SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT,
+    is_repairable_shell_error,
+    is_shell_full_contract_error,
+    is_shell_full_execution_error,
+    shell_repair_prompt,
+)
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_calls import execute_tool_call
 from orbit.runtime.tool_loop_state import ToolLoopState
@@ -18,6 +25,7 @@ from orbit.runtime.turn_trace import ModelStepMetrics
 
 
 TOOL_CALL_MAX_TOKENS = 96
+MAX_SHELL_REPAIR_RETRIES = 2
 
 
 def run_tool_loop(
@@ -45,6 +53,11 @@ def run_tool_loop(
     last_result: ChatResult | None = None
     state = ToolLoopState(allowed_tool_names)
     contract_retry_pending = False
+    shell_empty_result_check_pending = False
+    shell_empty_result_check_used = False
+    shell_error_final_pending = False
+    shell_repair_prompt_pending: str | None = None
+    shell_repair_retries = 0
     shell_full_enabled = "exec_shell_full_command" in allowed_tool_names
     suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
     if initial_tool_calls:
@@ -59,10 +72,25 @@ def run_tool_loop(
             tool_result = execution.result
             if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
                 contract_retry_pending = True
+            elif (
+                tool_result.name == "exec_shell_full_command"
+                and is_shell_full_execution_error(tool_result.content)
+                and is_repairable_shell_error(tool_result.content)
+                and shell_repair_retries < MAX_SHELL_REPAIR_RETRIES
+            ):
+                shell_repair_retries += 1
+                shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
+            elif tool_result.name == "exec_shell_full_command" and is_shell_full_execution_error(tool_result.content):
+                shell_error_final_pending = True
+            elif tool_result.name == "exec_shell_full_command" and not shell_empty_result_check_used and not tool_result.content.strip():
+                shell_empty_result_check_pending = True
+                shell_empty_result_check_used = True
             if on_tool_result:
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
             runtime.messages.append(tool_result_message(tool_call, tool_result))
-        if not contract_retry_pending:
+        if shell_error_final_pending or (
+            not contract_retry_pending and shell_repair_prompt_pending is None and not shell_empty_result_check_pending
+        ):
             return runtime._answer_from_tool_results(
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -82,6 +110,10 @@ def run_tool_loop(
             )
     for loop_index in range(1, max_loops + 1):
         call_messages = with_tool_call_system_prompt(runtime.messages)
+        if shell_repair_prompt_pending is not None:
+            call_messages = [*call_messages, {"role": "user", "content": shell_repair_prompt_pending}]
+        elif shell_empty_result_check_pending:
+            call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT}]
         state.used_tool_call_prompt = True
         tool_max_tokens = _bounded_internal_max_tokens(max_tokens, TOOL_CALL_MAX_TOKENS)
         tool_delta_callback = suppress_tool_delta if shell_full_enabled and (state.tool_rounds > 0 or contract_retry_pending) else on_final_delta
@@ -114,8 +146,12 @@ def run_tool_loop(
                         phase="tool_call_retry" if result.tool_calls else None,
                     )
                 )
-        elif result.tool_calls:
-            contract_retry_pending = False
+            elif result.tool_calls:
+                contract_retry_pending = False
+        if shell_repair_prompt_pending is not None:
+            shell_repair_prompt_pending = None
+        if shell_empty_result_check_pending:
+            shell_empty_result_check_pending = False
         if result.finish_reason == "length" and not result.tool_calls and state.tool_rounds > 0:
             return runtime._answer_from_tool_results(
                 temperature=temperature,
@@ -184,11 +220,33 @@ def run_tool_loop(
             tool_result = execution.result
             if tool_result.name == "exec_shell_full_command" and is_shell_full_contract_error(tool_result.content):
                 contract_retry_pending = True
+            elif (
+                tool_result.name == "exec_shell_full_command"
+                and is_shell_full_execution_error(tool_result.content)
+                and is_repairable_shell_error(tool_result.content)
+                and shell_repair_retries < MAX_SHELL_REPAIR_RETRIES
+            ):
+                shell_repair_retries += 1
+                shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
+            elif tool_result.name == "exec_shell_full_command" and is_shell_full_execution_error(tool_result.content):
+                shell_error_final_pending = True
+            elif tool_result.name == "exec_shell_full_command" and not shell_empty_result_check_used and not tool_result.content.strip():
+                shell_empty_result_check_pending = True
+                shell_empty_result_check_used = True
             if on_tool_result:
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
             if should_refresh_for_append(runtime.messages, tool_result.content, context_tokens=runtime.context_tokens):
                 runtime.refresh_memory_if_needed(temperature=temperature, force=True)
             runtime.messages.append(tool_result_message(tool_call, tool_result))
+        if shell_error_final_pending:
+            return runtime._answer_from_tool_results(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=on_final_delta,
+                on_model_step=on_model_step,
+                loop=loop_index + 1,
+                use_tool_prompt=state.used_tool_call_prompt,
+            )
         if state.round_limit_reached() and not contract_retry_pending:
             return runtime._answer_from_tool_results(
                 temperature=temperature,

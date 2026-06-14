@@ -5,6 +5,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ MAX_SHELL_TIMEOUT = 15
 DEFAULT_SHELL_OUTPUT_BYTES = 12_000
 MAX_SHELL_OUTPUT_BYTES = 12_000
 SEARCH_SHELL_OUTPUT_BYTES = 800
+SHELL_FAILURE_STREAM_CHARS = 1200
 PDF_CHUNK_CHARS = 3_000
 SHELL_READ_FILE_THRESHOLD_BYTES = 8 * 1024
 SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
@@ -26,6 +28,19 @@ SHELL_FULL_CONTRACT_RETRY_PROMPT = (
     "Use the available exec_shell_full_command tool now to inspect source/content/string evidence. "
     "Return only the tool call."
 )
+SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT = (
+    "The previous shell command returned no output. "
+    "If it modified files or state, verify the requested effect with one exec_shell_full_command that prints the changed value; "
+    "do not print only matching names, tags, or field labels. "
+    "otherwise return no tool call."
+)
+
+
+@dataclass(frozen=True)
+class ShellFailure:
+    exit_code: int
+    stdout: str
+    stderr: str
 
 _ANALYSIS_PROMPT_RE = re.compile(
     r"\b(analy[sz]e|analysis|review|inspect|vulnerab|exploit|malware|dropper|c2|ioc|reverse|decompil|static)\b",
@@ -99,13 +114,13 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"error: exec_shell_full_command failed: {exc}"
+    if completed.returncode != 0:
+        return _format_shell_failure(completed.returncode, completed.stdout, completed.stderr)
     output_parts = []
     if completed.stdout:
         output_parts.append(completed.stdout.rstrip())
     if completed.stderr:
         output_parts.append(completed.stderr.rstrip())
-    if completed.returncode != 0:
-        output_parts.append(f"error: command exited with status {completed.returncode}")
     content = "\n".join(part for part in output_parts if part)
     if not content:
         return ""
@@ -135,6 +150,86 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
 
 def is_shell_full_contract_error(content: str) -> bool:
     return content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX)
+
+
+def shell_failure_from_output(content: str) -> ShellFailure | None:
+    lines = content.splitlines()
+    if not lines or lines[0] != "shell_command_failed: true":
+        return None
+    exit_code: int | None = None
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    section: str | None = None
+    for line in lines[1:]:
+        if line.startswith("exit_code: "):
+            try:
+                exit_code = int(line.removeprefix("exit_code: ").strip())
+            except ValueError:
+                return None
+            continue
+        if line == "STDOUT:":
+            section = "stdout"
+            continue
+        if line == "STDERR:":
+            section = "stderr"
+            continue
+        if section == "stdout":
+            stdout_lines.append(line)
+        elif section == "stderr":
+            stderr_lines.append(line)
+    if exit_code is None:
+        return None
+    return ShellFailure(exit_code=exit_code, stdout="\n".join(stdout_lines).strip(), stderr="\n".join(stderr_lines).strip())
+
+
+def is_shell_full_execution_error(content: str) -> bool:
+    return shell_failure_from_output(content) is not None
+
+
+def is_repairable_shell_error(content: str) -> bool:
+    failure = shell_failure_from_output(content)
+    if failure is None:
+        return False
+    combined = f"{failure.stdout}\n{failure.stderr}".lower()
+    non_repairable = (
+        "permission denied",
+        "operation not permitted",
+        "read-only file system",
+        "no space left on device",
+        "resource temporarily unavailable",
+        "killed",
+        "out of memory",
+        "network is unreachable",
+        "temporary failure in name resolution",
+        "could not resolve host",
+        "connection timed out",
+    )
+    if any(marker in combined for marker in non_repairable):
+        return False
+    return True
+
+
+def shell_repair_prompt(content: str) -> str:
+    failure = shell_failure_from_output(content)
+    if failure is None:
+        failure = ShellFailure(exit_code=1, stdout="", stderr=_bounded_stream(content))
+    return "\n".join(
+        [
+            "The previous shell command failed.",
+            "",
+            f"Exit code: {failure.exit_code}",
+            "",
+            "STDOUT:",
+            _bounded_stream(failure.stdout) or "(empty)",
+            "",
+            "STDERR:",
+            _bounded_stream(failure.stderr) or "(empty)",
+            "",
+            "Return only corrected JSON:",
+            "",
+            '{"command":"..."}',
+        ]
+    )
 
 
 def _run_orbit_web_search(raw_command: str) -> str | None:
@@ -341,6 +436,23 @@ def _bounded_text(content: str, output_size: int) -> str:
     if len(encoded) <= output_size:
         return content
     return encoded[:output_size].decode("utf-8", errors="replace") + "\n[truncated]"
+
+
+def _bounded_stream(content: str) -> str:
+    return _bounded_text(content.strip(), SHELL_FAILURE_STREAM_CHARS)
+
+
+def _format_shell_failure(exit_code: int, stdout: str, stderr: str) -> str:
+    return "\n".join(
+        [
+            "shell_command_failed: true",
+            f"exit_code: {exit_code}",
+            "STDOUT:",
+            _bounded_stream(stdout) or "(empty)",
+            "STDERR:",
+            _bounded_stream(stderr) or "(empty)",
+        ]
+    )
 
 
 def _strip_html_tags(content: str) -> str:
