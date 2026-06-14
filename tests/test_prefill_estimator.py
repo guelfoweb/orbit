@@ -10,10 +10,14 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.terminal.prefill_estimator import (
+    CHAT_PREFILL_PROFILE,
     FALLBACK_PREFILL_TOKENS_PER_SECOND,
+    FINAL_FROM_TOOL_PREFILL_PROFILE,
     MAX_PREFILL_TOKENS_PER_SECOND,
     MIN_PREFILL_TOKENS_PER_SECOND,
     PrefillEstimator,
+    TOOL_PREFILL_PROFILE,
+    prefill_profile_for_phase,
 )
 
 
@@ -54,6 +58,21 @@ class PrefillEstimatorTests(unittest.TestCase):
 
         self.assertIsNone(estimator.estimate_seconds(0))
         self.assertIsNone(estimator.estimate_seconds(-1))
+
+    def test_profiles_are_updated_independently(self) -> None:
+        estimator = PrefillEstimator()
+
+        estimator.update(prompt_tokens=100, prompt_tokens_per_second=40.0, profile=TOOL_PREFILL_PROFILE)
+
+        self.assertAlmostEqual(estimator.rate_for(TOOL_PREFILL_PROFILE), 17.6)
+        self.assertEqual(estimator.rate_for(CHAT_PREFILL_PROFILE), FALLBACK_PREFILL_TOKENS_PER_SECOND)
+        self.assertEqual(estimator.estimate_seconds(120, profile=CHAT_PREFILL_PROFILE), 10)
+
+    def test_phase_maps_to_prefill_profile(self) -> None:
+        self.assertEqual(prefill_profile_for_phase("chat_final"), CHAT_PREFILL_PROFILE)
+        self.assertEqual(prefill_profile_for_phase("route"), TOOL_PREFILL_PROFILE)
+        self.assertEqual(prefill_profile_for_phase("tool_call_retry"), TOOL_PREFILL_PROFILE)
+        self.assertEqual(prefill_profile_for_phase("final_from_tool"), FINAL_FROM_TOOL_PREFILL_PROFILE)
 
 
 if __name__ == "__main__":

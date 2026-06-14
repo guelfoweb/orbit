@@ -13,7 +13,7 @@ from orbit.terminal.config import AppConfig
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens
-from orbit.terminal.prefill_estimator import PrefillEstimator
+from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE, PrefillEstimator, prefill_profile_for_phase
 from orbit.terminal.repl_input import clear_input_echo, read_prompt_input, replace_input_echo
 from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
@@ -90,7 +90,8 @@ class Repl:
 
     def _ask(self, prompt: str) -> None:
         prefill_tokens = estimate_prefill_tokens(self.runtime.messages, prompt)
-        prefill_seconds = self.prefill_estimator.estimate_seconds(prefill_tokens)
+        prefill_profile = _prefill_profile_for_turn(self.runtime.messages, tools_enabled=tools_are_enabled(self.tools_mode or "off"))
+        prefill_seconds = self.prefill_estimator.estimate_seconds(prefill_tokens, profile=prefill_profile)
         renderer = StreamRenderer(
             prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
             prefill_estimate_tokens=prefill_tokens,
@@ -164,6 +165,7 @@ class Repl:
         self.prefill_estimator.update(
             prompt_tokens=metrics.prompt_tokens,
             prompt_tokens_per_second=metrics.prompt_tokens_per_second,
+            profile=prefill_profile_for_phase(metrics.phase),
         )
 
     def _handle_command(self, command: str) -> bool:
@@ -309,3 +311,11 @@ def _visible_prefill_seconds(seconds: float | None) -> float | None:
     if seconds is None or seconds < MIN_PREFILL_ESTIMATE_SECONDS:
         return None
     return seconds
+
+
+def _prefill_profile_for_turn(messages: list[dict[str, object]], *, tools_enabled: bool) -> str:
+    if not tools_enabled:
+        return CHAT_PREFILL_PROFILE
+    if any(message.get("role") == "tool" for message in messages[-4:]):
+        return FINAL_FROM_TOOL_PREFILL_PROFILE
+    return TOOL_PREFILL_PROFILE

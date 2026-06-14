@@ -12,7 +12,7 @@ from orbit.terminal.config import add_config_arguments, load_app_config
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens
-from orbit.terminal.prefill_estimator import PrefillEstimator
+from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, TOOL_PREFILL_PROFILE, PrefillEstimator, prefill_profile_for_phase
 from orbit.terminal.repl import Repl
 from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.session_selection import select_interactive_session
@@ -127,7 +127,8 @@ def _run_one_shot(
 ) -> int:
     prefill_estimator = PrefillEstimator()
     prefill_tokens = estimate_prefill_tokens(runtime.messages, prompt)
-    prefill_seconds = prefill_estimator.estimate_seconds(prefill_tokens)
+    prefill_profile = TOOL_PREFILL_PROFILE if tools_are_enabled(tools) else CHAT_PREFILL_PROFILE
+    prefill_seconds = prefill_estimator.estimate_seconds(prefill_tokens, profile=prefill_profile)
     renderer = StreamRenderer(
         prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
         prefill_estimate_tokens=prefill_tokens,
@@ -184,6 +185,7 @@ def _run_one_shot(
     prefill_estimator.update(
         prompt_tokens=result.prompt_tokens,
         prompt_tokens_per_second=result.prompt_tokens_per_second,
+        profile=prefill_profile_for_phase("final_from_tool" if tools_are_enabled(tools) else "chat_final"),
     )
     elapsed = time.monotonic() - started
     print("\n\n", end="", flush=True)

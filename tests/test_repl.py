@@ -32,8 +32,10 @@ from orbit.terminal.repl_input import (
     visual_row_count,
 )
 from orbit.terminal.repl import Repl
+from orbit.terminal.repl import _prefill_profile_for_turn
 from orbit.terminal.session_preview import format_recent_session_messages
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
+from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE
 
 
 class InterruptingBackend:
@@ -204,6 +206,17 @@ class ReplTests(unittest.TestCase):
             ]
         )
         self.assertEqual(format_tool_result_event("exec_shell_full_command", 200, content=chunk_content), " └ chunk 1/3 200 chars -> model")
+
+    def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:
+        self.assertEqual(_prefill_profile_for_turn([], tools_enabled=False), CHAT_PREFILL_PROFILE)
+
+    def test_prefill_profile_for_turn_uses_tool_when_tools_on(self) -> None:
+        self.assertEqual(_prefill_profile_for_turn([], tools_enabled=True), TOOL_PREFILL_PROFILE)
+
+    def test_prefill_profile_for_turn_uses_final_from_tool_after_tool_result(self) -> None:
+        messages = [{"role": "tool", "content": "result"}]
+
+        self.assertEqual(_prefill_profile_for_turn(messages, tools_enabled=True), FINAL_FROM_TOOL_PREFILL_PROFILE)
 
     def test_unresolved_history_preview_is_not_sent_to_model(self) -> None:
         long_prompt = "Copied history " + ("x" * 900)
