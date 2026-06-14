@@ -12,7 +12,8 @@ from orbit.terminal.commands import health_text, help_text, reset_session, runti
 from orbit.terminal.config import AppConfig
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
-from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
+from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens
+from orbit.terminal.prefill_estimator import PrefillEstimator
 from orbit.terminal.repl_input import clear_input_echo, read_prompt_input, replace_input_echo
 from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
@@ -29,7 +30,7 @@ class Repl:
     config: AppConfig
     session: SessionStore | None = None
     history: PromptHistory | None = None
-    prompt_tokens_per_second: float | None = None
+    prefill_estimator: PrefillEstimator = field(default_factory=PrefillEstimator)
     can_continue: bool = False
     tools_mode: ToolSpec | None = None
     queued_prompts: list[str] = field(default_factory=list)
@@ -88,13 +89,11 @@ class Repl:
         return read_prompt_input()
 
     def _ask(self, prompt: str) -> None:
+        prefill_tokens = estimate_prefill_tokens(self.runtime.messages, prompt)
+        prefill_seconds = self.prefill_estimator.estimate_seconds(prefill_tokens)
         renderer = StreamRenderer(
-            prefill_estimate_seconds=estimate_prefill_seconds(
-                self.runtime.messages,
-                prompt,
-                prompt_tokens_per_second=self.prompt_tokens_per_second,
-            ),
-            prefill_estimate_tokens=estimate_prefill_tokens(self.runtime.messages, prompt),
+            prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
+            prefill_estimate_tokens=prefill_tokens,
         )
         checkpoint = len(self.runtime.messages)
         print()
@@ -162,8 +161,10 @@ class Repl:
             print(dim("/max-tokens N   increase output budget"), flush=True)
 
     def _record_model_step(self, metrics) -> None:
-        if metrics.prompt_tokens_per_second is not None and metrics.prompt_tokens_per_second > 0:
-            self.prompt_tokens_per_second = metrics.prompt_tokens_per_second
+        self.prefill_estimator.update(
+            prompt_tokens=metrics.prompt_tokens,
+            prompt_tokens_per_second=metrics.prompt_tokens_per_second,
+        )
 
     def _handle_command(self, command: str) -> bool:
         if command == "/exit":
@@ -259,13 +260,11 @@ class Repl:
             self.history.save()
 
     def _ask_continue(self) -> None:
+        prefill_tokens = estimate_prefill_tokens(self.runtime.messages, "")
+        prefill_seconds = self.prefill_estimator.estimate_seconds(prefill_tokens)
         renderer = StreamRenderer(
-            prefill_estimate_seconds=estimate_prefill_seconds(
-                self.runtime.messages,
-                "",
-                prompt_tokens_per_second=self.prompt_tokens_per_second,
-            ),
-            prefill_estimate_tokens=estimate_prefill_tokens(self.runtime.messages, ""),
+            prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
+            prefill_estimate_tokens=prefill_tokens,
         )
         checkpoint = len(self.runtime.messages)
         print()
@@ -304,3 +303,9 @@ def _confirm_clear_sessions() -> bool:
         print()
         return False
     return answer in {"y", "yes"}
+
+
+def _visible_prefill_seconds(seconds: float | None) -> float | None:
+    if seconds is None or seconds < MIN_PREFILL_ESTIMATE_SECONDS:
+        return None
+    return seconds

@@ -22,6 +22,7 @@ Orbit stays model-driven: the model decides when tools are needed. The runtime o
 - Python 3.11 or newer.
 - `llama-server` available in `PATH`.
 - Gemma 4 12B instruction-tuned GGUF model.
+- Matching Gemma 4 MTP draft GGUF model for the default server profile.
 - Linux recommended.
 
 Optional multimodal support requires the matching `mmproj-gemma-4-12B-it-Q8_0.gguf` projector.
@@ -48,7 +49,7 @@ https://github.com/qualcomm/llama.cpp
 branch: gemma-4-support-smaller-assistants
 ```
 
-Use this build for Orbit and MTP speculative decoding:
+Use this build for Orbit's default MTP speculative decoding profile:
 
 ```bash
 git clone https://github.com/qualcomm/llama.cpp.git llama.cpp-gemma4
@@ -109,7 +110,7 @@ scripts/suggest-server-profile.sh
 If you want to use the suggested profile, export the printed values before
 starting the server.
 
-Start the tuned local server:
+Start the tuned local server with the default MTP profile:
 
 ```bash
 scripts/gemma4-12b-server.sh start --mtp
@@ -394,7 +395,7 @@ CLI flags override config values.
 ## Troubleshooting
 
 - `llama-server not found in PATH`: build `llama.cpp` and export `PATH=/path/to/llama.cpp/build/bin:$PATH`.
-- `gemma-4-12B-it-Q4_K_M.gguf not found`: run `scripts/gemma4-12b-server.sh download` or set `MODEL_PATH`.
+- `gemma-4-12B-it-Q4_K_M.gguf not found`: run `scripts/gemma4-12b-server.sh download --mtp` or set `MODEL_PATH`.
 - `multimodal projector not found`: set `MMPROJ_PATH`.
 - `MTP draft not found`: run `scripts/gemma4-12b-server.sh download --mtp` or set `MTP_DRAFT_PATH`.
 - `unknown model architecture: gemma4-assistant`: use a compatible MTP fork via `MTP_LLAMA_SERVER_BIN`.

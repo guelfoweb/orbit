@@ -17,7 +17,7 @@ The tool name remains `orbit`. The repository directory may be temporary.
 - Prefer standard-library Python unless a dependency has clear value.
 - Keep one-shot, REPL, backend, runtime, tools, and terminal UI separated.
 - Do not reintroduce Ollama-specific logic in this codebase.
-- Do not expose PDF or browser tools until explicitly designed.
+- Do not expose browser tools until explicitly designed.
 - Broad shell access is allowed only through explicit tools-on mode and must stay disabled by default.
 - After runtime/tool/session changes, run unit tests.
 
@@ -45,7 +45,11 @@ Rules:
 - The runtime enforces timeout/output-size limits around shell execution.
 - For analysis prompts, metadata-only commands such as `ls`, `file`, or `stat` must trigger a model retry asking for direct content/source/string evidence.
 - `cat` on large UTF-8 text/source files may be post-processed through the internal bounded reader.
+- Commands that read or analyze local PDFs may be post-processed through text extraction.
+- PDF text extraction must prefer `pdftotext`; if unavailable, fallback to filtered `strings`.
+- PDF support is text-only: no OCR and no raw PDF reinjection.
 - HTML emitted by shell commands such as `curl` may be converted to readable text before reinjection.
+- If the user asks for HTML/page source analysis, preserve source-like HTML instead of converting it to readable text.
 - Web content must not be silently saved into the workdir.
 - Do not present a first bounded shell result as a complete summary of a long document.
 - Unknown tools must fail clearly.

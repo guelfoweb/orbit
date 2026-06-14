@@ -40,6 +40,7 @@ def execute_tool(
     *,
     workdir: Path,
     chunk_budget: dict[str, int] | None = None,
+    user_prompt: str | None = None,
 ) -> ToolResult:
     del chunk_budget
     if name not in TOOL_NAMES:
@@ -47,4 +48,4 @@ def execute_tool(
     parsed = parse_tool_arguments(arguments)
     if isinstance(parsed, str):
         return ToolResult(name=name, content=parsed)
-    return ToolResult(name=name, content=execute_exec_shell_full_command(parsed, workdir=workdir))
+    return ToolResult(name=name, content=execute_exec_shell_full_command(parsed, workdir=workdir, user_prompt=user_prompt))

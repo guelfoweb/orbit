@@ -65,10 +65,10 @@ These defaults were chosen for stability on CPU-only systems. Faster machines ca
 
 ## MTP speculative decoding
 
-MTP speculative decoding is optional.
+MTP speculative decoding is the recommended default startup profile for Orbit.
 
 The recommended `llama.cpp` build is the same Gemma 4 compatible fork used for
-normal mode. MTP only adds a draft model and speculative decoding flags; it does
+standard mode. MTP adds a draft model and speculative decoding flags; it does
 not change Orbit's runtime philosophy.
 
 In practical terms, MTP is speculative decoding:
@@ -145,8 +145,8 @@ which is expected: MTP helps most when the final answer has enough generated
 tokens to amortize the extra draft model work.
 
 Because this depends on a fork/branch rather than the default upstream
-`llama.cpp` baseline, the build should be treated as part of the tested Orbit
-profile. MTP itself remains optional and experimental.
+`llama.cpp` baseline, the compatible build and MTP draft model should be treated
+as part of the tested Orbit profile.
 
 ## Tool exposure
 

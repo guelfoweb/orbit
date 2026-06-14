@@ -3,8 +3,10 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from shutil import copyfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -287,6 +289,25 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("Divine Comedy", execution.result.content)
         self.assertNotIn("<td>", execution.result.content)
 
+    def test_exec_shell_full_preserves_html_source_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+                user_prompt="analyze the HTML source code of this page",
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "printf '<html><body><script>x()</script><p>Hello world</p></body></html>'"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("<script>", execution.result.content)
+        self.assertNotIn("shell_output_html_cleaned: true", execution.result.content)
+
     def test_exec_shell_full_does_not_reinject_unreadable_html_fragment_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executor = HybridToolExecutor(
@@ -305,6 +326,81 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("shell_output_html_cleaned: true", execution.result.content)
         self.assertIn("Italian poet", execution.result.content)
         self.assertNotIn("<script>", execution.result.content)
+
+    def test_exec_shell_full_extracts_pdf_text_with_pdftotext(self) -> None:
+        source = ROOT / "workdir" / "pdf" / "piccolo.pdf"
+        if not source.exists():
+            self.skipTest("pdf fixture unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "pdf").mkdir()
+            copyfile(source, workdir / "pdf" / "piccolo.pdf")
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "cat pdf/piccolo.pdf"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("shell_output_pdf_text: true", execution.result.content)
+        self.assertIn("extractor: pdftotext", execution.result.content)
+        self.assertNotIn("%PDF", execution.result.content)
+
+    def test_exec_shell_full_extracts_large_pdf_as_chunk(self) -> None:
+        source = ROOT / "workdir" / "pdf" / "grande.pdf"
+        if not source.exists():
+            self.skipTest("pdf fixture unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "pdf").mkdir()
+            copyfile(source, workdir / "pdf" / "grande.pdf")
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "pdftotext pdf/grande.pdf -"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("shell_output_pdf_text: true", execution.result.content)
+        self.assertIn("chunk_index: 0", execution.result.content)
+        self.assertIn("total_chunks:", execution.result.content)
+
+    def test_exec_shell_full_extracts_pdf_text_with_strings_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            target = workdir / "sample.pdf"
+            target.write_bytes(b"%PDF-1.4\nOrbit PDF fallback visible text\n%%EOF\n")
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            with patch("orbit.runtime.shell_guardrails.shutil.which") as which:
+                which.side_effect = lambda name: None if name == "pdftotext" else "/usr/bin/strings"
+                execution = executor.execute(
+                    "exec_shell_full_command",
+                    {"command": "cat sample.pdf"},
+                    chunk_budget={},
+                )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("shell_output_pdf_text: true", execution.result.content)
+        self.assertIn("extractor: strings", execution.result.content)
+        self.assertIn("Orbit PDF fallback visible text", execution.result.content)
+        self.assertNotIn("%PDF", execution.result.content)
 
 
 if __name__ == "__main__":

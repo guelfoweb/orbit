@@ -11,7 +11,8 @@ from orbit.runtime.media import load_audio, load_image
 from orbit.terminal.config import add_config_arguments, load_app_config
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
-from orbit.terminal.prefill import estimate_prefill_seconds, estimate_prefill_tokens
+from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens
+from orbit.terminal.prefill_estimator import PrefillEstimator
 from orbit.terminal.repl import Repl
 from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, tools_text
 from orbit.terminal.session_selection import select_interactive_session
@@ -124,9 +125,12 @@ def _run_one_shot(
     workdir,
     tools: str,
 ) -> int:
+    prefill_estimator = PrefillEstimator()
+    prefill_tokens = estimate_prefill_tokens(runtime.messages, prompt)
+    prefill_seconds = prefill_estimator.estimate_seconds(prefill_tokens)
     renderer = StreamRenderer(
-        prefill_estimate_seconds=estimate_prefill_seconds(runtime.messages, prompt),
-        prefill_estimate_tokens=estimate_prefill_tokens(runtime.messages, prompt),
+        prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
+        prefill_estimate_tokens=prefill_tokens,
     )
     started = time.monotonic()
     print()
@@ -177,6 +181,10 @@ def _run_one_shot(
         print(f"error: {exc}", file=sys.stderr)
         return 1
     renderer.finish()
+    prefill_estimator.update(
+        prompt_tokens=result.prompt_tokens,
+        prompt_tokens_per_second=result.prompt_tokens_per_second,
+    )
     elapsed = time.monotonic() - started
     print("\n\n", end="", flush=True)
     print(
@@ -191,6 +199,12 @@ def _run_one_shot(
         flush=True,
     )
     return 0
+
+
+def _visible_prefill_seconds(seconds: float | None) -> float | None:
+    if seconds is None or seconds < MIN_PREFILL_ESTIMATE_SECONDS:
+        return None
+    return seconds
 
 
 if __name__ == "__main__":

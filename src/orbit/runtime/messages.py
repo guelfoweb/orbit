@@ -41,7 +41,7 @@ Return valid one-line JSON only:
 
 Environment: OS={os_name}; shell={shell_name}.
 
-Use native commands in workdir. Use curl for URLs. Quote spaced paths.
+Use given paths exactly. Use native commands in workdir. Use curl for URLs. Quote spaced paths.
 
 Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.

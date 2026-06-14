@@ -39,7 +39,7 @@ Expected: creative answer displayed directly, no file creation.
 
 Expected: explanation only, no command.
 
-5. `Give me a compact checklist for reviewing suspicious JavaScript safely, without analyzing any local file.`
+5. `Give me a compact checklist for reviewing suspicious JavaScript safely, in up to eight bullets, without analyzing any local file.`
 
 Expected: general safety checklist, no local analysis.
 
@@ -71,7 +71,7 @@ Expected: shell command inspects source/text evidence; no execution of the sampl
 
 Expected: shell listing command; compact filename list.
 
-11. `Create new-note.md with a three-line note about Orbit tool safety.`
+11. `Create new-note.md with a three-line note about safe local shell tool usage.`
 
 Expected: shell command creates the file because tools are explicitly enabled.
 
@@ -150,3 +150,11 @@ Expected: bounded evidence-based shell command and concise answer.
 30. `Create a temporary lab directory named shell-lab-test, write a marker file containing "orbit-ok" inside it, show the marker contents, and then remove the directory.`
 
 Expected: shell command may create/delete because tools are explicitly enabled and requested.
+
+31. `Read pdf/small.pdf and summarize the document topic in one concise sentence.`
+
+Expected: shell command may use a PDF-related command; runtime extracts text with `pdftotext` when available and does not reinject raw PDF bytes.
+
+32. `Read pdf/big.pdf and summarize the document topic in one concise sentence.`
+
+Expected: shell command may use a PDF-related command; runtime returns a bounded PDF text chunk and final answer is based on extracted text.

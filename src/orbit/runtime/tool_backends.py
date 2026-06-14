@@ -60,4 +60,4 @@ class HybridToolExecutor:
         contract_error = validate_shell_full_contract(parsed, user_prompt=self.user_prompt)
         if contract_error:
             return ToolExecution(ToolResult(name=name, content=contract_error), "orbit")
-        return ToolExecution(execute_tool(name, parsed, workdir=self.workdir, chunk_budget=chunk_budget), "orbit")
+        return ToolExecution(execute_tool(name, parsed, workdir=self.workdir, chunk_budget=chunk_budget, user_prompt=self.user_prompt), "orbit")
