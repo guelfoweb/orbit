@@ -42,6 +42,9 @@ class RouteRequestTests(unittest.TestCase):
     def test_parse_tool_command_accepts_raw_orbit_web_search_tool_call(self) -> None:
         self.assertEqual(parse_tool_command('<|tool_call>call:orbit-web-search{"query":"Dante Alighieri"}<tool_call|>'), ToolRoute.FILESYSTEM)
 
+    def test_parse_tool_command_accepts_raw_orbit_web_search_key_value_tool_call(self) -> None:
+        self.assertEqual(parse_tool_command('<|tool_call>call:orbit-web-search{query="Dante Alighieri"}<tool_call|>'), ToolRoute.FILESYSTEM)
+
     def test_parse_command_decision_from_tool_calls_accepts_command_arguments(self) -> None:
         decision = parse_command_decision_from_tool_calls(
             [
@@ -69,6 +72,17 @@ class RouteRequestTests(unittest.TestCase):
     def test_command_tool_call_from_content_converts_raw_orbit_web_search(self) -> None:
         tool_call = command_tool_call_from_content(
             '<|tool_call>call:orbit-web-search{"query":"Dante Alighieri"}<tool_call|>',
+            ("exec_shell_full_command",),
+        )
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        self.assertEqual(tool_call["function"]["name"], "exec_shell_full_command")
+        self.assertEqual(tool_call["function"]["arguments"], "{\"command\": \"orbit-web-search 'Dante Alighieri'\"}")
+
+    def test_command_tool_call_from_content_converts_raw_orbit_web_search_key_value(self) -> None:
+        tool_call = command_tool_call_from_content(
+            '<|tool_call>call:orbit-web-search{query="Dante Alighieri"}<tool_call|>',
             ("exec_shell_full_command",),
         )
 

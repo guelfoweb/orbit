@@ -218,7 +218,8 @@ def _extract_raw_tool_call_command(content: str) -> str | None:
     if not match:
         return None
     name = match.group("name")
-    value = _parse_command_json_object(match.group("args")) or _extract_last_json_object(match.group("args"))
+    raw_args = match.group("args")
+    value = _parse_command_json_object(raw_args) or _extract_last_json_object(raw_args) or _extract_loose_key_value_object(raw_args)
     if name in SHELL_TOOL_ALIASES and _has_command(value):
         return value["command"]
     if name in WEB_SEARCH_TOOL_ALIASES:
@@ -233,6 +234,19 @@ def _web_search_command_from_args(value: dict[str, Any] | None) -> str | None:
     if not isinstance(query, str) or not query.strip():
         return None
     return f"orbit-web-search {shlex.quote(query.strip())}"
+
+
+def _extract_loose_key_value_object(content: str) -> dict[str, Any] | None:
+    text = content.strip()
+    if not text.startswith("{") or not text.endswith("}"):
+        return None
+    body = text[1:-1].strip()
+    if not body:
+        return None
+    match = re.fullmatch(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*\"(?P<value>[^\"]+)\"", body, flags=re.DOTALL)
+    if not match:
+        return None
+    return {match.group("key"): match.group("value")}
 
 
 def _parse_command_json_object(content: str) -> dict[str, Any] | None:
