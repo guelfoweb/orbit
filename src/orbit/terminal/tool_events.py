@@ -5,7 +5,7 @@ import re
 
 LARGE_TOOL_RESULT_CHARS = 10_000
 DISPLAY_TOOL_NAMES = {
-    "exec_shell_full_command": "shell",
+    "exec_shell_full_command": "exec",
 }
 
 
@@ -23,7 +23,7 @@ def format_tool_result_event(name: str, chars: int, source: str | None = None, c
     chunk = _chunk_label(content)
     if chunk:
         return f" └ {chunk} {chars} chars{suffix}"
-    return f" └ {display_tool_name(name)} {chars} chars{suffix}"
+    return f" └ {chars} chars{suffix}"
 
 
 def _chunk_label(content: str | None) -> str | None:
