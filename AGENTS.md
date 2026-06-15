@@ -117,6 +117,8 @@ When `llama-server` is running, also run at least one real smoke test for the ch
 
 Keep manual regression prompts in `docs/PROMPTS.md`. The file should stay short and focused on currently supported behavior.
 
+For release confidence, use `scripts/release-confidence.py`. Its fixtures must stay isolated in `/tmp`, and its checkers must validate final behavior rather than specific shell commands.
+
 ## Benchmark discipline
 
 - The software performance tuning line is closed.

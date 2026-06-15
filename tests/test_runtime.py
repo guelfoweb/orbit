@@ -16,6 +16,7 @@ from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
 from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
+from orbit.runtime.tool_loop import _should_guard_existing_file_rewrite
 from orbit.runtime.shell_guardrails import (
     SHELL_FULL_COMPLETION_GUARD_PROMPT,
     SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT,
@@ -1476,6 +1477,8 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "not confirmed")
         self.assertEqual(runtime.mutation_verifications, 1)
         self.assertEqual(runtime.mutation_verification_failures, 0)
+        self.assertIn("requested value or state", SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
+        self.assertIn("not only metadata, paths, tags, field names, or key names", SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
 
     def test_mutation_verification_semantic_repair_completes_partial_change(self) -> None:
         class SemanticRepairBackend:
@@ -2304,6 +2307,119 @@ cp "$1\""""
         self.assertEqual(runtime.minimal_patch_guard_successes, 1)
         self.assertEqual(runtime.minimal_patch_guard_failures, 0)
         self.assertEqual(backend.messages_seen[2][-1]["content"], SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT)
+
+    def test_minimal_patch_guard_intercepts_broad_rewrite_of_existing_file(self) -> None:
+        class BroadRewriteBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps(
+                        {
+                            "command": (
+                                "cat << 'EOF' > copy_file.sh\n"
+                                "#!/usr/bin/env bash\n"
+                                "echo broad rewrite should not run\n"
+                                "EOF"
+                            )
+                        }
+                    )
+                elif self.calls == 2:
+                    content = json.dumps(
+                        {
+                            "command": (
+                                "python3 -c 'from pathlib import Path; "
+                                "p=Path(\"copy_file.sh\"); "
+                                "s=p.read_text(); "
+                                "s=s.replace(\"cp $1 $2\", \"set -euo pipefail\\ncp \\\"$1\\\" \\\"$2\\\"\"); "
+                                "p.write_text(s); "
+                                "print(p.read_text())'"
+                            )
+                        }
+                    )
+                elif self.calls == 3:
+                    return ChatResult(
+                        content="patched",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=9,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="done",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "copy_file.sh").write_text("#!/usr/bin/env bash\ncp $1 $2\n", encoding="utf-8")
+            backend = BroadRewriteBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            result = runtime.ask_auto(
+                "Harden copy_file.sh for bash safety and correct quoting of arguments.",
+                temperature=0,
+                max_tokens=256,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            content = (workdir / "copy_file.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertNotIn("broad rewrite should not run", content)
+        self.assertIn("set -euo pipefail", content)
+        self.assertIn('cp "$1" "$2"', content)
+        self.assertEqual(runtime.minimal_patch_guard_nudges, 1)
+        self.assertEqual(runtime.minimal_patch_guard_commands, 1)
+        self.assertEqual(backend.messages_seen[1][-1]["content"], SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT)
+
+    def test_minimal_patch_guard_detects_raw_invalid_json_broad_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "copy_file.sh").write_text("#!/usr/bin/env bash\ncp $1 $2\n", encoding="utf-8")
+            raw_arguments = """{"command":"cat << 'EOF' > copy_file.sh
+#!/usr/bin/env bash
+set -euo pipefail
+EOF"""
+            tool_call = {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "exec_shell_full_command", "arguments": raw_arguments},
+            }
+
+            should_guard = _should_guard_existing_file_rewrite(
+                tool_call,
+                workdir=workdir,
+                should_nudge_minimal_patch=lambda **kwargs: kwargs["existing_file_rewrite"],
+            )
+
+        self.assertTrue(should_guard)
 
     def test_minimal_patch_guard_does_not_fire_for_short_mutation(self) -> None:
         class ShortMutationBackend:

@@ -15,6 +15,7 @@ from orbit.runtime.final_policy import (
     final_from_tool_retry_reason,
     final_tool_retry_instruction,
     has_list_like_tool_result,
+    is_operational_status_request,
 )
 
 
@@ -98,6 +99,75 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("up to six evidence-based findings", policy.messages[-1]["content"])
         self.assertIn("practical exploit impact", policy.messages[-1]["content"])
         self.assertIn("Do not include generic methodology", policy.messages[-1]["content"])
+
+    def test_operational_status_policy_prefers_recent_shell_evidence(self) -> None:
+        messages = [
+            {"role": "user", "content": "analyze index.html"},
+            {"role": "tool", "name": "exec_shell_full_command", "content": "old noisy index.html analysis\n<title>Example</title>"},
+            {"role": "assistant", "content": "old summary"},
+            {"role": "user", "content": "is the new file saved? what was it renamed?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": '{"command":"ls -F cleaned_index.html"}',
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "name": "exec_shell_full_command", "content": "cleaned_index.html"},
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertEqual(policy.max_tokens, 96)
+        self.assertIn("latest operational/status question", policy.messages[-1]["content"])
+        self.assertIn("most recent relevant shell output", policy.messages[-1]["content"])
+        self.assertIn("Ignore older tool results", policy.messages[-1]["content"])
+        self.assertIn("Do not summarize file or page content", policy.messages[-1]["content"])
+
+    def test_operational_status_policy_preserves_remove_confirmation(self) -> None:
+        messages = [
+            {"role": "user", "content": "remove index.html"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "rm index.html && ls index.html"},
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "name": "exec_shell_full_command", "content": "shell_command_failed: true\nexit_code: 2\nSTDOUT:\n(empty)\nSTDERR:\nls: cannot access 'index.html': No such file or directory"},
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertIn("latest operational/status question", policy.messages[-1]["content"])
+        self.assertIn("If recent evidence is insufficient", policy.messages[-1]["content"])
+
+    def test_content_request_keeps_normal_shell_full_policy(self) -> None:
+        messages = [
+            {"role": "user", "content": "summarize cleaned_index.html"},
+            {"role": "tool", "name": "exec_shell_full_command", "content": "<html><body>content</body></html>"},
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertIn("shell-full output", policy.messages[-1]["content"])
+        self.assertNotIn("latest operational/status question", policy.messages[-1]["content"])
+
+    def test_operational_status_detector_excludes_explicit_content_requests(self) -> None:
+        self.assertTrue(is_operational_status_request("is the new file saved? what was it renamed?"))
+        self.assertTrue(is_operational_status_request("remove index.html"))
+        self.assertFalse(is_operational_status_request("summarize cleaned_index.html"))
+        self.assertFalse(is_operational_status_request("what is in cleaned_index.html?"))
 
     def test_final_retry_reason_detects_raw_tool_call(self) -> None:
         result = ChatResult(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from dataclasses import dataclass
 
@@ -12,6 +13,7 @@ FINAL_FROM_TOOL_MIN_TOKENS = 256
 LARGE_FILE_FINAL_MAX_TOKENS = 128
 WEB_FETCH_FINAL_MAX_TOKENS = 72
 LIST_FINAL_MAX_TOKENS = 96
+OPERATIONAL_STATUS_FINAL_MAX_TOKENS = 96
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
     web_fetch_result = has_html_cleaned_tool_result(messages)
     list_like_result = has_list_like_tool_result(messages)
     shell_full_result = has_tool_result(messages, "exec_shell_full_command")
+    operational_status_result = shell_full_result and is_operational_status_request(last_user_text(messages))
     call_messages = messages
     if large_file_excerpt:
         call_messages = [
@@ -52,6 +55,20 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
                     "Focus on the central thesis and key messages. "
                     "Each bullet must be under eighteen words. No introduction. Stop after the second bullet. "
                     "Do not request more chunks unless the user explicitly asked for exhaustive analysis."
+                ),
+            },
+        ]
+    elif operational_status_result:
+        call_messages = [
+            *call_messages,
+            {
+                "role": "user",
+                "content": (
+                    "Answer the latest operational/status question directly. "
+                    "Use only the most recent relevant shell output. "
+                    "Ignore older tool results or content analysis unless explicitly requested. "
+                    "Do not summarize file or page content. "
+                    "If recent evidence is insufficient, say you cannot confirm."
                 ),
             },
         ]
@@ -81,6 +98,7 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
             large_file_excerpt=large_file_excerpt,
             web_fetch_result=web_fetch_result,
             list_like_result=list_like_result,
+            operational_status_result=operational_status_result,
         ),
         length_retry_allowed=(not streamed and (large_file_excerpt or web_fetch_result)),
         web_fetch_result=web_fetch_result,
@@ -93,6 +111,7 @@ def final_tool_max_tokens(
     large_file_excerpt: bool,
     web_fetch_result: bool,
     list_like_result: bool,
+    operational_status_result: bool = False,
 ) -> int:
     if large_file_excerpt:
         return min(max_tokens, LARGE_FILE_FINAL_MAX_TOKENS)
@@ -100,6 +119,8 @@ def final_tool_max_tokens(
         return min(max_tokens, WEB_FETCH_FINAL_MAX_TOKENS)
     if list_like_result:
         return min(max_tokens, LIST_FINAL_MAX_TOKENS)
+    if operational_status_result:
+        return min(max_tokens, OPERATIONAL_STATUS_FINAL_MAX_TOKENS)
     return max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS)
 
 
@@ -207,3 +228,39 @@ def is_list_shell_command(command: str | None) -> bool:
     if not tokens:
         return False
     return tokens[0] in {"ls", "find"}
+
+
+_OPERATIONAL_STATUS_RE = re.compile(
+    r"\b(?:is|was|were|did|does|do|has|have|what|where|confirm|check|verify|status|exists?|saved?|renamed?|"
+    r"deleted?|removed?|created?|written?|updated?|changed?|moved?|copied?|path|name|file)\b",
+    re.IGNORECASE,
+)
+_OPERATIONAL_ACTION_RE = re.compile(
+    r"^\s*(?:remove|delete|rename|move|create|save|write|copy|update|change)\b",
+    re.IGNORECASE,
+)
+_CONTENT_REQUEST_RE = re.compile(
+    r"\b(?:summari[sz]e|analy[sz]e|explain|review|describe|read|show|print|content|contents|source|html|page)\b",
+    re.IGNORECASE,
+)
+_CONTENT_PHRASE_RE = re.compile(
+    r"\b(?:what(?:'s|\s+is)?\s+in|what\s+does\b.*\bcontain|contains?|inside)\b",
+    re.IGNORECASE,
+)
+
+
+def last_user_text(messages: list[Message]) -> str | None:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        return content if isinstance(content, str) else None
+    return None
+
+
+def is_operational_status_request(prompt: str | None) -> bool:
+    if not prompt:
+        return False
+    if (_CONTENT_REQUEST_RE.search(prompt) or _CONTENT_PHRASE_RE.search(prompt)) and not _OPERATIONAL_ACTION_RE.search(prompt):
+        return False
+    return _OPERATIONAL_STATUS_RE.search(prompt) is not None or _OPERATIONAL_ACTION_RE.search(prompt) is not None

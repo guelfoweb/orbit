@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import replace
+from pathlib import Path
 from typing import Callable
 
 from orbit.backend import ChatResult
@@ -115,12 +117,17 @@ def run_tool_loop(
         completion_guard_used = True
         runtime.completion_guard_nudges += 1
 
-    def should_nudge_minimal_patch(*, broad_rewrite_seen: bool, length_truncated: bool = False) -> bool:
+    def should_nudge_minimal_patch(
+        *,
+        broad_rewrite_seen: bool,
+        length_truncated: bool = False,
+        existing_file_rewrite: bool = False,
+    ) -> bool:
         return (
             shell_full_enabled
             and not minimal_patch_guard_used
             and is_mutative_user_request(user_prompt)
-            and shell_commands_seen > 0
+            and (shell_commands_seen > 0 or existing_file_rewrite)
             and not shell_mutation_succeeded
             and (broad_rewrite_seen or length_truncated)
         )
@@ -307,27 +314,37 @@ def run_tool_loop(
             runtime.mutation_verifications += 1
     if initial_tool_calls:
         calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
-        state.increment_round()
-        runtime.messages.append(assistant_tool_call_message("", calls))
-        for tool_call in calls:
-            signature = state.mark_tool_call(tool_call)
-            if on_tool_call:
-                on_tool_call(*signature)
-            execution = execute_tool_call(tool_call, chunk_budget=state.chunk_budget, executor=executor)
-            tool_result = execution.result
-            update_state_after_tool_result(
+        if any(
+            _should_guard_existing_file_rewrite(
                 tool_call,
-                tool_result,
-                is_mutation_verification=False,
-                is_mutation_verification_repair=False,
-                is_mutation_semantic_repair=False,
-                is_content_evidence_guard=False,
-                is_completion_guard=False,
-                is_minimal_patch_guard=False,
+                workdir=workdir,
+                should_nudge_minimal_patch=should_nudge_minimal_patch,
             )
-            if on_tool_result:
-                on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
-            runtime.messages.append(tool_result_message(tool_call, tool_result))
+            for tool_call in calls
+        ):
+            request_minimal_patch_guard()
+        else:
+            state.increment_round()
+            runtime.messages.append(assistant_tool_call_message("", calls))
+            for tool_call in calls:
+                signature = state.mark_tool_call(tool_call)
+                if on_tool_call:
+                    on_tool_call(*signature)
+                execution = execute_tool_call(tool_call, chunk_budget=state.chunk_budget, executor=executor)
+                tool_result = execution.result
+                update_state_after_tool_result(
+                    tool_call,
+                    tool_result,
+                    is_mutation_verification=False,
+                    is_mutation_verification_repair=False,
+                    is_mutation_semantic_repair=False,
+                    is_content_evidence_guard=False,
+                    is_completion_guard=False,
+                    is_minimal_patch_guard=False,
+                )
+                if on_tool_result:
+                    on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
+                runtime.messages.append(tool_result_message(tool_call, tool_result))
         if (
             not shell_error_final_pending
             and not contract_retry_pending
@@ -487,6 +504,16 @@ def run_tool_loop(
             route_tool_call = command_like_tool_call(result.content, allowed_tool_names)
             if route_tool_call is not None:
                 result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
+        if result.tool_calls and any(
+            _should_guard_existing_file_rewrite(
+                tool_call,
+                workdir=workdir,
+                should_nudge_minimal_patch=should_nudge_minimal_patch,
+            )
+            for tool_call in result.tool_calls
+        ):
+            request_minimal_patch_guard()
+            continue
         runtime.messages.append(assistant_tool_call_message(result.content, result.tool_calls))
         if not result.tool_calls:
             if executing_mutation_semantic_repair and result.content.strip().upper() != "OK":
@@ -632,3 +659,59 @@ def _shell_raw_arguments_from_tool_call(tool_call: dict[str, object]) -> str | N
         return None
     arguments = function.get("arguments")
     return arguments if isinstance(arguments, str) and arguments.strip() else None
+
+
+def _should_guard_existing_file_rewrite(
+    tool_call: dict[str, object],
+    *,
+    workdir,
+    should_nudge_minimal_patch,
+) -> bool:
+    command = _shell_command_from_tool_call(tool_call)
+    raw_arguments = _shell_raw_arguments_from_tool_call(tool_call)
+    broad_rewrite_seen = _looks_like_preexecution_broad_rewrite(command) or _looks_like_preexecution_broad_rewrite(raw_arguments)
+    target_source = command or raw_arguments
+    if not broad_rewrite_seen or not target_source:
+        return False
+    return should_nudge_minimal_patch(
+        broad_rewrite_seen=True,
+        existing_file_rewrite=_targets_existing_file(target_source, workdir=workdir),
+    )
+
+
+def _looks_like_preexecution_broad_rewrite(text: str | None) -> bool:
+    if not text:
+        return False
+    return bool(
+        re.search(r"\bcat\s+<<\s*['\"]?\w+['\"]?\s*>\s*[^\s]+", text)
+        or re.search(r"\bcat\s*>\s*[^\s]+\s*<<\s*['\"]?\w+['\"]?", text)
+        or re.search(r"\btee\b.*\s>\s*", text)
+        or re.search(r"\btee\s+(?:-a\s+)?['\"]?[^'\"\s;|&]+", text)
+        or re.search(r"\bdd\b.*\bof=", text)
+    )
+
+
+def _targets_existing_file(command: str, *, workdir) -> bool:
+    for candidate in _rewrite_target_candidates(command):
+        try:
+            path = Path(workdir, candidate).expanduser().resolve()
+            root = Path(workdir).expanduser().resolve()
+            path.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if path.is_file():
+            return True
+    return False
+
+
+def _rewrite_target_candidates(command: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(r"(?:^|[\s;|&])>{1,2}\s*(['\"]?)([^'\"\s;|&]+)\1", command):
+        candidates.append(match.group(2))
+    for match in re.finditer(r"\btee\s+(?:-a\s+)?(['\"]?)([^'\"\s;|&]+)\1", command):
+        candidates.append(match.group(2))
+    for match in re.finditer(r"\bof=(['\"]?)([^'\"\s;|&]+)\1", command):
+        candidates.append(match.group(2))
+    for match in re.finditer(r"\bPath\(\s*['\"]([^'\"]+)['\"]\s*\).*?\bwrite_(?:text|bytes)\s*\(", command):
+        candidates.append(match.group(1))
+    return candidates

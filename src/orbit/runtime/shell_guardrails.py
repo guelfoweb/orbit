@@ -40,7 +40,8 @@ SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT = (
 SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT = (
     "The command succeeded but produced no output.\n\n"
     "Verify that the requested change actually occurred.\n\n"
-    "The verification command must print direct evidence of the changed value or state, not only metadata.\n\n"
+    "The verification command must print direct evidence of the requested value or state, "
+    "not only metadata, paths, tags, field names, or key names.\n\n"
     "Return only JSON:\n\n"
     '{"command":"..."}'
 )
@@ -55,7 +56,8 @@ SHELL_FULL_COMPLETION_GUARD_PROMPT = (
 SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT = (
     "Your previous command tried to rewrite too much and was too long or incomplete.\n\n"
     "Use a minimal local patch to modify only the necessary lines.\n\n"
-    "Do not rewrite the whole file unless strictly necessary.\n\n"
+    "Do not use heredocs, cat > file, tee, or full-file rewrites for existing files.\n\n"
+    "Use a short command that changes only the needed lines.\n\n"
     "Return only JSON:\n\n"
     '{"command":"..."}'
 )
@@ -93,11 +95,11 @@ _READ_ONLY_PROMPT_RE = re.compile(
     re.IGNORECASE,
 )
 _MUTATION_PROMPT_RE = re.compile(
-    r"\b(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter)\b",
+    r"\b(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
 )
 _NEGATED_MUTATION_PROMPT_RE = re.compile(
-    r"\b(?:do\s+not|don't|without)\s+(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter)\b",
+    r"\b(?:do\s+not|don't|without)\s+(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
 )
 
