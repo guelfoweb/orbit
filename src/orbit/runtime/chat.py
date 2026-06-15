@@ -59,6 +59,21 @@ class ChatRuntime:
     mutation_verifications: int = 0
     mutation_verification_repairs: int = 0
     mutation_verification_failures: int = 0
+    completion_guard_nudges: int = 0
+    completion_guard_commands: int = 0
+    completion_guard_successes: int = 0
+    completion_guard_failures: int = 0
+    minimal_patch_guard_nudges: int = 0
+    minimal_patch_guard_commands: int = 0
+    minimal_patch_guard_successes: int = 0
+    minimal_patch_guard_failures: int = 0
+    mutation_semantic_repairs: int = 0
+    mutation_semantic_repair_commands: int = 0
+    mutation_semantic_repair_failures: int = 0
+    content_evidence_guard_nudges: int = 0
+    content_evidence_guard_commands: int = 0
+    content_evidence_guard_successes: int = 0
+    content_evidence_guard_failures: int = 0
 
     def __post_init__(self) -> None:
         if not self.messages and self.system_prompt:

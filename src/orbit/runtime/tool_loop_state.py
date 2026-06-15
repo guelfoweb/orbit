@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from orbit.runtime.tool_calls import tool_call_signature
 
 
-SHELL_FULL_ROUND_LIMIT = 4
+SHELL_FULL_ROUND_LIMIT = 8
 DEFAULT_TOOL_ROUND_LIMIT = 1
 
 

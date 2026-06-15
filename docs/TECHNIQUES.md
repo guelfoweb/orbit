@@ -261,19 +261,28 @@ recoverable. They do not decide the task answer and they do not replace the
 model's reasoning. They enforce contracts, prevent pathological loops, bound
 inputs, and ask the model for correction when enough evidence is available.
 
+The important design rule is: **guide the model, do not solve the task in
+runtime code**.
+
+When a guard fires, Orbit gives the model a smaller, clearer internal task:
+produce corrected JSON, inspect real content, verify a mutation, or continue a
+requested edit. The runtime does not infer the correct patch, choose the target
+file, validate domain-specific semantics, or synthesize the final answer.
+
 Orbit groups guardrails into a few categories:
 
 - contract guardrails: valid tool-call shape, JSON recovery, unknown tool rejection
 - loop guardrails: bounded rounds, repeated tool-call detection, retry budgets
 - execution guardrails: timeouts, output-size limits, workdir confinement
-- evidence guardrails: metadata-only analysis retry, mutation verification
+- evidence guardrails: content-evidence recovery, metadata-only retry, mutation verification
+- task-completion guardrails: completion nudge, minimal patch nudge, semantic repair
 - context guardrails: bounded chunks, memory refresh, manual tool-result compaction
 
 ### Loop and contract guardrails
 
 Orbit keeps several runtime invariants in code:
 
-- bounded tool rounds
+- bounded tool rounds, with a slightly larger shell-full budget for repair workflows
 - repeated tool-call detection
 - timeout enforcement
 - malformed JSON/tool-call recovery
@@ -282,6 +291,27 @@ Orbit keeps several runtime invariants in code:
 
 These guardrails do not decide the task answer. They prevent pathological loops
 and invalid states.
+
+### Dynamic tool-call budget
+
+Route/tool-call turns are not final answers and should not use the same output
+budget.
+
+Orbit keeps ordinary tool-call turns small, but allows a larger budget for
+mutative/internal correction turns:
+
+- normal tool-call: compact JSON only
+- mutative tool-call: larger budget for safer edit commands
+- shell repair: larger budget for corrected commands
+- mutation verification: enough budget for evidence-producing commands
+- completion/minimal-patch/content-evidence guards: enough budget for one
+  follow-up command
+
+This reduces `finish_reason=length` in internal turns without increasing the
+cost of simple commands.
+
+The model still generates the command. The runtime only chooses an output budget
+appropriate to the phase.
 
 ### Shell repair loop
 
@@ -331,6 +361,51 @@ Most non-zero exits are treated as potentially repairable. Orbit skips repair
 only for clearly environmental failures such as permission errors, read-only
 filesystems, no space left, out-of-memory/killed processes, DNS failures, and
 network timeouts.
+
+### Content evidence recovery
+
+Coding and analysis tasks fail when the model stays at the metadata level:
+
+```text
+ls -R
+ls -F
+file target.py
+```
+
+Listing files can be useful, but it is not enough to fix code or analyze a
+sample. When a mutative coding task triggers metadata-only rejection and no
+source/test content has been read yet, Orbit asks the model for real evidence:
+
+```text
+Your previous command inspected only metadata or listings.
+
+For this coding task, inspect real file or test content before continuing.
+
+Use commands such as cat, sed -n, grep/rg on file contents, or test output.
+
+If file names are unknown, use grep/rg recursively over file contents.
+
+Do not use ls, find, tree, file, or stat.
+
+Return only JSON:
+
+{"command":"..."}
+```
+
+The runtime does not choose the file to read. It only prevents another
+listing-only step and asks the model to inspect content. After that, the normal
+flow continues:
+
+```text
+content evidence -> modification -> verification -> final answer
+```
+
+Visible counters:
+
+- `content_evidence_guard_nudges`
+- `content_evidence_guard_commands`
+- `content_evidence_guard_successes`
+- `content_evidence_guard_failures`
 
 ### Mutation verification
 
@@ -382,6 +457,112 @@ Mutation verification counters are visible in `/status`:
 - `mutation_verifications`
 - `mutation_verification_repairs`
 - `mutation_verification_failures`
+
+### Completion guard
+
+Some mutative coding tasks were correctly discovered but never edited. The model
+read the right file, identified the target, then finalized as if the task were a
+review.
+
+Orbit detects this pattern only when all of these are true:
+
+- the user request is mutative
+- shell-full is enabled
+- only read-only commands were executed
+- no mutating command was attempted
+- the model is about to finalize
+
+The internal nudge is deliberately small:
+
+```text
+You identified the target but did not perform the requested modification.
+
+Continue the task.
+
+Prefer short robust commands; avoid fragile quoting and long heredocs.
+Prefer minimal edits over rewriting entire files.
+
+Return only JSON:
+
+{"command":"..."}
+```
+
+The runtime does not suggest the edit. It only prevents premature completion.
+
+Visible counters:
+
+- `completion_guard_nudges`
+- `completion_guard_commands`
+- `completion_guard_successes`
+- `completion_guard_failures`
+
+### Minimal patch guard
+
+The model can understand the requested change but attempt to rewrite an entire
+file through a long heredoc or a very large command. On CPU-only local models,
+this often causes:
+
+- `finish_reason=length`
+- incomplete JSON
+- truncated heredocs
+- fragile full-file rewrites
+
+When the task is mutative, a target has been discovered, a broad rewrite is
+detected, and no valid mutation has succeeded yet, Orbit asks for a local patch:
+
+```text
+Your previous command tried to rewrite too much and was too long or incomplete.
+
+Use a minimal local patch to modify only the necessary lines.
+
+Do not rewrite the whole file unless strictly necessary.
+
+Return only JSON:
+
+{"command":"..."}
+```
+
+Again, the runtime does not generate the patch. It only redirects the model away
+from an overly broad strategy.
+
+Visible counters:
+
+- `minimal_patch_guard_nudges`
+- `minimal_patch_guard_commands`
+- `minimal_patch_guard_successes`
+- `minimal_patch_guard_failures`
+
+### Semantic mutation repair
+
+Verification can show that a mutation was applied but did not satisfy the full
+request. For example, a command may change one required property but miss
+another, or a test command may print `False`.
+
+Orbit can ask for one follow-up command:
+
+```text
+The previous modification was applied, and the verification output is in context.
+
+Check whether all requested changes are satisfied.
+
+If any requested change is missing, return a minimal follow-up command to complete it.
+
+If all requested changes are satisfied, return only: OK
+
+Return command JSON only when a follow-up command is needed:
+
+{"command":"..."}
+```
+
+This is still model-driven. The runtime does not know what counts as correct
+HTML, Python, shell, SQL, or JSON. It only gives the model verification evidence
+and one chance to complete the task.
+
+Visible counters:
+
+- `mutation_semantic_repairs`
+- `mutation_semantic_repair_commands`
+- `mutation_semantic_repair_failures`
 
 ## Context pressure
 

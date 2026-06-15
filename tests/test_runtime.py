@@ -16,7 +16,14 @@ from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
 from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
-from orbit.runtime.shell_guardrails import SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT, should_verify_shell_mutation
+from orbit.runtime.shell_guardrails import (
+    SHELL_FULL_COMPLETION_GUARD_PROMPT,
+    SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT,
+    SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT,
+    SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT,
+    SHELL_FULL_SEMANTIC_REPAIR_PROMPT,
+    should_verify_shell_mutation,
+)
 
 
 class FakeBackend:
@@ -1470,6 +1477,79 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.mutation_verifications, 1)
         self.assertEqual(runtime.mutation_verification_failures, 0)
 
+    def test_mutation_verification_semantic_repair_completes_partial_change(self) -> None:
+        class SemanticRepairBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps({"command": "python3 -c 'from pathlib import Path; p=Path(\"backup.sh\"); p.write_text(p.read_text().replace(\"cp $1 $2\", \"cp \\\"$1\\\" \\\"$2\\\"\"))'"})
+                elif self.calls == 2:
+                    content = json.dumps({"command": "cat backup.sh"})
+                elif self.calls == 3:
+                    content = json.dumps({"command": "python3 -c 'from pathlib import Path; p=Path(\"backup.sh\"); s=p.read_text(); p.write_text(s.replace(\"#!/usr/bin/env bash\\n\", \"#!/usr/bin/env bash\\nset -euo pipefail\\n\")); print(p.read_text())'"})
+                elif self.calls == 4:
+                    return ChatResult(
+                        content="script hardened",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=9,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="done",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "backup.sh").write_text("#!/usr/bin/env bash\ncp $1 $2\n", encoding="utf-8")
+            runtime = ChatRuntime(backend=SemanticRepairBackend(), system_prompt="route system")
+            result = runtime.ask_auto(
+                "Harden backup.sh for bash safety and correct quoting of arguments.",
+                temperature=0,
+                max_tokens=96,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            content = (workdir / "backup.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertIn("set -euo pipefail", content)
+        self.assertIn('cp "$1" "$2"', content)
+        self.assertEqual(runtime.mutation_verifications, 1)
+        self.assertEqual(runtime.mutation_semantic_repairs, 1)
+        self.assertEqual(runtime.mutation_semantic_repair_commands, 1)
+        self.assertEqual(runtime.mutation_semantic_repair_failures, 0)
+        self.assertEqual(runtime.backend.messages_seen[2][-1]["content"], SHELL_FULL_SEMANTIC_REPAIR_PROMPT)
+
     def test_mutation_verification_rename_noop_requests_verification(self) -> None:
         class RenameNoopBackend:
             def __init__(self) -> None:
@@ -1716,6 +1796,562 @@ class ToolRuntimeTests(unittest.TestCase):
                 user_prompt="update the user",
             )
         )
+
+    def test_completion_guard_continues_refactor_symbol_after_read_only_discovery(self) -> None:
+        class CompletionGuardBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps({"command": "grep -r \"slugify\" ."})
+                elif self.calls == 2:
+                    content = json.dumps(
+                        {
+                            "command": (
+                                "python3 -c \"from pathlib import Path; "
+                                "p=Path('names.py'); "
+                                "p.write_text(p.read_text().replace('slugify', 'normalize_slug')); "
+                                "print(p.read_text())\""
+                            )
+                        }
+                    )
+                elif self.calls == 3:
+                    return ChatResult(
+                        content="modification complete",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="done",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=9,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "names.py").write_text(
+                "def slugify(value):\n    return value\n\ndef make_id(value):\n    return slugify(value)\n",
+                encoding="utf-8",
+            )
+            backend = CompletionGuardBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            result = runtime.ask_auto(
+                "Rename slugify to normalize_slug across the codebase and update references.",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            updated = (workdir / "names.py").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertIn("def normalize_slug", updated)
+        self.assertNotIn("slugify", updated)
+        self.assertEqual(runtime.completion_guard_nudges, 1)
+        self.assertEqual(runtime.completion_guard_commands, 1)
+        self.assertEqual(runtime.completion_guard_successes, 1)
+        self.assertEqual(runtime.completion_guard_failures, 0)
+        self.assertEqual(backend.messages_seen[1][-1]["content"], SHELL_FULL_COMPLETION_GUARD_PROMPT)
+
+    def test_content_evidence_guard_recovers_after_metadata_only_listing(self) -> None:
+        class ContentEvidenceBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps({"command": "ls -R"})
+                elif self.calls == 2:
+                    content = json.dumps({"command": "cat string_utils.py test_string_utils.py"})
+                elif self.calls == 3:
+                    content = json.dumps({"command": "python3 -c 'from pathlib import Path; p=Path(\"string_utils.py\"); p.write_text(\"def is_palindrome(value):\\n    normalized = value.lower().replace(\\\" \\\", \\\"\\\")\\n    return normalized == normalized[::-1]\\n\"); print(p.read_text())'"})
+                elif self.calls == 4:
+                    return ChatResult(
+                        content="fixed",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=9,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="done",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "string_utils.py").write_text("def is_palindrome(value):\n    return value == value[::-1]\n", encoding="utf-8")
+            (workdir / "test_string_utils.py").write_text(
+                "from string_utils import is_palindrome\n\n"
+                "def test_palindrome_ignores_case_and_spaces():\n"
+                "    assert is_palindrome('Never odd or even')\n",
+                encoding="utf-8",
+            )
+            runtime = ChatRuntime(backend=ContentEvidenceBackend(), system_prompt="route system")
+            result = runtime.ask_auto(
+                "The test describes the desired behavior. Inspect files and fix the implementation.",
+                temperature=0,
+                max_tokens=128,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            updated = (workdir / "string_utils.py").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertIn("lower", updated)
+        self.assertIn("replace", updated)
+        self.assertEqual(runtime.content_evidence_guard_nudges, 1)
+        self.assertEqual(runtime.content_evidence_guard_commands, 1)
+        self.assertEqual(runtime.content_evidence_guard_successes, 1)
+        self.assertEqual(runtime.content_evidence_guard_failures, 0)
+        self.assertEqual(runtime.backend.messages_seen[1][-1]["content"], SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT)
+        self.assertEqual(runtime.completion_guard_nudges, 0)
+
+    def test_completion_guard_does_not_fire_for_read_only_analysis(self) -> None:
+        class ReadOnlyBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    content = json.dumps({"command": "grep -n \"shell=True\" vulnerable_service.py"})
+                elif self.calls == 2:
+                    return ChatResult(
+                        content="shell=True is vulnerable",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="final review",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            backend = ReadOnlyBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            result = runtime.ask_auto(
+                "Review vulnerable_service.py and report the vulnerable function. Do not modify files.",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "shell=True is vulnerable")
+        self.assertEqual(runtime.completion_guard_nudges, 0)
+        self.assertEqual(runtime.completion_guard_commands, 0)
+
+    def test_completion_guard_covers_common_mutative_coding_tasks(self) -> None:
+        cases = [
+            (
+                "config_update",
+                "Update config.json: set timeout to 30 and enable features.cache.",
+                {"config.json": '{"timeout":10,"features":{"cache":false}}\n'},
+                "cat config.json",
+                "python3 -c \"import json; p='config.json'; d=json.load(open(p)); d['timeout']=30; d['features']['cache']=True; open(p,'w').write(json.dumps(d)); print(open(p).read())\"",
+                lambda workdir: '"timeout": 30' in (workdir / "config.json").read_text(encoding="utf-8")
+                or '"timeout":30' in (workdir / "config.json").read_text(encoding="utf-8"),
+            ),
+            (
+                "html_css_edit",
+                "Change the page title to Dashboard and make the .btn color green.",
+                {"index.html": "<title>Old</title>\n", "style.css": ".btn { color: blue; }\n"},
+                "grep -r \"title\\|\\.btn\" .",
+                "python3 -c \"from pathlib import Path; Path('index.html').write_text(Path('index.html').read_text().replace('<title>Old</title>','<title>Dashboard</title>')); Path('style.css').write_text(Path('style.css').read_text().replace('blue','green')); print(Path('index.html').read_text()+Path('style.css').read_text())\"",
+                lambda workdir: "Dashboard" in (workdir / "index.html").read_text(encoding="utf-8")
+                and "green" in (workdir / "style.css").read_text(encoding="utf-8"),
+            ),
+            (
+                "python_edit",
+                "Improve parse_port in service.py so invalid or out-of-range ports raise ValueError.",
+                {"service.py": "def parse_port(value):\n    return int(value)\n"},
+                "cat service.py",
+                "printf '%s\\n' 'def parse_port(value):' '    port = int(value)' '    if not 1 <= port <= 65535:' '        raise ValueError(\"invalid port\")' '    return port' > service.py && cat service.py",
+                lambda workdir: "ValueError" in (workdir / "service.py").read_text(encoding="utf-8")
+                and "65535" in (workdir / "service.py").read_text(encoding="utf-8"),
+            ),
+            (
+                "write_test",
+                "Add a minimal pytest test for multiply(a, b) in math_utils.py.",
+                {"math_utils.py": "def multiply(a, b):\n    return a * b\n"},
+                "ls -F",
+                "python3 -c \"from pathlib import Path; Path('test_math_utils.py').write_text('from math_utils import multiply\\n\\ndef test_multiply():\\n    assert multiply(2, 3) == 6\\n'); print(Path('test_math_utils.py').read_text())\"",
+                lambda workdir: "multiply" in (workdir / "test_math_utils.py").read_text(encoding="utf-8"),
+            ),
+            (
+                "fix_failed_test",
+                "The test describes the desired behavior. Inspect files and fix the implementation.",
+                {
+                    "string_utils.py": "def is_palindrome(value):\n    return value == value[::-1]\n",
+                    "test_string_utils.py": "from string_utils import is_palindrome\n\ndef test_palindrome_ignores_case_and_spaces():\n    assert is_palindrome('Never odd or even')\n",
+                },
+                "grep -R \"is_palindrome\" .",
+                "python3 -c \"from pathlib import Path; Path('string_utils.py').write_text('def is_palindrome(value):\\n    normalized = value.lower().replace(\\\" \\\", \\\"\\\")\\n    return normalized == normalized[::-1]\\n'); print(Path('string_utils.py').read_text())\"",
+                lambda workdir: "lower" in (workdir / "string_utils.py").read_text(encoding="utf-8")
+                and "replace" in (workdir / "string_utils.py").read_text(encoding="utf-8"),
+            ),
+        ]
+
+        class CompletionGuardCaseBackend:
+            def __init__(self, read_command: str, mutate_command: str) -> None:
+                self.calls = 0
+                self.read_command = read_command
+                self.mutate_command = mutate_command
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    content = json.dumps({"command": self.read_command})
+                elif self.calls == 2:
+                    content = json.dumps({"command": self.mutate_command})
+                elif self.calls == 3:
+                    return ChatResult(
+                        content="modification complete",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="done",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=9,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        for name, prompt, files, read_command, mutate_command, check in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                workdir = Path(tmp)
+                for relative_path, content in files.items():
+                    (workdir / relative_path).write_text(content, encoding="utf-8")
+                runtime = ChatRuntime(
+                    backend=CompletionGuardCaseBackend(read_command, mutate_command),
+                    system_prompt="route system",
+                )
+                result = runtime.ask_auto(
+                    prompt,
+                    temperature=0,
+                    max_tokens=64,
+                    workdir=workdir,
+                    allowed_tool_names=("exec_shell_full_command",),
+                )
+
+                self.assertEqual(result.content, "done")
+                self.assertTrue(check(workdir))
+                self.assertEqual(runtime.completion_guard_nudges, 1)
+                self.assertEqual(runtime.completion_guard_commands, 1)
+                self.assertEqual(runtime.completion_guard_successes, 1)
+                self.assertEqual(runtime.completion_guard_failures, 0)
+
+    def test_completion_guard_records_failure_when_nudge_does_not_return_command(self) -> None:
+        class NoCommandBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    content = json.dumps({"command": "cat config.json"})
+                elif self.calls == 2:
+                    return ChatResult(
+                        content="config.json has timeout 10",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="not modified",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "config.json").write_text('{"timeout":10}\n', encoding="utf-8")
+            runtime = ChatRuntime(backend=NoCommandBackend(), system_prompt="route system")
+            result = runtime.ask_auto(
+                "Update config.json: set timeout to 30.",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "not modified")
+        self.assertEqual(runtime.completion_guard_nudges, 1)
+        self.assertEqual(runtime.completion_guard_commands, 0)
+        self.assertEqual(runtime.completion_guard_successes, 0)
+        self.assertEqual(runtime.completion_guard_failures, 1)
+
+    def test_minimal_patch_guard_retries_truncated_broad_rewrite_once(self) -> None:
+        class MinimalPatchBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps({"command": "cat script.sh"})
+                elif self.calls == 2:
+                    truncated = """{"command":"cat << 'EOF' > script.sh
+#!/usr/bin/env bash
+set -euo pipefail
+cp "$1\""""
+                    return ChatResult(
+                        content=truncated,
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": truncated,
+                                },
+                            }
+                        ],
+                        prompt_tokens=7,
+                        completion_tokens=160,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                elif self.calls == 3:
+                    content = json.dumps({"command": "python3 -c 'from pathlib import Path; p=Path(\"script.sh\"); s=p.read_text().replace(\"cp $1 $2\", \"cp quoted quoted\"); p.write_text(s); print(p.read_text())'"})
+                elif self.calls == 4:
+                    return ChatResult(
+                        content="patched",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=9,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                else:
+                    return ChatResult(
+                        content="done",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "script.sh").write_text("#!/usr/bin/env bash\ncp $1 $2\n", encoding="utf-8")
+            backend = MinimalPatchBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            result = runtime.ask_auto(
+                "Harden script.sh for bash safety and correct quoting of arguments.",
+                temperature=0,
+                max_tokens=256,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            content = (workdir / "script.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertIn("cp quoted quoted", content)
+        self.assertEqual(runtime.minimal_patch_guard_nudges, 1)
+        self.assertEqual(runtime.minimal_patch_guard_commands, 1)
+        self.assertEqual(runtime.minimal_patch_guard_successes, 1)
+        self.assertEqual(runtime.minimal_patch_guard_failures, 0)
+        self.assertEqual(backend.messages_seen[2][-1]["content"], SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT)
+
+    def test_minimal_patch_guard_does_not_fire_for_short_mutation(self) -> None:
+        class ShortMutationBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    content = json.dumps({"command": "sed -i 's/old/new/' note.txt && cat note.txt"})
+                else:
+                    return ChatResult(
+                        content="done",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("old\n", encoding="utf-8")
+            runtime = ChatRuntime(backend=ShortMutationBackend(), system_prompt="route system")
+            result = runtime.ask_auto(
+                "replace old with new in note.txt",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(runtime.minimal_patch_guard_nudges, 0)
 
     def test_shell_full_allows_multiple_successive_command_rounds(self) -> None:
         class MultiShellFullBackend:

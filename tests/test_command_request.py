@@ -102,6 +102,43 @@ class RouteRequestTests(unittest.TestCase):
         args = json.loads(tool_call["function"]["arguments"])
         self.assertEqual(args["command"], 'printf "one\ntwo" > note.txt')
 
+    def test_command_tool_call_from_content_accepts_literal_newline_command_json(self) -> None:
+        content = """{"command": "cat << 'EOF' > note.txt
+one
+two
+EOF"}"""
+
+        tool_call = command_tool_call_from_content(content, ("exec_shell_full_command",))
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        args = json.loads(tool_call["function"]["arguments"])
+        self.assertEqual(args["command"], "cat << 'EOF' > note.txt\none\ntwo\nEOF")
+
+    def test_command_tool_call_from_content_preserves_heredoc_command(self) -> None:
+        content = """{"command": "cat > script.sh << 'EOF'
+#!/usr/bin/env bash
+echo ok
+EOF"}"""
+
+        tool_call = command_tool_call_from_content(content, ("exec_shell_full_command",))
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        args = json.loads(tool_call["function"]["arguments"])
+        self.assertIn("cat > script.sh << 'EOF'\n", args["command"])
+        self.assertTrue(args["command"].endswith("\nEOF"))
+
+    def test_command_tool_call_from_content_accepts_loose_raw_shell_tool_call(self) -> None:
+        content = "<|tool_call>call shell cat backup.sh\n<|tool_call>call shell sed -i 's/a/b/' backup.sh"
+
+        tool_call = command_tool_call_from_content(content, ("exec_shell_full_command",))
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        args = json.loads(tool_call["function"]["arguments"])
+        self.assertEqual(args["command"], "cat backup.sh")
+
     def test_command_tool_call_from_content_respects_allowed_tools(self) -> None:
         self.assertIsNone(command_tool_call_from_content('{"command":"ls -F"}', ("read_file",)))
 
@@ -137,7 +174,7 @@ class RouteRequestTests(unittest.TestCase):
         self.assertIsNotNone(tool_call)
         assert tool_call is not None
         self.assertEqual(tool_call["function"]["name"], "exec_shell_full_command")
-        self.assertEqual(tool_call["function"]["arguments"], '{"command": "pwd"}')
+        self.assertEqual(tool_call["function"]["arguments"], '{"command":"pwd"}')
 
     def test_command_tool_call_from_tool_calls_accepts_shell_alias(self) -> None:
         tool_call = command_tool_call_from_tool_calls(
@@ -155,6 +192,29 @@ class RouteRequestTests(unittest.TestCase):
         assert tool_call is not None
         self.assertEqual(tool_call["function"]["name"], "exec_shell_full_command")
         self.assertEqual(tool_call["function"]["arguments"], '{"command": "curl https://example.com"}')
+
+    def test_command_tool_call_from_tool_calls_normalizes_invalid_multiline_arguments(self) -> None:
+        tool_call = command_tool_call_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "exec_shell_full_command",
+                        "arguments": """{"command":"cat << 'EOF' > note.txt
+one
+two
+EOF"}""",
+                    },
+                }
+            ],
+            ("exec_shell_full_command",),
+        )
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        args = json.loads(tool_call["function"]["arguments"])
+        self.assertEqual(args["command"], "cat << 'EOF' > note.txt\none\ntwo\nEOF")
 
     def test_command_tool_call_from_tool_calls_accepts_orbit_web_search_alias(self) -> None:
         tool_call = command_tool_call_from_tool_calls(

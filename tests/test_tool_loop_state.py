@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.runtime.tool_loop_state import ToolLoopState
+from orbit.runtime import tool_loop
 
 
 class ToolLoopStateTests(unittest.TestCase):
@@ -28,11 +29,11 @@ class ToolLoopStateTests(unittest.TestCase):
         state.increment_round()
         self.assertTrue(state.round_limit_reached())
 
-    def test_shell_full_allows_four_rounds(self) -> None:
+    def test_shell_full_allows_eight_rounds(self) -> None:
         state = ToolLoopState(("exec_shell_full_command",))
 
-        self.assertEqual(state.round_limit, 4)
-        for _ in range(3):
+        self.assertEqual(state.round_limit, 8)
+        for _ in range(7):
             state.increment_round()
             self.assertFalse(state.round_limit_reached())
         state.increment_round()
@@ -47,6 +48,17 @@ class ToolLoopStateTests(unittest.TestCase):
 
         self.assertEqual(signature[0], "read_file")
         self.assertTrue(state.has_seen_tool_call(tool_call))
+
+    def test_mutative_tool_call_budget_is_separate_and_bounded(self) -> None:
+        original = tool_loop.MUTATIVE_TOOL_CALL_MAX_TOKENS
+        try:
+            tool_loop.MUTATIVE_TOOL_CALL_MAX_TOKENS = 192
+
+            self.assertEqual(tool_loop._tool_call_max_tokens(512, mutative=False), 96)
+            self.assertEqual(tool_loop._tool_call_max_tokens(512, mutative=True), 192)
+            self.assertEqual(tool_loop._tool_call_max_tokens(160, mutative=True), 160)
+        finally:
+            tool_loop.MUTATIVE_TOOL_CALL_MAX_TOKENS = original
 
 
 if __name__ == "__main__":

@@ -48,6 +48,10 @@ Rules:
 - Shell repair must stay generic: no command/utility whitelist; skip only clearly environmental failures such as permission, filesystem, memory, DNS, or timeout errors.
 - Mutating shell commands that exit successfully with no output may trigger one model-driven verification command.
 - Mutation verification must not validate domain-specific formats in runtime; the model must produce evidence of the changed value or state.
+- Runtime guards must guide the model, not solve the task deterministically.
+- Internal guard prompts may ask for content evidence, completion, minimal local patches, or semantic repair, but the model must choose the command.
+- Tool-call output budgets may be dynamic by phase; do not raise global max tokens to hide internal control-flow bugs.
+- Coding guards must stay language-agnostic unless benchmark evidence justifies a narrower rule.
 - `cat` on large UTF-8 text/source files may be post-processed through the internal bounded reader.
 - Commands that read or analyze local PDFs may be post-processed through text extraction.
 - PDF text extraction must prefer `pdftotext`; if unavailable, fallback to filtered `strings`.

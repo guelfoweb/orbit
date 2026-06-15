@@ -61,8 +61,14 @@ def command_tool_call_from_tool_calls(
         name = function.get("name")
         if not isinstance(name, str):
             continue
-        args = parse_tool_arguments_or_empty(function.get("arguments"))
+        raw_arguments = function.get("arguments")
+        args = parse_tool_arguments_or_empty(raw_arguments)
+        parsed_valid_command = _has_command(args)
+        if not parsed_valid_command and isinstance(raw_arguments, str):
+            args = _extract_loose_command_object(raw_arguments) or _extract_last_json_object(raw_arguments) or {}
         if _has_command(args):
+            if name == "exec_shell_full_command" and isinstance(raw_arguments, str) and parsed_valid_command:
+                return tool_call
             return _tool_call("exec_shell_full_command", {"command": args["command"]})
         if name in WEB_SEARCH_TOOL_ALIASES:
             command = _web_search_command_from_args(args)
@@ -216,7 +222,7 @@ def _extract_raw_tool_call_command(content: str) -> str | None:
         flags=re.DOTALL,
     )
     if not match:
-        return None
+        return _extract_loose_raw_shell_command(text)
     name = match.group("name")
     raw_args = match.group("args")
     value = _parse_command_json_object(raw_args) or _extract_last_json_object(raw_args) or _extract_loose_key_value_object(raw_args)
@@ -280,6 +286,20 @@ def _extract_loose_command_object(content: str) -> dict[str, Any] | None:
         return None
     command = _decode_loose_json_string(match.group("command"))
     return {"command": command} if command.strip() else None
+
+
+def _extract_loose_raw_shell_command(text: str) -> str | None:
+    match = re.search(
+        r"<\|tool_call\>\s*call\s+shell\s+(?P<command>.*?)(?=<\|tool_call\>|<tool_call\|>|$)",
+        text,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return None
+    command = match.group("command").strip()
+    if not command or "{" in command or "}" in command:
+        return None
+    return command
 
 
 def _decode_loose_json_string(value: str) -> str:

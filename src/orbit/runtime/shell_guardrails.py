@@ -28,11 +28,43 @@ SHELL_FULL_CONTRACT_RETRY_PROMPT = (
     "Use the available exec_shell_full_command tool now to inspect source/content/string evidence. "
     "Return only the tool call."
 )
+SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT = (
+    "Your previous command inspected only metadata or listings.\n\n"
+    "For this coding task, inspect real file or test content before continuing.\n\n"
+    "Use commands such as cat, sed -n, grep/rg on file contents, or test output.\n\n"
+    "If file names are unknown, use grep/rg recursively over file contents.\n\n"
+    "Do not use ls, find, tree, file, or stat.\n\n"
+    "Return only JSON:\n\n"
+    '{"command":"..."}'
+)
 SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT = (
     "The command succeeded but produced no output.\n\n"
     "Verify that the requested change actually occurred.\n\n"
     "The verification command must print direct evidence of the changed value or state, not only metadata.\n\n"
     "Return only JSON:\n\n"
+    '{"command":"..."}'
+)
+SHELL_FULL_COMPLETION_GUARD_PROMPT = (
+    "You identified the target but did not perform the requested modification.\n\n"
+    "Continue the task.\n\n"
+    "Prefer short robust commands; avoid fragile quoting and long heredocs. "
+    "Prefer minimal edits over rewriting entire files.\n\n"
+    "Return only JSON:\n\n"
+    '{"command":"..."}'
+)
+SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT = (
+    "Your previous command tried to rewrite too much and was too long or incomplete.\n\n"
+    "Use a minimal local patch to modify only the necessary lines.\n\n"
+    "Do not rewrite the whole file unless strictly necessary.\n\n"
+    "Return only JSON:\n\n"
+    '{"command":"..."}'
+)
+SHELL_FULL_SEMANTIC_REPAIR_PROMPT = (
+    "The previous modification was applied, and the verification output is in context.\n\n"
+    "Check whether all requested changes are satisfied.\n\n"
+    "If any requested change is missing, return a minimal follow-up command to complete it.\n\n"
+    "If all requested changes are satisfied, return only: OK\n\n"
+    "Return command JSON only when a follow-up command is needed:\n\n"
     '{"command":"..."}'
 )
 
@@ -61,7 +93,11 @@ _READ_ONLY_PROMPT_RE = re.compile(
     re.IGNORECASE,
 )
 _MUTATION_PROMPT_RE = re.compile(
-    r"\b(?:create|write|edit|modify|replace|append|delete|remove|rename|move|copy|install|commit|update|insert|drop|alter)\b",
+    r"\b(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter)\b",
+    re.IGNORECASE,
+)
+_NEGATED_MUTATION_PROMPT_RE = re.compile(
+    r"\b(?:do\s+not|don't|without)\s+(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter)\b",
     re.IGNORECASE,
 )
 
@@ -221,7 +257,66 @@ def is_repairable_shell_error(content: str) -> bool:
 def should_verify_shell_mutation(command: str, *, user_prompt: str | None) -> bool:
     if user_prompt and _READ_ONLY_PROMPT_RE.search(user_prompt) and not _MUTATION_PROMPT_RE.search(user_prompt):
         return False
+    return is_mutating_shell_command(command)
+
+
+def is_mutative_user_request(user_prompt: str | None) -> bool:
+    if not user_prompt:
+        return False
+    if _NEGATED_MUTATION_PROMPT_RE.search(user_prompt) and not re.search(
+        r"\b(?:fix|update|change|create|write|rename|refactor|edit)\b.*\b(?:file|code|implementation|config|test)\b",
+        user_prompt,
+        re.IGNORECASE,
+    ):
+        return False
+    if _READ_ONLY_PROMPT_RE.search(user_prompt) and not _MUTATION_PROMPT_RE.search(user_prompt):
+        return False
+    return _MUTATION_PROMPT_RE.search(user_prompt) is not None
+
+
+def is_mutating_shell_command(command: str) -> bool:
     return _is_mutating_shell_command(command)
+
+
+def is_metadata_only_shell_command(command: str | None) -> bool:
+    if not command:
+        return False
+    return _METADATA_ONLY_RE.search(command) is not None
+
+
+def is_content_evidence_shell_command(command: str | None) -> bool:
+    if not command:
+        return False
+    return _CONTENT_EVIDENCE_RE.search(command) is not None
+
+
+def looks_like_broad_file_rewrite(text: str | None) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if re.search(r"\bcat\s+<<\s*['\"]?\w+['\"]?\s*>\s*[^\s]+", text):
+        return True
+    if re.search(r"\bcat\s*>\s*[^\s]+\s*<<\s*['\"]?\w+['\"]?", text):
+        return True
+    if re.search(r"\b(?:tee|dd)\b.*\b(?:of=|>\s*)", text):
+        return True
+    if re.search(r"\bwrite_(?:text|bytes)\s*\(", text):
+        return True
+    if re.search(r"\bopen\s*\([^)]*,\s*['\"]w", text):
+        return True
+    if "heredoc" in lowered:
+        return True
+    return False
+
+
+def is_incomplete_shell_json_or_command_error(content: str) -> bool:
+    lowered = content.lower()
+    return (
+        "invalid json tool arguments" in lowered
+        or "unterminated string" in lowered
+        or "missing closing quote" in lowered
+        or "unexpected eof" in lowered
+    )
 
 
 def shell_repair_prompt(content: str) -> str:
@@ -239,6 +334,8 @@ def shell_repair_prompt(content: str) -> str:
             "",
             "STDERR:",
             _bounded_stream(failure.stderr) or "(empty)",
+            "",
+            "Prefer short robust commands; avoid fragile quoting and long heredocs. Prefer minimal edits over rewriting entire files.",
             "",
             "Return only corrected JSON:",
             "",
