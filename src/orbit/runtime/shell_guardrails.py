@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -110,7 +111,7 @@ def exec_shell_full_definition() -> dict[str, Any]:
         "function": {
             "name": "exec_shell_full_command",
             "description": (
-                "Local shell confined to the current workdir. May read, write, delete, execute, and access network. "
+                "Unrestricted local shell launched from the current workdir. May read, write, delete, execute, access network, and access paths outside workdir. "
                 "Use whatever commands are needed to complete the task. "
                 "For analysis, prefer direct evidence from content, source, binaries, strings, logs, archives, and fetched data, not only metadata. "
                 'For generic web search, use orbit-web-search "query"; for explicit URLs, use curl. '
@@ -133,9 +134,6 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
     raw_command = arguments.get("command")
     if not isinstance(raw_command, str) or not raw_command.strip():
         return "error: exec_shell_full_command requires a non-empty command string"
-    confinement_error = _validate_workdir_confined_command(raw_command)
-    if confinement_error:
-        return confinement_error
     timeout = _bounded_int(arguments.get("timeout"), default=DEFAULT_SHELL_TIMEOUT, maximum=MAX_SHELL_TIMEOUT)
     output_size = _bounded_int(arguments.get("max_output_size"), default=DEFAULT_SHELL_OUTPUT_BYTES, maximum=MAX_SHELL_OUTPUT_BYTES)
     resolved_workdir = workdir.expanduser().resolve()
@@ -149,18 +147,11 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
     env["HOME"] = str(resolved_workdir)
     env["PWD"] = str(resolved_workdir)
     try:
-        completed = subprocess.run(
-            raw_command,
-            cwd=resolved_workdir,
-            env=env,
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        completed = _run_shell_command(raw_command, cwd=resolved_workdir, env=env, timeout=timeout)
+    except OSError as exc:
         return f"error: exec_shell_full_command failed: {exc}"
+    except subprocess.TimeoutExpired as exc:
+        return f"error: exec_shell_full_command timed out after {timeout}s"
     if completed.returncode != 0:
         return _format_shell_failure(completed.returncode, completed.stdout, completed.stderr)
     output_parts = []
@@ -177,6 +168,48 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
     if _is_search_command(raw_command):
         return _bounded_text(content, min(output_size, SEARCH_SHELL_OUTPUT_BYTES))
     return _bounded_text(content, output_size)
+
+
+def _run_shell_command(raw_command: str, *, cwd: Path, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        raw_command,
+        cwd=cwd,
+        env=env,
+        shell=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        stdout, stderr = process.communicate()
+        exc.stdout = stdout
+        exc.stderr = stderr
+        raise exc
+    return subprocess.CompletedProcess(raw_command, process.returncode, stdout, stderr)
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=1)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+        return
+    process.kill()
 
 
 def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str | None) -> str | None:
@@ -646,28 +679,3 @@ def _bounded_int(value: Any, *, default: int, maximum: int) -> int:
     if isinstance(value, int):
         return max(1, min(value, maximum))
     return default
-
-
-def _validate_workdir_confined_command(command: str) -> str | None:
-    try:
-        tokens = shlex.split(command)
-    except ValueError as exc:
-        return f"error: invalid shell command: {exc}"
-    if not tokens:
-        return "error: exec_shell_full_command requires a non-empty command string"
-    for token in tokens:
-        if token in {"cd", "pushd", "popd"}:
-            return "error: shell command must stay inside workdir; directory-changing commands are not allowed"
-        if "$HOME" in token or "${HOME}" in token or token == "~" or token.startswith("~/"):
-            return "error: shell command must stay inside workdir; home-directory paths are not allowed"
-        if _token_escapes_workdir(token):
-            return "error: shell command must stay inside workdir; absolute paths and parent traversal are not allowed"
-    return None
-
-
-def _token_escapes_workdir(token: str) -> bool:
-    if token.startswith(("http://", "https://")):
-        return False
-    if token.startswith("/"):
-        return True
-    return token == ".." or token.startswith("../") or "/../" in token or token.endswith("/..")

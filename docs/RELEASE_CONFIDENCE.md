@@ -34,6 +34,15 @@ Release criterion for this phase:
 - Known limitations are documented and not hidden behind fragile checkers.
 - No additional deterministic task fast paths are introduced.
 
+## Patch workflow experiments
+
+Two experimental branches were evaluated and intentionally not merged:
+
+- `patch-workflow-experiment`: tested a hidden `orbit-patch` pseudo-command inside `exec_shell_full_command`. It recovered 0/3 target failures; the model continued to prefer `sed` or heredoc strategies.
+- `patch-tool-experiment`: tested a model-facing `apply_patch` tool. It recovered 0/3 target failures in the final critical run and introduced temporary regressions during release-confidence testing.
+
+These results indicate that an optional patch tool is not sufficient for the current residual failures. The future direction, if these cases become release blockers, is a dedicated `deterministic-edit-workflow` forced by runtime state, not another optional patch command.
+
 ## Principles
 
 - Check final files, behavior, tests, or expected output.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from shutil import copyfile
 from pathlib import Path
@@ -53,7 +54,8 @@ class HybridToolExecutorTests(unittest.TestCase):
 
         self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command"])
         description = definitions[0]["function"]["description"]
-        self.assertIn("Local shell confined to the current workdir", description)
+        self.assertIn("Unrestricted local shell launched from the current workdir", description)
+        self.assertIn("access paths outside workdir", description)
         self.assertIn("orbit-web-search", description)
         self.assertIn("explicit URLs", description)
         self.assertIn("Quote paths containing spaces", description)
@@ -178,8 +180,10 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertNotIn("require content/source/string evidence", execution.result.content)
 
-    def test_exec_shell_full_rejects_absolute_paths(self) -> None:
+    def test_exec_shell_full_allows_absolute_paths_because_shell_is_unrestricted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp).parent / "orbit-shell-outside.txt"
+            outside.write_text("outside", encoding="utf-8")
             executor = HybridToolExecutor(
                 backend=FakeServerTools(),
                 workdir=Path(tmp),
@@ -188,18 +192,23 @@ class HybridToolExecutorTests(unittest.TestCase):
 
             execution = executor.execute(
                 "exec_shell_full_command",
-                {"command": "cat /etc/passwd"},
+                {"command": f"cat {outside}"},
                 chunk_budget={},
             )
+            outside.unlink()
 
         self.assertEqual(execution.source, "orbit")
-        self.assertIn("must stay inside workdir", execution.result.content)
+        self.assertEqual(execution.result.content, "outside")
 
-    def test_exec_shell_full_rejects_parent_traversal(self) -> None:
+    def test_exec_shell_full_allows_parent_traversal_because_shell_is_unrestricted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            outside = Path(tmp) / "secret.txt"
+            outside.write_text("secret", encoding="utf-8")
             executor = HybridToolExecutor(
                 backend=FakeServerTools(),
-                workdir=Path(tmp),
+                workdir=workdir,
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
@@ -210,10 +219,31 @@ class HybridToolExecutorTests(unittest.TestCase):
             )
 
         self.assertEqual(execution.source, "orbit")
-        self.assertIn("must stay inside workdir", execution.result.content)
+        self.assertEqual(execution.result.content, "secret")
 
-    def test_exec_shell_full_rejects_cd(self) -> None:
+    def test_exec_shell_full_allows_cd_because_shell_is_unrestricted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp) / "work"
+            workdir.mkdir()
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+            execution = executor.execute(
+                "exec_shell_full_command",
+                {"command": "cd .. && pwd"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertEqual(execution.result.content, str(Path(tmp)))
+
+    def test_exec_shell_full_timeout_kills_background_children(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tempfile.gettempdir()) / f"orbit-child-finished-{Path(tmp).name}"
+            marker.unlink(missing_ok=True)
             executor = HybridToolExecutor(
                 backend=FakeServerTools(),
                 workdir=Path(tmp),
@@ -222,12 +252,22 @@ class HybridToolExecutorTests(unittest.TestCase):
 
             execution = executor.execute(
                 "exec_shell_full_command",
-                {"command": "cd .. && ls"},
+                {
+                    "command": (
+                        "python3 -c 'import subprocess,time; "
+                        f"subprocess.Popen([\"sh\",\"-c\",\"sleep 2; touch {marker}\"]); "
+                        "time.sleep(20)'"
+                    ),
+                    "timeout": 1,
+                },
                 chunk_budget={},
             )
+            time.sleep(3)
+            child_survived = marker.exists()
+            marker.unlink(missing_ok=True)
 
-        self.assertEqual(execution.source, "orbit")
-        self.assertIn("directory-changing commands are not allowed", execution.result.content)
+        self.assertIn("timed out after 1s", execution.result.content)
+        self.assertFalse(child_survived)
 
     def test_exec_shell_full_cat_large_text_uses_read_file_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

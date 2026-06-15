@@ -273,7 +273,7 @@ Orbit groups guardrails into a few categories:
 
 - contract guardrails: valid tool-call shape, JSON recovery, unknown tool rejection
 - loop guardrails: bounded rounds, repeated tool-call detection, retry budgets
-- execution guardrails: timeouts, output-size limits, workdir confinement
+- execution guardrails: timeout/process cleanup, output-size limits, explicit unrestricted shell semantics
 - evidence guardrails: content-evidence recovery, metadata-only retry, mutation verification
 - task-completion guardrails: completion nudge, minimal patch nudge, semantic repair
 - context guardrails: bounded chunks, memory refresh, manual tool-result compaction

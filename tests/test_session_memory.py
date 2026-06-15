@@ -10,7 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.backend.base import ChatResult, Message
-from orbit.runtime.session_memory import MEMORY_MARKER, SUMMARY_MAX_TOKENS, maybe_refresh_memory, rebuild_with_memory
+from orbit.runtime.session_memory import MEMORY_MARKER, MEMORY_PREFIX, SUMMARY_MAX_TOKENS, maybe_refresh_memory, rebuild_with_memory
 
 
 class MemoryBackend:
@@ -69,7 +69,7 @@ class SessionMemoryTests(unittest.TestCase):
         self.assertTrue(result.changed)
         self.assertEqual(backend.calls, 1)
         self.assertEqual(messages[0]["content"], "system")
-        self.assertIn(MEMORY_MARKER, messages[1]["content"])
+        self.assertTrue(messages[1]["content"].startswith(MEMORY_PREFIX))
         self.assertLess(result.estimated_tokens_after, result.estimated_tokens_before)
         self.assertEqual(result.context_tokens, 1000)
         self.assertEqual(result.threshold_tokens, 850)
@@ -132,8 +132,25 @@ class SessionMemoryTests(unittest.TestCase):
         rebuilt = rebuild_with_memory(messages, summary="durable state", context_tokens=600)
 
         self.assertEqual(rebuilt[0]["role"], "system")
-        self.assertIn(MEMORY_MARKER, rebuilt[1]["content"])
+        self.assertTrue(rebuilt[1]["content"].startswith(MEMORY_PREFIX))
         self.assertEqual(rebuilt[2]["role"], "user")
+
+    def test_rebuild_replaces_existing_memory_message(self) -> None:
+        messages: list[Message] = [
+            {"role": "system", "content": "system"},
+            {"role": "system", "content": f"{MEMORY_PREFIX} old memory"},
+            {"role": "user", "content": "new question"},
+        ]
+
+        rebuilt = rebuild_with_memory(messages, summary="new memory", context_tokens=600)
+
+        memory_messages = [
+            message
+            for message in rebuilt
+            if message.get("role") == "system" and isinstance(message.get("content"), str) and message["content"].startswith(MEMORY_PREFIX)
+        ]
+        self.assertEqual(len(memory_messages), 1)
+        self.assertIn("new memory", memory_messages[0]["content"])
 
     def test_rebuild_drops_orphan_assistant_tail_without_user_boundary(self) -> None:
         messages: list[Message] = [
@@ -145,7 +162,7 @@ class SessionMemoryTests(unittest.TestCase):
         rebuilt = rebuild_with_memory(messages, summary="durable state", context_tokens=200)
 
         self.assertEqual(len(rebuilt), 2)
-        self.assertIn(MEMORY_MARKER, rebuilt[1]["content"])
+        self.assertTrue(rebuilt[1]["content"].startswith(MEMORY_PREFIX))
 
     def test_memory_generation_skips_recent_tail_that_will_be_kept(self) -> None:
         messages: list[Message] = [

@@ -8,6 +8,7 @@ from orbit.backend.base import ChatBackend, Message
 
 
 MEMORY_MARKER = "Orbit session memory"
+MEMORY_PREFIX = f"{MEMORY_MARKER}:"
 DEFAULT_CONTEXT_TOKENS = 8192
 SOFT_MEMORY_RATIO = 0.85
 TAIL_RATIO = 0.10
@@ -85,7 +86,7 @@ def rebuild_with_memory(messages: list[Message], *, summary: str, context_tokens
     rebuilt.append(
         {
             "role": "system",
-            "content": f"{MEMORY_MARKER} (visible context; use it to answer follow-up questions):\n{summary.strip()}",
+            "content": f"{MEMORY_PREFIX} visible context; use it to answer follow-up questions.\n{summary.strip()}",
         }
     )
     rebuilt.extend(tail)
@@ -215,4 +216,4 @@ def _recent_tail(messages: list[Message], *, context_tokens: int) -> list[Messag
 
 def _is_memory_message(message: Message) -> bool:
     content = message.get("content")
-    return message.get("role") == "system" and isinstance(content, str) and content.startswith(f"{MEMORY_MARKER}:")
+    return message.get("role") == "system" and isinstance(content, str) and content.startswith(MEMORY_PREFIX)
