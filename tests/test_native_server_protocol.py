@@ -7,6 +7,7 @@ from orbit.native_server.protocol import (
     native_chat_response,
     openai_chat_response,
     parse_chat_request,
+    parse_continue_request,
     trim_at_stop,
     validate_session_id,
 )
@@ -42,6 +43,20 @@ class NativeServerProtocolTests(unittest.TestCase):
             parse_chat_request({"messages": [{"role": "user", "content": "x"}], "stop": ["A", "", 1, "B"]}).stop,
             ("A", "B"),
         )
+
+    def test_parse_continue_request_accepts_defaults_and_options(self) -> None:
+        request = parse_continue_request({"max_tokens": 32, "thinking": True, "stop": ["A", "", "B"], "stream": True})
+
+        self.assertEqual(request.max_tokens, 32)
+        self.assertTrue(request.thinking)
+        self.assertEqual(request.stop, ("A", "B"))
+        self.assertTrue(request.stream)
+
+        default_request = parse_continue_request({})
+        self.assertEqual(default_request.max_tokens, 256)
+        self.assertIsNone(default_request.thinking)
+        self.assertEqual(default_request.stop, ())
+        self.assertFalse(default_request.stream)
 
     def test_parse_chat_request_keeps_tool_definitions(self) -> None:
         tool = {"type": "function", "function": {"name": "exec_shell_full_command"}}

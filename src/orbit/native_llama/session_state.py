@@ -31,6 +31,7 @@ class NativeSessionState:
     prompt_cache_mode: str | None = None
     in_flight: bool = False
     cancel_requested: bool = False
+    continuation_ready: bool = False
     last_metrics: NativeTimings | None = None
     # Reserved for future persistent MTP session state.
     ctx_dft: c_void_p | None = None

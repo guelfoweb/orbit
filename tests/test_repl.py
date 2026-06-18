@@ -392,6 +392,27 @@ class ReplTests(unittest.TestCase):
         self.assertIn("/continue", stdout.getvalue())
         self.assertIn("/max-tokens N", stdout.getvalue())
 
+    def test_length_footer_mentions_thinking_when_enabled(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path("."), think=True))
+        result = ChatResult(
+            content="partial",
+            model="fake",
+            finish_reason="length",
+            tool_calls=[],
+            prompt_tokens=10,
+            completion_tokens=32,
+            cached_tokens=0,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            repl._print_turn_footer(result, elapsed_seconds=1)
+
+        self.assertIn("thinking or final output stopped because max_tokens was reached", stdout.getvalue())
+
     def test_continue_command_requires_truncated_answer(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))

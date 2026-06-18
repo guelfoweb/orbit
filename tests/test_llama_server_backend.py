@@ -47,6 +47,83 @@ class FakeNativeStreamWithTrailingNoise:
 
 
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_continue_current_uses_native_continue_stream_endpoint_for_non_stream_call(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1, thinking=True)
+                self.seen_path: str | None = None
+                self.seen_payload: dict[str, object] | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, path: str, payload: dict[str, Any], *, on_delta, on_progress):
+                self.seen_path = path
+                self.seen_payload = payload
+                return _parse_native_stream(
+                    FakeStream(
+                        [
+                            'event: delta\n',
+                            'data: {"text":"continued"}\n',
+                            '\n',
+                            'event: metrics\n',
+                            'data: {"usage":{"prompt_tokens":0,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0}},"timings":{"predicted_per_second":2.0}}\n',
+                            '\n',
+                            'event: done\n',
+                            'data: {"finish_reason":"stop","model":"gemma4"}\n',
+                            '\n',
+                        ]
+                    ),
+                    on_delta=on_delta,
+                    on_progress=on_progress,
+                )
+
+        backend = Backend()
+        result = backend.continue_current(max_tokens=24)
+
+        self.assertEqual(backend.seen_path, "/chat/continue/stream")
+        self.assertEqual(backend.seen_payload, {"max_tokens": 24, "thinking": True, "stream": True})
+        self.assertEqual(result.content, "continued")
+        self.assertEqual(result.finish_reason, "stop")
+
+    def test_chat_uses_native_stream_endpoint_for_non_stream_call(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1, thinking=True)
+                self.seen_path: str | None = None
+                self.seen_payload: dict[str, object] | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, path: str, payload: dict[str, Any], *, on_delta, on_progress):
+                self.seen_path = path
+                self.seen_payload = payload
+                return _parse_native_stream(
+                    FakeStream(
+                        [
+                            'event: delta\n',
+                            'data: {"text":"hello"}\n',
+                            '\n',
+                            'event: metrics\n',
+                            'data: {"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0}},"timings":{"predicted_per_second":2.0}}\n',
+                            '\n',
+                            'event: done\n',
+                            'data: {"finish_reason":"stop","model":"gemma4"}\n',
+                            '\n',
+                        ]
+                    ),
+                    on_delta=on_delta,
+                    on_progress=on_progress,
+                )
+
+        backend = Backend()
+        result = backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=32)
+
+        self.assertEqual(backend.seen_path, "/chat/stream")
+        self.assertEqual(result.content, "hello")
+        self.assertEqual(result.finish_reason, "stop")
+
     def test_enrich_model_info_with_native_props_adds_context_and_capabilities(self) -> None:
         enriched = _enrich_model_info_with_props(
             None,

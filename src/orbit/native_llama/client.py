@@ -126,6 +126,7 @@ class NativeLlamaClient:
 
     def cancel(self) -> None:
         self._session.cancel_requested = True
+        self._session.continuation_ready = False
         self.cancel_event.set()
 
     def reset_cancel(self) -> None:
@@ -250,6 +251,7 @@ class NativeLlamaClient:
             lib.llama_memory_clear(mem, True)
         self._session.cached_prompt_tokens.clear()
         self._session.prompt_cache_mode = None
+        self._session.continuation_ready = False
         self._session.last_metrics = None
         if self._persistent_mtp_runtime is None:
             return
@@ -376,6 +378,7 @@ class NativeLlamaClient:
                     should_cancel=should_cancel,
                 )
                 self._session.last_metrics = timings
+                self._session.continuation_ready = _can_continue_from_timings(timings)
                 return timings
             finally:
                 self._session.in_flight = False
@@ -414,9 +417,10 @@ class NativeLlamaClient:
             should_cancel=should_cancel,
         )
         latest = result
-        extra_budget = min(max(128, max_tokens), 256)
+        extra_budget = max(1, min(max_tokens, 64))
+        allow_auto_continuation = max_tokens >= 128
         continuation_attempts = 0
-        while self._should_continue_thought_after_completion(
+        while allow_auto_continuation and self._should_continue_thought_after_completion(
             latest,
             max_tokens=max_tokens if continuation_attempts == 0 else extra_budget,
             thinking=thinking,
@@ -439,7 +443,7 @@ class NativeLlamaClient:
             result = _merge_completions(result, continuation)
             latest = continuation
             continuation_attempts += 1
-            if continuation_attempts >= 3 or not continuation.content:
+            if continuation_attempts >= 1 or not continuation.content:
                 break
         return result
 
@@ -457,6 +461,7 @@ class NativeLlamaClient:
     ) -> NativeCompletion:
         parts: list[str] = []
         channel_filter = None if thinking else _ControlChannelStreamFilter()
+        thought_label_filter = None if thinking else _LeadingThoughtLabelFilter()
         stop_filter = _StopSequenceStreamFilter(stop, emit=parts.append) if stop else None
 
         def collect(text: str) -> None:
@@ -464,6 +469,11 @@ class NativeLlamaClient:
                 visible_chunks = [text]
             else:
                 visible_chunks = channel_filter.write(text)
+            if thought_label_filter is not None:
+                normalized_chunks: list[str] = []
+                for visible_text in visible_chunks:
+                    normalized_chunks.extend(thought_label_filter.write(visible_text))
+                visible_chunks = normalized_chunks
             for visible_text in visible_chunks:
                 if stop_filter:
                     for delta in stop_filter.write(visible_text):
@@ -484,6 +494,12 @@ class NativeLlamaClient:
                 visible_chunks = []
             else:
                 visible_chunks = channel_filter.finish()
+            if thought_label_filter is not None:
+                normalized_chunks: list[str] = []
+                for visible_text in visible_chunks:
+                    normalized_chunks.extend(thought_label_filter.write(visible_text))
+                normalized_chunks.extend(thought_label_filter.finish())
+                visible_chunks = normalized_chunks
             for visible_text in visible_chunks:
                 if stop_filter:
                     for delta in stop_filter.write(visible_text):
@@ -553,6 +569,26 @@ class NativeLlamaClient:
         if not thinking:
             content = _strip_reasoning_preamble(content)
         return NativeCompletion(content=content, timings=timings, stopped_by_stop=bool(stop_filter and stop_filter.stopped))
+
+    def continue_chat_text_current_context(
+        self,
+        *,
+        max_tokens: int = 16,
+        stop: tuple[str, ...] = (),
+        thinking: bool | None = None,
+        on_progress=None,
+        on_token=None,
+        should_cancel=None,
+    ) -> NativeCompletion:
+        thinking = self._thinking_enabled(thinking)
+        return self._continue_chat_text_from_current_context(
+            max_tokens=max_tokens,
+            stop=stop,
+            thinking=thinking,
+            on_progress=on_progress,
+            on_token=on_token,
+            should_cancel=should_cancel,
+        )
 
     def _complete_prompt_multimodal(
         self,
@@ -722,6 +758,7 @@ class NativeLlamaClient:
                     if mtp_result is not None:
                         self._last_completion_used_mtp = True
                         self._session.last_metrics = mtp_result
+                        self._session.continuation_ready = False
                         return mtp_result
             self._last_completion_used_mtp = False
             self._last_completion_generation_cap = max_tokens
@@ -733,6 +770,7 @@ class NativeLlamaClient:
                 should_cancel=should_cancel,
             )
             self._session.last_metrics = timings
+            self._session.continuation_ready = _can_continue_from_timings(timings)
             return timings
         finally:
             self._session.in_flight = False
@@ -885,6 +923,9 @@ class NativeLlamaClient:
         on_token=None,
         should_cancel=None,
     ) -> NativeTimings:
+        if not self._session.continuation_ready:
+            raise RuntimeError("no active continuation state")
+        self.reset_cancel()
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = max_tokens
         generated, gen_ms, cancelled = self._generate_from_current_context(
@@ -893,7 +934,7 @@ class NativeLlamaClient:
             on_token=on_token,
             should_cancel=should_cancel,
         )
-        return NativeTimings(
+        timings = NativeTimings(
             prompt_tokens=0,
             output_tokens=generated,
             reused_prompt_tokens=0,
@@ -902,6 +943,9 @@ class NativeLlamaClient:
             generation_ms=gen_ms,
             cancelled=cancelled,
         )
+        self._session.last_metrics = timings
+        self._session.continuation_ready = _can_continue_from_timings(timings)
+        return timings
 
     def _generate_from_current_context(
         self,
@@ -1074,6 +1118,11 @@ def _strip_reasoning_preamble(content: str) -> str:
     text = content.strip()
     if not text:
         return text
+    lines = text.splitlines()
+    if lines and lines[0].strip().lower() == "thought":
+        cleaned = "\n".join(lines[1:]).strip()
+        if cleaned:
+            return cleaned
     lowered = text.lower()
     markers = (
         "\n**final answer:**",
@@ -1153,6 +1202,10 @@ def _looks_like_degenerate_thought_continuation(content: str) -> bool:
         return False
     punctuation = "".join(char for char in stripped if not char.isspace())
     return len(punctuation) >= 4 and len(set(punctuation)) <= 3
+
+
+def _can_continue_from_timings(timings: NativeTimings) -> bool:
+    return not timings.cancelled and timings.output_tokens > 0
 
 
 def _message_content(message: NativeMessage) -> str:
@@ -1263,3 +1316,40 @@ class _ControlChannelStreamFilter:
                     keep = max(keep, size)
                     break
         return max(0, len(self._buffer) - keep)
+
+
+class _LeadingThoughtLabelFilter:
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._resolved = False
+
+    def write(self, text: str) -> list[str]:
+        if self._resolved or not text:
+            return [text] if text else []
+        self._buffer += text
+        newline_index = self._find_newline(self._buffer)
+        if newline_index < 0:
+            return []
+        first_line = self._buffer[:newline_index]
+        rest = self._buffer[newline_index + 1 :]
+        self._resolved = True
+        self._buffer = ""
+        if first_line.strip().lower() == "thought":
+            return [rest] if rest else []
+        return [first_line + "\n" + rest] if rest else [first_line + "\n"]
+
+    def finish(self) -> list[str]:
+        if self._resolved or not self._buffer:
+            return []
+        self._resolved = True
+        buffered = self._buffer
+        self._buffer = ""
+        return [buffered]
+
+    @staticmethod
+    def _find_newline(text: str) -> int:
+        for marker in ("\r\n", "\n", "\r"):
+            idx = text.find(marker)
+            if idx >= 0:
+                return idx if marker == "\n" else idx + (0 if marker == "\r" else 1)
+        return -1

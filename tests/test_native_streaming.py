@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from orbit.native_llama.client import _ControlChannelStreamFilter, _StopSequenceStreamFilter
+from orbit.native_llama.client import _ControlChannelStreamFilter, _LeadingThoughtLabelFilter, _StopSequenceStreamFilter
 
 
 class NativeStreamingTests(unittest.TestCase):
@@ -29,6 +29,16 @@ class NativeStreamingTests(unittest.TestCase):
         deltas = stream.write("visible<|channel>thought\nhidden") + stream.finish()
 
         self.assertEqual("".join(deltas), "visible")
+
+    def test_leading_thought_label_filter_suppresses_plain_label_at_start(self) -> None:
+        stream = _LeadingThoughtLabelFilter()
+
+        deltas: list[str] = []
+        deltas.extend(stream.write("thought\nI was devel"))
+        deltas.extend(stream.write("oped by Google DeepMind."))
+        deltas.extend(stream.finish())
+
+        self.assertEqual("".join(deltas), "I was developed by Google DeepMind.")
 
     def test_stop_filter_does_not_emit_stop_sequence(self) -> None:
         emitted: list[str] = []

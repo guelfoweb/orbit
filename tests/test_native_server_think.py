@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass, field
 
-from orbit.native_server.app import OrbitNativeServer
+from orbit.native_server.app import OrbitNativeHandler, OrbitNativeServer
 from orbit.native_server.protocol import openai_chat_response, parse_chat_request
 
 
@@ -60,6 +60,34 @@ class _FakeClient:
 
 
 class NativeServerThinkTests(unittest.TestCase):
+    def test_json_ignores_client_disconnect_during_write(self) -> None:
+        class _BrokenWriter:
+            def write(self, _body: bytes) -> None:
+                raise BrokenPipeError("client disconnected")
+
+        class _DummyHandler:
+            def __init__(self) -> None:
+                self.wfile = _BrokenWriter()
+                self.statuses: list[int] = []
+                self.headers: list[tuple[str, str]] = []
+                self.ended = False
+
+            def send_response(self, status: int) -> None:
+                self.statuses.append(status)
+
+            def send_header(self, key: str, value: str) -> None:
+                self.headers.append((key, value))
+
+            def end_headers(self) -> None:
+                self.ended = True
+
+        handler = _DummyHandler()
+
+        OrbitNativeHandler._json(handler, {"status": "ok"})
+
+        self.assertEqual(handler.statuses, [200])
+        self.assertTrue(handler.ended)
+
     def test_request_thinking_overrides_client_default(self) -> None:
         server = OrbitNativeServer(client=_FakeClient(thinking=False), model_alias="m")
 
@@ -124,6 +152,24 @@ class NativeServerThinkTests(unittest.TestCase):
 
         self.assertEqual(result["finish_reason"], "empty_response")
 
+    def test_server_marks_open_thought_without_final_as_length(self) -> None:
+        client = _FakeClient(thinking=True)
+
+        def fake_complete(_messages, **kwargs):
+            kwargs["on_token"]("<|channel>thought\npartial plan")
+            return _FakeCompletion(
+                content="<|channel>thought\npartial plan",
+                timings=_FakeTimings(output_tokens=32, cancelled=False),
+                completed_after_thought=False,
+            )
+
+        client.complete_chat_text = fake_complete
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        result = server.complete(parse_chat_request({"messages": [{"role": "user", "content": "hello"}], "thinking": True, "max_tokens": 512}))
+
+        self.assertEqual(result["finish_reason"], "length")
+
     def test_server_keeps_cancelled_finish_reason_even_when_content_is_empty(self) -> None:
         client = _FakeClient(thinking=True)
 
@@ -139,6 +185,15 @@ class NativeServerThinkTests(unittest.TestCase):
         result = server.complete(parse_chat_request({"messages": [{"role": "user", "content": "hello"}], "thinking": True}))
 
         self.assertEqual(result["finish_reason"], "cancelled")
+
+    def test_error_result_handles_continue_payload_without_messages(self) -> None:
+        server = OrbitNativeServer(client=_FakeClient(thinking=False), model_alias="m")
+
+        result = server.error_result("no active continuation state", {"max_tokens": 32})
+
+        self.assertEqual(result["finish_reason"], "error")
+        self.assertEqual(result["session_id"], "default")
+        self.assertIn("no active continuation state", result["content"])
 
     def test_openai_shape_stays_correct_when_thinking_mode_changes_between_serial_calls(self) -> None:
         client = _FakeClient(thinking=False)

@@ -45,6 +45,15 @@ class LlamaServerBackend:
                 tools=tools,
             )
         )
+        if self._is_orbit_native_backend():
+            return self._with_display_model(
+                self._post_native_stream(
+                    "/chat/stream",
+                    payload,
+                    on_delta=lambda _text: None,
+                    on_progress=None,
+                )
+            )
         data = self._post_json("/v1/chat/completions", payload)
         return self._with_display_model(_parse_chat_result(data))
 
@@ -79,6 +88,34 @@ class LlamaServerBackend:
                 )
             )
         return self._with_display_model(self._post_stream("/v1/chat/completions", payload, on_delta=on_delta))
+
+    def continue_current(
+        self,
+        *,
+        max_tokens: int,
+        on_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
+    ) -> ChatResult:
+        if not self._is_orbit_native_backend():
+            raise LlamaServerError("native continuation is unavailable for this backend")
+        payload = {"max_tokens": max_tokens, "thinking": self.thinking, "stream": True}
+        if on_delta is None:
+            return self._with_display_model(
+                self._post_native_stream(
+                    "/chat/continue/stream",
+                    payload,
+                    on_delta=lambda _text: None,
+                    on_progress=None,
+                )
+            )
+        return self._with_display_model(
+            self._post_native_stream(
+                "/chat/continue/stream",
+                payload,
+                on_delta=on_delta,
+                on_progress=on_progress,
+            )
+        )
 
     def health(self) -> bool:
         try:
@@ -266,6 +303,23 @@ def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
         model=_str_or_none(data.get("model")),
         finish_reason=_str_or_none(first.get("finish_reason")),
         tool_calls=[tool_call for tool_call in tool_calls if isinstance(tool_call, dict)],
+        prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
+        completion_tokens=_int_or_none(usage.get("completion_tokens")),
+        cached_tokens=_int_or_none(details.get("cached_tokens")),
+        prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
+        generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
+    )
+
+
+def _parse_native_chat_result(data: dict[str, Any]) -> ChatResult:
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+    details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+    return ChatResult(
+        content=_str_or_none(data.get("content")) or "",
+        model=_str_or_none(data.get("model")),
+        finish_reason=_str_or_none(data.get("finish_reason")),
+        tool_calls=[],
         prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
         completion_tokens=_int_or_none(usage.get("completion_tokens")),
         cached_tokens=_int_or_none(details.get("cached_tokens")),

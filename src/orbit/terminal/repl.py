@@ -162,7 +162,7 @@ class Repl:
             flush=True,
         )
         if result.finish_reason == "length":
-            print(dim("output stopped because max_tokens was reached"), flush=True)
+            print(dim(_length_footer_message(self.config.think)), flush=True)
             print(dim("/continue       continue the answer"), flush=True)
             print(dim("/max-tokens N   increase output budget"), flush=True)
 
@@ -338,6 +338,12 @@ def _visible_prefill_seconds(seconds: float | None) -> float | None:
     if seconds is None or seconds < MIN_PREFILL_ESTIMATE_SECONDS:
         return None
     return seconds
+
+
+def _length_footer_message(thinking: bool) -> str:
+    if thinking:
+        return "thinking or final output stopped because max_tokens was reached"
+    return "output stopped because max_tokens was reached"
 
 
 def _prefill_profile_for_turn(messages: list[dict[str, object]], *, tools_enabled: bool) -> str:

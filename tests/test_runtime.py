@@ -165,6 +165,79 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Continue exactly", runtime.messages[-2]["content"])
         self.assertEqual(runtime.messages[-1]["role"], "assistant")
 
+    def test_continue_last_response_uses_open_reasoning_prompt_when_needed(self) -> None:
+        backend = FakeBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        runtime.messages.append({"role": "assistant", "content": "<|channel>thought\npartial reasoning"})
+
+        runtime.continue_last_response(temperature=0, max_tokens=32)
+
+        self.assertEqual(runtime.messages[-2]["role"], "user")
+        self.assertIn("do not restart it from the beginning", runtime.messages[-2]["content"].lower())
+
+    def test_continue_last_response_uses_native_backend_continuation_for_open_reasoning(self) -> None:
+        class NativeContinueBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.continue_calls = 0
+
+            def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
+                self.continue_calls += 1
+                if on_delta:
+                    on_delta("continued")
+                return ChatResult(
+                    content="continued",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=0,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = NativeContinueBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        runtime.messages.append({"role": "assistant", "content": "<|channel>thought\npartial reasoning"})
+
+        result = runtime.continue_last_response(temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "continued")
+        self.assertEqual(backend.continue_calls, 1)
+        self.assertEqual(runtime.messages[-1]["content"], "continued")
+
+    def test_continue_last_response_uses_native_backend_continuation_after_length_even_without_open_reasoning(self) -> None:
+        class NativeContinueBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.continue_calls = 0
+
+            def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
+                self.continue_calls += 1
+                return ChatResult(
+                    content="continued final answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=0,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = NativeContinueBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        runtime.messages.append({"role": "assistant", "content": "<|channel>thought\n<channel|>partial final"})
+        runtime.last_visible_finish_reason = "length"
+
+        result = runtime.continue_last_response(temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "continued final answer")
+        self.assertEqual(backend.continue_calls, 1)
+        self.assertEqual(runtime.messages[-1]["content"], "continued final answer")
+
     def test_ask_chat_uses_chat_prompt_without_tools(self) -> None:
         class ChatBackend:
             def __init__(self) -> None:
@@ -3470,6 +3543,86 @@ EOF"""
 
         self.assertEqual(result.content, "<|channel>thought\nfrom tool result<channel|>final answer")
         self.assertEqual(emitted, ["<|channel>thought\nfrom tool result", "<channel|>final answer"])
+
+    def test_ask_with_tools_streams_planning_thought_when_thinking_mode_is_on(self) -> None:
+        class StreamingPlanningThoughtBackend:
+            def __init__(self) -> None:
+                self.chat_stream_calls = 0
+                self.thinking = True
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                assert on_delta is not None
+                if self.chat_stream_calls == 1:
+                    on_delta("<|channel>thought\nplan before tools<channel|>ignored final")
+                    return ChatResult(
+                        content="<|channel>thought\nplan before tools<channel|>ignored final",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=5,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.chat_stream_calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"pwd\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                on_delta("<|channel>thought\nfrom tool result")
+                on_delta("<channel|>final answer")
+                return ChatResult(
+                    content="<|channel>thought\nfrom tool result<channel|>final answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=22,
+                    completion_tokens=5,
+                    cached_tokens=10,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            emitted: list[str] = []
+            backend = StreamingPlanningThoughtBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+            result = runtime.ask_with_tools(
+                "show current directory",
+                temperature=0,
+                max_tokens=512,
+                workdir=Path(tmp),
+                tool_names=("exec_shell_full_command",),
+                on_final_delta=emitted.append,
+            )
+
+        self.assertEqual(result.content, "<|channel>thought\nfrom tool result<channel|>final answer")
+        self.assertEqual(
+            emitted,
+            [
+                "plan before tools",
+                "<|channel>thought\nfrom tool result",
+                "<channel|>final answer",
+            ],
+        )
 
     def test_ask_with_tools_can_write_new_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

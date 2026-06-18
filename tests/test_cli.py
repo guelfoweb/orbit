@@ -175,6 +175,44 @@ class CliTests(unittest.TestCase):
         self.assertIn("/continue       continue the answer in interactive mode", output)
         self.assertIn("/max-tokens N   increase output budget", output)
 
+    def test_one_shot_length_footer_mentions_thinking_when_enabled(self) -> None:
+        class FakeRuntime:
+            messages = []
+            context_tokens = None
+
+            def ask_chat(self, *args, **kwargs):
+                on_final_delta = kwargs["on_final_delta"]
+                on_final_delta("partial")
+                return ChatResult(
+                    content="partial",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=32,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=100.0,
+                    generation_tokens_per_second=10.0,
+                )
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = cli._run_one_shot(
+                FakeRuntime(),
+                "hello",
+                image_paths=[],
+                audio_paths=[],
+                temperature=0.0,
+                max_tokens=32,
+                workdir=ROOT,
+                tools="off",
+                thinking=True,
+            )
+
+        output = stream.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("thinking or final output stopped because max_tokens was reached", output)
+
     def test_select_interactive_session_uses_new_session_when_stdin_is_not_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp) / "work"

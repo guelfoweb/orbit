@@ -20,6 +20,14 @@ class ChatRequest:
     tools: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class ContinueRequest:
+    max_tokens: int
+    thinking: bool | None
+    stop: tuple[str, ...]
+    stream: bool
+
+
 def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
     return ChatRequest(
         messages=_messages_from_payload(payload),
@@ -30,6 +38,15 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
         stop=_stop_sequences(payload.get("stop")),
         stream=payload.get("stream") is True,
         tools=_tools_from_payload(payload.get("tools")),
+    )
+
+
+def parse_continue_request(payload: dict[str, Any]) -> ContinueRequest:
+    return ContinueRequest(
+        max_tokens=_int_value(payload.get("max_tokens"), 256),
+        thinking=_thinking_mode(payload.get("thinking")),
+        stop=_stop_sequences(payload.get("stop")),
+        stream=payload.get("stream") is True,
     )
 
 

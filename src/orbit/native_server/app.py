@@ -10,11 +10,13 @@ import threading
 import time
 from typing import Any
 
-from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
+from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _has_open_thought_channel
 from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
 from orbit.native_server.protocol import (
+    ContinueRequest,
     DEFAULT_SESSION_ID,
     ChatRequest,
+    parse_continue_request,
     native_chat_response,
     openai_chat_response,
     parse_chat_request,
@@ -64,6 +66,7 @@ class OrbitNativeServer:
         timings = completion.timings
         content, stopped = trim_at_stop(completion.content, request.stop)
         stopped = stopped or completion.stopped_by_stop
+        open_thought = thinking and _has_open_thought_channel(completion.content)
         finish_reason = "cancelled" if timings.cancelled else "stop"
         if not timings.cancelled and not content.strip():
             finish_reason = "empty_response"
@@ -71,6 +74,8 @@ class OrbitNativeServer:
             finish_reason = "stop"
         if completion.completed_after_thought and not timings.cancelled:
             finish_reason = "stop"
+        elif open_thought and not timings.cancelled:
+            finish_reason = "length"
         elif timings.output_tokens >= request.max_tokens and not timings.cancelled and not stopped:
             finish_reason = "length"
         return native_chat_response(
@@ -78,6 +83,44 @@ class OrbitNativeServer:
             model=self.model_alias,
             finish_reason=finish_reason,
             session_id=request.session_id,
+            prompt_tokens=timings.prompt_tokens,
+            completion_tokens=timings.output_tokens,
+            reused_prompt_tokens=timings.reused_prompt_tokens,
+            evaluated_prompt_tokens=timings.evaluated_prompt_tokens,
+            prefill_ms=timings.prefill_ms,
+            generation_ms=timings.generation_ms,
+            cancelled=timings.cancelled and not stopped,
+        )
+
+    def continue_current(self, request: ContinueRequest, *, on_token=None, on_progress=None, should_cancel=None) -> dict[str, Any]:
+        with self.lock:
+            thinking = self.client.config.thinking if request.thinking is None else request.thinking
+            completion = self.client.continue_chat_text_current_context(
+                max_tokens=request.max_tokens,
+                stop=request.stop,
+                thinking=thinking,
+                on_progress=on_progress,
+                on_token=on_token,
+                should_cancel=should_cancel,
+            )
+        timings = completion.timings
+        content, stopped = trim_at_stop(completion.content, request.stop)
+        stopped = stopped or completion.stopped_by_stop
+        open_thought = thinking and _has_open_thought_channel(completion.content)
+        finish_reason = "cancelled" if timings.cancelled else "stop"
+        if not timings.cancelled and not content.strip():
+            finish_reason = "empty_response"
+        if stopped:
+            finish_reason = "stop"
+        elif open_thought and not timings.cancelled:
+            finish_reason = "length"
+        elif timings.output_tokens >= request.max_tokens and not timings.cancelled and not stopped:
+            finish_reason = "length"
+        return native_chat_response(
+            content=content,
+            model=self.model_alias,
+            finish_reason=finish_reason,
+            session_id=DEFAULT_SESSION_ID,
             prompt_tokens=timings.prompt_tokens,
             completion_tokens=timings.output_tokens,
             reused_prompt_tokens=timings.reused_prompt_tokens,
@@ -120,12 +163,19 @@ class OrbitNativeServer:
         }
 
     def error_result(self, message: str, payload: dict[str, Any]) -> dict[str, Any]:
-        request = parse_chat_request(payload)
+        session_id = DEFAULT_SESSION_ID
+        try:
+            request = parse_chat_request(payload)
+            session_id = request.session_id
+        except ValueError:
+            raw_session_id = payload.get("session_id")
+            if isinstance(raw_session_id, str) and raw_session_id.strip():
+                session_id = raw_session_id.strip()
         return native_chat_response(
             content=f"error: {message}",
             model=self.model_alias,
             finish_reason="error",
-            session_id=request.session_id,
+            session_id=session_id,
             prompt_tokens=0,
             completion_tokens=0,
             reused_prompt_tokens=0,
@@ -224,8 +274,18 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                 except RuntimeError as exc:
                     self._json(self._state().error_result(str(exc), payload), status=500)
                 return
+            if self.path == "/chat/continue":
+                try:
+                    request = parse_continue_request(payload)
+                    self._json(self._state().continue_current(request))
+                except RuntimeError as exc:
+                    self._json(self._state().error_result(str(exc), payload), status=500)
+                return
             if self.path == "/chat/stream":
                 self._native_stream(payload)
+                return
+            if self.path == "/chat/continue/stream":
+                self._native_continue_stream(payload)
                 return
             if self.path == "/cancel":
                 self._json(self._state().cancel(_session_id_from_payload(payload)))
@@ -267,11 +327,14 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
 
     def _json(self, data: dict[str, Any] | list[Any], *, status: int = 200) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except CLIENT_DISCONNECT_ERRORS:
+            return
 
     def _openai_stream(self, payload: dict[str, Any]) -> None:
         self.send_response(200)
@@ -371,6 +434,64 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
         except RuntimeError as exc:
             emit("error", {"message": str(exc), "session_id": request.session_id})
             emit("done", {"finish_reason": "error", "session_id": request.session_id})
+        except CLIENT_DISCONNECT_ERRORS:
+            self._state().client.cancel()
+        finally:
+            disconnect.stop()
+
+    def _native_continue_stream(self, payload: dict[str, Any]) -> None:
+        try:
+            request = parse_continue_request(payload)
+        except ValueError as exc:
+            self._json({"error": str(exc)}, status=400)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        disconnect = self._start_disconnect_watcher()
+
+        def emit(event: str, data: dict[str, Any]) -> None:
+            try:
+                if disconnect.is_set():
+                    self._state().client.cancel()
+                    raise BrokenPipeError("client disconnected")
+                if self._client_disconnected():
+                    self._state().client.cancel()
+                    raise BrokenPipeError("client disconnected")
+                self.wfile.write(sse_event(event, data))
+                self.wfile.flush()
+            except CLIENT_DISCONNECT_ERRORS:
+                self._state().client.cancel()
+                raise
+
+        def on_token(text: str) -> None:
+            emit("delta", {"text": text, "session_id": DEFAULT_SESSION_ID})
+
+        def on_progress(progress) -> None:
+            emit(
+                f"progress.{progress.phase}",
+                {
+                    "current": progress.current,
+                    "total": progress.total,
+                    "percent": progress.percent,
+                    "session_id": DEFAULT_SESSION_ID,
+                },
+            )
+
+        try:
+            result = self._state().continue_current(
+                request,
+                on_progress=on_progress,
+                on_token=on_token,
+                should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
+            )
+            emit("metrics", {"usage": result["usage"], "timings": result["timings"], "native": result["native"]})
+            emit("done", {"finish_reason": result["finish_reason"], "session_id": DEFAULT_SESSION_ID})
+        except RuntimeError as exc:
+            emit("error", {"message": str(exc), "session_id": DEFAULT_SESSION_ID})
+            emit("done", {"finish_reason": "error", "session_id": DEFAULT_SESSION_ID})
         except CLIENT_DISCONNECT_ERRORS:
             self._state().client.cancel()
         finally:

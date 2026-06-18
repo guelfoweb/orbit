@@ -50,11 +50,27 @@ def _contains_control_channel_markup(content: str) -> bool:
     return "<|channel>" in content or "<channel|>" in content
 
 
+def _last_assistant_has_open_reasoning(messages: list[Message]) -> bool:
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            return False
+        if "<|channel>thought" in content:
+            tail = content.split("<|channel>thought", 1)[1]
+            return "<channel|>" not in tail
+        stripped = content.strip().lower()
+        return stripped.startswith(("### reasoning", "## reasoning", "# reasoning", "reasoning:")) and "final answer" not in stripped
+    return False
+
+
 @dataclass
 class ChatRuntime:
     backend: ChatBackend
     system_prompt: str | None = None
     messages: list[Message] = field(default_factory=list)
+    thinking_mode: bool = False
     context_tokens: int | None = None
     last_memory_refresh: MemoryRefresh | None = None
     last_memory_refresh_message_count: int | None = None
@@ -80,8 +96,11 @@ class ChatRuntime:
     content_evidence_guard_commands: int = 0
     content_evidence_guard_successes: int = 0
     content_evidence_guard_failures: int = 0
+    last_visible_finish_reason: str | None = None
 
     def __post_init__(self) -> None:
+        if hasattr(self.backend, "thinking"):
+            self.thinking_mode = bool(getattr(self.backend, "thinking"))
         if not self.messages and self.system_prompt:
             self.messages.append({"role": "system", "content": self.system_prompt})
 
@@ -108,7 +127,7 @@ class ChatRuntime:
             loop=1,
         )
         self.messages.append({"role": "assistant", "content": result.content})
-        return result
+        return self._remember_visible_result(result)
 
     def ask_chat(
         self,
@@ -133,7 +152,7 @@ class ChatRuntime:
             loop=1,
         )
         self.messages.append({"role": "assistant", "content": result.content})
-        return result
+        return self._remember_visible_result(result)
 
     def continue_last_response(
         self,
@@ -144,10 +163,34 @@ class ChatRuntime:
         on_progress: Callable[[StreamProgress], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
     ) -> ChatResult:
+        if (
+            (self.last_visible_finish_reason == "length" or _last_assistant_has_open_reasoning(self.messages))
+            and hasattr(self.backend, "continue_current")
+        ):
+            if on_final_delta is None:
+                result = self.backend.continue_current(max_tokens=max_tokens)
+            else:
+                result = self.backend.continue_current(
+                    max_tokens=max_tokens,
+                    on_delta=on_final_delta,
+                    on_progress=on_progress,
+                )
+            if on_model_step:
+                on_model_step(ModelStepMetrics.from_result(loop=1, result=result, phase="chat_continue_native"))
+            self.messages.append({"role": "assistant", "content": result.content})
+            return self._remember_visible_result(result)
+        continuation_prompt = (
+            "Continue exactly from where the previous answer stopped. "
+            "If the previous answer stopped inside reasoning, do not restart it from the beginning. "
+            "Finish the remaining reasoning briefly, then continue with the missing final answer only. "
+            "Do not repeat already written text."
+            if _last_assistant_has_open_reasoning(self.messages)
+            else "Continue exactly from where the previous answer stopped. Do not repeat already written text."
+        )
         self.messages.append(
             {
                 "role": "user",
-                "content": "Continue exactly from where the previous answer stopped. Do not repeat already written text.",
+                "content": continuation_prompt,
             }
         )
         result = self._chat_final(
@@ -160,7 +203,7 @@ class ChatRuntime:
             loop=1,
         )
         self.messages.append({"role": "assistant", "content": result.content})
-        return result
+        return self._remember_visible_result(result)
 
     def ask_with_tools(
         self,
@@ -180,7 +223,14 @@ class ChatRuntime:
         self.last_memory_refresh = None
         self.refresh_memory_if_needed(temperature=temperature)
         self.messages.append({"role": "user", "content": prompt})
-        return self._run_tool_loop(
+        self._stream_tool_thinking_plan(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+        )
+        result = self._run_tool_loop(
             temperature=temperature,
             max_tokens=max_tokens,
             workdir=workdir,
@@ -192,6 +242,7 @@ class ChatRuntime:
             on_model_step=on_model_step,
             tool_names=tool_names,
         )
+        return self._remember_visible_result(result)
 
     def ask_auto(
         self,
@@ -220,8 +271,15 @@ class ChatRuntime:
             on_model_step=on_model_step,
         )
         if media_result is not None:
-            return media_result
+            return self._remember_visible_result(media_result)
         self.messages.append({"role": "user", "content": prompt})
+        self._stream_tool_thinking_plan(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+        )
         command_max_tokens = _bounded_internal_max_tokens(max_tokens, ROUTE_MAX_TOKENS)
         streamed_final_retry = False
         retried_empty_final = False
@@ -289,7 +347,7 @@ class ChatRuntime:
                         on_final_delta(chunk)
                 else:
                     on_final_delta(first.content)
-            return first
+            return self._remember_visible_result(first)
         if decision.route == ToolRoute.CHAT:
             chat_messages = with_chat_system_prompt(self.messages)
             result = self._chat_final(
@@ -302,14 +360,14 @@ class ChatRuntime:
                 loop=2,
             )
             self.messages.append({"role": "assistant", "content": result.content})
-            return result
+            return self._remember_visible_result(result)
         if decision.route == ToolRoute.MEDIA:
             if allowed_tool_names is not None:
                 result = _unsupported_tool_mode_result(first)
                 self.messages.append({"role": "assistant", "content": result.content})
                 if on_final_delta:
                     on_final_delta(result.content)
-                return result
+                return self._remember_visible_result(result)
             return self._ask_referenced_media(
                 prompt,
                 temperature=temperature,
@@ -335,8 +393,8 @@ class ChatRuntime:
             self.messages.append({"role": "assistant", "content": result.content})
             if on_final_delta:
                 on_final_delta(result.content)
-            return result
-        return self._run_tool_loop(
+            return self._remember_visible_result(result)
+        result = self._run_tool_loop(
             temperature=temperature,
             max_tokens=max_tokens,
             workdir=workdir,
@@ -352,6 +410,11 @@ class ChatRuntime:
                 or command_tool_call_from_content(command_content, tools)
             ),
         )
+        return self._remember_visible_result(result)
+
+    def _remember_visible_result(self, result: ChatResult) -> ChatResult:
+        self.last_visible_finish_reason = result.finish_reason
+        return result
 
     def _ask_media_if_referenced(
         self,
@@ -439,7 +502,7 @@ class ChatRuntime:
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
-    ) -> ChatResult:
+        ) -> ChatResult:
         return run_tool_loop(
             self,
             temperature=temperature,
@@ -454,6 +517,43 @@ class ChatRuntime:
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
         )
+
+    def _stream_tool_thinking_plan(
+        self,
+        *,
+        temperature: float,
+        max_tokens: int,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+    ) -> None:
+        if not self.thinking_mode or on_final_delta is None:
+            return
+        if not hasattr(self.backend, "chat_stream"):
+            return
+        planning_messages = [
+            *with_chat_system_prompt(self.messages),
+            {
+                "role": "user",
+                "content": (
+                    "Think briefly about the approach only. "
+                    "Do not answer the user yet. "
+                    "Do not call tools in this step."
+                ),
+            },
+        ]
+        thought_filter = _ThoughtOnlyDeltaFilter(on_final_delta)
+        with self._temporary_backend_thinking(True):
+            result = self.backend.chat_stream(
+                planning_messages,
+                temperature=temperature,
+                max_tokens=_bounded_internal_max_tokens(max_tokens, ROUTE_MAX_TOKENS),
+                on_delta=thought_filter.write,
+                on_progress=on_progress,
+            )
+        thought_filter.finish()
+        if on_model_step:
+            on_model_step(ModelStepMetrics.from_result(loop=1, result=result, phase="tool_plan"))
 
     def _answer_from_tool_results(
         self,
@@ -678,6 +778,50 @@ class ChatRuntime:
         if self.last_memory_refresh_message_count is None:
             return False
         return len(self.messages) - self.last_memory_refresh_message_count < self.memory_refresh_cooldown_messages
+
+
+class _ThoughtOnlyDeltaFilter:
+    _THOUGHT_START = "<|channel>thought\n"
+    _THOUGHT_END = "<channel|>"
+
+    def __init__(self, emit: Callable[[str], None]) -> None:
+        self._emit = emit
+        self._buffer = ""
+        self._in_thought = False
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        self._buffer += text
+        self._drain(final=False)
+
+    def finish(self) -> None:
+        self._drain(final=True)
+
+    def _drain(self, *, final: bool) -> None:
+        while self._buffer:
+            if self._in_thought:
+                end = self._buffer.find(self._THOUGHT_END)
+                if end < 0:
+                    if final:
+                        visible = self._buffer
+                        self._buffer = ""
+                        if visible:
+                            self._emit(visible)
+                    break
+                visible = self._buffer[:end]
+                if visible:
+                    self._emit(visible)
+                self._buffer = self._buffer[end + len(self._THOUGHT_END) :]
+                self._in_thought = False
+                continue
+            start = self._buffer.find(self._THOUGHT_START)
+            if start < 0:
+                if final:
+                    self._buffer = ""
+                break
+            self._buffer = self._buffer[start + len(self._THOUGHT_START) :]
+            self._in_thought = True
 
 
 def _bounded_internal_max_tokens(max_tokens: int, internal_max: int) -> int:
