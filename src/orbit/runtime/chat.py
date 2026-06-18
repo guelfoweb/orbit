@@ -581,7 +581,11 @@ class ChatRuntime:
             )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
-        retry_reason = final_from_tool_retry_reason(result, length_retry_allowed=policy.length_retry_allowed)
+        retry_reason = final_from_tool_retry_reason(
+            result,
+            length_retry_allowed=policy.length_retry_allowed,
+            incomplete_retry_allowed=policy.incomplete_retry_allowed,
+        )
         if retry_reason is not None:
             retry_messages = [*policy.messages, final_tool_retry_instruction()]
             retry_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)

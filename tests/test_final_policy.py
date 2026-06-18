@@ -42,6 +42,7 @@ class FinalPolicyTests(unittest.TestCase):
 
         self.assertEqual(policy.max_tokens, 72)
         self.assertTrue(policy.length_retry_allowed)
+        self.assertFalse(policy.incomplete_retry_allowed)
         self.assertTrue(policy.web_fetch_result)
         self.assertIn("Write exactly two concise bullets", policy.messages[-1]["content"])
 
@@ -51,6 +52,7 @@ class FinalPolicyTests(unittest.TestCase):
         policy = build_final_tool_policy(messages, max_tokens=512, streamed=True)
 
         self.assertFalse(policy.length_retry_allowed)
+        self.assertFalse(policy.incomplete_retry_allowed)
 
     def test_shell_list_command_is_detected_as_list_like(self) -> None:
         messages = [
@@ -103,6 +105,7 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("most recent relevant shell result", policy.messages[-1]["content"])
         self.assertIn("Do not call tools again", policy.messages[-1]["content"])
         self.assertIn("If the evidence is insufficient", policy.messages[-1]["content"])
+        self.assertTrue(policy.incomplete_retry_allowed)
 
     def test_operational_status_policy_prefers_recent_shell_evidence(self) -> None:
         messages = [
@@ -206,6 +209,54 @@ class FinalPolicyTests(unittest.TestCase):
         reason = final_from_tool_retry_reason(result, length_retry_allowed=False)
 
         self.assertEqual(reason, "empty_length")
+
+    def test_final_retry_reason_detects_incomplete_plain_final(self) -> None:
+        result = ChatResult(
+            content="Il documento e una relazione tecnica per il servizio di gestione della rete QX",
+            model="m",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+        reason = final_from_tool_retry_reason(
+            result,
+            length_retry_allowed=False,
+            incomplete_retry_allowed=True,
+        )
+
+        self.assertEqual(reason, "incomplete_final")
+
+    def test_final_retry_reason_ignores_short_operational_or_path_like_outputs(self) -> None:
+        path_result = ChatResult(
+            content="/home/guelfoweb/LAB/orbit",
+            model="m",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+        short_result = ChatResult(
+            content="saved as cleaned_index.html",
+            model="m",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+        self.assertIsNone(final_from_tool_retry_reason(path_result, length_retry_allowed=False, incomplete_retry_allowed=True))
+        self.assertIsNone(final_from_tool_retry_reason(short_result, length_retry_allowed=False, incomplete_retry_allowed=True))
 
     def test_final_tool_retry_instruction_is_unchanged(self) -> None:
         self.assertEqual(

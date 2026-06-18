@@ -21,6 +21,7 @@ class FinalToolPolicy:
     messages: list[Message]
     max_tokens: int
     length_retry_allowed: bool
+    incomplete_retry_allowed: bool
     web_fetch_result: bool
 
 
@@ -102,6 +103,7 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
             operational_status_result=operational_status_result,
         ),
         length_retry_allowed=(not streamed and (large_file_excerpt or web_fetch_result)),
+        incomplete_retry_allowed=shell_full_result and not (web_fetch_result or list_like_result or operational_status_result),
         web_fetch_result=web_fetch_result,
     )
 
@@ -139,7 +141,12 @@ def final_tool_retry_instruction() -> Message:
     }
 
 
-def final_from_tool_retry_reason(result: ChatResult, *, length_retry_allowed: bool) -> str | None:
+def final_from_tool_retry_reason(
+    result: ChatResult,
+    *,
+    length_retry_allowed: bool,
+    incomplete_retry_allowed: bool = False,
+) -> str | None:
     if result.tool_calls:
         return "tool_call_in_final"
     if contains_raw_tool_call(result.content):
@@ -150,11 +157,33 @@ def final_from_tool_retry_reason(result: ChatResult, *, length_retry_allowed: bo
         return "empty_length"
     if length_retry_allowed and result.finish_reason == "length":
         return "length"
+    if incomplete_retry_allowed and looks_like_incomplete_final(result.content):
+        return "incomplete_final"
     return None
 
 
 def contains_raw_tool_call(content: str) -> bool:
     return "<|tool_call>" in content or "<tool_call|>" in content
+
+
+def looks_like_incomplete_final(content: str) -> bool:
+    text = content.strip()
+    if len(text) < 48:
+        return False
+    if "\n" in text:
+        return False
+    if text.startswith(("-", "*", "•")):
+        return False
+    if "/" in text and " " not in text:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9._/-]+", text):
+        return False
+    if re.search(r"[.!?][\"')\\]]?$", text):
+        return False
+    words = text.split()
+    if len(words) < 8:
+        return False
+    return bool(re.search(r"[A-Za-z0-9]$", text))
 
 
 def has_large_file_excerpt(messages: list[Message]) -> bool:

@@ -3267,6 +3267,89 @@ EOF"""
         self.assertIsNotNone(backend.tools_seen[1])
         self.assertIsNone(backend.tools_seen[2])
 
+    def test_ask_with_tools_retries_incomplete_stop_final_after_tool_result(self) -> None:
+        class IncompleteStopFinalBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"pdftotext report.pdf - | head -n 100\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=16,
+                        completion_tokens=8,
+                        cached_tokens=9,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="Il documento e una relazione tecnica per il servizio di gestione della rete QX",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=20,
+                        completion_tokens=32,
+                        cached_tokens=10,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Sintesi: relazione tecnica sulla gestione, manutenzione ed evoluzione della rete QX.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=24,
+                    completion_tokens=18,
+                    cached_tokens=12,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = IncompleteStopFinalBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "analizza il PDF e fammi una sintesi",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "Sintesi: relazione tecnica sulla gestione, manutenzione ed evoluzione della rete QX.")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNotNone(backend.tools_seen[0])
+        self.assertIsNotNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[3])
+
     def test_ask_with_tools_can_read_text_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
