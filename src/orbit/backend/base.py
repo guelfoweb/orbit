@@ -21,6 +21,14 @@ class ChatResult:
 
 
 @dataclass(frozen=True)
+class StreamProgress:
+    phase: str
+    current: int
+    total: int
+    percent: int
+
+
+@dataclass(frozen=True)
 class ModelInfo:
     id: str | None
     capabilities: tuple[str, ...]
@@ -48,5 +56,6 @@ class ChatBackend(Protocol):
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
         on_delta: Callable[[str], None],
+        on_progress: Callable[[StreamProgress], None] | None = None,
     ) -> ChatResult:
         ...

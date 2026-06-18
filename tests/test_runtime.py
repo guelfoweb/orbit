@@ -502,7 +502,7 @@ class ToolRuntimeTests(unittest.TestCase):
                     generation_tokens_per_second=None,
                 )
 
-            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
                 raise AssertionError("short probe answer should not need streaming retry")
 
         emitted: list[str] = []
@@ -536,7 +536,7 @@ class ToolRuntimeTests(unittest.TestCase):
                     generation_tokens_per_second=None,
                 )
 
-            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
                 assert on_delta is not None
                 self.stream_max_tokens.append(max_tokens)
                 on_delta("full ")
@@ -2547,6 +2547,244 @@ EOF"""
         tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
         self.assertEqual(len(tool_messages), 2)
 
+    def test_ask_auto_streams_route_phase_when_progress_is_requested(self) -> None:
+        class StreamingRouteBackend:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.chat_stream_calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                raise AssertionError("route phase should use streaming when progress is requested")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                if self.chat_stream_calls == 1:
+                    assert on_progress is not None
+                    on_progress(type("P", (), {"phase": "prefill", "current": 12, "total": 48, "percent": 25})())
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                            }
+                        ],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                assert on_delta is not None
+                on_delta("done")
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=6,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        progress: list[tuple[str, int, int, int]] = []
+        emitted: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("hello", encoding="utf-8")
+            backend = StreamingRouteBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "read note.txt",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+                on_final_delta=emitted.append,
+                on_progress=lambda item: progress.append((item.phase, item.current, item.total, item.percent)),
+            )
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(emitted, ["done"])
+        self.assertEqual(progress, [("prefill", 12, 48, 25)])
+        self.assertEqual(backend.chat_calls, 0)
+        self.assertEqual(backend.chat_stream_calls, 2)
+
+    def test_ask_auto_replays_streamed_route_answer_when_tools_are_on_and_no_tool_is_used(self) -> None:
+        class StreamingRouteAnswerBackend:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.chat_stream_calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                raise AssertionError("route phase should use streaming when progress is requested")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                assert on_delta is not None
+                assert on_progress is not None
+                on_progress(type("P", (), {"phase": "generation", "current": 12, "total": 128, "percent": 9})())
+                on_delta("plain answer")
+                return ChatResult(
+                    content="plain answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        emitted: list[str] = []
+        progress: list[tuple[str, int, int, int]] = []
+        backend = StreamingRouteAnswerBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+        result = runtime.ask_auto(
+            "explain the plan before the final answer",
+            temperature=0,
+            max_tokens=128,
+            workdir=Path("."),
+            on_final_delta=emitted.append,
+            on_progress=lambda item: progress.append((item.phase, item.current, item.total, item.percent)),
+            allowed_tool_names=("exec_shell_full_command",),
+        )
+
+        self.assertEqual(result.content, "plain answer")
+        self.assertEqual(emitted, ["plain answer"])
+        self.assertEqual(progress, [("generation", 12, 128, 9)])
+        self.assertEqual(backend.chat_calls, 0)
+        self.assertEqual(backend.chat_stream_calls, 1)
+
+    def test_ask_auto_discards_route_thought_and_runs_chat_final(self) -> None:
+        class StreamingRouteThoughtBackend:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.chat_stream_calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                assert on_delta is not None
+                assert on_progress is not None
+                if self.chat_stream_calls == 1:
+                    on_delta("<|channel>thought\ninternal route plan")
+                    return ChatResult(
+                        content="<|channel>thought\ninternal route plan",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                on_delta("<|channel>thought\nvisible thinking")
+                on_delta("<channel|>visible answer")
+                return ChatResult(
+                    content="<|channel>thought\nvisible thinking<channel|>visible answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=9,
+                    completion_tokens=6,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        emitted: list[str] = []
+        backend = StreamingRouteThoughtBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+        result = runtime.ask_auto(
+            "who are you?",
+            temperature=0,
+            max_tokens=128,
+            workdir=Path("."),
+            on_final_delta=emitted.append,
+            on_progress=lambda _item: None,
+            allowed_tool_names=("exec_shell_full_command",),
+        )
+
+        self.assertEqual(result.content, "<|channel>thought\nvisible thinking<channel|>visible answer")
+        self.assertEqual(emitted, ["<|channel>thought\nvisible thinking", "<channel|>visible answer"])
+        self.assertEqual(backend.chat_calls, 0)
+        self.assertEqual(backend.chat_stream_calls, 2)
+
+    def test_ask_auto_discards_truncated_route_thought_and_streams_chat_final(self) -> None:
+        class StreamingRouteLengthBackend:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.chat_stream_calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                assert on_delta is not None
+                if self.chat_stream_calls == 1:
+                    on_delta("<|channel>thought\ninternal route plan")
+                    return ChatResult(
+                        content="<|channel>thought\ninternal route plan",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                on_delta("<|channel>thought\nvisible thinking")
+                on_delta("<channel|>visible answer")
+                return ChatResult(
+                    content="<|channel>thought\nvisible thinking<channel|>visible answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=9,
+                    completion_tokens=6,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        emitted: list[str] = []
+        backend = StreamingRouteLengthBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+        result = runtime.ask_auto(
+            "who are you?",
+            temperature=0,
+            max_tokens=128,
+            workdir=Path("."),
+            on_final_delta=emitted.append,
+            on_progress=lambda _item: None,
+            allowed_tool_names=("exec_shell_full_command",),
+        )
+
+        self.assertEqual(result.content, "<|channel>thought\nvisible thinking<channel|>visible answer")
+        self.assertEqual(emitted, ["<|channel>thought\nvisible thinking", "<channel|>visible answer"])
+        self.assertEqual(backend.chat_calls, 0)
+        self.assertEqual(backend.chat_stream_calls, 2)
+
     def test_complete_command_json_skips_tool_call_json_retry_round(self) -> None:
         class CompleteCommandBackend:
             def __init__(self) -> None:
@@ -3115,6 +3353,65 @@ EOF"""
         self.assertEqual(backend.system_prompts[-1], FINAL_FROM_TOOL_SYSTEM_PROMPT)
         self.assertNotIn("When tools are available", backend.system_prompts[-1])
 
+    def test_final_from_tool_streams_thought_channel_verbatim_to_renderer(self) -> None:
+        class StreamingFinalThoughtBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"pwd\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                assert on_delta is not None
+                on_delta("<|channel>thought\nfrom tool result")
+                on_delta("<channel|>final answer")
+                return ChatResult(
+                    content="<|channel>thought\nfrom tool result<channel|>final answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=22,
+                    completion_tokens=5,
+                    cached_tokens=10,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            emitted: list[str] = []
+            backend = StreamingFinalThoughtBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            result = runtime.ask_with_tools(
+                "show current directory",
+                temperature=0,
+                max_tokens=512,
+                workdir=Path(tmp),
+                tool_names=("exec_shell_full_command",),
+                on_final_delta=emitted.append,
+            )
+
+        self.assertEqual(result.content, "<|channel>thought\nfrom tool result<channel|>final answer")
+        self.assertEqual(emitted, ["<|channel>thought\nfrom tool result", "<channel|>final answer"])
+
     def test_ask_with_tools_can_write_new_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
@@ -3264,7 +3561,7 @@ EOF"""
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 raise AssertionError("chat should not be used when streaming is requested")
 
-            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
                 assert on_delta is not None
                 on_delta("hel")
                 on_delta("lo")
@@ -3297,7 +3594,7 @@ EOF"""
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 raise AssertionError("chat should not be used when streaming is requested")
 
-            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
                 self.calls += 1
                 if self.calls == 1:
                     return ChatResult(
@@ -3343,6 +3640,103 @@ EOF"""
         self.assertEqual(result.content, "done")
         self.assertEqual(emitted, ["done"])
         self.assertEqual(backend.calls, 3)
+
+    def test_ask_with_tools_streaming_retries_empty_final_then_streams_thought_and_answer(self) -> None:
+        class EmptyThenThoughtFinalBackend:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.chat_stream_calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                return ChatResult(
+                    content="",
+                    model="fake",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                        }
+                    ],
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                if self.chat_stream_calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                            }
+                        ],
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        cached_tokens=None,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                assert on_delta is not None
+                if self.chat_stream_calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=None,
+                        completion_tokens=0,
+                        cached_tokens=None,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                on_delta("<|channel>thought\nfrom tool result")
+                on_delta("<channel|>final answer")
+                return ChatResult(
+                    content="<|channel>thought\nfrom tool result<channel|>final answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=6,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        emitted: list[str] = []
+        steps = []
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("hello from file", encoding="utf-8")
+            backend = EmptyThenThoughtFinalBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "read note",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                on_final_delta=emitted.append,
+                on_model_step=steps.append,
+            )
+
+        self.assertEqual(result.content, "<|channel>thought\nfrom tool result<channel|>final answer")
+        self.assertEqual(emitted, ["<|channel>thought\nfrom tool result", "<channel|>final answer"])
+        self.assertEqual(backend.chat_calls, 1)
+        self.assertEqual(backend.chat_stream_calls, 3)
+        phases = [step.phase for step in steps]
+        self.assertEqual(phases, ["tool_call", "final", "tool_call_retry", "final_from_tool"])
 
     def test_ask_with_tools_emits_tool_call_event(self) -> None:
         events: list[tuple[str, str]] = []

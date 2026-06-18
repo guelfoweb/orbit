@@ -6,6 +6,7 @@ import time
 
 from orbit import __version__
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
+from orbit.native_llama.download_cli import main as native_download_main
 from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.media import load_audio, load_image
@@ -15,7 +16,7 @@ from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens, estimate_prefill_tokens_after_tool_result
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, TOOL_PREFILL_PROFILE, PrefillEstimator, prefill_profile_for_phase
 from orbit.terminal.repl import Repl
-from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, tools_text
+from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, think_mode_text, tools_text
 from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import estimate_context_status_tokens, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
@@ -25,7 +26,16 @@ from orbit.terminal.tool_mode import allowed_tool_names_for_spec, tools_are_enab
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="orbit")
+    parser = argparse.ArgumentParser(
+        prog="orbit",
+        epilog=(
+            "extra commands:\n"
+            "  orbit download <repo-or-file.gguf>\n"
+            "  orbit download --mmproj <repo>\n"
+            "  orbit download --all <repo>\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("prompt", nargs="*", help="Prompt for one-shot mode. Omit for interactive mode.")
     parser.add_argument("--image", action="append", default=[], help="Attach a local image to a one-shot prompt.")
     parser.add_argument("--audio", action="append", default=[], help="Attach a local WAV or MP3 audio file to a one-shot prompt.")
@@ -36,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "download":
+        return native_download_main(argv)
     args = build_parser().parse_args(argv)
     try:
         config = load_app_config(args)
@@ -44,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     backend = LlamaServerBackend(base_url=config.base_url, timeout=config.timeout)
+    backend.thinking = config.think
     if args.health:
         print(health_text(backend, config))
         return 0
@@ -69,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             max_tokens=config.max_tokens,
             workdir=config.workdir,
             tools=config.tools,
+            thinking=config.think,
         )
     if args.image or args.audio:
         print("error: --image/--audio require a one-shot prompt", file=sys.stderr)
@@ -105,6 +120,8 @@ def _handle_one_shot_command(
         return "error: /compact is available only in interactive mode"
     if command == "/tools":
         return tools_text(config.tools)
+    if command == "/think":
+        return think_mode_text(config.think)
     if command == "/health":
         return health_text(backend, config)
     if command == "/help":
@@ -112,6 +129,13 @@ def _handle_one_shot_command(
     if command == "/max-tokens" or command.startswith("/max-tokens "):
         _, message = set_max_tokens(config, command.removeprefix("/max-tokens").strip())
         return message
+    if command == "/think" or command.startswith("/think "):
+        value = command.removeprefix("/think").strip().lower()
+        if not value:
+            return think_mode_text(config.think)
+        if value not in {"on", "off"}:
+            return "error: usage: /think [off|on]"
+        return f"think: {value}"
     return f"unknown command: {command}"
 
 
@@ -125,6 +149,7 @@ def _run_one_shot(
     max_tokens: int,
     workdir,
     tools: str,
+    thinking: bool,
 ) -> int:
     prefill_estimator = PrefillEstimator()
     tools_enabled = tools_are_enabled(tools)
@@ -135,6 +160,7 @@ def _run_one_shot(
     renderer = StreamRenderer(
         prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
         prefill_estimate_tokens=prefill_tokens,
+        thinking=thinking,
     )
     started = time.monotonic()
     print()
@@ -150,6 +176,7 @@ def _run_one_shot(
                 images=images,
                 audios=audios,
                 on_final_delta=renderer.write,
+                on_progress=renderer.progress,
             )
         elif not tools_enabled:
             result = runtime.ask_chat(
@@ -157,6 +184,7 @@ def _run_one_shot(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=renderer.write,
+                on_progress=renderer.progress,
             )
         else:
             result = runtime.ask_auto(
@@ -166,6 +194,7 @@ def _run_one_shot(
                 workdir=workdir,
                 allowed_tool_names=allowed_tool_names_for_spec(tools),
                 on_final_delta=renderer.write,
+                on_progress=renderer.progress,
                 on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
                 on_tool_result=lambda name, chars, source, content: _show_tool_result(
                     renderer,

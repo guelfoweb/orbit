@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
-from orbit.terminal.commands import health_text, help_text, reset_session, runtime_status, set_max_tokens, tools_text
+from orbit.terminal.commands import health_text, help_text, reset_session, runtime_status, set_max_tokens, think_mode_text, tools_text
 from orbit.terminal.config import AppConfig
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
@@ -39,12 +39,14 @@ class Repl:
     def __post_init__(self) -> None:
         if self.tools_mode is None:
             self.tools_mode = self.config.tools
+        self.backend.thinking = self.config.think
 
     def run(self) -> int:
         if self.history:
             self.history.load()
         print(dim("orbit interactive mode. Type /help for commands."))
         print(dim(f"tools: {self.tools_mode}"))
+        print(dim(f"think: {'on' if self.config.think else 'off'}"))
         if has_existing_session_context(self.runtime.messages):
             print(dim("recent session context:"))
             for line in format_recent_session_messages(self.runtime.messages):
@@ -98,6 +100,7 @@ class Repl:
         renderer = StreamRenderer(
             prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
             prefill_estimate_tokens=prefill_tokens,
+            thinking=self.config.think,
         )
         checkpoint = len(self.runtime.messages)
         print()
@@ -112,6 +115,7 @@ class Repl:
                     workdir=self.config.workdir,
                     allowed_tool_names=allowed_tool_names_for_spec(self.tools_mode or "off"),
                     on_final_delta=renderer.write,
+                    on_progress=renderer.progress,
                     on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
                     on_tool_result=lambda name, chars, source, content: self._show_tool_result(renderer, name, chars, source, content),
                     on_model_step=self._record_model_step,
@@ -122,6 +126,7 @@ class Repl:
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                     on_final_delta=renderer.write,
+                    on_progress=renderer.progress,
                     on_model_step=self._record_model_step,
                 )
         except KeyboardInterrupt:
@@ -207,6 +212,9 @@ class Repl:
             self.config, message = set_max_tokens(self.config, value)
             print(message)
             return True
+        if command == "/think" or command.startswith("/think "):
+            print(self._handle_think_command(command))
+            return True
         if command == "/status":
             print(runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode))
             return True
@@ -248,6 +256,17 @@ class Repl:
             return f"tools: {self.tools_mode}"
         return f"error: usage: /tools [{USAGE}]"
 
+    def _handle_think_command(self, command: str) -> str:
+        value = command.removeprefix("/think").strip().lower()
+        if not value:
+            return think_mode_text(self.config.think)
+        if value not in {"on", "off"}:
+            return "error: usage: /think [off|on]"
+        self.config = replace(self.config, think=value == "on")
+        self.backend.thinking = self.config.think
+        self.runtime.thinking_mode = self.config.think
+        return f"think: {value}"
+
     def _continue_last_answer(self) -> None:
         if not self.can_continue:
             print("error: no truncated answer to continue", file=sys.stderr)
@@ -274,6 +293,7 @@ class Repl:
         renderer = StreamRenderer(
             prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
             prefill_estimate_tokens=prefill_tokens,
+            thinking=self.config.think,
         )
         checkpoint = len(self.runtime.messages)
         print()

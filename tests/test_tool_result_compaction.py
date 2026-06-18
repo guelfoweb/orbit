@@ -81,7 +81,7 @@ class FakeCompactionBackend:
             generation_tokens_per_second=None,
         )
 
-    def chat_stream(self, messages, *, temperature, max_tokens, tools=None, on_delta=None):
+    def chat_stream(self, messages, *, temperature, max_tokens, tools=None, on_delta=None, on_progress=None):
         raise AssertionError("streaming should not be used")
 
 

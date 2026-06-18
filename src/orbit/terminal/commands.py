@@ -8,6 +8,7 @@ from orbit.runtime.session_memory import DEFAULT_CONTEXT_TOKENS, SOFT_MEMORY_RAT
 from orbit.runtime.sessions import SessionStore
 from orbit.runtime.tools import tool_names
 from orbit.terminal.config import AppConfig
+from orbit.terminal.think_mode import think_text
 from orbit.terminal.tool_mode import ToolSpec
 
 
@@ -22,6 +23,7 @@ def help_text() -> str:
         ("/health", "Check llama-server health."),
         ("/help", "Show this help."),
         ("/max-tokens [n]", "Show or set output token limit for following turns."),
+        ("/think [off|on]", "Show or set thinking visibility."),
         ("/reset", "Clear current conversation and saved session."),
         ("/sessions clear", "Delete all saved sessions for this workdir."),
         ("/status [ctx]", "Show runtime status or estimated context usage."),
@@ -70,6 +72,10 @@ def tools_text(current: ToolSpec | None = None) -> str:
     return "\n".join(lines)
 
 
+def think_mode_text(current: bool | None = None) -> str:
+    return think_text(current)
+
+
 def runtime_status(
     runtime: ChatRuntime,
     config: AppConfig,
@@ -94,6 +100,7 @@ def runtime_status(
         f"messages: {len(runtime.messages)}",
         f"estimated_context_tokens: {estimate_message_tokens(runtime.messages)}",
         f"system: {'off' if config.no_system else 'on'}",
+        f"thinking_mode: {'on' if config.think else 'off'}",
         "",
         "Workdir",
         "-------",

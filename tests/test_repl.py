@@ -56,7 +56,7 @@ class InterruptingBackend:
             generation_tokens_per_second=None,
         )
 
-    def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None) -> ChatResult:
+    def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
         assert on_delta is not None
         on_delta("partial")
         raise KeyboardInterrupt
