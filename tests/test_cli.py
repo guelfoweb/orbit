@@ -17,6 +17,8 @@ if str(SRC) not in sys.path:
 
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.session_selection import display_datetime, preview_prompt, select_interactive_session
+from orbit.terminal import cli
+from orbit.backend.base import ChatResult
 
 
 class CliTests(unittest.TestCase):
@@ -132,6 +134,46 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIn("think: on", completed.stdout)
         self.assertIn("thinking_mode: on", completed.stdout)
+
+    def test_one_shot_length_footer_suggests_continue(self) -> None:
+        class FakeRuntime:
+            messages = []
+            context_tokens = None
+
+            def ask_chat(self, *args, **kwargs):
+                on_final_delta = kwargs["on_final_delta"]
+                on_final_delta("partial")
+                return ChatResult(
+                    content="partial",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=32,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=100.0,
+                    generation_tokens_per_second=10.0,
+                )
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = cli._run_one_shot(
+                FakeRuntime(),
+                "hello",
+                image_paths=[],
+                audio_paths=[],
+                temperature=0.0,
+                max_tokens=32,
+                workdir=ROOT,
+                tools="off",
+                thinking=False,
+            )
+
+        output = stream.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("output stopped because max_tokens was reached", output)
+        self.assertIn("/continue       continue the answer in interactive mode", output)
+        self.assertIn("/max-tokens N   increase output budget", output)
 
     def test_select_interactive_session_uses_new_session_when_stdin_is_not_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -245,6 +245,65 @@ def _last_tool_message(runtime: ChatRuntime) -> Message:
 
 
 class ToolRuntimeTests(unittest.TestCase):
+    def test_ask_with_tools_temporarily_disables_backend_thinking_for_tool_rounds_only(self) -> None:
+        class ThinkingAwareBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.thinking = True
+                self.thinking_seen: list[bool] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.thinking_seen.append(self.thinking)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                            }
+                        ],
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        cached_tokens=None,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="<|channel>thought\nfrom tool result<channel|>done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("hello from file", encoding="utf-8")
+            backend = ThinkingAwareBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "read note",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+            )
+
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertGreaterEqual(len(backend.thinking_seen), 2)
+        self.assertTrue(all(flag is False for flag in backend.thinking_seen[:-1]))
+        self.assertTrue(backend.thinking_seen[-1])
+        self.assertTrue(backend.thinking)
+
     def test_ask_auto_respects_allowed_tool_subset(self) -> None:
         class FilesystemRouteBackend:
             def __init__(self) -> None:

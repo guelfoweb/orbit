@@ -83,11 +83,12 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
             {
                 "role": "user",
                 "content": (
-                    "Use only the shell-full output. "
-                    "Answer concisely in up to six evidence-based findings. "
-                    "For each finding, name the affected function/file and practical exploit impact when available. "
-                    "Do not include generic methodology, disclaimers, or remediation unless asked. "
-                    "Expand only if asked."
+                    "Use only the available shell-full output. "
+                    "Answer the latest user request directly and concisely from that evidence. "
+                    "Prefer the most recent relevant shell result. "
+                    "Do not summarize unrelated older output. "
+                    "Do not call tools again. "
+                    "If the evidence is insufficient, say you cannot confirm."
                 ),
             },
         ]

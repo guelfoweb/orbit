@@ -237,6 +237,10 @@ def _run_one_shot(
         ),
         flush=True,
     )
+    if result.finish_reason == "length":
+        print(dim("output stopped because max_tokens was reached"), flush=True)
+        print(dim("/continue       continue the answer in interactive mode"), flush=True)
+        print(dim("/max-tokens N   increase output budget"), flush=True)
     return 0
 
 

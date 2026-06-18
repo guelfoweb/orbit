@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from contextlib import contextmanager
 from typing import Callable
 
 from orbit.backend import ChatBackend, ChatResult
@@ -575,30 +576,44 @@ class ChatRuntime:
         on_progress: Callable[[StreamProgress], None] | None,
     ) -> ChatResult:
         try:
+            with self._temporary_backend_thinking(False):
+                if on_final_delta is None:
+                    return self.backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+                return self.backend.chat_stream(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    on_delta=on_final_delta,
+                    on_progress=on_progress,
+                )
+        except RuntimeError as exc:
+            if not _is_tool_argument_json_error(exc):
+                raise
+        retry_messages = [*messages, {"role": "system", "content": TOOL_CALL_JSON_RETRY_PROMPT}]
+        with self._temporary_backend_thinking(False):
             if on_final_delta is None:
-                return self.backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+                return self.backend.chat(retry_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
             return self.backend.chat_stream(
-                messages,
+                retry_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
                 on_delta=on_final_delta,
                 on_progress=on_progress,
             )
-        except RuntimeError as exc:
-            if not _is_tool_argument_json_error(exc):
-                raise
-        retry_messages = [*messages, {"role": "system", "content": TOOL_CALL_JSON_RETRY_PROMPT}]
-        if on_final_delta is None:
-            return self.backend.chat(retry_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
-        return self.backend.chat_stream(
-            retry_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            on_delta=on_final_delta,
-            on_progress=on_progress,
-        )
+
+    @contextmanager
+    def _temporary_backend_thinking(self, value: bool):
+        if not hasattr(self.backend, "thinking"):
+            yield
+            return
+        previous = getattr(self.backend, "thinking")
+        setattr(self.backend, "thinking", value)
+        try:
+            yield
+        finally:
+            setattr(self.backend, "thinking", previous)
 
     def reset(self) -> None:
         self.messages.clear()

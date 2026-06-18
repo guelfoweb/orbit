@@ -90,15 +90,19 @@ class FinalPolicyTests(unittest.TestCase):
 
         self.assertTrue(has_list_like_tool_result(messages))
 
-    def test_shell_full_policy_is_evidence_based_and_compact(self) -> None:
-        messages = [{"role": "tool", "name": "exec_shell_full_command", "content": "source evidence"}]
+    def test_shell_full_policy_answers_latest_request_directly(self) -> None:
+        messages = [
+            {"role": "user", "content": "Use the shell output and answer with the exact first line only."},
+            {"role": "tool", "name": "exec_shell_full_command", "content": "first line\nsecond line"},
+        ]
 
         policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
 
         self.assertIn("shell-full output", policy.messages[-1]["content"])
-        self.assertIn("up to six evidence-based findings", policy.messages[-1]["content"])
-        self.assertIn("practical exploit impact", policy.messages[-1]["content"])
-        self.assertIn("Do not include generic methodology", policy.messages[-1]["content"])
+        self.assertIn("latest user request directly", policy.messages[-1]["content"])
+        self.assertIn("most recent relevant shell result", policy.messages[-1]["content"])
+        self.assertIn("Do not call tools again", policy.messages[-1]["content"])
+        self.assertIn("If the evidence is insufficient", policy.messages[-1]["content"])
 
     def test_operational_status_policy_prefers_recent_shell_evidence(self) -> None:
         messages = [
