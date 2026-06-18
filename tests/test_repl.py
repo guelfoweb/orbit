@@ -207,6 +207,17 @@ class ReplTests(unittest.TestCase):
         )
         self.assertEqual(format_tool_result_event("exec_shell_full_command", 200, content=chunk_content), " └ chunk 1/3 200 chars -> model")
 
+    def test_tool_result_event_marks_contract_rejection(self) -> None:
+        content = (
+            "error: shell-full analysis requests require content/source/string evidence, "
+            "not only metadata/listing. Use a bounded command such as sed/head/grep/strings on the target file."
+        )
+
+        self.assertEqual(
+            format_tool_result_event("exec_shell_full_command", len(content), content=content),
+            f" └ {len(content)} chars -> model | rejected",
+        )
+
     def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:
         self.assertEqual(_prefill_profile_for_turn([], tools_enabled=False), CHAT_PREFILL_PROFILE)
 
