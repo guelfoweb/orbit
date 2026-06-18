@@ -256,8 +256,7 @@ def _run_one_shot(
             else "output stopped because max_tokens was reached"
         )
         print(dim(message), flush=True)
-        print(dim("/continue       continue the answer in interactive mode"), flush=True)
-        print(dim("/max-tokens N   increase output budget"), flush=True)
+        print(dim("rerun with --max-tokens N for a larger one-shot budget"), flush=True)
     return 0
 
 

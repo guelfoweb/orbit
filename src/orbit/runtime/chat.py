@@ -603,6 +603,28 @@ class ChatRuntime:
                         retry_reason=retry_reason,
                     )
                 )
+        if (
+            self.thinking_mode
+            and result.finish_reason == "length"
+            and hasattr(self.backend, "continue_current")
+        ):
+            if on_final_delta is None:
+                continuation = self.backend.continue_current(max_tokens=max_tokens)
+            else:
+                continuation = self.backend.continue_current(
+                    max_tokens=max_tokens,
+                    on_delta=on_final_delta,
+                    on_progress=on_progress,
+                )
+            result = _merge_chat_results(result, continuation)
+            if on_model_step:
+                on_model_step(
+                    ModelStepMetrics.from_result(
+                        loop=loop + 2,
+                        result=continuation,
+                        phase="final_from_tool_continue_native",
+                    )
+                )
         self.messages.append({"role": "assistant", "content": result.content})
         return result
 
@@ -826,6 +848,25 @@ class _ThoughtOnlyDeltaFilter:
 
 def _bounded_internal_max_tokens(max_tokens: int, internal_max: int) -> int:
     return max(1, min(max_tokens, internal_max))
+
+
+def _merge_chat_results(first: ChatResult, second: ChatResult) -> ChatResult:
+    def add_int(a: int | None, b: int | None) -> int | None:
+        if a is None and b is None:
+            return None
+        return (a or 0) + (b or 0)
+
+    return ChatResult(
+        content=f"{first.content}{second.content}",
+        model=second.model or first.model,
+        finish_reason=second.finish_reason or first.finish_reason,
+        tool_calls=second.tool_calls or first.tool_calls,
+        prompt_tokens=add_int(first.prompt_tokens, second.prompt_tokens),
+        completion_tokens=add_int(first.completion_tokens, second.completion_tokens),
+        cached_tokens=add_int(first.cached_tokens, second.cached_tokens),
+        prompt_tokens_per_second=second.prompt_tokens_per_second or first.prompt_tokens_per_second,
+        generation_tokens_per_second=second.generation_tokens_per_second or first.generation_tokens_per_second,
+    )
 
 
 def _is_empty_final_response(result: ChatResult) -> bool:

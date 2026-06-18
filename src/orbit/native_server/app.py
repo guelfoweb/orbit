@@ -366,6 +366,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                 on_token=on_token,
                 should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
             )
+            disconnect.disarm()
             emit(openai_chat_response(result, content=""))
             self.wfile.write(sse_data("[DONE]"))
             self.wfile.flush()
@@ -429,6 +430,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                 on_token=on_token,
                 should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
             )
+            disconnect.disarm()
             emit("metrics", {"usage": result["usage"], "timings": result["timings"], "native": result["native"]})
             emit("done", {"finish_reason": result["finish_reason"], "session_id": request.session_id})
         except RuntimeError as exc:
@@ -487,6 +489,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                 on_token=on_token,
                 should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
             )
+            disconnect.disarm()
             emit("metrics", {"usage": result["usage"], "timings": result["timings"], "native": result["native"]})
             emit("done", {"finish_reason": result["finish_reason"], "session_id": DEFAULT_SESSION_ID})
         except RuntimeError as exc:
@@ -630,6 +633,8 @@ class _DisconnectWatcher:
         self._on_disconnect = on_disconnect
         self._disconnected = threading.Event()
         self._stop = threading.Event()
+        self._armed = threading.Event()
+        self._armed.set()
         self._thread = threading.Thread(target=self._run, name="orbit-stream-disconnect", daemon=True)
 
     def start(self) -> None:
@@ -642,6 +647,9 @@ class _DisconnectWatcher:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=0.5)
+
+    def disarm(self) -> None:
+        self._armed.clear()
 
     def _run(self) -> None:
         while not self._stop.is_set() and not self._disconnected.is_set():
@@ -669,4 +677,5 @@ class _DisconnectWatcher:
 
     def _mark_disconnected(self) -> None:
         self._disconnected.set()
-        self._on_disconnect()
+        if self._armed.is_set():
+            self._on_disconnect()

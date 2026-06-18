@@ -135,7 +135,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("think: on", completed.stdout)
         self.assertIn("thinking_mode: on", completed.stdout)
 
-    def test_one_shot_length_footer_suggests_continue(self) -> None:
+    def test_one_shot_length_footer_suggests_larger_budget(self) -> None:
         class FakeRuntime:
             messages = []
             context_tokens = None
@@ -172,8 +172,7 @@ class CliTests(unittest.TestCase):
         output = stream.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("output stopped because max_tokens was reached", output)
-        self.assertIn("/continue       continue the answer in interactive mode", output)
-        self.assertIn("/max-tokens N   increase output budget", output)
+        self.assertIn("rerun with --max-tokens N for a larger one-shot budget", output)
 
     def test_one_shot_length_footer_mentions_thinking_when_enabled(self) -> None:
         class FakeRuntime:
@@ -212,6 +211,7 @@ class CliTests(unittest.TestCase):
         output = stream.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("thinking or final output stopped because max_tokens was reached", output)
+        self.assertIn("rerun with --max-tokens N for a larger one-shot budget", output)
 
     def test_select_interactive_session_uses_new_session_when_stdin_is_not_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

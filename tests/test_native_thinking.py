@@ -331,6 +331,25 @@ class NativeThinkingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no active continuation state"):
             client._continue_generation_from_current_context(max_tokens=16)
 
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_chat_text_marks_continuation_ready_for_open_thought(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(thinking=True))
+        timings = NativeTimings(10, 32, 0, 10, 10.0, 20.0, False)
+
+        def fake_complete_chat(_messages, **kwargs):
+            kwargs["on_token"]("<|channel>thought\npartial reasoning")
+            return timings
+
+        with mock.patch.object(client, "complete_chat", side_effect=fake_complete_chat):
+            result = client.complete_chat_text(
+                [{"role": "user", "content": "hello"}],
+                max_tokens=32,
+                thinking=True,
+            )
+
+        self.assertEqual(result.content, "<|channel>thought\npartial reasoning")
+        self.assertTrue(client._session.continuation_ready)
+
     def test_merge_completions_sums_generation_and_output_tokens(self) -> None:
         first = NativeCompletion("<|channel>thought\nx", NativeTimings(10, 32, 3, 7, 11.0, 22.0, False), False)
         second = NativeCompletion("<channel|>b", NativeTimings(0, 5, 0, 0, 0.0, 3.0, False), False)

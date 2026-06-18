@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass, field
 
-from orbit.native_server.app import OrbitNativeHandler, OrbitNativeServer
+from orbit.native_server.app import OrbitNativeHandler, OrbitNativeServer, _DisconnectWatcher
 from orbit.native_server.protocol import openai_chat_response, parse_chat_request
 
 
@@ -60,6 +60,16 @@ class _FakeClient:
 
 
 class NativeServerThinkTests(unittest.TestCase):
+    def test_disconnect_watcher_disarm_skips_cancel_callback(self) -> None:
+        called: list[str] = []
+        watcher = _DisconnectWatcher(None, lambda: called.append("cancel"))  # type: ignore[arg-type]
+
+        watcher.disarm()
+        watcher._mark_disconnected()
+
+        self.assertEqual(called, [])
+        self.assertTrue(watcher.is_set())
+
     def test_json_ignores_client_disconnect_during_write(self) -> None:
         class _BrokenWriter:
             def write(self, _body: bytes) -> None:

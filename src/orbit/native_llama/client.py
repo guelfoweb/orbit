@@ -527,7 +527,9 @@ class NativeLlamaClient:
         content = _trim_at_stop("".join(parts), stop)
         if not thinking:
             content = _strip_reasoning_preamble(content)
-        return NativeCompletion(content=content, timings=timings, stopped_by_stop=bool(stop_filter and stop_filter.stopped))
+        completion = NativeCompletion(content=content, timings=timings, stopped_by_stop=bool(stop_filter and stop_filter.stopped))
+        self._session.continuation_ready = _can_continue_from_completion(completion, thinking=thinking)
+        return completion
 
     def _continue_chat_text_from_current_context(
         self,
@@ -1206,6 +1208,16 @@ def _looks_like_degenerate_thought_continuation(content: str) -> bool:
 
 def _can_continue_from_timings(timings: NativeTimings) -> bool:
     return not timings.cancelled and timings.output_tokens > 0
+
+
+def _can_continue_from_completion(completion: NativeCompletion, *, thinking: bool) -> bool:
+    if completion.timings.cancelled or completion.timings.output_tokens <= 0:
+        return False
+    if completion.stopped_by_stop:
+        return False
+    if thinking:
+        return _has_open_thought_channel(completion.content) or completion.completed_after_thought
+    return True
 
 
 def _message_content(message: NativeMessage) -> str:
