@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from orbit.backend import ChatResult
-from orbit.backend.base import Message
+from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
 from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
 from orbit.runtime.session_memory import should_refresh_for_append
@@ -59,6 +59,7 @@ def run_tool_loop(
     workdir,
     max_loops: int,
     on_final_delta: Callable[[str], None] | None,
+    on_progress: Callable[[StreamProgress], None] | None,
     on_tool_call: Callable[[str, str], None] | None,
     on_tool_result: Callable[[str, int, str, str], None] | None,
     on_model_step: Callable[[ModelStepMetrics], None] | None,
@@ -361,6 +362,7 @@ def run_tool_loop(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
+                    on_progress=on_progress,
                     on_model_step=on_model_step,
                     loop=state.tool_rounds + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
@@ -370,6 +372,7 @@ def run_tool_loop(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
+                on_progress=on_progress,
                 on_model_step=on_model_step,
                 loop=state.tool_rounds + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
@@ -416,6 +419,7 @@ def run_tool_loop(
             max_tokens=tool_max_tokens,
             tools=tools,
             on_final_delta=tool_delta_callback,
+            on_progress=on_progress,
         )
         last_result = result
         if on_model_step:
@@ -428,6 +432,7 @@ def run_tool_loop(
                 max_tokens=tool_max_tokens,
                 tools=tools,
                 on_final_delta=suppress_tool_delta,
+                on_progress=on_progress,
             )
             last_result = result
             contract_retry_pending = False
@@ -475,6 +480,7 @@ def run_tool_loop(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
+                on_progress=on_progress,
                 on_model_step=on_model_step,
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
@@ -493,6 +499,7 @@ def run_tool_loop(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
+                    on_progress=on_progress,
                     on_model_step=on_model_step,
                     loop=loop_index + 2,
                 )
@@ -532,6 +539,7 @@ def run_tool_loop(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
+                    on_progress=on_progress,
                     on_model_step=on_model_step,
                     loop=loop_index + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
@@ -544,6 +552,7 @@ def run_tool_loop(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
+                    on_progress=on_progress,
                     on_model_step=on_model_step,
                     loop=loop_index + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
@@ -577,6 +586,7 @@ def run_tool_loop(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
+                on_progress=on_progress,
                 on_model_step=on_model_step,
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
@@ -589,6 +599,7 @@ def run_tool_loop(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
+                on_progress=on_progress,
                 on_model_step=on_model_step,
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,

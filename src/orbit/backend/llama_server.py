@@ -7,7 +7,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .base import ChatResult, Message, ModelInfo
+from .base import ChatResult, Message, ModelInfo, StreamProgress
 from .model_names import resolve_model_display_name
 from .payloads import ChatPayloadOptions, build_chat_payload
 
@@ -17,13 +17,15 @@ class LlamaServerError(RuntimeError):
 
 
 class LlamaServerBackend:
-    def __init__(self, *, base_url: str, timeout: float, model: str | None = None) -> None:
+    def __init__(self, *, base_url: str, timeout: float, model: str | None = None, thinking: bool = False) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.thinking = thinking
         self._model_info_cache: ModelInfo | None = None
         self._display_model_name: str | None = None
         self._server_tools_cache: list[dict[str, Any]] | None = None
+        self._props_cache: dict[str, Any] | None = None
 
     def chat(
         self,
@@ -39,6 +41,7 @@ class LlamaServerBackend:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                thinking=self.thinking,
                 tools=tools,
             )
         )
@@ -53,6 +56,7 @@ class LlamaServerBackend:
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
         on_delta: Callable[[str], None],
+        on_progress: Callable[[StreamProgress], None] | None = None,
     ) -> ChatResult:
         payload = build_chat_payload(
             ChatPayloadOptions(
@@ -60,10 +64,20 @@ class LlamaServerBackend:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                thinking=self.thinking,
                 tools=tools,
                 stream=True,
             )
         )
+        if self._is_orbit_native_backend():
+            return self._with_display_model(
+                self._post_native_stream(
+                    "/chat/stream",
+                    payload,
+                    on_delta=on_delta,
+                    on_progress=on_progress,
+                )
+            )
         return self._with_display_model(self._post_stream("/v1/chat/completions", payload, on_delta=on_delta))
 
     def health(self) -> bool:
@@ -123,10 +137,18 @@ class LlamaServerBackend:
         return self._send(request)
 
     def _props_or_empty(self) -> dict[str, Any]:
+        if self._props_cache is not None:
+            return self._props_cache
         try:
-            return self._get_json("/props")
+            data = self._get_json("/props")
         except LlamaServerError:
+            self._props_cache = {}
             return {}
+        self._props_cache = data if isinstance(data, dict) else {}
+        return self._props_cache
+
+    def _is_orbit_native_backend(self) -> bool:
+        return _str_or_none(self._props_or_empty().get("backend")) == "orbit-native"
 
     def _with_display_model(self, result: ChatResult) -> ChatResult:
         display = self.display_model_name()
@@ -155,6 +177,32 @@ class LlamaServerBackend:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 return _parse_chat_stream(response, on_delta=on_delta)
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise LlamaServerError(f"llama-server HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise LlamaServerError(f"cannot connect to llama-server at {self.base_url}: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise LlamaServerError(f"llama-server request timed out after {self.timeout:.0f}s") from exc
+
+    def _post_native_stream(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        on_delta: Callable[[str], None],
+        on_progress: Callable[[StreamProgress], None] | None,
+    ) -> ChatResult:
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            f"{self.base_url}{path}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                return _parse_native_stream(response, on_delta=on_delta, on_progress=on_progress)
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise LlamaServerError(f"llama-server HTTP {exc.code}: {detail}") from exc
@@ -270,6 +318,107 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
         tool_calls = parsed_raw_tool_calls
         content = ""
 
+    details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+    return ChatResult(
+        content=content,
+        model=model,
+        finish_reason=finish_reason,
+        tool_calls=tool_calls,
+        prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
+        completion_tokens=_int_or_none(usage.get("completion_tokens")),
+        cached_tokens=_int_or_none(details.get("cached_tokens")),
+        prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
+        generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
+    )
+
+
+def _parse_native_stream(
+    response: Any,
+    *,
+    on_delta: Callable[[str], None],
+    on_progress: Callable[[StreamProgress], None] | None,
+) -> ChatResult:
+    content_parts: list[str] = []
+    tool_calls_by_index: dict[int, dict[str, Any]] = {}
+    content_filter = _ContentStreamFilter(on_delta)
+    model: str | None = None
+    finish_reason: str | None = None
+    usage: dict[str, Any] = {}
+    timings: dict[str, Any] = {}
+    current_event: str | None = None
+    current_data_lines: list[str] = []
+    stream_done = False
+
+    def flush_event() -> None:
+        nonlocal current_event, current_data_lines, model, finish_reason, usage, timings, stream_done
+        if not current_event:
+            current_data_lines = []
+            return
+        data_text = "\n".join(current_data_lines).strip()
+        current_data_lines = []
+        if not data_text:
+            current_event = None
+            return
+        try:
+            data = json.loads(data_text)
+        except json.JSONDecodeError:
+            current_event = None
+            return
+        if not isinstance(data, dict):
+            current_event = None
+            return
+        if current_event == "delta":
+            text = data.get("text")
+            if isinstance(text, str) and text:
+                content_parts.append(text)
+                content_filter.write(text)
+        elif current_event.startswith("progress.") and on_progress:
+            phase = current_event.split(".", maxsplit=1)[1]
+            progress = StreamProgress(
+                phase=phase,
+                current=_int_or_none(data.get("current")) or 0,
+                total=_int_or_none(data.get("total")) or 0,
+                percent=_int_or_none(data.get("percent")) or 0,
+            )
+            on_progress(progress)
+        elif current_event == "tool_calls":
+            _merge_stream_tool_calls(tool_calls_by_index, data.get("tool_calls"))
+        elif current_event == "metrics":
+            if isinstance(data.get("usage"), dict):
+                usage = data["usage"]
+            if isinstance(data.get("timings"), dict):
+                timings = data["timings"]
+        elif current_event == "done":
+            finish_reason = _str_or_none(data.get("finish_reason")) or finish_reason
+            stream_done = True
+        elif current_event == "error":
+            message = _str_or_none(data.get("message")) or "native stream error"
+            raise LlamaServerError(message)
+        model = _str_or_none(data.get("model")) or model
+        current_event = None
+
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            flush_event()
+            if stream_done:
+                break
+            continue
+        if line.startswith("event:"):
+            current_event = line.removeprefix("event:").strip()
+            continue
+        if line.startswith("data:"):
+            current_data_lines.append(line.removeprefix("data:").strip())
+
+    if not stream_done:
+        flush_event()
+    content_filter.finish()
+    content = "".join(content_parts)
+    tool_calls = [tool_calls_by_index[index] for index in sorted(tool_calls_by_index)]
+    parsed_raw_tool_calls = _parse_raw_tool_call_content(content)
+    if not tool_calls and parsed_raw_tool_calls:
+        tool_calls = parsed_raw_tool_calls
+        content = ""
     details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
     return ChatResult(
         content=content,

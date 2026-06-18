@@ -12,7 +12,7 @@ It is developed and tested primarily on Linux. macOS may work if `llama-server` 
 - Stream assistant responses in the terminal.
 - Enable or disable unrestricted shell tools at runtime.
 - Let the model use the local shell for files, web fetches, edits, system inspection, and automation when tools are enabled.
-- Attach local images or audio files in one-shot mode when the server is started with multimodal support.
+- Attach local images or audio files in one-shot mode when the server is started with multimodal support, including native `orbit-server` when a matching `mmproj` is available.
 - Keep lightweight sessions and prompt history under `~/.orbit`.
 
 Orbit stays model-driven: the model decides when tools are needed. The runtime only enforces safety, path, size, timeout, and tool-contract boundaries.
@@ -88,6 +88,25 @@ into the standard Hugging Face cache:
 
 ```bash
 scripts/gemma4-12b-server.sh download --mtp
+```
+
+If you also want the multimodal projector for `llama-server` or native
+`orbit-server`, download it in the same step:
+
+```bash
+scripts/gemma4-12b-server.sh download --multimodal --mtp
+```
+
+The native downloader can fetch the projector directly from the registry too:
+
+```bash
+orbit download --mmproj ggml-org/gemma-4-12B-it-GGUF
+```
+
+Or download the full local stack in one command:
+
+```bash
+orbit download --all ggml-org/gemma-4-12B-it-GGUF
 ```
 
 Internally this uses:
@@ -336,7 +355,7 @@ chunk calls: max 3 per user turn
 
 Images and audio are optional. Skip this section for normal text usage.
 
-Start the server with multimodal support:
+Start `llama-server` with multimodal support:
 
 ```bash
 scripts/gemma4-12b-server.sh start --multimodal
@@ -364,6 +383,22 @@ orbit --audio path/to/audio.wav "Transcribe this audio."
 Supported image types: JPEG, PNG, WebP.
 
 Supported audio types: WAV, MP3. Audio support in `llama.cpp` is experimental and can be slow.
+
+Native `orbit-server` also supports the same one-shot image/audio inputs when the target model is bootstrapped with a matching `mmproj`:
+
+```bash
+PYTHONPATH=src python3 scripts/orbit-server.py --port 18082
+```
+
+If the projector is not resolved automatically from `models/` or the Hugging Face cache, pass it explicitly:
+
+```bash
+PYTHONPATH=src python3 scripts/orbit-server.py \
+  --port 18082 \
+  --mmproj /path/to/mmproj-gemma-4-12B-it-Q8_0.gguf
+```
+
+The native backend keeps multimodal prefill in the standard path. Persistent MTP remains a text-only optimization path and is not used for image/audio turns.
 
 ## Config
 

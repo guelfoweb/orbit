@@ -639,3 +639,94 @@ prompt size, context, tool schemas, and reinjected tool results.
 
 See [Performance notes](PERFORMANCE.md) for benchmark data and server-profile
 details.
+
+## Native backend parity tips
+
+`orbit-server` is being developed as an experimental native backend. The same
+runtime/backend boundary still applies:
+
+- runtime owns behavior;
+- backend owns inference;
+- tools, guards, repair loops, memory, and final-answer policy stay in the
+  runtime.
+
+The native backend must therefore reproduce the inference contract that
+`llama-server` gives the model, without moving runtime logic into the backend.
+
+### Preserve model-facing tool declarations
+
+OpenAI-compatible `tools` are not just metadata. With Gemma 4, `llama-server`
+renders them into the chat template and this can change model behavior in
+guard-sensitive coding tasks.
+
+For Gemma 4, tool declarations must be rendered inside the system turn using
+the model-native wrapper:
+
+```text
+<|tool>declaration:<tool_name>{...}<tool|>
+```
+
+Dropping `tools` from the native backend can make the model miss part of the
+tool contract. A real failure mode was:
+
+```text
+llama-server:
+  cat parser.py
+  sed local return-value replacement
+  PASS
+
+orbit-server without tool declarations:
+  sed mutation without reading parser.py content
+  FAIL
+```
+
+The fix is protocol/template parity, not prompt tuning:
+
+- keep `tools` in the native request object;
+- render tool declarations through the Gemma 4 template format;
+- keep execution and tool policy in the runtime.
+
+### Strip generated control channels
+
+Gemma 4 may emit empty or internal channel blocks such as:
+
+```text
+<|channel>thought
+<channel|>
+```
+
+`llama-server` strips these through its chat parser. A native backend must do
+the same before emitting deltas or final content.
+
+This is backend output parsing, not a runtime behavior change. It prevents
+terminal leaks while preserving the model-generated visible answer.
+
+### Diagnose behavioral parity with transcripts
+
+When `orbit-server` and `llama-server` produce different outcomes, compare the
+actual tool transcript before changing prompts or guards:
+
+- commands emitted by the model;
+- tool results reinjected;
+- whether source/content was read before mutation;
+- finish reason;
+- stop/control-token leaks;
+- prompt/tool template differences.
+
+The useful question is not "which backend is faster?" but:
+
+```text
+Did the backend present the same model-facing contract?
+```
+
+Only fix differences that belong to backend responsibility:
+
+- chat template;
+- tool declaration rendering;
+- tokenization/detokenization;
+- stop/control-token parsing;
+- sampling/inference configuration;
+- cancellation and metrics.
+
+Do not fix backend parity by adding runtime task logic, deterministic edits, or
+new guard behavior.

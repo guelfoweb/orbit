@@ -79,6 +79,7 @@ class ConfigTests(unittest.TestCase):
                         "max_tokens": 512,
                         "context_tokens": 4096,
                         "no_system": True,
+                        "think": True,
                         "tools": "on",
                     }
                 ),
@@ -93,6 +94,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.max_tokens, 512)
         self.assertEqual(config.context_tokens, 4096)
         self.assertTrue(config.no_system)
+        self.assertTrue(config.think)
         self.assertEqual(config.tools, "on")
 
     def test_cli_flags_override_config_file(self) -> None:
@@ -110,6 +112,8 @@ class ConfigTests(unittest.TestCase):
                     "64",
                     "--context-tokens",
                     "2048",
+                    "--think",
+                    "on",
                     "--tools",
                     "on",
                 )
@@ -118,6 +122,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.workdir, ROOT.resolve())
         self.assertEqual(config.max_tokens, 64)
         self.assertEqual(config.context_tokens, 2048)
+        self.assertTrue(config.think)
         self.assertEqual(config.tools, "on")
 
     def test_config_rejects_unknown_tool_spec(self) -> None:

@@ -5,13 +5,13 @@ from typing import Any
 
 from .base import Message
 
-
 @dataclass(frozen=True)
 class ChatPayloadOptions:
     model: str
     messages: list[Message]
     temperature: float
     max_tokens: int
+    thinking: bool = False
     tools: list[dict[str, Any]] | None = None
     stream: bool = False
     cache_prompt: bool = True
@@ -24,6 +24,8 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
         "temperature": options.temperature,
         "max_tokens": options.max_tokens,
         "cache_prompt": options.cache_prompt,
+        "thinking": options.thinking,
+        "chat_template_kwargs": {"enable_thinking": options.thinking},
     }
     if options.stream:
         payload["stream"] = True

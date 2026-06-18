@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from orbit.backend import ChatBackend, ChatResult
-from orbit.backend.base import Message
+from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.final_policy import (
     build_final_tool_policy,
     final_from_tool_retry_reason,
@@ -23,6 +23,7 @@ from orbit.runtime.messages import (
 )
 
 from orbit.runtime.command_request import (
+    CommandStreamFilter,
     ToolRoute,
     decision_tool_names,
     parse_command_decision,
@@ -42,6 +43,10 @@ from orbit.runtime.turn_trace import ModelStepMetrics
 
 
 ROUTE_MAX_TOKENS = 128
+
+
+def _contains_control_channel_markup(content: str) -> bool:
+    return "<|channel>" in content or "<channel|>" in content
 
 
 @dataclass
@@ -88,6 +93,7 @@ class ChatRuntime:
         images: list[ImageInput] | None = None,
         audios: list[AudioInput] | None = None,
         on_final_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
     ) -> ChatResult:
         self.messages.append({"role": "user", "content": message_content(prompt, images or [], audios or [])})
@@ -96,6 +102,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_model_step=on_model_step,
             loop=1,
         )
@@ -109,6 +116,7 @@ class ChatRuntime:
         temperature: float,
         max_tokens: int,
         on_final_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
     ) -> ChatResult:
         self.last_memory_refresh = None
@@ -119,6 +127,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_model_step=on_model_step,
             loop=1,
         )
@@ -131,6 +140,7 @@ class ChatRuntime:
         temperature: float,
         max_tokens: int,
         on_final_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
     ) -> ChatResult:
         self.messages.append(
@@ -144,6 +154,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_model_step=on_model_step,
             loop=1,
         )
@@ -159,6 +170,7 @@ class ChatRuntime:
         workdir,
         max_loops: int = 10,
         on_final_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
         on_tool_result: Callable[[str, int, str, str], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
@@ -173,6 +185,7 @@ class ChatRuntime:
             workdir=workdir,
             max_loops=max_loops,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_model_step=on_model_step,
@@ -188,6 +201,7 @@ class ChatRuntime:
         workdir,
         max_loops: int = 10,
         on_final_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
         on_tool_result: Callable[[str, int, str, str], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
@@ -201,6 +215,7 @@ class ChatRuntime:
             max_tokens=max_tokens,
             workdir=workdir,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_model_step=on_model_step,
         )
         if media_result is not None:
@@ -209,13 +224,37 @@ class ChatRuntime:
         command_max_tokens = _bounded_internal_max_tokens(max_tokens, ROUTE_MAX_TOKENS)
         streamed_final_retry = False
         retried_empty_final = False
+        route_stream_filter = None
+        route_streamed_chunks: list[str] = []
         command_messages = with_command_system_prompt(self.messages)
-        first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
+        if on_progress is None:
+            first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
+        else:
+            route_stream_filter = CommandStreamFilter(route_streamed_chunks.append) if on_final_delta is not None else None
+            first = self.backend.chat_stream(
+                command_messages,
+                temperature=temperature,
+                max_tokens=command_max_tokens,
+                on_delta=route_stream_filter.write if route_stream_filter is not None else (lambda _text: None),
+                on_progress=on_progress,
+            )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
         command_content = first.content
         decision = parse_command_decision_from_tool_calls(first.tool_calls) or parse_command_decision(command_content)
         if decision is None:
+            route_requires_chat_final = _contains_control_channel_markup(first.content)
+            if route_requires_chat_final and first.finish_reason != "length":
+                first = self._chat_final(
+                    with_chat_system_prompt(self.messages),
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    on_model_step=on_model_step,
+                    loop=2,
+                )
+                retried_empty_final = True
             if first.finish_reason == "length":
                 if on_final_delta is None:
                     first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
@@ -226,6 +265,7 @@ class ChatRuntime:
                         temperature=temperature,
                         max_tokens=max_tokens,
                         on_delta=on_final_delta,
+                        on_progress=on_progress,
                     )
                 if on_model_step:
                     on_model_step(ModelStepMetrics.from_result(loop=2, result=first, phase="chat_final_retry"))
@@ -236,12 +276,18 @@ class ChatRuntime:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
+                    on_progress=on_progress,
                     on_model_step=on_model_step,
                     loop=2,
                 )
             self.messages.append({"role": "assistant", "content": first.content})
             if on_final_delta and not streamed_final_retry and not retried_empty_final:
-                on_final_delta(first.content)
+                if route_stream_filter is not None:
+                    route_stream_filter.finish()
+                    for chunk in route_streamed_chunks:
+                        on_final_delta(chunk)
+                else:
+                    on_final_delta(first.content)
             return first
         if decision.route == ToolRoute.CHAT:
             chat_messages = with_chat_system_prompt(self.messages)
@@ -250,6 +296,7 @@ class ChatRuntime:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
+                on_progress=on_progress,
                 on_model_step=on_model_step,
                 loop=2,
             )
@@ -268,6 +315,7 @@ class ChatRuntime:
                 max_tokens=max_tokens,
                 workdir=workdir,
                 on_final_delta=on_final_delta,
+                on_progress=on_progress,
                 on_model_step=on_model_step,
                 command_result=first,
             )
@@ -293,6 +341,7 @@ class ChatRuntime:
             workdir=workdir,
             max_loops=max_loops,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_model_step=on_model_step,
@@ -311,6 +360,7 @@ class ChatRuntime:
         max_tokens: int,
         workdir,
         on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
     ) -> ChatResult | None:
         try:
@@ -326,6 +376,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_model_step=on_model_step,
             loop=1,
         )
@@ -340,6 +391,7 @@ class ChatRuntime:
         max_tokens: int,
         workdir,
         on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         command_result: ChatResult,
     ) -> ChatResult:
@@ -365,6 +417,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_model_step=on_model_step,
             loop=2,
         )
@@ -379,6 +432,7 @@ class ChatRuntime:
         workdir,
         max_loops: int,
         on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
         on_tool_call: Callable[[str, str], None] | None,
         on_tool_result: Callable[[str, int, str, str], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
@@ -392,6 +446,7 @@ class ChatRuntime:
             workdir=workdir,
             max_loops=max_loops,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_model_step=on_model_step,
@@ -405,6 +460,7 @@ class ChatRuntime:
         temperature: float,
         max_tokens: int,
         on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         loop: int,
         use_tool_prompt: bool,
@@ -419,6 +475,7 @@ class ChatRuntime:
                 temperature=temperature,
                 max_tokens=policy.max_tokens,
                 on_delta=on_final_delta,
+                on_progress=on_progress,
             )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
@@ -434,6 +491,7 @@ class ChatRuntime:
                     temperature=temperature,
                     max_tokens=retry_max_tokens,
                     on_delta=on_final_delta,
+                    on_progress=on_progress,
                 )
             if on_model_step:
                 on_model_step(
@@ -454,6 +512,7 @@ class ChatRuntime:
         temperature: float,
         max_tokens: int,
         on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         loop: int,
     ) -> ChatResult:
@@ -462,6 +521,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
         )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="chat_final"))
@@ -473,6 +533,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_final_delta=on_final_delta,
+            on_progress=on_progress,
         )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=retry, phase="chat_final_retry"))
@@ -491,6 +552,7 @@ class ChatRuntime:
         temperature: float,
         max_tokens: int,
         on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
     ) -> ChatResult:
         if on_final_delta is None:
             return self.backend.chat(messages, temperature=temperature, max_tokens=max_tokens)
@@ -499,6 +561,7 @@ class ChatRuntime:
             temperature=temperature,
             max_tokens=max_tokens,
             on_delta=on_final_delta,
+            on_progress=on_progress,
         )
 
     def _chat_tool_call_once(
@@ -509,6 +572,7 @@ class ChatRuntime:
         max_tokens: int,
         tools: list[dict[str, object]],
         on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
     ) -> ChatResult:
         try:
             if on_final_delta is None:
@@ -519,6 +583,7 @@ class ChatRuntime:
                 max_tokens=max_tokens,
                 tools=tools,
                 on_delta=on_final_delta,
+                on_progress=on_progress,
             )
         except RuntimeError as exc:
             if not _is_tool_argument_json_error(exc):
@@ -532,6 +597,7 @@ class ChatRuntime:
             max_tokens=max_tokens,
             tools=tools,
             on_delta=on_final_delta,
+            on_progress=on_progress,
         )
 
     def reset(self) -> None:

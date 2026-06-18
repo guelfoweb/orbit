@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT
+from orbit.terminal.think_mode import DEFAULT_THINKING, normalize_think_spec
 from orbit.terminal.tool_mode import ToolSpec, normalize_tool_spec
 
 
@@ -30,6 +31,7 @@ class AppConfig:
     context_tokens: int | None = None
     system: str = DEFAULT_SYSTEM_PROMPT
     no_system: bool = False
+    think: bool = DEFAULT_THINKING
     tools: ToolSpec = DEFAULT_TOOLS
 
 
@@ -43,6 +45,7 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--context-tokens", type=int, help="Override runtime context estimate for testing/benchmarking.")
     parser.add_argument("--system")
     parser.add_argument("--no-system", action="store_true", help="Do not send the default system prompt.")
+    parser.add_argument("--think", help="Initial thinking mode: off or on.")
     parser.add_argument("--tools", help="Initial tool mode: off or on.")
 
 
@@ -74,6 +77,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         ),
         system=_str_value(values, "system", AppConfig.system),
         no_system=_bool_value(values, "no_system", AppConfig.no_system),
+        think=_bool_value_or_spec(values, "think", AppConfig.think),
         tools=_tool_spec_value(values),
     )
     return AppConfig(
@@ -106,6 +110,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         else config.context_tokens,
         system=args.system if args.system is not None else config.system,
         no_system=args.no_system or config.no_system,
+        think=normalize_think_spec(args.think) if args.think is not None else config.think,
         tools=normalize_tool_spec(args.tools) if args.tools is not None else config.tools,
     )
 
@@ -195,6 +200,11 @@ def _bool_value(values: dict[str, Any], key: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"invalid config key {key}: expected boolean")
     return value
+
+
+def _bool_value_or_spec(values: dict[str, Any], key: str, default: bool) -> bool:
+    value = values.get(key, default)
+    return normalize_think_spec(value, key=key)
 
 
 def _tool_spec_value(values: dict[str, Any]) -> ToolSpec:

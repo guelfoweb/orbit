@@ -15,3 +15,6 @@ orbit = "orbit.terminal.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"orbit.native_llama" = ["model_registry.json", "vendor/README.md", "vendor/shim/*.cpp"]

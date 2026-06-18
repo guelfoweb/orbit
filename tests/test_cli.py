@@ -20,6 +20,12 @@ from orbit.terminal.session_selection import display_datetime, preview_prompt, s
 
 
 class CliTests(unittest.TestCase):
+    def test_one_shot_think_on_does_not_crash(self) -> None:
+        completed = _run_cli("", "--think", "on", "/think")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("think: on", completed.stdout)
+
     def test_one_shot_status_command_does_not_call_model(self) -> None:
         completed = _run_cli("", "/status")
 
@@ -62,6 +68,14 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Single tools:", completed.stdout)
         self.assertNotIn("llama-server:", completed.stdout)
         self.assertNotIn("orbit-only:", completed.stdout)
+
+    def test_one_shot_think_command_does_not_call_model(self) -> None:
+        completed = _run_cli("", "/think")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("think: off", completed.stdout)
+        self.assertIn("/think off = suppress reasoning", completed.stdout)
+        self.assertIn("/think on  = show reasoning before the final answer", completed.stdout)
 
     def test_one_shot_max_tokens_command_does_not_call_model(self) -> None:
         completed = _run_cli("", "/max-tokens 2048")
@@ -111,6 +125,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIn("max_tokens: 512", completed.stdout)
         self.assertIn("max_tokens: 2048", completed.stdout)
+
+    def test_repl_think_command_updates_status(self) -> None:
+        completed = _run_cli("/think on\n/status\n/exit\n")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("think: on", completed.stdout)
+        self.assertIn("thinking_mode: on", completed.stdout)
 
     def test_select_interactive_session_uses_new_session_when_stdin_is_not_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

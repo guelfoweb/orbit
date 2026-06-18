@@ -23,6 +23,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("/max-tokens [n]", help_text())
         self.assertIn("/continue", help_text())
         self.assertIn("/sessions clear", help_text())
+        self.assertIn("/think [off|on]", help_text())
         self.assertIn("/status [ctx]", help_text())
         self.assertIn("/tools [off|on]", help_text())
         self.assertNotIn("Show or set tools: off or on.", help_text())
@@ -64,6 +65,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Memory\n-------", status)
         self.assertIn("Model\n-------", status)
         self.assertIn("tools_mode: n/a", status)
+        self.assertIn("thinking_mode: off", status)
         self.assertIn("model_tools: exec_shell_full_command", status)
         self.assertIn("memory_refresh_threshold: 6963/8192", status)
         self.assertIn("memory_refreshes: 0", status)
@@ -123,6 +125,14 @@ class CommandTests(unittest.TestCase):
         status = runtime_status(runtime, AppConfig(), backend, tools_mode="on")
 
         self.assertIn("tools_mode: on", status)
+
+    def test_runtime_status_shows_thinking_mode_from_config(self) -> None:
+        backend = FakeStatusBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        status = runtime_status(runtime, AppConfig(think=True), backend)
+
+        self.assertIn("thinking_mode: on", status)
 
     def test_tools_text_shows_user_selectable_specs_only(self) -> None:
         output = tools_text("off")

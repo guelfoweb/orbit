@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.backend.llama_server import LlamaServerBackend, _parse_chat_result, _parse_chat_stream, _parse_model_info
+from orbit.backend.llama_server import LlamaServerBackend, _parse_chat_result, _parse_chat_stream, _parse_model_info, _parse_native_stream
 from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
 from orbit.backend import model_names
 
@@ -24,7 +24,70 @@ class FakeStream:
         return iter(line.encode("utf-8") for line in self.lines)
 
 
+class FakeNativeStreamWithTrailingNoise:
+    def __iter__(self):
+        yield b'event: delta\n'
+        yield b'data: {"text":"ok"}\n'
+        yield b'\n'
+        yield b'event: metrics\n'
+        yield b'data: {"usage":{"prompt_tokens":10,"completion_tokens":1},"timings":{"predicted_per_second":2.0}}\n'
+        yield b'\n'
+        yield b'event: done\n'
+        yield b'data: {"finish_reason":"stop","model":"gemma4"}\n'
+        yield b'\n'
+        while True:
+            yield b': keep-alive\n'
+
+
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_chat_stream_uses_native_stream_for_orbit_backend_even_with_tools(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.path: str | None = None
+                self.stream_kind: str | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, path, payload, *, on_delta, on_progress):
+                self.path = path
+                self.stream_kind = "native"
+                return _parse_native_stream(
+                    FakeStream(
+                        [
+                            'event: progress.prefill\n',
+                            'data: {"current":10,"total":20,"percent":50}\n',
+                            '\n',
+                            'event: done\n',
+                            'data: {"finish_reason":"tool_calls"}\n',
+                            '\n',
+                        ]
+                    ),
+                    on_delta=on_delta,
+                    on_progress=on_progress,
+                )
+
+            def _post_stream(self, path, payload, *, on_delta):
+                self.path = path
+                self.stream_kind = "openai"
+                raise AssertionError("openai stream should not be used")
+
+        progress: list[tuple[str, int, int, int]] = []
+        backend = Backend()
+        backend.chat_stream(
+            [{"role": "user", "content": "read note.txt"}],
+            temperature=0,
+            max_tokens=32,
+            tools=[{"type": "function", "function": {"name": "exec_shell_full_command"}}],
+            on_delta=lambda _text: None,
+            on_progress=lambda item: progress.append((item.phase, item.current, item.total, item.percent)),
+        )
+
+        self.assertEqual(backend.stream_kind, "native")
+        self.assertEqual(backend.path, "/chat/stream")
+        self.assertEqual(progress, [("prefill", 10, 20, 50)])
+
     def test_chat_payload_enables_prompt_cache(self) -> None:
         payload = build_chat_payload(
             ChatPayloadOptions(
@@ -74,6 +137,19 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(payload["tool_choice"], "auto")
         self.assertIs(payload["parallel_tool_calls"], False)
         self.assertIs(payload["parse_tool_calls"], True)
+
+    def test_chat_payload_carries_thinking_flag(self) -> None:
+        payload = build_chat_payload(
+            ChatPayloadOptions(
+                model="gemma4",
+                messages=[{"role": "user", "content": "think"}],
+                temperature=0,
+                max_tokens=32,
+                thinking=True,
+            )
+        )
+
+        self.assertTrue(payload["thinking"])
 
     def test_parse_chat_result_extracts_content_and_metrics(self) -> None:
         result = _parse_chat_result(
@@ -167,6 +243,22 @@ class LlamaServerBackendTests(unittest.TestCase):
             result.tool_calls[0]["function"]["arguments"],
             '{"command": "strings -a samples/suspicious_dropper_demo.js && grep -E \\"http://|https://|[0-9]{1,3}\\\\.[0-9]{1,3}\\" samples/suspicious_dropper_demo.js | sort | uniq"}',
         )
+
+    def test_parse_native_stream_stops_at_done_without_waiting_for_eof(self) -> None:
+        deltas: list[str] = []
+
+        result = _parse_native_stream(
+            FakeNativeStreamWithTrailingNoise(),
+            on_delta=deltas.append,
+            on_progress=None,
+        )
+
+        self.assertEqual("".join(deltas), "ok")
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertEqual(result.model, "gemma4")
+        self.assertEqual(result.prompt_tokens, 10)
+        self.assertEqual(result.completion_tokens, 1)
 
     def test_parse_model_info_extracts_capabilities_and_meta(self) -> None:
         info = _parse_model_info(
@@ -279,6 +371,74 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual("".join(emitted), "Need more.  Done.")
         self.assertIn("<|tool_call>", result.content)
         self.assertEqual(result.tool_calls, [])
+
+    def test_parse_native_stream_emits_progress_and_metrics(self) -> None:
+        emitted: list[str] = []
+        progress = []
+
+        result = _parse_native_stream(
+            FakeStream(
+                [
+                    'event: progress.prefill\n',
+                    'data: {"current":243,"total":935,"percent":25}\n',
+                    '\n',
+                    'event: delta\n',
+                    'data: {"text":"hel"}\n',
+                    '\n',
+                    'event: progress.generation\n',
+                    'data: {"current":1,"total":32,"percent":3}\n',
+                    '\n',
+                    'event: delta\n',
+                    'data: {"text":"lo"}\n',
+                    '\n',
+                    'event: metrics\n',
+                    'data: {"usage":{"prompt_tokens":935,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":12}},"timings":{"prompt_per_second":14.7,"predicted_per_second":3.2}}\n',
+                    '\n',
+                    'event: done\n',
+                    'data: {"finish_reason":"stop"}\n',
+                    '\n',
+                ]
+            ),
+            on_delta=emitted.append,
+            on_progress=lambda item: progress.append((item.phase, item.current, item.total, item.percent)),
+        )
+
+        self.assertEqual(emitted, ["hel", "lo"])
+        self.assertEqual(progress, [("prefill", 243, 935, 25), ("generation", 1, 32, 3)])
+        self.assertEqual(result.content, "hello")
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertEqual(result.prompt_tokens, 935)
+        self.assertEqual(result.completion_tokens, 2)
+        self.assertEqual(result.cached_tokens, 12)
+        self.assertEqual(result.prompt_tokens_per_second, 14.7)
+        self.assertEqual(result.generation_tokens_per_second, 3.2)
+
+    def test_parse_native_stream_converts_raw_tool_call_and_suppresses_delta(self) -> None:
+        emitted: list[str] = []
+
+        result = _parse_native_stream(
+            FakeStream(
+                [
+                    'event: progress.prefill\n',
+                    'data: {"current":243,"total":935,"percent":25}\n',
+                    '\n',
+                    'event: delta\n',
+                    'data: {"text":"<|tool_call>call:exec_shell_full_command{command:<|\\"|>cat note.txt<|\\"|>}<tool_call|>"}\n',
+                    '\n',
+                    'event: done\n',
+                    'data: {"finish_reason":"tool_calls"}\n',
+                    '\n',
+                ]
+            ),
+            on_delta=emitted.append,
+            on_progress=lambda _item: None,
+        )
+
+        self.assertEqual(emitted, [])
+        self.assertEqual(result.content, "")
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(result.tool_calls[0]["function"]["name"], "exec_shell_full_command")
+        self.assertEqual(result.tool_calls[0]["function"]["arguments"], '{"command": "cat note.txt"}')
 
 
 if __name__ == "__main__":

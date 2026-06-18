@@ -37,5 +37,21 @@ class PayloadTests(unittest.TestCase):
             [{"role": "tool", "tool_call_id": "call-1", "name": "read_file", "content": "compact"}],
         )
 
+    def test_build_chat_payload_includes_thinking_flag(self) -> None:
+        payload = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0,
+                max_tokens=32,
+                thinking=True,
+            )
+        )
+
+        self.assertTrue(payload["thinking"])
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": True})
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertEqual(payload["messages"][0]["content"], "hello")
+
 if __name__ == "__main__":
     unittest.main()

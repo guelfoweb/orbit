@@ -36,7 +36,7 @@ usage() {
 usage: scripts/gemma4-12b-server.sh start [--multimodal] [--mtp]
        scripts/gemma4-12b-server.sh stop
        scripts/gemma4-12b-server.sh status
-       scripts/gemma4-12b-server.sh download [--mtp]
+       scripts/gemma4-12b-server.sh download [--multimodal] [--mtp]
 
 Starts/stops llama-server for the tuned Gemma 4 12B instruction-tuned Orbit profile.
 
@@ -179,6 +179,9 @@ download_with_llama_server() {
 
 download_models() {
   download_with_llama_server "$MAIN_MODEL_REPO" "$MAIN_MODEL_FILE"
+  if [ "$MULTIMODAL" -eq 1 ]; then
+    download_with_llama_server "$MAIN_MODEL_REPO" "mmproj-gemma-4-12B-it-Q8_0.gguf"
+  fi
   if [ "$MTP" -eq 1 ]; then
     download_with_llama_server "$MTP_MODEL_REPO" "$MTP_MODEL_FILE"
   fi
