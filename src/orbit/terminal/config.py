@@ -37,7 +37,7 @@ class AppConfig:
 
 def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to optional JSON config file.")
-    parser.add_argument("--base-url", help="llama-server base URL.")
+    parser.add_argument("--base-url", help="Local backend base URL.")
     parser.add_argument("--workdir", help="Working directory used for session identity.")
     parser.add_argument("--timeout", type=float, help="HTTP timeout in seconds.")
     parser.add_argument("--temperature", type=float)

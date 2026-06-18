@@ -20,7 +20,7 @@ def help_text() -> str:
     commands = [
         ("/compact [tools]", "Compact memory; use tools for old tool results."),
         ("/continue", "Continue the last answer if it reached max_tokens."),
-        ("/health", "Check llama-server health."),
+        ("/health", "Check backend health."),
         ("/help", "Show this help."),
         ("/max-tokens [n]", "Show or set output token limit for following turns."),
         ("/think [off|on]", "Show or set thinking visibility."),
@@ -43,7 +43,7 @@ def health_text(backend: LlamaServerBackend, config: AppConfig) -> str:
         f"server: {'ok' if healthy else 'unavailable'}",
     ]
     if not healthy:
-        lines.append("hint: start llama-server before launching Orbit")
+        lines.append("hint: start a local backend before launching Orbit")
         return "\n".join(lines)
     info = backend.model_info()
     display_model = (info.id if info and info.id else None) or backend.display_model_name() or "unknown"

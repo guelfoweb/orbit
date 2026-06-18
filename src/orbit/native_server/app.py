@@ -137,7 +137,7 @@ class OrbitNativeServer:
 
 
 class OrbitNativeHandler(BaseHTTPRequestHandler):
-    server_version = "orbit-server/experimental"
+    server_version = "orbit-server"
 
     def do_GET(self) -> None:
         if self.path == "/health":

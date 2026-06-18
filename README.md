@@ -1,77 +1,45 @@
 # orbit
 
-Minimal local agentic CLI for `llama.cpp` / `llama-server`.
+Minimal local agentic CLI centered on native `orbit-server`, with optional compatibility for other OpenAI-compatible local backends.
 
-Orbit is designed around `gemma4:12b-it`, local execution, prompt-cache awareness, streaming output, and CPU-only usability.
+Orbit is designed around Gemma 4, local execution, streaming output, shell-tool opt-in, and CPU-only usability. The native path supports chat, tools, session reuse, MTP, and multimodal input without requiring `llama-server` as the primary backend.
 
-It is developed and tested primarily on Linux. macOS may work if `llama-server` and the model files are available. Windows is not a target environment.
+Linux is the main target environment. macOS may work. Windows is not a target environment.
 
 ## What it does
 
-- Chat with a local `llama-server` model.
-- Stream assistant responses in the terminal.
-- Enable or disable unrestricted shell tools at runtime.
-- Let the model use the local shell for files, web fetches, edits, system inspection, and automation when tools are enabled.
-- Attach local images or audio files in one-shot mode when the server is started with multimodal support, including native `orbit-server` when a matching `mmproj` is available.
-- Keep lightweight sessions and prompt history under `~/.orbit`.
+- chats with a local model through a small terminal CLI
+- streams answers and runtime metrics
+- exposes unrestricted local shell only when `/tools on` is enabled
+- keeps the tool loop model-driven
+- supports local image and audio input when the backend is started with multimodal support
+- supports native MTP when target and draft models are available
+- stores lightweight sessions and prompt history under `~/.orbit`
 
-Orbit stays model-driven: the model decides when tools are needed. The runtime only enforces safety, path, size, timeout, and tool-contract boundaries.
+Orbit stays model-driven. The runtime enforces safety, size, timeout, and tool-contract boundaries, but it does not deterministically solve user tasks.
+
+## Backend stance
+
+- Primary backend path: native `orbit-server`
+- Compatibility path: `llama-server` or another OpenAI-compatible local backend
+- CLI default base URL: `http://127.0.0.1:18080`
+
+If your native server runs on another port, pass `--base-url`.
 
 ## Requirements
 
-- Python 3.11 or newer.
-- `llama-server` available in `PATH`.
-- Gemma 4 12B instruction-tuned GGUF model.
-- Matching Gemma 4 MTP draft GGUF model for the default server profile.
-- Linux recommended.
+- Python 3.11 or newer
+- Linux recommended
+- a local Gemma 4 target GGUF model
 
-Optional multimodal support requires the matching `mmproj-gemma-4-12B-it-Q8_0.gguf` projector.
+Optional artifacts:
+
+- MTP draft GGUF for native speculative decoding
+- matching `mmproj` GGUF for multimodal image/audio input
 
 ## Quick start
 
-Follow these steps in order.
-
-### 1. Install system packages
-
-On Debian/Ubuntu-like systems, install the basic build tools first:
-
-```bash
-sudo apt update
-sudo apt install -y git cmake build-essential python3 python3-venv
-```
-
-### 2. Build llama.cpp
-
-Orbit is tested with a Gemma 4 compatible `llama.cpp` fork:
-
-```text
-https://github.com/qualcomm/llama.cpp
-branch: gemma-4-support-smaller-assistants
-```
-
-Use this build for Orbit's default MTP speculative decoding profile:
-
-```bash
-git clone https://github.com/qualcomm/llama.cpp.git llama.cpp-gemma4
-cd llama.cpp-gemma4
-git checkout gemma-4-support-smaller-assistants
-cmake -B build -DGGML_NATIVE=ON -DGGML_BLAS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
-cmake --build build --config Release -j"$(nproc)"
-export PATH="$PWD/build/bin:$PATH"
-```
-
-Verify:
-
-```bash
-llama-server --version
-```
-
-This step is required before any model download command, because Orbit's helper
-uses `llama-server -hf` to fetch GGUF files into the Hugging Face cache.
-
-### 3. Install Orbit
-
-Clone this repository and install the CLI:
+### 1. Install Orbit
 
 ```bash
 git clone https://github.com/guelfoweb/orbit.git
@@ -81,374 +49,130 @@ python3 -m venv .venv
 pip install -e .
 ```
 
-### 4. Download the model
+### 2. Download models
 
-Use the Orbit helper to download the main GGUF model and the MTP draft model
-into the standard Hugging Face cache:
-
-```bash
-scripts/gemma4-12b-server.sh download --mtp
-```
-
-If you also want the multimodal projector for `llama-server` or native
-`orbit-server`, download it in the same step:
+Download only the target model:
 
 ```bash
-scripts/gemma4-12b-server.sh download --multimodal --mtp
+orbit download ggml-org/gemma-4-12B-it-GGUF
 ```
 
-The native downloader can fetch the projector directly from the registry too:
+Download only the multimodal projector:
 
 ```bash
-orbit download --mmproj ggml-org/gemma-4-12B-it-GGUF
+orbit download ggml-org/gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
 
-Or download the full local stack in one command:
+Download only the MTP draft:
+
+```bash
+orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+```
+
+Download the full local stack declared by the registry:
 
 ```bash
 orbit download --all ggml-org/gemma-4-12B-it-GGUF
 ```
 
-Internally this uses:
+### 3. Start the native backend
+
+Basic native server:
 
 ```bash
-llama-server -hf ggml-org/gemma-4-12B-it-GGUF --hf-file gemma-4-12B-it-Q4_K_M.gguf
-llama-server -hf unsloth/gemma-4-12b-it-GGUF --hf-file MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+PYTHONPATH=src python3 scripts/orbit-server.py --port 18081
 ```
 
-If `llama-server` starts after the download, stop it with `Ctrl+C`.
-
-### 5. Start Orbit
-
-Optionally inspect a suggested CPU profile for your machine:
+With MTP experimental path enabled:
 
 ```bash
-scripts/suggest-server-profile.sh
+PYTHONPATH=src python3 scripts/orbit-server.py --port 18081 --enable-mtp-experimental
 ```
 
-If you want to use the suggested profile, export the printed values before
-starting the server.
-
-Start the tuned local server with the default MTP profile:
+With a multimodal projector:
 
 ```bash
-scripts/gemma4-12b-server.sh start --mtp
+PYTHONPATH=src python3 scripts/orbit-server.py \
+  --port 18081 \
+  --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
 
-Then start Orbit:
+You can combine MTP and multimodal flags when both artifacts are available.
+
+### 4. Start Orbit
 
 ```bash
-orbit
+orbit --base-url http://127.0.0.1:18081
 ```
 
-Inside Orbit, tools start disabled. Enable shell tools only when you need local or web operations:
+Inside Orbit, tools are off by default:
 
 ```text
 /tools on
 ```
 
-If something fails, run:
+## One-shot usage
 
 ```bash
-scripts/gemma4-12b-server.sh status
-tail -n 80 ~/.orbit/gemma4-12b-server.log
+orbit --base-url http://127.0.0.1:18081 "Say who you are in one short sentence."
+orbit --base-url http://127.0.0.1:18081 --image workdir/media/image1.jpg "Describe this image."
+orbit --base-url http://127.0.0.1:18081 --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
 ```
 
-## Model paths
+## Thinking mode
 
-Orbit's server helper automatically searches the default Hugging Face cache
-paths created by `llama-server -hf`:
+Orbit supports runtime thinking visibility:
 
 ```text
-~/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/<snapshot>/gemma-4-12B-it-Q4_K_M.gguf
-~/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/snapshots/<snapshot>/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+/think off
+/think on
 ```
 
-If the model files are elsewhere, set:
+- `think off`: do not request visible reasoning
+- `think on`: request visible reasoning first, then the final answer
 
-```bash
-MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf
-MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf
-```
-
-The helper starts `llama-server` on `http://127.0.0.1:18080`.
-
-Stop it with:
-
-```bash
-scripts/gemma4-12b-server.sh stop
-```
-
-Check status with:
-
-```bash
-scripts/gemma4-12b-server.sh status
-```
-
-If you need a custom model path at startup:
-
-```bash
-MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf \
-MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf \
-scripts/gemma4-12b-server.sh start --mtp
-```
-
-Override the detected paths if needed:
-
-```bash
-MODEL_PATH=/path/to/gemma-4-12B-it-Q4_K_M.gguf \
-MTP_LLAMA_SERVER_BIN=/path/to/compatible/llama-server \
-MTP_DRAFT_PATH=/path/to/gemma-4-12b-it-Q8_0-MTP.gguf \
-scripts/gemma4-12b-server.sh start --mtp
-```
-
-See [MTP speculative decoding](docs/PERFORMANCE.md#mtp-speculative-decoding)
-for benchmark notes.
-
-## Run orbit
-
-Interactive mode:
-
-```bash
-orbit
-```
-
-One-shot mode:
-
-```bash
-orbit "Say who you are in one short sentence."
-```
-
-Health check:
-
-```bash
-orbit --health
-```
-
-Show tool modes:
-
-```bash
-orbit /tools
-```
-
-If your server uses a different URL:
-
-```bash
-orbit --base-url http://127.0.0.1:18080
-```
+The backend and model must actually support visible reasoning for this to appear correctly.
 
 ## Interactive commands
 
 ```text
-/compact [tools]  Compact conversation memory or old tool results.
+/compact [tools]  Compact memory or old tool results.
 /continue         Continue the last answer if it reached max_tokens.
-/health           Check llama-server health.
+/health           Check backend health.
 /help             Show this help.
 /max-tokens [n]   Show or set output token limit for following turns.
+/think [off|on]   Show or set thinking visibility.
 /reset            Clear current conversation and saved session.
 /sessions clear   Delete all saved sessions for this workdir.
 /status [ctx]     Show runtime status or estimated context usage.
-/tools [spec]     Show or set tools: off or on.
+/tools [off|on]   Show or set shell tool access.
 /exit             Exit interactive mode.
 ```
 
 `/max-tokens <n>` affects only the current runtime. It does not rewrite config or session files.
 
-## Tool mode
+## Compatibility path
 
-Orbit starts chat-only unless configured otherwise.
+Orbit can still talk to compatible local HTTP backends through `--base-url`. Keep this as compatibility or comparison, not as the preferred product path.
 
-This is intentional. With tools off, Orbit does not send tool schemas and does
-not enter the tool loop, so ordinary chat turns are lighter and cheaper during
-prefill.
-
-Orbit currently has a single operational tool mode:
-
-```text
-/tools off = chat only
-/tools on  = unrestricted local shell for files, web, edits, system, and automation
-```
-
-Examples:
-
-```text
-/tools off
-/tools on
-```
-
-`off` keeps Orbit in chat-only mode. `on` exposes only one model-facing tool:
-`exec_shell_full_command`.
-
-When tools are on, the model can run arbitrary shell commands from the
-configured workdir. Commands may read, write, delete, execute programs, access
-the network, and access paths outside the workdir. Use this mode only in a
-disposable lab environment.
-
-## Common usage profiles
-
-For ordinary chat, keep tools disabled:
-
-```text
-/tools off
-```
-
-For local files, URLs, shell automation, system inspection, edits, or isolated
-analysis work:
-
-```text
-/tools on
-```
-
-If a session starts feeling slow, check the active context:
-
-```text
-/status ctx
-```
-
-When old tool results dominate the context, compact only those results:
-
-```text
-/compact tools
-```
-
-## Shell tool mode
-
-`/tools on` is an explicit lab mode for tasks that need local commands.
-It runs from the configured `--workdir`.
-
-Recommended startup:
+The legacy helper:
 
 ```bash
-orbit --workdir workdir
+scripts/gemma4-12b-server.sh
 ```
 
-```text
-/tools on
-Inspect samples/suspicious_dropper_demo.js without executing it. Return suspicious URLs, IPs, encoded payloads, or execution-related strings.
-```
-
-Do not use `/tools on` on a normal working directory unless you accept the risk.
-Use a disposable lab directory for malware analysis, reverse engineering, or
-commands with side effects.
-
-## Safety boundaries
-
-- Tools are off by default.
-- `/tools on` exposes only `exec_shell_full_command`.
-- `exec_shell_full_command` is unrestricted except for timeout/output limits.
-- The runtime does not sandbox or validate shell commands in this mode.
-- Shell commands run from the configured `--workdir`, but may access paths outside it.
-- Generic web search uses the internal shell command `orbit-web-search "query"` when the model decides it is needed.
-- Explicit URLs are fetched by shell commands such as `curl`.
-- Long files and long web pages are handled by bounded shell output and post-processing.
-
-Current read limits:
-
-```text
-complete read: up to 256 KB
-chunk mode: files up to 1 MB
-chunk size: 6k chars by default, 12k chars max
-chunk calls: max 3 per user turn
-```
-
-## Images and audio
-
-Images and audio are optional. Skip this section for normal text usage.
-
-Start `llama-server` with multimodal support:
-
-```bash
-scripts/gemma4-12b-server.sh start --multimodal
-```
-
-If the projector is not in the default cache path:
-
-```bash
-MMPROJ_PATH=/path/to/mmproj-gemma-4-12B-it-Q8_0.gguf \
-scripts/gemma4-12b-server.sh start --multimodal
-```
-
-Image one-shot:
-
-```bash
-orbit --image path/to/image.jpg "Describe this image in one short sentence."
-```
-
-Audio one-shot:
-
-```bash
-orbit --audio path/to/audio.wav "Transcribe this audio."
-```
-
-Supported image types: JPEG, PNG, WebP.
-
-Supported audio types: WAV, MP3. Audio support in `llama.cpp` is experimental and can be slow.
-
-Native `orbit-server` also supports the same one-shot image/audio inputs when the target model is bootstrapped with a matching `mmproj`:
-
-```bash
-PYTHONPATH=src python3 scripts/orbit-server.py --port 18082
-```
-
-If the projector is not resolved automatically from `models/` or the Hugging Face cache, pass it explicitly:
-
-```bash
-PYTHONPATH=src python3 scripts/orbit-server.py \
-  --port 18082 \
-  --mmproj /path/to/mmproj-gemma-4-12B-it-Q8_0.gguf
-```
-
-The native backend keeps multimodal prefill in the standard path. Persistent MTP remains a text-only optimization path and is not used for image/audio turns.
-
-## Config
-
-Optional config file:
-
-```bash
-mkdir -p ~/.orbit
-cat > ~/.orbit/config.json <<'JSON'
-{
-  "base_url": "http://127.0.0.1:18080",
-  "workdir": ".",
-  "timeout": 300,
-  "temperature": 0,
-  "max_tokens": 512,
-  "tools": "off"
-}
-JSON
-```
-
-CLI flags override config values.
-
-## Sessions and history
-
-- Sessions are stored under `~/.orbit/sessions`.
-- Prompt history is stored under `~/.orbit/history` when `readline` is available.
-- Slash commands are not stored in prompt history.
-- Duplicate prompts are collapsed.
-- Long pasted prompts are displayed compactly but preserved internally.
+is kept only as a compatibility/startup helper for `llama-server`-based local setups.
 
 ## Troubleshooting
 
-- `llama-server not found in PATH`: build `llama.cpp` and export `PATH=/path/to/llama.cpp/build/bin:$PATH`.
-- `gemma-4-12B-it-Q4_K_M.gguf not found`: run `scripts/gemma4-12b-server.sh download --mtp` or set `MODEL_PATH`.
-- `multimodal projector not found`: set `MMPROJ_PATH`.
-- `MTP draft not found`: run `scripts/gemma4-12b-server.sh download --mtp` or set `MTP_DRAFT_PATH`.
-- `unknown model architecture: gemma4-assistant`: use a compatible MTP fork via `MTP_LLAMA_SERVER_BIN`.
-- `existing llama-server is not multimodal`: stop it, then restart with `start --multimodal`.
-- Another process owns the port: stop it or change `PORT` / `BASE_URL`.
+- backend unavailable: check `orbit --health --base-url ...`
+- model not found: verify the Orbit models cache or explicit model paths
+- multimodal unavailable: ensure the matching `mmproj` is present and the backend was started with it
+- MTP unavailable: ensure both target and draft models are available and the backend was started with the experimental MTP path
 
-## Tests
+## Benchmarks and prompts
 
-```bash
-python3 -m unittest discover -s tests -q
-```
-
-Manual regression prompts are kept in [docs/PROMPTS.md](docs/PROMPTS.md).
-
-The public regression benchmark is available as `scripts/bench-core.sh`.
-It uses the repository `workdir/` fixture by default.
-
-Performance design notes are kept in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
-
-Runtime techniques are kept in [docs/TECHNIQUES.md](docs/TECHNIQUES.md).
+- performance notes: [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+- runtime techniques: [docs/TECHNIQUES.md](docs/TECHNIQUES.md)
+- manual regression prompts: [docs/PROMPTS.md](docs/PROMPTS.md)
+- release confidence suite: [docs/RELEASE_CONFIDENCE.md](docs/RELEASE_CONFIDENCE.md)

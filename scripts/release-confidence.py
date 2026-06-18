@@ -605,11 +605,11 @@ def run_case(case: Case, *, base_url: str, timeout: int, max_tokens: int, keep_f
 def health_check(base_url: str, timeout: int) -> None:
     backend = LlamaServerBackend(base_url=base_url, timeout=timeout)
     if not backend.health():
-        raise SystemExit(f"error: llama-server is not healthy at {base_url}")
+        raise SystemExit(f"error: backend is not healthy at {base_url}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Orbit release confidence tests against llama-server.")
+    parser = argparse.ArgumentParser(description="Run Orbit release confidence tests against a local backend.")
     parser.add_argument("--base-url", default=os.environ.get("ORBIT_BASE_URL", "http://127.0.0.1:18080"))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("ORBIT_TEST_TIMEOUT", "300")))
     parser.add_argument("--max-tokens", type=int, default=int(os.environ.get("ORBIT_TEST_MAX_TOKENS", "320")))

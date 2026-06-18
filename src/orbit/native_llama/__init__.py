@@ -1,6 +1,5 @@
-"""Experimental native llama.cpp client.
+"""Native llama.cpp integration for Orbit.
 
-This package is intentionally isolated from the production llama-server backend.
-It exists to measure whether direct llama.cpp control is worth the maintenance
-cost.
+This package backs Orbit's native local-server path and stays isolated from the
+rest of the runtime so backend-specific inference details do not leak upward.
 """

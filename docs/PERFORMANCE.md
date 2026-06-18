@@ -1,248 +1,103 @@
 # Performance notes
 
-Orbit is optimized for a specific constraint: running a useful local agentic CLI with Gemma 4 12B on CPU-only, mid-tier hardware.
+Orbit is tuned for a practical local-agent constraint: Gemma 4 on CPU-only hardware, low operational complexity, and model-driven behavior.
 
-The goal is not maximum theoretical throughput. The goal is practical end-to-end latency while keeping the runtime model-driven, safe, inspectable, and predictable.
+The goal is not maximum synthetic throughput. The goal is predictable end-to-end latency without turning Orbit into a deterministic workflow engine.
 
 ## Baseline assumptions
 
-- Backend: local `llama-server`.
-- Model: Gemma 4 12B instruction-tuned GGUF.
-- Target profile: CPU-only machine, no dedicated GPU.
-- Context window: 8192 tokens.
-- Runtime style: model-driven routing and final answers.
-- Tools: disabled by default; one explicit shell tool mode when enabled.
-- Recommended `llama.cpp` build: Gemma 4 compatible fork/branch documented in
-  the README.
+- primary backend: native `orbit-server`
+- compatibility backend: `llama-server` or another OpenAI-compatible local backend
+- model family: Gemma 4 GGUF
+- context target: 8192 tokens
+- tools: off by default
+- runtime style: model-driven routing, tool loop, and final answer
 
-Orbit does not replace the model's reasoning with deterministic task answers. The runtime optimizes what the model sees, when tools are exposed, how much context is injected, and when boundaries are enforced.
+## Native backend profile
 
-## Reference hardware
-
-The default profile was tuned on this CPU-only machine:
+The stable CPU-oriented native profile is:
 
 ```text
-Machine class: Intel NUC 10 class system
-CPU: Intel Core i7-10710U @ 1.10 GHz
-Physical cores: 6
-Logical CPUs: 12
-Architecture: x86_64
-L3 cache: 12 MiB
-RAM: 62 GiB visible
-Swap: 2 GiB
-GPU acceleration: none
+threads=6
+threads_batch=6
+ctx_size=8192
+batch_size=256
+ubatch_size=128
+parallel_slots=1
 ```
 
-This is a general-purpose workstation class machine, not an AI workstation. The selected defaults favor stability and acceptable latency over aggressive throughput.
+These defaults favor stability on CPU-only systems. Change them only with comparable benchmarks.
 
-## Server profile
+## MTP
 
-The default helper script starts `llama-server` with conservative CPU-oriented settings:
+Native MTP is supported through:
 
-```bash
-THREADS=6
-BATCH_SIZE=256
-UBATCH_SIZE=128
-CACHE_RAM=8192
-CTX_SIZE=8192
-PARALLEL_SLOTS=1
-```
+- target model GGUF
+- draft MTP GGUF
+- persistent session state
+- conservative fallback to standard generation
 
-The main server flags are:
+Practical points:
 
-```bash
-llama-server \
-  -c 8192 \
-  -t 6 \
-  -b 256 \
-  -ub 128 \
-  -np 1 \
-  --reasoning off \
-  --cache-ram 8192
-```
+- MTP primarily helps generation, not prompt prefill
+- long or tool-heavy prompts are still dominated by prefill and reinjection costs
+- CPU-only latency is sensitive to scheduler noise
+- comparative MTP benchmarks should use fixed CPU affinity, for example `taskset -c 0-5`
 
-These defaults were chosen for stability on CPU-only systems. Faster machines can raise `THREADS`, `BATCH_SIZE`, `UBATCH_SIZE`, and `CACHE_RAM`, but changes should be benchmarked instead of assumed.
+## Multimodal
 
-## MTP speculative decoding
+Multimodal support adds a third artifact:
 
-MTP speculative decoding is the recommended default startup profile for Orbit.
+- target model
+- draft MTP model, if MTP is enabled
+- `mmproj` model for image/audio support
 
-The recommended `llama.cpp` build is the same Gemma 4 compatible fork used for
-standard mode. MTP adds a draft model and speculative decoding flags; it does
-not change Orbit's runtime philosophy.
+This affects startup and memory footprint more than token generation speed.
 
-In practical terms, MTP is speculative decoding:
+## Runtime techniques that matter most
 
-1. The main Gemma 4 12B model remains the authority for the final output.
-2. A smaller/specialized draft model proposes upcoming tokens in advance.
-3. The main model verifies the proposed tokens.
-4. Correct draft tokens can be accepted in batches.
-5. Incorrect draft tokens are discarded and generation continues normally.
-
-This can increase generation throughput because the main model does not always
-need to generate one token at a time. When the draft model predicts well, the
-main model validates multiple tokens more efficiently than producing each one
-sequentially.
-
-MTP mostly helps the generation phase (`gen/s`). It does not significantly
-reduce prefill cost (`pf/s`), because prefill is dominated by processing the
-input prompt, tool schemas, conversation context, and tool results.
-
-Operational tradeoffs:
-
-- It requires a compatible `llama-server` build.
-- It requires an additional draft model file.
-- It uses more memory than the baseline profile.
-- It is most useful when the final answer generates enough tokens to amortize
-  the extra draft-model work.
-
-The tested implementation came from:
-
-```text
-Repository: https://github.com/qualcomm/llama.cpp
-Branch: gemma-4-support-smaller-assistants
-```
-
-The tested server profile kept the same CPU-oriented settings used by the
-baseline:
-
-```bash
-THREADS=6
-BATCH_SIZE=256
-UBATCH_SIZE=128
-CACHE_RAM=8192
-CTX_SIZE=8192
-PARALLEL_SLOTS=1
-```
-
-The only relevant difference was enabling the draft MTP model:
-
-```bash
-llama-server \
-  -m <gemma-4-12B-it-Q4_K_M.gguf> \
-  --spec-type draft-mtp \
-  --model-draft <gemma-4-12b-it-Q8_0-MTP.gguf> \
-  -c 8192 \
-  -t 6 \
-  -b 256 \
-  -ub 128 \
-  -np 1 \
-  --reasoning off \
-  --cache-ram 8192
-```
-
-Observed CPU-only benchmark results:
-
-| Prompt | No MTP | MTP | Wall-time delta |
-| --- | ---: | ---: | ---: |
-| `hi, who are you?` | `pf 12.5/s`, `gen 3.5/s`, `11s` | `pf 16.5/s`, `gen 7.1/s`, `6s` | ~45% faster |
-| `tell me who designed you` | `pf 17.0/s`, `gen 4.2/s`, `6s` | `pf 15.5/s`, `gen 6.7/s`, `5s` | ~17% faster |
-| `search online for information about Agenzia per l'Italia Digitale` | `pf 10.7/s`, `gen 3.0/s`, `1m56s` | `pf 11.3/s`, `gen 4.1/s`, `1m28s` | ~24% faster |
-| `what configuration does this computer have?` | `pf 10.4/s`, `gen 3.2/s`, `3m00s` | `pf 11.8/s`, `gen 4.6/s`, `2m26s` | ~19% faster |
-
-The main gain was higher generation throughput. Prefill did not change as much,
-which is expected: MTP helps most when the final answer has enough generated
-tokens to amortize the extra draft model work.
-
-Because this depends on a fork/branch rather than the default upstream
-`llama.cpp` baseline, the compatible build and MTP draft model should be treated
-as part of the tested Orbit profile.
-
-## Runtime integration methods
-
-Orbit uses a set of runtime techniques to reduce latency without
-turning user tasks into deterministic fast paths.
-
-The detailed implementation notes are kept in [Techniques](TECHNIQUES.md).
-
-The main techniques are:
+The main latency wins in Orbit have come from:
 
 - tools off by default
-- separate chat and tools prompts
-- stable prompt prefixes for cache reuse
-- complete command decisions when obvious
-- adaptive prefill estimation
+- keeping chat and tool prompts separate
+- stable prompt prefixes for reuse
 - bounded tool-result reinjection
-- chunked long-file handling
-- HTML cleanup before reinjection
-- explicit URL fetch through `curl`
-- generic search through `orbit-web-search`
-- model-driven memory refresh
-- manual tool-result compaction
-- compact final-answer policy
+- short final answers by policy
+- explicit memory refresh instead of uncontrolled context growth
 
-## Terminal UX
-
-The terminal UI is intentionally simple.
-
-Performance-related UX choices:
-
-- streamed final answers
-- elapsed-time indicator before first token
-- compact tool events
-- dim metrics footer
-- compact preview for long pasted text
-- prompt history without duplicate prompts
-
-The user sees progress immediately, even when CPU-only inference is slow.
+Implementation notes are in [TECHNIQUES.md](TECHNIQUES.md).
 
 ## Benchmark discipline
 
-Orbit keeps one public regression benchmark helper:
+Public regression benchmark:
 
 ```bash
 scripts/bench-core.sh
 ```
 
-It exercises chat, file listing, short reads, longer reads, grep, and URL fetch
-through the normal CLI path. Deeper profiling should be done with temporary
-local scripts or manual measurements, not permanent project scripts.
+Rules:
 
-New performance changes should show measurable benefit before they are kept.
+- compare like with like
+- keep prompt, config, model, and backend mode identical
+- use fixed CPU affinity for serious CPU-only measurements
+- treat single-run differences as noise unless repeated
 
-## Benchmark findings
+## Main bottlenecks observed
 
-Across the Gemma 4 12B CPU-only benchmark runs, the main bottleneck was not route classification itself.
+The dominant costs have usually been:
 
-The highest costs usually came from:
+- prefill on large prompts, tool schemas, and tool results
+- long final generations
+- reinjection of large command output
+- scheduler noise on CPU-only runs
 
-- prefill on large or unstable prompt inputs
-- reinjecting large tool results into the final inference
-- final answers that were longer than the task required
+Micro-optimizing one function is less useful than reducing unnecessary inference work.
 
-The strongest improvements came from reducing unnecessary inference steps, keeping tool results bounded, and making final-answer policies more concise.
+## What Orbit intentionally does not optimize
 
-Backend tuning still matters, especially threads, batch size, micro-batch size, context size, and cache behavior. But after a stable server profile is found, removing avoidable model calls and avoidable output often has a larger practical impact than micro-optimizing backend flags.
+Orbit avoids optimizations that make behavior brittle or hide correctness issues:
 
-## What was intentionally not optimized
-
-Orbit avoids optimizations that would make behavior brittle:
-
-- no deterministic answers for normal user tasks
-- no hidden web-to-file save path
-- no automatic continuation after `finish=length`
-- no broad shell access by default
-- no generic browser tool
-- no silent local summarization of long text
-
-Broad shell access exists only after `/tools on` and should be used in isolated
-lab workdirs.
-
-The runtime can enforce boundaries, but the model remains responsible for reasoning, tool selection, and final answers.
-
-## Practical takeaway
-
-On CPU-only hardware, the biggest wins came from:
-
-1. Keeping tools off by default.
-2. Keeping one explicit shell tool surface.
-3. Making route/tool-call turns short.
-4. Keeping prompt prefixes stable for cache reuse.
-5. Bounding and structuring tool results.
-6. Chunking long text instead of flooding context.
-7. Reducing unnecessarily long final answers.
-8. Measuring every change before keeping it.
-
-The result is not a generic agent framework. It is a small, controlled local CLI tuned for a specific model and hardware class.
-
-For CPU-only local agents, reducing unnecessary inferences and unnecessary output often produces larger gains than increasing raw model throughput.
+- deterministic task-specific fast paths
+- hidden route rewrites
+- prompt surgery to fake speedups
+- broad architectural changes without benchmark evidence

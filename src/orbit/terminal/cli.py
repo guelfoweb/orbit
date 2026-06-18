@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("prompt", nargs="*", help="Prompt for one-shot mode. Omit for interactive mode.")
     parser.add_argument("--image", action="append", default=[], help="Attach a local image to a one-shot prompt.")
     parser.add_argument("--audio", action="append", default=[], help="Attach a local WAV or MP3 audio file to a one-shot prompt.")
-    parser.add_argument("--health", action="store_true", help="Check llama-server connectivity and model metadata.")
+    parser.add_argument("--health", action="store_true", help="Check backend connectivity and model metadata.")
     add_config_arguments(parser)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser

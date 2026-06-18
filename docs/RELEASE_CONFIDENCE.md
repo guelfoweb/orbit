@@ -2,7 +2,7 @@
 
 This suite checks Orbit as a lightweight coding agent before release. It uses isolated fixtures copied into `/tmp` and validates final behavior, not implementation details such as whether the model used `sed`, `python`, `perl`, or another shell strategy.
 
-Run it with a healthy local `llama-server`:
+Run it with a healthy local Orbit backend:
 
 ```bash
 python3 scripts/release-confidence.py --keep-failed

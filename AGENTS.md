@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the new `orbit` CLI built around `llama.cpp` / `llama-server`.
+This repository contains the `orbit` CLI built around local `llama.cpp`-based backends, with native `orbit-server` as the primary path.
 
 The tool name remains `orbit`. The repository directory may be temporary.
 
@@ -23,11 +23,11 @@ The tool name remains `orbit`. The repository directory may be temporary.
 
 ## Backend
 
-- Supported backend: local `llama-server`.
-- API style: OpenAI-compatible chat completions.
+- Primary backend: native `orbit-server`.
+- Compatibility backend: local OpenAI-compatible chat completions, including `llama-server`.
 - Default base URL: `http://127.0.0.1:18080`.
 - Primary target model: `gemma4:12b-it`.
-- Reasoning should be disabled at server startup for the current baseline.
+- Reasoning should remain disabled by default at backend startup unless explicitly testing visible thinking.
 - Context profiles are provided by helper scripts, not hidden runtime magic.
 
 ## Tools
@@ -113,7 +113,7 @@ Minimum checks before considering a change safe:
 python3 -m unittest discover -s tests -q
 ```
 
-When `llama-server` is running, also run at least one real smoke test for the changed area.
+When a local backend is running, also run at least one real smoke test for the changed area.
 
 Keep manual regression prompts in `docs/PROMPTS.md`. The file should stay short and focused on currently supported behavior.
 
@@ -128,7 +128,7 @@ For release confidence, use `scripts/release-confidence.py`. Its fixtures must s
 - Use `scripts/bench-core.sh` as the public regression benchmark.
 - `scripts/bench-core.sh` uses the repository `workdir/` fixture by default.
 - For deeper profiling, prefer temporary local scripts or manual measurements rather than adding permanent helper scripts.
-- Keep explicit `llama-server` slot/cache management out of the core runtime unless benchmarks justify it.
+- Keep explicit backend slot/cache management out of the core runtime unless benchmarks justify it.
 
 ## Todo
 
