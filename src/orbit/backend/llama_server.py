@@ -90,12 +90,16 @@ class LlamaServerBackend:
     def model_info(self) -> ModelInfo | None:
         if self._model_info_cache is not None:
             return self._model_info_cache
+        props = self._props_or_empty()
         try:
             data = self._get_json("/v1/models")
         except LlamaServerError:
-            return None
-        props = self._props_or_empty()
-        self._model_info_cache = _parse_model_info(data, model_path=_str_or_none(props.get("model_path")))
+            self._model_info_cache = _enrich_model_info_with_props(None, props)
+            return self._model_info_cache
+        self._model_info_cache = _enrich_model_info_with_props(
+            _parse_model_info(data, model_path=_str_or_none(props.get("model_path"))),
+            props,
+        )
         return self._model_info_cache
 
     def display_model_name(self) -> str | None:
@@ -125,6 +129,9 @@ class LlamaServerBackend:
             return []
         self._server_tools_cache = [item for item in data if isinstance(item, dict)]
         return self._server_tools_cache
+
+    def backend_props(self) -> dict[str, Any]:
+        return dict(self._props_or_empty())
 
     def execute_server_tool(self, name: str, arguments: dict[str, Any]) -> str:
         data = self._post_json("/tools", {"tool": name, "params": arguments})
@@ -613,6 +620,38 @@ def _parse_model_info(data: dict[str, Any], *, model_path: str | None = None) ->
         context_length=_int_or_none(meta.get("n_ctx")),
         parameter_count=_int_or_none(meta.get("n_params")),
         size_bytes=_int_or_none(meta.get("size")),
+    )
+
+
+def _enrich_model_info_with_props(info: ModelInfo | None, props: dict[str, Any]) -> ModelInfo | None:
+    capabilities = list(info.capabilities if info else ())
+    backend = _str_or_none(props.get("backend"))
+    if backend == "orbit-native" and "completion" not in capabilities:
+        capabilities.append("completion")
+    if bool(props.get("supports_vision")) and "vision" not in capabilities:
+        capabilities.append("vision")
+    if bool(props.get("supports_audio")) and "audio" not in capabilities:
+        capabilities.append("audio")
+    if bool(props.get("multimodal_available")) and "multimodal" not in capabilities:
+        capabilities.append("multimodal")
+    context_length = _int_or_none(props.get("ctx_size"))
+    if info is None:
+        model_id = resolve_model_display_name(_str_or_none(props.get("model_id")), model_path=_str_or_none(props.get("model_path")))
+        if not model_id and not capabilities and context_length is None:
+            return None
+        return ModelInfo(
+            id=model_id,
+            capabilities=tuple(capabilities),
+            context_length=context_length,
+            parameter_count=None,
+            size_bytes=None,
+        )
+    return ModelInfo(
+        id=info.id,
+        capabilities=tuple(capabilities) or info.capabilities,
+        context_length=info.context_length if info.context_length is not None else context_length,
+        parameter_count=info.parameter_count,
+        size_bytes=info.size_bytes,
     )
 
 

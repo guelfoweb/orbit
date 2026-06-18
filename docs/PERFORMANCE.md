@@ -72,7 +72,7 @@ Implementation notes are in [TECHNIQUES.md](TECHNIQUES.md).
 Public regression benchmark:
 
 ```bash
-scripts/bench-core.sh
+orbit bench-core --base-url http://127.0.0.1:11976
 ```
 
 Rules:

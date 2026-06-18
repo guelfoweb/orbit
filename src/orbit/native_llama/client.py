@@ -87,7 +87,16 @@ class NativeLlamaClient:
     def session_snapshot(self, session_id: str = DEFAULT_NATIVE_SESSION_ID) -> NativeSessionSnapshot:
         if session_id != self._session.session_id:
             raise ValueError("only the default native session is supported in this experiment")
-        return self._session.snapshot(backend_mode="no-mtp")
+        return self._session.snapshot(backend_mode=self._current_backend_mode())
+
+    def _current_backend_mode(self) -> str:
+        if not self.config.use_mtp_experimental:
+            return "no-mtp"
+        if self._last_completion_used_mtp:
+            return "mtp"
+        if self._session.mtp_enabled:
+            return "mtp-ready"
+        return "no-mtp"
 
     def set_quiet_logging(self) -> None:
         def log_cb(_level: int, _text: bytes, _data) -> None:

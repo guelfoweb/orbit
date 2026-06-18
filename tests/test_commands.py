@@ -134,6 +134,21 @@ class CommandTests(unittest.TestCase):
 
         self.assertIn("thinking_mode: on", status)
 
+    def test_runtime_status_shows_native_backend_runtime_details(self) -> None:
+        backend = FakeNativeStatusBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        status = runtime_status(runtime, AppConfig(think=True), backend)
+
+        self.assertIn("Backend runtime\n---------------", status)
+        self.assertIn("backend: orbit-native", status)
+        self.assertIn("backend_mode: no-mtp", status)
+        self.assertIn("session_id: default", status)
+        self.assertIn("threads: 6", status)
+        self.assertIn("ctx_size: 8192", status)
+        self.assertIn("mtp_available: yes", status)
+        self.assertIn("multimodal_available: yes", status)
+
     def test_tools_text_shows_user_selectable_specs_only(self) -> None:
         output = tools_text("off")
 
@@ -150,6 +165,9 @@ class CommandTests(unittest.TestCase):
 
 
 class FakeStatusBackend:
+    def backend_props(self) -> dict[str, object]:
+        return {}
+
     def model_info(self) -> ModelInfo:
         return ModelInfo(
             id="gemma4:12b",
@@ -178,6 +196,26 @@ class FakeFullToolBackend(FakeStatusBackend):
             {"tool": "edit_file"},
             {"tool": "apply_diff"},
         ]
+
+
+class FakeNativeStatusBackend(FakeStatusBackend):
+    def backend_props(self) -> dict[str, object]:
+        return {
+            "backend": "orbit-native",
+            "backend_mode": "no-mtp",
+            "session_id": "default",
+            "cached_tokens": 128,
+            "in_flight": False,
+            "threads": 6,
+            "threads_batch": 6,
+            "ctx_size": 8192,
+            "batch_size": 256,
+            "ubatch_size": 128,
+            "parallel_slots": 1,
+            "mtp_available": True,
+            "mtp_enabled": False,
+            "multimodal_available": True,
+        }
 
 
 if __name__ == "__main__":

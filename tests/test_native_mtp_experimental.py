@@ -24,8 +24,8 @@ class NativeMtpExperimentalTests(unittest.TestCase):
             model_id="gemma4-12b-it-q4km",
         )
 
-    def test_parser_accepts_enable_mtp_experimental_flag(self) -> None:
-        args = build_parser().parse_args(["--enable-mtp-experimental"])
+    def test_parser_accepts_mtp_flag(self) -> None:
+        args = build_parser().parse_args(["--mtp"])
         self.assertTrue(args.enable_mtp_experimental)
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")

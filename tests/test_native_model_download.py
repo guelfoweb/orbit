@@ -126,6 +126,10 @@ class NativeModelDownloadTests(unittest.TestCase):
         self.assertIn("https://huggingface.co/ggml-org/gemma-4-12B-it-GGUF/resolve/main/mmproj-gemma-4-12B-it-Q8_0.gguf", seen)
         self.assertIn("https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/MTP/gemma-4-12b-it-Q8_0-MTP.gguf", seen)
 
+    def test_parse_repo_without_spec_still_requires_explicit_call_path(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_huggingface_spec("")
+
 
 if __name__ == "__main__":
     unittest.main()

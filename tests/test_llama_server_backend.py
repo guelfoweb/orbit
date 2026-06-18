@@ -11,7 +11,14 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.backend.llama_server import LlamaServerBackend, _parse_chat_result, _parse_chat_stream, _parse_model_info, _parse_native_stream
+from orbit.backend.llama_server import (
+    LlamaServerBackend,
+    _enrich_model_info_with_props,
+    _parse_chat_result,
+    _parse_chat_stream,
+    _parse_model_info,
+    _parse_native_stream,
+)
 from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
 from orbit.backend import model_names
 
@@ -40,6 +47,27 @@ class FakeNativeStreamWithTrailingNoise:
 
 
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_enrich_model_info_with_native_props_adds_context_and_capabilities(self) -> None:
+        enriched = _enrich_model_info_with_props(
+            None,
+            {
+                "backend": "orbit-native",
+                "model_id": "gemma4-12b-it-q4km",
+                "model_path": "/models/target.gguf",
+                "ctx_size": 8192,
+                "supports_vision": True,
+                "supports_audio": True,
+                "multimodal_available": True,
+            },
+        )
+
+        assert enriched is not None
+        self.assertEqual(enriched.context_length, 8192)
+        self.assertIn("completion", enriched.capabilities)
+        self.assertIn("vision", enriched.capabilities)
+        self.assertIn("audio", enriched.capabilities)
+        self.assertIn("multimodal", enriched.capabilities)
+
     def test_chat_stream_uses_native_stream_for_orbit_backend_even_with_tools(self) -> None:
         class Backend(LlamaServerBackend):
             def __init__(self) -> None:

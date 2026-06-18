@@ -163,7 +163,10 @@ cat <<EOF
 # logical_cpus: $CPUS
 # memory_gib: $RAM_GIB
 # profile: $PROFILE
-# These values are suggestions. Review them before exporting.
+# These values are suggestions for orbit server. Review them before exporting.
+# Typical use:
+#   export THREADS=$THREADS BATCH_SIZE=$BATCH_SIZE UBATCH_SIZE=$UBATCH_SIZE CACHE_RAM=$CACHE_RAM
+#   orbit server --port 11976 --mtp
 
 export THREADS=$THREADS
 export BATCH_SIZE=$BATCH_SIZE

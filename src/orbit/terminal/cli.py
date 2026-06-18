@@ -6,7 +6,10 @@ import time
 
 from orbit import __version__
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
+from orbit.dev.bench_core import main as bench_core_main
+from orbit.dev.release_confidence import main as release_confidence_main
 from orbit.native_llama.download_cli import main as native_download_main
+from orbit.native_server.app import run_server
 from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.media import load_audio, load_image
@@ -32,7 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
             "extra commands:\n"
             "  orbit download <repo-or-file.gguf>\n"
             "  orbit download --mmproj <repo>\n"
-            "  orbit download --all <repo>\n"
+            "  orbit download --all [repo]\n"
+            "  orbit server [options]\n"
+            "  orbit bench-core [options]\n"
+            "  orbit release-confidence [options]\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -49,6 +55,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "download":
         return native_download_main(argv)
+    if argv and argv[0] == "server":
+        return run_server(argv[1:])
+    if argv and argv[0] == "bench-core":
+        return bench_core_main(argv[1:], orbit_bin=sys.argv[0])
+    if argv and argv[0] == "release-confidence":
+        return release_confidence_main(argv[1:])
     args = build_parser().parse_args(argv)
     try:
         config = load_app_config(args)

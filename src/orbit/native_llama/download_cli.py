@@ -5,13 +5,14 @@ from pathlib import Path
 import sys
 
 from orbit.native_llama.model_download import download_all_for_repo, download_model
-from orbit.native_llama.model_registry import default_models_dir
+from orbit.native_llama.model_registry import default_models_dir, get_manifest
+from orbit.native_llama.paths import DEFAULT_MODEL_ID
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orbit download")
-    parser.add_argument("spec", help="Hugging Face repo or repo/path/to/model.gguf")
-    parser.add_argument("--all", action="store_true", help="Download all registry-declared artifacts for a known model repo: target GGUF, multimodal projector, and draft MTP when present.")
+    parser.add_argument("spec", nargs="?", help="Hugging Face repo or repo/path/to/model.gguf")
+    parser.add_argument("--all", action="store_true", help="Download all registry-declared artifacts for the default native model when no repo is provided: target GGUF, multimodal projector, and draft MTP when present.")
     parser.add_argument("--mmproj", action="store_true", help="When spec is a repo, download the registry-declared multimodal projector instead of the target GGUF.")
     parser.add_argument("--models-dir", help="Override Orbit model cache directory.")
     return parser
@@ -29,11 +30,15 @@ def _download(args: argparse.Namespace) -> int:
             if args.mmproj:
                 print("error: --all cannot be combined with --mmproj", file=sys.stderr)
                 return 1
-            batch = download_all_for_repo(args.spec, models_dir=models_dir)
+            repo = args.spec or get_manifest(DEFAULT_MODEL_ID).target.repo
+            batch = download_all_for_repo(repo, models_dir=models_dir)
             for result in batch.results:
                 action = "downloaded" if result.downloaded else "already present"
                 print(f"{action}: {result.path}")
             return 0
+        if not args.spec:
+            print("error: expected Hugging Face repo or repo/file", file=sys.stderr)
+            return 1
         result = download_model(args.spec, models_dir=models_dir, prefer="mmproj" if args.mmproj else "target")
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -5,8 +5,10 @@ This suite checks Orbit as a lightweight coding agent before release. It uses is
 Run it with a healthy local Orbit backend:
 
 ```bash
-python3 scripts/release-confidence.py --keep-failed
+orbit release-confidence --keep-failed
 ```
+
+If you are using the native backend default path, this means `orbit-server` running on `http://127.0.0.1:11976`.
 
 The suite writes a machine-readable report to `/tmp/orbit-release-confidence.json`.
 

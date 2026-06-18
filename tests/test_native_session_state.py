@@ -38,6 +38,25 @@ class NativeSessionStateTests(unittest.TestCase):
         self.assertIsNone(snapshot.last_metrics)
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_session_snapshot_shows_mtp_ready_when_enabled_but_unused(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._session.mtp_enabled = True
+
+        snapshot = client.session_snapshot()
+
+        self.assertEqual(snapshot.backend_mode, "mtp-ready")
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_session_snapshot_shows_mtp_when_last_completion_used_mtp(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._session.mtp_enabled = True
+        client._last_completion_used_mtp = True
+
+        snapshot = client.session_snapshot()
+
+        self.assertEqual(snapshot.backend_mode, "mtp")
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_session_snapshot_reflects_cached_tokens_cancel_and_last_metrics(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig())
         client._session.cached_prompt_tokens = [1, 2, 3, 4]

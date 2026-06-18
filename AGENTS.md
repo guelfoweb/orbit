@@ -117,7 +117,7 @@ When a local backend is running, also run at least one real smoke test for the c
 
 Keep manual regression prompts in `docs/PROMPTS.md`. The file should stay short and focused on currently supported behavior.
 
-For release confidence, use `scripts/release-confidence.py`. Its fixtures must stay isolated in `/tmp`, and its checkers must validate final behavior rather than specific shell commands.
+For release confidence, use `orbit release-confidence`. Its fixtures must stay isolated in `/tmp`, and its checkers must validate final behavior rather than specific shell commands.
 
 ## Benchmark discipline
 
@@ -125,8 +125,8 @@ For release confidence, use `scripts/release-confidence.py`. Its fixtures must s
 - Keep the current benchmark set as the regression suite.
 - Do not change routing, tool selection, final-answer policy, prompts, tool payloads, or cache behavior for performance unless a benchmark shows a strong, comparable benefit.
 - In the absence of strong measurement evidence, do not touch observable behavior.
-- Use `scripts/bench-core.sh` as the public regression benchmark.
-- `scripts/bench-core.sh` uses the repository `workdir/` fixture by default.
+- Use `orbit bench-core` as the public regression benchmark.
+- `orbit bench-core` uses the repository `workdir/` fixture by default.
 - For deeper profiling, prefer temporary local scripts or manual measurements rather than adding permanent helper scripts.
 - Keep explicit backend slot/cache management out of the core runtime unless benchmarks justify it.
 

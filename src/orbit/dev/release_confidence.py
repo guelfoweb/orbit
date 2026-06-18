@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -15,15 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError  # noqa: E402
-from orbit.runtime import messages as runtime_messages  # noqa: E402
-from orbit.runtime.chat import ChatRuntime  # noqa: E402
+from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
+from orbit.runtime import messages as runtime_messages
+from orbit.runtime.chat import ChatRuntime
 
 
 CheckResult = tuple[bool, str]
@@ -608,20 +601,20 @@ def health_check(base_url: str, timeout: int) -> None:
         raise SystemExit(f"error: backend is not healthy at {base_url}")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Orbit release confidence tests against a local backend.")
-    parser.add_argument("--base-url", default=os.environ.get("ORBIT_BASE_URL", "http://127.0.0.1:18080"))
+    parser.add_argument("--base-url", default=os.environ.get("ORBIT_BASE_URL", "http://127.0.0.1:11976"))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("ORBIT_TEST_TIMEOUT", "300")))
     parser.add_argument("--max-tokens", type=int, default=int(os.environ.get("ORBIT_TEST_MAX_TOKENS", "320")))
     parser.add_argument("--only", action="append", default=[], help="Run only a case id. Can be repeated.")
     parser.add_argument("--keep-failed", action="store_true", help="Copy failed fixtures to /tmp for inspection.")
     parser.add_argument("--json-out", default="/tmp/orbit-release-confidence.json")
     parser.add_argument("--list", action="store_true", help="List cases and exit.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     selected = [case for case in CASES if not args.only or case.case_id in set(args.only)]
     if args.list:
         for case in CASES:
@@ -659,7 +652,3 @@ def main() -> int:
     print(f"summary: {passed}/{len(results)} passed")
     print(f"json: {args.json_out}")
     return 0 if passed == len(results) else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

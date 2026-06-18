@@ -72,6 +72,12 @@ orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
 Download the full local stack declared by the registry:
 
 ```bash
+orbit download --all
+```
+
+You can still override the repo explicitly:
+
+```bash
 orbit download --all ggml-org/gemma-4-12B-it-GGUF
 ```
 
@@ -80,29 +86,36 @@ orbit download --all ggml-org/gemma-4-12B-it-GGUF
 Basic native server:
 
 ```bash
-PYTHONPATH=src python3 scripts/orbit-server.py --port 18081
+orbit server --port 11976
 ```
 
-With MTP experimental path enabled:
+With MTP enabled:
 
 ```bash
-PYTHONPATH=src python3 scripts/orbit-server.py --port 18081 --enable-mtp-experimental
+orbit server --port 11976 --mtp
 ```
 
 With a multimodal projector:
 
 ```bash
-PYTHONPATH=src python3 scripts/orbit-server.py \
-  --port 18081 \
+orbit server \
+  --port 11976 \
   --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
 
-You can combine MTP and multimodal flags when both artifacts are available.
+You can combine MTP and multimodal flags when both artifacts are available:
+
+```bash
+orbit server \
+  --port 11976 \
+  --mtp \
+  --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
+```
 
 ### 4. Start Orbit
 
 ```bash
-orbit --base-url http://127.0.0.1:18081
+orbit --base-url http://127.0.0.1:11976
 ```
 
 Inside Orbit, tools are off by default:
@@ -114,9 +127,9 @@ Inside Orbit, tools are off by default:
 ## One-shot usage
 
 ```bash
-orbit --base-url http://127.0.0.1:18081 "Say who you are in one short sentence."
-orbit --base-url http://127.0.0.1:18081 --image workdir/media/image1.jpg "Describe this image."
-orbit --base-url http://127.0.0.1:18081 --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
+orbit --base-url http://127.0.0.1:11976 "Say who you are in one short sentence."
+orbit --base-url http://127.0.0.1:11976 --image workdir/media/image1.jpg "Describe this image."
+orbit --base-url http://127.0.0.1:11976 --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
 ```
 
 ## Thinking mode
@@ -155,14 +168,6 @@ The backend and model must actually support visible reasoning for this to appear
 
 Orbit can still talk to compatible local HTTP backends through `--base-url`. Keep this as compatibility or comparison, not as the preferred product path.
 
-The legacy helper:
-
-```bash
-scripts/gemma4-12b-server.sh
-```
-
-is kept only as a compatibility/startup helper for `llama-server`-based local setups.
-
 ## Troubleshooting
 
 - backend unavailable: check `orbit --health --base-url ...`
@@ -176,3 +181,10 @@ is kept only as a compatibility/startup helper for `llama-server`-based local se
 - runtime techniques: [docs/TECHNIQUES.md](docs/TECHNIQUES.md)
 - manual regression prompts: [docs/PROMPTS.md](docs/PROMPTS.md)
 - release confidence suite: [docs/RELEASE_CONFIDENCE.md](docs/RELEASE_CONFIDENCE.md)
+
+## Maintenance commands
+
+```bash
+orbit bench-core --base-url http://127.0.0.1:11976
+orbit release-confidence --base-url http://127.0.0.1:11976 --keep-failed
+```

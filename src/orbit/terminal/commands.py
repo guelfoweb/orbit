@@ -84,6 +84,7 @@ def runtime_status(
     tools_mode: ToolSpec | None = None,
 ) -> str:
     info = backend.model_info()
+    props = backend.backend_props()
     display_model = (info.id if info and info.id else None) or backend.display_model_name() or "unknown"
     lines = [
         "Backend",
@@ -145,6 +146,28 @@ def runtime_status(
         f"minimal_patch_guard_successes: {runtime.minimal_patch_guard_successes}",
         f"minimal_patch_guard_failures: {runtime.minimal_patch_guard_failures}",
     ]
+    if props:
+        lines.extend(
+            [
+                "",
+                "Backend runtime",
+                "---------------",
+                f"backend: {_str_value(props.get('backend'))}",
+                f"backend_mode: {_str_value(props.get('backend_mode'))}",
+                f"session_id: {_str_value(props.get('session_id'))}",
+                f"cached_tokens: {_int_value(props.get('cached_tokens'))}",
+                f"in_flight: {_boolish_value(props.get('in_flight'))}",
+                f"threads: {_int_value(props.get('threads'))}",
+                f"threads_batch: {_int_value(props.get('threads_batch'))}",
+                f"ctx_size: {_int_value(props.get('ctx_size'))}",
+                f"batch_size: {_int_value(props.get('batch_size'))}",
+                f"ubatch_size: {_int_value(props.get('ubatch_size'))}",
+                f"parallel_slots: {_int_value(props.get('parallel_slots'))}",
+                f"mtp_available: {_boolish_value(props.get('mtp_available'))}",
+                f"mtp_enabled: {_boolish_value(props.get('mtp_enabled'))}",
+                f"multimodal_available: {_boolish_value(props.get('multimodal_available'))}",
+            ]
+        )
     if info:
         lines.extend(
             [
@@ -216,6 +239,20 @@ def _memory_cooldown_remaining(runtime: ChatRuntime) -> int:
         return 0
     used = len(runtime.messages) - runtime.last_memory_refresh_message_count
     return max(0, runtime.memory_refresh_cooldown_messages - used)
+
+
+def _str_value(value: object) -> str:
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def _int_value(value: object) -> str:
+    return str(value) if isinstance(value, int) else "unknown"
+
+
+def _boolish_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return "unknown"
 
 
 def _format_tools_mode(mode: ToolSpec | None) -> str:

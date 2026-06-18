@@ -26,7 +26,7 @@ from orbit.native_server.protocol import (
 
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 18081
+DEFAULT_PORT = 11976
 DEFAULT_ALIAS = "gemma4:12b-it-native"
 
 
@@ -461,7 +461,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-mtp-dry-run", action="store_true", help="Backend-only MTP draft generation dry run. No accept loop or user output.")
     parser.add_argument("--enable-mtp-accept-probe", action="store_true", help="Backend-only MTP single accept-loop probe. No user output or runtime integration.")
     parser.add_argument("--enable-mtp-decode-probe", action="store_true", help="Backend-only experimental MTP decode-loop probe. No user output or runtime integration.")
-    parser.add_argument("--enable-mtp-experimental", action="store_true", help="Backend-only experimental MTP completion path with automatic no-MTP fallback.")
+    parser.add_argument(
+        "--mtp",
+        "--enable-mtp-experimental",
+        dest="enable_mtp_experimental",
+        action="store_true",
+        help="Enable native MTP completion path with automatic no-MTP fallback.",
+    )
     parser.add_argument("--verbose-llama-log", action="store_true")
     return parser
 
