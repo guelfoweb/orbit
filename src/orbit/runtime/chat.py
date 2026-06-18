@@ -286,17 +286,18 @@ class ChatRuntime:
         route_stream_filter = None
         route_streamed_chunks: list[str] = []
         command_messages = with_command_system_prompt(self.messages)
-        if on_progress is None:
-            first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
-        else:
-            route_stream_filter = CommandStreamFilter(route_streamed_chunks.append) if on_final_delta is not None else None
-            first = self.backend.chat_stream(
-                command_messages,
-                temperature=temperature,
-                max_tokens=command_max_tokens,
-                on_delta=route_stream_filter.write if route_stream_filter is not None else (lambda _text: None),
-                on_progress=on_progress,
-            )
+        with self._temporary_backend_thinking(False):
+            if on_progress is None:
+                first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
+            else:
+                route_stream_filter = CommandStreamFilter(route_streamed_chunks.append) if on_final_delta is not None else None
+                first = self.backend.chat_stream(
+                    command_messages,
+                    temperature=temperature,
+                    max_tokens=command_max_tokens,
+                    on_delta=route_stream_filter.write if route_stream_filter is not None else (lambda _text: None),
+                    on_progress=on_progress,
+                )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
         command_content = first.content

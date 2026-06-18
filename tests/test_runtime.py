@@ -377,6 +377,41 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertTrue(backend.thinking_seen[-1])
         self.assertTrue(backend.thinking)
 
+    def test_ask_auto_temporarily_disables_backend_thinking_for_route_phase(self) -> None:
+        class ThinkingAwareRouteBackend:
+            def __init__(self) -> None:
+                self.thinking = True
+                self.thinking_seen: list[bool] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.thinking_seen.append(self.thinking)
+                return ChatResult(
+                    content="plain answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=5,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ThinkingAwareRouteBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt="route system", thinking_mode=True)
+
+        result = runtime.ask_auto(
+            "explain the plan before the final answer",
+            temperature=0,
+            max_tokens=128,
+            workdir=Path("."),
+            allowed_tool_names=("exec_shell_full_command",),
+        )
+
+        self.assertEqual(result.content, "plain answer")
+        self.assertEqual(backend.thinking_seen, [False])
+        self.assertTrue(backend.thinking)
+
     def test_ask_auto_respects_allowed_tool_subset(self) -> None:
         class FilesystemRouteBackend:
             def __init__(self) -> None:
