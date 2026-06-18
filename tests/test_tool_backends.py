@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.runtime.tool_backends import HybridToolExecutor
+from orbit.runtime.shell_guardrails import SHELL_FULL_CONTRACT_ERROR_PREFIX, validate_shell_full_contract
 
 
 class FakeServerTools:
@@ -42,6 +43,23 @@ class FakeServerTools:
 
 
 class HybridToolExecutorTests(unittest.TestCase):
+    def test_shell_full_contract_rejects_metadata_only_analysis_in_italian(self) -> None:
+        error = validate_shell_full_contract(
+            {"command": "ls -F pdf/"},
+            user_prompt='analizza intero documento PDF nella cartella "pdf/RELAZIONE TECNICA 1.pdf" e fammi una sintesi dettagliata',
+        )
+
+        self.assertIsNotNone(error)
+        self.assertTrue(error.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX))
+
+    def test_shell_full_contract_allows_content_evidence_analysis_in_italian(self) -> None:
+        error = validate_shell_full_contract(
+            {"command": 'pdftotext "pdf/RELAZIONE TECNICA 1.pdf" - | head -n 40'},
+            user_prompt='analizza intero documento PDF nella cartella "pdf/RELAZIONE TECNICA 1.pdf" e fammi una sintesi dettagliata',
+        )
+
+        self.assertIsNone(error)
+
     def test_exposes_only_allowed_shell_full_definition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executor = HybridToolExecutor(

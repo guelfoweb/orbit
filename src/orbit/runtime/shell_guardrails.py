@@ -79,7 +79,12 @@ class ShellFailure:
     stderr: str
 
 _ANALYSIS_PROMPT_RE = re.compile(
-    r"\b(analy[sz]e|analysis|review|inspect|vulnerab|exploit|malware|dropper|c2|ioc|reverse|decompil|static)\b",
+    r"\b("
+    r"analy[sz]e|analysis|review|inspect|"
+    r"analizz|analisi|ispezion|esamina|esamin|"
+    r"vulnerab|exploit|malware|dropper|c2|ioc|reverse|decompil|static|"
+    r"summar(?:y|ize)|riassunt|sintesi"
+    r")\b",
     re.IGNORECASE,
 )
 _METADATA_ONLY_RE = re.compile(r"^\s*(?:ls|file|stat)(?:\s|$)", re.IGNORECASE)
