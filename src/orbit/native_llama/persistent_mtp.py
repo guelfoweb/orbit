@@ -8,6 +8,7 @@ import os
 import subprocess
 
 from .mtp_completion import MtpCompletionResult
+from .native_artifacts import packaged_shim_path, require_legacy_llama_root
 from .paths import NativeLlamaPaths
 
 MtpTokenCallback = CFUNCTYPE(None, c_char_p, c_void_p)
@@ -130,10 +131,14 @@ class PersistentMtpLibrary:
 
 def build_persistent_mtp_shim(
     *,
-    llama_root: Path,
+    llama_root: Path | None,
     build_dir: Path | None = None,
     runner=subprocess.run,
 ) -> Path:
+    packaged = packaged_shim_path("liborbit-persistent-mtp.so")
+    if packaged is not None:
+        return packaged
+    llama_root = require_legacy_llama_root(llama_root, artifact_name="liborbit-persistent-mtp.so")
     build_root = build_dir or (Path.home() / ".orbit" / "native-build")
     build_root.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).parent / "vendor" / "shim" / "orbit_persistent_mtp.cpp"

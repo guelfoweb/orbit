@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from orbit.native_llama.mtp_probe import build_mtp_probe_helper, run_mtp_probe
 from orbit.native_llama.paths import NativeLlamaPaths
@@ -11,6 +12,15 @@ from orbit.native_server.app import build_parser
 
 
 class NativeMtpProbeTests(unittest.TestCase):
+    def test_build_helper_prefers_packaged_probe_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            packaged = Path(tmp) / "orbit-mtp-probe"
+            packaged.write_text("", encoding="utf-8")
+            with mock.patch("orbit.native_llama.mtp_probe.packaged_shim_path", return_value=packaged):
+                helper = build_mtp_probe_helper(llama_root=None)
+
+        self.assertEqual(helper, packaged)
+
     def test_probe_returns_fallback_when_draft_is_missing(self) -> None:
         paths = NativeLlamaPaths(
             llama_root=Path("/llama"),
@@ -48,6 +58,11 @@ class NativeMtpProbeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "failed to build mtp probe helper"):
                 build_mtp_probe_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
+
+    def test_build_helper_requires_legacy_root_when_no_packaged_artifact_exists(self) -> None:
+        with mock.patch("orbit.native_llama.mtp_probe.packaged_shim_path", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "missing native build inputs for orbit-mtp-probe"):
+                build_mtp_probe_helper(llama_root=None)
 
     def test_probe_reports_init_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

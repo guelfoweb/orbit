@@ -568,7 +568,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orbit-server")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--llama-root", type=Path, default=DEFAULT_LLAMA_ROOT)
+    parser.add_argument(
+        "--llama-root",
+        type=Path,
+        default=DEFAULT_LLAMA_ROOT,
+        help="Optional legacy llama.cpp root. If omitted, Orbit first looks for packaged native libraries, then ORBIT_LLAMA_ROOT.",
+    )
     parser.add_argument("--model-id", default=None, help=f"Orbit model id. Defaults to {DEFAULT_MODEL_ID} when --model is not used.")
     parser.add_argument("--model", type=Path, help="Legacy direct target model path override.")
     parser.add_argument("--mmproj", type=Path, help="Optional multimodal projector override for native image/audio support.")

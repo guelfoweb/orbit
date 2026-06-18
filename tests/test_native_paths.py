@@ -3,11 +3,33 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
-from orbit.native_llama.paths import LEGACY_MODEL_ID, resolve_legacy_paths, resolve_paths
+from orbit.native_llama.paths import DEFAULT_VENDOR_LIB_DIR, LEGACY_MODEL_ID, resolve_legacy_paths, resolve_paths
 
 
 class NativePathsTests(unittest.TestCase):
+    def test_resolves_vendored_native_runtime_without_llama_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vendor_lib = root / "vendor/lib"
+            models_dir = root / "models"
+            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            vendor_lib.mkdir(parents=True)
+            (vendor_lib / "libllama.so").write_text("", encoding="utf-8")
+            target.parent.mkdir(parents=True)
+            target.write_text("target", encoding="utf-8")
+            mmproj.write_text("mmproj", encoding="utf-8")
+
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib):
+                paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
+
+        self.assertIsNone(paths.llama_root)
+        self.assertEqual(paths.build_bin, vendor_lib)
+        self.assertEqual(paths.library, vendor_lib / "libllama.so")
+        self.assertEqual(paths.model, target)
+
     def test_resolves_target_from_models_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -57,6 +79,17 @@ class NativePathsTests(unittest.TestCase):
 
             with self.assertRaises(FileNotFoundError):
                 resolve_paths(llama_root=llama_root, models_dir=root / "models", hf_cache=root / "hf")
+
+    def test_raises_when_no_native_runtime_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing_vendor = root / "vendor/lib"
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", missing_vendor):
+                with self.assertRaises(FileNotFoundError) as ctx:
+                    resolve_paths(llama_root=None, models_dir=root / "models", hf_cache=root / "hf")
+
+        self.assertIn("libllama.so not found", str(ctx.exception))
+        self.assertIn("vendor/lib/libllama.so", str(ctx.exception))
 
     def test_exposes_draft_and_mtp_available_when_both_are_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

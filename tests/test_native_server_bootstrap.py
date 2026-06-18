@@ -3,11 +3,33 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from orbit.native_server.app import build_parser, resolve_bootstrap_paths
 
 
 class NativeServerBootstrapTests(unittest.TestCase):
+    def test_bootstrap_can_use_packaged_vendor_lib_without_llama_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vendor_lib = root / "vendor/lib"
+            models_dir = root / "models"
+            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            vendor_lib.mkdir(parents=True)
+            (vendor_lib / "libllama.so").write_text("", encoding="utf-8")
+            target.parent.mkdir(parents=True)
+            target.write_text("target", encoding="utf-8")
+            mmproj.write_text("mmproj", encoding="utf-8")
+
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib):
+                args = build_parser().parse_args(["--models-dir", str(models_dir), "--hf-cache", str(root / "hf")])
+                paths = resolve_bootstrap_paths(args)
+
+        self.assertEqual(paths.build_bin, vendor_lib)
+        self.assertIsNone(paths.llama_root)
+        self.assertEqual(paths.model, target)
+
     def test_bootstrap_defaults_to_model_id_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

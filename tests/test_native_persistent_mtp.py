@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -7,10 +8,19 @@ from unittest import mock
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.paths import NativeLlamaPaths
-from orbit.native_llama.persistent_mtp import PersistentMtpSessionRuntime, run_persistent_mtp_completion
+from orbit.native_llama.persistent_mtp import PersistentMtpSessionRuntime, build_persistent_mtp_shim, run_persistent_mtp_completion
 
 
 class NativePersistentMtpTests(unittest.TestCase):
+    def test_build_persistent_shim_prefers_packaged_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            packaged = Path(tmp) / "liborbit-persistent-mtp.so"
+            packaged.write_text("", encoding="utf-8")
+            with mock.patch("orbit.native_llama.persistent_mtp.packaged_shim_path", return_value=packaged):
+                shim = build_persistent_mtp_shim(llama_root=None)
+
+        self.assertEqual(shim, packaged)
+
     def _paths(self, *, mtp_available: bool = True, fallback_reason: str | None = None) -> NativeLlamaPaths:
         return NativeLlamaPaths(
             llama_root=Path("/llama"),
@@ -92,6 +102,11 @@ class NativePersistentMtpTests(unittest.TestCase):
         self.assertTrue(client._session.mtp_enabled)
         fake_lib.llama_memory_clear.assert_called()
         mocked_reset.assert_called_once()
+
+    def test_build_persistent_shim_requires_legacy_root_when_no_packaged_artifact_exists(self) -> None:
+        with mock.patch("orbit.native_llama.persistent_mtp.packaged_shim_path", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "missing native build inputs for liborbit-persistent-mtp.so"):
+                build_persistent_mtp_shim(llama_root=None)
 
     @mock.patch("orbit.native_llama.client.free_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")

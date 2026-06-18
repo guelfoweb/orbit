@@ -118,6 +118,34 @@ Deliverables:
 Acceptance:
 - a new user can install Orbit and start `orbit-server` without a manual `llama.cpp` build
 
+### Artifact contract for the first Linux product cut
+
+Expected packaged runtime libraries under `src/orbit/native_llama/vendor/lib/`:
+
+- `libllama.so`
+- `libllama-common.so`
+- `libggml.so`
+- `libggml-base.so`
+- `libggml-cpu.so`
+- optional: `libmtmd.so`
+
+Expected packaged shim artifacts under `src/orbit/native_llama/vendor/shim/`:
+
+- `orbit-mtp-probe`
+- `orbit-mtp-dry-run`
+- `orbit-mtp-accept-probe`
+- `orbit-mtp-decode-probe`
+- `orbit-mtp-completion`
+- `liborbit-persistent-mtp.so`
+
+### Naming and versioning policy
+
+- Orbit Python package version and packaged native artifacts must be released as one tested set.
+- Orbit should treat packaged native libs and packaged shim binaries as ABI-coupled artifacts.
+- The first stable product cut should target Linux only.
+- If packaged libs are present, Orbit should prefer them over any external `llama_root`.
+- `--llama-root` and `ORBIT_LLAMA_ROOT` remain rollback compatibility, not the primary product path.
+
 ### Milestone 4. Product bootstrap
 
 Goal:
@@ -159,4 +187,3 @@ Orbit can be called autonomous from `llama-server` only when all of these are tr
 3. No external `llama.cpp` checkout/build is required for normal usage.
 4. Native libs and shims are shipped or installed by Orbit itself.
 5. `orbit download --all` is sufficient to fetch the model-side artifacts.
-

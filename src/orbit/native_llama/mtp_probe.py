@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import subprocess
 
+from .native_artifacts import packaged_shim_path, require_legacy_llama_root
 from .paths import NativeLlamaPaths
 
 
@@ -64,10 +65,14 @@ def run_mtp_probe(
 
 def build_mtp_probe_helper(
     *,
-    llama_root: Path,
+    llama_root: Path | None,
     build_dir: Path | None = None,
     runner=subprocess.run,
 ) -> Path:
+    packaged = packaged_shim_path("orbit-mtp-probe")
+    if packaged is not None:
+        return packaged
+    llama_root = require_legacy_llama_root(llama_root, artifact_name="orbit-mtp-probe")
     build_root = build_dir or (Path.home() / ".orbit" / "native-build")
     build_root.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).parent / "vendor" / "shim" / "orbit_mtp_probe.cpp"

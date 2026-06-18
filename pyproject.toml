@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "orbit"
 version = "0.0.1"
-description = "Minimal local Orbit runtime for llama-server."
+description = "Minimal local Orbit runtime centered on native orbit-server."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
@@ -17,4 +17,9 @@ orbit = "orbit.terminal.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"orbit.native_llama" = ["model_registry.json", "vendor/README.md", "vendor/shim/*.cpp"]
+"orbit.native_llama" = [
+  "model_registry.json",
+  "vendor/README.md",
+  "vendor/lib/*",
+  "vendor/shim/*",
+]
