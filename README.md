@@ -4,6 +4,9 @@ Minimal local agentic CLI centered on native `orbit-server`, with optional compa
 
 Orbit is designed around Gemma 4, local execution, streaming output, shell-tool opt-in, and CPU-only usability. The native path supports chat, tools, session reuse, MTP, and multimodal input without requiring `llama-server` as the primary backend.
 
+Important status note:
+the native backend is the primary Orbit path, but a fresh clone is not yet a zero-build product. Today, native Orbit still expects prepared native `llama`/`ggml` libraries, and some MTP paths still rely on local shim compilation. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+
 Linux is the main target environment. macOS may work. Windows is not a target environment.
 
 ## What it does
@@ -48,6 +51,8 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
 ```
+
+This installs the Python package and CLI. It does not yet guarantee a fully self-contained native backend on a fresh machine.
 
 ### 2. Download models
 
@@ -178,6 +183,7 @@ Orbit can still talk to compatible local HTTP backends through `--base-url`. Kee
 ## Benchmarks and prompts
 
 - performance notes: [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+- native packaging roadmap: [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md)
 - runtime techniques: [docs/TECHNIQUES.md](docs/TECHNIQUES.md)
 - manual regression prompts: [docs/PROMPTS.md](docs/PROMPTS.md)
 - release confidence suite: [docs/RELEASE_CONFIDENCE.md](docs/RELEASE_CONFIDENCE.md)

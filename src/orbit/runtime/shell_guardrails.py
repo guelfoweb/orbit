@@ -428,6 +428,9 @@ def _read_pdf_target(raw_command: str, *, workdir: Path) -> str | None:
     text, method = _extract_pdf_text(target)
     if not text.strip():
         return f"error: no text extracted from PDF: {target.name}"
+    filtered = _apply_pdf_text_filters(raw_command, target=target, text=text)
+    if filtered is not None:
+        text = filtered
     return _format_extracted_pdf(target, text, method=method)
 
 
@@ -508,6 +511,144 @@ def _format_extracted_pdf(target: Path, text: str, *, method: str) -> str:
             text[:end],
         ]
     )
+
+
+def _apply_pdf_text_filters(raw_command: str, *, target: Path, text: str) -> str | None:
+    try:
+        stages = [shlex.split(stage) for stage in _split_shell_pipeline(raw_command)]
+    except ValueError:
+        return None
+    if not stages:
+        return None
+    pdf_stage_index = -1
+    target_name = target.name
+    target_path = str(target)
+    for index, stage in enumerate(stages):
+        if any(token.strip("'\"") in {target_name, target_path} or token.strip("'\"").endswith(f"/{target_name}") for token in stage):
+            pdf_stage_index = index
+            break
+    if pdf_stage_index < 0:
+        return None
+    current = text
+    for stage in stages[pdf_stage_index + 1 :]:
+        current = _apply_pdf_text_filter_stage(current, stage)
+        if current is None:
+            return None
+    return current
+
+
+def _split_shell_pipeline(raw_command: str) -> list[str]:
+    stages: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escape = False
+    for char in raw_command:
+        if escape:
+            current.append(char)
+            escape = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escape = True
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            current.append(char)
+            quote = char
+            continue
+        if char == "|":
+            stage = "".join(current).strip()
+            if stage:
+                stages.append(stage)
+            current = []
+            continue
+        current.append(char)
+    stage = "".join(current).strip()
+    if stage:
+        stages.append(stage)
+    return stages
+
+
+def _apply_pdf_text_filter_stage(text: str, stage: list[str]) -> str | None:
+    if not stage:
+        return text
+    command = Path(stage[0]).name
+    lines = text.splitlines()
+    if command == "head":
+        count = _read_line_count_option(stage[1:], default=10)
+        return "\n".join(lines[:count])
+    if command == "tail":
+        count = _read_line_count_option(stage[1:], default=10)
+        return "\n".join(lines[-count:] if count > 0 else [])
+    if command == "sed":
+        return _apply_pdf_sed_filter(lines, stage[1:])
+    if command in {"grep", "rg"}:
+        return _apply_pdf_grep_filter(lines, stage)
+    return text
+
+
+def _read_line_count_option(tokens: list[str], *, default: int) -> int:
+    for index, token in enumerate(tokens):
+        if token == "-n" and index + 1 < len(tokens):
+            return max(0, _safe_int(tokens[index + 1], default))
+        if token.startswith("-n") and len(token) > 2:
+            return max(0, _safe_int(token[2:], default))
+    return default
+
+
+def _apply_pdf_sed_filter(lines: list[str], tokens: list[str]) -> str:
+    if "-n" not in tokens:
+        return "\n".join(lines)
+    for token in tokens:
+        match = re.fullmatch(r"(\d+),(\d+)p", token)
+        if match:
+            start = max(1, int(match.group(1)))
+            end = max(start, int(match.group(2)))
+            return "\n".join(lines[start - 1 : end])
+    return "\n".join(lines)
+
+
+def _apply_pdf_grep_filter(lines: list[str], stage: list[str]) -> str:
+    flags = 0
+    invert = False
+    patterns: list[str] = []
+    tokens = stage[1:]
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-v":
+            invert = True
+        elif token == "-i":
+            flags |= re.IGNORECASE
+        elif token == "-E":
+            pass
+        elif token in {"-e", "--regexp"} and index + 1 < len(tokens):
+            index += 1
+            patterns.append(tokens[index])
+        elif token.startswith("-") and set(token[1:]).issubset({"i", "v", "E"}):
+            if "i" in token:
+                flags |= re.IGNORECASE
+            if "v" in token:
+                invert = True
+        elif not patterns:
+            patterns.append(token)
+        index += 1
+    if not patterns:
+        return "\n".join(lines)
+    regex = re.compile("|".join(f"(?:{pattern})" for pattern in patterns), flags)
+    filtered = [line for line in lines if bool(regex.search(line)) != invert]
+    return "\n".join(filtered)
+
+
+def _safe_int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def _read_large_cat_target(raw_command: str, *, workdir: Path) -> str | None:

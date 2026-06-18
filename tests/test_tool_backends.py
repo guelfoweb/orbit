@@ -455,6 +455,76 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("chunk_index: 0", execution.result.content)
         self.assertIn("total_chunks:", execution.result.content)
 
+    def test_exec_shell_full_pdf_head_and_tail_return_different_slices(self) -> None:
+        sample_text = "\n".join(f"Line {index:03d}" for index in range(1, 41))
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            target = workdir / "sample.pdf"
+            target.write_bytes(b"%PDF-1.4\n")
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            with patch("orbit.runtime.shell_guardrails._extract_pdf_text", return_value=(sample_text, "pdftotext")):
+                head_execution = executor.execute(
+                    "exec_shell_full_command",
+                    {"command": "pdftotext sample.pdf - | head -n 3"},
+                    chunk_budget={},
+                )
+                tail_execution = executor.execute(
+                    "exec_shell_full_command",
+                    {"command": "pdftotext sample.pdf - | tail -n 3"},
+                    chunk_budget={},
+                )
+
+        self.assertIn("Line 001", head_execution.result.content)
+        self.assertIn("Line 003", head_execution.result.content)
+        self.assertNotIn("Line 040", head_execution.result.content)
+        self.assertIn("Line 038", tail_execution.result.content)
+        self.assertIn("Line 040", tail_execution.result.content)
+        self.assertNotEqual(head_execution.result.content, tail_execution.result.content)
+
+    def test_exec_shell_full_pdf_sed_and_grep_filters_text(self) -> None:
+        sample_text = "\n".join(
+            [
+                "alpha",
+                "",
+                "beta",
+                "gamma",
+                "Security requirement",
+                "VPN requirement",
+                "delta",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            target = workdir / "sample.pdf"
+            target.write_bytes(b"%PDF-1.4\n")
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            with patch("orbit.runtime.shell_guardrails._extract_pdf_text", return_value=(sample_text, "pdftotext")):
+                sed_execution = executor.execute(
+                    "exec_shell_full_command",
+                    {"command": "pdftotext sample.pdf - | sed -n '3,5p'"},
+                    chunk_budget={},
+                )
+                grep_execution = executor.execute(
+                    "exec_shell_full_command",
+                    {"command": "pdftotext sample.pdf - | grep -iE 'Security|VPN'"},
+                    chunk_budget={},
+                )
+
+        self.assertIn("beta", sed_execution.result.content)
+        self.assertIn("Security requirement", sed_execution.result.content)
+        self.assertNotIn("VPN requirement", sed_execution.result.content)
+        self.assertIn("Security requirement", grep_execution.result.content)
+        self.assertIn("VPN requirement", grep_execution.result.content)
+        self.assertNotIn("alpha", grep_execution.result.content)
+
     def test_exec_shell_full_extracts_pdf_text_with_strings_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
