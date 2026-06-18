@@ -33,6 +33,32 @@ Use:
 
 Expected: normal answer, no shell command.
 
+## Thinking
+
+Use:
+
+```text
+/tools off
+/think on
+```
+
+6. `Explain the plan before the final answer.`
+7. `Who designed you?`
+
+Expected:
+- visible reasoning is shown first
+- final answer is still produced
+- if max tokens are exhausted in one-shot mode, Orbit suggests rerunning with `--max-tokens`, not `/continue`
+
+Interactive continuation check:
+
+1. run `explain the plan before the final answer` with a low output budget
+2. if the answer stops at `length`, run `/continue`
+
+Expected:
+- `/continue` resumes from the current native context
+- no `no active continuation state` error after a normal completed turn
+
 ## Tools on
 
 Use only in a safe workdir or isolated lab:
@@ -70,3 +96,21 @@ Use only in a safe workdir or isolated lab:
 32. `Read pdf/big.pdf and summarize the document topic in one concise sentence.`
 
 Expected: command chosen by the model, bounded evidence, concise final answer.
+
+## Tools + Thinking
+
+Use:
+
+```text
+/tools on
+/think on
+```
+
+33. `Use the shell tool to print the current working directory, then answer with only that path.`
+34. `Use the shell tool to list the first three entries in the current directory. Think briefly, then answer with only the listed names, compactly. No categories or explanations.`
+
+Expected:
+- a short visible planning thought may appear before tool use
+- the internal route phase must not consume the whole budget with extra reasoning
+- the shell tool is still called
+- the final answer is produced after the tool result
