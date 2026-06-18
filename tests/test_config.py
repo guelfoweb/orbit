@@ -60,7 +60,7 @@ class ConfigTests(unittest.TestCase):
 
         config = load_app_config(args)
 
-        self.assertEqual(config.base_url, "http://127.0.0.1:18080")
+        self.assertEqual(config.base_url, "http://127.0.0.1:11976")
         self.assertEqual(config.workdir, Path(".").resolve())
         self.assertEqual(config.max_tokens, 512)
         self.assertIsNone(config.context_tokens)

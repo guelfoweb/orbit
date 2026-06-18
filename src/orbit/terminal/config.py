@@ -23,7 +23,7 @@ DEFAULT_TOOLS = "off"
 
 @dataclass(frozen=True)
 class AppConfig:
-    base_url: str = "http://127.0.0.1:18080"
+    base_url: str = "http://127.0.0.1:11976"
     workdir: Path = Path(".")
     timeout: float = 300.0
     temperature: float = 0.0

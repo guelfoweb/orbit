@@ -22,7 +22,7 @@ Orbit stays model-driven. The runtime enforces safety, size, timeout, and tool-c
 
 - Primary backend path: native `orbit-server`
 - Compatibility path: `llama-server` or another OpenAI-compatible local backend
-- CLI default base URL: `http://127.0.0.1:18080`
+- CLI default base URL: `http://127.0.0.1:11976`
 
 If your native server runs on another port, pass `--base-url`.
 
