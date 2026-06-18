@@ -37,6 +37,16 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(client.mtp_fallback_reason, "draft-mtp-missing")
 
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_skips_when_thinking_is_on(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True, thinking=True))
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8, thinking=True)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "thinking-mode")
+        self.assertEqual(client.last_mtp_completion.error, "thinking-mode")
+
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_try_complete_with_mtp_experimental_returns_timings_on_success(self, _mocked_lib, mocked_run) -> None:
@@ -383,6 +393,31 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(result, expected)
         client.cancel.assert_called_once()
         client._complete_prompt_standard.assert_called_once()
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_prompt_skips_mtp_when_thinking_is_on(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True, thinking=True))
+        expected = NativeTimings(
+            prompt_tokens=5,
+            output_tokens=1,
+            reused_prompt_tokens=0,
+            evaluated_prompt_tokens=5,
+            prefill_ms=1.0,
+            generation_ms=2.0,
+        )
+        client._try_complete_with_mtp_experimental = mock.Mock(side_effect=AssertionError("mtp path should be skipped"))
+        client._complete_prompt_standard = mock.Mock(return_value=expected)
+
+        result = client.complete_prompt(
+            "hello",
+            allow_mtp_experimental=True,
+            thinking=True,
+        )
+
+        self.assertEqual(result, expected)
+        client._complete_prompt_standard.assert_called_once()
+        self.assertEqual(client.mtp_fallback_reason, "thinking-mode")
+        self.assertEqual(client.last_mtp_completion.error, "thinking-mode")
 
 
 if __name__ == "__main__":

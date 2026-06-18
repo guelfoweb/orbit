@@ -692,7 +692,14 @@ class NativeLlamaClient:
         self.reset_cancel()
         self._session.in_flight = True
         try:
-            if allow_mtp_experimental:
+            if allow_mtp_experimental and thinking:
+                self.mtp_fallback_reason = "thinking-mode"
+                self.last_mtp_completion = MtpCompletionResult(
+                    enabled=self.config.use_mtp_experimental,
+                    success=False,
+                    error="thinking-mode",
+                )
+            if allow_mtp_experimental and not thinking:
                 if should_cancel and should_cancel():
                     self.cancel()
                 else:
@@ -731,6 +738,10 @@ class NativeLlamaClient:
         on_token=None,
     ) -> NativeTimings | None:
         thinking = self._thinking_enabled(thinking)
+        if thinking:
+            self.mtp_fallback_reason = "thinking-mode"
+            self.last_mtp_completion = MtpCompletionResult(enabled=self.config.use_mtp_experimental, success=False, error="thinking-mode")
+            return None
         if not self.config.use_mtp_experimental:
             self.last_mtp_completion = MtpCompletionResult(enabled=False, success=False, error=None)
             return None
