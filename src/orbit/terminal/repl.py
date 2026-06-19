@@ -22,6 +22,7 @@ from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
 from orbit.terminal.theme import danger, dim
+from orbit.runtime.thinking_mode import ThinkingMode
 
 
 @dataclass
@@ -146,7 +147,13 @@ class Repl:
         self._print_turn_footer(result, elapsed_seconds=elapsed)
 
     def _print_turn_footer(self, result, *, elapsed_seconds: float) -> None:
-        self.can_continue = result.finish_reason == "length"
+        self.can_continue = self.runtime.can_continue_last_response() or (
+            ThinkingMode(enabled=self.config.think).continuation_kind_for(
+                content=result.content,
+                finish_reason=result.finish_reason,
+            )
+            is not None
+        )
         if self.runtime.last_memory_refresh:
             refresh = self.runtime.last_memory_refresh
             print(dim(format_memory_refresh(refresh)), flush=True)
@@ -161,8 +168,12 @@ class Repl:
             ),
             flush=True,
         )
-        if result.finish_reason == "length":
-            print(dim(_length_footer_message(self.config.think)), flush=True)
+        if self.can_continue:
+            if result.finish_reason == "length":
+                message = _length_footer_message(self.config.think)
+            else:
+                message = "reasoning finished without a complete final answer"
+            print(dim(message), flush=True)
             print(dim("/continue       continue the answer"), flush=True)
             print(dim("/max-tokens N   increase output budget"), flush=True)
 
@@ -268,6 +279,7 @@ class Repl:
         return f"think: {value}"
 
     def _continue_last_answer(self) -> None:
+        self.can_continue = self.can_continue or self.runtime.can_continue_last_response()
         if not self.can_continue:
             print("error: no truncated answer to continue", file=sys.stderr)
             return
@@ -304,6 +316,7 @@ class Repl:
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 on_final_delta=renderer.write,
+                on_progress=renderer.progress,
                 on_model_step=self._record_model_step,
             )
         except KeyboardInterrupt:

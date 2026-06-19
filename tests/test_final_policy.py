@@ -11,10 +11,19 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.base import ChatResult
 from orbit.runtime.final_policy import (
+    LONG_SHELL_ANALYSIS_FINAL_MAX_TOKENS,
+    classify_final_answer_completeness,
     build_final_tool_policy,
+    final_from_tool_compact_retry_reason,
+    final_tool_compact_retry_max_tokens,
     final_from_tool_retry_reason,
+    final_tool_compact_retry_instruction,
     final_tool_retry_instruction,
     has_list_like_tool_result,
+    has_pdf_text_tool_result,
+    is_repetitive_final_answer,
+    is_compact_list_request,
+    is_list_shell_command,
     is_operational_status_request,
 )
 
@@ -54,6 +63,60 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertFalse(policy.length_retry_allowed)
         self.assertFalse(policy.incomplete_retry_allowed)
 
+    def test_pdf_chunk_result_uses_large_excerpt_policy(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": 'Leggi il PDF "report.pdf" e fammi una sintesi.',
+            },
+            {
+                "role": "tool",
+                "name": "exec_shell_full_command",
+                "content": (
+                    "shell_output_pdf_text: true\n"
+                    "path: report.pdf\n"
+                    "extractor: pdftotext\n"
+                    "chunk_index: 1\n"
+                    "total_chunks: 4\n"
+                    "chars: 3000-6000 of 9000\n"
+                    "content:\nchunk one"
+                ),
+            }
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertEqual(policy.max_tokens, 128)
+        self.assertTrue(policy.length_retry_allowed)
+        self.assertIn("Use only the already inspected chunk(s) or excerpt(s)", policy.messages[-1]["content"])
+
+    def test_exhaustive_pdf_chunk_policy_allows_larger_final_budget(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": 'Analizza intero documento PDF "report.pdf" e fammi una sintesi dettagliata.',
+            },
+            {
+                "role": "tool",
+                "name": "exec_shell_full_command",
+                "content": (
+                    "shell_output_pdf_text: true\n"
+                    "path: report.pdf\n"
+                    "extractor: pdftotext\n"
+                    "chunk_index: 2\n"
+                    "total_chunks: 4\n"
+                    "chars: 6000-9000 of 9000\n"
+                    "content:\nchunk two"
+                ),
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertEqual(policy.max_tokens, 256)
+        self.assertTrue(policy.length_retry_allowed)
+        self.assertIn("fuller synthesis", policy.messages[-1]["content"])
+
     def test_shell_list_command_is_detected_as_list_like(self) -> None:
         messages = [
             {
@@ -92,6 +155,84 @@ class FinalPolicyTests(unittest.TestCase):
 
         self.assertTrue(has_list_like_tool_result(messages))
 
+    def test_find_exec_cat_is_not_treated_as_listing(self) -> None:
+        self.assertFalse(is_list_shell_command('find . -name "vulnerable_service.py" -exec cat {} +'))
+
+    def test_rejected_ls_after_pdf_excerpt_is_not_treated_as_list_like(self) -> None:
+        messages = [
+            {"role": "user", "content": 'Read pdf/small.pdf and summarize the document topic in one concise sentence.'},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-pdf",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "pdftotext pdf/small.pdf - | sed -n '1,10p'"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-pdf",
+                "name": "exec_shell_full_command",
+                "content": "shell_output_pdf_text: true\npath: pdf/small.pdf\nextractor: pdftotext\nA short PDF about safety.",
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-ls",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "ls -R pdf/"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-ls",
+                "name": "exec_shell_full_command",
+                "content": "error: shell-full analysis requests require content/source/string evidence",
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=128, streamed=False)
+
+        self.assertFalse(has_list_like_tool_result(messages))
+        self.assertFalse(is_compact_list_request(messages[0]["content"]))
+        self.assertNotIn("Return only the listed names", policy.messages[-1]["content"])
+        self.assertIn("PDF text extraction already succeeded", policy.messages[-1]["content"])
+
+    def test_generic_recursive_listing_request_does_not_force_compact_names_mode(self) -> None:
+        messages = [
+            {"role": "user", "content": "List all files and directories in this workdir, including subdirectories."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-find",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "find . -maxdepth 10 -not -path '*/.*'"},
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-find", "name": "exec_shell_full_command", "content": ".\n./pdf\n./text"},
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=128, streamed=False)
+
+        self.assertTrue(has_list_like_tool_result(messages))
+        self.assertFalse(is_compact_list_request(messages[0]["content"]))
+        self.assertNotIn("Return only the listed names", policy.messages[-1]["content"])
+
     def test_shell_full_policy_answers_latest_request_directly(self) -> None:
         messages = [
             {"role": "user", "content": "Use the shell output and answer with the exact first line only."},
@@ -106,6 +247,76 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("Do not call tools again", policy.messages[-1]["content"])
         self.assertIn("If the evidence is insufficient", policy.messages[-1]["content"])
         self.assertTrue(policy.incomplete_retry_allowed)
+
+    def test_long_shell_analysis_policy_is_compact_and_bounded(self) -> None:
+        messages = [
+            {"role": "user", "content": "inspect vulnerable_service.py and explain the vulnerabilities"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "find . -name \"vulnerable_service.py\" -exec cat {} +"},
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "name": "exec_shell_full_command", "content": "x" * 1600},
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=160, streamed=False)
+
+        self.assertEqual(policy.max_tokens, LONG_SHELL_ANALYSIS_FINAL_MAX_TOKENS)
+        self.assertIn("latest relevant shell-full output", policy.messages[-1]["content"])
+        self.assertIn("exactly 4 short bullets", policy.messages[-1]["content"])
+        self.assertIn("'- Finding: ... Fix: ...'", policy.messages[-1]["content"])
+        self.assertIn("brief remediation", policy.messages[-1]["content"])
+        self.assertEqual(final_tool_compact_retry_max_tokens(512, messages=policy.messages), 160)
+
+    def test_compact_retry_max_tokens_stays_default_for_non_shell_policy(self) -> None:
+        messages = [
+            {"role": "user", "content": 'Leggi il PDF "pdf/small.pdf" e fammi una sintesi dettagliata.'},
+            {
+                "role": "tool",
+                "name": "exec_shell_full_command",
+                "content": (
+                    "shell_output_pdf_text: true\n"
+                    "path: pdf/small.pdf\n"
+                    "extractor: pdftotext\n"
+                    "content:\n"
+                    "Questo documento descrive una rete sicura con firewall e monitoraggio."
+                ),
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        self.assertEqual(final_tool_compact_retry_max_tokens(512, messages=policy.messages), 160)
+
+    def test_pdf_text_policy_treats_file_as_present_and_readable(self) -> None:
+        messages = [
+            {"role": "user", "content": 'Leggi il PDF "pdf/small.pdf" e fammi una sintesi dettagliata.'},
+            {
+                "role": "tool",
+                "name": "exec_shell_full_command",
+                "content": (
+                    "shell_output_pdf_text: true\n"
+                    "path: pdf/small.pdf\n"
+                    "extractor: pdftotext\n"
+                    "content:\n"
+                    "Questo documento descrive una rete sicura con firewall e monitoraggio."
+                ),
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        self.assertTrue(has_pdf_text_tool_result(messages))
+        self.assertIn("PDF text extraction already succeeded", policy.messages[-1]["content"])
+        self.assertIn("Treat the PDF file as present and readable", policy.messages[-1]["content"])
+        self.assertIn("Do not claim the file is missing", policy.messages[-1]["content"])
 
     def test_operational_status_policy_prefers_recent_shell_evidence(self) -> None:
         messages = [
@@ -210,7 +421,7 @@ class FinalPolicyTests(unittest.TestCase):
 
         self.assertEqual(reason, "empty_length")
 
-    def test_final_retry_reason_detects_incomplete_plain_final(self) -> None:
+    def test_final_retry_reason_does_not_handle_semantic_incomplete_final(self) -> None:
         result = ChatResult(
             content="Il documento e una relazione tecnica per il servizio di gestione della rete QX",
             model="m",
@@ -229,7 +440,7 @@ class FinalPolicyTests(unittest.TestCase):
             incomplete_retry_allowed=True,
         )
 
-        self.assertEqual(reason, "incomplete_final")
+        self.assertIsNone(reason)
 
     def test_final_retry_reason_ignores_short_operational_or_path_like_outputs(self) -> None:
         path_result = ChatResult(
@@ -263,6 +474,131 @@ class FinalPolicyTests(unittest.TestCase):
             final_tool_retry_instruction()["content"],
             "Do not call tools. Provide a shorter final answer from the available tool result now.",
         )
+
+    def test_final_tool_compact_retry_instruction_is_constrained(self) -> None:
+        content = final_tool_compact_retry_instruction()["content"]
+        self.assertIn("three to five sentences", content)
+        self.assertIn("No repetition", content)
+        self.assertIn("Do not call tools", content)
+
+    def test_final_answer_completeness_detects_heading_stub(self) -> None:
+        completeness = classify_final_answer_completeness("The file contains several vulnerabilities.\n\n### ")
+        self.assertEqual(completeness.status, "malformed_markdown")
+
+    def test_final_answer_completeness_detects_list_label_stub(self) -> None:
+        completeness = classify_final_answer_completeness("1. **SQL Injection:**")
+        self.assertEqual(completeness.status, "incomplete_stub")
+
+    def test_final_answer_completeness_detects_unclosed_backtick(self) -> None:
+        completeness = classify_final_answer_completeness("Use the variable `user_input to build the query.")
+        self.assertEqual(completeness.status, "malformed_markdown")
+
+    def test_final_answer_completeness_detects_reasoning_like_answer(self) -> None:
+        completeness = classify_final_answer_completeness("Plan:\n1. Inspect the file\n2. Summarize the findings")
+        self.assertEqual(completeness.status, "reasoning_like")
+
+    def test_final_answer_completeness_accepts_complete_brief_answer(self) -> None:
+        completeness = classify_final_answer_completeness(
+            "The file is vulnerable to SQL injection and command injection due to unsanitized input handling."
+        )
+        self.assertEqual(completeness.status, "complete")
+
+    def test_repetitive_final_answer_is_detected(self) -> None:
+        content = (
+            "The file contains several issues that need review. "
+            "The file contains several issues that need review. "
+            "The file contains several issues that need review."
+        )
+        self.assertTrue(is_repetitive_final_answer(content))
+
+    def test_final_answer_completeness_detects_too_short_after_large_tool_result(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": "inspect vulnerable_service.py and explain the vulnerabilities",
+            },
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": "{\"command\":\"cat samples/vulnerable_service.py\"}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "exec_shell_full_command",
+                "tool_call_id": "call-1",
+                "content": "x" * 1200,
+            },
+        ]
+        completeness = classify_final_answer_completeness("Several flaws exist", messages=messages)
+        self.assertEqual(completeness.status, "too_short_after_tool")
+
+    def test_compact_retry_reason_detects_long_length_final(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "exec_shell_full_command", "arguments": {"command": "cat vulnerable_service.py"}},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": "x" * 1600},
+        ]
+        result = ChatResult(
+            content="Long answer that ran out of space before finishing the explanation.",
+            model="m",
+            finish_reason="length",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+        self.assertEqual(final_from_tool_compact_retry_reason(result, messages=messages), "length")
+
+    def test_compact_retry_reason_detects_repetitive_final(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "exec_shell_full_command", "arguments": {"command": "cat vulnerable_service.py"}},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": "x" * 1600},
+        ]
+        result = ChatResult(
+            content=(
+                "The application is vulnerable to injection and weak validation. "
+                "The application is vulnerable to injection and weak validation. "
+                "The application is vulnerable to injection and weak validation."
+            ),
+            model="m",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+        self.assertEqual(final_from_tool_compact_retry_reason(result, messages=messages), "repetition")
 
 
 if __name__ == "__main__":
