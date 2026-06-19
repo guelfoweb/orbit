@@ -8,6 +8,7 @@ from orbit import __version__
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.dev.bench_core import main as bench_core_main
 from orbit.dev.release_confidence import main as release_confidence_main
+from orbit.native_llama.build_cli import main as native_build_main
 from orbit.native_llama.download_cli import main as native_download_main
 from orbit.native_server.app import run_server
 from orbit.runtime import ChatRuntime
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="orbit",
         epilog=(
             "extra commands:\n"
+            "  orbit build-native [options]\n"
             "  orbit download <repo-or-file.gguf>\n"
             "  orbit download --mmproj <repo>\n"
             "  orbit download --all [repo]\n"
@@ -53,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "build-native":
+        return native_build_main(argv[1:])
     if argv and argv[0] == "download":
         return native_download_main(argv)
     if argv and argv[0] == "server":

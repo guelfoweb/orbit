@@ -21,6 +21,7 @@ class CliDownloadDispatchTests(unittest.TestCase):
         parser = cli.build_parser()
         help_text = parser.format_help()
 
+        self.assertIn("orbit build-native [options]", help_text)
         self.assertIn("orbit download <repo-or-file.gguf>", help_text)
         self.assertIn("orbit download --mmproj <repo>", help_text)
         self.assertIn("orbit download --all [repo]", help_text)
@@ -34,6 +35,13 @@ class CliDownloadDispatchTests(unittest.TestCase):
 
         self.assertEqual(code, 7)
         mocked.assert_called_once_with(["download", "--mmproj", "ggml-org/gemma-4-12B-it-GGUF"])
+
+    def test_main_dispatches_build_native_subcommand(self) -> None:
+        with mock.patch("orbit.terminal.cli.native_build_main", return_value=5) as mocked:
+            code = cli.main(["build-native", "--jobs", "6"])
+
+        self.assertEqual(code, 5)
+        mocked.assert_called_once_with(["--jobs", "6"])
 
     def test_main_dispatches_server_subcommand(self) -> None:
         with mock.patch("orbit.terminal.cli.run_server", return_value=11) as mocked:

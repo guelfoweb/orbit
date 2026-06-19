@@ -901,12 +901,16 @@ class NativeLlamaClient:
                     break
                 raise RuntimeError(f"llama_decode failed during prefill: {decode_rc}")
         pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
-        generated, gen_ms, cancelled = self._generate_from_current_context(
+        generated, gen_ms, cancelled, generated_tokens = self._generate_from_current_context(
             max_tokens=max_tokens,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
         )
+        # Preserve the exact generated token ids in the cached context so the
+        # next turn can reuse the real frontier instead of re-tokenizing prior
+        # assistant text from UTF-8 output.
+        self._session.cached_prompt_tokens = [*prompt_tokens, *generated_tokens]
         return NativeTimings(
             prompt_tokens=n_prompt,
             output_tokens=generated,
@@ -930,12 +934,13 @@ class NativeLlamaClient:
         self.reset_cancel()
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = max_tokens
-        generated, gen_ms, cancelled = self._generate_from_current_context(
+        generated, gen_ms, cancelled, generated_tokens = self._generate_from_current_context(
             max_tokens=max_tokens,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
         )
+        self._session.cached_prompt_tokens.extend(generated_tokens)
         timings = NativeTimings(
             prompt_tokens=0,
             output_tokens=generated,
@@ -956,12 +961,13 @@ class NativeLlamaClient:
         on_progress=None,
         on_token=None,
         should_cancel=None,
-    ) -> tuple[int, float, bool]:
+    ) -> tuple[int, float, bool, list[int]]:
         if not self._session.ctx_tgt or not self._session.sampler or not self._vocab:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
         lib.llama_sampler_reset(self._session.sampler)
         generated = 0
+        generated_tokens: list[int] = []
         gen_start = lib.llama_time_us()
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         while generated < max_tokens and not self.cancel_event.is_set():
@@ -972,6 +978,7 @@ class NativeLlamaClient:
             lib.llama_sampler_accept(self._session.sampler, token)
             if lib.llama_vocab_is_eog(self._vocab, token):
                 break
+            generated_tokens.append(int(token))
             text = decoder.decode(self._token_to_bytes(token), final=False)
             if text and on_token:
                 on_token(text)
@@ -989,7 +996,7 @@ class NativeLlamaClient:
         if text and on_token:
             on_token(text)
         gen_ms = (lib.llama_time_us() - gen_start) / 1000.0
-        return generated, gen_ms, self.cancel_event.is_set()
+        return generated, gen_ms, self.cancel_event.is_set(), generated_tokens
 
     def tokenize(self, prompt: str) -> list[int]:
         if not self._vocab:
@@ -1025,7 +1032,6 @@ class NativeLlamaClient:
                 lib.llama_memory_clear(mem, True)
             else:
                 lib.llama_memory_seq_rm(mem, 0, common, -1)
-        self._session.cached_prompt_tokens = list(prompt_tokens)
         return common
 
     def apply_chat_template(
