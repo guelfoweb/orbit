@@ -278,6 +278,14 @@ class NativeThinkingTests(unittest.TestCase):
         )
         self.assertEqual(_strip_reasoning_preamble(content), "42")
 
+    def test_strip_reasoning_preamble_removes_thought_preview_prefix(self) -> None:
+        content = "thought preview\nDante Alighieri was an Italian poet."
+        self.assertEqual(_strip_reasoning_preamble(content), "Dante Alighieri was an Italian poet.")
+
+    def test_strip_reasoning_preamble_removes_single_letter_reasoning_artifact(self) -> None:
+        content = "s\nDante Alighieri was an Italian poet."
+        self.assertEqual(_strip_reasoning_preamble(content), "Dante Alighieri was an Italian poet.")
+
     def test_detects_open_thought_channel(self) -> None:
         self.assertTrue(_has_open_thought_channel("<|channel>thought\npartial"))
         self.assertFalse(_has_open_thought_channel("<|channel>thought\nx<channel|>final"))
@@ -315,7 +323,7 @@ class NativeThinkingTests(unittest.TestCase):
         client._session.cancel_requested = True
         client._session.continuation_ready = True
 
-        with mock.patch.object(client, "_generate_from_current_context", return_value=(3, 12.0, False)) as generate:
+        with mock.patch.object(client, "_generate_from_current_context", return_value=(3, 12.0, False, [1, 2, 3])) as generate:
             timings = client._continue_generation_from_current_context(max_tokens=16)
 
         self.assertFalse(client.cancel_event.is_set())

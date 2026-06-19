@@ -746,8 +746,18 @@ class NativeLlamaClient:
                     success=False,
                     error="thinking-mode",
                 )
+            elif allow_mtp_experimental and self._should_skip_mtp_for_chat_followup():
+                self.mtp_fallback_reason = "chat-followup-fallback"
+                self.last_mtp_completion = MtpCompletionResult(
+                    enabled=self.config.use_mtp_experimental,
+                    success=False,
+                    error="chat-followup-fallback",
+                )
+                self.reset_session_state()
             if allow_mtp_experimental and not thinking:
-                if should_cancel and should_cancel():
+                if self.mtp_fallback_reason == "chat-followup-fallback":
+                    pass
+                elif should_cancel and should_cancel():
                     self.cancel()
                 else:
                     mtp_result = self._try_complete_with_mtp_experimental(
@@ -776,6 +786,14 @@ class NativeLlamaClient:
             return timings
         finally:
             self._session.in_flight = False
+
+    def _should_skip_mtp_for_chat_followup(self) -> bool:
+        if not self.config.use_mtp_experimental:
+            return False
+        mode = self._session.prompt_cache_mode or ""
+        if not mode.startswith("chat:"):
+            return False
+        return bool(self._session.cached_prompt_tokens)
 
     def _try_complete_with_mtp_experimental(
         self,
@@ -809,6 +827,25 @@ class NativeLlamaClient:
 
         mtp_prompt = _prepare_mtp_prompt(prompt, thinking=thinking)
         streamed_parts: list[str] = []
+        visible_streamed_parts: list[str] = []
+        channel_filter = None if thinking else _ControlChannelStreamFilter()
+        thought_label_filter = None if thinking else _LeadingThoughtLabelFilter()
+
+        def handle_stream_chunk(text: str) -> None:
+            streamed_parts.append(text)
+            visible_chunks = [text] if channel_filter is None else channel_filter.write(text)
+            if thought_label_filter is not None:
+                normalized_chunks: list[str] = []
+                for visible_text in visible_chunks:
+                    normalized_chunks.extend(thought_label_filter.write(visible_text))
+                visible_chunks = normalized_chunks
+            for visible_text in visible_chunks:
+                if not visible_text:
+                    continue
+                visible_streamed_parts.append(visible_text)
+                if on_token:
+                    on_token(visible_text)
+
         generation_cap = max(1, min(max_tokens, 32))
         self._last_completion_generation_cap = generation_cap
         result = run_persistent_mtp_completion(
@@ -818,15 +855,37 @@ class NativeLlamaClient:
             ctx_tgt=self._session.ctx_tgt,
             prompt=mtp_prompt,
             max_tokens=generation_cap,
-            on_token=(lambda text: (streamed_parts.append(text), on_token(text))[1]) if on_token else None,
+            on_token=handle_stream_chunk,
             on_progress=(
                 lambda phase, current, total: on_progress(
                     NativeProgress("prefill" if phase == 0 else "generation", current, total)
                 )
             ) if on_progress else None,
         )
+        if channel_filter is not None:
+            flushed_chunks = channel_filter.finish()
+            if thought_label_filter is not None:
+                normalized_chunks = []
+                for visible_text in flushed_chunks:
+                    normalized_chunks.extend(thought_label_filter.write(visible_text))
+                normalized_chunks.extend(thought_label_filter.finish())
+                flushed_chunks = normalized_chunks
+            for visible_text in flushed_chunks:
+                if not visible_text:
+                    continue
+                visible_streamed_parts.append(visible_text)
+                if on_token:
+                    on_token(visible_text)
+        elif thought_label_filter is not None:
+            for visible_text in thought_label_filter.finish():
+                if not visible_text:
+                    continue
+                visible_streamed_parts.append(visible_text)
+                if on_token:
+                    on_token(visible_text)
         if result.success and result.content and not thinking:
-            result = replace(result, content=_strip_control_channels(result.content))
+            sanitized_content = _strip_reasoning_preamble(_strip_control_channels(result.content))
+            result = replace(result, content=sanitized_content)
         self.last_mtp_completion = result
         if not result.success:
             self.mtp_fallback_reason = result.error or "mtp-experimental-failed"
@@ -834,11 +893,15 @@ class NativeLlamaClient:
             self._session.mtp_failure_reason = self.mtp_fallback_reason
             self._session.mtp_enabled = False
             return None
+        if not thinking and not result.content.strip():
+            self.mtp_fallback_reason = "empty-visible-content"
+            self.last_mtp_completion = replace(result, success=False, error="empty-visible-content")
+            return None
         self.mtp_fallback_reason = None
         self._session.mtp_failed = False
         self._session.mtp_failure_reason = None
         self._session.mtp_enabled = True
-        if result.content and on_token and not streamed_parts:
+        if result.content and on_token and not visible_streamed_parts:
             on_token(result.content)
         prompt_token_list = self.tokenize(mtp_prompt) if self._vocab else []
         prompt_tokens = len(prompt_token_list)
@@ -848,7 +911,16 @@ class NativeLlamaClient:
             reused_prompt_tokens += 1
         if prompt_token_list:
             reused_prompt_tokens = min(reused_prompt_tokens, len(prompt_token_list) - 1)
-        self._session.cached_prompt_tokens = list(prompt_token_list)
+        generated_token_list: list[int] = []
+        if self._vocab and result.content:
+            try:
+                generated_token_list = self.tokenize(result.content)
+            except Exception:
+                generated_token_list = []
+        # Preserve the visible generated frontier for the next native reuse pass.
+        # The persistent MTP shim does not currently expose exact output token ids,
+        # so we fall back to re-tokenizing the finalized assistant text here.
+        self._session.cached_prompt_tokens = [*prompt_token_list, *generated_token_list]
         return NativeTimings(
             prompt_tokens=prompt_tokens,
             output_tokens=result.output_tokens,
@@ -1127,7 +1199,7 @@ def _strip_reasoning_preamble(content: str) -> str:
     if not text:
         return text
     lines = text.splitlines()
-    if lines and lines[0].strip().lower() == "thought":
+    if lines and _is_reasoning_label_line(lines[0], next_line=lines[1] if len(lines) > 1 else ""):
         cleaned = "\n".join(lines[1:]).strip()
         if cleaned:
             return cleaned
@@ -1166,6 +1238,27 @@ def _strip_reasoning_preamble(content: str) -> str:
             if cleaned:
                 return cleaned
     return text
+
+
+def _is_reasoning_label_line(line: str, *, next_line: str = "") -> bool:
+    stripped = line.strip()
+    lowered = stripped.lower()
+    if lowered in {
+        "thought",
+        "thought preview",
+        "reasoning",
+        "reasoning preview",
+        "plan",
+        "plan preview",
+        "step",
+        "steps",
+    }:
+        return True
+    if len(stripped) == 1 and stripped.islower() and next_line.strip():
+        next_text = next_line.lstrip()
+        if next_text and (next_text[0].isupper() or next_text[0].isdigit()):
+            return True
+    return False
 
 
 def _has_open_thought_channel(content: str) -> bool:
@@ -1352,7 +1445,7 @@ class _LeadingThoughtLabelFilter:
         rest = self._buffer[newline_index + 1 :]
         self._resolved = True
         self._buffer = ""
-        if first_line.strip().lower() == "thought":
+        if _is_reasoning_label_line(first_line, next_line=rest):
             return [rest] if rest else []
         return [first_line + "\n" + rest] if rest else [first_line + "\n"]
 

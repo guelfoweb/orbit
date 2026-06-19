@@ -29,6 +29,28 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertTrue(args.enable_mtp_experimental)
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_prompt_skips_mtp_on_chat_followup_and_resets_session(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._session.prompt_cache_mode = "chat:thinking=off"
+        client._session.cached_prompt_tokens = [1, 2, 3]
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+
+        with (
+            mock.patch.object(client, "reset_session_state") as reset_state,
+            mock.patch.object(client, "_try_complete_with_mtp_experimental") as mtp_try,
+            mock.patch.object(client, "_complete_prompt_standard", return_value=NativeTimings(3, 1, 0, 3, 1.0, 2.0, False)) as standard,
+        ):
+            result = client.complete_prompt("hello", max_tokens=8, allow_mtp_experimental=True, thinking=False)
+
+        self.assertEqual(result.output_tokens, 1)
+        mtp_try.assert_not_called()
+        reset_state.assert_called_once()
+        standard.assert_called_once()
+        self.assertEqual(client.mtp_fallback_reason, "chat-followup-fallback")
+        self.assertEqual(client.last_mtp_completion.error, "chat-followup-fallback")
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_try_complete_with_mtp_experimental_falls_back_when_draft_missing(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(mtp_available=False, fallback_reason="draft-mtp-missing"), NativeClientConfig(use_mtp_experimental=True))
 
@@ -55,7 +77,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         client._session.ctx_tgt = object()
         client._session.mtp_enabled = True
         client._persistent_mtp_runtime = object()
-        client.tokenize = lambda prompt: [1, 2, 3]
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [9]])
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
             success=True,
@@ -88,7 +110,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(timings.reused_prompt_tokens, 0)
         self.assertEqual("".join(emitted), "ok")
         self.assertIsNone(client.mtp_fallback_reason)
-        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 3])
+        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 3, 9])
         self.assertEqual(client.last_mtp_completion.full_accept_steps, 1)
         self.assertEqual(client.last_mtp_completion.replay_steps, 0)
         self.assertEqual(client.last_mtp_completion.partial_accept_steps, 0)
@@ -105,7 +127,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         client._session.ctx_tgt = object()
         client._session.mtp_enabled = True
         client._persistent_mtp_runtime = object()
-        client.tokenize = lambda prompt: [1, 2, 3]
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [8, 9]])
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
             success=True,
@@ -129,6 +151,58 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual("".join(emitted), "ok.")
         self.assertEqual(client.last_mtp_completion.content, "ok.")
         self.assertEqual(client.last_mtp_completion.acceptance_ratio, 2 / 3)
+        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 3, 8, 9])
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_strips_plain_reasoning_preview_tokens(self, _mocked_lib, mocked_run) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+        client._persistent_mtp_runtime = object()
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [8, 9, 10]])
+        mocked_run.return_value = MtpCompletionResult(
+            enabled=True,
+            success=True,
+            error=None,
+            content="thought preview\nDante Alighieri was an Italian poet.",
+            output_tokens=6,
+            elapsed_ms=12.5,
+        )
+        emitted: list[str] = []
+
+        timings = client._try_complete_with_mtp_experimental("hello", max_tokens=8, on_token=emitted.append)
+
+        self.assertIsNotNone(timings)
+        self.assertEqual("".join(emitted), "Dante Alighieri was an Italian poet.")
+        self.assertEqual(client.last_mtp_completion.content, "Dante Alighieri was an Italian poet.")
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_falls_back_when_visible_content_is_empty(self, _mocked_lib, mocked_run) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+        client._persistent_mtp_runtime = object()
+        client.tokenize = mock.Mock(return_value=[1, 2, 3])
+        mocked_run.return_value = MtpCompletionResult(
+            enabled=True,
+            success=True,
+            error=None,
+            content="<|channel>thought\nhidden<channel|>",
+            output_tokens=2,
+            elapsed_ms=12.5,
+        )
+        emitted: list[str] = []
+
+        timings = client._try_complete_with_mtp_experimental("hello", max_tokens=8, on_token=emitted.append)
+
+        self.assertIsNone(timings)
+        self.assertEqual(emitted, [])
+        self.assertEqual(client.mtp_fallback_reason, "empty-visible-content")
+        self.assertEqual(client.last_mtp_completion.error, "empty-visible-content")
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
@@ -138,7 +212,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         client._session.ctx_tgt = object()
         client._session.mtp_enabled = True
         client._persistent_mtp_runtime = object()
-        client.tokenize = lambda prompt: [1, 2, 3]
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [9]])
 
         def fake_run(**kwargs):
             kwargs["on_token"]("o")
@@ -168,7 +242,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         client._session.ctx_tgt = object()
         client._session.mtp_enabled = True
         client._persistent_mtp_runtime = object()
-        client.tokenize = lambda prompt: [1, 2, 3]
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [9]])
         progress = []
 
         def fake_run(**kwargs):
@@ -201,7 +275,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         client._session.ctx_tgt = object()
         client._session.mtp_enabled = True
         client._persistent_mtp_runtime = object()
-        client.tokenize = lambda prompt: [1, 2, 3]
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [9]])
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
             success=True,
@@ -225,7 +299,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         client._session.ctx_tgt = object()
         client._session.mtp_enabled = True
         client._persistent_mtp_runtime = object()
-        client.tokenize = lambda prompt: [1, 2, 3]
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [9]])
         client._session.cached_prompt_tokens = [1, 2, 3]
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
@@ -248,6 +322,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertIsNotNone(timings)
         assert timings is not None
         self.assertEqual(timings.reused_prompt_tokens, 2)
+        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 3, 9])
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
@@ -281,7 +356,7 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         client._session.ctx_tgt = object()
         client._session.mtp_enabled = True
         client._persistent_mtp_runtime = object()
-        client.tokenize = lambda prompt: [1, 2, 3]
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [9]])
         client.cancel()
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
@@ -298,6 +373,28 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertFalse(client.cancel_event.is_set())
         self.assertTrue(client.last_mtp_completion.success)
         self.assertIsNone(client.mtp_fallback_reason)
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_caches_generated_frontier_for_next_turn(self, _mocked_lib, mocked_run) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+        client._persistent_mtp_runtime = object()
+        client.tokenize = mock.Mock(side_effect=[[1, 2, 3], [41, 42]])
+        mocked_run.return_value = MtpCompletionResult(
+            enabled=True,
+            success=True,
+            error=None,
+            content="dante",
+            output_tokens=2,
+            elapsed_ms=12.5,
+        )
+
+        client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 3, 41, 42])
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_complete_chat_keeps_mtp_enabled_for_final_from_tool_history(self, _mocked_lib) -> None:

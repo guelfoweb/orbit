@@ -40,6 +40,24 @@ class NativeStreamingTests(unittest.TestCase):
 
         self.assertEqual("".join(deltas), "I was developed by Google DeepMind.")
 
+    def test_leading_thought_label_filter_suppresses_thought_preview_label(self) -> None:
+        stream = _LeadingThoughtLabelFilter()
+
+        deltas: list[str] = []
+        deltas.extend(stream.write("thought preview\nDante Alighieri"))
+        deltas.extend(stream.finish())
+
+        self.assertEqual("".join(deltas), "Dante Alighieri")
+
+    def test_leading_thought_label_filter_suppresses_single_letter_reasoning_artifact(self) -> None:
+        stream = _LeadingThoughtLabelFilter()
+
+        deltas: list[str] = []
+        deltas.extend(stream.write("s\nDante Alighieri was an Italian poet."))
+        deltas.extend(stream.finish())
+
+        self.assertEqual("".join(deltas), "Dante Alighieri was an Italian poet.")
+
     def test_stop_filter_does_not_emit_stop_sequence(self) -> None:
         emitted: list[str] = []
         stream = _StopSequenceStreamFilter(("STOP",), emit=emitted.append)
