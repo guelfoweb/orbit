@@ -4,13 +4,18 @@ import os
 import re
 import signal
 import shlex
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from orbit.runtime.file_tools import MAX_CHUNK_FILE_BYTES, MAX_READ_CHARS, read_file
+from orbit.runtime.file_tools import (
+    PDF_CHUNK_CHARS,
+    extract_pdf_text,
+    format_pdf_result,
+    read_file,
+    read_pdf,
+)
 from orbit.runtime.path_guardrails import resolve_inside_workdir
 from orbit.runtime.web import html_to_text, search_web
 
@@ -21,7 +26,6 @@ DEFAULT_SHELL_OUTPUT_BYTES = 12_000
 MAX_SHELL_OUTPUT_BYTES = 12_000
 SEARCH_SHELL_OUTPUT_BYTES = 800
 SHELL_FAILURE_STREAM_CHARS = 1200
-PDF_CHUNK_CHARS = 3_000
 SHELL_READ_FILE_THRESHOLD_BYTES = 8 * 1024
 SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
 SHELL_FULL_CONTRACT_RETRY_PROMPT = (
@@ -31,8 +35,9 @@ SHELL_FULL_CONTRACT_RETRY_PROMPT = (
 )
 SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT = (
     "Your previous command inspected only metadata or listings.\n\n"
-    "For this coding task, inspect real file or test content before continuing.\n\n"
-    "Use commands such as cat, sed -n, grep/rg on file contents, or test output.\n\n"
+    "For this task, inspect real file, document, source, string, or test content before continuing.\n\n"
+    "Use commands such as cat, sed -n, grep/rg on file contents, or test output.\n"
+    "For PDFs, prefer pdftotext <file> - piped to sed, head, tail, or grep.\n\n"
     "If file names are unknown, use grep/rg recursively over file contents.\n\n"
     "Do not use ls, find, tree, file, or stat.\n\n"
     "Return only JSON:\n\n"
@@ -52,6 +57,24 @@ SHELL_FULL_COMPLETION_GUARD_PROMPT = (
     "Prefer short robust commands; avoid fragile quoting and long heredocs. "
     "Prefer minimal edits over rewriting entire files.\n\n"
     "Return only JSON:\n\n"
+    '{"command":"..."}'
+)
+SHELL_FULL_ANALYSIS_COMPLETION_GUARD_PROMPT = (
+    "You already have direct content/source evidence from previous tool results.\n\n"
+    "If that evidence is sufficient to answer the user, stop calling tools and answer now.\n\n"
+    "Only request one more tool if a specific missing fact is still required. "
+    "If you need another tool, prefer a direct content-reading command over more discovery or listings.\n\n"
+    "Do not use broad directory discovery unless the missing fact is explicitly about directory contents.\n\n"
+    "Either answer directly in plain prose, or return exactly one JSON tool call:\n\n"
+    '{"command":"..."}'
+)
+SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX = (
+    "Requested file not read yet.\n\n"
+    "Use the real evidence below.\n"
+    "If a candidate path exists, prefer one direct content-reading command on it.\n"
+    "Otherwise use one targeted discovery step.\n"
+    "If the file is unavailable, answer clearly.\n\n"
+    "Either answer briefly in plain prose, or return exactly one JSON tool call:\n\n"
     '{"command":"..."}'
 )
 SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT = (
@@ -83,7 +106,7 @@ _ANALYSIS_PROMPT_RE = re.compile(
     r"analy[sz]e|analysis|review|inspect|"
     r"analizz|analisi|ispezion|esamina|esamin|"
     r"vulnerab|exploit|malware|dropper|c2|ioc|reverse|decompil|static|"
-    r"summar(?:y|ize)|riassunt|sintesi"
+    r"summar(?:y|ize)|riassunt\w*|riassum\w*|sintesi"
     r")\b",
     re.IGNORECASE,
 )
@@ -235,6 +258,23 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
 
 def is_shell_full_contract_error(content: str) -> bool:
     return content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX)
+
+
+def build_shell_full_file_recovery_guard_prompt(
+    *,
+    requested_path: str,
+    last_error: str | None,
+    candidate_paths: list[str],
+) -> str:
+    details = [f"Requested file: {requested_path}"]
+    if last_error:
+        details.append(f"Direct read failure: {last_error}")
+    if candidate_paths:
+        details.append("Candidate paths from prior discovery:")
+        details.extend(f"- {path}" for path in candidate_paths[:5])
+    else:
+        details.append("Candidate paths from prior discovery: none")
+    return f"{SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX}\n\n" + "\n".join(details)
 
 
 def shell_failure_from_output(content: str) -> ShellFailure | None:
@@ -430,13 +470,34 @@ def _read_pdf_target(raw_command: str, *, workdir: Path) -> str | None:
     target = _first_pdf_target(tokens, workdir=workdir)
     if target is None:
         return None
-    text, method = _extract_pdf_text(target)
+    text, method = extract_pdf_text(target)
     if not text.strip():
         return f"error: no text extracted from PDF: {target.name}"
     filtered = _apply_pdf_text_filters(raw_command, target=target, text=text)
-    if filtered is not None:
-        text = filtered
-    return _format_extracted_pdf(target, text, method=method)
+    if filtered is None:
+        result = read_pdf(str(target.relative_to(workdir)), arguments={}, workdir=workdir)
+        if result.startswith("error:"):
+            return result
+        return "\n".join(
+            [
+                "shell_output_pdf_text: true",
+                result.removeprefix("pdf_text: true\n"),
+            ]
+        )
+    if len(filtered) <= PDF_CHUNK_CHARS:
+        formatted = format_pdf_result(target, filtered, extractor=method)
+    else:
+        formatted = format_pdf_result(
+            target,
+            filtered[:PDF_CHUNK_CHARS],
+            extractor=method,
+            chunk_index=0,
+            total_chunks=max(1, (len(filtered) + PDF_CHUNK_CHARS - 1) // PDF_CHUNK_CHARS),
+            chars_start=0,
+            chars_end=PDF_CHUNK_CHARS,
+            total_length=len(filtered),
+        )
+    return "\n".join(["shell_output_pdf_text: true", formatted.removeprefix("pdf_text: true\n")])
 
 
 def _command_intends_pdf_text(tokens: list[str]) -> bool:
@@ -456,66 +517,6 @@ def _first_pdf_target(tokens: list[str], *, workdir: Path) -> Path | None:
             continue
         return target_or_error
     return None
-
-
-def _extract_pdf_text(target: Path) -> tuple[str, str]:
-    pdftotext = shutil.which("pdftotext")
-    if pdftotext:
-        completed = subprocess.run(
-            [pdftotext, "-layout", str(target), "-"],
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=MAX_SHELL_TIMEOUT,
-            check=False,
-        )
-        if completed.returncode == 0 and completed.stdout.strip():
-            return completed.stdout, "pdftotext"
-    strings = shutil.which("strings")
-    if not strings:
-        return "", "unavailable"
-    completed = subprocess.run(
-        [strings, "-a", "-n", "8", str(target)],
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        capture_output=True,
-        timeout=MAX_SHELL_TIMEOUT,
-        check=False,
-    )
-    if completed.returncode == 0:
-        return _clean_pdf_strings_output(completed.stdout), "strings"
-    return "", "strings"
-
-
-def _format_extracted_pdf(target: Path, text: str, *, method: str) -> str:
-    if len(text.encode("utf-8", errors="replace")) > MAX_CHUNK_FILE_BYTES:
-        return f"error: extracted PDF text too large: max {MAX_CHUNK_FILE_BYTES} bytes"
-    if len(text) <= MAX_READ_CHARS:
-        return "\n".join(
-            [
-                "shell_output_pdf_text: true",
-                f"path: {target.name}",
-                f"extractor: {method}",
-                "content:",
-                text.strip() or "(empty PDF text)",
-            ]
-        )
-    end = min(PDF_CHUNK_CHARS, len(text))
-    total_chunks = max(1, (len(text) + PDF_CHUNK_CHARS - 1) // PDF_CHUNK_CHARS)
-    return "\n".join(
-        [
-            "shell_output_pdf_text: true",
-            f"path: {target.name}",
-            f"extractor: {method}",
-            "chunk_index: 0",
-            f"total_chunks: {total_chunks}",
-            f"chars: 0-{end} of {len(text)}",
-            "content:",
-            text[:end],
-        ]
-    )
 
 
 def _apply_pdf_text_filters(raw_command: str, *, target: Path, text: str) -> str | None:

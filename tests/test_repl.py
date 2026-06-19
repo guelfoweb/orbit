@@ -72,6 +72,7 @@ class CountingRuntime(ChatRuntime):
         self.ask_auto_calls = 0
         self.ask_chat_calls = 0
         self.last_allowed_tool_names = None
+        self.last_continue_on_progress = None
 
     def ask_auto(self, *args, **kwargs) -> ChatResult:
         self.ask_calls += 1
@@ -107,6 +108,7 @@ class CountingRuntime(ChatRuntime):
     def continue_last_response(self, *args, **kwargs) -> ChatResult:
         self.ask_calls += 1
         on_final_delta = kwargs.get("on_final_delta")
+        self.last_continue_on_progress = kwargs.get("on_progress")
         if on_final_delta:
             on_final_delta("continued")
         return ChatResult(
@@ -449,6 +451,29 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(runtime.ask_calls, 1)
         self.assertIn("continued", stdout.getvalue())
         self.assertFalse(repl.can_continue)
+        self.assertIsNotNone(runtime.last_continue_on_progress)
+
+    def test_footer_offers_continue_for_reasoning_only_stop(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path("."), think=True))
+        result = ChatResult(
+            content="### Reasoning\nstill thinking",
+            model="fake",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=10,
+            completion_tokens=16,
+            cached_tokens=0,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            repl._print_turn_footer(result, elapsed_seconds=1)
+
+        self.assertTrue(repl.can_continue)
+        self.assertIn("/continue", stdout.getvalue())
 
     def test_tools_are_off_by_default_and_chat_path_is_used(self) -> None:
         runtime = CountingRuntime()

@@ -21,6 +21,7 @@ from orbit.runtime.shell_guardrails import (
     SHELL_FULL_COMPLETION_GUARD_PROMPT,
     SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT,
     SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT,
+    SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX,
     SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT,
     SHELL_FULL_SEMANTIC_REPAIR_PROMPT,
     should_verify_shell_mutation,
@@ -173,20 +174,21 @@ class RuntimeTests(unittest.TestCase):
         runtime.continue_last_response(temperature=0, max_tokens=32)
 
         self.assertEqual(runtime.messages[-2]["role"], "user")
-        self.assertIn("do not restart it from the beginning", runtime.messages[-2]["content"].lower())
+        self.assertIn("stop reasoning now", runtime.messages[-2]["content"].lower())
 
-    def test_continue_last_response_uses_native_backend_continuation_for_open_reasoning(self) -> None:
-        class NativeContinueBackend(FakeBackend):
+    def test_continue_last_response_uses_prompt_fallback_for_open_reasoning(self) -> None:
+        class FallbackBackend(FakeBackend):
             def __init__(self) -> None:
                 super().__init__()
                 self.continue_calls = 0
+                self.chat_calls = 0
+                self.thinking = True
+                self.last_messages: list[Message] = []
 
             def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
                 self.continue_calls += 1
-                if on_delta:
-                    on_delta("continued")
                 return ChatResult(
-                    content="continued",
+                    content="should not be used",
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -197,15 +199,73 @@ class RuntimeTests(unittest.TestCase):
                     generation_tokens_per_second=None,
                 )
 
-        backend = NativeContinueBackend()
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                self.last_thinking = self.thinking
+                self.last_messages = messages
+                return ChatResult(
+                    content="Final answer from fallback.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = FallbackBackend()
         runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
         runtime.messages.append({"role": "assistant", "content": "<|channel>thought\npartial reasoning"})
 
         result = runtime.continue_last_response(temperature=0, max_tokens=32)
 
-        self.assertEqual(result.content, "continued")
-        self.assertEqual(backend.continue_calls, 1)
-        self.assertEqual(runtime.messages[-1]["content"], "continued")
+        self.assertEqual(result.content, "Final answer from fallback.")
+        self.assertEqual(backend.continue_calls, 0)
+        self.assertEqual(backend.chat_calls, 1)
+        self.assertEqual(runtime.messages[-1]["content"], "Final answer from fallback.")
+        self.assertFalse(backend.last_thinking)
+        self.assertIn("Stop reasoning now and write only the missing final answer.", backend.last_messages[-2]["content"])
+        self.assertIn("Start the answer with 'Final answer:'", backend.last_messages[-2]["content"])
+
+    def test_continue_last_response_returns_controlled_error_if_fallback_stays_thinking_like(self) -> None:
+        class ThinkingFallbackBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.continue_calls = 0
+                self.chat_calls = 0
+                self.thinking = True
+
+            def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
+                self.continue_calls += 1
+                raise AssertionError("native continue should not be used for thinking continuation")
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                return ChatResult(
+                    content="<|channel>thought\nstill thinking",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ThinkingFallbackBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        runtime.messages.append({"role": "assistant", "content": "<|channel>thought\npartial reasoning"})
+
+        result = runtime.continue_last_response(temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "error: model did not produce a final answer after continuation")
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertEqual(backend.continue_calls, 0)
+        self.assertEqual(backend.chat_calls, 1)
+        self.assertFalse(runtime.can_continue_last_response())
 
     def test_continue_last_response_uses_native_backend_continuation_after_length_even_without_open_reasoning(self) -> None:
         class NativeContinueBackend(FakeBackend):
@@ -1187,16 +1247,650 @@ class ToolRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result.content, "vulnerability found from source evidence")
-        self.assertEqual(backend.calls, 5)
+        self.assertEqual(backend.calls, 4)
         self.assertEqual(backend.tools_seen[0], None)
         self.assertIsNotNone(backend.tools_seen[1])
         self.assertIsNotNone(backend.tools_seen[2])
-        self.assertIsNotNone(backend.tools_seen[3])
-        self.assertEqual(backend.tools_seen[4], None)
+        self.assertEqual(backend.tools_seen[3], None)
         self.assertIsNotNone(backend.second_call_last_message)
         self.assertIn("content/source/string evidence", backend.second_call_last_message["content"])
         self.assertIsNotNone(backend.third_call_last_message)
         self.assertIn("Return only the tool call", backend.third_call_last_message["content"])
+
+    def test_analysis_completion_guard_reconsiders_non_content_followup_after_evidence(self) -> None:
+        class AnalysisCompletionBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.guard_messages: list[Message] | None = None
+                self.final_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "sed -n '1,80p' vulnerable_service.py"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "ls -R"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    self.guard_messages = messages
+                    return ChatResult(
+                        content="I already have enough evidence.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                self.final_messages = messages
+                return ChatResult(
+                    content="The file is vulnerable because it executes shell commands with shell=True.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            backend = AnalysisCompletionBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "inspect vulnerable_service.py and explain the vulnerabilities",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertTrue(result.content.strip())
+        self.assertIn(backend.calls, {3, 4})
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertIn("shell=True", tool_messages[0]["content"])
+
+    def test_analysis_completion_guard_does_not_block_followup_content_read(self) -> None:
+        class FollowupContentBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "sed -n '1,40p' report.txt"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "sed -n '41,80p' report.txt"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Final summary from both chunks.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=4,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "report.txt").write_text("A\n" * 120, encoding="utf-8")
+            backend = FollowupContentBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "inspect report.txt and summarize it",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "Final summary from both chunks.")
+
+    def test_file_recovery_guard_guides_model_to_candidate_read(self) -> None:
+        class FileRecoveryBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.guard_messages: list[Message] | None = None
+                self.guard_max_tokens: int | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                last_content = str(messages[-1].get("content"))
+                if SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX in last_content and self.guard_messages is None:
+                    self.guard_messages = messages
+                    self.guard_max_tokens = max_tokens
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "cat vulnerable_service.py"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content=json.dumps({"command": "find . -name \"vulnerable_service.py\""}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content=json.dumps({"command": "ls -R"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 4:
+                    return ChatResult(
+                        content=json.dumps({"command": "sed -n '1,80p' ./samples/vulnerable_service.py"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The file is vulnerable because it uses shell=True in subprocess.run.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=9,
+                    completion_tokens=6,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            samples = workdir / "samples"
+            samples.mkdir()
+            (samples / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            backend = FileRecoveryBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "inspect vulnerable_service.py and explain the vulnerabilities",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertIn("shell=True", result.content)
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 3)
+        self.assertIn("No such file or directory", tool_messages[0]["content"])
+        self.assertIn("./samples/vulnerable_service.py", tool_messages[1]["content"])
+        self.assertIn("shell=True", tool_messages[2]["content"])
+        self.assertIsNotNone(backend.guard_messages)
+        self.assertEqual(backend.guard_max_tokens, 64)
+        self.assertIn(SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX, backend.guard_messages[-1]["content"])
+        self.assertIn("Requested file: vulnerable_service.py", backend.guard_messages[-1]["content"])
+        self.assertIn("Direct read failure:", backend.guard_messages[-1]["content"])
+        self.assertIn("./samples/vulnerable_service.py", backend.guard_messages[-1]["content"])
+
+    def test_file_recovery_guard_allows_final_not_found_answer(self) -> None:
+        class MissingFileBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.guard_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                last_content = str(messages[-1].get("content"))
+                if SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX in last_content and self.guard_messages is None:
+                    self.guard_messages = messages
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "cat missing.py"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content=json.dumps({"command": "find . -name \"missing.py\""}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content=json.dumps({"command": "ls -R"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="I could not find `missing.py` after a direct read and a targeted search.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = MissingFileBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "inspect missing.py and explain the vulnerabilities",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertIn("could not find", result.content.lower())
+        self.assertIsNotNone(backend.guard_messages)
+        self.assertIn("Requested file: missing.py", backend.guard_messages[-1]["content"])
+
+    def test_file_recovery_guard_does_not_block_recursive_listing_requests(self) -> None:
+        class RecursiveListingBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "ls -R"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Directory listing complete.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=6,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = RecursiveListingBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "list files recursively",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "Directory listing complete.")
+        self.assertEqual(backend.calls, 2)
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+
+    def test_direct_content_read_handoffs_immediately_to_final_from_tool(self) -> None:
+        class DirectContentHandoffBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.final_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "sed -n '1,80p' vulnerable_service.py"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                self.final_messages = messages
+                assert tools is None
+                assert "shell-full output" in str(messages[-1].get("content"))
+                return ChatResult(
+                    content="The file is vulnerable because it uses shell=True in subprocess.run.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=6,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            backend = DirectContentHandoffBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_with_tools(
+                "inspect vulnerable_service.py and explain the vulnerabilities",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertIn("shell=True", result.content)
+        self.assertEqual(backend.calls, 2)
+        self.assertIsNotNone(backend.final_messages)
+
+    def test_candidate_paths_without_direct_content_do_not_handoff_to_final_from_tool(self) -> None:
+        class CandidatePathBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.third_call_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat vulnerable_service.py"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "find . -name \"vulnerable_service.py\""}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    self.third_call_messages = messages
+                    assert tools is not None
+                    assert "shell-full output" not in str(messages[-1].get("content"))
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-3",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "sed -n '1,80p' ./samples/vulnerable_service.py"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                assert tools is None
+                assert "shell-full output" in str(messages[-1].get("content"))
+                return ChatResult(
+                    content="The file is vulnerable because it uses shell=True in subprocess.run.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            samples = workdir / "samples"
+            samples.mkdir()
+            (samples / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            backend = CandidatePathBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_with_tools(
+                "inspect vulnerable_service.py and explain the vulnerabilities",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertIn("shell=True", result.content)
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNotNone(backend.third_call_messages)
+
+    def test_mutative_request_does_not_handoff_directly_to_final_from_tool(self) -> None:
+        class MutativeNoHandoffBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.second_call_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "printf 'updated\\n' > note.txt && cat note.txt"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    self.second_call_messages = messages
+                    assert tools is not None
+                    assert "shell-full output" not in str(messages[-1].get("content"))
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat note.txt"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = MutativeNoHandoffBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_with_tools(
+                "update note.txt with the word updated",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNotNone(backend.second_call_messages)
 
     def test_shell_full_failed_initial_command_gets_one_model_retry(self) -> None:
         class FailedShellCommandBackend:
@@ -2706,13 +3400,12 @@ EOF"""
             )
 
         self.assertEqual(result.content, "final answer from multiple shell results")
-        self.assertEqual(backend.calls, 4)
+        self.assertEqual(backend.calls, 3)
         self.assertIsNotNone(backend.tools_seen[0])
-        self.assertIsNotNone(backend.tools_seen[1])
-        self.assertIsNotNone(backend.tools_seen[2])
-        self.assertIsNone(backend.tools_seen[3])
+        self.assertIsNone(backend.tools_seen[1])
+        self.assertIsNone(backend.tools_seen[2])
         tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
-        self.assertEqual(len(tool_messages), 2)
+        self.assertEqual(len(tool_messages), 1)
 
     def test_ask_auto_streams_route_phase_when_progress_is_requested(self) -> None:
         class StreamingRouteBackend:
@@ -3346,8 +4039,8 @@ EOF"""
         self.assertEqual(result.content, "Sintesi: relazione tecnica sulla gestione, manutenzione ed evoluzione della rete QX.")
         self.assertEqual(backend.calls, 4)
         self.assertIsNotNone(backend.tools_seen[0])
-        self.assertIsNotNone(backend.tools_seen[1])
-        self.assertIsNotNone(backend.tools_seen[2])
+        self.assertIsNone(backend.tools_seen[1])
+        self.assertIsNone(backend.tools_seen[2])
         self.assertIsNone(backend.tools_seen[3])
 
     def test_ask_with_tools_can_read_text_file(self) -> None:
@@ -3505,7 +4198,7 @@ EOF"""
             )
 
         self.assertEqual(result.content, "CPU information from tool result")
-        self.assertEqual(backend.calls, 4)
+        self.assertEqual(backend.calls, 3)
         self.assertEqual(steps[-1].phase, "final_from_tool")
 
     def test_ask_with_tools_traces_tool_call_retry_in_final_answer(self) -> None:
@@ -3662,7 +4355,7 @@ EOF"""
         self.assertEqual(result.content, "<|channel>thought\nfrom tool result<channel|>final answer")
         self.assertEqual(emitted, ["<|channel>thought\nfrom tool result", "<channel|>final answer"])
 
-    def test_final_from_tool_uses_native_continuation_once_when_thinking_hits_length(self) -> None:
+    def test_final_from_tool_uses_compact_retry_once_when_thinking_hits_length(self) -> None:
         class StreamingFinalThoughtLengthBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -3708,13 +4401,26 @@ EOF"""
                     )
                 assert on_delta is not None
                 on_delta("<|channel>thought\npartial")
+                if self.calls == 3:
+                    return ChatResult(
+                        content="<|channel>thought\npartial",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=22,
+                        completion_tokens=5,
+                        cached_tokens=10,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                on_delta("short final answer")
                 return ChatResult(
-                    content="<|channel>thought\npartial",
+                    content="short final answer",
                     model="fake",
-                    finish_reason="length",
+                    finish_reason="stop",
                     tool_calls=[],
-                    prompt_tokens=22,
-                    completion_tokens=5,
+                    prompt_tokens=24,
+                    completion_tokens=6,
                     cached_tokens=10,
                     prompt_tokens_per_second=None,
                     generation_tokens_per_second=None,
@@ -3722,19 +4428,7 @@ EOF"""
 
             def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
                 self.continue_calls += 1
-                assert on_delta is not None
-                on_delta("<channel|>final answer")
-                return ChatResult(
-                    content="<channel|>final answer",
-                    model="fake",
-                    finish_reason="stop",
-                    tool_calls=[],
-                    prompt_tokens=0,
-                    completion_tokens=4,
-                    cached_tokens=0,
-                    prompt_tokens_per_second=None,
-                    generation_tokens_per_second=None,
-                )
+                raise AssertionError("final-from-tool should not use native continuation")
 
         with tempfile.TemporaryDirectory() as tmp:
             emitted: list[str] = []
@@ -3751,13 +4445,13 @@ EOF"""
                 on_model_step=steps.append,
             )
 
-        self.assertEqual(backend.continue_calls, 1)
-        self.assertEqual(result.content, "<|channel>thought\npartial<channel|>final answer")
+        self.assertEqual(backend.continue_calls, 0)
+        self.assertEqual(result.content, "short final answer")
         self.assertEqual(result.finish_reason, "stop")
-        self.assertEqual(emitted, ["plan before tools", "<|channel>thought\npartial", "<channel|>final answer"])
-        self.assertEqual(steps[-1].phase, "final_from_tool_continue_native")
+        self.assertEqual(emitted, ["plan before tools", "<|channel>thought\npartial", "short final answer"])
+        self.assertIn(steps[-1].phase, {"final_from_tool", "final_from_tool_compact_retry"})
 
-    def test_final_from_tool_non_stream_uses_native_continuation_once_when_thinking_hits_length(self) -> None:
+    def test_final_from_tool_non_stream_uses_compact_retry_once_when_thinking_hits_length(self) -> None:
         class FinalThoughtLengthBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -3784,13 +4478,25 @@ EOF"""
                         prompt_tokens_per_second=None,
                         generation_tokens_per_second=None,
                     )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="<|channel>thought\npartial",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=22,
+                        completion_tokens=5,
+                        cached_tokens=10,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
                 return ChatResult(
-                    content="<|channel>thought\npartial",
+                    content="short final answer",
                     model="fake",
-                    finish_reason="length",
+                    finish_reason="stop",
                     tool_calls=[],
-                    prompt_tokens=22,
-                    completion_tokens=5,
+                    prompt_tokens=24,
+                    completion_tokens=6,
                     cached_tokens=10,
                     prompt_tokens_per_second=None,
                     generation_tokens_per_second=None,
@@ -3798,17 +4504,7 @@ EOF"""
 
             def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
                 self.continue_calls += 1
-                return ChatResult(
-                    content="<channel|>final answer",
-                    model="fake",
-                    finish_reason="stop",
-                    tool_calls=[],
-                    prompt_tokens=0,
-                    completion_tokens=4,
-                    cached_tokens=0,
-                    prompt_tokens_per_second=None,
-                    generation_tokens_per_second=None,
-                )
+                raise AssertionError("final-from-tool should not use native continuation")
 
         with tempfile.TemporaryDirectory() as tmp:
             backend = FinalThoughtLengthBackend()
@@ -3821,8 +4517,8 @@ EOF"""
                 tool_names=("exec_shell_full_command",),
             )
 
-        self.assertEqual(backend.continue_calls, 1)
-        self.assertEqual(result.content, "<|channel>thought\npartial<channel|>final answer")
+        self.assertEqual(backend.continue_calls, 0)
+        self.assertEqual(result.content, "short final answer")
         self.assertEqual(result.finish_reason, "stop")
 
     def test_ask_with_tools_streams_planning_thought_when_thinking_mode_is_on(self) -> None:
@@ -4132,7 +4828,7 @@ EOF"""
 
         self.assertEqual(result.content, "done")
         self.assertEqual(emitted, ["done"])
-        self.assertEqual(backend.calls, 3)
+        self.assertEqual(backend.calls, 2)
 
     def test_ask_with_tools_streaming_retries_empty_final_then_streams_thought_and_answer(self) -> None:
         class EmptyThenThoughtFinalBackend:
@@ -4225,11 +4921,11 @@ EOF"""
             )
 
         self.assertEqual(result.content, "<|channel>thought\nfrom tool result<channel|>final answer")
-        self.assertEqual(emitted, ["<|channel>thought\nfrom tool result", "<channel|>final answer"])
-        self.assertEqual(backend.chat_calls, 1)
+        self.assertEqual(emitted, ["<|channel>thought\nfrom tool result<channel|>final answer"])
+        self.assertEqual(backend.chat_calls, 0)
         self.assertEqual(backend.chat_stream_calls, 3)
         phases = [step.phase for step in steps]
-        self.assertEqual(phases, ["tool_call", "final", "tool_call_retry", "final_from_tool"])
+        self.assertEqual(phases, ["tool_call", "final_from_tool", "final_from_tool_retry"])
 
     def test_ask_with_tools_emits_tool_call_event(self) -> None:
         events: list[tuple[str, str]] = []
@@ -4268,7 +4964,7 @@ EOF"""
                 on_model_step=steps.append,
             )
 
-        self.assertEqual(len(steps), 3)
+        self.assertEqual(len(steps), 2)
         self.assertEqual(steps[0].loop, 1)
         self.assertEqual(steps[0].phase, "tool_call")
         self.assertEqual(steps[0].cached_tokens, 8)
