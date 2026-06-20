@@ -4,6 +4,7 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
+from shutil import copyfile
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1591,6 +1592,83 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn("Requested file: vulnerable_service.py", backend.guard_messages[-1]["content"])
         self.assertIn("Direct read failure:", backend.guard_messages[-1]["content"])
         self.assertIn("./samples/vulnerable_service.py", backend.guard_messages[-1]["content"])
+
+    def test_pdf_recovery_guard_prefers_robust_text_extraction_without_auto_running_it(self) -> None:
+        class PdfRecoveryBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.guard_messages: list[Message] | None = None
+                self.generic_shell_repairs = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                last_content = str(messages[-1].get("content"))
+                if SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX in last_content and self.guard_messages is None:
+                    self.guard_messages = messages
+                if "The previous shell command failed." in last_content:
+                    self.generic_shell_repairs += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content=json.dumps({"command": "pdffind pdf/grande.pdf"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content=json.dumps({"command": "pdftotext pdf/grande.pdf - | head -n 20"}),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The document is a presentation about eIDAS regulation and identity proofing.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=10,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "pdf").mkdir()
+            copyfile(ROOT / "workdir" / "pdf" / "grande.pdf", workdir / "pdf" / "grande.pdf")
+            backend = PdfRecoveryBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "Read pdf/grande.pdf and summarize the document topic in one concise sentence.",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertIn("identity proofing", result.content.lower())
+        self.assertIsNotNone(backend.guard_messages)
+        self.assertEqual(backend.generic_shell_repairs, 0)
+        guard = str(backend.guard_messages[-1]["content"])
+        self.assertIn("Requested file: pdf/grande.pdf", guard)
+        self.assertIn("Requested file currently exists in the workdir: yes", guard)
+        self.assertIn("Last failed command: pdffind pdf/grande.pdf", guard)
+        self.assertIn("Last exit code:", guard)
+        self.assertIn("preferably pdftotext", guard)
+        self.assertIn("fallback such as strings", guard)
+        self.assertIn("Do not conclude that the file is missing or unreadable yet.", guard)
 
     def test_file_recovery_guard_allows_final_not_found_answer(self) -> None:
         class MissingFileBackend:

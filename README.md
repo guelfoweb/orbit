@@ -5,7 +5,7 @@ Minimal local CLI for running Gemma 4 with the native `orbit-server`.
 Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal Orbit setup does not require an external `llama-server` process at runtime.
 
 Important status note:
-the native backend is the primary Orbit path, but a fresh clone is not yet a zero-build product. Today, Orbit still expects native `llama`/`ggml` components to be available locally, and some MTP paths still rebuild a local shim when needed. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+the native backend is the primary Orbit path, but a fresh clone still needs native prerequisites. Today, Orbit still expects `llama.cpp`-derived native `llama`/`ggml` components to be available locally, and some MTP paths still rebuild a local shim when needed. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
 
 Linux is the main target environment. macOS may work. Windows is not a target environment.
 
@@ -52,7 +52,7 @@ python3 -m venv .venv
 pip install -e .
 ```
 
-This installs the Python package and CLI. It does not yet guarantee a fully self-contained native backend on a fresh machine.
+This installs the Python package and CLI. It does not yet guarantee that a fresh machine already has the native libraries Orbit needs.
 
 ### What a fresh checkout still needs today
 

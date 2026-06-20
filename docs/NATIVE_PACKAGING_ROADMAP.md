@@ -15,7 +15,7 @@ Today, a fresh clone still depends on:
 - a prepared `llama.cpp` build tree with `libllama.so`, `libllama-common.so`, and `ggml` libraries
 - local native helper or shim compilation for some MTP paths
 
-That means Orbit is already independent from `llama-server` as a backend choice, but it is not yet a zero-build product for a new user.
+That means Orbit does not require an external `llama-server` runtime process, but it is not yet a packaged no-prerequisite product for a new user.
 
 ## Current bootstrap contract
 
@@ -129,7 +129,7 @@ Acceptance:
 ### Milestone 3. Packaged native libs
 
 Goal:
-- make the native backend self-contained from Orbit’s point of view
+- make the native backend start from Orbit-owned packaged artifacts instead of requiring a separate local native build tree
 
 Deliverables:
 - packaged `libllama`, `libllama-common`, `ggml`, and `mtmd` runtime libraries
@@ -197,7 +197,7 @@ all work with no manual path entry on a supported packaged install.
 - Native ABI drift is the main packaging risk.
 - Shipping mismatched `llama` and shim binaries is worse than keeping the current explicit dependency.
 - Linux should remain the first supported packaging target.
-- macOS should be treated as follow-up, not as part of the first self-contained product milestone.
+- macOS should be treated as follow-up, not as part of the first fully packaged native product milestone.
 
 ## Release criterion for “Orbit is autonomous”
 
