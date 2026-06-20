@@ -265,15 +265,39 @@ def build_shell_full_file_recovery_guard_prompt(
     requested_path: str,
     last_error: str | None,
     candidate_paths: list[str],
+    requested_path_exists: bool = False,
+    last_command: str | None = None,
+    last_failure_content: str | None = None,
 ) -> str:
     details = [f"Requested file: {requested_path}"]
+    if requested_path_exists:
+        details.append("Requested file currently exists in the workdir: yes")
     if last_error:
         details.append(f"Direct read failure: {last_error}")
+    failure = shell_failure_from_output(last_failure_content or "")
+    if last_command:
+        details.append(f"Last failed command: {last_command}")
+    if failure is not None:
+        details.append(f"Last exit code: {failure.exit_code}")
+        if failure.stderr:
+            details.append(f"Last stderr: {_bounded_stream(failure.stderr)}")
+        elif failure.stdout:
+            details.append(f"Last stdout: {_bounded_stream(failure.stdout)}")
     if candidate_paths:
         details.append("Candidate paths from prior discovery:")
         details.extend(f"- {path}" for path in candidate_paths[:5])
     else:
         details.append("Candidate paths from prior discovery: none")
+    if requested_path_exists and requested_path.lower().endswith(".pdf"):
+        details.append("No usable content has been extracted from the requested PDF yet.")
+        details.append("Do not conclude that the file is missing or unreadable yet.")
+        details.append("Verify the file path in the workdir, then use a simple PDF text extractor if available, preferably pdftotext.")
+        details.append("If pdftotext is unavailable or still fails, try a minimal text fallback such as strings.")
+        details.append("Avoid specialist PDF utilities when the goal is only to read text and summarize the document.")
+        details.append("Use only text actually extracted from the file in the final answer.")
+    elif requested_path_exists:
+        details.append("No usable content has been extracted from the requested file yet.")
+        details.append("Do not conclude that the file is missing or unreadable yet.")
     return f"{SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX}\n\n" + "\n".join(details)
 
 

@@ -6,6 +6,7 @@ import select
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
 from typing import Any
@@ -530,26 +531,30 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
 def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    paths = resolve_bootstrap_paths(args)
-    client = NativeLlamaClient(
-        paths,
-        NativeClientConfig(
-            context_tokens=args.ctx,
-            threads=args.threads,
-            threads_batch=args.threads_batch,
-            batch_size=args.batch,
-            ubatch_size=args.ubatch,
-            thinking=args.think == "on",
-            mtp_probe_enabled=args.enable_mtp_probe,
-            mtp_dry_run_enabled=args.enable_mtp_dry_run,
-            mtp_accept_probe_enabled=args.enable_mtp_accept_probe,
-            mtp_decode_probe_enabled=args.enable_mtp_decode_probe,
-            use_mtp_experimental=args.enable_mtp_experimental,
-        ),
-    )
-    if not args.verbose_llama_log:
-        client.set_quiet_logging()
-    client.load()
+    try:
+        paths = resolve_bootstrap_paths(args)
+        client = NativeLlamaClient(
+            paths,
+            NativeClientConfig(
+                context_tokens=args.ctx,
+                threads=args.threads,
+                threads_batch=args.threads_batch,
+                batch_size=args.batch,
+                ubatch_size=args.ubatch,
+                thinking=args.think == "on",
+                mtp_probe_enabled=args.enable_mtp_probe,
+                mtp_dry_run_enabled=args.enable_mtp_dry_run,
+                mtp_accept_probe_enabled=args.enable_mtp_accept_probe,
+                mtp_decode_probe_enabled=args.enable_mtp_decode_probe,
+                use_mtp_experimental=args.enable_mtp_experimental,
+            ),
+        )
+        if not args.verbose_llama_log:
+            client.set_quiet_logging()
+        client.load()
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(_format_native_bootstrap_error(exc), file=sys.stderr)
+        return 1
 
     httpd = ThreadingHTTPServer((args.host, args.port), OrbitNativeHandler)
     httpd.orbit_state = OrbitNativeServer(client=client, model_alias=args.alias)  # type: ignore[attr-defined]
@@ -620,6 +625,25 @@ def resolve_bootstrap_paths(args: argparse.Namespace) -> NativeLlamaPaths:
         models_dir=args.models_dir,
         hf_cache=args.hf_cache,
     )
+
+
+def _format_native_bootstrap_error(exc: Exception) -> str:
+    detail = str(exc).strip() or exc.__class__.__name__
+    if "libllama.so not found" in detail:
+        return (
+            "error: native backend libraries are missing.\n"
+            f"detail: {detail}\n"
+            "hint: provide --llama-root /path/to/llama.cpp, or set ORBIT_LLAMA_ROOT, "
+            "or package native libraries under src/orbit/native_llama/vendor/lib."
+        )
+    if "missing native build inputs for" in detail:
+        return (
+            "error: native MTP shim inputs are missing.\n"
+            f"detail: {detail}\n"
+            "hint: use --llama-root /path/to/llama.cpp (or ORBIT_LLAMA_ROOT) so Orbit can rebuild "
+            "the required shim, or package the shim under src/orbit/native_llama/vendor/shim."
+        )
+    return f"error: failed to start native backend: {detail}"
 
 
 def _session_id_from_payload(payload: dict[str, Any]) -> str:

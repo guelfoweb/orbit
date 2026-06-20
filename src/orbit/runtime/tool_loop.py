@@ -204,7 +204,12 @@ def run_tool_loop(
                 return True
         return False
 
-    def request_file_recovery_guard() -> None:
+    def request_file_recovery_guard(
+        *,
+        last_command: str | None = None,
+        last_failure_content: str | None = None,
+        requested_path_exists: bool = False,
+    ) -> None:
         if not turn.requested_user_path:
             return
         turn.pending_file_recovery_guard = True
@@ -213,6 +218,9 @@ def run_tool_loop(
             requested_path=turn.requested_user_path,
             last_error=turn.last_error,
             candidate_paths=turn.candidate_paths,
+            requested_path_exists=requested_path_exists,
+            last_command=last_command,
+            last_failure_content=last_failure_content,
         )
 
     def has_pending_internal_request() -> bool:
@@ -290,7 +298,12 @@ def run_tool_loop(
                 runtime.content_evidence_guard_failures += 1
             return
         if is_shell_full_execution_error(tool_result.content):
-            if tool_output_kind == "file_not_found":
+            direct_requested_read_failed = bool(
+                turn.requested_user_path
+                and command
+                and _looks_like_direct_requested_read(command, turn.requested_user_path)
+            )
+            if tool_output_kind == "file_not_found" or direct_requested_read_failed:
                 turn.mark_direct_read_failed(_summarize_shell_error(tool_result.content))
             if is_mutation_verification:
                 if (
@@ -319,6 +332,21 @@ def run_tool_loop(
                 runtime.mutation_semantic_repair_failures += 1
                 repair.shell_error_final_pending = True
                 turn.mark_exhausted()
+                return
+            requested_path_exists = _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
+            requested_pdf_path = bool(turn.requested_user_path and turn.requested_user_path.lower().endswith(".pdf"))
+            if (
+                is_repairable_shell_error(tool_result.content)
+                and direct_requested_read_failed
+                and requested_pdf_path
+                and requested_path_exists
+                and turn.can_reconsider(RECONSIDER_FILE_RECOVERY)
+            ):
+                request_file_recovery_guard(
+                    last_command=command,
+                    last_failure_content=tool_result.content,
+                    requested_path_exists=True,
+                )
                 return
             if is_repairable_shell_error(tool_result.content) and repair.shell_repair_retries < MAX_SHELL_REPAIR_RETRIES:
                 repair.shell_repair_retries += 1
@@ -825,6 +853,18 @@ def _extract_requested_user_path(prompt: str | None) -> str | None:
         if candidate:
             return candidate.strip()
     return None
+
+
+def _requested_user_path_exists(requested_path: str | None, *, workdir) -> bool:
+    if not requested_path:
+        return False
+    root = Path(workdir).expanduser().resolve()
+    target = (root / requested_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return False
+    return target.is_file()
 
 
 def _looks_like_discovery_command(command: str) -> bool:

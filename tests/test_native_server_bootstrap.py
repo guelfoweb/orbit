@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-from orbit.native_server.app import build_parser, resolve_bootstrap_paths
+from orbit.native_server.app import build_parser, resolve_bootstrap_paths, run_server
 
 
 class NativeServerBootstrapTests(unittest.TestCase):
@@ -113,6 +115,38 @@ class NativeServerBootstrapTests(unittest.TestCase):
             args = build_parser().parse_args(["--llama-root", str(llama_root), "--model-id", "gemma4-12b-it-q4km", "--models-dir", str(root / "models"), "--hf-cache", str(root / "hf")])
             with self.assertRaises(FileNotFoundError):
                 resolve_bootstrap_paths(args)
+
+    def test_run_server_reports_clear_error_when_native_runtime_is_missing(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch(
+            "orbit.native_server.app.resolve_bootstrap_paths",
+            side_effect=FileNotFoundError("libllama.so not found. Searched: /missing/libllama.so."),
+        ):
+            with redirect_stderr(stderr):
+                code = run_server([])
+
+        self.assertEqual(code, 1)
+        output = stderr.getvalue()
+        self.assertIn("error: native backend libraries are missing.", output)
+        self.assertIn("--llama-root", output)
+        self.assertIn("ORBIT_LLAMA_ROOT", output)
+
+    def test_run_server_reports_clear_error_when_mtp_shim_inputs_are_missing(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as mocked_paths, mock.patch(
+            "orbit.native_server.app.NativeLlamaClient"
+        ) as mocked_client:
+            mocked_paths.return_value = mock.Mock()
+            mocked_client.return_value.load.side_effect = RuntimeError(
+                "missing native build inputs for liborbit-persistent-mtp.so"
+            )
+            with redirect_stderr(stderr):
+                code = run_server(["--mtp"])
+
+        self.assertEqual(code, 1)
+        output = stderr.getvalue()
+        self.assertIn("error: native MTP shim inputs are missing.", output)
+        self.assertIn("--llama-root", output)
 
 
 if __name__ == "__main__":

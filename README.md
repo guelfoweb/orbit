@@ -5,7 +5,7 @@ Minimal local CLI for running Gemma 4 with the native `orbit-server`.
 Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal Orbit setup does not require an external `llama-server` process at runtime.
 
 Important status note:
-the native backend is the primary Orbit path, but a fresh clone is not yet a zero-build product. Today, Orbit still expects native `llama`/`ggml` components to be available locally, and some MTP paths still rebuild a local shim when needed. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+the native backend is the primary Orbit path, but a fresh clone still needs native prerequisites. Today, Orbit still expects `llama.cpp`-derived native `llama`/`ggml` components to be available locally, and some MTP paths still rebuild a local shim when needed. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
 
 Linux is the main target environment. macOS may work. Windows is not a target environment.
 
@@ -52,7 +52,25 @@ python3 -m venv .venv
 pip install -e .
 ```
 
-This installs the Python package and CLI. It does not yet guarantee a fully self-contained native backend on a fresh machine.
+This installs the Python package and CLI. It does not yet guarantee that a fresh machine already has the native libraries Orbit needs.
+
+### What a fresh checkout still needs today
+
+Orbit already owns the Python CLI, model download, and the native server entrypoint. What it does not yet ship by itself is the full native `llama.cpp` runtime.
+
+Today, a clean checkout still needs one of these:
+
+- packaged native libraries under `src/orbit/native_llama/vendor/lib`
+- or a local `llama.cpp` build tree passed with `--llama-root`
+- or the same path exported through `ORBIT_LLAMA_ROOT`
+
+Example:
+
+```bash
+orbit server --port 11976 --llama-root /path/to/llama.cpp
+```
+
+If you enable `--mtp`, Orbit may also rebuild a local MTP shim from the same `llama.cpp` tree when no packaged shim is available.
 
 ### 2. Download models
 
@@ -94,6 +112,12 @@ Stable default server, with MTP disabled:
 orbit server --port 11976
 ```
 
+If native libraries are not packaged inside Orbit yet, use:
+
+```bash
+orbit server --port 11976 --llama-root /path/to/llama.cpp
+```
+
 Optional MTP mode:
 
 ```bash
@@ -122,6 +146,7 @@ What this means:
 - `orbit server` starts the stable native backend without MTP.
 - `orbit server --mtp` enables the experimental MTP path explicitly.
 - MTP can improve some workloads, but Orbit keeps it off by default because stability has priority.
+- if native libs are missing, Orbit now exits with a short error telling you to use `--llama-root` or `ORBIT_LLAMA_ROOT`
 - experimental multi-turn raw MTP chat reuse remains debug-only behind:
   - `ORBIT_MTP_CHAT_REUSE_RAW=1`
   - `ORBIT_MTP_CHAT_REUSE_DEBUG=1`

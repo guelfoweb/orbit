@@ -92,8 +92,8 @@ Use only in a safe workdir or isolated lab:
 28. `Check whether strings, file, readelf, objdump, jadx, and apktool are available on this system, then say which ones are present.`
 29. `Extract printable strings from samples/suspicious_dropper_demo.js and report suspicious network or execution-related strings.`
 30. `Create a temporary lab directory named shell-lab-test, write a marker file containing "orbit-ok" inside it, show the marker contents, and then remove the directory.`
-31. `Read pdf/small.pdf and summarize the document topic in one concise sentence.`
-32. `Read pdf/big.pdf and summarize the document topic in one concise sentence.`
+31. `Read pdf/piccolo.pdf and summarize the document topic in one concise sentence.`
+32. `Read pdf/grande.pdf and summarize the document topic in one concise sentence.`
 
 Expected: command chosen by the model, bounded evidence, concise final answer.
 
