@@ -17,6 +17,21 @@ Today, a fresh clone still depends on:
 
 That means Orbit is already independent from `llama-server` as a backend choice, but it is not yet a zero-build product for a new user.
 
+## Current bootstrap contract
+
+Today, `orbit server` can start in three ways:
+
+1. packaged native runtime libraries already exist under `src/orbit/native_llama/vendor/lib`
+2. `ORBIT_LLAMA_ROOT` points to a prepared local `llama.cpp` tree
+3. the user passes `--llama-root /path/to/llama.cpp`
+
+For MTP paths, Orbit also needs either:
+
+- a packaged shim under `src/orbit/native_llama/vendor/shim`
+- or a buildable local `llama.cpp` tree so the shim can be rebuilt explicitly
+
+If these prerequisites are missing, the release path should fail with a short actionable error, not a Python stacktrace.
+
 ## Target UX
 
 The intended product path is:
