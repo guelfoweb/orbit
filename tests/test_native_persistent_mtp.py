@@ -16,10 +16,30 @@ class NativePersistentMtpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             packaged = Path(tmp) / "liborbit-persistent-mtp.so"
             packaged.write_text("", encoding="utf-8")
-            with mock.patch("orbit.native_llama.persistent_mtp.packaged_shim_path", return_value=packaged):
+            with mock.patch("orbit.native_llama.persistent_mtp.packaged_shim_path", return_value=packaged), mock.patch(
+                "orbit.native_llama.persistent_mtp._shim_exports_required_symbols", return_value=True
+            ):
                 shim = build_persistent_mtp_shim(llama_root=None)
 
         self.assertEqual(shim, packaged)
+
+    def test_build_persistent_shim_rebuilds_when_packaged_artifact_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            packaged = tmp_path / "liborbit-persistent-mtp.so"
+            packaged.write_text("stale", encoding="utf-8")
+            llama_root = tmp_path / "llama"
+            (llama_root / "build/bin").mkdir(parents=True)
+            for name in ("libllama-common.so", "libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so"):
+                (llama_root / "build/bin" / name).write_text("", encoding="utf-8")
+            runner = mock.Mock(return_value=mock.Mock(returncode=0, stderr="", stdout=""))
+            with mock.patch("orbit.native_llama.persistent_mtp.packaged_shim_path", return_value=packaged), mock.patch(
+                "orbit.native_llama.persistent_mtp._shim_exports_required_symbols", side_effect=[False, False, True]
+            ):
+                shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=tmp_path, runner=runner)
+
+        self.assertEqual(shim, packaged)
+        runner.assert_called_once()
 
     def _paths(self, *, mtp_available: bool = True, fallback_reason: str | None = None) -> NativeLlamaPaths:
         return NativeLlamaPaths(
@@ -34,8 +54,25 @@ class NativePersistentMtpTests(unittest.TestCase):
         )
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_persistent_mtp_stays_disabled_by_default_when_experimental_flag_is_off(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig())
+        client._session.ctx_tgt = object()
+
+        with mock.patch("orbit.native_llama.client.create_persistent_mtp_session") as mocked_create:
+            client._initialize_persistent_mtp_session()
+
+        snapshot = client.session_snapshot()
+        self.assertFalse(snapshot.mtp_enabled)
+        self.assertFalse(snapshot.mtp_initialized)
+        self.assertIsNone(snapshot.mtp_failure_reason)
+        mocked_create.assert_not_called()
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_persistent_mtp_stays_disabled_when_draft_is_missing(self, _mocked_lib) -> None:
-        client = NativeLlamaClient(self._paths(mtp_available=False, fallback_reason="draft-mtp-missing"), NativeClientConfig())
+        client = NativeLlamaClient(
+            self._paths(mtp_available=False, fallback_reason="draft-mtp-missing"),
+            NativeClientConfig(use_mtp_experimental=True),
+        )
         client._session.ctx_tgt = object()
 
         client._initialize_persistent_mtp_session()
@@ -48,7 +85,7 @@ class NativePersistentMtpTests(unittest.TestCase):
     @mock.patch("orbit.native_llama.client.create_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_persistent_mtp_initializes_and_exposes_runtime_handles(self, _mocked_lib, mocked_create) -> None:
-        client = NativeLlamaClient(self._paths(), NativeClientConfig())
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._session.ctx_tgt = object()
         mocked_create.return_value = PersistentMtpSessionRuntime(
             handle=object(),
@@ -71,7 +108,7 @@ class NativePersistentMtpTests(unittest.TestCase):
     @mock.patch("orbit.native_llama.client.create_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_persistent_mtp_records_init_failure(self, _mocked_lib, mocked_create) -> None:
-        client = NativeLlamaClient(self._paths(), NativeClientConfig())
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._session.ctx_tgt = object()
         mocked_create.side_effect = RuntimeError("init failed")
 
@@ -85,7 +122,7 @@ class NativePersistentMtpTests(unittest.TestCase):
     @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_reset_session_state_clears_target_cache_and_reinitializes_persistent_mtp(self, mocked_lib_cls, mocked_reset) -> None:
-        client = NativeLlamaClient(self._paths(), NativeClientConfig())
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         fake_lib = mock.Mock()
         fake_lib.llama_get_memory.return_value = object()
         mocked_lib_cls.return_value.lib = fake_lib

@@ -11,6 +11,11 @@ from .mtp_completion import MtpCompletionResult
 from .native_artifacts import packaged_shim_path, require_legacy_llama_root
 from .paths import NativeLlamaPaths
 
+_REQUIRED_SHIM_SYMBOLS = (
+    "orbit_mtp_session_complete",
+    "orbit_mtp_session_set_followup_suffix_tokens",
+)
+
 MtpTokenCallback = CFUNCTYPE(None, c_char_p, c_void_p)
 MtpProgressCallback = CFUNCTYPE(None, c_int32, c_int32, c_int32, c_void_p)
 
@@ -136,14 +141,14 @@ def build_persistent_mtp_shim(
     runner=subprocess.run,
 ) -> Path:
     packaged = packaged_shim_path("liborbit-persistent-mtp.so")
-    if packaged is not None:
+    if packaged is not None and _shim_exports_required_symbols(packaged):
         return packaged
     llama_root = require_legacy_llama_root(llama_root, artifact_name="liborbit-persistent-mtp.so")
     build_root = build_dir or (Path.home() / ".orbit" / "native-build")
     build_root.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).parent / "vendor" / "shim" / "orbit_persistent_mtp.cpp"
     output = build_root / "liborbit-persistent-mtp.so"
-    if output.exists() and output.stat().st_mtime >= source.stat().st_mtime:
+    if output.exists() and output.stat().st_mtime >= source.stat().st_mtime and _shim_exports_required_symbols(output):
         return output
 
     bin_dir = llama_root / "build/bin"
@@ -172,6 +177,17 @@ def build_persistent_mtp_shim(
         detail = (completed.stderr or completed.stdout).strip()
         raise RuntimeError(f"failed to build persistent mtp shim: {detail or completed.returncode}")
     return output
+
+
+def _shim_exports_required_symbols(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
+    try:
+        lib = ctypes.CDLL(str(path), mode=flags)
+    except OSError:
+        return False
+    return all(hasattr(lib, symbol) for symbol in _REQUIRED_SHIM_SYMBOLS)
 
 
 def create_persistent_mtp_session(

@@ -213,6 +213,8 @@ class NativeLlamaClient:
         self._session.mtp_enabled = False
         self._session.mtp_failed = False
         self._session.mtp_failure_reason = None
+        if not self.config.use_mtp_experimental:
+            return
         if not self.paths.mtp_available or self.paths.draft_mtp_model is None:
             self._session.mtp_failure_reason = self.paths.fallback_reason or "draft-mtp-unavailable"
             return

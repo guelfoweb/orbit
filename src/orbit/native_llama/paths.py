@@ -10,6 +10,7 @@ from .model_registry import ResolvedModel, get_manifest, resolve_model
 PACKAGE_NATIVE_ROOT = Path(__file__).resolve().parent / "vendor"
 DEFAULT_VENDOR_LIB_DIR = PACKAGE_NATIVE_ROOT / "lib"
 DEFAULT_VENDOR_SHIM_DIR = PACKAGE_NATIVE_ROOT / "shim"
+BUNDLED_SOURCE_ROOT = PACKAGE_NATIVE_ROOT / "source" / "llama.cpp"
 DEFAULT_LLAMA_ROOT = Path(os.environ["ORBIT_LLAMA_ROOT"]).expanduser().resolve() if os.environ.get("ORBIT_LLAMA_ROOT") else None
 DEFAULT_MODEL_ID = "gemma4-12b-it-q4km"
 LEGACY_MODEL_ID = "legacy-path"
@@ -39,7 +40,8 @@ def resolve_paths(
     models_dir: Path | None = None,
     hf_cache: Path | None = None,
 ) -> NativeLlamaPaths:
-    resolved_llama_root, build_bin, library = _resolve_native_runtime(llama_root)
+    source_root = _resolve_build_source_root(llama_root)
+    _runtime_llama_root, build_bin, library = _resolve_native_runtime(llama_root)
     manifest = get_manifest(model_id)
     resolved = _resolve_model(
         manifest_id=model_id,
@@ -50,7 +52,7 @@ def resolve_paths(
     )
 
     return NativeLlamaPaths(
-        llama_root=resolved_llama_root,
+        llama_root=source_root,
         build_bin=build_bin,
         library=library,
         model=resolved.target_path,
@@ -70,7 +72,8 @@ def resolve_legacy_paths(
     model: Path,
     mmproj: Path | None = None,
 ) -> NativeLlamaPaths:
-    resolved_llama_root, build_bin, library = _resolve_native_runtime(llama_root)
+    source_root = _resolve_build_source_root(llama_root)
+    _runtime_llama_root, build_bin, library = _resolve_native_runtime(llama_root)
     resolved_model = model.expanduser().resolve()
 
     if not resolved_model.exists():
@@ -80,7 +83,7 @@ def resolve_legacy_paths(
         raise FileNotFoundError(f"mmproj not found: {resolved_mmproj}")
 
     return NativeLlamaPaths(
-        llama_root=resolved_llama_root,
+        llama_root=source_root,
         build_bin=build_bin,
         library=library,
         model=resolved_model,
@@ -130,3 +133,13 @@ def _resolve_native_runtime(llama_root: Path | None) -> tuple[Path | None, Path,
         f"Searched: {searched_text}. "
         "Provide --llama-root or ORBIT_LLAMA_ROOT, or package native libraries under orbit/native_llama/vendor/lib."
     )
+
+
+def _resolve_build_source_root(llama_root: Path | None) -> Path | None:
+    if llama_root is not None:
+        resolved_root = llama_root.expanduser().resolve()
+        if (resolved_root / "CMakeLists.txt").exists():
+            return resolved_root
+    if (BUNDLED_SOURCE_ROOT / "CMakeLists.txt").exists():
+        return BUNDLED_SOURCE_ROOT
+    return None

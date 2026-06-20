@@ -28,6 +28,10 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         args = build_parser().parse_args(["--mtp"])
         self.assertTrue(args.enable_mtp_experimental)
 
+    def test_parser_defaults_mtp_flag_to_off(self) -> None:
+        args = build_parser().parse_args([])
+        self.assertFalse(args.enable_mtp_experimental)
+
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_try_complete_with_mtp_experimental_falls_back_when_draft_missing(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(mtp_available=False, fallback_reason="draft-mtp-missing"), NativeClientConfig(use_mtp_experimental=True))

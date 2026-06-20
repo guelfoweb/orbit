@@ -28,6 +28,12 @@ orbit server --port 11976 --mtp
 orbit
 ```
 
+Current product default:
+
+- `orbit server` starts the native backend with MTP off.
+- `orbit server --mtp` enables the native MTP path explicitly.
+- persistent multi-turn raw MTP chat reuse is not default and remains debug-only.
+
 No external `llama.cpp` checkout.
 No manual CMake build.
 No `llama-server` install.

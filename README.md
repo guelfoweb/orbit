@@ -1,11 +1,11 @@
 # orbit
 
-Minimal local agentic CLI centered on native `orbit-server`, with optional compatibility for other OpenAI-compatible local backends.
+Minimal local CLI for running Gemma 4 with the native `orbit-server`.
 
-Orbit is designed around Gemma 4, local execution, streaming output, shell-tool opt-in, and CPU-only usability. The native path supports chat, tools, session reuse, MTP, and multimodal input without requiring `llama-server` as the primary backend.
+Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal Orbit setup does not require an external `llama-server` process at runtime.
 
 Important status note:
-the native backend is the primary Orbit path, but a fresh clone is not yet a zero-build product. Today, native Orbit still expects prepared native `llama`/`ggml` libraries, and some MTP paths still rely on local shim compilation. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+the native backend is the primary Orbit path, but a fresh clone is not yet a zero-build product. Today, Orbit still expects native `llama`/`ggml` components to be available locally, and some MTP paths still rebuild a local shim when needed. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
 
 Linux is the main target environment. macOS may work. Windows is not a target environment.
 
@@ -88,13 +88,13 @@ orbit download --all ggml-org/gemma-4-12B-it-GGUF
 
 ### 3. Start the native backend
 
-Basic native server:
+Stable default server, with MTP disabled:
 
 ```bash
 orbit server --port 11976
 ```
 
-With MTP enabled:
+Optional MTP mode:
 
 ```bash
 orbit server --port 11976 --mtp
@@ -117,7 +117,40 @@ orbit server \
   --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
 
-### 4. Start Orbit
+What this means:
+
+- `orbit server` starts the stable native backend without MTP.
+- `orbit server --mtp` enables the experimental MTP path explicitly.
+- MTP can improve some workloads, but Orbit keeps it off by default because stability has priority.
+- experimental multi-turn raw MTP chat reuse remains debug-only behind:
+  - `ORBIT_MTP_CHAT_REUSE_RAW=1`
+  - `ORBIT_MTP_CHAT_REUSE_DEBUG=1`
+
+### 4. Check the server
+
+After startup, you can verify that the server is healthy:
+
+```bash
+orbit --base-url http://127.0.0.1:11976 --health
+```
+
+Inside the interactive client, you can inspect backend state with:
+
+```text
+/health
+/props
+```
+
+Expected `/props` values:
+
+- default server:
+  - `backend_mode=no-mtp`
+  - `mtp_enabled=false`
+- with `--mtp`:
+  - `backend_mode=mtp-ready`
+  - `mtp_enabled=true`
+
+### 5. Start Orbit
 
 ```bash
 orbit --base-url http://127.0.0.1:11976
