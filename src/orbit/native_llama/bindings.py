@@ -22,6 +22,8 @@ from pathlib import Path
 import ctypes
 import os
 
+from .native_names import platform_runtime_libs, runtime_library_filename
+
 
 llama_token = c_int32
 llama_pos = c_int32
@@ -153,14 +155,16 @@ class LlamaLibrary:
     def __init__(self, build_bin: Path) -> None:
         self.build_bin = build_bin
         self._handles: list[CDLL] = []
-        self.lib = self._load_library("libllama.so")
+        self.lib = self._load_library(runtime_library_filename("llama"))
         self._configure_api()
 
     def _load_library(self, name: str) -> CDLL:
         flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
         # Load dependencies explicitly because LD_LIBRARY_PATH cannot be changed
         # reliably after Python startup.
-        for dep in ("libggml-base.so", "libggml.so", "libggml-cpu.so", "libllama-common.so"):
+        for dep in platform_runtime_libs():
+            if dep == name:
+                continue
             path = self.build_bin / dep
             if path.exists():
                 try:
@@ -246,7 +250,7 @@ class LlamaLibrary:
 class MtmdLibrary:
     def __init__(self, build_bin: Path) -> None:
         flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
-        self.lib = ctypes.CDLL(str(build_bin / "libmtmd.so"), mode=flags)
+        self.lib = ctypes.CDLL(str(build_bin / runtime_library_filename("mtmd")), mode=flags)
         self._configure_api()
 
     def _configure_api(self) -> None:

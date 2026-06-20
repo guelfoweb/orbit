@@ -18,6 +18,8 @@ class NativePackagingMetadataTests(unittest.TestCase):
 
         self.assertIn("vendor/lib/*", package_data)
         self.assertIn("vendor/shim/*", package_data)
+        self.assertIn("vendor/source/llama.cpp/**/*", package_data)
+        self.assertIn("vendor/THIRD_PARTY_NOTICES.md", package_data)
         self.assertIn("model_registry.json", package_data)
 
     def test_manifest_includes_native_vendor_tree(self) -> None:
@@ -30,6 +32,12 @@ class NativePackagingMetadataTests(unittest.TestCase):
 
         self.assertTrue(readme.exists())
         self.assertIn("packaged native runtime libraries", readme.read_text(encoding="utf-8"))
+
+    def test_third_party_notices_exist(self) -> None:
+        notices = ROOT / "src/orbit/native_llama/vendor/THIRD_PARTY_NOTICES.md"
+
+        self.assertTrue(notices.exists())
+        self.assertIn("llama.cpp", notices.read_text(encoding="utf-8"))
 
     def test_native_artifact_contract_lists_expected_linux_files(self) -> None:
         self.assertIn("libllama.so", LINUX_RUNTIME_LIBS)

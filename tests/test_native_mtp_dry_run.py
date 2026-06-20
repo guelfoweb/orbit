@@ -47,8 +47,9 @@ class NativeMtpDryRunTests(unittest.TestCase):
                     stderr = "compile failed"
                 return Completed()
 
-            with self.assertRaisesRegex(RuntimeError, "failed to build mtp dry run helper"):
-                build_mtp_dry_run_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
+            with mock.patch("orbit.native_llama.mtp_dry_run.packaged_shim_path", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "failed to build mtp dry run helper"):
+                    build_mtp_dry_run_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
 
     def test_dry_run_reports_failure_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,3 +133,4 @@ class NativeMtpDryRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+from unittest import mock

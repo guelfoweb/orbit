@@ -8,3 +8,14 @@ dist/
 screenshots/
 models/
 workdir/pdf/
+src/orbit/native_llama/vendor/build/
+src/orbit/native_llama/vendor/lib/*.so
+src/orbit/native_llama/vendor/lib/*.dylib
+src/orbit/native_llama/vendor/lib/*.a
+src/orbit/native_llama/vendor/shim/*.so
+src/orbit/native_llama/vendor/shim/*.dylib
+src/orbit/native_llama/vendor/shim/orbit-mtp-probe
+src/orbit/native_llama/vendor/shim/orbit-mtp-dry-run
+src/orbit/native_llama/vendor/shim/orbit-mtp-accept-probe
+src/orbit/native_llama/vendor/shim/orbit-mtp-decode-probe
+src/orbit/native_llama/vendor/shim/orbit-mtp-completion

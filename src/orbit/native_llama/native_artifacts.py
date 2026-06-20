@@ -27,6 +27,7 @@ SHIM_ARTIFACTS = (
 )
 
 
+
 def packaged_runtime_lib_path(name: str) -> Path | None:
     candidate = DEFAULT_VENDOR_LIB_DIR / name
     if candidate.exists():

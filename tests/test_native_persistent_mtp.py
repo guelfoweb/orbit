@@ -30,16 +30,16 @@ class NativePersistentMtpTests(unittest.TestCase):
             packaged.write_text("stale", encoding="utf-8")
             llama_root = tmp_path / "llama"
             (llama_root / "build/bin").mkdir(parents=True)
-            for name in ("libllama-common.so", "libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so"):
-                (llama_root / "build/bin" / name).write_text("", encoding="utf-8")
-            runner = mock.Mock(return_value=mock.Mock(returncode=0, stderr="", stdout=""))
             with mock.patch("orbit.native_llama.persistent_mtp.packaged_shim_path", return_value=packaged), mock.patch(
-                "orbit.native_llama.persistent_mtp._shim_exports_required_symbols", side_effect=[False, False, True]
-            ):
-                shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=tmp_path, runner=runner)
+                "orbit.native_llama.persistent_mtp._shim_exports_required_symbols", return_value=False
+            ), mock.patch(
+                "orbit.native_llama.persistent_mtp.compile_cpp_helper",
+                return_value=tmp_path / "liborbit-persistent-mtp.so",
+            ) as mocked_compile:
+                shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=tmp_path)
 
         self.assertEqual(shim, packaged)
-        runner.assert_called_once()
+        mocked_compile.assert_called_once()
 
     def _paths(self, *, mtp_available: bool = True, fallback_reason: str | None = None) -> NativeLlamaPaths:
         return NativeLlamaPaths(
