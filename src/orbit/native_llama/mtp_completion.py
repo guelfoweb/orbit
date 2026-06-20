@@ -38,6 +38,8 @@ class MtpCompletionResult:
     rollback_tokens_total: int = 0
     checkpoint_count: int = 0
     restore_count: int = 0
+    raw_emitted_token_ids: list[int] | None = None
+    end_turn_frontier_token_ids: list[int] | None = None
 
 
 def run_mtp_completion(

@@ -28,6 +28,9 @@ class NativeSessionState:
     ctx_tgt: c_void_p | None = None
     sampler: c_void_p | None = None
     cached_prompt_tokens: list[int] = field(default_factory=list)
+    chat_visible_frontier_tokens: list[int] = field(default_factory=list)
+    committed_frontier_tokens: list[int] = field(default_factory=list)
+    raw_emitted_token_ids: list[int] = field(default_factory=list)
     prompt_cache_mode: str | None = None
     in_flight: bool = False
     cancel_requested: bool = False

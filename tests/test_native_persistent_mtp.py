@@ -91,6 +91,9 @@ class NativePersistentMtpTests(unittest.TestCase):
         mocked_lib_cls.return_value.lib = fake_lib
         client._session.ctx_tgt = object()
         client._session.cached_prompt_tokens = [1, 2, 3]
+        client._session.chat_visible_frontier_tokens = [1, 2, 3, 4]
+        client._session.committed_frontier_tokens = [1, 2, 3, 4]
+        client._session.raw_emitted_token_ids = [4]
         client._session.last_metrics = NativeTimings(5, 1, 2, 3, 1.0, 2.0)
         client._persistent_mtp_runtime = PersistentMtpSessionRuntime(handle=object(), ctx_dft=object(), spec=object())
         mocked_reset.return_value = PersistentMtpSessionRuntime(handle=object(), ctx_dft=object(), spec=object())
@@ -98,6 +101,9 @@ class NativePersistentMtpTests(unittest.TestCase):
         client.reset_session_state()
 
         self.assertEqual(client._session.cached_prompt_tokens, [])
+        self.assertEqual(client._session.chat_visible_frontier_tokens, [])
+        self.assertEqual(client._session.committed_frontier_tokens, [])
+        self.assertEqual(client._session.raw_emitted_token_ids, [])
         self.assertIsNone(client._session.last_metrics)
         self.assertTrue(client._session.mtp_enabled)
         fake_lib.llama_memory_clear.assert_called()
@@ -204,6 +210,12 @@ class NativePersistentMtpTests(unittest.TestCase):
             def orbit_mtp_session_last_restore_count(self, _handle):
                 return 0
 
+            def orbit_mtp_session_last_raw_emitted_token_ids(self, _handle):
+                return b"[41,42]"
+
+            def orbit_mtp_session_last_end_turn_frontier_token_ids(self, _handle):
+                return b"[1,2,3,41,42]"
+
         class FakeLibrary:
             def __init__(self, _build_bin, _shim_path) -> None:
                 self.lib = FakeLib()
@@ -221,6 +233,8 @@ class NativePersistentMtpTests(unittest.TestCase):
             )
 
         self.assertTrue(result.success)
+        self.assertEqual(result.raw_emitted_token_ids, [41, 42])
+        self.assertEqual(result.end_turn_frontier_token_ids, [1, 2, 3, 41, 42])
 
 
 if __name__ == "__main__":

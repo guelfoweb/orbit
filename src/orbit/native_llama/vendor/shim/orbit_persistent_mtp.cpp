@@ -67,6 +67,11 @@ static bool draft_trace_enabled() {
     return value && value[0] && std::strcmp(value, "0") != 0;
 }
 
+static bool chat_reuse_debug_enabled() {
+    const char * value = std::getenv("ORBIT_MTP_CHAT_REUSE_DEBUG");
+    return value && value[0] && std::strcmp(value, "0") != 0;
+}
+
 static void emit_orbit_frontier_trace(const char * label, const std::string & payload) {
     if (!partial_debug_enabled()) {
         return;
@@ -93,6 +98,13 @@ static void emit_orbit_validate_trace(const char * label, const std::string & pa
         return;
     }
     std::fprintf(stderr, "ORBIT_MTP_VALIDATE %s %s\n", label ? label : "event", payload.c_str());
+}
+
+static void emit_orbit_chat_reuse_trace(const char * label, const std::string & payload) {
+    if (!chat_reuse_debug_enabled()) {
+        return;
+    }
+    std::fprintf(stderr, "ORBIT_MTP_CHAT_REUSE_SHIM %s %s\n", label ? label : "event", payload.c_str());
 }
 
 static uint64_t stable_hash_string(const std::string & value) {
@@ -132,6 +144,11 @@ struct orbit_mtp_session {
     long rss_after_init_kb = -1;
     long rss_peak_kb = -1;
     std::vector<llama_token> cached_prompt_tokens;
+    std::vector<llama_token> committed_frontier_tokens;
+    std::vector<llama_token> pending_followup_suffix_tokens;
+    bool pending_followup_suffix_active = false;
+    std::string last_raw_emitted_token_ids_json;
+    std::string last_end_turn_frontier_token_ids_json;
     std::string last_content;
     int last_output_tokens = 0;
     int last_draft_tokens_total = 0;
@@ -346,6 +363,33 @@ static std::string token_vec_json(const llama_vocab * vocab, const std::vector<l
         out << "{\"id\":" << (int) tokens[i] << ",\"piece\":\"" << token_piece_json(vocab, tokens[i]) << "\"}";
     }
     out << "]";
+    return out.str();
+}
+
+static std::string token_id_vec_json(const std::vector<llama_token> & tokens) {
+    std::ostringstream out;
+    out << "[";
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << (int) tokens[i];
+    }
+    out << "]";
+    return out.str();
+}
+
+static std::string checkpoint_summary_json(const common_prompt_checkpoint & ckpt) {
+    std::ostringstream out;
+    out
+        << "{"
+        << "\"empty\":" << (ckpt.empty() ? "true" : "false")
+        << ",\"n_tokens\":" << ckpt.n_tokens
+        << ",\"pos_min\":" << ckpt.pos_min
+        << ",\"pos_max\":" << ckpt.pos_max
+        << ",\"data_tgt_bytes\":" << ckpt.data_tgt.size()
+        << ",\"data_dft_bytes\":" << ckpt.data_dft.size()
+        << "}";
     return out.str();
 }
 
@@ -1394,6 +1438,12 @@ extern "C" bool orbit_mtp_session_reset(void * handle, void * ctx_tgt_ptr) {
     }
     session->request_boundary_ckpt.clear();
     session->request_boundary_prompt_tgt.clear();
+    session->cached_prompt_tokens.clear();
+    session->committed_frontier_tokens.clear();
+    session->pending_followup_suffix_tokens.clear();
+    session->pending_followup_suffix_active = false;
+    session->last_raw_emitted_token_ids_json = "[]";
+    session->last_end_turn_frontier_token_ids_json = "[]";
 
     return true;
 }
@@ -1412,6 +1462,38 @@ extern "C" void * orbit_mtp_session_ctx_dft(void * handle) {
 extern "C" void * orbit_mtp_session_spec(void * handle) {
     auto * session = static_cast<orbit_mtp_session *>(handle);
     return session ? static_cast<void *>(session->spec) : nullptr;
+}
+
+extern "C" bool orbit_mtp_session_set_followup_suffix_tokens(
+    void * handle,
+    const int32_t * token_ids,
+    int32_t token_count
+) {
+    g_last_error.clear();
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    if (!session) {
+        set_error("persistent MTP followup suffix requires a valid session");
+        return false;
+    }
+    if (token_count < 0) {
+        set_error("persistent MTP followup suffix token count must be non-negative");
+        return false;
+    }
+    session->pending_followup_suffix_tokens.clear();
+    session->pending_followup_suffix_active = true;
+    if (token_count == 0) {
+        return true;
+    }
+    if (!token_ids) {
+        set_error("persistent MTP followup suffix tokens are missing");
+        session->pending_followup_suffix_active = false;
+        return false;
+    }
+    session->pending_followup_suffix_tokens.reserve((size_t) token_count);
+    for (int32_t i = 0; i < token_count; ++i) {
+        session->pending_followup_suffix_tokens.push_back((llama_token) token_ids[i]);
+    }
+    return true;
 }
 
 extern "C" long orbit_mtp_session_rss_before_kb(void * handle) {
@@ -1481,6 +1563,8 @@ extern "C" bool orbit_mtp_session_complete(
     session->last_timing_json = "{}";
     session->last_validate_trace_json = "[]";
     session->last_target_decode_trace_json = "[]";
+    session->last_raw_emitted_token_ids_json = "[]";
+    session->last_end_turn_frontier_token_ids_json = "[]";
     session->phase_prefix_restore = {};
     session->phase_suffix_decode_target = {};
     session->phase_draft_generation = {};
@@ -1525,7 +1609,19 @@ extern "C" bool orbit_mtp_session_complete(
         return false;
     }
 
+    const bool use_live_followup_suffix = session->pending_followup_suffix_active;
+    const std::vector<llama_token> followup_suffix_tokens = session->pending_followup_suffix_tokens;
+    session->pending_followup_suffix_active = false;
+    session->pending_followup_suffix_tokens.clear();
     std::vector<llama_token> prompt_tgt(prompt);
+    if (use_live_followup_suffix) {
+        if (session->committed_frontier_tokens.empty()) {
+            set_error("missing committed frontier for persistent MTP followup reuse");
+            return false;
+        }
+        prompt_tgt = session->committed_frontier_tokens;
+        prompt_tgt.insert(prompt_tgt.end(), followup_suffix_tokens.begin(), followup_suffix_tokens.end());
+    }
     llama_token id_last = LLAMA_TOKEN_NULL;
     int32_t n_past = (int32_t) prompt_tgt.size();
 
@@ -1534,6 +1630,30 @@ extern "C" bool orbit_mtp_session_complete(
     if (!smpl) {
         set_error("failed to initialize common sampler");
         return false;
+    }
+    if (chat_reuse_debug_enabled()) {
+        std::ostringstream out;
+        out
+            << "{"
+            << "\"prompt_tokenized_size\":" << prompt.size()
+            << ",\"prompt_tail\":" << token_vec_json(vocab_tgt, tail_tokens(prompt, 48))
+            << ",\"cached_prompt_tokens_size\":" << session->cached_prompt_tokens.size()
+            << ",\"cached_prompt_tokens_tail\":" << token_vec_json(vocab_tgt, tail_tokens(session->cached_prompt_tokens, 48))
+            << ",\"committed_frontier_tokens_size\":" << session->committed_frontier_tokens.size()
+            << ",\"committed_frontier_tokens_tail\":" << token_vec_json(vocab_tgt, tail_tokens(session->committed_frontier_tokens, 48))
+            << ",\"use_live_followup_suffix\":" << (use_live_followup_suffix ? "true" : "false")
+            << ",\"followup_suffix_tokens\":" << token_vec_json(vocab_tgt, followup_suffix_tokens)
+            << ",\"request_boundary_ckpt\":" << checkpoint_summary_json(session->request_boundary_ckpt)
+            << ",\"request_boundary_prompt_tgt_size\":" << session->request_boundary_prompt_tgt.size()
+            << ",\"request_boundary_prompt_tgt_tail\":" << token_vec_json(vocab_tgt, tail_tokens(session->request_boundary_prompt_tgt, 48))
+            << ",\"prompt_tgt_size_initial\":" << prompt_tgt.size()
+            << ",\"prompt_tgt_tail_initial\":" << token_vec_json(vocab_tgt, tail_tokens(prompt_tgt, 48))
+            << ",\"n_past_initial\":" << n_past
+            << ",\"ctx_tgt_max_pos_initial\":" << llama_memory_seq_pos_max(mem_tgt, 0)
+            << ",\"ctx_dft_max_pos_initial\":" << llama_memory_seq_pos_max(mem_dft, 0)
+            << ",\"sampler_hash_initial\":" << stable_hash_string(common_sampler_prev_str(smpl, ctx_tgt, 8))
+            << "}";
+        emit_orbit_chat_reuse_trace("start", out.str());
     }
     std::vector<llama_token> generated;
     generated.reserve((size_t) std::max(1, std::min(32, (int) max_tokens)));
@@ -1579,6 +1699,27 @@ extern "C" bool orbit_mtp_session_complete(
             const bool replay_is_recovery = is_recovery_replay;
             const auto replay_phase_start = std::chrono::steady_clock::now();
             const bool use_request_boundary = generated.empty() && can_restore_request_boundary && !used_request_boundary;
+            const bool use_live_frontier_suffix = generated.empty() && use_live_followup_suffix;
+            const size_t live_frontier_prefix = use_live_frontier_suffix ? session->committed_frontier_tokens.size() : 0;
+            if (chat_reuse_debug_enabled() && trace_step_index == 0) {
+                std::ostringstream out;
+                out
+                    << "{"
+                    << "\"path\":\"" << (
+                        use_live_frontier_suffix ? "live_frontier_suffix" :
+                        (use_request_boundary ? "request_boundary_restore" : "full_replay")) << "\""
+                    << ",\"generated_empty\":" << (generated.empty() ? "true" : "false")
+                    << ",\"use_live_frontier_suffix\":" << (use_live_frontier_suffix ? "true" : "false")
+                    << ",\"can_restore_request_boundary\":" << (can_restore_request_boundary ? "true" : "false")
+                    << ",\"used_request_boundary\":" << (used_request_boundary ? "true" : "false")
+                    << ",\"reusable_request_prefix\":" << reusable_request_prefix
+                    << ",\"live_frontier_prefix\":" << live_frontier_prefix
+                    << ",\"prompt_tgt_size\":" << prompt_tgt.size()
+                    << ",\"ctx_tgt_max_pos\":" << llama_memory_seq_pos_max(mem_tgt, 0)
+                    << ",\"ctx_dft_max_pos\":" << llama_memory_seq_pos_max(mem_dft, 0)
+                    << "}";
+                emit_orbit_chat_reuse_trace("replay_path", out.str());
+            }
             if (debug_partial) {
                 const auto replay_origin =
                     use_request_boundary ? "request_boundary" :
@@ -1600,9 +1741,11 @@ extern "C" bool orbit_mtp_session_complete(
                 session->last_replay_steps++;
                 session->debug_replay_count++;
             }
-            llama_memory_clear(mem_tgt, true);
-            llama_memory_clear(mem_dft, true);
-            session->debug_memory_clear_count += 2;
+            if (!use_live_frontier_suffix) {
+                llama_memory_clear(mem_tgt, true);
+                llama_memory_clear(mem_dft, true);
+                session->debug_memory_clear_count += 2;
+            }
 
             if (!prompt_tgt.empty()) {
                 if (use_request_boundary) {
@@ -1613,7 +1756,7 @@ extern "C" bool orbit_mtp_session_complete(
                         phase_add(session->phase_prefix_restore, phase_start);
                     }
                     used_request_boundary = true;
-                } else {
+                } else if (!use_live_frontier_suffix) {
                     const size_t chunk_size = (size_t) std::max<uint32_t>(1, session->n_batch);
                     for (size_t offset = 0; offset < prompt_tgt.size(); offset += chunk_size) {
                         const size_t count = std::min(chunk_size, prompt_tgt.size() - offset);
@@ -1675,12 +1818,15 @@ extern "C" bool orbit_mtp_session_complete(
                         prompt_tgt.begin() + (ptrdiff_t) reusable_request_prefix,
                         prompt_tgt.end());
                     process_pos0 = (int32_t) reusable_request_prefix;
+                } else if (use_live_frontier_suffix) {
+                    process_tokens = followup_suffix_tokens;
+                    process_pos0 = (int32_t) live_frontier_prefix;
                 } else {
                     process_tokens = prompt_tgt;
                     process_pos0 = 0;
                 }
                 if (!process_tokens.empty()) {
-                    if (use_request_boundary) {
+                    if (use_request_boundary || use_live_frontier_suffix) {
                         const size_t chunk_size = (size_t) std::max<uint32_t>(1, session->n_batch);
                         for (size_t offset = 0; offset < process_tokens.size(); offset += chunk_size) {
                             const size_t count = std::min(chunk_size, process_tokens.size() - offset);
@@ -1810,6 +1956,19 @@ extern "C" bool orbit_mtp_session_complete(
                 }
                 generated.push_back(id_last);
                 emit_output_token(id_last);
+                if (chat_reuse_debug_enabled()) {
+                    std::ostringstream out;
+                    out
+                        << "{"
+                        << "\"first_sampled_id\":{\"id\":" << (int) id_last << ",\"piece\":\"" << token_piece_json(vocab_tgt, id_last) << "\"}"
+                        << ",\"prompt_tgt_size\":" << prompt_tgt.size()
+                        << ",\"n_past\":" << n_past
+                        << ",\"ctx_tgt_max_pos\":" << llama_memory_seq_pos_max(mem_tgt, 0)
+                        << ",\"ctx_dft_max_pos\":" << llama_memory_seq_pos_max(mem_dft, 0)
+                        << ",\"sampler_hash\":" << stable_hash_string(common_sampler_prev_str(smpl, ctx_tgt, 8))
+                        << "}";
+                    emit_orbit_chat_reuse_trace("first_sample", out.str());
+                }
                 if (frontier_trace_before_first_partial) {
                     const std::vector<llama_token> tok = {id_last};
                     emit_orbit_frontier_trace("advance", frontier_event_json(
@@ -1900,6 +2059,18 @@ extern "C" bool orbit_mtp_session_complete(
             session->last_draft_tokens_total += (int) draft.size();
             draft_is_fresh = true;
             n_draft = draft.size();
+            if (chat_reuse_debug_enabled() && trace_step_index == 0) {
+                std::ostringstream out;
+                out
+                    << "{"
+                    << "\"first_draft_tokens\":" << token_vec_json(vocab_tgt, draft)
+                    << ",\"prompt_tgt_size\":" << prompt_tgt.size()
+                    << ",\"n_past\":" << n_past
+                    << ",\"ctx_dft_max_before\":" << draft_ctx_dft_max_before
+                    << ",\"ctx_dft_max_after_expected\":" << (draft.empty() ? draft_ctx_dft_max_before : draft_ctx_dft_max_before + (int32_t) draft.size())
+                    << "}";
+                emit_orbit_chat_reuse_trace("first_draft", out.str());
+            }
             if (draft_trace_enabled()) {
                 const uint64_t sampler_hash_before = stable_hash_string(draft_sampler_before);
                 const uint64_t sampler_hash_after = stable_hash_string(common_sampler_prev_str(smpl, ctx_tgt, 8));
@@ -2020,6 +2191,22 @@ extern "C" bool orbit_mtp_session_complete(
             prompt_tgt.push_back(id_last);
             prompt_tgt.insert(prompt_tgt.end(), draft.begin(), draft.end());
             boundary_committed_live = true;
+        }
+        if (chat_reuse_debug_enabled() && trace_step_index == 0) {
+            std::ostringstream out;
+            out
+                << "{"
+                << "\"first_validate_n_tok\":" << validate_tokens.size()
+                << ",\"validate_tokens\":" << token_vec_json(vocab_tgt, validate_tokens)
+                << ",\"validate_pos0\":" << validate_pos0
+                << ",\"boundary_committed_live\":" << (boundary_committed_live ? "true" : "false")
+                << ",\"frontier_logical_base\":" << frontier_logical_base
+                << ",\"prompt_tgt_size\":" << prompt_tgt.size()
+                << ",\"n_past\":" << n_past
+                << ",\"ctx_tgt_max_pos\":" << llama_memory_seq_pos_max(mem_tgt, 0)
+                << ",\"ctx_dft_max_pos\":" << llama_memory_seq_pos_max(mem_dft, 0)
+                << "}";
+            emit_orbit_chat_reuse_trace("first_validate", out.str());
         }
 
         if (debug_partial && pending_partial_trace_index > 0) {
@@ -2278,7 +2465,35 @@ extern "C" bool orbit_mtp_session_complete(
 
 done:
     common_sampler_free(smpl);
-    session->cached_prompt_tokens = prompt;
+    session->cached_prompt_tokens = prompt_tgt;
+    session->last_raw_emitted_token_ids_json = token_id_vec_json(generated);
+    {
+        std::vector<llama_token> end_turn_frontier = prompt_tgt;
+        end_turn_frontier.insert(end_turn_frontier.end(), generated.begin(), generated.end());
+        session->committed_frontier_tokens = end_turn_frontier;
+        session->last_end_turn_frontier_token_ids_json = token_id_vec_json(end_turn_frontier);
+    }
+    if (chat_reuse_debug_enabled()) {
+        std::vector<llama_token> first_emitted = generated;
+        if (first_emitted.size() > 20) {
+            first_emitted.resize(20);
+        }
+        std::ostringstream out;
+        out
+            << "{"
+            << "\"first_20_emitted_raw_ids\":" << token_vec_json(vocab_tgt, first_emitted)
+            << ",\"raw_last_content\":\"" << json_escape(session->last_content) << "\""
+            << ",\"cached_prompt_tokens_size_after\":" << session->cached_prompt_tokens.size()
+            << ",\"cached_prompt_tokens_tail_after\":" << token_vec_json(vocab_tgt, tail_tokens(session->cached_prompt_tokens, 48))
+            << ",\"request_boundary_ckpt_after\":" << checkpoint_summary_json(session->request_boundary_ckpt)
+            << ",\"request_boundary_prompt_tgt_size_after\":" << session->request_boundary_prompt_tgt.size()
+            << ",\"request_boundary_prompt_tgt_tail_after\":" << token_vec_json(vocab_tgt, tail_tokens(session->request_boundary_prompt_tgt, 48))
+            << ",\"ctx_tgt_max_pos_after\":" << llama_memory_seq_pos_max(mem_tgt, 0)
+            << ",\"ctx_dft_max_pos_after\":" << llama_memory_seq_pos_max(mem_dft, 0)
+            << ",\"output_tokens\":" << session->last_output_tokens
+            << "}";
+        emit_orbit_chat_reuse_trace("done", out.str());
+    }
     session->last_fresh_acceptance_ratio = session->last_draft_tokens_total > 0
         ? (double) session->last_accepted_tokens_total / (double) session->last_draft_tokens_total
         : 0.0;
@@ -2354,6 +2569,16 @@ extern "C" const char * orbit_mtp_session_last_content(void * handle) {
 extern "C" int32_t orbit_mtp_session_last_output_tokens(void * handle) {
     auto * session = static_cast<orbit_mtp_session *>(handle);
     return session ? session->last_output_tokens : 0;
+}
+
+extern "C" const char * orbit_mtp_session_last_raw_emitted_token_ids(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_raw_emitted_token_ids_json.c_str() : "[]";
+}
+
+extern "C" const char * orbit_mtp_session_last_end_turn_frontier_token_ids(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_end_turn_frontier_token_ids_json.c_str() : "[]";
 }
 
 extern "C" int32_t orbit_mtp_session_last_draft_tokens_total(void * handle) {

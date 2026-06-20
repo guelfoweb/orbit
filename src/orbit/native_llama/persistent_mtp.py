@@ -4,6 +4,7 @@ from ctypes import CDLL, CFUNCTYPE, c_bool, c_char_p, c_int32, c_long, c_uint32,
 from dataclasses import dataclass
 from pathlib import Path
 import ctypes
+import json
 import os
 import subprocess
 
@@ -63,6 +64,8 @@ class PersistentMtpLibrary:
         lib.orbit_mtp_session_ctx_dft.restype = c_void_p
         lib.orbit_mtp_session_spec.argtypes = [c_void_p]
         lib.orbit_mtp_session_spec.restype = c_void_p
+        lib.orbit_mtp_session_set_followup_suffix_tokens.argtypes = [c_void_p, ctypes.POINTER(c_int32), c_int32]
+        lib.orbit_mtp_session_set_followup_suffix_tokens.restype = c_bool
         lib.orbit_mtp_session_rss_before_kb.argtypes = [c_void_p]
         lib.orbit_mtp_session_rss_before_kb.restype = c_long
         lib.orbit_mtp_session_rss_after_init_kb.argtypes = [c_void_p]
@@ -127,6 +130,10 @@ class PersistentMtpLibrary:
         lib.orbit_mtp_session_last_checkpoint_count.restype = c_int32
         lib.orbit_mtp_session_last_restore_count.argtypes = [c_void_p]
         lib.orbit_mtp_session_last_restore_count.restype = c_int32
+        lib.orbit_mtp_session_last_raw_emitted_token_ids.argtypes = [c_void_p]
+        lib.orbit_mtp_session_last_raw_emitted_token_ids.restype = c_char_p
+        lib.orbit_mtp_session_last_end_turn_frontier_token_ids.argtypes = [c_void_p]
+        lib.orbit_mtp_session_last_end_turn_frontier_token_ids.restype = c_char_p
 
 
 def build_persistent_mtp_shim(
@@ -250,6 +257,28 @@ def free_persistent_mtp_session(
     library.lib.orbit_mtp_session_free(runtime.handle)
 
 
+def set_persistent_mtp_followup_suffix_tokens(
+    *,
+    llama_root: Path,
+    paths: NativeLlamaPaths,
+    runtime: PersistentMtpSessionRuntime,
+    suffix_tokens: list[int],
+    build_dir: Path | None = None,
+    library_factory=PersistentMtpLibrary,
+) -> None:
+    shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=build_dir)
+    library = library_factory(paths.build_bin, shim)
+    count = len(suffix_tokens)
+    if count > 0:
+        token_array = (c_int32 * count)(*suffix_tokens)
+        token_ptr = token_array
+    else:
+        token_ptr = None
+    ok = library.lib.orbit_mtp_session_set_followup_suffix_tokens(runtime.handle, token_ptr, count)
+    if not ok:
+        raise RuntimeError(_decode_error(library.lib.orbit_mtp_last_error()))
+
+
 def run_persistent_mtp_completion(
     *,
     llama_root: Path,
@@ -323,6 +352,8 @@ def run_persistent_mtp_completion(
         rollback_tokens_total=int(library.lib.orbit_mtp_session_last_rollback_tokens_total(runtime.handle)),
         checkpoint_count=int(library.lib.orbit_mtp_session_last_checkpoint_count(runtime.handle)),
         restore_count=int(library.lib.orbit_mtp_session_last_restore_count(runtime.handle)),
+        raw_emitted_token_ids=_decode_token_id_list(library.lib.orbit_mtp_session_last_raw_emitted_token_ids(runtime.handle)),
+        end_turn_frontier_token_ids=_decode_token_id_list(library.lib.orbit_mtp_session_last_end_turn_frontier_token_ids(runtime.handle)),
     )
 
 
@@ -344,3 +375,15 @@ def _long_or_none(value: int | None) -> int | None:
     if value < 0:
         return None
     return value
+
+
+def _decode_token_id_list(value: bytes | None) -> list[int]:
+    if not value:
+        return []
+    try:
+        payload = json.loads(value.decode(errors="replace"))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, int)]
