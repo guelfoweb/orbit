@@ -3,6 +3,8 @@ from __future__ import annotations
 import codecs
 from ctypes import POINTER, byref, c_char, cast, c_float, c_ubyte, create_string_buffer, c_void_p, sizeof
 from dataclasses import dataclass, replace
+import json
+import os
 from pathlib import Path
 import threading
 
@@ -32,6 +34,7 @@ from .persistent_mtp import (
     free_persistent_mtp_session,
     reset_persistent_mtp_session,
     run_persistent_mtp_completion,
+    set_persistent_mtp_followup_suffix_tokens,
 )
 from .session_state import DEFAULT_NATIVE_SESSION_ID, NativeSessionSnapshot, NativeSessionState
 
@@ -83,6 +86,7 @@ class NativeLlamaClient:
         self._persistent_mtp_runtime: PersistentMtpSessionRuntime | None = None
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = 0
+        self._mtp_chat_debug_turn = 0
 
     def session_snapshot(self, session_id: str = DEFAULT_NATIVE_SESSION_ID) -> NativeSessionSnapshot:
         if session_id != self._session.session_id:
@@ -250,6 +254,9 @@ class NativeLlamaClient:
         if mem:
             lib.llama_memory_clear(mem, True)
         self._session.cached_prompt_tokens.clear()
+        self._session.chat_visible_frontier_tokens.clear()
+        self._session.committed_frontier_tokens.clear()
+        self._session.raw_emitted_token_ids.clear()
         self._session.prompt_cache_mode = None
         self._session.continuation_ready = False
         self._session.last_metrics = None
@@ -445,6 +452,7 @@ class NativeLlamaClient:
             continuation_attempts += 1
             if continuation_attempts >= 1 or not continuation.content:
                 break
+        self._update_chat_visible_frontier_tokens(messages, result.content, tools=tools, thinking=thinking)
         return result
 
     def _complete_chat_text_once(
@@ -571,6 +579,28 @@ class NativeLlamaClient:
         if not thinking:
             content = _strip_reasoning_preamble(content)
         return NativeCompletion(content=content, timings=timings, stopped_by_stop=bool(stop_filter and stop_filter.stopped))
+
+    def _update_chat_visible_frontier_tokens(
+        self,
+        messages: list[NativeMessage],
+        assistant_content: str,
+        *,
+        tools: list[dict] | None,
+        thinking: bool,
+    ) -> None:
+        if not self._vocab:
+            return
+        assistant_message: NativeMessage = {"role": "assistant", "content": assistant_content}
+        try:
+            frontier_prompt = render_gemma4_chat(
+                [*messages, assistant_message],
+                tools=tools,
+                thinking=thinking,
+                add_generation_prompt=False,
+            )
+            self._session.chat_visible_frontier_tokens = self.tokenize(frontier_prompt)
+        except Exception:
+            self._session.chat_visible_frontier_tokens = []
 
     def continue_chat_text_current_context(
         self,
@@ -746,8 +776,22 @@ class NativeLlamaClient:
                     success=False,
                     error="thinking-mode",
                 )
+            elif (
+                allow_mtp_experimental
+                and self._should_skip_mtp_for_chat_followup()
+                and not self._mtp_chat_raw_reuse_enabled()
+            ):
+                self.mtp_fallback_reason = "chat-followup-fallback"
+                self.last_mtp_completion = MtpCompletionResult(
+                    enabled=self.config.use_mtp_experimental,
+                    success=False,
+                    error="chat-followup-fallback",
+                )
+                self.reset_session_state()
             if allow_mtp_experimental and not thinking:
-                if should_cancel and should_cancel():
+                if self.mtp_fallback_reason == "chat-followup-fallback":
+                    pass
+                elif should_cancel and should_cancel():
                     self.cancel()
                 else:
                     mtp_result = self._try_complete_with_mtp_experimental(
@@ -776,6 +820,31 @@ class NativeLlamaClient:
             return timings
         finally:
             self._session.in_flight = False
+
+    def _should_skip_mtp_for_chat_followup(self) -> bool:
+        if not self.config.use_mtp_experimental:
+            return False
+        mode = self._session.prompt_cache_mode or ""
+        if not mode.startswith("chat:"):
+            return False
+        return bool(self._session.cached_prompt_tokens)
+
+    def _mtp_chat_reuse_debug_enabled(self) -> bool:
+        value = os.environ.get("ORBIT_MTP_CHAT_REUSE_DEBUG", "")
+        return bool(value and value != "0")
+
+    def _mtp_chat_raw_reuse_enabled(self) -> bool:
+        value = os.environ.get("ORBIT_MTP_CHAT_REUSE_RAW", "")
+        return bool(value and value != "0")
+
+    def _emit_mtp_chat_reuse_debug(self, label: str, payload: dict[str, object]) -> None:
+        if not self._mtp_chat_reuse_debug_enabled():
+            return
+        try:
+            text = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        except Exception:
+            text = repr(payload)
+        print(f"ORBIT_MTP_CHAT_REUSE {label} {text}", file=os.sys.stderr, flush=True)
 
     def _try_complete_with_mtp_experimental(
         self,
@@ -808,7 +877,84 @@ class NativeLlamaClient:
             return None
 
         mtp_prompt = _prepare_mtp_prompt(prompt, thinking=thinking)
+        prompt_token_list = self.tokenize(mtp_prompt) if self._vocab else []
+        is_chat_followup = (self._session.prompt_cache_mode or "").startswith("chat:") and bool(self._session.cached_prompt_tokens)
+        raw_chat_reuse = is_chat_followup and self._mtp_chat_raw_reuse_enabled()
+        visible_prefix_tokens = list(self._session.chat_visible_frontier_tokens or self._session.cached_prompt_tokens)
+        committed_frontier_tokens = list(self._session.committed_frontier_tokens)
+        shared_visible_prefix = _shared_prefix_len_tokens(prompt_token_list, visible_prefix_tokens)
+        shared_committed_prefix = _shared_prefix_len_tokens(prompt_token_list, committed_frontier_tokens)
+        followup_suffix_tokens: list[int] = []
+        if raw_chat_reuse and shared_visible_prefix == len(visible_prefix_tokens):
+            followup_suffix_tokens = prompt_token_list[len(visible_prefix_tokens):]
+        debug_turn: int | None = None
+        if self._mtp_chat_reuse_debug_enabled() and (self._session.prompt_cache_mode or "").startswith("chat:"):
+            self._mtp_chat_debug_turn += 1
+            debug_turn = self._mtp_chat_debug_turn
+            self._emit_mtp_chat_reuse_debug(
+                "input",
+                {
+                    "turn": debug_turn,
+                    "prompt_cache_mode": self._session.prompt_cache_mode,
+                    "prompt_tokenized_size": len(prompt_token_list),
+                    "prompt_tail": _debug_token_tail(prompt_token_list, 48),
+                    "cached_prompt_tokens_size": len(self._session.cached_prompt_tokens),
+                    "cached_prompt_tokens_tail": _debug_token_tail(self._session.cached_prompt_tokens, 48),
+                    "chat_visible_frontier_tokens_size": len(self._session.chat_visible_frontier_tokens),
+                    "chat_visible_frontier_tokens_tail": _debug_token_tail(self._session.chat_visible_frontier_tokens, 48),
+                    "committed_frontier_tokens_size": len(self._session.committed_frontier_tokens),
+                    "committed_frontier_tokens_tail": _debug_token_tail(self._session.committed_frontier_tokens, 48),
+                    "shared_visible_prefix": shared_visible_prefix,
+                    "shared_committed_prefix": shared_committed_prefix,
+                    "raw_chat_reuse": raw_chat_reuse,
+                    "followup_suffix_tokens_size": len(followup_suffix_tokens),
+                    "followup_suffix_tokens_tail": _debug_token_tail(followup_suffix_tokens, 24),
+                    "ctx_tgt_present": bool(self._session.ctx_tgt),
+                    "ctx_dft_present": bool(self._session.ctx_dft),
+                    "spec_present": bool(self._session.spec),
+                    "mtp_enabled": self._session.mtp_enabled,
+                },
+            )
+        if raw_chat_reuse:
+            if not committed_frontier_tokens:
+                self.mtp_fallback_reason = "chat-followup-raw-frontier-missing"
+                self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
+                return None
+            if shared_visible_prefix != len(visible_prefix_tokens):
+                self.mtp_fallback_reason = "chat-followup-visible-prefix-mismatch"
+                self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
+                return None
+            try:
+                set_persistent_mtp_followup_suffix_tokens(
+                    llama_root=self.paths.llama_root,
+                    paths=self.paths,
+                    runtime=self._persistent_mtp_runtime,
+                    suffix_tokens=followup_suffix_tokens,
+                )
+            except Exception as exc:
+                self.mtp_fallback_reason = f"chat-followup-raw-reuse-setup-failed: {exc}"
+                self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
+                return None
         streamed_parts: list[str] = []
+        visible_streamed_parts: list[str] = []
+        channel_filter = None if thinking else _ControlChannelStreamFilter()
+        thought_label_filter = None if thinking else _LeadingThoughtLabelFilter()
+
+        def handle_stream_chunk(text: str) -> None:
+            streamed_parts.append(text)
+            visible_chunks = [text] if channel_filter is None else channel_filter.write(text)
+            if thought_label_filter is not None:
+                normalized_chunks: list[str] = []
+                for visible_text in visible_chunks:
+                    normalized_chunks.extend(thought_label_filter.write(visible_text))
+                visible_chunks = normalized_chunks
+            for visible_text in visible_chunks:
+                if not visible_text:
+                    continue
+                visible_streamed_parts.append(visible_text)
+                if on_token:
+                    on_token(visible_text)
+
         generation_cap = max(1, min(max_tokens, 32))
         self._last_completion_generation_cap = generation_cap
         result = run_persistent_mtp_completion(
@@ -818,37 +964,112 @@ class NativeLlamaClient:
             ctx_tgt=self._session.ctx_tgt,
             prompt=mtp_prompt,
             max_tokens=generation_cap,
-            on_token=(lambda text: (streamed_parts.append(text), on_token(text))[1]) if on_token else None,
+            on_token=handle_stream_chunk,
             on_progress=(
                 lambda phase, current, total: on_progress(
                     NativeProgress("prefill" if phase == 0 else "generation", current, total)
                 )
             ) if on_progress else None,
         )
+        if channel_filter is not None:
+            flushed_chunks = channel_filter.finish()
+            if thought_label_filter is not None:
+                normalized_chunks = []
+                for visible_text in flushed_chunks:
+                    normalized_chunks.extend(thought_label_filter.write(visible_text))
+                normalized_chunks.extend(thought_label_filter.finish())
+                flushed_chunks = normalized_chunks
+            for visible_text in flushed_chunks:
+                if not visible_text:
+                    continue
+                visible_streamed_parts.append(visible_text)
+                if on_token:
+                    on_token(visible_text)
+        elif thought_label_filter is not None:
+            for visible_text in thought_label_filter.finish():
+                if not visible_text:
+                    continue
+                visible_streamed_parts.append(visible_text)
+                if on_token:
+                    on_token(visible_text)
+        raw_stream_text = "".join(streamed_parts)
         if result.success and result.content and not thinking:
-            result = replace(result, content=_strip_control_channels(result.content))
+            sanitized_content = _strip_reasoning_preamble(_strip_control_channels(result.content))
+            result = replace(result, content=sanitized_content)
         self.last_mtp_completion = result
+        if debug_turn is not None:
+            self._emit_mtp_chat_reuse_debug(
+                "output",
+                {
+                    "turn": debug_turn,
+                    "raw_last_content": raw_stream_text or result.content,
+                    "visible_content": result.content,
+                    "output_tokens": result.output_tokens,
+                    "success": result.success,
+                    "error": result.error,
+                },
+            )
         if not result.success:
             self.mtp_fallback_reason = result.error or "mtp-experimental-failed"
             self._session.mtp_failed = True
             self._session.mtp_failure_reason = self.mtp_fallback_reason
             self._session.mtp_enabled = False
             return None
+        if not thinking and not result.content.strip():
+            self.mtp_fallback_reason = "empty-visible-content"
+            self.last_mtp_completion = replace(result, success=False, error="empty-visible-content")
+            if debug_turn is not None:
+                self._emit_mtp_chat_reuse_debug(
+                    "visible_empty",
+                    {
+                        "turn": debug_turn,
+                        "raw_stream_text": raw_stream_text,
+                        "raw_result_content": result.content,
+                    },
+                )
+            return None
         self.mtp_fallback_reason = None
         self._session.mtp_failed = False
         self._session.mtp_failure_reason = None
         self._session.mtp_enabled = True
-        if result.content and on_token and not streamed_parts:
+        self._session.raw_emitted_token_ids = list(result.raw_emitted_token_ids or [])
+        self._session.committed_frontier_tokens = list(result.end_turn_frontier_token_ids or [])
+        if result.content and on_token and not visible_streamed_parts:
             on_token(result.content)
-        prompt_token_list = self.tokenize(mtp_prompt) if self._vocab else []
         prompt_tokens = len(prompt_token_list)
         reused_prompt_tokens = 0
-        max_common = min(len(prompt_token_list), len(self._session.cached_prompt_tokens))
-        while reused_prompt_tokens < max_common and prompt_token_list[reused_prompt_tokens] == self._session.cached_prompt_tokens[reused_prompt_tokens]:
+        reuse_basis_tokens = visible_prefix_tokens if raw_chat_reuse and visible_prefix_tokens else self._session.cached_prompt_tokens
+        max_common = min(len(prompt_token_list), len(reuse_basis_tokens))
+        while reused_prompt_tokens < max_common and prompt_token_list[reused_prompt_tokens] == reuse_basis_tokens[reused_prompt_tokens]:
             reused_prompt_tokens += 1
         if prompt_token_list:
             reused_prompt_tokens = min(reused_prompt_tokens, len(prompt_token_list) - 1)
-        self._session.cached_prompt_tokens = list(prompt_token_list)
+        generated_token_list: list[int] = []
+        if self._vocab and result.content:
+            try:
+                generated_token_list = self.tokenize(result.content)
+            except Exception:
+                generated_token_list = []
+        # Preserve the visible generated frontier for the next native reuse pass.
+        # The persistent MTP shim does not currently expose exact output token ids,
+        # so we fall back to re-tokenizing the finalized assistant text here.
+        self._session.cached_prompt_tokens = [*prompt_token_list, *generated_token_list]
+        if debug_turn is not None:
+            self._emit_mtp_chat_reuse_debug(
+                "reuse",
+                {
+                    "turn": debug_turn,
+                    "reused_prompt_tokens": reused_prompt_tokens,
+                    "generated_tokenized_size": len(generated_token_list),
+                    "generated_tokenized_tail": _debug_token_tail(generated_token_list, 20),
+                    "cached_prompt_tokens_after_size": len(self._session.cached_prompt_tokens),
+                    "cached_prompt_tokens_after_tail": _debug_token_tail(self._session.cached_prompt_tokens, 48),
+                    "raw_emitted_token_ids_size": len(self._session.raw_emitted_token_ids),
+                    "raw_emitted_token_ids_tail": _debug_token_tail(self._session.raw_emitted_token_ids, 20),
+                    "committed_frontier_tokens_size_after": len(self._session.committed_frontier_tokens),
+                    "committed_frontier_tokens_tail_after": _debug_token_tail(self._session.committed_frontier_tokens, 48),
+                },
+            )
         return NativeTimings(
             prompt_tokens=prompt_tokens,
             output_tokens=result.output_tokens,
@@ -901,12 +1122,16 @@ class NativeLlamaClient:
                     break
                 raise RuntimeError(f"llama_decode failed during prefill: {decode_rc}")
         pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
-        generated, gen_ms, cancelled = self._generate_from_current_context(
+        generated, gen_ms, cancelled, generated_tokens = self._generate_from_current_context(
             max_tokens=max_tokens,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
         )
+        # Preserve the exact generated token ids in the cached context so the
+        # next turn can reuse the real frontier instead of re-tokenizing prior
+        # assistant text from UTF-8 output.
+        self._session.cached_prompt_tokens = [*prompt_tokens, *generated_tokens]
         return NativeTimings(
             prompt_tokens=n_prompt,
             output_tokens=generated,
@@ -930,12 +1155,13 @@ class NativeLlamaClient:
         self.reset_cancel()
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = max_tokens
-        generated, gen_ms, cancelled = self._generate_from_current_context(
+        generated, gen_ms, cancelled, generated_tokens = self._generate_from_current_context(
             max_tokens=max_tokens,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
         )
+        self._session.cached_prompt_tokens.extend(generated_tokens)
         timings = NativeTimings(
             prompt_tokens=0,
             output_tokens=generated,
@@ -956,12 +1182,13 @@ class NativeLlamaClient:
         on_progress=None,
         on_token=None,
         should_cancel=None,
-    ) -> tuple[int, float, bool]:
+    ) -> tuple[int, float, bool, list[int]]:
         if not self._session.ctx_tgt or not self._session.sampler or not self._vocab:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
         lib.llama_sampler_reset(self._session.sampler)
         generated = 0
+        generated_tokens: list[int] = []
         gen_start = lib.llama_time_us()
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         while generated < max_tokens and not self.cancel_event.is_set():
@@ -972,6 +1199,7 @@ class NativeLlamaClient:
             lib.llama_sampler_accept(self._session.sampler, token)
             if lib.llama_vocab_is_eog(self._vocab, token):
                 break
+            generated_tokens.append(int(token))
             text = decoder.decode(self._token_to_bytes(token), final=False)
             if text and on_token:
                 on_token(text)
@@ -989,7 +1217,7 @@ class NativeLlamaClient:
         if text and on_token:
             on_token(text)
         gen_ms = (lib.llama_time_us() - gen_start) / 1000.0
-        return generated, gen_ms, self.cancel_event.is_set()
+        return generated, gen_ms, self.cancel_event.is_set(), generated_tokens
 
     def tokenize(self, prompt: str) -> list[int]:
         if not self._vocab:
@@ -1025,7 +1253,6 @@ class NativeLlamaClient:
                 lib.llama_memory_clear(mem, True)
             else:
                 lib.llama_memory_seq_rm(mem, 0, common, -1)
-        self._session.cached_prompt_tokens = list(prompt_tokens)
         return common
 
     def apply_chat_template(
@@ -1121,7 +1348,7 @@ def _strip_reasoning_preamble(content: str) -> str:
     if not text:
         return text
     lines = text.splitlines()
-    if lines and lines[0].strip().lower() == "thought":
+    if lines and _is_reasoning_label_line(lines[0], next_line=lines[1] if len(lines) > 1 else ""):
         cleaned = "\n".join(lines[1:]).strip()
         if cleaned:
             return cleaned
@@ -1160,6 +1387,43 @@ def _strip_reasoning_preamble(content: str) -> str:
             if cleaned:
                 return cleaned
     return text
+
+
+def _is_reasoning_label_line(line: str, *, next_line: str = "") -> bool:
+    stripped = line.strip()
+    lowered = stripped.lower()
+    if lowered in {
+        "thought",
+        "thought preview",
+        "reasoning",
+        "reasoning preview",
+        "plan",
+        "plan preview",
+        "step",
+        "steps",
+    }:
+        return True
+    if len(stripped) == 1 and stripped.islower() and next_line.strip():
+        next_text = next_line.lstrip()
+        if next_text and (next_text[0].isupper() or next_text[0].isdigit()):
+            return True
+    return False
+
+
+def _debug_token_tail(tokens: list[int], count: int) -> list[int]:
+    if count <= 0:
+        return []
+    if len(tokens) <= count:
+        return list(tokens)
+    return list(tokens[-count:])
+
+
+def _shared_prefix_len_tokens(left: list[int], right: list[int]) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
 
 
 def _has_open_thought_channel(content: str) -> bool:
@@ -1346,7 +1610,7 @@ class _LeadingThoughtLabelFilter:
         rest = self._buffer[newline_index + 1 :]
         self._resolved = True
         self._buffer = ""
-        if first_line.strip().lower() == "thought":
+        if _is_reasoning_label_line(first_line, next_line=rest):
             return [rest] if rest else []
         return [first_line + "\n" + rest] if rest else [first_line + "\n"]
 

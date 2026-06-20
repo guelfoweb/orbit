@@ -137,6 +137,38 @@ class NativeSessionStateTests(unittest.TestCase):
         self.assertEqual(timings.reused_prompt_tokens, 3)
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_prompt_caches_exact_generated_tokens_for_next_turn(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig())
+        mocked_lib = _mocked_lib.return_value.lib
+        mocked_lib.llama_time_us.side_effect = [0, 1000]
+        mocked_lib.llama_batch_get_one.return_value = object()
+        mocked_lib.llama_decode.return_value = 0
+        client._session.ctx_tgt = object()
+        client._vocab = object()
+        client._session.sampler = object()
+        client.tokenize = mock.Mock(return_value=[10, 11, 12])
+        client._prepare_memory_for_prompt = mock.Mock(return_value=2)
+        client._generate_from_current_context = mock.Mock(return_value=(2, 20.0, False, [21, 22]))
+
+        timings = client._complete_prompt_standard("hello", max_tokens=2)
+
+        self.assertEqual(timings.output_tokens, 2)
+        self.assertEqual(client._session.cached_prompt_tokens, [10, 11, 12, 21, 22])
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_continue_generation_extends_cached_context_with_generated_tokens(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig())
+        client._session.continuation_ready = True
+        client._session.cached_prompt_tokens = [1, 2, 3]
+        client.reset_cancel = mock.Mock()
+        client._generate_from_current_context = mock.Mock(return_value=(2, 15.0, False, [4, 5]))
+
+        timings = client._continue_generation_from_current_context(max_tokens=2)
+
+        self.assertEqual(timings.output_tokens, 2)
+        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 3, 4, 5])
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_prompt_cache_mode_change_resets_session_state(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig())
         client._session.ctx_tgt = object()
