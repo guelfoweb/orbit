@@ -267,6 +267,83 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(backend.chat_calls, 1)
         self.assertFalse(runtime.can_continue_last_response())
 
+    def test_continue_last_response_uses_prompt_fallback_for_bullet_reasoning_length(self) -> None:
+        class BulletReasoningBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.continue_calls = 0
+                self.chat_calls = 0
+                self.thinking = True
+                self.last_messages: list[Message] = []
+
+            def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
+                self.continue_calls += 1
+                raise AssertionError("native continue should not be used for truncated reasoning prelude")
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                self.last_thinking = self.thinking
+                self.last_messages = messages
+                return ChatResult(
+                    content="Final answer: I understand and will answer concisely.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = BulletReasoningBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        runtime.messages.append(
+            {
+                "role": "assistant",
+                "content": "* Constraint 1: explain the plan.\n* Constraint 2: give the final answer.\n* Drafting the response:",
+            }
+        )
+        runtime.client_state.last_content = runtime.messages[-1]["content"]
+        runtime.last_visible_finish_reason = "length"
+
+        result = runtime.continue_last_response(temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "Final answer: I understand and will answer concisely.")
+        self.assertEqual(backend.continue_calls, 0)
+        self.assertEqual(backend.chat_calls, 1)
+        self.assertFalse(backend.last_thinking)
+        self.assertIn("Stop reasoning now and write only the missing final answer.", backend.last_messages[-2]["content"])
+        self.assertIn("Write exactly one short final-answer sentence.", backend.last_messages[-2]["content"])
+
+    def test_continue_last_response_returns_controlled_error_if_forced_final_is_incomplete(self) -> None:
+        class IncompleteForcedFinalBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.thinking = True
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                return ChatResult(
+                    content="Final answer: I will now provide a concise final",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = IncompleteForcedFinalBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        runtime.messages.append({"role": "assistant", "content": "### Reasoning\npartial"})
+
+        result = runtime.continue_last_response(temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "error: model did not produce a final answer after continuation")
+        self.assertFalse(runtime.can_continue_last_response())
+
     def test_continue_last_response_uses_native_backend_continuation_after_length_even_without_open_reasoning(self) -> None:
         class NativeContinueBackend(FakeBackend):
             def __init__(self) -> None:

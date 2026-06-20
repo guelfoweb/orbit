@@ -523,13 +523,15 @@ class ContinueEnvironment:
         return ContinueResult(result=result, used_native_continue=False, used_prompt_fallback=True)
 
     def _continuation_kind_before_continue(self) -> str | None:
-        if self.runtime.client_state.continuation_kind is not None:
-            return self.runtime.client_state.continuation_kind
         if self.runtime.client_state.last_content:
-            return self.runtime._thinking().continuation_kind_for(
+            current_kind = self.runtime._thinking().continuation_kind_for(
                 content=self.runtime.client_state.last_content,
                 finish_reason=self.runtime.client_state.last_finish_reason,
             )
+            if current_kind is not None:
+                return current_kind
+        if self.runtime.client_state.continuation_kind is not None:
+            return self.runtime.client_state.continuation_kind
         if last_assistant_has_open_reasoning(self.runtime.messages):
             return "thinking"
         if self.runtime.last_visible_finish_reason == "length":
@@ -547,12 +549,14 @@ class ContinueEnvironment:
         loop: int,
         force_disable_backend_thinking: bool = False,
     ) -> ChatResult:
-        if force_disable_backend_thinking and last_assistant_has_open_reasoning(self.runtime.messages):
+        if force_disable_backend_thinking:
             original_request = last_user_text(self.runtime.messages)
             continuation_prompt = (
                 "Stop reasoning now and write only the missing final answer. "
                 "Start the answer with 'Final answer:'. "
+                "Write exactly one short final-answer sentence. "
                 "Do not continue or repeat any thought text. "
+                "Do not explain the plan again. "
                 "No hidden reasoning, no plan, no thinking markers. "
                 + (
                     f"Answer concisely and directly to the original user request: {original_request!r}. "
@@ -591,10 +595,13 @@ class ContinueEnvironment:
                 on_model_step=on_model_step,
                 loop=loop,
             )
-        if force_disable_backend_thinking and self.runtime._thinking().continuation_kind_for(
-            content=result.content,
-            finish_reason=result.finish_reason,
-        ) is not None:
+        if force_disable_backend_thinking and (
+            self.runtime._thinking().continuation_kind_for(
+                content=result.content,
+                finish_reason=result.finish_reason,
+            ) is not None
+            or looks_like_incomplete_final(result.content)
+        ):
             result = replace(
                 result,
                 content="error: model did not produce a final answer after continuation",

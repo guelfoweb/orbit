@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 
 FINAL_MARKERS = (
@@ -15,6 +16,17 @@ REASONING_PREFIXES = (
     "# reasoning",
     "reasoning:",
     "plan:",
+)
+
+_REASONING_META_KEYWORDS = (
+    "constraint",
+    "constraints",
+    "scenario",
+    "user's request",
+    "user request",
+    "looking at the prompt",
+    "drafting the response",
+    "let's assume",
 )
 
 
@@ -53,6 +65,22 @@ def looks_like_reasoning_without_final(content: str, *, thinking_enabled: bool) 
     return stripped.startswith(REASONING_PREFIXES)
 
 
+def looks_like_truncated_reasoning_prelude(content: str) -> bool:
+    stripped = content.strip().lower()
+    if not stripped:
+        return False
+    if any(marker in stripped for marker in FINAL_MARKERS):
+        return False
+    if stripped.startswith(REASONING_PREFIXES):
+        return True
+    preview = stripped[:600]
+    if any(keyword in preview for keyword in _REASONING_META_KEYWORDS):
+        return True
+    lines = [line.strip() for line in preview.splitlines() if line.strip()]
+    bullet_lines = sum(1 for line in lines[:8] if re.match(r"(?:[-*•]\s|\d+[.)]\s)", line))
+    return bullet_lines >= 2
+
+
 def looks_like_incomplete_tool_answer(content: str) -> bool:
     text = content.strip()
     if len(text) < 24:
@@ -71,6 +99,8 @@ class ThinkingMode:
 
     def continuation_kind_for(self, *, content: str, finish_reason: str | None) -> str | None:
         if looks_like_reasoning_without_final(content, thinking_enabled=self.enabled):
+            return "thinking"
+        if self.enabled and finish_reason == "length" and looks_like_truncated_reasoning_prelude(content):
             return "thinking"
         if finish_reason == "length":
             return "final_answer"

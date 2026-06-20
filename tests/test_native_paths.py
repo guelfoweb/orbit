@@ -22,13 +22,39 @@ class NativePathsTests(unittest.TestCase):
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
 
-            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib):
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib), mock.patch(
+                "orbit.native_llama.paths.BUNDLED_SOURCE_ROOT", root / "missing-bundled-source"
+            ):
                 paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
 
         self.assertIsNone(paths.llama_root)
         self.assertEqual(paths.build_bin, vendor_lib)
         self.assertEqual(paths.library, vendor_lib / "libllama.so")
         self.assertEqual(paths.model, target)
+
+    def test_resolves_vendored_runtime_and_preserves_bundled_source_root_for_builds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vendor_lib = root / "vendor/lib"
+            bundled = root / "vendor/source/llama.cpp"
+            models_dir = root / "models"
+            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            vendor_lib.mkdir(parents=True)
+            (vendor_lib / "libllama.so").write_text("", encoding="utf-8")
+            (bundled / "CMakeLists.txt").parent.mkdir(parents=True, exist_ok=True)
+            (bundled / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.20)\n", encoding="utf-8")
+            target.parent.mkdir(parents=True)
+            target.write_text("target", encoding="utf-8")
+            mmproj.write_text("mmproj", encoding="utf-8")
+
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib), mock.patch(
+                "orbit.native_llama.paths.BUNDLED_SOURCE_ROOT", bundled
+            ):
+                paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
+
+        self.assertEqual(paths.llama_root, bundled)
+        self.assertEqual(paths.build_bin, vendor_lib)
 
     def test_resolves_target_from_models_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

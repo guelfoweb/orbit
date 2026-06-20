@@ -88,13 +88,13 @@ orbit download --all ggml-org/gemma-4-12B-it-GGUF
 
 ### 3. Start the native backend
 
-Basic native server:
+Basic native server, with MTP disabled by default:
 
 ```bash
 orbit server --port 11976
 ```
 
-With MTP enabled:
+With MTP enabled explicitly:
 
 ```bash
 orbit server --port 11976 --mtp
@@ -116,6 +116,13 @@ orbit server \
   --mtp \
   --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
+
+Notes:
+
+- `orbit server` does not enable MTP unless `--mtp` is passed.
+- experimental multi-turn raw MTP chat reuse remains debug-only behind:
+  - `ORBIT_MTP_CHAT_REUSE_RAW=1`
+  - `ORBIT_MTP_CHAT_REUSE_DEBUG=1`
 
 ### 4. Start Orbit
 
