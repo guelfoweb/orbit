@@ -357,6 +357,110 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(backend.chat_calls, 2)
         self.assertEqual(backend.thinking_seen, [True, False])
 
+    def test_ask_chat_rejects_reasoning_leakage_even_when_finish_reason_is_stop(self) -> None:
+        class ReasoningLeakThenFinalBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.chat_calls = 0
+                self.thinking = True
+                self.thinking_seen: list[bool] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                self.thinking_seen.append(self.thinking)
+                if self.chat_calls == 1:
+                    return ChatResult(
+                        content=(
+                            '"What is the main difference between essay and wise?"\n'
+                            'The user likely meant "essay" and "wise".\n'
+                            "* **Possibility A:** compare essay and thesis.\n"
+                            "* **Possibility B:** compare essay and wise.\n"
+                            "An essay is a written composition, while wise means having good judgment."
+                        ),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="An essay is a written composition, while wise means having good judgment.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ReasoningLeakThenFinalBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+
+        result = runtime.ask_chat("what is the main difference beetwen essay and wise?", temperature=0, max_tokens=64)
+
+        self.assertEqual(
+            result.content,
+            "An essay is a written composition, while wise means having good judgment.",
+        )
+        self.assertEqual(backend.chat_calls, 2)
+        self.assertEqual(backend.thinking_seen, [True, False])
+
+    def test_ask_chat_returns_controlled_error_if_final_only_retry_still_leaks_reasoning(self) -> None:
+        class ReasoningLeakTwiceBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.chat_calls = 0
+                self.thinking = True
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                if self.chat_calls == 1:
+                    return ChatResult(
+                        content=(
+                            "The user likely meant two different words.\n"
+                            "* **Possibility A:** first interpretation.\n"
+                            "* **Possibility B:** second interpretation.\n"
+                            "Here is a partial answer."
+                        ),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content=(
+                        "The user likely meant two different words.\n"
+                        "* **Possibility A:** first interpretation.\n"
+                        "* **Possibility B:** second interpretation.\n"
+                        "Here is another partial answer."
+                    ),
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ReasoningLeakTwiceBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+
+        result = runtime.ask_chat("what is the main difference beetwen essay and wise?", temperature=0, max_tokens=64)
+
+        self.assertEqual(result.content, "error: model did not produce a clean final answer")
+        self.assertEqual(result.finish_reason, "stop")
+
     def test_ask_chat_emits_distinct_phase_reasons_for_reasoning_repair(self) -> None:
         class ReasoningThenFinalBackend(FakeBackend):
             def __init__(self) -> None:
