@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 import tempfile
 import time
 import unittest
@@ -484,7 +485,7 @@ class HybridToolExecutorTests(unittest.TestCase):
                 workdir=workdir,
                 allowed_tool_names=("exec_shell_full_command",),
             )
-            with patch("orbit.runtime.shell_guardrails._extract_pdf_text", return_value=(sample_text, "pdftotext")):
+            with patch("orbit.runtime.shell_guardrails.extract_pdf_text", return_value=(sample_text, "pdftotext")):
                 head_execution = executor.execute(
                     "exec_shell_full_command",
                     {"command": "pdftotext sample.pdf - | head -n 3"},
@@ -524,7 +525,7 @@ class HybridToolExecutorTests(unittest.TestCase):
                 workdir=workdir,
                 allowed_tool_names=("exec_shell_full_command",),
             )
-            with patch("orbit.runtime.shell_guardrails._extract_pdf_text", return_value=(sample_text, "pdftotext")):
+            with patch("orbit.runtime.shell_guardrails.extract_pdf_text", return_value=(sample_text, "pdftotext")):
                 sed_execution = executor.execute(
                     "exec_shell_full_command",
                     {"command": "pdftotext sample.pdf - | sed -n '3,5p'"},
@@ -554,8 +555,16 @@ class HybridToolExecutorTests(unittest.TestCase):
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-            with patch("orbit.runtime.shell_guardrails.shutil.which") as which:
+            with patch("orbit.runtime.file_tools.shutil.which") as which, patch(
+                "orbit.runtime.file_tools.subprocess.run"
+            ) as run:
                 which.side_effect = lambda name: None if name == "pdftotext" else "/usr/bin/strings"
+                run.return_value = subprocess.CompletedProcess(
+                    args=["/usr/bin/strings", "-a", "-n", "8", str(target)],
+                    returncode=0,
+                    stdout="%PDF-1.4\nOrbit PDF fallback visible text\n%%EOF\n",
+                    stderr="",
+                )
                 execution = executor.execute(
                     "exec_shell_full_command",
                     {"command": "cat sample.pdf"},
