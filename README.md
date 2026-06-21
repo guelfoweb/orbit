@@ -25,7 +25,7 @@ Orbit stays model-driven. The runtime enforces safety, size, timeout, and tool-c
 
 - Primary backend path: native `orbit-server`
 - Compatibility path: `llama-server` or another OpenAI-compatible local backend
-- CLI default base URL: `http://127.0.0.1:11976`
+- CLI default base URL: `http://127.0.0.1:12120`
 
 If your native server runs on another port, pass `--base-url`.
 
@@ -106,34 +106,34 @@ orbit download --all ggml-org/gemma-4-12B-it-GGUF
 Stable default server, with MTP disabled:
 
 ```bash
-orbit server --port 11976
+orbit server
 ```
 
 If native libraries are not packaged inside Orbit yet, use:
 
 ```bash
-orbit server --port 11976 --llama-root /path/to/llama.cpp
+orbit server --llama-root /path/to/llama.cpp
 ```
 
 Optional MTP mode:
 
 ```bash
-orbit server --port 11976 --mtp
+orbit server --mtp
 ```
 
 With a multimodal projector:
 
 ```bash
-orbit server \
-  --port 11976 \
+  orbit server \
+  --port 12120 \
   --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
 
 You can combine MTP and multimodal flags when both artifacts are available:
 
 ```bash
-orbit server \
-  --port 11976 \
+  orbit server \
+  --port 12120 \
   --mtp \
   --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
@@ -153,7 +153,7 @@ What this means:
 After startup, you can verify that the server is healthy:
 
 ```bash
-orbit --base-url http://127.0.0.1:11976 --health
+orbit --health
 ```
 
 Inside the interactive client, you can inspect backend state with:
@@ -174,7 +174,7 @@ Expected `/props` values:
 ### 5. Start Orbit
 
 ```bash
-orbit --base-url http://127.0.0.1:11976
+orbit
 ```
 
 Inside Orbit, tools are off by default:
@@ -186,9 +186,9 @@ Inside Orbit, tools are off by default:
 ## One-shot usage
 
 ```bash
-orbit --base-url http://127.0.0.1:11976 "Say who you are in one short sentence."
-orbit --base-url http://127.0.0.1:11976 --image workdir/media/image1.jpg "Describe this image."
-orbit --base-url http://127.0.0.1:11976 --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
+orbit "Say who you are in one short sentence."
+orbit --image workdir/media/image1.jpg "Describe this image."
+orbit --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
 ```
 
 ## Thinking mode
@@ -246,6 +246,6 @@ Orbit can still talk to compatible local HTTP backends through `--base-url`. Kee
 ## Maintenance commands
 
 ```bash
-orbit bench-core --base-url http://127.0.0.1:11976
-orbit release-confidence --base-url http://127.0.0.1:11976 --keep-failed
+orbit bench-core --base-url http://127.0.0.1:12120
+orbit release-confidence --base-url http://127.0.0.1:12120 --keep-failed
 ```

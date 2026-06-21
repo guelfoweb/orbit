@@ -37,18 +37,18 @@ class CliDownloadDispatchTests(unittest.TestCase):
 
     def test_main_dispatches_server_subcommand(self) -> None:
         with mock.patch("orbit.terminal.cli.run_server", return_value=11) as mocked:
-            code = cli.main(["server", "--port", "11976"])
+            code = cli.main(["server", "--port", "12120"])
 
         self.assertEqual(code, 11)
-        mocked.assert_called_once_with(["--port", "11976"])
+        mocked.assert_called_once_with(["--port", "12120"])
 
     def test_main_dispatches_bench_core_subcommand(self) -> None:
         with mock.patch("orbit.terminal.cli.bench_core_main", return_value=12) as mocked:
-            code = cli.main(["bench-core", "--base-url", "http://127.0.0.1:11976"])
+            code = cli.main(["bench-core", "--base-url", "http://127.0.0.1:12120"])
 
         self.assertEqual(code, 12)
         mocked.assert_called_once()
-        self.assertEqual(mocked.call_args.args[0], ["--base-url", "http://127.0.0.1:11976"])
+        self.assertEqual(mocked.call_args.args[0], ["--base-url", "http://127.0.0.1:12120"])
 
     def test_main_dispatches_release_confidence_subcommand(self) -> None:
         with mock.patch("orbit.terminal.cli.release_confidence_main", return_value=13) as mocked:

@@ -223,11 +223,11 @@ class LlamaServerBackend:
                 return _parse_chat_stream(response, on_delta=on_delta)
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise LlamaServerError(f"llama-server HTTP {exc.code}: {detail}") from exc
+            raise LlamaServerError(f"backend server HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
-            raise LlamaServerError(f"cannot connect to llama-server at {self.base_url}: {exc.reason}") from exc
+            raise LlamaServerError(f"cannot connect to backend server at {self.base_url}: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise LlamaServerError(f"llama-server request timed out after {self.timeout:.0f}s") from exc
+            raise LlamaServerError(f"backend server request timed out after {self.timeout:.0f}s") from exc
 
     def _post_native_stream(
         self,
@@ -249,11 +249,11 @@ class LlamaServerBackend:
                 return _parse_native_stream(response, on_delta=on_delta, on_progress=on_progress)
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise LlamaServerError(f"llama-server HTTP {exc.code}: {detail}") from exc
+            raise LlamaServerError(f"backend server HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
-            raise LlamaServerError(f"cannot connect to llama-server at {self.base_url}: {exc.reason}") from exc
+            raise LlamaServerError(f"cannot connect to backend server at {self.base_url}: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise LlamaServerError(f"llama-server request timed out after {self.timeout:.0f}s") from exc
+            raise LlamaServerError(f"backend server request timed out after {self.timeout:.0f}s") from exc
 
     def _send(self, request: Request) -> Any:
         try:
@@ -261,28 +261,28 @@ class LlamaServerBackend:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise LlamaServerError(f"llama-server HTTP {exc.code}: {detail}") from exc
+            raise LlamaServerError(f"backend server HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
-            raise LlamaServerError(f"cannot connect to llama-server at {self.base_url}: {exc.reason}") from exc
+            raise LlamaServerError(f"cannot connect to backend server at {self.base_url}: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise LlamaServerError(f"llama-server request timed out after {self.timeout:.0f}s") from exc
+            raise LlamaServerError(f"backend server request timed out after {self.timeout:.0f}s") from exc
 
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise LlamaServerError(f"llama-server returned invalid JSON: {raw[:200]}") from exc
+            raise LlamaServerError(f"backend server returned invalid JSON: {raw[:200]}") from exc
         return data
 
 def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise LlamaServerError("llama-server response has no choices")
+        raise LlamaServerError("backend server response has no choices")
     first = choices[0]
     if not isinstance(first, dict):
-        raise LlamaServerError("llama-server choice is invalid")
+        raise LlamaServerError("backend server choice is invalid")
     message = first.get("message")
     if not isinstance(message, dict):
-        raise LlamaServerError("llama-server choice has no message")
+        raise LlamaServerError("backend server choice has no message")
     content = message.get("content")
     if not isinstance(content, str):
         content = ""

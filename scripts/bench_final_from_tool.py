@@ -115,7 +115,7 @@ def _run_case(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark final_from_tool-heavy paths against a local Orbit server.")
-    parser.add_argument("--base-url", default="http://127.0.0.1:11976")
+    parser.add_argument("--base-url", default="http://127.0.0.1:12120")
     parser.add_argument("--workdir", default=str(WORKDIR))
     parser.add_argument("--json-out")
     args = parser.parse_args()

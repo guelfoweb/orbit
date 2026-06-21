@@ -603,7 +603,7 @@ def health_check(base_url: str, timeout: int) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Orbit release confidence tests against a local backend.")
-    parser.add_argument("--base-url", default=os.environ.get("ORBIT_BASE_URL", "http://127.0.0.1:11976"))
+    parser.add_argument("--base-url", default=os.environ.get("ORBIT_BASE_URL", "http://127.0.0.1:12120"))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("ORBIT_TEST_TIMEOUT", "300")))
     parser.add_argument("--max-tokens", type=int, default=int(os.environ.get("ORBIT_TEST_MAX_TOKENS", "320")))
     parser.add_argument("--only", action="append", default=[], help="Run only a case id. Can be repeated.")
