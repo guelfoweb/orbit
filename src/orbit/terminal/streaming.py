@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import re
 import threading
 import time
 
 from orbit.backend.base import StreamProgress
-from orbit.runtime.final_policy import classify_final_answer_completeness, looks_like_reasoning_leakage
 from orbit.terminal.theme import DIM, RESET, dim
 
 
@@ -245,12 +243,7 @@ class _ThinkingDisplayFilter:
         return self._drain(final=False)
 
     def finish(self) -> list[tuple[str, bool]]:
-        emitted = self._drain(final=True)
-        fallback = self._fallback_final_answer()
-        if fallback:
-            emitted.append((fallback, False))
-            self._saw_final_output = True
-        return emitted
+        return self._drain(final=True)
 
     def _drain(self, *, final: bool) -> list[tuple[str, bool]]:
         emitted: list[tuple[str, bool]] = []
@@ -328,19 +321,6 @@ class _ThinkingDisplayFilter:
             return
         self._saw_final_output = True
 
-    def _fallback_final_answer(self) -> str | None:
-        if self._saw_final_output or self._in_final:
-            return None
-        thought_text = "".join(self._thought_text_parts).strip()
-        if not thought_text or not looks_like_reasoning_leakage(thought_text):
-            return None
-        lines = [line for line in (_clean_reasoning_line(raw) for raw in thought_text.splitlines()) if line]
-        for line in reversed(lines):
-            completeness = classify_final_answer_completeness(line)
-            if completeness.is_complete and not looks_like_reasoning_leakage(line):
-                return line
-        return None
-
     def _safe_emit_length(self) -> int:
         keep = 0
         for marker in self._FINAL_MARKERS:
@@ -388,25 +368,3 @@ def _strip_channel_markup(text: str) -> str:
         .replace("<|channel>final\n", "")
         .replace("<channel|>", "")
     )
-
-
-def _clean_reasoning_line(line: str) -> str:
-    text = line.strip()
-    if not text:
-        return ""
-    text = re.sub(r"^(?:[-*]\s+)+", "", text)
-    text = text.strip()
-    text = text.strip("*")
-    text = text.strip()
-    if not text:
-        return ""
-    lowered = text.lower()
-    if re.match(r"^possibility\s+[a-z]\b", lowered):
-        return ""
-    if lowered.startswith(("the user likely meant", "the user probably meant", "the user may have meant")):
-        return ""
-    if lowered.startswith(("wait, looking at the words", "looking at the words")):
-        return ""
-    if text.startswith(("'", '"')) and text.endswith(("'", '"')) and len(text) > 8:
-        return ""
-    return text

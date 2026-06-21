@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from orbit.native_llama.client import _ControlChannelStreamFilter, _LeadingThoughtLabelFilter, _StopSequenceStreamFilter
+from orbit.native_llama.client import (
+    _ControlChannelStreamFilter,
+    _LeadingThoughtLabelFilter,
+    _StopSequenceStreamFilter,
+    _strip_reasoning_preamble,
+)
 
 
 class NativeStreamingTests(unittest.TestCase):
@@ -75,6 +80,14 @@ class NativeStreamingTests(unittest.TestCase):
         self.assertEqual("".join(deltas), "hello world")
         self.assertEqual("".join(emitted), "hello world")
         self.assertFalse(stream.stopped)
+
+    def test_strip_reasoning_preamble_only_removes_plain_thought_label(self) -> None:
+        self.assertEqual(_strip_reasoning_preamble("thought\nfinal answer"), "final answer")
+
+    def test_strip_reasoning_preamble_keeps_reasoning_and_final_answer_text(self) -> None:
+        content = "Reasoning:\nstep 1\n\nFinal answer: done"
+
+        self.assertEqual(_strip_reasoning_preamble(content), content)
 
 
 if __name__ == "__main__":

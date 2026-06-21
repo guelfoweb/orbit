@@ -259,10 +259,7 @@ class NativeThinkingTests(unittest.TestCase):
             "**Final Answer:**\n"
             "Use mv \"old report 2026.txt\" \"final report 2026.txt\""
         )
-        self.assertEqual(
-            _strip_reasoning_preamble(content),
-            'Use mv "old report 2026.txt" "final report 2026.txt"',
-        )
+        self.assertEqual(_strip_reasoning_preamble(content), content)
 
     def test_strip_reasoning_preamble_keeps_plain_answer_when_no_boundary_exists(self) -> None:
         content = "This is a direct explanation without a separate final-answer section."
@@ -276,7 +273,7 @@ class NativeThinkingTests(unittest.TestCase):
             "The final answer is:\n"
             "42"
         )
-        self.assertEqual(_strip_reasoning_preamble(content), "42")
+        self.assertEqual(_strip_reasoning_preamble(content), content)
 
     def test_detects_open_thought_channel(self) -> None:
         self.assertTrue(_has_open_thought_channel("<|channel>thought\npartial"))
