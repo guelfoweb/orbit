@@ -33,7 +33,7 @@ from orbit.terminal.repl_input import (
     visual_row_count,
 )
 from orbit.terminal.repl import Repl
-from orbit.terminal.repl import _phase_label, _phase_progress_label, _prefill_profile_for_turn
+from orbit.terminal.repl import _phase_progress_label, _prefill_profile_for_turn
 from orbit.terminal.session_preview import format_recent_session_messages
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE
@@ -269,22 +269,7 @@ class ReplTests(unittest.TestCase):
             " └ . | ./pdf | ./text | 25 chars -> model",
         )
 
-    def test_phase_label_maps_buffered_and_streamed_phases(self) -> None:
-        self.assertEqual(_phase_label(ModelPhaseStart("tool_plan", streamed=True)), "phase: thinking")
-        self.assertEqual(_phase_label(ModelPhaseStart("route", streamed=False)), "phase: deciding tool use (non-streaming)")
-        self.assertEqual(_phase_label(ModelPhaseStart("chat_final", streamed=True, attempt=1)), "phase: final answer pass 1")
-        self.assertEqual(
-            _phase_label(ModelPhaseStart("chat_final_completion_repair", streamed=True, attempt=2, reason="reasoning_like")),
-            "phase: forced final answer only",
-        )
-        self.assertEqual(
-            _phase_label(ModelPhaseStart("final_from_tool", streamed=False, attempt=1)),
-            "phase: final answer from tool result pass 1 (non-streaming)",
-        )
-        self.assertEqual(
-            _phase_label(ModelPhaseStart("final_from_tool_compact_retry", streamed=False, attempt=4, reason="length")),
-            "phase: compact final answer retry (length) (non-streaming)",
-        )
+    def test_phase_progress_label_maps_buffered_and_streamed_phases(self) -> None:
         self.assertEqual(_phase_progress_label(ModelPhaseStart("chat_final", streamed=True, attempt=1)), "final answer")
         self.assertEqual(_phase_progress_label(ModelPhaseStart("chat_final", streamed=True, attempt=2)), "final answer #2")
         self.assertEqual(
@@ -300,7 +285,7 @@ class ReplTests(unittest.TestCase):
             "compact retry",
         )
 
-    def test_record_phase_start_coalesces_duplicate_labels(self) -> None:
+    def test_record_phase_start_updates_phase_label_without_printing_phase_event(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
 
@@ -321,13 +306,7 @@ class ReplTests(unittest.TestCase):
         repl._record_phase_start(renderer, ModelPhaseStart("chat_final", streamed=True, attempt=1))
         repl._record_phase_start(renderer, ModelPhaseStart("chat_final_completion_repair", streamed=True, attempt=2, reason="reasoning_like"))
 
-        self.assertEqual(
-            renderer.events,
-            [
-                "phase: final answer pass 1",
-                "phase: forced final answer only",
-            ],
-        )
+        self.assertEqual(renderer.events, [])
         self.assertEqual(renderer.phase_label, "forced final")
 
     def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:

@@ -37,7 +37,6 @@ class Repl:
     can_continue: bool = False
     tools_mode: ToolSpec | None = None
     queued_prompts: list[str] = field(default_factory=list)
-    _last_phase_label: str | None = None
 
     def __post_init__(self) -> None:
         if self.tools_mode is None:
@@ -95,7 +94,6 @@ class Repl:
         return read_prompt_input()
 
     def _ask(self, prompt: str) -> None:
-        self._last_phase_label = None
         tools_enabled = tools_are_enabled(self.tools_mode or "off")
         system_prompt = ROUTE_SYSTEM_PROMPT if tools_enabled else CHAT_SYSTEM_PROMPT
         prefill_tokens = estimate_prefill_tokens(self.runtime.messages, prompt, system_prompt=system_prompt)
@@ -190,12 +188,7 @@ class Repl:
         )
 
     def _record_phase_start(self, renderer: StreamRenderer, phase: ModelPhaseStart) -> None:
-        label = _phase_label(phase)
         renderer.set_phase_label(_phase_progress_label(phase))
-        if not label or label == self._last_phase_label:
-            return
-        self._last_phase_label = label
-        renderer.event(label, restart_timer=True)
 
     def _show_tool_result(self, renderer: StreamRenderer, name: str, chars: int, source: str | None, content: str | None) -> None:
         if content is not None:
@@ -313,7 +306,6 @@ class Repl:
             self.history.save()
 
     def _ask_continue(self) -> None:
-        self._last_phase_label = None
         prefill_tokens = estimate_prefill_tokens(self.runtime.messages, "")
         prefill_seconds = self.prefill_estimator.estimate_seconds(prefill_tokens)
         renderer = StreamRenderer(
@@ -372,58 +364,6 @@ def _length_footer_message(thinking: bool) -> str:
     if thinking:
         return "thinking or final output stopped because max_tokens was reached"
     return "output stopped because max_tokens was reached"
-
-
-def _phase_label(phase: ModelPhaseStart) -> str | None:
-    suffix = ""
-    if not phase.streamed:
-        suffix = " (non-streaming)"
-
-    if phase.phase == "tool_plan":
-        return "phase: thinking"
-    if phase.phase == "route":
-        return f"phase: deciding tool use{suffix}"
-    if phase.phase == "chat_final":
-        pass_label = f" pass {phase.attempt}" if phase.attempt else ""
-        return f"phase: final answer{pass_label}{suffix}"
-    if phase.phase == "chat_final_retry":
-        reason = " after length" if phase.reason == "length" else ""
-        return f"phase: retrying final answer{reason}{suffix}"
-    if phase.phase == "chat_final_completion_repair":
-        if phase.reason == "reasoning_like":
-            return f"phase: forced final answer only{suffix}"
-        if phase.reason:
-            return f"phase: repairing final answer ({phase.reason}){suffix}"
-        return f"phase: repairing final answer{suffix}"
-    if phase.phase == "tool_call":
-        pass_label = f" pass {phase.attempt}" if phase.attempt else ""
-        return f"phase: tool call{pass_label}{suffix}"
-    if phase.phase == "tool_call_retry":
-        if phase.reason == "tool_contract_retry":
-            return "phase: retrying tool call after contract mismatch (non-streaming)"
-        return f"phase: retrying tool call{suffix}"
-    if phase.phase == "final_from_tool":
-        pass_label = f" pass {phase.attempt}" if phase.attempt else ""
-        return f"phase: final answer from tool result{pass_label}{suffix}"
-    if phase.phase == "final_from_tool_retry":
-        if phase.reason == "length":
-            return f"phase: continuing final answer from tool result after length{suffix}"
-        if phase.reason:
-            return f"phase: final answer from tool result retry ({phase.reason}){suffix}"
-        return f"phase: final answer from tool result retry{suffix}"
-    if phase.phase == "final_from_tool_completion_repair":
-        if phase.reason == "reasoning_like":
-            return f"phase: forced final answer from tool result only{suffix}"
-        if phase.reason:
-            return f"phase: repairing final answer from tool result ({phase.reason}){suffix}"
-        return f"phase: repairing final answer from tool result{suffix}"
-    if phase.phase == "final_from_tool_compact_retry":
-        if phase.reason:
-            return f"phase: compact final answer retry ({phase.reason}){suffix}"
-        return f"phase: compact final answer retry{suffix}"
-    if phase.phase == "chat_continue_native":
-        return f"phase: continuing after length{suffix}"
-    return None
 
 
 def _phase_progress_label(phase: ModelPhaseStart) -> str | None:
