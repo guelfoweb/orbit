@@ -272,8 +272,44 @@ class ReplTests(unittest.TestCase):
     def test_phase_label_maps_buffered_and_streamed_phases(self) -> None:
         self.assertEqual(_phase_label(ModelPhaseStart("tool_plan", streamed=True)), "phase: thinking")
         self.assertEqual(_phase_label(ModelPhaseStart("route", streamed=False)), "phase: deciding tool use (non-streaming)")
-        self.assertEqual(_phase_label(ModelPhaseStart("final_from_tool", streamed=False)), "phase: final answer (non-streaming)")
-        self.assertEqual(_phase_label(ModelPhaseStart("final_from_tool_compact_retry", streamed=False)), "phase: shortening final answer")
+        self.assertEqual(_phase_label(ModelPhaseStart("chat_final", streamed=True, attempt=1)), "phase: final answer pass 1")
+        self.assertEqual(
+            _phase_label(ModelPhaseStart("chat_final_completion_repair", streamed=True, attempt=2, reason="reasoning_like")),
+            "phase: forced final answer only",
+        )
+        self.assertEqual(
+            _phase_label(ModelPhaseStart("final_from_tool", streamed=False, attempt=1)),
+            "phase: final answer from tool result pass 1 (non-streaming)",
+        )
+        self.assertEqual(
+            _phase_label(ModelPhaseStart("final_from_tool_compact_retry", streamed=False, attempt=4, reason="length")),
+            "phase: compact final answer retry (length) (non-streaming)",
+        )
+
+    def test_record_phase_start_coalesces_duplicate_labels(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+
+        class Renderer:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            def event(self, text: str, restart_timer: bool = True) -> None:
+                self.events.append(text)
+
+        renderer = Renderer()
+
+        repl._record_phase_start(renderer, ModelPhaseStart("chat_final", streamed=True, attempt=1))
+        repl._record_phase_start(renderer, ModelPhaseStart("chat_final", streamed=True, attempt=1))
+        repl._record_phase_start(renderer, ModelPhaseStart("chat_final_completion_repair", streamed=True, attempt=2, reason="reasoning_like"))
+
+        self.assertEqual(
+            renderer.events,
+            [
+                "phase: final answer pass 1",
+                "phase: forced final answer only",
+            ],
+        )
 
     def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:
         self.assertEqual(_prefill_profile_for_turn([], tools_enabled=False), CHAT_PREFILL_PROFILE)

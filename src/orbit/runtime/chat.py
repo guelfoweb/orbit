@@ -287,7 +287,7 @@ class ChatRuntime:
         command_messages = with_command_system_prompt(self.messages)
         with self._temporary_backend_thinking(False):
             if on_phase_start:
-                on_phase_start(ModelPhaseStart("route", streamed=False))
+                on_phase_start(ModelPhaseStart("route", streamed=False, attempt=1, reason="tool_decision"))
             if on_progress is None:
                 first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
             else:
@@ -555,7 +555,7 @@ class ChatRuntime:
         thought_filter = _ThoughtOnlyDeltaFilter(on_final_delta)
         with self._transport_environment().backend_thinking(True):
             if on_phase_start:
-                on_phase_start(ModelPhaseStart("tool_plan", streamed=True))
+                on_phase_start(ModelPhaseStart("tool_plan", streamed=True, attempt=1, reason="pre_tool_thinking"))
             result = self.backend.chat_stream(
                 planning_messages,
                 temperature=temperature,

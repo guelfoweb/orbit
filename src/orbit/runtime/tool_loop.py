@@ -520,6 +520,8 @@ def run_tool_loop(
                 ModelPhaseStart(
                     "tool_call",
                     streamed=tool_delta_callback is not suppress_tool_delta and on_final_delta is not None,
+                    attempt=state.tool_rounds + 1,
+                    reason="model_tool_call",
                 )
             )
         result = runtime._chat_tool_call_once(
@@ -536,7 +538,7 @@ def run_tool_loop(
         if repair.contract_retry_pending and not result.tool_calls:
             retry_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_CONTRACT_RETRY_PROMPT}]
             if on_phase_start:
-                on_phase_start(ModelPhaseStart("tool_call_retry", streamed=False))
+                on_phase_start(ModelPhaseStart("tool_call_retry", streamed=False, attempt=state.tool_rounds + 1, reason="tool_contract_retry"))
             result = runtime._chat_tool_call_once(
                 retry_messages,
                 temperature=temperature,

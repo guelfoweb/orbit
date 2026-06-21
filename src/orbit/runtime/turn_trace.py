@@ -9,6 +9,8 @@ from orbit.backend import ChatResult
 class ModelPhaseStart:
     phase: str
     streamed: bool = True
+    attempt: int | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,7 @@ from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_P
 from orbit.runtime.chat import _has_list_like_tool_result
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.tool_loop import _should_guard_existing_file_rewrite
+from orbit.runtime.turn_trace import ModelPhaseStart
 from orbit.runtime.shell_guardrails import (
     SHELL_FULL_COMPLETION_GUARD_PROMPT,
     SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT,
@@ -355,6 +356,58 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "Final answer: Dante Alighieri was an Italian poet.")
         self.assertEqual(backend.chat_calls, 2)
         self.assertEqual(backend.thinking_seen, [True, False])
+
+    def test_ask_chat_emits_distinct_phase_reasons_for_reasoning_repair(self) -> None:
+        class ReasoningThenFinalBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.chat_calls = 0
+                self.thinking = True
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                if self.chat_calls == 1:
+                    return ChatResult(
+                        content="<|channel>thought\nprivate chain<channel|>",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Final answer: Dante Alighieri was an Italian poet.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ReasoningThenFinalBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        phases: list[ModelPhaseStart] = []
+
+        runtime.ask_chat(
+            "Who is Dante Alighieri?",
+            temperature=0,
+            max_tokens=32,
+            on_phase_start=phases.append,
+        )
+
+        self.assertEqual(
+            [(phase.phase, phase.attempt, phase.reason) for phase in phases],
+            [
+                ("chat_final", 1, None),
+                ("chat_final_completion_repair", 2, "reasoning_like"),
+            ],
+        )
 
     def test_continue_last_response_uses_prompt_fallback_for_bullet_reasoning_length(self) -> None:
         class BulletReasoningBackend(FakeBackend):
