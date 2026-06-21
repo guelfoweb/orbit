@@ -13,11 +13,20 @@ FINAL_FROM_TOOL_MIN_TOKENS = 256
 LARGE_FILE_FINAL_MAX_TOKENS = 128
 EXHAUSTIVE_LARGE_FILE_FINAL_MAX_TOKENS = 256
 WEB_FETCH_FINAL_MAX_TOKENS = 72
+PDF_FINAL_MAX_TOKENS = 128
+PDF_BRIEF_FINAL_MAX_TOKENS = 72
 LIST_FINAL_MAX_TOKENS = 96
 OPERATIONAL_STATUS_FINAL_MAX_TOKENS = 96
 LONG_SHELL_ANALYSIS_FINAL_MAX_TOKENS = 96
+BRIEF_SHELL_FINAL_MAX_TOKENS = 96
 COMPACT_FINAL_RETRY_MAX_TOKENS = 160
 COMPACT_FINAL_RETRY_MIN_TOKENS = 64
+FINAL_TOOL_CONTENT_COMPACT_THRESHOLD = 1200
+FINAL_TOOL_CONTENT_HEAD_CHARS = 800
+FINAL_TOOL_CONTENT_TAIL_CHARS = 300
+FINAL_TOOL_PDF_BRIEF_CHARS = 900
+FINAL_TOOL_PDF_MAX_CHARS = 1400
+FINAL_TOOL_TRUNCATION_MARKER = "[output truncated for model context]"
 _COMPACT_LIST_REQUEST_RE = re.compile(
     r"\b(?:only\s+(?:the\s+)?(?:filenames?|names?)|return\s+only|only\s+the\s+listed\s+names|solo\s+i\s+nomi|solo\s+i\s+file|solo\s+nomi)\b",
     re.IGNORECASE,
@@ -61,19 +70,24 @@ class FinalAnswerCompleteness:
 
 
 def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streamed: bool) -> FinalToolPolicy:
-    large_file_excerpt = has_large_file_excerpt(messages)
-    exhaustive_document_request = is_exhaustive_document_request(last_user_text(messages))
-    web_fetch_result = has_html_cleaned_tool_result(messages)
-    pdf_text_result = has_pdf_text_tool_result(messages)
-    list_like_result = has_list_like_tool_result(messages) and is_compact_list_request(last_user_text(messages))
-    shell_full_result = has_tool_result(messages, "exec_shell_full_command")
-    operational_status_result = shell_full_result and is_operational_status_request(last_user_text(messages))
+    prompt = last_user_text(messages)
+    call_messages = prepare_final_tool_messages(messages)
+    large_file_excerpt = has_large_file_excerpt(call_messages)
+    exhaustive_document_request = is_exhaustive_document_request(prompt)
+    web_fetch_result = has_html_cleaned_tool_result(call_messages)
+    pdf_text_result = has_pdf_text_tool_result(call_messages)
+    list_like_result = has_list_like_tool_result(call_messages) and is_compact_list_request(prompt)
+    shell_full_result = has_tool_result(call_messages, "exec_shell_full_command")
+    operational_status_result = shell_full_result and is_operational_status_request(prompt)
+    brief_request = is_brief_final_request(prompt)
+    brief_shell_result = shell_full_result and brief_request and not (
+        large_file_excerpt or web_fetch_result or pdf_text_result or list_like_result or operational_status_result
+    )
     compact_shell_analysis_result = (
         shell_full_result
         and _has_long_shell_tool_result(messages)
         and not (large_file_excerpt or web_fetch_result or pdf_text_result or list_like_result or operational_status_result)
     )
-    call_messages = messages
     if large_file_excerpt:
         call_messages = [
             *call_messages,
@@ -132,7 +146,12 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
                     "Base the answer only on the extracted PDF text already available. "
                     "Do not claim the file is missing or inaccessible unless a tool result explicitly says extraction failed. "
                     "Do not call tools again. "
-                    "If the extracted text is only partial, say that briefly and summarize only that evidence."
+                    + (
+                        "Answer in exactly one concise sentence. No introduction. "
+                        if brief_request
+                        else ""
+                    )
+                    + "If the extracted text is only partial, say that briefly and summarize only that evidence."
                 ),
             },
         ]
@@ -148,21 +167,41 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
                 "role": "user",
                 "content": (
                     (
-                        "Use only the latest relevant shell-full output. "
-                        "Answer using exactly 4 short bullets. "
-                        "Each bullet must be one sentence in this format: '- Finding: ... Fix: ...'. "
-                        "No headings, code fences, examples, introduction, or thinking. "
-                        "Focus only on the main findings and brief remediation. "
-                        "Do not call tools again. "
-                        "If the evidence is insufficient, say you cannot confirm."
+                        (
+                            "Use only the latest relevant shell-full output. "
+                            "Answer in at most two short sentences. "
+                            "Focus only on the main confirmed issue and the shortest useful fix. "
+                            "No headings, bullets, code fences, introduction, or thinking. "
+                            "Do not call tools again. "
+                            "If the evidence is insufficient, say you cannot confirm."
+                            if brief_request
+                            else
+                            "Use only the latest relevant shell-full output. "
+                            "Answer using exactly 4 short bullets. "
+                            "Each bullet must be one sentence in this format: '- Finding: ... Fix: ...'. "
+                            "No headings, code fences, examples, introduction, or thinking. "
+                            "Focus only on the main findings and brief remediation. "
+                            "Do not call tools again. "
+                            "If the evidence is insufficient, say you cannot confirm."
+                        )
                         if compact_shell_analysis_result
                         else
-                        "Use only the available shell-full output. "
-                        "Answer the latest user request directly and concisely from that evidence. "
-                        "Prefer the most recent relevant shell result. "
-                        "Do not summarize unrelated older output. "
-                        "Do not call tools again. "
-                        "If the evidence is insufficient, say you cannot confirm."
+                        (
+                            "Use only the available shell-full output. "
+                            "Answer the latest user request in one concise sentence. "
+                            "Prefer the most recent relevant shell result. "
+                            "Do not summarize unrelated older output. "
+                            "Do not call tools again. "
+                            "If the evidence is insufficient, say you cannot confirm."
+                            if brief_request
+                            else
+                            "Use only the available shell-full output. "
+                            "Answer the latest user request directly and concisely from that evidence. "
+                            "Prefer the most recent relevant shell result. "
+                            "Do not summarize unrelated older output. "
+                            "Do not call tools again. "
+                            "If the evidence is insufficient, say you cannot confirm."
+                        )
                     )
                 ),
             },
@@ -174,9 +213,12 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
             large_file_excerpt=large_file_excerpt,
             exhaustive_document_request=exhaustive_document_request,
             web_fetch_result=web_fetch_result,
+            pdf_text_result=pdf_text_result,
             list_like_result=list_like_result,
             operational_status_result=operational_status_result,
             compact_shell_analysis_result=compact_shell_analysis_result,
+            brief_shell_result=brief_shell_result,
+            brief_request=brief_request,
         ),
         length_retry_allowed=(not streamed and (large_file_excerpt or web_fetch_result)),
         incomplete_retry_allowed=shell_full_result and not (web_fetch_result or list_like_result or operational_status_result),
@@ -190,21 +232,142 @@ def final_tool_max_tokens(
     large_file_excerpt: bool,
     exhaustive_document_request: bool,
     web_fetch_result: bool,
+    pdf_text_result: bool,
     list_like_result: bool,
     operational_status_result: bool = False,
     compact_shell_analysis_result: bool = False,
+    brief_shell_result: bool = False,
+    brief_request: bool = False,
 ) -> int:
     if large_file_excerpt:
         return min(max_tokens, EXHAUSTIVE_LARGE_FILE_FINAL_MAX_TOKENS if exhaustive_document_request else LARGE_FILE_FINAL_MAX_TOKENS)
     if web_fetch_result:
         return min(max_tokens, WEB_FETCH_FINAL_MAX_TOKENS)
+    if pdf_text_result:
+        return min(max_tokens, PDF_BRIEF_FINAL_MAX_TOKENS if brief_request else PDF_FINAL_MAX_TOKENS)
     if list_like_result:
         return min(max_tokens, LIST_FINAL_MAX_TOKENS)
     if operational_status_result:
         return min(max_tokens, OPERATIONAL_STATUS_FINAL_MAX_TOKENS)
     if compact_shell_analysis_result:
         return min(max_tokens, LONG_SHELL_ANALYSIS_FINAL_MAX_TOKENS)
+    if brief_shell_result:
+        return min(max_tokens, BRIEF_SHELL_FINAL_MAX_TOKENS)
     return max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS)
+
+
+def prepare_final_tool_messages(messages: list[Message]) -> list[Message]:
+    prompt = last_user_text(messages)
+    prepared = _prune_to_latest_successful_tool_evidence(messages)
+    return _compact_latest_tool_evidence(prepared, prompt=prompt)
+
+
+def _prune_to_latest_successful_tool_evidence(messages: list[Message]) -> list[Message]:
+    tool_message, _command = last_successful_shell_result_and_command(messages)
+    if tool_message is None:
+        return [dict(message) for message in messages]
+    selected_tool_call_id = tool_message.get("tool_call_id")
+    selected_tool_identity = id(tool_message)
+    pruned: list[Message] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "tool" and message.get("name") == "exec_shell_full_command":
+            keep_tool = False
+            if isinstance(selected_tool_call_id, str):
+                keep_tool = message.get("tool_call_id") == selected_tool_call_id
+            else:
+                keep_tool = id(message) == selected_tool_identity
+            if not keep_tool:
+                continue
+            pruned.append(dict(message))
+            continue
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            filtered_calls = list(message["tool_calls"])
+            if isinstance(selected_tool_call_id, str):
+                filtered_calls = [
+                    tool_call for tool_call in filtered_calls if isinstance(tool_call, dict) and tool_call.get("id") == selected_tool_call_id
+                ]
+            if not filtered_calls and not str(message.get("content") or "").strip():
+                continue
+            copied = dict(message)
+            if filtered_calls:
+                copied["tool_calls"] = filtered_calls
+            else:
+                copied.pop("tool_calls", None)
+            pruned.append(copied)
+            continue
+        pruned.append(dict(message))
+    return pruned
+
+
+def _compact_latest_tool_evidence(messages: list[Message], *, prompt: str | None) -> list[Message]:
+    tool_message, command = last_successful_shell_result_and_command(messages)
+    if tool_message is None:
+        return messages
+    if is_list_shell_command(command) and not is_compact_list_request(prompt):
+        return messages
+    compacted: list[Message] = [dict(message) for message in messages]
+    target_index = next(
+        (index for index in range(len(compacted) - 1, -1, -1) if compacted[index].get("role") == "tool"),
+        None,
+    )
+    if target_index is None:
+        return compacted
+    content = compacted[target_index].get("content")
+    if not isinstance(content, str):
+        return compacted
+    replacement = _compact_tool_content(content, prompt=prompt)
+    if replacement == content:
+        return compacted
+    compacted[target_index]["content"] = replacement
+    return compacted
+
+
+def _compact_tool_content(content: str, *, prompt: str | None) -> str:
+    if len(content) <= FINAL_TOOL_CONTENT_COMPACT_THRESHOLD:
+        return content
+    if "shell_output_pdf_text: true" in content:
+        return _compact_pdf_tool_content(content, brief_request=is_brief_final_request(prompt))
+    return _compact_generic_tool_content(content)
+
+
+def _compact_pdf_tool_content(content: str, *, brief_request: bool) -> str:
+    prefix, body = _split_tool_content_body(content)
+    limit = FINAL_TOOL_PDF_BRIEF_CHARS if brief_request else FINAL_TOOL_PDF_MAX_CHARS
+    compact_body = _truncate_with_marker(body, head_chars=limit, tail_chars=0)
+    return _join_tool_content(prefix, compact_body)
+
+
+def _compact_generic_tool_content(content: str) -> str:
+    prefix, body = _split_tool_content_body(content)
+    compact_body = _truncate_with_marker(
+        body,
+        head_chars=FINAL_TOOL_CONTENT_HEAD_CHARS,
+        tail_chars=FINAL_TOOL_CONTENT_TAIL_CHARS,
+    )
+    return _join_tool_content(prefix, compact_body)
+
+
+def _split_tool_content_body(content: str) -> tuple[str, str]:
+    marker = "content:\n"
+    if marker in content:
+        prefix, body = content.split(marker, 1)
+        return f"{prefix}{marker}", body
+    return "", content
+
+
+def _join_tool_content(prefix: str, body: str) -> str:
+    return f"{prefix}{body}" if prefix else body
+
+
+def _truncate_with_marker(text: str, *, head_chars: int, tail_chars: int) -> str:
+    if len(text) <= head_chars + tail_chars + len(FINAL_TOOL_TRUNCATION_MARKER) + 8:
+        return text
+    head = text[:head_chars].rstrip()
+    if tail_chars <= 0:
+        return f"{head}\n{FINAL_TOOL_TRUNCATION_MARKER}"
+    tail = text[-tail_chars:].lstrip()
+    return f"{head}\n{FINAL_TOOL_TRUNCATION_MARKER}\n{tail}"
 
 
 def final_tool_retry_max_tokens(max_tokens: int, *, web_fetch_result: bool) -> int:
@@ -548,6 +711,10 @@ _CONTENT_PHRASE_RE = re.compile(
     r"\b(?:what(?:'s|\s+is)?\s+in|what\s+does\b.*\bcontain|contains?|inside)\b",
     re.IGNORECASE,
 )
+_BRIEF_FINAL_REQUEST_RE = re.compile(
+    r"\b(?:one\s+sentence|single\s+sentence|one\s+concise\s+sentence|concise\s+sentence|brief(?:ly)?|short(?:ly)?|in\s+short|main\s+(?:issue|point|finding)|brief\s+answer|short\s+answer)\b",
+    re.IGNORECASE,
+)
 
 
 def last_user_text(messages: list[Message]) -> str | None:
@@ -557,6 +724,12 @@ def last_user_text(messages: list[Message]) -> str | None:
         content = message.get("content")
         return content if isinstance(content, str) else None
     return None
+
+
+def is_brief_final_request(prompt: str | None) -> bool:
+    if prompt is None:
+        return False
+    return bool(_BRIEF_FINAL_REQUEST_RE.search(prompt))
 
 
 def is_operational_status_request(prompt: str | None) -> bool:
