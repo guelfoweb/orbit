@@ -48,6 +48,13 @@ _REASONING_PREFIXES = (
     "reasoning:",
     "plan:",
 )
+_REASONING_LEAK_META_PHRASES = (
+    "the user likely meant",
+    "the user probably meant",
+    "the user may have meant",
+    "looking at the words",
+    "wait, looking at the words",
+)
 
 
 @dataclass(frozen=True)
@@ -436,7 +443,11 @@ def classify_final_answer_completeness(content: str, *, messages: list[Message] 
     lowered = stripped.lower()
     if not stripped:
         return FinalAnswerCompleteness("incomplete_stub", "empty")
-    if _has_open_thought_channel(content) or looks_like_reasoning_without_final_answer(lowered):
+    if (
+        _has_open_thought_channel(content)
+        or looks_like_reasoning_without_final_answer(lowered)
+        or looks_like_reasoning_leakage(content, lowered_content=lowered)
+    ):
         return FinalAnswerCompleteness("reasoning_like")
     if "<|channel>thought" in content and "<channel|>" in content:
         tail = content.split("<channel|>", 1)[1].strip()
@@ -486,6 +497,26 @@ def looks_like_reasoning_without_final_answer(lowered_content: str) -> bool:
     if any(marker in lowered_content for marker in _FINAL_MARKERS):
         return False
     return lowered_content.startswith(_REASONING_PREFIXES)
+
+
+def looks_like_reasoning_leakage(content: str, *, lowered_content: str | None = None) -> bool:
+    lowered = lowered_content if lowered_content is not None else content.lower()
+    if not any(phrase in lowered for phrase in _REASONING_LEAK_META_PHRASES):
+        return False
+    possibility_matches = re.findall(r"(?:^|\n)\s*(?:[-*]\s+)?(?:\*\*)?possibility\s+[a-z]\b", lowered, flags=re.MULTILINE)
+    if len(possibility_matches) >= 2:
+        return True
+    bullet_lines = [
+        line.strip().lower()
+        for line in content.splitlines()
+        if line.strip()
+    ]
+    possibility_bullets = sum(
+        1
+        for line in bullet_lines
+        if ("possibility " in line and re.search(r"possibility\s+[a-z]\b", line))
+    )
+    return possibility_bullets >= 2
 
 
 def _has_open_thought_channel(content: str) -> bool:

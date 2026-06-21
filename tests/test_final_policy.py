@@ -630,6 +630,16 @@ class FinalPolicyTests(unittest.TestCase):
         completeness = classify_final_answer_completeness("Plan:\n1. Inspect the file\n2. Summarize the findings")
         self.assertEqual(completeness.status, "reasoning_like")
 
+    def test_final_answer_completeness_detects_reasoning_leakage_with_possibilities(self) -> None:
+        completeness = classify_final_answer_completeness(
+            '"What is the main difference between essay and wise?"\n'
+            "The user likely meant \"essay\" and \"wise\".\n"
+            "* **Possibility A:** compare essay and thesis.\n"
+            "* **Possibility B:** compare essay and wise.\n"
+            "The main difference is that an essay is a piece of writing, while wise means having good judgment."
+        )
+        self.assertEqual(completeness.status, "reasoning_like")
+
     def test_final_answer_completeness_detects_closed_thought_without_final_tail(self) -> None:
         completeness = classify_final_answer_completeness("<|channel>thought\nprivate chain<channel|>")
         self.assertEqual(completeness.status, "reasoning_like")
@@ -637,6 +647,12 @@ class FinalPolicyTests(unittest.TestCase):
     def test_final_answer_completeness_accepts_complete_brief_answer(self) -> None:
         completeness = classify_final_answer_completeness(
             "The file is vulnerable to SQL injection and command injection due to unsanitized input handling."
+        )
+        self.assertEqual(completeness.status, "complete")
+
+    def test_final_answer_completeness_allows_normal_possibility_wording(self) -> None:
+        completeness = classify_final_answer_completeness(
+            "One possibility is that the user is comparing an essay with the adjective \"wise\", but the direct difference is that an essay is a written composition while wise describes judgment."
         )
         self.assertEqual(completeness.status, "complete")
 

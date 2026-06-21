@@ -154,13 +154,30 @@ class TransportEnvironment:
             )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=retry, phase=retry_phase))
-        if not is_empty_final_response(retry):
+        retry_completeness = classify_final_answer_completeness(retry.content, messages=retry_messages)
+        if not is_empty_final_response(retry) and retry_completeness.is_complete:
             return retry
 
+        if is_empty_final_response(retry):
+            error = ChatResult(
+                content="error: model returned an empty response twice",
+                model=retry.model,
+                finish_reason="empty_response",
+                tool_calls=retry.tool_calls,
+                prompt_tokens=retry.prompt_tokens,
+                completion_tokens=retry.completion_tokens,
+                cached_tokens=retry.cached_tokens,
+                prompt_tokens_per_second=retry.prompt_tokens_per_second,
+                generation_tokens_per_second=retry.generation_tokens_per_second,
+            )
+            if on_final_delta:
+                on_final_delta(error.content)
+            return error
+
         error = ChatResult(
-            content="error: model returned an empty response twice",
+            content="error: model did not produce a clean final answer",
             model=retry.model,
-            finish_reason="empty_response",
+            finish_reason="stop",
             tool_calls=retry.tool_calls,
             prompt_tokens=retry.prompt_tokens,
             completion_tokens=retry.completion_tokens,
