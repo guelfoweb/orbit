@@ -268,6 +268,94 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(backend.chat_calls, 1)
         self.assertFalse(runtime.can_continue_last_response())
 
+    def test_ask_chat_retries_reasoning_only_stop_with_final_only_retry(self) -> None:
+        class ReasoningThenFinalBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.chat_calls = 0
+                self.thinking = True
+                self.thinking_seen: list[bool] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                self.thinking_seen.append(self.thinking)
+                if self.chat_calls == 1:
+                    return ChatResult(
+                        content="<|channel>thought\nprivate chain<channel|>",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Final answer: Dante Alighieri was an Italian poet.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ReasoningThenFinalBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+
+        result = runtime.ask_chat("Who is Dante Alighieri?", temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "Final answer: Dante Alighieri was an Italian poet.")
+        self.assertEqual(backend.chat_calls, 2)
+        self.assertEqual(backend.thinking_seen, [True, False])
+
+    def test_ask_chat_retries_reasoning_only_length_with_final_only_retry(self) -> None:
+        class ReasoningThenFinalBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.chat_calls = 0
+                self.thinking = True
+                self.thinking_seen: list[bool] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.chat_calls += 1
+                self.thinking_seen.append(self.thinking)
+                if self.chat_calls == 1:
+                    return ChatResult(
+                        content="<|channel>thought\nprivate chain<channel|>",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Final answer: Dante Alighieri was an Italian poet.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = ReasoningThenFinalBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+
+        result = runtime.ask_chat("Who is Dante Alighieri?", temperature=0, max_tokens=32)
+
+        self.assertEqual(result.content, "Final answer: Dante Alighieri was an Italian poet.")
+        self.assertEqual(backend.chat_calls, 2)
+        self.assertEqual(backend.thinking_seen, [True, False])
+
     def test_continue_last_response_uses_prompt_fallback_for_bullet_reasoning_length(self) -> None:
         class BulletReasoningBackend(FakeBackend):
             def __init__(self) -> None:
@@ -456,7 +544,7 @@ def _last_tool_message(runtime: ChatRuntime) -> Message:
 
 
 class ToolRuntimeTests(unittest.TestCase):
-    def test_ask_with_tools_temporarily_disables_backend_thinking_for_tool_rounds_only(self) -> None:
+    def test_ask_with_tools_disables_backend_thinking_for_tool_plan_and_final_answer(self) -> None:
         class ThinkingAwareBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -511,8 +599,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.finish_reason, "stop")
         self.assertGreaterEqual(len(backend.thinking_seen), 2)
-        self.assertTrue(all(flag is False for flag in backend.thinking_seen[:-1]))
-        self.assertTrue(backend.thinking_seen[-1])
+        self.assertTrue(all(flag is False for flag in backend.thinking_seen))
         self.assertTrue(backend.thinking)
 
     def test_ask_auto_temporarily_disables_backend_thinking_for_route_phase(self) -> None:

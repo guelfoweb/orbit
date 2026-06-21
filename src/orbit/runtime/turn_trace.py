@@ -6,6 +6,12 @@ from orbit.backend import ChatResult
 
 
 @dataclass(frozen=True)
+class ModelPhaseStart:
+    phase: str
+    streamed: bool = True
+
+
+@dataclass(frozen=True)
 class ModelStepMetrics:
     loop: int
     phase: str

@@ -23,6 +23,7 @@ from orbit.terminal.tool_events import format_tool_call_event, format_tool_resul
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
 from orbit.terminal.theme import danger, dim
 from orbit.runtime.thinking_mode import ThinkingMode
+from orbit.runtime.turn_trace import ModelPhaseStart
 
 
 @dataclass
@@ -120,6 +121,7 @@ class Repl:
                     on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
                     on_tool_result=lambda name, chars, source, content: self._show_tool_result(renderer, name, chars, source, content),
                     on_model_step=self._record_model_step,
+                    on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
                 )
             else:
                 result = self.runtime.ask_chat(
@@ -129,6 +131,7 @@ class Repl:
                     on_final_delta=renderer.write,
                     on_progress=renderer.progress,
                     on_model_step=self._record_model_step,
+                    on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
                 )
         except KeyboardInterrupt:
             renderer.finish()
@@ -183,6 +186,11 @@ class Repl:
             prompt_tokens_per_second=metrics.prompt_tokens_per_second,
             profile=prefill_profile_for_phase(metrics.phase),
         )
+
+    def _record_phase_start(self, renderer: StreamRenderer, phase: ModelPhaseStart) -> None:
+        label = _phase_label(phase)
+        if label:
+            renderer.event(label, restart_timer=True)
 
     def _show_tool_result(self, renderer: StreamRenderer, name: str, chars: int, source: str | None, content: str | None) -> None:
         if content is not None:
@@ -318,6 +326,7 @@ class Repl:
                 on_final_delta=renderer.write,
                 on_progress=renderer.progress,
                 on_model_step=self._record_model_step,
+                on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
             )
         except KeyboardInterrupt:
             renderer.finish()
@@ -357,6 +366,24 @@ def _length_footer_message(thinking: bool) -> str:
     if thinking:
         return "thinking or final output stopped because max_tokens was reached"
     return "output stopped because max_tokens was reached"
+
+
+def _phase_label(phase: ModelPhaseStart) -> str | None:
+    labels = {
+        "tool_plan": "phase: thinking",
+        "route": "phase: deciding tool use (non-streaming)",
+        "chat_final": "phase: final answer",
+        "chat_final_retry": "phase: continuing after length",
+        "chat_final_completion_repair": "phase: repairing final answer",
+        "tool_call": "phase: tool call" if phase.streamed else "phase: tool call (non-streaming)",
+        "tool_call_retry": "phase: retrying tool call (non-streaming)",
+        "final_from_tool": "phase: final answer" if phase.streamed else "phase: final answer (non-streaming)",
+        "final_from_tool_retry": "phase: continuing after length" if phase.streamed else "phase: continuing after length (non-streaming)",
+        "final_from_tool_completion_repair": "phase: repairing incomplete final answer",
+        "final_from_tool_compact_retry": "phase: shortening final answer",
+        "chat_continue_native": "phase: continuing after length",
+    }
+    return labels.get(phase.phase)
 
 
 def _prefill_profile_for_turn(messages: list[dict[str, object]], *, tools_enabled: bool) -> str:

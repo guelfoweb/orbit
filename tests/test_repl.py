@@ -33,10 +33,11 @@ from orbit.terminal.repl_input import (
     visual_row_count,
 )
 from orbit.terminal.repl import Repl
-from orbit.terminal.repl import _prefill_profile_for_turn
+from orbit.terminal.repl import _phase_label, _prefill_profile_for_turn
 from orbit.terminal.session_preview import format_recent_session_messages
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE
+from orbit.runtime.turn_trace import ModelPhaseStart
 
 
 class InterruptingBackend:
@@ -267,6 +268,12 @@ class ReplTests(unittest.TestCase):
             format_tool_result_event("exec_shell_full_command", len(list_content), content=list_content),
             " └ . | ./pdf | ./text | 25 chars -> model",
         )
+
+    def test_phase_label_maps_buffered_and_streamed_phases(self) -> None:
+        self.assertEqual(_phase_label(ModelPhaseStart("tool_plan", streamed=True)), "phase: thinking")
+        self.assertEqual(_phase_label(ModelPhaseStart("route", streamed=False)), "phase: deciding tool use (non-streaming)")
+        self.assertEqual(_phase_label(ModelPhaseStart("final_from_tool", streamed=False)), "phase: final answer (non-streaming)")
+        self.assertEqual(_phase_label(ModelPhaseStart("final_from_tool_compact_retry", streamed=False)), "phase: shortening final answer")
 
     def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:
         self.assertEqual(_prefill_profile_for_turn([], tools_enabled=False), CHAT_PREFILL_PROFILE)
