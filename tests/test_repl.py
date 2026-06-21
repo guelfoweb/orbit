@@ -235,8 +235,8 @@ class ReplTests(unittest.TestCase):
             "Read: cat README.md",
         )
         self.assertEqual(
-            format_tool_call_event("exec_shell_full_command", json.dumps({"command": "sed -i 's/11976/12120/' README.md"})),
-            "Edit: sed -i 's/11976/12120/' README.md",
+            format_tool_call_event("exec_shell_full_command", json.dumps({"command": "sed -i 's/12120/12121/' README.md"})),
+            "Edit: sed -i 's/12120/12121/' README.md",
         )
         self.assertEqual(
             format_tool_call_event("exec_shell_full_command", json.dumps({"command": "tee notes.txt >/dev/null"})),

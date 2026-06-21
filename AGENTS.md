@@ -25,7 +25,7 @@ The tool name remains `orbit`. The repository directory may be temporary.
 
 - Primary backend: native `orbit-server`.
 - Compatibility backend: local OpenAI-compatible chat completions, including `llama-server`.
-- Default base URL: `http://127.0.0.1:11976`.
+- Default base URL: `http://127.0.0.1:12120`.
 - Primary target model: `gemma4:12b-it`.
 - Reasoning should remain disabled by default at backend startup unless explicitly testing visible thinking.
 - Context profiles are provided by helper scripts, not hidden runtime magic.
