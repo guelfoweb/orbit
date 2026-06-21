@@ -1,6 +1,6 @@
 # PROMPTS.md
 
-Manual regression prompts for Orbit against the current local backend, preferably native `orbit-server` on `http://127.0.0.1:12120`.
+Manual regression prompts for Orbit against the current local backend, preferably native `orbit server` on `http://127.0.0.1:12120`.
 
 Run from the repository root with a clean temporary home when possible:
 

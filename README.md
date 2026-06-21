@@ -1,11 +1,10 @@
 # orbit
 
-Minimal local CLI for running Gemma 4 with the native `orbit-server`.
+Minimal local CLI for running Gemma 4 with the native `orbit server` backend.
 
 Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal Orbit setup does not require an external `llama-server` process at runtime.
 
-Important status note:
-the native backend is the primary Orbit path, and Orbit does not require an external `llama-server` runtime process. The native backend still depends on native libraries derived from `llama.cpp`/`ggml`, built either from Orbit's vendored sources or from a documented developer fallback such as `--llama-root`. Zero-build packaging remains future work. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+Orbit does not require an external `llama-server` runtime process. The native backend still depends on native libraries derived from `llama.cpp`/`ggml`, built either from Orbit's vendored sources or from a documented developer fallback such as `--llama-root`. Zero-build packaging remains future work. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
 
 Linux is the main target environment. macOS may work. Windows is not a target environment.
 
@@ -23,7 +22,7 @@ Orbit stays model-driven. The runtime enforces safety, size, timeout, and tool-c
 
 ## Backend stance
 
-- Primary backend path: native `orbit-server`
+- Primary backend path: native `orbit server`
 - Compatibility path: `llama-server` or another OpenAI-compatible local backend
 - CLI default base URL: `http://127.0.0.1:12120`
 
@@ -59,7 +58,7 @@ This installs the Python package and CLI.
 If `vendor/lib/` does not already contain the required native libraries, build them explicitly:
 
 ```bash
-python scripts/build_native.py
+python3 scripts/build_native.py
 ```
 
 This uses Orbit's vendored `llama.cpp` sources and writes local build output under `src/orbit/native_llama/vendor/`.
@@ -89,18 +88,6 @@ Download only the MTP draft:
 orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
 ```
 
-Download the full local stack declared by the registry:
-
-```bash
-orbit download --all
-```
-
-You can still override the repo explicitly:
-
-```bash
-orbit download --all ggml-org/gemma-4-12B-it-GGUF
-```
-
 ### 4. Start the native backend
 
 Stable default server, with MTP disabled:
@@ -109,13 +96,15 @@ Stable default server, with MTP disabled:
 orbit server
 ```
 
+To get a reasonable CPU/RAM starting profile, you can first run `scripts/suggest-server-profile.sh`; it checks local CPU and RAM and prints conservative environment-variable suggestions to review before export.
+
 If native libraries are not packaged inside Orbit yet, use:
 
 ```bash
 orbit server --llama-root /path/to/llama.cpp
 ```
 
-Optional MTP mode:
+Optional experimental MTP mode:
 
 ```bash
 orbit server --mtp
@@ -143,12 +132,12 @@ What this means:
 - `orbit server` starts the stable native backend without MTP.
 - `orbit server --mtp` enables the experimental MTP path explicitly.
 - MTP can improve some workloads, but Orbit keeps it off by default because stability has priority.
-- if native libs are missing, Orbit exits with a short error telling you to build them with `python scripts/build_native.py` or use `--llama-root` / `ORBIT_LLAMA_ROOT`
+- if native libs are missing, Orbit exits with a short error telling you to build them with `python3 scripts/build_native.py` or use `--llama-root` / `ORBIT_LLAMA_ROOT`
 - experimental multi-turn raw MTP chat reuse remains debug-only behind:
   - `ORBIT_MTP_CHAT_REUSE_RAW=1`
   - `ORBIT_MTP_CHAT_REUSE_DEBUG=1`
 
-### 4. Check the server
+### 5. Check the server
 
 After startup, you can verify that the server is healthy:
 
@@ -171,7 +160,8 @@ Expected `/props` values:
 - with `--mtp`:
   - `backend_mode=mtp-ready`
   - `mtp_enabled=true`
-### 5. Start Orbit
+
+### 6. Start Orbit
 
 ```bash
 orbit
@@ -230,7 +220,7 @@ Orbit can still talk to compatible local HTTP backends through `--base-url`. Kee
 ## Troubleshooting
 
 - backend unavailable: check `orbit --health --base-url ...`
-- native libraries missing: run `python scripts/build_native.py`, or use `--llama-root` / `ORBIT_LLAMA_ROOT` as a developer fallback
+- native libraries missing: run `python3 scripts/build_native.py`, or use `--llama-root` / `ORBIT_LLAMA_ROOT` as a developer fallback
 - model not found: verify the Orbit models cache or explicit model paths
 - multimodal unavailable: ensure the matching `mmproj` is present and the backend was started with it
 - MTP unavailable: ensure both target and draft models are available and the backend was started with the experimental MTP path

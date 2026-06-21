@@ -4,7 +4,7 @@ Orbit already owns:
 
 - model download and local `models/` cache
 - model registry and `model_id` resolution
-- native `orbit-server`
+- native `orbit server`
 - native MTP path
 - optional multimodal projector support
 
@@ -23,7 +23,7 @@ That means Orbit does not require an external `llama-server` runtime process, bu
 Today, `orbit server` can start in three ways:
 
 1. packaged native runtime libraries already exist under `src/orbit/native_llama/vendor/lib`
-2. the user builds those libraries explicitly from Orbit's vendored `llama.cpp` sources with `python scripts/build_native.py`
+2. the user builds those libraries explicitly from Orbit's vendored `llama.cpp` sources with `python3 scripts/build_native.py`
 3. `ORBIT_LLAMA_ROOT` or `--llama-root /path/to/llama.cpp` points to a prepared local developer tree
 
 For MTP paths, Orbit also needs either:
@@ -39,7 +39,7 @@ The intended product path is:
 
 ```bash
 pip install orbit
-python scripts/build_native.py
+python3 scripts/build_native.py
 orbit download --all
 orbit server --port 12120
 orbit
@@ -140,7 +140,7 @@ Deliverables:
 - version compatibility check between Python package and native artifacts
 
 Acceptance:
-- a new user can install Orbit and start `orbit-server` without a manual local native build
+- a new user can install Orbit and start `orbit server` without a manual local native build
 
 ### Artifact contract for the first Linux product cut
 
@@ -206,7 +206,7 @@ all work with no manual path entry on a supported packaged install.
 
 Orbit can be called autonomous from `llama-server` only when all of these are true:
 
-1. `orbit-server` is the default documented backend path.
+1. `orbit server` is the default documented backend path.
 2. No external `llama-server` install is required.
 3. No external `llama.cpp` checkout/build is required for normal usage.
 4. Native libs and shims are shipped or installed by Orbit itself.

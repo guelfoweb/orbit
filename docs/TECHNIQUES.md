@@ -1,6 +1,6 @@
 # Techniques
 
-This document summarizes the runtime techniques Orbit uses with its current local backends, primarily native `orbit-server`.
+This document summarizes the runtime techniques Orbit uses with its current local backends, primarily native `orbit server`.
 
 The goal is not to replace the model with deterministic task logic. The model still decides when shell access is needed, which command to run, and how to write the final answer. The runtime shapes the contract, bounds expensive inputs, and keeps long sessions observable.
 

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the `orbit` CLI built around local `llama.cpp`-based backends, with native `orbit-server` as the primary path.
+This repository contains the `orbit` CLI built around local `llama.cpp`-based backends, with native `orbit server` as the primary path.
 
 The tool name remains `orbit`. The repository directory may be temporary.
 
@@ -23,7 +23,7 @@ The tool name remains `orbit`. The repository directory may be temporary.
 
 ## Backend
 
-- Primary backend: native `orbit-server`.
+- Primary backend: native `orbit server`.
 - Compatibility backend: local OpenAI-compatible chat completions, including `llama-server`.
 - Default base URL: `http://127.0.0.1:12120`.
 - Primary target model: `gemma4:12b-it`.

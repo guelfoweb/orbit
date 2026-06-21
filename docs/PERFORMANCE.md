@@ -6,7 +6,7 @@ The goal is not maximum synthetic throughput. The goal is predictable end-to-end
 
 ## Baseline assumptions
 
-- primary backend: native `orbit-server`
+- primary backend: native `orbit server`
 - compatibility backend: `llama-server` or another OpenAI-compatible local backend
 - model family: Gemma 4 GGUF
 - context target: 8192 tokens
