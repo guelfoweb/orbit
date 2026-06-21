@@ -37,6 +37,7 @@ class StreamRenderer:
         self._thinking_started = False
         self._thinking_final_started = False
         self._thinking_dim_open = False
+        self._phase_label: str | None = None
 
     def start(self) -> None:
         self._started = True
@@ -135,7 +136,7 @@ class StreamRenderer:
         elapsed = time.monotonic() - self._start_time
         frame = SPINNER_FRAMES[self._frame_index % len(SPINNER_FRAMES)]
         self._frame_index += 1
-        line = dim(f"{frame} Working ({self._working_status(elapsed)} - Ctrl+C to interrupt)")
+        line = dim(f"{frame} Working{self._working_phase_prefix()} ({self._working_status(elapsed)} - Ctrl+C to interrupt)")
         print(f"\r{_pad_to_terminal_width(line)}", end="", flush=True)
 
     @staticmethod
@@ -146,6 +147,9 @@ class StreamRenderer:
     def set_prefill_estimate(self, seconds: float | None, tokens: int | None = None) -> None:
         self._prefill_estimate_seconds = seconds
         self._prefill_estimate_tokens = tokens
+
+    def set_phase_label(self, label: str | None) -> None:
+        self._phase_label = label.strip() if label else None
 
     def _normalize_progress(self, update: StreamProgress) -> StreamProgress:
         if update.phase != "generation":
@@ -184,6 +188,11 @@ class StreamRenderer:
                 label = PREFILL_COMPLETION_LABEL if progress >= 95 else f"pf ~{progress}%"
             parts.append(label)
         return ", ".join(parts)
+
+    def _working_phase_prefix(self) -> str:
+        if not self._phase_label:
+            return ""
+        return f" [{self._phase_label}]"
 
 
 def _terminal_columns() -> int:

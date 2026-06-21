@@ -163,11 +163,35 @@ class StreamingRendererTests(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("Working (0s, pf ~1% - Ctrl+C to interrupt)", output)
 
+    def test_wait_timer_includes_phase_label_when_present(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(interval=0.01, prefill_estimate_seconds=10)
+            renderer.set_phase_label("final answer")
+            renderer.start()
+            time.sleep(0.02)
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("Working [final answer] (0s, pf ~1% - Ctrl+C to interrupt)", output)
+
     def test_wait_timer_prints_prefill_token_progress_when_estimated(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
 
         self.assertIn("pf ~500/1000 tk", renderer._working_status(5))
         self.assertIn("waiting for model...", renderer._working_status(10))
+
+    def test_wait_timer_includes_phase_label_in_real_progress_status(self) -> None:
+        renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
+        renderer.set_phase_label("forced final")
+        renderer.progress(StreamProgress(phase="prefill", current=243, total=935, percent=25))
+
+        self.assertEqual(renderer._working_phase_prefix(), " [forced final]")
+        self.assertIn("pf 243/935 tk (25%)", renderer._working_status(5))
 
     def test_wait_timer_prints_prefill_finalizing_after_estimate(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10)
