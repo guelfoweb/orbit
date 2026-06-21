@@ -48,9 +48,3 @@ class ModelStepMetrics:
             tool_calls=tool_calls,
             retry_reason=retry_reason,
         )
-
-
-def cache_ratio(metrics: ModelStepMetrics) -> float | None:
-    if metrics.cached_tokens is None or not metrics.prompt_tokens:
-        return None
-    return metrics.cached_tokens / metrics.prompt_tokens

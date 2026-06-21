@@ -311,23 +311,6 @@ def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
     )
 
 
-def _parse_native_chat_result(data: dict[str, Any]) -> ChatResult:
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
-    details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
-    return ChatResult(
-        content=_str_or_none(data.get("content")) or "",
-        model=_str_or_none(data.get("model")),
-        finish_reason=_str_or_none(data.get("finish_reason")),
-        tool_calls=[],
-        prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
-        completion_tokens=_int_or_none(usage.get("completion_tokens")),
-        cached_tokens=_int_or_none(details.get("cached_tokens")),
-        prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
-        generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
-    )
-
-
 def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> ChatResult:
     content_parts: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -568,19 +551,6 @@ class _ContentStreamFilter:
                 self._on_delta(self._buffer[:emit_len])
                 self._buffer = self._buffer[emit_len:]
             return
-
-
-def _raw_tool_call_stream_state(text: str) -> str:
-    stripped = text.lstrip()
-    if not stripped:
-        return "pending"
-    if _is_partial_prefix(stripped, "<|tool_call>"):
-        return "pending"
-    if not stripped.startswith("<|tool_call>"):
-        return "text"
-    if "<tool_call|>" not in stripped:
-        return "pending"
-    return "tool_call" if _parse_raw_tool_call_content(stripped) else "text"
 
 
 def _is_partial_prefix(text: str, prefix: str) -> bool:
