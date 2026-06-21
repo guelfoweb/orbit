@@ -21,6 +21,7 @@ from orbit.backend.llama_server import (
 )
 from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
 from orbit.backend import model_names
+from urllib.error import URLError
 
 
 class FakeStream:
@@ -47,6 +48,13 @@ class FakeNativeStreamWithTrailingNoise:
 
 
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_backend_connection_error_mentions_backend_server(self) -> None:
+        backend = LlamaServerBackend(base_url="http://127.0.0.1:12120", model="fake", timeout=1)
+
+        with self.assertRaisesRegex(Exception, "cannot connect to backend server at http://127.0.0.1:12120"):
+            with unittest.mock.patch("orbit.backend.llama_server.urlopen", side_effect=URLError("[Errno 111] Connection refused")):
+                backend._get_json("/health")
+
     def test_continue_current_uses_native_continue_stream_endpoint_for_non_stream_call(self) -> None:
         class Backend(LlamaServerBackend):
             def __init__(self) -> None:

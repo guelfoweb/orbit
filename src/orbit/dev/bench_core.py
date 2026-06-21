@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 
-DEFAULT_BASE_URL = "http://127.0.0.1:11976"
+DEFAULT_BASE_URL = "http://127.0.0.1:12120"
 DEFAULT_WORKDIR = "workdir"
 DEFAULT_TIMEOUT = 600
 DEFAULT_MAX_TOKENS = 512

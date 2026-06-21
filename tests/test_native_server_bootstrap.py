@@ -83,6 +83,11 @@ class NativeServerBootstrapTests(unittest.TestCase):
 
         self.assertEqual(args.think, "on")
 
+    def test_parser_defaults_to_new_user_port(self) -> None:
+        args = build_parser().parse_args([])
+
+        self.assertEqual(args.port, 12120)
+
     def test_bootstrap_supports_legacy_direct_model_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -32,7 +32,7 @@ class CliTests(unittest.TestCase):
         completed = _run_cli("", "/status")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("base_url: http://127.0.0.1:11976", completed.stdout)
+        self.assertIn("base_url: http://127.0.0.1:12120", completed.stdout)
         self.assertIn("server:", completed.stdout)
         self.assertIn("messages: 1", completed.stdout)
         self.assertNotIn("model: fake", completed.stdout)
@@ -52,7 +52,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         self.assertIn("Health\n------", completed.stdout)
-        self.assertIn("base_url: http://127.0.0.1:11976", completed.stdout)
+        self.assertIn("base_url: http://127.0.0.1:12120", completed.stdout)
         self.assertIn("server:", completed.stdout)
         self.assertNotIn("orbit interactive mode", completed.stdout)
 
@@ -96,7 +96,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         self.assertIn("orbit interactive mode", completed.stdout)
-        self.assertIn("base_url: http://127.0.0.1:11976", completed.stdout)
+        self.assertIn("base_url: http://127.0.0.1:12120", completed.stdout)
         self.assertIn("server:", completed.stdout)
         self.assertIn("messages: 1", completed.stdout)
         self.assertIn("workdir:", completed.stdout)

@@ -29,7 +29,7 @@ from orbit.native_server.protocol import (
 
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 11976
+DEFAULT_PORT = 12120
 DEFAULT_ALIAS = "gemma4:12b-it-native"
 
 

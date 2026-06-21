@@ -41,7 +41,7 @@ The intended product path is:
 pip install orbit
 python scripts/build_native.py
 orbit download --all
-orbit server --port 11976
+orbit server --port 12120
 orbit
 ```
 
@@ -182,8 +182,8 @@ Deliverables:
 
 Acceptance:
 - `orbit download --all`
-- `orbit server --port 11976`
-- `orbit server --port 11976 --mtp`
+- `orbit server --port 12120`
+- `orbit server --port 12120 --mtp`
 
 all work with no manual path entry on a supported packaged install.
 

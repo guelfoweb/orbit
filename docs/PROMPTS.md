@@ -1,12 +1,12 @@
 # PROMPTS.md
 
-Manual regression prompts for Orbit against the current local backend, preferably native `orbit-server` on `http://127.0.0.1:11976`.
+Manual regression prompts for Orbit against the current local backend, preferably native `orbit-server` on `http://127.0.0.1:12120`.
 
 Run from the repository root with a clean temporary home when possible:
 
 ```bash
 HOME_DIR="$(mktemp -d)" HOME="$HOME_DIR" .venv/bin/orbit \
-  --base-url http://127.0.0.1:11976 \
+  --base-url http://127.0.0.1:12120 \
   --workdir workdir
 ```
 
