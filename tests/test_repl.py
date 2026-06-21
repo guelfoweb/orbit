@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -196,18 +197,22 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(format_tool_result_event("read_file", 9999), " └ 9999 chars -> model")
         self.assertEqual(format_tool_result_event("read_file", 10000), " └ 10000 chars -> model | large context")
         self.assertEqual(format_tool_result_event("read_file", 5, "orbit"), " └ 5 chars -> model")
-        self.assertEqual(format_tool_call_event("exec_shell_full_command", '{"command":"ls"}'), 'exec {"command":"ls"}')
+        self.assertEqual(format_tool_call_event("exec_shell_full_command", '{"command":"ls"}'), "List: ls")
         self.assertEqual(format_tool_result_event("exec_shell_full_command", 45), " └ 45 chars -> model")
         chunk_content = "\n".join(
             [
                 "shell_output_read_file: true",
+                "path: build_native.py",
                 "chunk_index: 0",
                 "total_chunks: 3",
                 "content:",
-                "hello",
+                "#!/usr/bin/env python3",
             ]
         )
-        self.assertEqual(format_tool_result_event("exec_shell_full_command", 200, content=chunk_content), " └ chunk 1/3 200 chars -> model")
+        self.assertEqual(
+            format_tool_result_event("exec_shell_full_command", 200, content=chunk_content),
+            " └ chunk 1/3 build_native.py: #!/usr/bin/env python3 | 200 chars -> model",
+        )
 
     def test_tool_result_event_marks_contract_rejection(self) -> None:
         content = (
@@ -217,7 +222,50 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(
             format_tool_result_event("exec_shell_full_command", len(content), content=content),
-            f" └ {len(content)} chars -> model | rejected",
+            f" └ rejected metadata-only output | {len(content)} chars -> model | rejected",
+        )
+
+    def test_tool_call_event_classifies_shell_commands(self) -> None:
+        self.assertEqual(
+            format_tool_call_event("exec_shell_full_command", json.dumps({"command": 'rg -n "build_native" src tests'})),
+            'Search: rg -n "build_native" src tests',
+        )
+        self.assertEqual(
+            format_tool_call_event("exec_shell_full_command", json.dumps({"command": "cat README.md"})),
+            "Read: cat README.md",
+        )
+        self.assertEqual(
+            format_tool_call_event("exec_shell_full_command", json.dumps({"command": "sed -i 's/11976/12120/' README.md"})),
+            "Edit: sed -i 's/11976/12120/' README.md",
+        )
+        self.assertEqual(
+            format_tool_call_event("exec_shell_full_command", json.dumps({"command": "tee notes.txt >/dev/null"})),
+            "Write: tee notes.txt >/dev/null",
+        )
+        self.assertEqual(
+            format_tool_call_event("exec_shell_full_command", json.dumps({"command": "curl -L https://example.com"})),
+            "Web: curl -L https://example.com",
+        )
+
+    def test_tool_result_event_previews_pdf_and_list_output(self) -> None:
+        pdf_content = "\n".join(
+            [
+                "shell_output_pdf_text: true",
+                "path: pdf/grande.pdf",
+                "extractor: pdftotext",
+                "content:",
+                "This document discusses eIDAS 2.0 and the EUDI Wallet.",
+            ]
+        )
+        self.assertEqual(
+            format_tool_result_event("exec_shell_full_command", len(pdf_content), content=pdf_content),
+            " └ pdf/grande.pdf: This document discusses eIDAS 2.0 and the EUDI… | 133 chars -> model",
+        )
+
+        list_content = ".\n./pdf\n./text\n./samples\n"
+        self.assertEqual(
+            format_tool_result_event("exec_shell_full_command", len(list_content), content=list_content),
+            " └ . | ./pdf | ./text | 25 chars -> model",
         )
 
     def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:
