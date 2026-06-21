@@ -99,7 +99,7 @@ class TransportEnvironment:
         repair_incomplete_final: bool = True,
     ) -> ChatResult:
         if on_phase_start:
-            on_phase_start(ModelPhaseStart("chat_final", streamed=on_final_delta is not None))
+            on_phase_start(ModelPhaseStart("chat_final", streamed=on_final_delta is not None, attempt=1))
         result = self.chat_once(
             messages,
             temperature=temperature,
@@ -117,6 +117,7 @@ class TransportEnvironment:
 
         retry_messages = messages
         retry_phase = "chat_final_retry"
+        retry_reason = "empty_or_invalid"
         with_final_only_retry = False
         if not completeness.is_complete:
             retry_messages = [
@@ -131,9 +132,17 @@ class TransportEnvironment:
                 },
             ]
             retry_phase = "chat_final_completion_repair"
+            retry_reason = completeness.status
             with_final_only_retry = True
         if on_phase_start:
-            on_phase_start(ModelPhaseStart(retry_phase, streamed=on_final_delta is not None))
+            on_phase_start(
+                ModelPhaseStart(
+                    retry_phase,
+                    streamed=on_final_delta is not None,
+                    attempt=2,
+                    reason=retry_reason,
+                )
+            )
         retry_context = self.backend_thinking(False) if with_final_only_retry else nullcontext()
         with retry_context:
             retry = self.chat_once(
@@ -334,7 +343,13 @@ class FinalFromToolEnvironment:
         compact_retry_attempted = False
         compact_retry_failed = False
         if on_phase_start:
-            on_phase_start(ModelPhaseStart("final_from_tool", streamed=stream_buffer is None and on_final_delta is not None))
+            on_phase_start(
+                ModelPhaseStart(
+                    "final_from_tool",
+                    streamed=stream_buffer is None and on_final_delta is not None,
+                    attempt=1,
+                )
+            )
         with self.transport.backend_thinking(False):
             if on_final_delta is None:
                 result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
@@ -361,7 +376,14 @@ class FinalFromToolEnvironment:
             retry_messages = [*policy.messages, final_tool_retry_instruction()]
             retry_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)
             if on_phase_start:
-                on_phase_start(ModelPhaseStart("final_from_tool_retry", streamed=stream_buffer is None and on_final_delta is not None))
+                on_phase_start(
+                    ModelPhaseStart(
+                        "final_from_tool_retry",
+                        streamed=stream_buffer is None and on_final_delta is not None,
+                        attempt=2,
+                        reason=retry_reason,
+                    )
+                )
             with self.transport.backend_thinking(False):
                 if on_final_delta is None:
                     retry_candidate = self.runtime.backend.chat(retry_messages, temperature=temperature, max_tokens=retry_max_tokens)
@@ -414,7 +436,12 @@ class FinalFromToolEnvironment:
             repair_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)
             if on_phase_start:
                 on_phase_start(
-                    ModelPhaseStart("final_from_tool_completion_repair", streamed=stream_buffer is None and on_final_delta is not None)
+                    ModelPhaseStart(
+                        "final_from_tool_completion_repair",
+                        streamed=stream_buffer is None and on_final_delta is not None,
+                        attempt=3,
+                        reason="pdf_contradiction" if contradiction else completeness.status,
+                    )
                 )
             with self.transport.backend_thinking(False):
                 if on_final_delta is None:
@@ -455,7 +482,14 @@ class FinalFromToolEnvironment:
             compact_messages = [*policy.messages, final_tool_compact_retry_instruction()]
             compact_max_tokens = final_tool_compact_retry_max_tokens(max_tokens, messages=policy.messages)
             if on_phase_start:
-                on_phase_start(ModelPhaseStart("final_from_tool_compact_retry", streamed=stream_buffer is None and on_final_delta is not None))
+                on_phase_start(
+                    ModelPhaseStart(
+                        "final_from_tool_compact_retry",
+                        streamed=stream_buffer is None and on_final_delta is not None,
+                        attempt=4,
+                        reason=compact_retry_reason,
+                    )
+                )
             with self.transport.backend_thinking(False):
                 if on_final_delta is None:
                     candidate = self.runtime.backend.chat(compact_messages, temperature=temperature, max_tokens=compact_max_tokens)
@@ -542,7 +576,14 @@ class ContinueEnvironment:
                 max_passes=3,
             )
             if on_phase_start:
-                on_phase_start(ModelPhaseStart("chat_continue_native", streamed=on_final_delta is not None))
+                on_phase_start(
+                    ModelPhaseStart(
+                        "chat_continue_native",
+                        streamed=on_final_delta is not None,
+                        attempt=1,
+                        reason="length",
+                    )
+                )
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=1, result=result, phase="chat_continue_native"))
             if self.runtime._thinking().continuation_kind_for(content=result.content, finish_reason=result.finish_reason) is not None:
