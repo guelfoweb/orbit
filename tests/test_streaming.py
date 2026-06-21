@@ -111,7 +111,7 @@ class StreamingRendererTests(unittest.TestCase):
         self.assertIn("Thinking...", output)
         self.assertIn("\033[2mprivate chain\033[0m", output)
 
-    def test_thinking_mode_emits_fallback_final_answer_when_reasoning_leaks_without_marker(self) -> None:
+    def test_thinking_mode_does_not_extract_final_answer_from_reasoning_leakage(self) -> None:
         stream = io.StringIO()
         original = sys.stdout
         try:
@@ -132,10 +132,13 @@ class StreamingRendererTests(unittest.TestCase):
         self.assertIn("Thinking...", output)
         self.assertIn("The user likely meant essay and wise.", output)
         self.assertIn(
+            'The main difference is that an essay is a written composition, while "wise" means having good judgment.',
+            output,
+        )
+        self.assertNotIn(
             '\n\nThe main difference is that an essay is a written composition, while "wise" means having good judgment.',
             output,
         )
-        self.assertNotIn('\n\nPossibility A: typo.', output)
 
     def test_thinking_mode_does_not_invent_final_answer_when_only_reasoning_is_present(self) -> None:
         stream = io.StringIO()
@@ -154,7 +157,6 @@ class StreamingRendererTests(unittest.TestCase):
 
         output = stream.getvalue()
         self.assertIn("Thinking...", output)
-        self.assertNotIn("\n\nPossibility", output)
         self.assertNotIn("\n\nThe main difference", output)
 
     def test_event_prints_dim_message(self) -> None:

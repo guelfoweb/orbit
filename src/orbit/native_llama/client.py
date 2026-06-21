@@ -1124,40 +1124,6 @@ def _strip_reasoning_preamble(content: str) -> str:
         cleaned = "\n".join(lines[1:]).strip()
         if cleaned:
             return cleaned
-    lowered = text.lower()
-    markers = (
-        "\n**final answer:**",
-        "\n**final answer**:",
-        "\nfinal answer**:",
-        "\nfinal answer:",
-        "\nfinal answer is:",
-        "\nthe final answer is:",
-        "\nthe final answer:",
-        "\nfinal:",
-        "\nanswer:",
-    )
-    for marker in markers:
-        idx = lowered.find(marker)
-        if idx >= 0:
-            cleaned = text[idx + len(marker) :].lstrip(" \t\r\n*:")
-            if cleaned:
-                return cleaned
-    heading_markers = (
-        "### reasoning",
-        "## reasoning",
-        "# reasoning",
-        "### plan",
-        "## plan",
-        "# plan",
-        "reasoning:",
-        "plan:",
-    )
-    if lowered.startswith(heading_markers):
-        split_at = text.find("\n\n")
-        if split_at >= 0:
-            cleaned = text[split_at + 2 :].strip()
-            if cleaned:
-                return cleaned
     return text
 
 
