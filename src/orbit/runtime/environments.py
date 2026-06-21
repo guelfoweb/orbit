@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
     from orbit.runtime.chat import ChatRuntime
 
+CHAT_THINKING_MAX_TOKENS = 64
+
 
 @dataclass(frozen=True)
 class ClientTurnState:
@@ -278,6 +280,58 @@ class PureChatEnvironment:
         loop: int,
     ) -> ChatResult:
         self.runtime.messages.append({"role": "user", "content": user_content})
+        if self.runtime.thinking_mode:
+            thinking_max_tokens = CompletionBudget(max_tokens).internal(CHAT_THINKING_MAX_TOKENS)
+            thinking_messages = [
+                *call_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Think briefly about how to answer. "
+                        "Do not answer the user yet. "
+                        "Reason only in this pass. "
+                        "Keep it to at most three very short bullets or two short sentences, then stop."
+                    ),
+                },
+            ]
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("tool_plan", streamed=on_final_delta is not None, attempt=1, reason="chat_thinking"))
+            with self.transport.backend_thinking(True):
+                thinking_result = self.transport.chat_once(
+                    thinking_messages,
+                    temperature=temperature,
+                    max_tokens=thinking_max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                )
+            if on_model_step:
+                on_model_step(ModelStepMetrics.from_result(loop=loop, result=thinking_result, phase="chat_thinking"))
+            final_messages = [
+                *call_messages,
+                {"role": "assistant", "content": thinking_result.content},
+                {
+                    "role": "user",
+                    "content": (
+                        "Now provide the final answer only. "
+                        "Start the answer with 'Final answer:'. "
+                        "Do not include reasoning, plan, or prompt analysis. "
+                        "Answer the user directly now."
+                    ),
+                },
+            ]
+            with self.transport.backend_thinking(False):
+                result = self.transport.chat_final(
+                    final_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
+                    loop=loop + 1,
+                )
+            self.runtime.messages.append({"role": "assistant", "content": result.content})
+            return result
         result = self.transport.chat_final(
             call_messages,
             temperature=temperature,
