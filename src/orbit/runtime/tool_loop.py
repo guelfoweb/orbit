@@ -48,7 +48,7 @@ from orbit.runtime.tool_loop_state import (
 )
 from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
 from orbit.runtime.tools import default_tool_names
-from orbit.runtime.turn_trace import ModelStepMetrics
+from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
 def _env_int(name: str, default: int) -> int:
@@ -76,6 +76,7 @@ def run_tool_loop(
     on_tool_call: Callable[[str, str], None] | None,
     on_tool_result: Callable[[str, int, str, str], None] | None,
     on_model_step: Callable[[ModelStepMetrics], None] | None,
+    on_phase_start: Callable[[ModelPhaseStart], None] | None,
     tool_names: tuple[str, ...] | None,
     initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
 ) -> ChatResult:
@@ -435,6 +436,7 @@ def run_tool_loop(
                         on_final_delta=on_final_delta,
                         on_progress=on_progress,
                         on_model_step=on_model_step,
+                        on_phase_start=on_phase_start,
                         loop=state.tool_rounds + 1,
                         use_tool_prompt=state.used_tool_call_prompt,
                     )
@@ -456,6 +458,7 @@ def run_tool_loop(
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=state.tool_rounds + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
                 )
@@ -466,6 +469,7 @@ def run_tool_loop(
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 loop=state.tool_rounds + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
             )
@@ -511,6 +515,13 @@ def run_tool_loop(
             file_recovery=turn.pending_file_recovery_guard,
         )
         tool_delta_callback = suppress_tool_delta if shell_full_enabled and (state.tool_rounds > 0 or repair.contract_retry_pending) else on_final_delta
+        if on_phase_start:
+            on_phase_start(
+                ModelPhaseStart(
+                    "tool_call",
+                    streamed=tool_delta_callback is not suppress_tool_delta and on_final_delta is not None,
+                )
+            )
         result = runtime._chat_tool_call_once(
             call_messages,
             temperature=temperature,
@@ -524,6 +535,8 @@ def run_tool_loop(
             on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
         if repair.contract_retry_pending and not result.tool_calls:
             retry_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_CONTRACT_RETRY_PROMPT}]
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("tool_call_retry", streamed=False))
             result = runtime._chat_tool_call_once(
                 retry_messages,
                 temperature=temperature,
@@ -565,6 +578,7 @@ def run_tool_loop(
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
             )
@@ -584,6 +598,7 @@ def run_tool_loop(
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=loop_index + 2,
                 )
         if result.tool_calls:
@@ -631,6 +646,7 @@ def run_tool_loop(
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=loop_index + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
                 )
@@ -646,6 +662,7 @@ def run_tool_loop(
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=loop_index + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
                 )
@@ -680,6 +697,7 @@ def run_tool_loop(
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=loop_index + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
                 )
@@ -691,6 +709,7 @@ def run_tool_loop(
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
             )
@@ -705,6 +724,7 @@ def run_tool_loop(
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
             )

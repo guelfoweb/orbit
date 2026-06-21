@@ -630,6 +630,10 @@ class FinalPolicyTests(unittest.TestCase):
         completeness = classify_final_answer_completeness("Plan:\n1. Inspect the file\n2. Summarize the findings")
         self.assertEqual(completeness.status, "reasoning_like")
 
+    def test_final_answer_completeness_detects_closed_thought_without_final_tail(self) -> None:
+        completeness = classify_final_answer_completeness("<|channel>thought\nprivate chain<channel|>")
+        self.assertEqual(completeness.status, "reasoning_like")
+
     def test_final_answer_completeness_accepts_complete_brief_answer(self) -> None:
         completeness = classify_final_answer_completeness(
             "The file is vulnerable to SQL injection and command injection due to unsanitized input handling."

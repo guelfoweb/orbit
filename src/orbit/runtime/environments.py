@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable
 import json
@@ -28,7 +28,7 @@ from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import TOOL_CALL_JSON_RETRY_PROMPT
 from orbit.runtime.thinking_mode import ThinkingMode, last_assistant_has_open_reasoning
 from orbit.runtime.tool_loop import run_tool_loop
-from orbit.runtime.turn_trace import ModelStepMetrics
+from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,8 +94,12 @@ class TransportEnvironment:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
         loop: int,
+        repair_incomplete_final: bool = True,
     ) -> ChatResult:
+        if on_phase_start:
+            on_phase_start(ModelPhaseStart("chat_final", streamed=on_final_delta is not None))
         result = self.chat_once(
             messages,
             temperature=temperature,
@@ -105,18 +109,42 @@ class TransportEnvironment:
         )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="chat_final"))
-        if not is_empty_final_response(result):
+        completeness = classify_final_answer_completeness(result.content, messages=messages)
+        if not repair_incomplete_final and not is_empty_final_response(result):
+            return result
+        if not is_empty_final_response(result) and completeness.is_complete:
             return result
 
-        retry = self.chat_once(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            on_final_delta=on_final_delta,
-            on_progress=on_progress,
-        )
+        retry_messages = messages
+        retry_phase = "chat_final_retry"
+        with_final_only_retry = False
+        if not completeness.is_complete:
+            retry_messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Stop reasoning and provide the final answer only. "
+                        "No thinking, no plan, no headings, no bullet list unless explicitly requested. "
+                        "Answer the user directly now."
+                    ),
+                },
+            ]
+            retry_phase = "chat_final_completion_repair"
+            with_final_only_retry = True
+        if on_phase_start:
+            on_phase_start(ModelPhaseStart(retry_phase, streamed=on_final_delta is not None))
+        retry_context = self.backend_thinking(False) if with_final_only_retry else nullcontext()
+        with retry_context:
+            retry = self.chat_once(
+                retry_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+            )
         if on_model_step:
-            on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=retry, phase="chat_final_retry"))
+            on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=retry, phase=retry_phase))
         if not is_empty_final_response(retry):
             return retry
 
@@ -220,6 +248,7 @@ class PureChatEnvironment:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
         loop: int,
     ) -> ChatResult:
         self.runtime.messages.append({"role": "user", "content": user_content})
@@ -230,6 +259,7 @@ class PureChatEnvironment:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=loop,
         )
         self.runtime.messages.append({"role": "assistant", "content": result.content})
@@ -252,6 +282,7 @@ class ToolLoopEnvironment:
         on_tool_call: Callable[[str, str], None] | None,
         on_tool_result: Callable[[str, int, str, str], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
     ) -> ToolResultBundle:
@@ -266,6 +297,7 @@ class ToolLoopEnvironment:
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
         )
@@ -288,6 +320,7 @@ class FinalFromToolEnvironment:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
         loop: int,
         use_tool_prompt: bool,
     ) -> FinalAnswerResult:
@@ -300,16 +333,19 @@ class FinalFromToolEnvironment:
         repair_failed = False
         compact_retry_attempted = False
         compact_retry_failed = False
-        if on_final_delta is None:
-            result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
-        else:
-            result = self.runtime.backend.chat_stream(
-                policy.messages,
-                temperature=temperature,
-                max_tokens=policy.max_tokens,
-                on_delta=final_delta,
-                on_progress=on_progress,
-            )
+        if on_phase_start:
+            on_phase_start(ModelPhaseStart("final_from_tool", streamed=stream_buffer is None and on_final_delta is not None))
+        with self.transport.backend_thinking(False):
+            if on_final_delta is None:
+                result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
+            else:
+                result = self.runtime.backend.chat_stream(
+                    policy.messages,
+                    temperature=temperature,
+                    max_tokens=policy.max_tokens,
+                    on_delta=final_delta,
+                    on_progress=on_progress,
+                )
         best_non_empty_result = result if result.content.strip() else None
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
@@ -324,16 +360,19 @@ class FinalFromToolEnvironment:
             previous_result = result
             retry_messages = [*policy.messages, final_tool_retry_instruction()]
             retry_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)
-            if on_final_delta is None:
-                retry_candidate = self.runtime.backend.chat(retry_messages, temperature=temperature, max_tokens=retry_max_tokens)
-            else:
-                retry_candidate = self.runtime.backend.chat_stream(
-                    retry_messages,
-                    temperature=temperature,
-                    max_tokens=retry_max_tokens,
-                    on_delta=final_delta,
-                    on_progress=on_progress,
-                )
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("final_from_tool_retry", streamed=stream_buffer is None and on_final_delta is not None))
+            with self.transport.backend_thinking(False):
+                if on_final_delta is None:
+                    retry_candidate = self.runtime.backend.chat(retry_messages, temperature=temperature, max_tokens=retry_max_tokens)
+                else:
+                    retry_candidate = self.runtime.backend.chat_stream(
+                        retry_messages,
+                        temperature=temperature,
+                        max_tokens=retry_max_tokens,
+                        on_delta=final_delta,
+                        on_progress=on_progress,
+                    )
             if retry_candidate.content.strip():
                 best_non_empty_result = retry_candidate
             result = _prefer_non_empty_retry_result(previous_result, retry_candidate)
@@ -373,16 +412,21 @@ class FinalFromToolEnvironment:
             )
             repair_messages = [*policy.messages, {"role": "user", "content": repair_instruction}]
             repair_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)
-            if on_final_delta is None:
-                result = self.runtime.backend.chat(repair_messages, temperature=temperature, max_tokens=repair_max_tokens)
-            else:
-                result = self.runtime.backend.chat_stream(
-                    repair_messages,
-                    temperature=temperature,
-                    max_tokens=repair_max_tokens,
-                    on_delta=final_delta,
-                    on_progress=on_progress,
+            if on_phase_start:
+                on_phase_start(
+                    ModelPhaseStart("final_from_tool_completion_repair", streamed=stream_buffer is None and on_final_delta is not None)
                 )
+            with self.transport.backend_thinking(False):
+                if on_final_delta is None:
+                    result = self.runtime.backend.chat(repair_messages, temperature=temperature, max_tokens=repair_max_tokens)
+                else:
+                    result = self.runtime.backend.chat_stream(
+                        repair_messages,
+                        temperature=temperature,
+                        max_tokens=repair_max_tokens,
+                        on_delta=final_delta,
+                        on_progress=on_progress,
+                    )
             if result.content.strip():
                 best_non_empty_result = result
             if on_model_step:
@@ -410,16 +454,19 @@ class FinalFromToolEnvironment:
             original_result = best_non_empty_result or result
             compact_messages = [*policy.messages, final_tool_compact_retry_instruction()]
             compact_max_tokens = final_tool_compact_retry_max_tokens(max_tokens, messages=policy.messages)
-            if on_final_delta is None:
-                candidate = self.runtime.backend.chat(compact_messages, temperature=temperature, max_tokens=compact_max_tokens)
-            else:
-                candidate = self.runtime.backend.chat_stream(
-                    compact_messages,
-                    temperature=temperature,
-                    max_tokens=compact_max_tokens,
-                    on_delta=final_delta,
-                    on_progress=on_progress,
-                )
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("final_from_tool_compact_retry", streamed=stream_buffer is None and on_final_delta is not None))
+            with self.transport.backend_thinking(False):
+                if on_final_delta is None:
+                    candidate = self.runtime.backend.chat(compact_messages, temperature=temperature, max_tokens=compact_max_tokens)
+                else:
+                    candidate = self.runtime.backend.chat_stream(
+                        compact_messages,
+                        temperature=temperature,
+                        max_tokens=compact_max_tokens,
+                        on_delta=final_delta,
+                        on_progress=on_progress,
+                    )
             if candidate.content.strip():
                 best_non_empty_result = candidate
             if on_model_step:
@@ -468,6 +515,7 @@ class ContinueEnvironment:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
     ) -> ContinueResult:
         initial_kind = self._continuation_kind_before_continue()
         if initial_kind == "thinking":
@@ -477,6 +525,7 @@ class ContinueEnvironment:
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 loop=1,
                 force_disable_backend_thinking=True,
             )
@@ -492,6 +541,8 @@ class ContinueEnvironment:
                 on_progress=on_progress,
                 max_passes=3,
             )
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("chat_continue_native", streamed=on_final_delta is not None))
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=1, result=result, phase="chat_continue_native"))
             if self.runtime._thinking().continuation_kind_for(content=result.content, finish_reason=result.finish_reason) is not None:
@@ -502,6 +553,7 @@ class ContinueEnvironment:
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=2,
                     force_disable_backend_thinking=True,
                 )
@@ -518,6 +570,7 @@ class ContinueEnvironment:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=1,
         )
         return ContinueResult(result=result, used_native_continue=False, used_prompt_fallback=True)
@@ -546,6 +599,7 @@ class ContinueEnvironment:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
         loop: int,
         force_disable_backend_thinking: bool = False,
     ) -> ChatResult:
@@ -583,7 +637,9 @@ class ContinueEnvironment:
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=loop,
+                    repair_incomplete_final=False,
                 )
         else:
             result = self.transport.chat_final(
@@ -593,7 +649,9 @@ class ContinueEnvironment:
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 loop=loop,
+                repair_incomplete_final=False,
             )
         if force_disable_backend_thinking and (
             self.runtime._thinking().continuation_kind_for(

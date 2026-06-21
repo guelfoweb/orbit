@@ -60,7 +60,7 @@ from orbit.runtime.tool_result_compaction import (
     compact_tool_results,
     persistent_messages as persistent_tool_result_messages,
 )
-from orbit.runtime.turn_trace import ModelStepMetrics
+from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
 ROUTE_MAX_TOKENS = 128
@@ -116,6 +116,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None = None,
         on_progress: Callable[[StreamProgress], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
         user_content = message_content(prompt, images or [], audios or [])
         result = self._pure_chat_environment().ask_user_content(
@@ -126,6 +127,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=1,
         )
         return self._remember_visible_result(result)
@@ -139,6 +141,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None = None,
         on_progress: Callable[[StreamProgress], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
         self.last_memory_refresh = None
         self.refresh_memory_if_needed(temperature=temperature)
@@ -151,6 +154,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=1,
         )
         return self._remember_visible_result(result)
@@ -163,6 +167,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None = None,
         on_progress: Callable[[StreamProgress], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
         result = self._continue_environment().continue_last_response(
             temperature=temperature,
@@ -170,6 +175,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
         )
         return self._remember_visible_result(_tool_loop_result_value(result))
 
@@ -186,6 +192,7 @@ class ChatRuntime:
         on_tool_call: Callable[[str, str], None] | None = None,
         on_tool_result: Callable[[str, int, str, str], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
         self.last_memory_refresh = None
@@ -197,6 +204,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
         )
         result = self._run_tool_loop(
             temperature=temperature,
@@ -208,6 +216,7 @@ class ChatRuntime:
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             tool_names=tool_names,
         )
         return self._remember_visible_result(result.result)
@@ -225,6 +234,7 @@ class ChatRuntime:
         on_tool_call: Callable[[str, str], None] | None = None,
         on_tool_result: Callable[[str, int, str, str], None] | None = None,
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         allowed_tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
         self.last_memory_refresh = None
@@ -241,6 +251,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
         )
         if media_result is not None:
             return self._remember_visible_result(media_result)
@@ -251,6 +262,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
         )
         if resolution.bypass_tool_route:
             bundle = self._run_tool_loop(
@@ -263,6 +275,7 @@ class ChatRuntime:
                 on_tool_call=on_tool_call,
                 on_tool_result=on_tool_result,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 tool_names=("exec_shell_full_command",),
             )
             return self._remember_visible_result(_tool_loop_result_value(bundle))
@@ -273,6 +286,8 @@ class ChatRuntime:
         route_streamed_chunks: list[str] = []
         command_messages = with_command_system_prompt(self.messages)
         with self._temporary_backend_thinking(False):
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("route", streamed=False))
             if on_progress is None:
                 first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
             else:
@@ -299,6 +314,7 @@ class ChatRuntime:
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=2,
                 )
                 retried_empty_final = True
@@ -325,6 +341,7 @@ class ChatRuntime:
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
                     loop=2,
                 )
             self.messages.append({"role": "assistant", "content": first.content})
@@ -345,6 +362,7 @@ class ChatRuntime:
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 loop=2,
             )
             self.messages.append({"role": "assistant", "content": result.content})
@@ -364,6 +382,7 @@ class ChatRuntime:
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
                 on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
                 command_result=first,
             )
         tools = decision_tool_names(decision, prompt)
@@ -392,6 +411,7 @@ class ChatRuntime:
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             tool_names=tools,
             initial_tool_calls=(
                 command_tool_call_from_tool_calls(first.tool_calls, tools)
@@ -414,6 +434,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult | None:
         if resolution.error:
             return None
@@ -429,6 +450,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=1,
         )
         return result
@@ -443,6 +465,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         command_result: ChatResult,
     ) -> ChatResult:
         if resolution.error:
@@ -467,6 +490,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=2,
         )
         self.messages.append({"role": "assistant", "content": result.content})
@@ -484,6 +508,7 @@ class ChatRuntime:
         on_tool_call: Callable[[str, str], None] | None,
         on_tool_result: Callable[[str, int, str, str], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
         ):
@@ -497,6 +522,7 @@ class ChatRuntime:
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
         )
@@ -508,6 +534,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> None:
         if not self._thinking().should_stream_tool_plan(
             has_delta_sink=on_final_delta is not None,
@@ -527,6 +554,8 @@ class ChatRuntime:
         ]
         thought_filter = _ThoughtOnlyDeltaFilter(on_final_delta)
         with self._transport_environment().backend_thinking(True):
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("tool_plan", streamed=True))
             result = self.backend.chat_stream(
                 planning_messages,
                 temperature=temperature,
@@ -546,6 +575,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         loop: int,
         use_tool_prompt: bool,
     ) -> ChatResult:
@@ -555,6 +585,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=loop,
             use_tool_prompt=use_tool_prompt,
         ).result
@@ -568,6 +599,7 @@ class ChatRuntime:
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         loop: int,
     ) -> ChatResult:
         result = self._transport_environment().chat_final(
@@ -577,6 +609,7 @@ class ChatRuntime:
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
             loop=loop,
         )
         return result

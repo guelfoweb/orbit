@@ -442,6 +442,7 @@ def classify_final_answer_completeness(content: str, *, messages: list[Message] 
         tail = content.split("<channel|>", 1)[1].strip()
         if tail:
             return FinalAnswerCompleteness("complete")
+        return FinalAnswerCompleteness("reasoning_like")
     if re.search(r"(?:^|\n)\s*#{1,6}\s*$", content.rstrip()):
         return FinalAnswerCompleteness("malformed_markdown", "heading_stub")
     if re.search(r"(?:^|\n)\s*(?:[-*]|\d+\.)\s+\*\*[^*\n]+:\*\*\s*$", content.rstrip()):
