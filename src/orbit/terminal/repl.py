@@ -191,6 +191,7 @@ class Repl:
 
     def _record_phase_start(self, renderer: StreamRenderer, phase: ModelPhaseStart) -> None:
         label = _phase_label(phase)
+        renderer.set_phase_label(_phase_progress_label(phase))
         if not label or label == self._last_phase_label:
             return
         self._last_phase_label = label
@@ -422,6 +423,48 @@ def _phase_label(phase: ModelPhaseStart) -> str | None:
         return f"phase: compact final answer retry{suffix}"
     if phase.phase == "chat_continue_native":
         return f"phase: continuing after length{suffix}"
+    return None
+
+
+def _phase_progress_label(phase: ModelPhaseStart) -> str | None:
+    if phase.phase == "tool_plan":
+        return "thinking"
+    if phase.phase == "route":
+        return "tool decision"
+    if phase.phase == "chat_final":
+        if phase.attempt and phase.attempt > 1:
+            return f"final answer #{phase.attempt}"
+        return "final answer"
+    if phase.phase == "chat_final_retry":
+        if phase.reason == "length":
+            return "final retry"
+        return "final retry"
+    if phase.phase == "chat_final_completion_repair":
+        if phase.reason == "reasoning_like":
+            return "forced final"
+        return "repair final"
+    if phase.phase == "tool_call":
+        if phase.attempt and phase.attempt > 1:
+            return f"tool call #{phase.attempt}"
+        return "tool call"
+    if phase.phase == "tool_call_retry":
+        return "tool retry"
+    if phase.phase == "final_from_tool":
+        if phase.attempt and phase.attempt > 1:
+            return f"tool final #{phase.attempt}"
+        return "tool final"
+    if phase.phase == "final_from_tool_retry":
+        if phase.reason == "length":
+            return "tool final continue"
+        return "tool final retry"
+    if phase.phase == "final_from_tool_completion_repair":
+        if phase.reason == "reasoning_like":
+            return "forced tool final"
+        return "tool final repair"
+    if phase.phase == "final_from_tool_compact_retry":
+        return "compact retry"
+    if phase.phase == "chat_continue_native":
+        return "continue"
     return None
 
 
