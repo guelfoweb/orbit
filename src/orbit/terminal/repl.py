@@ -189,6 +189,7 @@ class Repl:
 
     def _record_phase_start(self, renderer: StreamRenderer, phase: ModelPhaseStart) -> None:
         renderer.set_phase_label(_phase_progress_label(phase))
+        renderer.set_final_output_mode(_phase_starts_final_output(phase))
 
     def _show_tool_result(self, renderer: StreamRenderer, name: str, chars: int, source: str | None, content: str | None) -> None:
         if content is not None:
@@ -414,3 +415,16 @@ def _prefill_profile_for_turn(messages: list[dict[str, object]], *, tools_enable
     if any(message.get("role") == "tool" for message in messages[-4:]):
         return FINAL_FROM_TOOL_PREFILL_PROFILE
     return TOOL_PREFILL_PROFILE
+
+
+def _phase_starts_final_output(phase: ModelPhaseStart) -> bool:
+    return phase.phase in {
+        "chat_final",
+        "chat_final_retry",
+        "chat_final_completion_repair",
+        "final_from_tool",
+        "final_from_tool_retry",
+        "final_from_tool_completion_repair",
+        "final_from_tool_compact_retry",
+        "chat_continue_native",
+    }

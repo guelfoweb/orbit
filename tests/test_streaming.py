@@ -159,6 +159,25 @@ class StreamingRendererTests(unittest.TestCase):
         self.assertIn("Thinking...", output)
         self.assertNotIn("\n\nThe main difference", output)
 
+    def test_final_output_mode_switches_following_text_out_of_thinking_color(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(thinking=True)
+            renderer.write("brief reasoning")
+            renderer.set_final_output_mode(True)
+            renderer.write("final answer")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("Thinking...", output)
+        self.assertIn("\033[2mbrief reasoning\033[0m", output)
+        self.assertIn("\n\nfinal answer", output)
+        self.assertNotIn("\033[2mfinal answer", output)
+
     def test_event_prints_dim_message(self) -> None:
         stream = io.StringIO()
         original = sys.stdout

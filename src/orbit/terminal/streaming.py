@@ -151,6 +151,11 @@ class StreamRenderer:
     def set_phase_label(self, label: str | None) -> None:
         self._phase_label = label.strip() if label else None
 
+    def set_final_output_mode(self, enabled: bool) -> None:
+        if self._thinking_filter is None or not enabled:
+            return
+        self._thinking_filter.start_final_output()
+
     def _normalize_progress(self, update: StreamProgress) -> StreamProgress:
         if update.phase != "generation":
             return update
@@ -244,6 +249,10 @@ class _ThinkingDisplayFilter:
 
     def finish(self) -> list[tuple[str, bool]]:
         return self._drain(final=True)
+
+    def start_final_output(self) -> None:
+        self._in_channel_thought = False
+        self._in_final = True
 
     def _drain(self, *, final: bool) -> list[tuple[str, bool]]:
         emitted: list[tuple[str, bool]] = []

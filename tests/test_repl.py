@@ -33,7 +33,7 @@ from orbit.terminal.repl_input import (
     visual_row_count,
 )
 from orbit.terminal.repl import Repl
-from orbit.terminal.repl import _phase_progress_label, _prefill_profile_for_turn
+from orbit.terminal.repl import _phase_progress_label, _phase_starts_final_output, _prefill_profile_for_turn
 from orbit.terminal.session_preview import format_recent_session_messages
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE
@@ -285,6 +285,12 @@ class ReplTests(unittest.TestCase):
             "compact retry",
         )
 
+    def test_phase_starts_final_output_for_final_phases_only(self) -> None:
+        self.assertTrue(_phase_starts_final_output(ModelPhaseStart("chat_final", streamed=True, attempt=1)))
+        self.assertTrue(_phase_starts_final_output(ModelPhaseStart("final_from_tool_retry", streamed=False, attempt=2)))
+        self.assertFalse(_phase_starts_final_output(ModelPhaseStart("tool_plan", streamed=True, attempt=1)))
+        self.assertFalse(_phase_starts_final_output(ModelPhaseStart("tool_call", streamed=False, attempt=1)))
+
     def test_record_phase_start_updates_phase_label_without_printing_phase_event(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
@@ -293,12 +299,16 @@ class ReplTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.events: list[str] = []
                 self.phase_label: str | None = None
+                self.final_output_mode: list[bool] = []
 
             def event(self, text: str, restart_timer: bool = True) -> None:
                 self.events.append(text)
 
             def set_phase_label(self, label: str | None) -> None:
                 self.phase_label = label
+
+            def set_final_output_mode(self, enabled: bool) -> None:
+                self.final_output_mode.append(enabled)
 
         renderer = Renderer()
 
@@ -308,6 +318,7 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(renderer.events, [])
         self.assertEqual(renderer.phase_label, "forced final")
+        self.assertEqual(renderer.final_output_mode, [True, True, True])
 
     def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:
         self.assertEqual(_prefill_profile_for_turn([], tools_enabled=False), CHAT_PREFILL_PROFILE)
