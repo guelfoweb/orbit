@@ -106,26 +106,26 @@ orbit download --all ggml-org/gemma-4-12B-it-GGUF
 Stable default server, with MTP disabled:
 
 ```bash
-orbit server --port 11976
+orbit server --port 12120
 ```
 
 If native libraries are not packaged inside Orbit yet, use:
 
 ```bash
-orbit server --port 11976 --llama-root /path/to/llama.cpp
+orbit server --port 12120 --llama-root /path/to/llama.cpp
 ```
 
 Optional MTP mode:
 
 ```bash
-orbit server --port 11976 --mtp
+orbit server --port 12120 --mtp
 ```
 
 With a multimodal projector:
 
 ```bash
 orbit server \
-  --port 11976 \
+  --port 12120 \
   --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
 
@@ -133,7 +133,7 @@ You can combine MTP and multimodal flags when both artifacts are available:
 
 ```bash
 orbit server \
-  --port 11976 \
+  --port 12120 \
   --mtp \
   --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 ```
@@ -153,7 +153,7 @@ What this means:
 After startup, you can verify that the server is healthy:
 
 ```bash
-orbit --base-url http://127.0.0.1:11976 --health
+orbit --base-url http://127.0.0.1:12120 --health
 ```
 
 Inside the interactive client, you can inspect backend state with:
@@ -174,7 +174,7 @@ Expected `/props` values:
 ### 5. Start Orbit
 
 ```bash
-orbit --base-url http://127.0.0.1:11976
+orbit --base-url http://127.0.0.1:12120
 ```
 
 Inside Orbit, tools are off by default:
@@ -186,9 +186,9 @@ Inside Orbit, tools are off by default:
 ## One-shot usage
 
 ```bash
-orbit --base-url http://127.0.0.1:11976 "Say who you are in one short sentence."
-orbit --base-url http://127.0.0.1:11976 --image workdir/media/image1.jpg "Describe this image."
-orbit --base-url http://127.0.0.1:11976 --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
+orbit --base-url http://127.0.0.1:12120 "Say who you are in one short sentence."
+orbit --base-url http://127.0.0.1:12120 --image workdir/media/image1.jpg "Describe this image."
+orbit --base-url http://127.0.0.1:12120 --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
 ```
 
 ## Thinking mode
