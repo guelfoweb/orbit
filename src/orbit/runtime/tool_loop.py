@@ -758,18 +758,6 @@ def _is_empty_final_response(result: ChatResult) -> bool:
     return not result.tool_calls and result.finish_reason == "stop" and not result.content.strip()
 
 
-def _all_tool_calls_allowed(tool_calls: list[dict[str, object]], allowed_tool_names: tuple[str, ...]) -> bool:
-    allowed = set(allowed_tool_names)
-    for tool_call in tool_calls:
-        function = tool_call.get("function")
-        if not isinstance(function, dict):
-            return False
-        name = function.get("name")
-        if not isinstance(name, str) or name not in allowed:
-            return False
-    return True
-
-
 def _last_user_text(messages: list[Message]) -> str | None:
     for message in reversed(messages):
         if message.get("role") != "user":

@@ -1079,10 +1079,6 @@ class NativeLlamaClient:
         return bytes(buf[:n])
 
 
-def _contains_stop(content: str, stops: tuple[str, ...]) -> bool:
-    return any(stop in content for stop in stops)
-
-
 def _trim_at_stop(content: str, stops: tuple[str, ...]) -> str:
     first: int | None = None
     for stop in stops:
