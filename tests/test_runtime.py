@@ -461,6 +461,89 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "error: model did not produce a clean final answer")
         self.assertEqual(result.finish_reason, "stop")
 
+    def test_ask_chat_think_on_streams_separate_thinking_then_final_answer_pass(self) -> None:
+        class StreamingThinkingThenFinalBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.chat_calls = 0
+                self.thinking = True
+                self.thinking_seen: list[bool] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(
+                self,
+                messages: list[Message],
+                *,
+                temperature: float,
+                max_tokens: int,
+                tools=None,
+                on_delta=None,
+                on_progress=None,
+            ) -> ChatResult:
+                self.chat_calls += 1
+                self.thinking_seen.append(self.thinking)
+                assert on_delta is not None
+                if self.chat_calls == 1:
+                    on_delta("The user likely means \"essay\" and \"wise\".\n")
+                    on_delta("* **Possibility A:** compare essay and thesis.\n")
+                    on_delta("* **Possibility B:** compare essay and wise.\n")
+                    return ChatResult(
+                        content=(
+                            "The user likely means \"essay\" and \"wise\".\n"
+                            "* **Possibility A:** compare essay and thesis.\n"
+                            "* **Possibility B:** compare essay and wise.\n"
+                        ),
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                on_delta("Final answer: An essay is a piece of writing, while wise describes good judgment.")
+                return ChatResult(
+                    content="Final answer: An essay is a piece of writing, while wise describes good judgment.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = StreamingThinkingThenFinalBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        emitted: list[str] = []
+
+        result = runtime.ask_chat(
+            "what is the main difference beetwen essay and wise?",
+            temperature=0,
+            max_tokens=64,
+            on_final_delta=emitted.append,
+        )
+
+        self.assertEqual(
+            result.content,
+            "Final answer: An essay is a piece of writing, while wise describes good judgment.",
+        )
+        self.assertEqual(
+            emitted,
+            [
+                "The user likely means \"essay\" and \"wise\".\n",
+                "* **Possibility A:** compare essay and thesis.\n",
+                "* **Possibility B:** compare essay and wise.\n",
+                "Final answer: An essay is a piece of writing, while wise describes good judgment.",
+            ],
+        )
+        self.assertEqual(backend.chat_calls, 2)
+        self.assertEqual(backend.thinking_seen, [True, False])
+
     def test_ask_chat_emits_distinct_phase_reasons_for_reasoning_repair(self) -> None:
         class ReasoningThenFinalBackend(FakeBackend):
             def __init__(self) -> None:
@@ -474,7 +557,24 @@ class RuntimeTests(unittest.TestCase):
                     return ChatResult(
                         content="<|channel>thought\nprivate chain<channel|>",
                         model="fake",
-                        finish_reason="length",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.chat_calls == 2:
+                    return ChatResult(
+                        content=(
+                            "The user likely meant two different words.\n"
+                            "* **Possibility A:** first interpretation.\n"
+                            "* **Possibility B:** second interpretation.\n"
+                            "Here is a partial answer."
+                        ),
+                        model="fake",
+                        finish_reason="stop",
                         tool_calls=[],
                         prompt_tokens=2,
                         completion_tokens=2,
@@ -508,6 +608,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(
             [(phase.phase, phase.attempt, phase.reason) for phase in phases],
             [
+                ("tool_plan", 1, "chat_thinking"),
                 ("chat_final", 1, None),
                 ("chat_final_completion_repair", 2, "reasoning_like"),
             ],

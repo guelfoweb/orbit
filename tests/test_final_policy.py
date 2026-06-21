@@ -640,6 +640,16 @@ class FinalPolicyTests(unittest.TestCase):
         )
         self.assertEqual(completeness.status, "reasoning_like")
 
+    def test_final_answer_completeness_detects_reasoning_leakage_with_means_wording(self) -> None:
+        completeness = classify_final_answer_completeness(
+            '"What is the main difference between essay and wise?"\n'
+            "The user likely means \"essay\" and \"wise\".\n"
+            "* **Possibility A:** compare essay and thesis.\n"
+            "* **Possibility B:** compare essay and wise.\n"
+            "An essay is a piece of writing, while wise describes judgment."
+        )
+        self.assertEqual(completeness.status, "reasoning_like")
+
     def test_final_answer_completeness_detects_closed_thought_without_final_tail(self) -> None:
         completeness = classify_final_answer_completeness("<|channel>thought\nprivate chain<channel|>")
         self.assertEqual(completeness.status, "reasoning_like")

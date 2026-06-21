@@ -50,10 +50,15 @@ _REASONING_PREFIXES = (
 )
 _REASONING_LEAK_META_PHRASES = (
     "the user likely meant",
+    "the user likely means",
     "the user probably meant",
+    "the user probably means",
     "the user may have meant",
+    "the user may mean",
     "looking at the words",
     "wait, looking at the words",
+    "the sentence should",
+    "i should",
 )
 
 
