@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from orbit.runtime.final_policy import (
     has_pdf_text_tool_result,
     is_repetitive_final_answer,
     is_compact_list_request,
+    prepare_final_tool_messages,
     is_list_shell_command,
     is_operational_status_request,
 )
@@ -317,6 +319,137 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("PDF text extraction already succeeded", policy.messages[-1]["content"])
         self.assertIn("Treat the PDF file as present and readable", policy.messages[-1]["content"])
         self.assertIn("Do not claim the file is missing", policy.messages[-1]["content"])
+
+    def test_pdf_text_brief_policy_caps_tokens_and_requests_one_sentence(self) -> None:
+        messages = [
+            {"role": "user", "content": "Read pdf/grande.pdf and summarize the document topic in one concise sentence."},
+            {
+                "role": "tool",
+                "name": "exec_shell_full_command",
+                "content": (
+                    "shell_output_pdf_text: true\n"
+                    "path: pdf/grande.pdf\n"
+                    "extractor: pdftotext\n"
+                    "content:\n"
+                    + ("A" * 1800)
+                ),
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        self.assertEqual(policy.max_tokens, 72)
+        self.assertIn("exactly one concise sentence", policy.messages[-1]["content"])
+
+    def test_prepare_final_tool_messages_prunes_older_failed_tool_attempts(self) -> None:
+        messages = [
+            {"role": "user", "content": "Read pdf/piccolo.pdf and summarize it."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "exec_shell_full_command", "arguments": {"command": "pdfflow pdf/piccolo.pdf"}},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "exec_shell_full_command",
+                "content": "error: command not found",
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-2",
+                        "function": {"name": "exec_shell_full_command", "arguments": {"command": "pdftotext pdf/piccolo.pdf - | head -n 40"}},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-2",
+                "name": "exec_shell_full_command",
+                "content": "shell_output_pdf_text: true\npath: pdf/piccolo.pdf\nextractor: pdftotext\ncontent:\nUseful text",
+            },
+        ]
+
+        prepared = prepare_final_tool_messages(messages)
+
+        self.assertEqual(sum(1 for message in prepared if message.get("role") == "tool"), 1)
+        self.assertIn("Useful text", str(prepared[-1].get("content")))
+        self.assertNotIn("command not found", json.dumps(prepared, ensure_ascii=False))
+
+    def test_prepare_final_tool_messages_compacts_large_pdf_tool_content(self) -> None:
+        messages = [
+            {"role": "user", "content": "Read pdf/grande.pdf and summarize the document topic in one concise sentence."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "exec_shell_full_command", "arguments": {"command": "pdftotext pdf/grande.pdf -"}},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "exec_shell_full_command",
+                "content": (
+                    "shell_output_pdf_text: true\npath: pdf/grande.pdf\nextractor: pdftotext\ncontent:\n"
+                    + ("A" * 1800)
+                ),
+            },
+        ]
+
+        prepared = prepare_final_tool_messages(messages)
+        content = str(prepared[-1].get("content"))
+
+        self.assertIn("[output truncated for model context]", content)
+        self.assertIn("shell_output_pdf_text: true", content)
+        self.assertLess(len(content), 1300)
+
+    def test_prepare_final_tool_messages_leaves_recursive_listing_verbatim(self) -> None:
+        content = ".\n" + "\n".join(f"./file-{index}.txt" for index in range(200))
+        messages = [
+            {"role": "user", "content": "List all files and directories recursively."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "exec_shell_full_command", "arguments": {"command": "find . -maxdepth 10 -not -path '*/.*'"}},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": content},
+        ]
+
+        prepared = prepare_final_tool_messages(messages)
+
+        self.assertEqual(prepared[-1]["content"], content)
+
+    def test_brief_shell_policy_caps_tokens_and_tightens_prompt(self) -> None:
+        messages = [
+            {"role": "user", "content": "Read text/summary.txt and summarize it in one concise sentence."},
+            {
+                "role": "tool",
+                "name": "exec_shell_full_command",
+                "content": "A concise source excerpt about AI safety and alignment.",
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        self.assertEqual(policy.max_tokens, 96)
+        self.assertIn("one concise sentence", policy.messages[-1]["content"])
 
     def test_operational_status_policy_prefers_recent_shell_evidence(self) -> None:
         messages = [
