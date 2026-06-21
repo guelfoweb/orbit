@@ -20,6 +20,8 @@ where = ["src"]
 "orbit.native_llama" = [
   "model_registry.json",
   "vendor/README.md",
+  "vendor/THIRD_PARTY_NOTICES.md",
   "vendor/lib/*",
   "vendor/shim/*",
+  "vendor/source/llama.cpp/**/*",
 ]

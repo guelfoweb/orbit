@@ -7,8 +7,10 @@ import ctypes
 import os
 import subprocess
 
+from .build_support import compile_cpp_helper
 from .mtp_completion import MtpCompletionResult
 from .native_artifacts import packaged_shim_path, require_legacy_llama_root
+from .native_names import persistent_mtp_shim_filename, platform_runtime_libs
 from .paths import NativeLlamaPaths
 
 _REQUIRED_SHIM_SYMBOLS = (
@@ -48,7 +50,7 @@ class PersistentMtpLibrary:
 
     def _load_library(self) -> CDLL:
         flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
-        for dep in ("libggml-base.so", "libggml.so", "libggml-cpu.so", "libllama-common.so", "libllama.so"):
+        for dep in platform_runtime_libs():
             path = self.build_bin / dep
             if path.exists():
                 self._handles.append(ctypes.CDLL(str(path), mode=flags))
@@ -138,45 +140,26 @@ def build_persistent_mtp_shim(
     *,
     llama_root: Path | None,
     build_dir: Path | None = None,
+    build_bin: Path | None = None,
     runner=subprocess.run,
 ) -> Path:
-    packaged = packaged_shim_path("liborbit-persistent-mtp.so")
+    packaged = packaged_shim_path(persistent_mtp_shim_filename())
     if packaged is not None and _shim_exports_required_symbols(packaged):
         return packaged
-    llama_root = require_legacy_llama_root(llama_root, artifact_name="liborbit-persistent-mtp.so")
+    artifact_name = persistent_mtp_shim_filename()
+    llama_root = require_legacy_llama_root(llama_root, artifact_name=artifact_name)
     build_root = build_dir or (Path.home() / ".orbit" / "native-build")
-    build_root.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).parent / "vendor" / "shim" / "orbit_persistent_mtp.cpp"
-    output = build_root / "liborbit-persistent-mtp.so"
-    if output.exists() and output.stat().st_mtime >= source.stat().st_mtime and _shim_exports_required_symbols(output):
-        return output
-
-    bin_dir = llama_root / "build/bin"
-    command = [
-        "g++",
-        "-std=c++17",
-        "-shared",
-        "-fPIC",
-        str(source),
-        f"-I{llama_root / 'include'}",
-        f"-I{llama_root / 'common'}",
-        f"-I{llama_root}",
-        f"-I{llama_root / 'ggml/include'}",
-        f"-I{llama_root / 'src'}",
-        f"-Wl,-rpath,{bin_dir}",
-        str(bin_dir / "libllama-common.so"),
-        str(bin_dir / "libllama.so"),
-        str(bin_dir / "libggml.so"),
-        str(bin_dir / "libggml-base.so"),
-        str(bin_dir / "libggml-cpu.so"),
-        "-o",
-        str(output),
-    ]
-    completed = runner(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip()
-        raise RuntimeError(f"failed to build persistent mtp shim: {detail or completed.returncode}")
-    return output
+    output = build_root / artifact_name
+    return compile_cpp_helper(
+        artifact_label="persistent mtp shim",
+        source=source,
+        output=output,
+        llama_root=llama_root,
+        build_bin=build_bin,
+        runner=runner,
+        shared=True,
+    )
 
 
 def _shim_exports_required_symbols(path: Path) -> bool:

@@ -17,4 +17,8 @@ Expected future contents include platform-specific builds such as:
 
 Orbit now prefers this directory before any legacy external `llama_root` path.
 
-In the current repository phase, no native binaries are committed here yet.
+These outputs must be treated as generated artifacts:
+
+- do not commit `.so`, `.dylib`, `.a`, or build directories
+- build them explicitly with `python scripts/build_native.py`
+- keep `--llama-root` / `ORBIT_LLAMA_ROOT` only as developer compatibility fallbacks

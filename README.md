@@ -5,7 +5,7 @@ Minimal local CLI for running Gemma 4 with the native `orbit-server`.
 Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal Orbit setup does not require an external `llama-server` process at runtime.
 
 Important status note:
-the native backend is the primary Orbit path, but a fresh clone still needs native prerequisites. Today, Orbit still expects `llama.cpp`-derived native `llama`/`ggml` components to be available locally, and some MTP paths still rebuild a local shim when needed. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+the native backend is the primary Orbit path, and Orbit does not require an external `llama-server` runtime process. The native backend still depends on native libraries derived from `llama.cpp`/`ggml`, built either from Orbit's vendored sources or from a documented developer fallback such as `--llama-root`. Zero-build packaging remains future work. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
 
 Linux is the main target environment. macOS may work. Windows is not a target environment.
 
@@ -52,27 +52,24 @@ python3 -m venv .venv
 pip install -e .
 ```
 
-This installs the Python package and CLI. It does not yet guarantee that a fresh machine already has the native libraries Orbit needs.
+This installs the Python package and CLI.
 
-### What a fresh checkout still needs today
+### 2. Build the native backend libraries
 
-Orbit already owns the Python CLI, model download, and the native server entrypoint. What it does not yet ship by itself is the full native `llama.cpp` runtime.
-
-Today, a clean checkout still needs one of these:
-
-- packaged native libraries under `src/orbit/native_llama/vendor/lib`
-- or a local `llama.cpp` build tree passed with `--llama-root`
-- or the same path exported through `ORBIT_LLAMA_ROOT`
-
-Example:
+If `vendor/lib/` does not already contain the required native libraries, build them explicitly:
 
 ```bash
-orbit server --port 11976 --llama-root /path/to/llama.cpp
+python scripts/build_native.py
 ```
 
-If you enable `--mtp`, Orbit may also rebuild a local MTP shim from the same `llama.cpp` tree when no packaged shim is available.
+This uses Orbit's vendored `llama.cpp` sources and writes local build output under `src/orbit/native_llama/vendor/`.
 
-### 2. Download models
+Developer fallback:
+
+- `--llama-root /path/to/llama.cpp`
+- `ORBIT_LLAMA_ROOT=/path/to/llama.cpp`
+
+### 3. Download models
 
 Download only the target model:
 
@@ -104,7 +101,7 @@ You can still override the repo explicitly:
 orbit download --all ggml-org/gemma-4-12B-it-GGUF
 ```
 
-### 3. Start the native backend
+### 4. Start the native backend
 
 Stable default server, with MTP disabled:
 
@@ -146,7 +143,7 @@ What this means:
 - `orbit server` starts the stable native backend without MTP.
 - `orbit server --mtp` enables the experimental MTP path explicitly.
 - MTP can improve some workloads, but Orbit keeps it off by default because stability has priority.
-- if native libs are missing, Orbit now exits with a short error telling you to use `--llama-root` or `ORBIT_LLAMA_ROOT`
+- if native libs are missing, Orbit exits with a short error telling you to build them with `python scripts/build_native.py` or use `--llama-root` / `ORBIT_LLAMA_ROOT`
 - experimental multi-turn raw MTP chat reuse remains debug-only behind:
   - `ORBIT_MTP_CHAT_REUSE_RAW=1`
   - `ORBIT_MTP_CHAT_REUSE_DEBUG=1`
@@ -174,7 +171,6 @@ Expected `/props` values:
 - with `--mtp`:
   - `backend_mode=mtp-ready`
   - `mtp_enabled=true`
-
 ### 5. Start Orbit
 
 ```bash
@@ -234,6 +230,7 @@ Orbit can still talk to compatible local HTTP backends through `--base-url`. Kee
 ## Troubleshooting
 
 - backend unavailable: check `orbit --health --base-url ...`
+- native libraries missing: run `python scripts/build_native.py`, or use `--llama-root` / `ORBIT_LLAMA_ROOT` as a developer fallback
 - model not found: verify the Orbit models cache or explicit model paths
 - multimodal unavailable: ensure the matching `mmproj` is present and the backend was started with it
 - MTP unavailable: ensure both target and draft models are available and the backend was started with the experimental MTP path

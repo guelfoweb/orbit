@@ -25,6 +25,7 @@ from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
 from .mtp_accept_probe import MtpAcceptProbeResult, run_mtp_accept_probe
 from .mtp_dry_run import MtpDryRunResult, run_mtp_dry_run
 from .mtp_probe import MtpProbeResult, run_mtp_probe
+from .native_names import runtime_library_filename
 from .paths import NativeLlamaPaths
 from .persistent_mtp import (
     PersistentMtpSessionRuntime,
@@ -61,7 +62,7 @@ class NativeLlamaClient:
         self.paths = paths
         self.config = config or NativeClientConfig()
         self.lib = LlamaLibrary(paths.build_bin)
-        self.mtmd = MtmdLibrary(paths.build_bin) if (paths.build_bin / "libmtmd.so").exists() else None
+        self.mtmd = MtmdLibrary(paths.build_bin) if (paths.build_bin / runtime_library_filename("mtmd")).exists() else None
         self.cancel_event = threading.Event()
         self._callbacks: list[object] = []
         self._model: c_void_p | None = None

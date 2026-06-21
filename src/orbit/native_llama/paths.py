@@ -4,12 +4,15 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from .build_support import PACKAGE_NATIVE_ROOT
 from .model_registry import ResolvedModel, get_manifest, resolve_model
+from .native_names import runtime_library_filename
 
 
-PACKAGE_NATIVE_ROOT = Path(__file__).resolve().parent / "vendor"
 DEFAULT_VENDOR_LIB_DIR = PACKAGE_NATIVE_ROOT / "lib"
 DEFAULT_VENDOR_SHIM_DIR = PACKAGE_NATIVE_ROOT / "shim"
+BUNDLED_SOURCE_ROOT = PACKAGE_NATIVE_ROOT / "source" / "llama.cpp"
+DEFAULT_LLAMA_LIB_DIR = Path(os.environ["ORBIT_LLAMA_LIB_DIR"]).expanduser().resolve() if os.environ.get("ORBIT_LLAMA_LIB_DIR") else None
 BUNDLED_SOURCE_ROOT = PACKAGE_NATIVE_ROOT / "source" / "llama.cpp"
 DEFAULT_LLAMA_ROOT = Path(os.environ["ORBIT_LLAMA_ROOT"]).expanduser().resolve() if os.environ.get("ORBIT_LLAMA_ROOT") else None
 DEFAULT_MODEL_ID = "gemma4-12b-it-q4km"
@@ -116,22 +119,28 @@ def _resolve_model(
 
 
 def _resolve_native_runtime(llama_root: Path | None) -> tuple[Path | None, Path, Path]:
-    vendored_library = DEFAULT_VENDOR_LIB_DIR / "libllama.so"
+    library_name = runtime_library_filename("llama")
+    vendored_library = DEFAULT_VENDOR_LIB_DIR / library_name
     if vendored_library.exists():
         return None, DEFAULT_VENDOR_LIB_DIR, vendored_library
     searched: list[Path] = [vendored_library]
+    if DEFAULT_LLAMA_LIB_DIR is not None:
+        env_library = DEFAULT_LLAMA_LIB_DIR / library_name
+        if env_library.exists():
+            return None, DEFAULT_LLAMA_LIB_DIR, env_library
+        searched.append(env_library)
     if llama_root is not None:
         resolved_root = llama_root.expanduser().resolve()
         build_bin = resolved_root / "build/bin"
-        library = build_bin / "libllama.so"
+        library = build_bin / library_name
         if library.exists():
             return resolved_root, build_bin, library
         searched.append(library)
     searched_text = ", ".join(str(path) for path in searched)
     raise FileNotFoundError(
-        "libllama.so not found. "
+        f"{library_name} not found. "
         f"Searched: {searched_text}. "
-        "Provide --llama-root or ORBIT_LLAMA_ROOT, or package native libraries under orbit/native_llama/vendor/lib."
+        "Provide ORBIT_LLAMA_LIB_DIR, --llama-root, or ORBIT_LLAMA_ROOT, or package native libraries under orbit/native_llama/vendor/lib."
     )
 
 

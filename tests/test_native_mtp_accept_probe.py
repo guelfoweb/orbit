@@ -46,8 +46,9 @@ class NativeMtpAcceptProbeTests(unittest.TestCase):
                     stderr = "compile failed"
                 return Completed()
 
-            with self.assertRaisesRegex(RuntimeError, "failed to build mtp accept probe helper"):
-                build_mtp_accept_probe_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
+            with mock.patch("orbit.native_llama.mtp_accept_probe.packaged_shim_path", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "failed to build mtp accept probe helper"):
+                    build_mtp_accept_probe_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
 
     def test_accept_probe_reports_failure_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,3 +138,4 @@ class NativeMtpAcceptProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+from unittest import mock

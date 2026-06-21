@@ -46,8 +46,9 @@ class NativeMtpDecodeProbeTests(unittest.TestCase):
                     stderr = "compile failed"
                 return Completed()
 
-            with self.assertRaisesRegex(RuntimeError, "failed to build mtp decode probe helper"):
-                build_mtp_decode_probe_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
+            with mock.patch("orbit.native_llama.mtp_decode_probe.packaged_shim_path", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "failed to build mtp decode probe helper"):
+                    build_mtp_decode_probe_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
 
     def test_decode_probe_reports_success_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -110,3 +111,4 @@ class NativeMtpDecodeProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+from unittest import mock

@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import subprocess
 
+from .build_support import compile_cpp_helper
 from .native_artifacts import packaged_shim_path, require_legacy_llama_root
 from .paths import NativeLlamaPaths
 
@@ -104,6 +105,7 @@ def build_mtp_completion_helper(
     *,
     llama_root: Path | None,
     build_dir: Path | None = None,
+    build_bin: Path | None = None,
     runner=subprocess.run,
 ) -> Path:
     packaged = packaged_shim_path("orbit-mtp-completion")
@@ -114,33 +116,14 @@ def build_mtp_completion_helper(
     build_root.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).parent / "vendor" / "shim" / "orbit_mtp_completion.cpp"
     output = build_root / "orbit-mtp-completion"
-    if output.exists() and output.stat().st_mtime >= source.stat().st_mtime:
-        return output
-
-    bin_dir = llama_root / "build/bin"
-    command = [
-        "g++",
-        "-std=c++17",
-        str(source),
-        f"-I{llama_root / 'include'}",
-        f"-I{llama_root / 'common'}",
-        f"-I{llama_root}",
-        f"-I{llama_root / 'ggml/include'}",
-        f"-I{llama_root / 'src'}",
-        f"-Wl,-rpath,{bin_dir}",
-        str(bin_dir / "libllama-common.so"),
-        str(bin_dir / "libllama.so"),
-        str(bin_dir / "libggml.so"),
-        str(bin_dir / "libggml-base.so"),
-        str(bin_dir / "libggml-cpu.so"),
-        "-o",
-        str(output),
-    ]
-    completed = runner(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip()
-        raise RuntimeError(f"failed to build mtp completion helper: {detail or completed.returncode}")
-    return output
+    return compile_cpp_helper(
+        artifact_label="mtp completion helper",
+        source=source,
+        output=output,
+        llama_root=llama_root,
+        build_bin=build_bin,
+        runner=runner,
+    )
 
 
 def _int_or_default(value) -> int:

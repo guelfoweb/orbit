@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from orbit.native_llama.paths import DEFAULT_VENDOR_LIB_DIR, LEGACY_MODEL_ID, resolve_legacy_paths, resolve_paths
+from orbit.native_llama.native_names import runtime_library_filename
+from orbit.native_llama.paths import BUNDLED_SOURCE_ROOT, DEFAULT_VENDOR_LIB_DIR, LEGACY_MODEL_ID, resolve_legacy_paths, resolve_paths
 
 
 class NativePathsTests(unittest.TestCase):
@@ -17,7 +18,8 @@ class NativePathsTests(unittest.TestCase):
             target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
             mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
             vendor_lib.mkdir(parents=True)
-            (vendor_lib / "libllama.so").write_text("", encoding="utf-8")
+            library_name = runtime_library_filename("llama")
+            (vendor_lib / library_name).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
@@ -29,8 +31,31 @@ class NativePathsTests(unittest.TestCase):
 
         self.assertIsNone(paths.llama_root)
         self.assertEqual(paths.build_bin, vendor_lib)
-        self.assertEqual(paths.library, vendor_lib / "libllama.so")
+        self.assertEqual(paths.library, vendor_lib / runtime_library_filename("llama"))
         self.assertEqual(paths.model, target)
+
+    def test_resolves_runtime_from_orbit_llama_lib_dir_without_llama_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_lib = root / "custom-lib"
+            models_dir = root / "models"
+            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            env_lib.mkdir(parents=True)
+            (env_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
+            target.parent.mkdir(parents=True)
+            target.write_text("target", encoding="utf-8")
+            mmproj.write_text("mmproj", encoding="utf-8")
+
+            with (
+                mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", root / "missing-vendor-lib"),
+                mock.patch("orbit.native_llama.paths.DEFAULT_LLAMA_LIB_DIR", env_lib),
+            ):
+                paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
+
+        self.assertEqual(paths.llama_root, BUNDLED_SOURCE_ROOT)
+        self.assertEqual(paths.build_bin, env_lib)
+        self.assertEqual(paths.library, env_lib / runtime_library_filename("llama"))
 
     def test_resolves_vendored_runtime_and_preserves_bundled_source_root_for_builds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -41,7 +66,7 @@ class NativePathsTests(unittest.TestCase):
             target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
             mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
             vendor_lib.mkdir(parents=True)
-            (vendor_lib / "libllama.so").write_text("", encoding="utf-8")
+            (vendor_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             (bundled / "CMakeLists.txt").parent.mkdir(parents=True, exist_ok=True)
             (bundled / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.20)\n", encoding="utf-8")
             target.parent.mkdir(parents=True)
@@ -65,7 +90,7 @@ class NativePathsTests(unittest.TestCase):
             target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
             mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
@@ -87,7 +112,7 @@ class NativePathsTests(unittest.TestCase):
             build_bin = llama_root / "build/bin"
             target = hf_cache / "models--ggml-org--gemma-4-12B-it-GGUF/snapshots/abc/gemma-4-12B-it-Q4_K_M.gguf"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
             target.write_text("target", encoding="utf-8")
 
@@ -101,7 +126,7 @@ class NativePathsTests(unittest.TestCase):
             llama_root = root / "llama"
             build_bin = llama_root / "build/bin"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
 
             with self.assertRaises(FileNotFoundError):
                 resolve_paths(llama_root=llama_root, models_dir=root / "models", hf_cache=root / "hf")
@@ -114,8 +139,9 @@ class NativePathsTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError) as ctx:
                     resolve_paths(llama_root=None, models_dir=root / "models", hf_cache=root / "hf")
 
-        self.assertIn("libllama.so not found", str(ctx.exception))
-        self.assertIn("vendor/lib/libllama.so", str(ctx.exception))
+        library_name = runtime_library_filename("llama")
+        self.assertIn(f"{library_name} not found", str(ctx.exception))
+        self.assertIn(f"vendor/lib/{library_name}", str(ctx.exception))
 
     def test_exposes_draft_and_mtp_available_when_both_are_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,7 +153,7 @@ class NativePathsTests(unittest.TestCase):
             mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
             draft = models_dir / "unsloth--gemma-4-12b-it-GGUF" / "MTP/gemma-4-12b-it-Q8_0-MTP.gguf"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
             draft.parent.mkdir(parents=True)
             target.write_text("target", encoding="utf-8")
@@ -151,7 +177,7 @@ class NativePathsTests(unittest.TestCase):
             target = root / "manual.gguf"
             mmproj = root / "mmproj.gguf"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
 

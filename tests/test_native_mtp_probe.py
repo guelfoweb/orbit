@@ -56,8 +56,9 @@ class NativeMtpProbeTests(unittest.TestCase):
                     stderr = "compile failed"
                 return Completed()
 
-            with self.assertRaisesRegex(RuntimeError, "failed to build mtp probe helper"):
-                build_mtp_probe_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
+            with mock.patch("orbit.native_llama.mtp_probe.packaged_shim_path", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "failed to build mtp probe helper"):
+                    build_mtp_probe_helper(llama_root=llama_root, build_dir=root / "out", runner=runner)
 
     def test_build_helper_requires_legacy_root_when_no_packaged_artifact_exists(self) -> None:
         with mock.patch("orbit.native_llama.mtp_probe.packaged_shim_path", return_value=None):

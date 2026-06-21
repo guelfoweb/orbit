@@ -8,12 +8,13 @@ Orbit already owns:
 - native MTP path
 - optional multimodal projector support
 
-Orbit does **not** yet own native binary distribution end to end.
+Orbit now has an explicit vendored self-build path for the native runtime, but it does **not** yet own zero-build binary distribution end to end.
 
-Today, a fresh clone still depends on:
+Today, a fresh checkout can build its own native runtime from Orbit's vendored `llama.cpp` sources, but it still depends on:
 
-- a prepared `llama.cpp` build tree with `libllama.so`, `libllama-common.so`, and `ggml` libraries
-- local native helper or shim compilation for some MTP paths
+- a local CMake/compiler toolchain
+- native libraries derived from `llama.cpp`/`ggml`
+- optional local native helper or shim compilation for some MTP paths
 
 That means Orbit does not require an external `llama-server` runtime process, but it is not yet a packaged no-prerequisite product for a new user.
 
@@ -22,13 +23,13 @@ That means Orbit does not require an external `llama-server` runtime process, bu
 Today, `orbit server` can start in three ways:
 
 1. packaged native runtime libraries already exist under `src/orbit/native_llama/vendor/lib`
-2. `ORBIT_LLAMA_ROOT` points to a prepared local `llama.cpp` tree
-3. the user passes `--llama-root /path/to/llama.cpp`
+2. the user builds those libraries explicitly from Orbit's vendored `llama.cpp` sources with `python scripts/build_native.py`
+3. `ORBIT_LLAMA_ROOT` or `--llama-root /path/to/llama.cpp` points to a prepared local developer tree
 
 For MTP paths, Orbit also needs either:
 
 - a packaged shim under `src/orbit/native_llama/vendor/shim`
-- or a buildable local `llama.cpp` tree so the shim can be rebuilt explicitly
+- or a buildable local/vendored source tree so the shim can be rebuilt explicitly
 
 If these prerequisites are missing, the release path should fail with a short actionable error, not a Python stacktrace.
 
@@ -38,10 +39,16 @@ The intended product path is:
 
 ```bash
 pip install orbit
+python scripts/build_native.py
 orbit download --all
-orbit server --port 11976 --mtp
+orbit server --port 11976
 orbit
 ```
+
+No external `llama-server` runtime process.
+No external `llama.cpp` checkout in the primary path.
+One explicit local native build step.
+No hardcoded local developer paths.
 
 Current product default:
 
@@ -49,16 +56,11 @@ Current product default:
 - `orbit server --mtp` enables the native MTP path explicitly.
 - persistent multi-turn raw MTP chat reuse is not default and remains debug-only.
 
-No external `llama.cpp` checkout.
-No manual CMake build.
-No `llama-server` install.
-No hardcoded local paths.
-
 ## Current blockers
 
-### 1. Native runtime libraries are not packaged by Orbit
+### 1. Prebuilt native runtime libraries are not packaged by Orbit
 
-The native loader still expects prebuilt shared libraries such as:
+The native loader can now build these from Orbit's vendored sources, but prebuilt release artifacts are not yet packaged:
 
 - `libllama.so`
 - `libllama-common.so`
@@ -67,7 +69,7 @@ The native loader still expects prebuilt shared libraries such as:
 - `libggml-cpu.so`
 - `libmtmd.so` when multimodal is enabled
 
-These are currently resolved from an external build tree.
+These may come from `vendor/lib/`, `ORBIT_LLAMA_LIB_DIR`, or an external developer fallback such as `--llama-root`.
 
 ### 2. Orbit-owned C/C++ shims are not shipped as product artifacts
 
@@ -78,14 +80,14 @@ For product use, Orbit should ship:
 - prebuilt shim binaries per supported platform
 - or a tightly controlled build step during packaging, not ad hoc at runtime
 
-### 3. The native loader still assumes an external build layout
+### 3. Developer fallback still assumes an external build layout
 
-The current path resolution still uses the concept of a `llama_root/build/bin` layout.
+The compatibility fallback still supports the concept of a `llama_root/build/bin` layout.
 
 The product path should instead resolve:
 
-- packaged Orbit native libs
-- packaged Orbit shim artifacts
+- Orbit-built native libs under `vendor/lib/`
+- Orbit-built shim artifacts under `vendor/shim/`
 - downloaded model artifacts from the Orbit model cache
 
 ### 4. Release packaging policy is not finalized
@@ -105,13 +107,14 @@ Goal:
 - make Orbit load native assets from its own package boundary first
 
 Deliverables:
+- `src/orbit/native_llama/vendor/source/llama.cpp/` vendored source boundary
+- `src/orbit/native_llama/vendor/build/llama.cpp/` local build boundary
 - `src/orbit/native_llama/vendor/lib/` loader path support
-- `src/orbit/native_llama/vendor/include/` pinned header boundary
 - shim lookup from Orbit-owned paths before any legacy path
-- clear runtime error if packaged native assets are missing
+- clear runtime error if native assets are missing
 
 Acceptance:
-- no runtime code requires a hardcoded developer-local `llama_root` path when packaged assets exist
+- no runtime code requires a hardcoded developer-local `llama_root` path when Orbit-built assets exist
 
 ### Milestone 2. Packaged shim artifacts
 
@@ -137,7 +140,7 @@ Deliverables:
 - version compatibility check between Python package and native artifacts
 
 Acceptance:
-- a new user can install Orbit and start `orbit-server` without a manual `llama.cpp` build
+- a new user can install Orbit and start `orbit-server` without a manual local native build
 
 ### Artifact contract for the first Linux product cut
 

@@ -7,6 +7,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
+from orbit.native_llama.native_names import runtime_library_filename
 from orbit.native_server.app import build_parser, resolve_bootstrap_paths, run_server
 
 
@@ -19,7 +20,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
             mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
             vendor_lib.mkdir(parents=True)
-            (vendor_lib / "libllama.so").write_text("", encoding="utf-8")
+            (vendor_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
@@ -29,7 +30,31 @@ class NativeServerBootstrapTests(unittest.TestCase):
                 paths = resolve_bootstrap_paths(args)
 
         self.assertEqual(paths.build_bin, vendor_lib)
-        self.assertIsNone(paths.llama_root)
+        self.assertIsNotNone(paths.llama_root)
+        self.assertEqual(paths.model, target)
+
+    def test_bootstrap_can_use_orbit_llama_lib_dir_without_llama_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_lib = root / "custom-lib"
+            models_dir = root / "models"
+            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            env_lib.mkdir(parents=True)
+            (env_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
+            target.parent.mkdir(parents=True)
+            target.write_text("target", encoding="utf-8")
+            mmproj.write_text("mmproj", encoding="utf-8")
+
+            with (
+                mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", root / "missing-vendor-lib"),
+                mock.patch("orbit.native_llama.paths.DEFAULT_LLAMA_LIB_DIR", env_lib),
+            ):
+                args = build_parser().parse_args(["--models-dir", str(models_dir), "--hf-cache", str(root / "hf")])
+                paths = resolve_bootstrap_paths(args)
+
+        self.assertEqual(paths.build_bin, env_lib)
+        self.assertIsNotNone(paths.llama_root)
         self.assertEqual(paths.model, target)
 
     def test_bootstrap_defaults_to_model_id_registry(self) -> None:
@@ -41,7 +66,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
             mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
@@ -66,7 +91,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             target = root / "manual.gguf"
             mmproj = root / "manual-mmproj.gguf"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
 
@@ -88,7 +113,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
             draft = models_dir / "unsloth--gemma-4-12b-it-GGUF" / "MTP/gemma-4-12b-it-Q8_0-MTP.gguf"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
             draft.parent.mkdir(parents=True)
             target.write_text("target", encoding="utf-8")
@@ -110,7 +135,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             llama_root = root / "llama"
             build_bin = llama_root / "build/bin"
             build_bin.mkdir(parents=True)
-            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
 
             args = build_parser().parse_args(["--llama-root", str(llama_root), "--model-id", "gemma4-12b-it-q4km", "--models-dir", str(root / "models"), "--hf-cache", str(root / "hf")])
             with self.assertRaises(FileNotFoundError):
