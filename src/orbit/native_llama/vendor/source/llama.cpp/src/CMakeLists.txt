@@ -50,6 +50,9 @@ set_target_properties(llama PROPERTIES
 
 target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include)
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mtmd/models/models.h")
+    target_include_directories(llama PRIVATE ../tools/mtmd)
+endif()
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml)
