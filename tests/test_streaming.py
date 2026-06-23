@@ -228,7 +228,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working (0s, pf ~1% - Ctrl+C to interrupt)", output)
+        self.assertIn("Working (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
 
     def test_wait_timer_includes_phase_label_when_present(self) -> None:
         stream = io.StringIO()
@@ -244,12 +244,12 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working [final answer] (0s, pf ~1% - Ctrl+C to interrupt)", output)
+        self.assertIn("Working [final answer] (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
 
     def test_wait_timer_prints_prefill_token_progress_when_estimated(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
 
-        self.assertIn("pf ~500/1000 tk", renderer._working_status(5))
+        self.assertIn("prefill estimate ~500/1000 tk", renderer._working_status(5))
         self.assertIn("waiting for model...", renderer._working_status(10))
 
     def test_wait_timer_includes_phase_label_in_real_progress_status(self) -> None:
@@ -258,7 +258,13 @@ class StreamingRendererTests(unittest.TestCase):
         renderer.progress(StreamProgress(phase="prefill", current=243, total=935, percent=25))
 
         self.assertEqual(renderer._working_phase_prefix(), " [forced final]")
-        self.assertIn("pf 243/935 tk (25%)", renderer._working_status(5))
+        self.assertIn("prefill 243/935 tk (25%)", renderer._working_status(1))
+
+    def test_wait_timer_names_generation_progress_explicitly(self) -> None:
+        renderer = StreamRenderer()
+        renderer.progress(StreamProgress(phase="generation", current=7, total=512, percent=1))
+
+        self.assertIn("generation 7/512 tk (1%)", renderer._working_status(1))
 
     def test_wait_timer_prints_prefill_finalizing_after_estimate(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10)
@@ -269,20 +275,20 @@ class StreamingRendererTests(unittest.TestCase):
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
         renderer.progress(StreamProgress(phase="prefill", current=243, total=935, percent=25))
 
-        self.assertIn("pf 243/935 tk (25%)", renderer._working_status(5))
+        self.assertIn("prefill 243/935 tk (25%)", renderer._working_status(5))
 
     def test_wait_timer_shows_real_generation_progress_when_available(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
         renderer.progress(StreamProgress(phase="generation", current=7, total=32, percent=21))
 
-        self.assertIn("gen 7/32 tk (21%)", renderer._working_status(5))
+        self.assertIn("generation 7/32 tk (21%)", renderer._working_status(5))
 
     def test_wait_timer_accumulates_generation_across_continuation_passes(self) -> None:
         renderer = StreamRenderer()
         renderer.progress(StreamProgress(phase="generation", current=32, total=32, percent=100))
         renderer.progress(StreamProgress(phase="generation", current=1, total=128, percent=0))
 
-        self.assertIn("gen 33/160 tk (20%)", renderer._working_status(5))
+        self.assertIn("generation 33/160 tk (20%)", renderer._working_status(5))
 
     def test_first_progress_renders_immediately_before_timer_tick(self) -> None:
         stream = io.StringIO()
@@ -297,7 +303,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("pf 12/48 tk (25%)", output)
+        self.assertIn("prefill 12/48 tk (25%)", output)
 
     def test_wait_line_is_padded_to_clear_previous_content(self) -> None:
         padded = _pad_to_terminal_width("\033[2mshort\033[0m")
@@ -344,11 +350,11 @@ class StreamingRendererTests(unittest.TestCase):
         renderer = StreamRenderer()
         renderer.progress(StreamProgress(phase="generation", current=6, total=32, percent=18))
 
-        self.assertIn("gen 6/32 tk (18%)", renderer._working_status(5))
+        self.assertIn("generation 6/32 tk (18%)", renderer._working_status(5))
 
         renderer._restart_timer()
 
-        self.assertNotIn("gen 6/32 tk (18%)", renderer._working_status(0))
+        self.assertNotIn("generation 6/32 tk (18%)", renderer._working_status(0))
 
     def test_restart_timer_clears_generation_accumulator(self) -> None:
         renderer = StreamRenderer()
@@ -358,7 +364,7 @@ class StreamingRendererTests(unittest.TestCase):
         renderer._restart_timer()
         renderer.progress(StreamProgress(phase="generation", current=1, total=128, percent=0))
 
-        self.assertIn("gen 1/128 tk (0%)", renderer._working_status(0))
+        self.assertIn("generation 1/128 tk (0%)", renderer._working_status(0))
 
 
 if __name__ == "__main__":

@@ -174,9 +174,9 @@ class StreamRenderer:
         parts = [format_elapsed(elapsed)]
         if self._progress is not None:
             if self._progress.phase == "prefill":
-                parts.append(f"pf {self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
+                parts.append(f"prefill {self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
             elif self._progress.phase == "generation":
-                parts.append(f"gen {self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
+                parts.append(f"generation {self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
             else:
                 parts.append(f"{self._progress.phase} {self._progress.current}/{self._progress.total} ({self._progress.percent}%)")
             return ", ".join(parts)
@@ -187,10 +187,10 @@ class StreamRenderer:
                 label = (
                     PREFILL_COMPLETION_LABEL
                     if current >= self._prefill_estimate_tokens
-                    else f"pf ~{current}/{self._prefill_estimate_tokens} tk"
+                    else f"prefill estimate ~{current}/{self._prefill_estimate_tokens} tk"
                 )
             else:
-                label = PREFILL_COMPLETION_LABEL if progress >= 95 else f"pf ~{progress}%"
+                label = PREFILL_COMPLETION_LABEL if progress >= 95 else f"prefill estimate ~{progress}%"
             parts.append(label)
         return ", ".join(parts)
 
