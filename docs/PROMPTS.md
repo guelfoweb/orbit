@@ -77,11 +77,6 @@ Use only in a safe workdir or isolated lab:
 13. `In edit-target.txt replace beta with BETA and tell me what changed.`
 14. `Append a final line "delta" to edit-patch.txt.`
 15. `Create a directory named tmp-edit-dir, then tell me whether it was created.`
-16. `Search online for Dante Alighieri and return four concise facts with source names.`
-17. `Fetch https://example.com and summarize the page in two short bullets.`
-18. `Search the web for Agenzia per l'Italia Digitale and explain what it is in up to four bullets.`
-19. `Fetch https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html and explain the central thesis in Italian.`
-20. `Search online for official information about Linux Mint and report the project website.`
 21. `Tell me the specs of this computer.`
 22. `How much free memory is available on this machine?`
 23. `Show disk usage for the current workdir filesystem.`
@@ -96,6 +91,29 @@ Use only in a safe workdir or isolated lab:
 32. `Read pdf/grande.pdf and summarize the document topic in one concise sentence.`
 
 Expected: command chosen by the model, bounded evidence, concise final answer.
+
+## Online tools (optional manual smoke)
+
+These prompts depend on external network reachability and third-party site/provider behavior.
+They are useful manual smoke checks, but they are not part of the required local release gate for the CPU-first no-MTP path.
+
+In particular, generic web search through `orbit-web-search` is best-effort and may return no results when the upstream provider serves anti-bot or challenge pages instead of search results.
+
+Use:
+
+```text
+/tools on
+```
+
+16. `Search online for Dante Alighieri and return four concise facts with source names.`
+17. `Fetch https://example.com and summarize the page in two short bullets.`
+18. `Search the web for Agenzia per l'Italia Digitale and explain what it is in up to four bullets.`
+19. `Fetch https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html and explain the central thesis in Italian.`
+20. `Search online for official information about Linux Mint and report the project website.`
+
+Expected:
+- when the remote provider responds normally, Orbit uses bounded web evidence and returns a concise answer
+- when the provider returns no results, a challenge page, or an environmental failure, Orbit should answer conservatively instead of inventing facts
 
 ## Tools + Thinking
 
