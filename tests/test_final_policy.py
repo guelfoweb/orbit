@@ -277,6 +277,30 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("brief remediation", policy.messages[-1]["content"])
         self.assertEqual(final_tool_compact_retry_max_tokens(512, messages=policy.messages), 160)
 
+    def test_long_shell_web_info_policy_stays_natural(self) -> None:
+        messages = [
+            {"role": "user", "content": "search online for information about Mario Nobile"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "orbit-web-search 'Mario Nobile'"},
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "name": "exec_shell_full_command", "content": "x" * 1600},
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=160, streamed=False)
+
+        self.assertNotIn("'- Finding: ... Fix: ...'", policy.messages[-1]["content"])
+        self.assertNotIn("exactly 4 short bullets", policy.messages[-1]["content"])
+        self.assertIn("Answer the latest user request directly and concisely", policy.messages[-1]["content"])
+
     def test_compact_retry_max_tokens_stays_default_for_non_shell_policy(self) -> None:
         messages = [
             {"role": "user", "content": 'Leggi il PDF "pdf/small.pdf" e fammi una sintesi dettagliata.'},
