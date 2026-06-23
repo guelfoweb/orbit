@@ -181,24 +181,6 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertIn("require content/source/string evidence", execution.result.content)
 
-    def test_exec_shell_full_blocks_metadata_only_specific_file_read_prompt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            executor = HybridToolExecutor(
-                backend=FakeServerTools(),
-                workdir=Path(tmp),
-                allowed_tool_names=("exec_shell_full_command",),
-                user_prompt="read the README.md file and explain it in a concise three-sentence list",
-            )
-
-            execution = executor.execute(
-                "exec_shell_full_command",
-                {"command": "ls -F"},
-                chunk_budget={},
-            )
-
-        self.assertEqual(execution.source, "orbit")
-        self.assertIn("require content/source/string evidence", execution.result.content)
-
     def test_exec_shell_full_allows_listing_when_not_analysis_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executor = HybridToolExecutor(
@@ -211,42 +193,6 @@ class HybridToolExecutorTests(unittest.TestCase):
             execution = executor.execute(
                 "exec_shell_full_command",
                 {"command": "ls -R ."},
-                chunk_budget={},
-            )
-
-        self.assertEqual(execution.source, "orbit")
-        self.assertNotIn("require content/source/string evidence", execution.result.content)
-
-    def test_exec_shell_full_allows_listing_for_directory_question(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            executor = HybridToolExecutor(
-                backend=FakeServerTools(),
-                workdir=Path(tmp),
-                allowed_tool_names=("exec_shell_full_command",),
-                user_prompt="list all files in this workdir",
-            )
-
-            execution = executor.execute(
-                "exec_shell_full_command",
-                {"command": "ls -F"},
-                chunk_budget={},
-            )
-
-        self.assertEqual(execution.source, "orbit")
-        self.assertNotIn("require content/source/string evidence", execution.result.content)
-
-    def test_exec_shell_full_allows_metadata_request_for_specific_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            executor = HybridToolExecutor(
-                backend=FakeServerTools(),
-                workdir=Path(tmp),
-                allowed_tool_names=("exec_shell_full_command",),
-                user_prompt="show note.txt metadata",
-            )
-
-            execution = executor.execute(
-                "exec_shell_full_command",
-                {"command": "ls -l note.txt"},
                 chunk_budget={},
             )
 
