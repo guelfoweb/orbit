@@ -36,6 +36,12 @@ Release criterion for this phase:
 - Known limitations are documented and not hidden behind fragile checkers.
 - No additional deterministic task fast paths are introduced.
 
+Manual prompt validation follows the same boundary:
+
+- local chat, thinking, file/PDF, and shell-tool prompts are part of the required CPU-first no-MTP release gate
+- prompts that depend on external websites or generic web-search providers are optional online smoke checks, not release blockers for the local path
+- a conservative `I cannot confirm ...` answer is acceptable for those optional online prompts when the upstream provider returns no results, a challenge page, or another environmental failure
+
 ## Patch workflow experiments
 
 Two experimental branches were evaluated and intentionally not merged:
