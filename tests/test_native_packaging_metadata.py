@@ -46,6 +46,13 @@ class NativePackagingMetadataTests(unittest.TestCase):
         self.assertTrue((mtmd_models / "models.h").exists())
         self.assertGreaterEqual(len(list(mtmd_models.glob("*.cpp"))), 10)
 
+    def test_vendored_llama_cmake_includes_mtmd_models_when_present(self) -> None:
+        src_cmake = ROOT / "src/orbit/native_llama/vendor/source/llama.cpp/src/CMakeLists.txt"
+        text = src_cmake.read_text(encoding="utf-8")
+
+        self.assertIn('EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mtmd/models/models.h"', text)
+        self.assertIn("target_include_directories(llama PRIVATE ../tools/mtmd)", text)
+
     def test_native_artifact_contract_lists_expected_linux_files(self) -> None:
         self.assertIn("libllama.so", LINUX_RUNTIME_LIBS)
         self.assertIn("libggml-cpu.so", LINUX_RUNTIME_LIBS)
