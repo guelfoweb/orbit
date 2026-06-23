@@ -39,6 +39,13 @@ class NativePackagingMetadataTests(unittest.TestCase):
         self.assertTrue(notices.exists())
         self.assertIn("llama.cpp", notices.read_text(encoding="utf-8"))
 
+    def test_vendored_mtmd_model_sources_exist(self) -> None:
+        mtmd_models = ROOT / "src/orbit/native_llama/vendor/source/llama.cpp/tools/mtmd/models"
+
+        self.assertTrue(mtmd_models.exists())
+        self.assertTrue((mtmd_models / "models.h").exists())
+        self.assertGreaterEqual(len(list(mtmd_models.glob("*.cpp"))), 10)
+
     def test_native_artifact_contract_lists_expected_linux_files(self) -> None:
         self.assertIn("libllama.so", LINUX_RUNTIME_LIBS)
         self.assertIn("libggml-cpu.so", LINUX_RUNTIME_LIBS)

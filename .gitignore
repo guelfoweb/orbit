@@ -7,6 +7,8 @@ dist/
 *.egg-info/
 screenshots/
 models/
+!src/orbit/native_llama/vendor/source/llama.cpp/tools/mtmd/models/
+!src/orbit/native_llama/vendor/source/llama.cpp/tools/mtmd/models/**
 workdir/pdf/
 src/orbit/native_llama/vendor/build/
 src/orbit/native_llama/vendor/lib/*.so
