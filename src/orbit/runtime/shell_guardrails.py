@@ -123,6 +123,13 @@ _READ_ONLY_PROMPT_RE = re.compile(
     r"^\s*(?:read|show|list|tell|display|print|count|search|find|grep|summari[sz]e|explain|describe)\b",
     re.IGNORECASE,
 )
+_USER_PATH_RE = re.compile(
+    r"(?:[\"'`])([^\"'`\n]+?\.[A-Za-z0-9]{1,8})(?:[\"'`])|(?:^|[\s(])([A-Za-z0-9_./-]+?\.[A-Za-z0-9]{1,8})(?=$|[\s),:;])"
+)
+_METADATA_REQUEST_RE = re.compile(
+    r"\b(?:metadata|meta-data|stat|stats|size|permission|permissions|owner|group|mtime|ctime|timestamp|timestamps|modified|file\s+info|file\s+details)\b",
+    re.IGNORECASE,
+)
 _MUTATION_PROMPT_RE = re.compile(
     r"\b(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
@@ -244,7 +251,7 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
     raw_command = arguments.get("command")
     if not isinstance(raw_command, str) or not user_prompt:
         return None
-    if not _ANALYSIS_PROMPT_RE.search(user_prompt):
+    if not _requires_direct_content_evidence(user_prompt):
         return None
     if _CONTENT_EVIDENCE_RE.search(raw_command):
         return None
@@ -252,8 +259,16 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
         return (
             f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, not only metadata/listing. "
             "Use a bounded command such as sed/head/grep/strings on the target file."
-        )
+    )
     return None
+
+
+def _requires_direct_content_evidence(user_prompt: str) -> bool:
+    if _ANALYSIS_PROMPT_RE.search(user_prompt):
+        return True
+    if _METADATA_REQUEST_RE.search(user_prompt):
+        return False
+    return _READ_ONLY_PROMPT_RE.search(user_prompt) is not None and _USER_PATH_RE.search(user_prompt) is not None
 
 
 def is_shell_full_contract_error(content: str) -> bool:
@@ -269,6 +284,17 @@ def build_shell_full_file_recovery_guard_prompt(
     last_command: str | None = None,
     last_failure_content: str | None = None,
 ) -> str:
+    prompt_prefix = SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX
+    if requested_path_exists:
+        prompt_prefix = (
+            "Requested file not read yet.\n\n"
+            "Use the real evidence below.\n"
+            "The requested file exists, but no usable content has been extracted from it yet.\n"
+            "Before answering, use one appropriate direct content-reading command on the file or a confirmed candidate path.\n"
+            "Use commands such as cat, sed -n, head, tail, or grep/rg on the file contents.\n\n"
+            "Return only JSON:\n\n"
+            '{"command":"..."}'
+        )
     details = [f"Requested file: {requested_path}"]
     if requested_path_exists:
         details.append("Requested file currently exists in the workdir: yes")
@@ -298,7 +324,7 @@ def build_shell_full_file_recovery_guard_prompt(
     elif requested_path_exists:
         details.append("No usable content has been extracted from the requested file yet.")
         details.append("Do not conclude that the file is missing or unreadable yet.")
-    return f"{SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX}\n\n" + "\n".join(details)
+    return f"{prompt_prefix}\n\n" + "\n".join(details)
 
 
 def shell_failure_from_output(content: str) -> ShellFailure | None:

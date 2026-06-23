@@ -224,6 +224,24 @@ def run_tool_loop(
             last_failure_content=last_failure_content,
         )
 
+    def file_recovery_retry_prompt(*, requested_path_exists: bool) -> str:
+        details = [
+            "The previous response still did not read the requested file contents.",
+        ]
+        if turn.requested_user_path:
+            details.append(f"Requested file: {turn.requested_user_path}")
+        if requested_path_exists:
+            details.append("The requested file exists in the workdir.")
+        details.extend(
+            [
+                "Before answering, use one appropriate exec_shell_full_command to obtain real file content evidence.",
+                "Use commands such as cat, sed -n, head, tail, or grep/rg on the file contents.",
+                "Do not answer from metadata, listings, or assumptions.",
+                "Return only the tool call.",
+            ]
+        )
+        return " ".join(details)
+
     def has_pending_internal_request() -> bool:
         return turn.has_pending_internal_request()
 
@@ -291,6 +309,19 @@ def run_tool_loop(
         if is_shell_full_contract_error(tool_result.content):
             if command and is_metadata_only_shell_command(command):
                 turn.metadata_only_rejections += 1
+            requested_path_exists = _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
+            if (
+                turn.requested_user_path
+                and not turn.content_evidence_satisfied
+                and turn.can_reconsider(RECONSIDER_FILE_RECOVERY)
+            ):
+                request_file_recovery_guard(
+                    last_command=command,
+                    last_failure_content=tool_result.content,
+                    requested_path_exists=requested_path_exists,
+                )
+                repair.contract_retry_pending = True
+                return
             if should_nudge_content_evidence():
                 request_content_evidence_guard()
             else:
@@ -479,6 +510,7 @@ def run_tool_loop(
         executing_mutation_verification_repair = repair.mutation_verification_repair_pending
         executing_mutation_semantic_repair = repair.mutation_semantic_repair_pending
         executing_content_evidence_guard = turn.pending_content_evidence_guard
+        executing_file_recovery_guard = turn.pending_file_recovery_guard
         executing_completion_guard = turn.pending_completion_guard
         executing_minimal_patch_guard = turn.pending_minimal_patch_guard
         if repair.shell_repair_prompt_pending is not None:
@@ -536,7 +568,12 @@ def run_tool_loop(
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
         if repair.contract_retry_pending and not result.tool_calls:
-            retry_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_CONTRACT_RETRY_PROMPT}]
+            retry_prompt = SHELL_FULL_CONTRACT_RETRY_PROMPT
+            if executing_file_recovery_guard and turn.requested_user_path:
+                retry_prompt = file_recovery_retry_prompt(
+                    requested_path_exists=_requested_user_path_exists(turn.requested_user_path, workdir=workdir)
+                )
+            retry_messages = [*call_messages, {"role": "user", "content": retry_prompt}]
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("tool_call_retry", streamed=False, attempt=state.tool_rounds + 1, reason="tool_contract_retry"))
             result = runtime._chat_tool_call_once(
@@ -627,8 +664,16 @@ def run_tool_loop(
         if result.tool_calls and should_nudge_file_recovery(result.tool_calls):
             request_file_recovery_guard()
             continue
-        runtime.messages.append(assistant_tool_call_message(result.content, result.tool_calls))
         if not result.tool_calls:
+            executed_internal_tool_prompt = (
+                executing_mutation_verification
+                or executing_mutation_verification_repair
+                or executing_mutation_semantic_repair
+                or executing_content_evidence_guard
+                or executing_file_recovery_guard
+                or executing_completion_guard
+                or executing_minimal_patch_guard
+            )
             if executing_mutation_semantic_repair and result.content.strip().upper() != "OK":
                 runtime.mutation_semantic_repair_failures += 1
             if executing_content_evidence_guard:
@@ -638,6 +683,17 @@ def run_tool_loop(
             if executing_minimal_patch_guard:
                 runtime.minimal_patch_guard_failures += 1
             if state.tool_rounds > 0 and shell_full_enabled:
+                if (
+                    turn.requested_user_path
+                    and turn.metadata_only_rejections > 0
+                    and not turn.content_evidence_satisfied
+                    and _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
+                    and not repair.file_content_retry_used
+                ):
+                    repair.file_content_retry_used = True
+                    turn.pending_file_recovery_guard = True
+                    turn.pending_file_recovery_guard_prompt = file_recovery_retry_prompt(requested_path_exists=True)
+                    continue
                 if should_nudge_completion():
                     request_completion_guard()
                     continue
@@ -652,7 +708,10 @@ def run_tool_loop(
                     loop=loop_index + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
                 )
+            if state.tool_rounds == 0 and not executed_internal_tool_prompt:
+                runtime.messages.append({"role": "assistant", "content": result.content})
             return result
+        runtime.messages.append(assistant_tool_call_message(result.content, result.tool_calls))
         state.increment_round()
         turn.increment_round()
         for tool_call in result.tool_calls:
