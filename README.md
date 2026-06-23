@@ -2,9 +2,9 @@
 
 Minimal local CLI for running Gemma 4 with the native `orbit server` backend.
 
-Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal Orbit setup does not require an external `llama-server` process at runtime.
+Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal setup uses Orbit's native backend and does not require an external `llama-server` process at runtime.
 
-Orbit does not require an external `llama-server` runtime process. The native backend still depends on native libraries derived from `llama.cpp`/`ggml`, built either from Orbit's vendored sources or from a documented developer fallback such as `--llama-root`. Zero-build packaging remains future work. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+The native backend still depends on native libraries derived from `llama.cpp`/`ggml`, built either from Orbit's vendored sources or from a documented developer fallback such as `--llama-root`. Zero-build packaging remains future work. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
 
 Linux is the main target environment. macOS may work. Windows is not a target environment.
 
@@ -27,6 +27,24 @@ Orbit stays model-driven. The runtime enforces safety, size, timeout, and tool-c
 - CLI default base URL: `http://127.0.0.1:12120`
 
 If your native server runs on another port, pass `--base-url`.
+
+## CPU-first native build
+
+Orbit is designed, tested, and supported primarily for CPU-only local execution.
+
+The vendored native self-build path is CPU-only in this release:
+
+```bash
+python3 scripts/build_native.py
+```
+
+GPU acceleration is not part of Orbit's supported vendored self-build path yet. Advanced users who want CUDA, Metal, Vulkan, or ROCm should build `llama.cpp` natively on the target GPU machine and point Orbit to that build through the documented developer fallback:
+
+```bash
+orbit server --llama-root /path/to/gpu-enabled/llama.cpp
+```
+
+This keeps Orbit's default path portable and stable while still allowing advanced GPU experiments through upstream `llama.cpp` builds.
 
 ## Requirements
 
@@ -55,7 +73,7 @@ This installs the Python package and CLI.
 
 ### 2. Build the native backend libraries
 
-If `vendor/lib/` does not already contain the required native libraries, build them explicitly:
+If `vendor/lib/` does not already contain the required CPU native libraries, build them explicitly:
 
 ```bash
 python3 scripts/build_native.py
