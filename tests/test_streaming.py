@@ -228,7 +228,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
+        self.assertIn("Working [prefill estimate] (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
 
     def test_wait_timer_includes_phase_label_when_present(self) -> None:
         stream = io.StringIO()
@@ -244,7 +244,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working [final answer] (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
+        self.assertIn("Working [prefill estimate] (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
 
     def test_wait_timer_prints_prefill_token_progress_when_estimated(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
@@ -257,8 +257,15 @@ class StreamingRendererTests(unittest.TestCase):
         renderer.set_phase_label("forced final")
         renderer.progress(StreamProgress(phase="prefill", current=243, total=935, percent=25))
 
-        self.assertEqual(renderer._working_phase_prefix(), " [forced final]")
+        self.assertEqual(renderer._working_phase_prefix(), " [prefill]")
         self.assertIn("prefill 243/935 tk (25%)", renderer._working_status(1))
+
+    def test_wait_timer_includes_generation_detail_in_phase_label(self) -> None:
+        renderer = StreamRenderer()
+        renderer.set_phase_label("final answer")
+        renderer.progress(StreamProgress(phase="generation", current=7, total=512, percent=1))
+
+        self.assertEqual(renderer._working_phase_prefix(), " [generation]")
 
     def test_wait_timer_names_generation_progress_explicitly(self) -> None:
         renderer = StreamRenderer()

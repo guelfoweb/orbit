@@ -195,9 +195,21 @@ class StreamRenderer:
         return ", ".join(parts)
 
     def _working_phase_prefix(self) -> str:
-        if not self._phase_label:
-            return ""
-        return f" [{self._phase_label}]"
+        detail = self._working_phase_detail()
+        if detail:
+            return f" [{detail}]"
+        return ""
+
+    def _working_phase_detail(self) -> str | None:
+        if self._progress is not None:
+            if self._progress.phase == "prefill":
+                return "prefill"
+            if self._progress.phase == "generation":
+                return "generation"
+            return self._progress.phase
+        if self._prefill_estimate_seconds and self._prefill_estimate_seconds >= 1:
+            return "prefill estimate"
+        return None
 
 
 def _terminal_columns() -> int:
