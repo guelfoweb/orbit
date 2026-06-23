@@ -45,6 +45,9 @@ class RouteRequestTests(unittest.TestCase):
     def test_parse_tool_command_accepts_raw_orbit_web_search_key_value_tool_call(self) -> None:
         self.assertEqual(parse_tool_command('<|tool_call>call:orbit-web-search{query="Dante Alighieri"}<tool_call|>'), ToolRoute.FILESYSTEM)
 
+    def test_parse_tool_command_accepts_parenthesized_shell_tool_call(self) -> None:
+        self.assertEqual(parse_tool_command('<|tool_call>call(shell, "orbit-web-search \\"Mario Nobile\\"")<tool_call|>'), ToolRoute.FILESYSTEM)
+
     def test_parse_command_decision_from_tool_calls_accepts_command_arguments(self) -> None:
         decision = parse_command_decision_from_tool_calls(
             [
@@ -138,6 +141,16 @@ EOF"}"""
         assert tool_call is not None
         args = json.loads(tool_call["function"]["arguments"])
         self.assertEqual(args["command"], "cat backup.sh")
+
+    def test_command_tool_call_from_content_accepts_parenthesized_shell_tool_call(self) -> None:
+        content = '<|tool_call>call(shell, "orbit-web-search \\"Mario Nobile\\"")<tool_call|>'
+
+        tool_call = command_tool_call_from_content(content, ("exec_shell_full_command",))
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        args = json.loads(tool_call["function"]["arguments"])
+        self.assertEqual(args["command"], 'orbit-web-search "Mario Nobile"')
 
     def test_command_tool_call_from_content_respects_allowed_tools(self) -> None:
         self.assertIsNone(command_tool_call_from_content('{"command":"ls -F"}', ("read_file",)))

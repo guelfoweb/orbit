@@ -1583,6 +1583,217 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.tool_names_seen[0], ())
         self.assertEqual(backend.tool_names_seen[1], ())
 
+    def test_ask_auto_routes_parenthesized_raw_shell_tool_call_to_tool_loop(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content='<|tool_call>call(shell, "orbit-web-search \\"Mario Nobile\\"")<tool_call|>',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=22,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": "{\"command\":\"orbit-web-search 'Mario Nobile'\"}",
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Mario Nobile is an Italian public official.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=9,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "search online for information about Mario Nobile",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "Mario Nobile is an Italian public official.")
+        self.assertEqual(backend.calls, 3)
+
+    def test_ask_auto_retries_route_as_tool_call_after_length_without_decision(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.retry_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="This answer wanders and never reaches a valid routing decision",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=96,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    self.retry_messages = messages
+                    return ChatResult(
+                        content='{"command":"cat note.txt"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="hello from note",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("hello from note", encoding="utf-8")
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "read note.txt",
+                temperature=0,
+                max_tokens=96,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "hello from note")
+        self.assertEqual(backend.calls, 3)
+        self.assertIsNotNone(backend.retry_messages)
+        self.assertEqual(backend.retry_messages[0]["content"], TOOL_CALL_SYSTEM_PROMPT)
+
+    def test_ask_auto_retries_explicit_web_search_prompt_when_route_answers_in_prose(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.retry_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="I could not find anything useful from memory.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=12,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    self.retry_messages = messages
+                    return ChatResult(
+                        content="I still cannot route this correctly.",
+                        model="fake",
+                        finish_reason="length",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=96,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"printf 'Mario Nobile is a public official.'\"}"},
+                            }
+                        ],
+                        prompt_tokens=7,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Mario Nobile is a public official.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=6,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_auto(
+                "search online for information about Mario Nobile",
+                temperature=0,
+                max_tokens=96,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "Mario Nobile is a public official.")
+        self.assertEqual(backend.calls, 5)
+        self.assertIsNotNone(backend.retry_messages)
+        self.assertEqual(backend.retry_messages[0]["content"], TOOL_CALL_SYSTEM_PROMPT)
+
     def test_shell_full_analysis_metadata_only_command_gets_one_model_retry(self) -> None:
         class ShellFullAnalysisBackend:
             def __init__(self) -> None:
@@ -5426,6 +5637,63 @@ EOF"""
         self.assertEqual(backend.chat_stream_calls, 3)
         phases = [step.phase for step in steps]
         self.assertEqual(phases, ["tool_call", "final_from_tool", "final_from_tool_retry"])
+
+    def test_final_from_tool_emits_result_content_when_buffered_stream_has_no_deltas(self) -> None:
+        class BufferedNoDeltaBackend:
+            def __init__(self) -> None:
+                self.chat_stream_calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                if self.chat_stream_calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"orbit-web-search 'Mario Nobile'\"}"},
+                            }
+                        ],
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        cached_tokens=None,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Mario Nobile is an Italian public official.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=9,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        emitted: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = BufferedNoDeltaBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "search online for information about Mario Nobile",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+                on_final_delta=emitted.append,
+            )
+
+        self.assertEqual(result.content, "Mario Nobile is an Italian public official.")
+        self.assertEqual(emitted, ["Mario Nobile is an Italian public official."])
+        self.assertEqual(backend.chat_stream_calls, 2)
 
     def test_ask_with_tools_emits_tool_call_event(self) -> None:
         events: list[tuple[str, str]] = []

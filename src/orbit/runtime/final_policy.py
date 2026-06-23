@@ -98,6 +98,7 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
     compact_shell_analysis_result = (
         shell_full_result
         and _has_long_shell_tool_result(messages)
+        and is_shell_review_request(prompt)
         and not (large_file_excerpt or web_fetch_result or pdf_text_result or list_like_result or operational_status_result)
     )
     if large_file_excerpt:
@@ -752,6 +753,10 @@ _BRIEF_FINAL_REQUEST_RE = re.compile(
     r"\b(?:one\s+sentence|single\s+sentence|one\s+concise\s+sentence|concise\s+sentence|brief(?:ly)?|short(?:ly)?|in\s+short|main\s+(?:issue|point|finding)|brief\s+answer|short\s+answer)\b",
     re.IGNORECASE,
 )
+_SHELL_REVIEW_REQUEST_RE = re.compile(
+    r"\b(?:review|inspect|audit|diagnos(?:e|is)|debug|bug|issue|issues|problem|problems|fix|remediat\w*|vulnerab\w*|security|secure|weakness|weaknesses|risk|risks|exploit|injection|misconfig\w*|failure|failures)\b",
+    re.IGNORECASE,
+)
 
 
 def last_user_text(messages: list[Message]) -> str | None:
@@ -767,6 +772,12 @@ def is_brief_final_request(prompt: str | None) -> bool:
     if prompt is None:
         return False
     return bool(_BRIEF_FINAL_REQUEST_RE.search(prompt))
+
+
+def is_shell_review_request(prompt: str | None) -> bool:
+    if not prompt:
+        return False
+    return bool(_SHELL_REVIEW_REQUEST_RE.search(prompt))
 
 
 def is_operational_status_request(prompt: str | None) -> bool:
