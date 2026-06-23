@@ -284,6 +284,17 @@ def build_shell_full_file_recovery_guard_prompt(
     last_command: str | None = None,
     last_failure_content: str | None = None,
 ) -> str:
+    prompt_prefix = SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX
+    if requested_path_exists:
+        prompt_prefix = (
+            "Requested file not read yet.\n\n"
+            "Use the real evidence below.\n"
+            "The requested file exists, but no usable content has been extracted from it yet.\n"
+            "Before answering, use one appropriate direct content-reading command on the file or a confirmed candidate path.\n"
+            "Use commands such as cat, sed -n, head, tail, or grep/rg on the file contents.\n\n"
+            "Return only JSON:\n\n"
+            '{"command":"..."}'
+        )
     details = [f"Requested file: {requested_path}"]
     if requested_path_exists:
         details.append("Requested file currently exists in the workdir: yes")
@@ -313,7 +324,7 @@ def build_shell_full_file_recovery_guard_prompt(
     elif requested_path_exists:
         details.append("No usable content has been extracted from the requested file yet.")
         details.append("Do not conclude that the file is missing or unreadable yet.")
-    return f"{SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX}\n\n" + "\n".join(details)
+    return f"{prompt_prefix}\n\n" + "\n".join(details)
 
 
 def shell_failure_from_output(content: str) -> ShellFailure | None:

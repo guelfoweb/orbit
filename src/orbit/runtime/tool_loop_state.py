@@ -42,6 +42,7 @@ class ToolRepairState:
     mutation_verification_repair_used: bool = False
     mutation_semantic_repair_pending: bool = False
     mutation_semantic_repair_used: bool = False
+    file_content_retry_used: bool = False
 
     def has_pending(self) -> bool:
         return (

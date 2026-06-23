@@ -23,7 +23,6 @@ from orbit.runtime.shell_guardrails import (
     SHELL_FULL_COMPLETION_GUARD_PROMPT,
     SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT,
     SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT,
-    SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX,
     SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT,
     SHELL_FULL_SEMANTIC_REPAIR_PROMPT,
     should_verify_shell_mutation,
@@ -1887,7 +1886,8 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(backend.tools_seen[2])
         self.assertEqual(backend.tools_seen[3], None)
         self.assertIsNotNone(backend.second_call_last_message)
-        self.assertIn("content/source/string evidence", backend.second_call_last_message["content"])
+        self.assertIn("Requested file: samples/vulnerable_service.py", backend.second_call_last_message["content"])
+        self.assertIn("No usable content has been extracted from the requested file yet.", backend.second_call_last_message["content"])
         self.assertIsNotNone(backend.third_call_last_message)
         self.assertIn("Return only the tool call", backend.third_call_last_message["content"])
 
@@ -2057,7 +2057,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
                 last_content = str(messages[-1].get("content"))
-                if SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX in last_content and self.guard_messages is None:
+                if "Requested file not read yet." in last_content and self.guard_messages is None:
                     self.guard_messages = messages
                     self.guard_max_tokens = max_tokens
                 if self.calls == 1:
@@ -2144,7 +2144,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn("shell=True", tool_messages[2]["content"])
         self.assertIsNotNone(backend.guard_messages)
         self.assertEqual(backend.guard_max_tokens, 64)
-        self.assertIn(SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX, backend.guard_messages[-1]["content"])
+        self.assertIn("Requested file not read yet.", backend.guard_messages[-1]["content"])
         self.assertIn("Requested file: vulnerable_service.py", backend.guard_messages[-1]["content"])
         self.assertIn("Direct read failure:", backend.guard_messages[-1]["content"])
         self.assertIn("./samples/vulnerable_service.py", backend.guard_messages[-1]["content"])
@@ -2159,7 +2159,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
                 last_content = str(messages[-1].get("content"))
-                if SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX in last_content and self.guard_messages is None:
+                if "Requested file not read yet." in last_content and self.guard_messages is None:
                     self.guard_messages = messages
                 if "The previous shell command failed." in last_content:
                     self.generic_shell_repairs += 1
@@ -2235,7 +2235,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
                 last_content = str(messages[-1].get("content"))
-                if SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX in last_content and self.guard_messages is None:
+                if "Requested file not read yet." in last_content and self.guard_messages is None:
                     self.guard_messages = messages
                 if self.calls == 1:
                     return ChatResult(
@@ -4548,7 +4548,35 @@ EOF"""
                         generation_tokens_per_second=None,
                     )
                 if self.calls == 3:
-                    if "require content/source/string evidence" not in messages[-1]["content"]:
+                    if not messages[-1]["content"].startswith("Requested file not read yet."):
+                        raise AssertionError(messages[-1]["content"])
+                    return ChatResult(
+                        content="I cannot confirm the content of the file yet.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 4:
+                    if "still did not read the requested file contents" not in messages[-1]["content"]:
+                        raise AssertionError(messages[-1]["content"])
+                    return ChatResult(
+                        content="I still cannot confirm the content of the file.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 5:
+                    if "still did not read the requested file contents" not in messages[-1]["content"]:
                         raise AssertionError(messages[-1]["content"])
                     return ChatResult(
                         content='{"command":"cat README.md"}',
@@ -4590,8 +4618,10 @@ EOF"""
 
         self.assertEqual(first.content, "hello there")
         self.assertEqual(second.content, "done")
-        self.assertEqual(backend.calls, 5)
+        self.assertEqual(backend.calls, 6)
         self.assertIn("hi", str(backend.messages_seen[1]))
+        self.assertNotIn("I cannot confirm the content of the file yet.", str(backend.messages_seen[3]))
+        self.assertNotIn("I still cannot confirm the content of the file.", str(backend.messages_seen[4]))
 
     def test_ask_auto_media_without_path_is_normal_chat_without_command_json(self) -> None:
         class MediaRouteBackend:
