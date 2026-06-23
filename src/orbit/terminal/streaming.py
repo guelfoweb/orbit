@@ -174,11 +174,11 @@ class StreamRenderer:
         parts = [format_elapsed(elapsed)]
         if self._progress is not None:
             if self._progress.phase == "prefill":
-                parts.append(f"prefill {self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
+                parts.append(f"{self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
             elif self._progress.phase == "generation":
-                parts.append(f"generation {self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
+                parts.append(f"{self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
             else:
-                parts.append(f"{self._progress.phase} {self._progress.current}/{self._progress.total} ({self._progress.percent}%)")
+                parts.append(f"{self._progress.current}/{self._progress.total} ({self._progress.percent}%)")
             return ", ".join(parts)
         if self._prefill_estimate_seconds and self._prefill_estimate_seconds >= 1:
             progress = max(1, int((elapsed / self._prefill_estimate_seconds) * 100))
