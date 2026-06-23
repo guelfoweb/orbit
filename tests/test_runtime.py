@@ -4514,6 +4514,85 @@ EOF"""
         self.assertEqual(backend.tool_names_seen[0], ())
         self.assertEqual(backend.tool_names_seen[1], ())
 
+    def test_ask_auto_rejects_metadata_only_file_read_after_prior_chat_turn(self) -> None:
+        class MultiTurnBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="hello there",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content='{"command":"ls -F"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    if "require content/source/string evidence" not in messages[-1]["content"]:
+                        raise AssertionError(messages[-1]["content"])
+                    return ChatResult(
+                        content='{"command":"cat README.md"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="done",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "README.md").write_text("Orbit README", encoding="utf-8")
+            backend = MultiTurnBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            first = runtime.ask_auto("hi", temperature=0, max_tokens=32, workdir=workdir)
+            second = runtime.ask_auto(
+                "read the README.md file and explain it in a concise three-sentence list",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(first.content, "hello there")
+        self.assertEqual(second.content, "done")
+        self.assertEqual(backend.calls, 5)
+        self.assertIn("hi", str(backend.messages_seen[1]))
+
     def test_ask_auto_media_without_path_is_normal_chat_without_command_json(self) -> None:
         class MediaRouteBackend:
             def __init__(self) -> None:
