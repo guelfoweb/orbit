@@ -277,6 +277,31 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("brief remediation", policy.messages[-1]["content"])
         self.assertEqual(final_tool_compact_retry_max_tokens(512, messages=policy.messages), 160)
 
+    def test_long_shell_informational_policy_does_not_use_finding_fix_format(self) -> None:
+        messages = [
+            {"role": "user", "content": "tell me the specs about this computer"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "uname -a; lscpu; free -h; df -h"},
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "name": "exec_shell_full_command", "content": "x" * 1600},
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=160, streamed=False)
+
+        self.assertNotIn("'- Finding: ... Fix: ...'", policy.messages[-1]["content"])
+        self.assertIn("Answer the latest user request directly and concisely", policy.messages[-1]["content"])
+        self.assertIn("Prefer the most recent relevant shell result", policy.messages[-1]["content"])
+        self.assertEqual(policy.max_tokens, 256)
+
     def test_compact_retry_max_tokens_stays_default_for_non_shell_policy(self) -> None:
         messages = [
             {"role": "user", "content": 'Leggi il PDF "pdf/small.pdf" e fammi una sintesi dettagliata.'},
