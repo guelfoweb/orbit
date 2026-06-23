@@ -195,12 +195,9 @@ class StreamRenderer:
         return ", ".join(parts)
 
     def _working_phase_prefix(self) -> str:
-        label = self._phase_label
         detail = self._working_phase_detail()
-        if label and detail:
-            return f" [{label} · {detail}]"
-        if label:
-            return f" [{label}]"
+        if detail:
+            return f" [{detail}]"
         return ""
 
     def _working_phase_detail(self) -> str | None:
