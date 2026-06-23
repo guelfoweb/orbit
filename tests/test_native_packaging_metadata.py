@@ -46,6 +46,13 @@ class NativePackagingMetadataTests(unittest.TestCase):
         self.assertTrue((mtmd_models / "models.h").exists())
         self.assertGreaterEqual(len(list(mtmd_models.glob("*.cpp"))), 10)
 
+    def test_vendored_llama_model_sources_exist(self) -> None:
+        llama_models = ROOT / "src/orbit/native_llama/vendor/source/llama.cpp/src/models"
+
+        self.assertTrue(llama_models.exists())
+        self.assertTrue((llama_models / "models.h").exists())
+        self.assertGreaterEqual(len(list(llama_models.glob("*.cpp"))), 50)
+
     def test_vendored_llama_cmake_includes_mtmd_models_when_present(self) -> None:
         src_cmake = ROOT / "src/orbit/native_llama/vendor/source/llama.cpp/src/CMakeLists.txt"
         text = src_cmake.read_text(encoding="utf-8")
