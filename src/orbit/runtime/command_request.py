@@ -289,6 +289,17 @@ def _extract_loose_command_object(content: str) -> dict[str, Any] | None:
 
 
 def _extract_loose_raw_shell_command(text: str) -> str | None:
+    call_match = re.search(
+        r'<\|tool_call\>\s*call\s*\(\s*(?P<name>[A-Za-z0-9_-]+)\s*,\s*"(?P<command>(?:[^"\\]|\\.)*)"\s*\)\s*(?=<\|tool_call\>|<tool_call\|>|$)',
+        text,
+        flags=re.DOTALL,
+    )
+    if call_match:
+        name = call_match.group("name")
+        if name not in SHELL_TOOL_ALIASES:
+            return None
+        command = _decode_loose_json_string(call_match.group("command")).strip()
+        return command or None
     match = re.search(
         r"<\|tool_call\>\s*call\s+shell\s+(?P<command>.*?)(?=<\|tool_call\>|<tool_call\|>|$)",
         text,

@@ -36,6 +36,7 @@ from orbit.runtime.messages import (
     with_final_tool_system_prompt,
     with_media_system_prompt,
     with_command_system_prompt,
+    with_tool_call_system_prompt,
 )
 
 from orbit.runtime.command_request import (
@@ -64,6 +65,14 @@ from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
 ROUTE_MAX_TOKENS = 128
+_ROUTE_TOOL_RETRY_PROMPT_RE = re.compile(
+    r"\b(?:search|online|web|url|http|https|read|show|print|inspect|analy[sz]e|review|list|find|grep|curl|fetch|directory|folder|file|path|pdf|html|source|current\s+directory|computer|system|specs?)\b|[/\\]|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_WEB_SEARCH_RE = re.compile(
+    r"\b(?:search\s+(?:online|the\s+web|web)|web\s+search|look\s+up\s+online|find\s+online|cerca\s+(?:online|sul\s+web|nel\s+web))\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -304,55 +313,108 @@ class ChatRuntime:
         command_content = first.content
         decision = parse_command_decision_from_tool_calls(first.tool_calls) or parse_command_decision(command_content)
         if decision is None:
-            initial_shell_tool_call = command_tool_call_from_tool_calls(first.tool_calls, ("exec_shell_full_command",)) or command_tool_call_from_content(command_content, ("exec_shell_full_command",))
-            route_requires_chat_final = contains_control_channel_markup(first.content)
-            if route_requires_chat_final and first.finish_reason != "length":
-                first = self._transport_environment().chat_final(
-                    with_chat_system_prompt(self.messages),
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    on_final_delta=on_final_delta,
-                    on_progress=on_progress,
-                    on_model_step=on_model_step,
-                    on_phase_start=on_phase_start,
-                    loop=2,
-                )
-                retried_empty_final = True
-            if first.finish_reason == "length":
-                if on_final_delta is None:
-                    first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
-                else:
-                    streamed_final_retry = True
-                    first = self.backend.chat_stream(
+            explicit_web_search = _requires_explicit_web_search_tool(prompt, allowed_tool_names)
+            if _should_force_tool_route_retry(prompt, allowed_tool_names, first.finish_reason):
+                with self._temporary_backend_thinking(False):
+                    route_retry_messages = _route_retry_messages(
+                        self.messages,
+                        explicit_web_search=explicit_web_search,
+                    )
+                    if on_phase_start:
+                        on_phase_start(
+                            ModelPhaseStart(
+                                "route_retry",
+                                streamed=False,
+                                attempt=2,
+                                reason="explicit_web_search" if explicit_web_search else "length_without_decision",
+                            )
+                        )
+                    if on_progress is None:
+                        route_retry = self.backend.chat(
+                            route_retry_messages,
+                            temperature=temperature,
+                            max_tokens=command_max_tokens,
+                        )
+                    else:
+                        route_retry = self.backend.chat_stream(
+                            route_retry_messages,
+                            temperature=temperature,
+                            max_tokens=command_max_tokens,
+                            on_delta=lambda _text: None,
+                            on_progress=on_progress,
+                        )
+                if on_model_step:
+                    on_model_step(ModelStepMetrics.from_result(loop=2, result=route_retry, phase="route_retry"))
+                retry_decision = parse_command_decision_from_tool_calls(route_retry.tool_calls) or parse_command_decision(route_retry.content)
+                if retry_decision is not None:
+                    first = route_retry
+                    command_content = route_retry.content
+                    decision = retry_decision
+            if decision is None:
+                if explicit_web_search:
+                    bundle = self._run_tool_loop(
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        workdir=workdir,
+                        max_loops=max_loops,
+                        on_final_delta=on_final_delta,
+                        on_progress=on_progress,
+                        on_tool_call=on_tool_call,
+                        on_tool_result=on_tool_result,
+                        on_model_step=on_model_step,
+                        on_phase_start=on_phase_start,
+                        tool_names=("exec_shell_full_command",),
+                    )
+                    return self._remember_visible_result(_tool_loop_result_value(bundle))
+                initial_shell_tool_call = command_tool_call_from_tool_calls(first.tool_calls, ("exec_shell_full_command",)) or command_tool_call_from_content(command_content, ("exec_shell_full_command",))
+                route_requires_chat_final = contains_control_channel_markup(first.content)
+                if route_requires_chat_final and first.finish_reason != "length":
+                    first = self._transport_environment().chat_final(
+                        with_chat_system_prompt(self.messages),
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        on_final_delta=on_final_delta,
+                        on_progress=on_progress,
+                        on_model_step=on_model_step,
+                        on_phase_start=on_phase_start,
+                        loop=2,
+                    )
+                    retried_empty_final = True
+                if first.finish_reason == "length":
+                    if on_final_delta is None:
+                        first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
+                    else:
+                        streamed_final_retry = True
+                        first = self.backend.chat_stream(
+                            self.messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            on_delta=on_final_delta,
+                            on_progress=on_progress,
+                        )
+                    if on_model_step:
+                        on_model_step(ModelStepMetrics.from_result(loop=2, result=first, phase="chat_final_retry"))
+                if _is_empty_final_response(first):
+                    retried_empty_final = True
+                    first = self._transport_environment().chat_final(
                         self.messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
-                        on_delta=on_final_delta,
+                        on_final_delta=on_final_delta,
                         on_progress=on_progress,
+                        on_model_step=on_model_step,
+                        on_phase_start=on_phase_start,
+                        loop=2,
                     )
-                if on_model_step:
-                    on_model_step(ModelStepMetrics.from_result(loop=2, result=first, phase="chat_final_retry"))
-            if _is_empty_final_response(first):
-                retried_empty_final = True
-                first = self._transport_environment().chat_final(
-                    self.messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    on_final_delta=on_final_delta,
-                    on_progress=on_progress,
-                    on_model_step=on_model_step,
-                    on_phase_start=on_phase_start,
-                    loop=2,
-                )
-            self.messages.append({"role": "assistant", "content": first.content})
-            if on_final_delta and not streamed_final_retry and not retried_empty_final:
-                if route_stream_filter is not None:
-                    route_stream_filter.finish()
-                    for chunk in route_streamed_chunks:
-                        on_final_delta(chunk)
-                else:
-                    on_final_delta(first.content)
-            return self._remember_visible_result(first)
+                self.messages.append({"role": "assistant", "content": first.content})
+                if on_final_delta and not streamed_final_retry and not retried_empty_final:
+                    if route_stream_filter is not None:
+                        route_stream_filter.finish()
+                        for chunk in route_streamed_chunks:
+                            on_final_delta(chunk)
+                    else:
+                        on_final_delta(first.content)
+                return self._remember_visible_result(first)
         if decision.route == ToolRoute.CHAT:
             chat_messages = with_chat_system_prompt(self.messages)
             result = self._chat_final(
@@ -826,6 +888,40 @@ def _tool_call_command(tool_call: dict[str, object] | None) -> str | None:
         return None
     command = arguments.get("command")
     return command if isinstance(command, str) else None
+
+
+def _should_retry_route_as_tool_call(prompt: str, allowed_tool_names: tuple[str, ...] | None) -> bool:
+    if "exec_shell_full_command" not in set(allowed_tool_names or ()):
+        return False
+    return bool(_ROUTE_TOOL_RETRY_PROMPT_RE.search(prompt))
+
+
+def _requires_explicit_web_search_tool(prompt: str, allowed_tool_names: tuple[str, ...] | None) -> bool:
+    if "exec_shell_full_command" not in set(allowed_tool_names or ()):
+        return False
+    return bool(_EXPLICIT_WEB_SEARCH_RE.search(prompt))
+
+
+def _should_force_tool_route_retry(prompt: str, allowed_tool_names: tuple[str, ...] | None, finish_reason: str | None) -> bool:
+    if _requires_explicit_web_search_tool(prompt, allowed_tool_names):
+        return True
+    return finish_reason == "length" and _should_retry_route_as_tool_call(prompt, allowed_tool_names)
+
+
+def _route_retry_messages(messages: list[Message], *, explicit_web_search: bool) -> list[Message]:
+    reminder = (
+        "The user explicitly asked for an online/web search. "
+        "Do not answer from memory. "
+        "Return exactly one shell tool call now that performs the search. Output no prose."
+        if explicit_web_search
+        else
+        "The previous routing pass did not return a valid decision. "
+        "Return exactly one shell tool call now if shell/web/file access is needed. Output no prose."
+    )
+    return [
+        *with_tool_call_system_prompt(messages),
+        {"role": "user", "content": reminder},
+    ]
 
 
 def _tool_loop_result_value(result):

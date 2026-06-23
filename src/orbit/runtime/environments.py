@@ -593,6 +593,8 @@ class FinalFromToolEnvironment:
         if stream_buffer is not None and on_final_delta is not None:
             if used_retry_or_repair_pass and result.content:
                 on_final_delta(result.content)
+            elif not stream_buffer.chunks and result.content:
+                on_final_delta(result.content)
             else:
                 for chunk in stream_buffer.chunks:
                     on_final_delta(chunk)
