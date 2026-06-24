@@ -18,6 +18,9 @@ from orbit.runtime.shell_guardrails import (
     SHELL_FULL_CONTRACT_RETRY_PROMPT,
     SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT,
     build_shell_full_file_recovery_guard_prompt,
+    build_shell_full_url_recovery_guard_prompt,
+    extract_requested_user_url,
+    is_explicit_url_fetch_shell_command,
     SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT,
     SHELL_FULL_SEMANTIC_REPAIR_PROMPT,
     is_incomplete_shell_json_or_command_error,
@@ -29,6 +32,7 @@ from orbit.runtime.shell_guardrails import (
     is_shell_full_contract_error,
     is_shell_full_execution_error,
     looks_like_broad_file_rewrite,
+    requires_url_content_evidence,
     shell_repair_prompt,
     should_verify_shell_mutation,
 )
@@ -43,6 +47,7 @@ from orbit.runtime.tool_loop_state import (
     RECONSIDER_CONTENT_EVIDENCE,
     RECONSIDER_FILE_RECOVERY,
     RECONSIDER_MINIMAL_PATCH,
+    RECONSIDER_URL_RECOVERY,
     ToolLoopState,
     ToolTurnState,
 )
@@ -91,13 +96,24 @@ def run_tool_loop(
     last_result: ChatResult | None = None
     state = ToolLoopState(allowed_tool_names)
     user_prompt = _last_user_text(runtime.messages)
-    turn = ToolTurnState(requested_user_path=_extract_requested_user_path(user_prompt))
+    turn = ToolTurnState(
+        requested_user_path=_extract_requested_user_path(user_prompt),
+        requested_user_url=extract_requested_user_url(user_prompt),
+    )
     repair = turn.repair_state
     shell_full_enabled = "exec_shell_full_command" in allowed_tool_names
+    url_content_required = requires_url_content_evidence(user_prompt)
     suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
 
     # These local helpers still couple policy and runtime counters in one place.
     # The state objects only store turn-local facts; they do not decide tasks.
+
+    def has_required_direct_evidence() -> bool:
+        return (
+            turn.content_evidence_satisfied
+            or turn.url_content_evidence_satisfied
+            or turn.url_failure_evidence_satisfied
+        )
 
     def should_nudge_completion() -> bool:
         return (
@@ -224,6 +240,23 @@ def run_tool_loop(
             last_failure_content=last_failure_content,
         )
 
+    def request_url_recovery_guard(
+        *,
+        last_command: str | None = None,
+        last_failure_content: str | None = None,
+        fetch_attempted: bool = False,
+    ) -> None:
+        if not turn.requested_user_url:
+            return
+        turn.pending_url_recovery_guard = True
+        turn.mark_reconsider(RECONSIDER_URL_RECOVERY)
+        turn.pending_url_recovery_guard_prompt = build_shell_full_url_recovery_guard_prompt(
+            requested_url=turn.requested_user_url,
+            last_command=last_command,
+            last_failure_content=last_failure_content,
+            fetch_attempted=fetch_attempted or turn.url_fetch_attempted,
+        )
+
     def file_recovery_retry_prompt(*, requested_path_exists: bool) -> str:
         details = [
             "The previous response still did not read the requested file contents.",
@@ -242,13 +275,30 @@ def run_tool_loop(
         )
         return " ".join(details)
 
+    def url_recovery_retry_prompt(*, fetch_attempted: bool) -> str:
+        details = [
+            "The previous response still did not obtain usable content or a real HTTP/network failure for the requested URL.",
+        ]
+        if turn.requested_user_url:
+            details.append(f"Requested URL: {turn.requested_user_url}")
+        if fetch_attempted or turn.url_fetch_attempted:
+            details.append("A direct fetch attempt is still required to answer safely.")
+        details.extend(
+            [
+                "Before answering, use one appropriate exec_shell_full_command to retrieve the URL content or verify the real HTTP/network failure.",
+                "Do not speculate from the URL alone.",
+                "Return only the tool call.",
+            ]
+        )
+        return " ".join(details)
+
     def has_pending_internal_request() -> bool:
         return turn.has_pending_internal_request()
 
     def should_handoff_to_final_from_tool() -> bool:
         return (
             shell_full_enabled
-            and turn.content_evidence_satisfied
+            and has_required_direct_evidence()
             and turn.finalizable
             and not has_pending_internal_request()
             and not repair.shell_error_final_pending
@@ -275,10 +325,17 @@ def run_tool_loop(
         raw_arguments = _shell_raw_arguments_from_tool_call(tool_call)
         command_is_mutating = bool(command and is_mutating_shell_command(command))
         command_is_content_evidence = bool(command and is_content_evidence_shell_command(command))
+        command_is_url_fetch = bool(
+            command
+            and turn.requested_user_url
+            and is_explicit_url_fetch_shell_command(command, requested_url=turn.requested_user_url)
+        )
         tool_output_kind = _classify_shell_output_kind(command, tool_result.content, requested_path=turn.requested_user_path)
         turn.set_tool_result_kind(tool_output_kind)
         if command:
             turn.shell_commands_seen += 1
+        if command_is_url_fetch:
+            turn.url_fetch_attempted = True
         if command_is_mutating:
             turn.shell_mutation_attempted = True
         if is_content_evidence_guard:
@@ -309,6 +366,19 @@ def run_tool_loop(
         if is_shell_full_contract_error(tool_result.content):
             if command and is_metadata_only_shell_command(command):
                 turn.metadata_only_rejections += 1
+            if (
+                url_content_required
+                and turn.requested_user_url
+                and not has_required_direct_evidence()
+                and turn.can_reconsider(RECONSIDER_URL_RECOVERY)
+            ):
+                request_url_recovery_guard(
+                    last_command=command,
+                    last_failure_content=tool_result.content,
+                    fetch_attempted=command_is_url_fetch,
+                )
+                repair.contract_retry_pending = True
+                return
             requested_path_exists = _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
             if (
                 turn.requested_user_path
@@ -330,6 +400,11 @@ def run_tool_loop(
                 runtime.content_evidence_guard_failures += 1
             return
         if is_shell_full_execution_error(tool_result.content):
+            if command_is_url_fetch:
+                turn.mark_url_failure_evidence(_summarize_shell_error(tool_result.content))
+                repair.shell_error_final_pending = True
+                turn.mark_exhausted()
+                return
             direct_requested_read_failed = bool(
                 turn.requested_user_path
                 and command
@@ -390,6 +465,8 @@ def run_tool_loop(
         if command_is_mutating:
             turn.shell_mutation_succeeded = True
         if tool_result.content.strip():
+            if command_is_url_fetch and not command_is_mutating:
+                turn.mark_url_content_evidence()
             if command_is_content_evidence and not command_is_mutating:
                 turn.mark_direct_content_read()
                 if is_content_evidence_guard:
@@ -511,6 +588,7 @@ def run_tool_loop(
         executing_mutation_semantic_repair = repair.mutation_semantic_repair_pending
         executing_content_evidence_guard = turn.pending_content_evidence_guard
         executing_file_recovery_guard = turn.pending_file_recovery_guard
+        executing_url_recovery_guard = turn.pending_url_recovery_guard
         executing_completion_guard = turn.pending_completion_guard
         executing_minimal_patch_guard = turn.pending_minimal_patch_guard
         if repair.shell_repair_prompt_pending is not None:
@@ -525,6 +603,8 @@ def run_tool_loop(
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_ANALYSIS_COMPLETION_GUARD_PROMPT}]
         elif turn.pending_file_recovery_guard:
             call_messages = [*call_messages, {"role": "user", "content": turn.pending_file_recovery_guard_prompt or ""}]
+        elif turn.pending_url_recovery_guard:
+            call_messages = [*call_messages, {"role": "user", "content": turn.pending_url_recovery_guard_prompt or ""}]
         elif turn.pending_minimal_patch_guard:
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT}]
         elif turn.pending_completion_guard:
@@ -538,6 +618,7 @@ def run_tool_loop(
                 or repair.mutation_semantic_repair_pending
                 or turn.pending_content_evidence_guard
                 or turn.pending_analysis_completion_guard
+                or turn.pending_url_recovery_guard
                 or turn.pending_minimal_patch_guard
                 or turn.pending_completion_guard
                 or repair.mutation_verification_pending
@@ -573,6 +654,8 @@ def run_tool_loop(
                 retry_prompt = file_recovery_retry_prompt(
                     requested_path_exists=_requested_user_path_exists(turn.requested_user_path, workdir=workdir)
                 )
+            elif executing_url_recovery_guard and turn.requested_user_url:
+                retry_prompt = url_recovery_retry_prompt(fetch_attempted=turn.url_fetch_attempted)
             retry_messages = [*call_messages, {"role": "user", "content": retry_prompt}]
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("tool_call_retry", streamed=False, attempt=state.tool_rounds + 1, reason="tool_contract_retry"))
@@ -671,6 +754,7 @@ def run_tool_loop(
                 or executing_mutation_semantic_repair
                 or executing_content_evidence_guard
                 or executing_file_recovery_guard
+                or executing_url_recovery_guard
                 or executing_completion_guard
                 or executing_minimal_patch_guard
             )
@@ -683,6 +767,16 @@ def run_tool_loop(
             if executing_minimal_patch_guard:
                 runtime.minimal_patch_guard_failures += 1
             if state.tool_rounds > 0 and shell_full_enabled:
+                if (
+                    url_content_required
+                    and turn.requested_user_url
+                    and not has_required_direct_evidence()
+                    and not repair.url_content_retry_used
+                ):
+                    repair.url_content_retry_used = True
+                    turn.pending_url_recovery_guard = True
+                    turn.pending_url_recovery_guard_prompt = url_recovery_retry_prompt(fetch_attempted=turn.url_fetch_attempted)
+                    continue
                 if (
                     turn.requested_user_path
                     and turn.metadata_only_rejections > 0
@@ -708,6 +802,15 @@ def run_tool_loop(
                     loop=loop_index + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
                 )
+            if (
+                shell_full_enabled
+                and url_content_required
+                and turn.requested_user_url
+                and not has_required_direct_evidence()
+                and not executed_internal_tool_prompt
+            ):
+                request_url_recovery_guard(fetch_attempted=turn.url_fetch_attempted)
+                continue
             if state.tool_rounds == 0 and not executed_internal_tool_prompt:
                 runtime.messages.append({"role": "assistant", "content": result.content})
             return result

@@ -19,6 +19,7 @@ EVIDENCE_EXHAUSTED = "exhausted"
 RECONSIDER_CONTENT_EVIDENCE = "content_evidence"
 RECONSIDER_ANALYSIS_COMPLETION = "analysis_completion"
 RECONSIDER_FILE_RECOVERY = "file_recovery"
+RECONSIDER_URL_RECOVERY = "url_recovery"
 RECONSIDER_COMPLETION = "completion"
 RECONSIDER_MINIMAL_PATCH = "minimal_patch"
 
@@ -43,6 +44,7 @@ class ToolRepairState:
     mutation_semantic_repair_pending: bool = False
     mutation_semantic_repair_used: bool = False
     file_content_retry_used: bool = False
+    url_content_retry_used: bool = False
 
     def has_pending(self) -> bool:
         return (
@@ -67,6 +69,7 @@ class ToolTurnState:
     """
 
     requested_user_path: str | None = None
+    requested_user_url: str | None = None
     round_count: int = 0
     evidence_state: str = EVIDENCE_UNRESOLVED
     candidate_paths: list[str] = field(default_factory=list)
@@ -81,12 +84,17 @@ class ToolTurnState:
     pending_analysis_completion_guard: bool = False
     pending_file_recovery_guard: bool = False
     pending_file_recovery_guard_prompt: str | None = None
+    pending_url_recovery_guard: bool = False
+    pending_url_recovery_guard_prompt: str | None = None
     pending_completion_guard: bool = False
     pending_minimal_patch_guard: bool = False
     metadata_only_rejections: int = 0
     shell_commands_seen: int = 0
     shell_mutation_attempted: bool = False
     shell_mutation_succeeded: bool = False
+    url_fetch_attempted: bool = False
+    url_content_evidence_satisfied: bool = False
+    url_failure_evidence_satisfied: bool = False
 
     def increment_round(self) -> None:
         self.round_count += 1
@@ -103,6 +111,7 @@ class ToolTurnState:
             or self.pending_content_evidence_guard
             or self.pending_analysis_completion_guard
             or self.pending_file_recovery_guard
+            or self.pending_url_recovery_guard
             or self.pending_completion_guard
             or self.pending_minimal_patch_guard
         )
@@ -130,6 +139,16 @@ class ToolTurnState:
         self.finalizable = True
         self.evidence_state = EVIDENCE_DIRECT_CONTENT_READ
 
+    def mark_url_content_evidence(self) -> None:
+        self.url_content_evidence_satisfied = True
+        self.finalizable = True
+
+    def mark_url_failure_evidence(self, error: str | None) -> None:
+        self.url_fetch_attempted = True
+        self.url_failure_evidence_satisfied = True
+        self.last_error = error
+        self.finalizable = True
+
     def mark_finalizable(self) -> None:
         self.finalizable = True
         if self.content_evidence_satisfied:
@@ -149,6 +168,8 @@ class ToolTurnState:
         self.pending_analysis_completion_guard = False
         self.pending_file_recovery_guard = False
         self.pending_file_recovery_guard_prompt = None
+        self.pending_url_recovery_guard = False
+        self.pending_url_recovery_guard_prompt = None
         self.pending_completion_guard = False
         self.pending_minimal_patch_guard = False
 

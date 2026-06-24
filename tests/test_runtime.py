@@ -4623,6 +4623,179 @@ EOF"""
         self.assertNotIn("I cannot confirm the content of the file yet.", str(backend.messages_seen[3]))
         self.assertNotIn("I still cannot confirm the content of the file.", str(backend.messages_seen[4]))
 
+    def test_ask_with_tools_requires_real_url_fetch_before_answering(self) -> None:
+        class UrlRecoveryBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="The page seems hypothetical because the date looks future-dated.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    if "Requested URL content not fetched yet." not in str(messages[-1]["content"]):
+                        raise AssertionError(messages[-1]["content"])
+                    return ChatResult(
+                        content='{"command":"python3 -c \\"print(\'<html><body>Central thesis: human dignity and solidarity.</body></html>\')\\" https://example.com/doc"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=3,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Grounded final answer.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=12,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=UrlRecoveryBackend(), system_prompt="route system")
+            result = runtime.ask_with_tools(
+                "Fetch https://example.com/doc and explain the central thesis in Italian.",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "Grounded final answer.")
+
+    def test_ask_with_tools_requires_real_url_fetch_after_runtime_reset(self) -> None:
+        class UrlRecoveryAfterResetBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="hello back",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=4,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="I cannot confirm the page contents yet.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    if "Requested URL content not fetched yet." not in str(messages[-1]["content"]):
+                        raise AssertionError(messages[-1]["content"])
+                    return ChatResult(
+                        content='{"command":"python3 -c \\"print(\'<html><body>Central thesis: grounded evidence.</body></html>\')\\" https://example.com/doc"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=3,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Grounded after reset.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=12,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = UrlRecoveryAfterResetBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            runtime.ask("hi", temperature=0, max_tokens=32)
+            runtime.reset()
+            result = runtime.ask_with_tools(
+                "Fetch https://example.com/doc and explain the central thesis in Italian.",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "Grounded after reset.")
+
+    def test_ask_with_tools_allows_grounded_url_failure_after_real_fetch_attempt(self) -> None:
+        class UrlFailureBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"command":"python3 -c \\"import sys; sys.stderr.write(\'HTTP 404 Not Found\\\\n\'); raise SystemExit(22)\\" https://example.com/missing"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=3,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The URL returned an HTTP 404 error.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=4,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=UrlFailureBackend(), system_prompt="route system")
+            result = runtime.ask_with_tools(
+                "Fetch https://example.com/missing and summarize it.",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "The URL returned an HTTP 404 error.")
+
     def test_ask_auto_media_without_path_is_normal_chat_without_command_json(self) -> None:
         class MediaRouteBackend:
             def __init__(self) -> None:
