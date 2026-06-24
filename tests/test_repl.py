@@ -655,6 +655,16 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(repl.tools_mode, "on")
         self.assertIn("tools: on", stdout.getvalue())
 
+    def test_reset_does_not_turn_tools_off(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+
+        repl._handle_tools_command("/tools on")
+        handled = repl._handle_command("/reset")
+
+        self.assertTrue(handled)
+        self.assertEqual(repl.tools_mode, "on")
+
     def test_sessions_clear_can_be_cancelled(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))

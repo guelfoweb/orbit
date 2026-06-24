@@ -126,10 +126,16 @@ _READ_ONLY_PROMPT_RE = re.compile(
 _USER_PATH_RE = re.compile(
     r"(?:[\"'`])([^\"'`\n]+?\.[A-Za-z0-9]{1,8})(?:[\"'`])|(?:^|[\s(])([A-Za-z0-9_./-]+?\.[A-Za-z0-9]{1,8})(?=$|[\s),:;])"
 )
+_URL_RE = re.compile(r"https?://[^\s<>'\")]+", re.IGNORECASE)
 _METADATA_REQUEST_RE = re.compile(
     r"\b(?:metadata|meta-data|stat|stats|size|permission|permissions|owner|group|mtime|ctime|timestamp|timestamps|modified|file\s+info|file\s+details)\b",
     re.IGNORECASE,
 )
+_URL_CONTENT_REQUEST_RE = re.compile(
+    r"\b(?:fetch|read|open|explain|summari[sz]e|analy[sz]e|review|inspect|translate|describe|thesis|central\s+thesis|riassum\w*|sintesi|spiega|leggi|apri|analizz\w*|descrivi|traduci)\b",
+    re.IGNORECASE,
+)
+_TRIVIAL_URL_NONFETCH_RE = re.compile(r"^\s*(?:echo|printf|true|false|pwd)(?:\s|$)", re.IGNORECASE)
 _MUTATION_PROMPT_RE = re.compile(
     r"\b(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
@@ -251,6 +257,17 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
     raw_command = arguments.get("command")
     if not isinstance(raw_command, str) or not user_prompt:
         return None
+    requested_url = extract_requested_user_url(user_prompt)
+    if requested_url and requires_url_content_evidence(user_prompt):
+        if raw_command.strip().startswith("orbit-web-search"):
+            return (
+                f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, explicit URL requests require direct URL fetch or a real HTTP/network failure, "
+                "not generic web search."
+            )
+        if not is_explicit_url_fetch_shell_command(raw_command, requested_url=requested_url):
+            return (
+                f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, explicit URL requests require direct URL content/failure evidence from the requested URL."
+            )
     if not _requires_direct_content_evidence(user_prompt):
         return None
     if _CONTENT_EVIDENCE_RE.search(raw_command):
@@ -269,6 +286,33 @@ def _requires_direct_content_evidence(user_prompt: str) -> bool:
     if _METADATA_REQUEST_RE.search(user_prompt):
         return False
     return _READ_ONLY_PROMPT_RE.search(user_prompt) is not None and _USER_PATH_RE.search(user_prompt) is not None
+
+
+def extract_requested_user_url(prompt: str | None) -> str | None:
+    if not prompt:
+        return None
+    match = _URL_RE.search(prompt)
+    if not match:
+        return None
+    return match.group(0).rstrip(".,;:!?")
+
+
+def requires_url_content_evidence(prompt: str | None) -> bool:
+    if not prompt:
+        return False
+    if not extract_requested_user_url(prompt):
+        return False
+    return _URL_CONTENT_REQUEST_RE.search(prompt) is not None
+
+
+def is_explicit_url_fetch_shell_command(command: str | None, *, requested_url: str) -> bool:
+    if not command:
+        return False
+    if requested_url not in command:
+        return False
+    if is_metadata_only_shell_command(command):
+        return False
+    return _TRIVIAL_URL_NONFETCH_RE.search(command) is None
 
 
 def is_shell_full_contract_error(content: str) -> bool:
@@ -325,6 +369,46 @@ def build_shell_full_file_recovery_guard_prompt(
         details.append("No usable content has been extracted from the requested file yet.")
         details.append("Do not conclude that the file is missing or unreadable yet.")
     return f"{prompt_prefix}\n\n" + "\n".join(details)
+
+
+def build_shell_full_url_recovery_guard_prompt(
+    *,
+    requested_url: str,
+    last_command: str | None = None,
+    last_failure_content: str | None = None,
+    fetch_attempted: bool = False,
+) -> str:
+    details = [
+        "Requested URL content not fetched yet.",
+        f"Requested URL: {requested_url}",
+    ]
+    if fetch_attempted:
+        details.append("A previous command still did not provide usable URL content or a real HTTP/network failure for that URL.")
+    details.extend(
+        [
+            "Before answering, use one appropriate exec_shell_full_command to retrieve the URL content or verify the real HTTP/network failure.",
+            "Do not speculate about the page contents or existence from the URL alone.",
+            "Do not replace the direct fetch with generic web search unless you already have direct fetch failure evidence.",
+        ]
+    )
+    failure = shell_failure_from_output(last_failure_content or "")
+    if last_command:
+        details.append(f"Last command: {last_command}")
+    if failure is not None:
+        details.append(f"Last exit code: {failure.exit_code}")
+        if failure.stderr:
+            details.append(f"Last stderr: {_bounded_stream(failure.stderr)}")
+        elif failure.stdout:
+            details.append(f"Last stdout: {_bounded_stream(failure.stdout)}")
+    details.extend(
+        [
+            "",
+            "Return only JSON:",
+            "",
+            '{"command":"..."}',
+        ]
+    )
+    return "\n".join(details)
 
 
 def shell_failure_from_output(content: str) -> ShellFailure | None:

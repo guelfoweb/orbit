@@ -181,6 +181,15 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertIn("require content/source/string evidence", execution.result.content)
 
+    def test_validate_shell_full_contract_rejects_explicit_url_without_fetch(self) -> None:
+        error = validate_shell_full_contract(
+            {"command": 'orbit-web-search "vatican va encyclical"'},
+            user_prompt="Fetch https://example.com/doc and explain the central thesis.",
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("explicit URL requests require direct URL fetch", error)
+
     def test_exec_shell_full_allows_listing_when_not_analysis_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executor = HybridToolExecutor(
