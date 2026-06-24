@@ -21,6 +21,8 @@ from orbit.runtime.shell_guardrails import (
     build_shell_full_url_recovery_guard_prompt,
     extract_requested_user_url,
     is_explicit_url_fetch_shell_command,
+    looks_like_url_content_evidence,
+    looks_like_url_fetch_failure,
     SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT,
     SHELL_FULL_SEMANTIC_REPAIR_PROMPT,
     is_incomplete_shell_json_or_command_error,
@@ -54,6 +56,7 @@ from orbit.runtime.tool_loop_state import (
 from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
 from orbit.runtime.tools import default_tool_names
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
+from orbit.runtime.web import fetch_url_result_error, fetch_url_result_has_text, fetch_url_result_status
 
 
 def _env_int(name: str, default: int) -> int:
@@ -285,7 +288,7 @@ def run_tool_loop(
             details.append("A direct fetch attempt is still required to answer safely.")
         details.extend(
             [
-                "Before answering, use one appropriate exec_shell_full_command to retrieve the URL content or verify the real HTTP/network failure.",
+                "Before answering, use fetch_url or another appropriate tool to retrieve the URL content or verify the real HTTP/network failure.",
                 "Do not speculate from the URL alone.",
                 "Return only the tool call.",
             ]
@@ -297,8 +300,7 @@ def run_tool_loop(
 
     def should_handoff_to_final_from_tool() -> bool:
         return (
-            shell_full_enabled
-            and has_required_direct_evidence()
+            has_required_direct_evidence()
             and turn.finalizable
             and not has_pending_internal_request()
             and not repair.shell_error_final_pending
@@ -319,7 +321,7 @@ def run_tool_loop(
         # This remains the main transition reducer for tool evidence and bounded
         # repair state. It updates turn-local state, while runtime counters stay
         # here to avoid leaking telemetry into the state objects themselves.
-        if tool_result.name != "exec_shell_full_command":
+        if tool_result.name not in {"exec_shell_full_command", "fetch_url"}:
             return
         command = _shell_command_from_tool_call(tool_call)
         raw_arguments = _shell_raw_arguments_from_tool_call(tool_call)
@@ -335,6 +337,8 @@ def run_tool_loop(
         if command:
             turn.shell_commands_seen += 1
         if command_is_url_fetch:
+            turn.url_fetch_attempted = True
+        if tool_result.name == "fetch_url":
             turn.url_fetch_attempted = True
         if command_is_mutating:
             turn.shell_mutation_attempted = True
@@ -462,12 +466,38 @@ def run_tool_loop(
             repair.shell_error_final_pending = True
             turn.mark_exhausted()
             return
+        fetch_url_status = fetch_url_result_status(tool_result.content) if tool_result.name == "fetch_url" else None
+        fetch_url_success = bool(tool_result.name == "fetch_url" and fetch_url_status == "ok" and fetch_url_result_has_text(tool_result.content))
+        fetch_url_failure = bool(
+            tool_result.name == "fetch_url"
+            and fetch_url_status in {"http_error", "network_error", "timeout", "unsupported_content", "empty_body"}
+        )
         if command_is_mutating:
             turn.shell_mutation_succeeded = True
         if tool_result.content.strip():
             if command_is_url_fetch and not command_is_mutating:
+                if looks_like_url_content_evidence(tool_result.content):
+                    turn.mark_url_content_evidence()
+                elif looks_like_url_fetch_failure(tool_result.content):
+                    turn.mark_url_failure_evidence(_summarize_shell_error(tool_result.content))
+                elif url_content_required and turn.requested_user_url and turn.can_reconsider(RECONSIDER_URL_RECOVERY):
+                    request_url_recovery_guard(
+                        last_command=command,
+                        last_failure_content=tool_result.content,
+                        fetch_attempted=True,
+                    )
+                    return
+            if fetch_url_success:
                 turn.mark_url_content_evidence()
-            if command_is_content_evidence and not command_is_mutating:
+            elif fetch_url_failure:
+                turn.mark_url_failure_evidence(fetch_url_result_error(tool_result.content))
+            elif tool_result.name == "fetch_url" and url_content_required and turn.requested_user_url and turn.can_reconsider(RECONSIDER_URL_RECOVERY):
+                request_url_recovery_guard(
+                    last_failure_content=tool_result.content,
+                    fetch_attempted=True,
+                )
+                return
+            if command_is_content_evidence and not command_is_mutating and not command_is_url_fetch:
                 turn.mark_direct_content_read()
                 if is_content_evidence_guard:
                     runtime.content_evidence_guard_successes += 1
@@ -477,8 +507,11 @@ def run_tool_loop(
                     turn.mark_candidate_paths_found(_merge_candidate_paths(turn.candidate_paths, discovered))
             if is_mutation_verification and not repair.mutation_semantic_repair_used:
                 request_mutation_semantic_repair()
-            if turn.content_evidence_satisfied or repair.shell_error_final_pending:
+            if has_required_direct_evidence() or repair.shell_error_final_pending:
                 turn.mark_finalizable()
+            return
+        if tool_result.name == "fetch_url" and url_content_required and turn.requested_user_url and turn.can_reconsider(RECONSIDER_URL_RECOVERY):
+            request_url_recovery_guard(fetch_attempted=True)
             return
         if is_content_evidence_guard:
             runtime.content_evidence_guard_failures += 1

@@ -11,6 +11,7 @@ from orbit.runtime.tool_arguments import parse_tool_arguments_or_empty
 
 SHELL_TOOL_ALIASES = {"exec_shell_full_command", "shell"}
 WEB_SEARCH_TOOL_ALIASES = {"orbit-web-search"}
+FETCH_URL_TOOL_ALIASES = {"fetch_url"}
 
 
 class ToolRoute(StrEnum):
@@ -45,6 +46,8 @@ def parse_command_decision_from_tool_calls(tool_calls: list[dict[str, Any]]) -> 
             return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
         if name in WEB_SEARCH_TOOL_ALIASES and _web_search_command_from_args(args):
             return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
+        if name in FETCH_URL_TOOL_ALIASES and _has_url(args):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("fetch_url",))
     return None
 
 
@@ -52,7 +55,8 @@ def command_tool_call_from_tool_calls(
     tool_calls: list[dict[str, Any]],
     allowed_tool_names: tuple[str, ...],
 ) -> dict[str, Any] | None:
-    if "exec_shell_full_command" not in set(allowed_tool_names):
+    allowed = set(allowed_tool_names)
+    if not ({"exec_shell_full_command", "fetch_url"} & allowed):
         return None
     for tool_call in tool_calls:
         function = tool_call.get("function")
@@ -70,9 +74,15 @@ def command_tool_call_from_tool_calls(
             if name == "exec_shell_full_command" and isinstance(raw_arguments, str) and parsed_valid_command:
                 return tool_call
             return _tool_call("exec_shell_full_command", {"command": args["command"]})
+        if name in FETCH_URL_TOOL_ALIASES and _has_url(args):
+            if "fetch_url" not in allowed:
+                return None
+            if name == "fetch_url" and isinstance(raw_arguments, str):
+                return tool_call
+            return _tool_call("fetch_url", {"url": args["url"]})
         if name in WEB_SEARCH_TOOL_ALIASES:
             command = _web_search_command_from_args(args)
-            if command:
+            if command and "exec_shell_full_command" in allowed:
                 return _tool_call("exec_shell_full_command", {"command": command})
     return None
 
@@ -81,13 +91,23 @@ def command_tool_call_from_content(
     content: str,
     allowed_tool_names: tuple[str, ...],
 ) -> dict[str, Any] | None:
-    if "exec_shell_full_command" not in set(allowed_tool_names):
+    allowed = set(allowed_tool_names)
+    if not ({"exec_shell_full_command", "fetch_url"} & allowed):
         return None
     raw_command = _extract_raw_tool_call_command(content)
     if raw_command:
+        if "exec_shell_full_command" not in allowed:
+            return None
         return _tool_call("exec_shell_full_command", {"command": raw_command})
+    raw_url = _extract_raw_tool_call_url(content)
+    if raw_url:
+        if "fetch_url" not in allowed:
+            return None
+        return _tool_call("fetch_url", {"url": raw_url})
     value = _parse_command_json_object(content) or _extract_last_json_object(content) or _extract_loose_command_object(content)
     if not _has_command(value):
+        if _has_url(value) and "fetch_url" in allowed:
+            return _tool_call("fetch_url", {"url": value["url"]})
         return None
     return _tool_call("exec_shell_full_command", {"command": value["command"]})
 
@@ -97,16 +117,20 @@ def parse_command_decision(content: str) -> RouteDecision | None:
     if not text:
         return None
     if _parse_raw_tool_call_decision(text) is not None:
-        return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
+        return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command", "fetch_url"))
     value = _parse_command_json_object(text)
     if _has_command(value):
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
+    if _has_url(value):
+        return RouteDecision(ToolRoute.FILESYSTEM, ("fetch_url",))
     if _has_command(_extract_loose_command_object(text)):
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
     for line in text.splitlines():
         value = _parse_command_json_object(_strip_json_fence(line.strip()))
         if _has_command(value):
             return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
+        if _has_url(value):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("fetch_url",))
     return None
 
 
@@ -119,13 +143,13 @@ def command_stream_state(text: str, *, max_prefix_chars: int = ROUTE_STREAM_PREF
         return "not_command"
     if not stripped:
         return "pending"
-    if _is_partial_prefix(stripped, "<|tool_call>") or _is_partial_prefix(stripped, '{"command"'):
+    if _is_partial_prefix(stripped, "<|tool_call>") or _is_partial_prefix(stripped, '{"command"') or _is_partial_prefix(stripped, '{"url"'):
         return "pending"
     if stripped.startswith("<|tool_call>"):
         if "<tool_call|>" in stripped:
             return "route" if parse_tool_command(stripped) is not None else "not_command"
         return "pending"
-    if stripped.startswith('{"command"'):
+    if stripped.startswith('{"command"') or stripped.startswith('{"url"'):
         if _looks_like_complete_json_object(stripped):
             return "route" if parse_tool_command(stripped) is not None else "not_command"
         return "pending"
@@ -180,14 +204,14 @@ class CommandStreamFilter:
 def tool_names_for_decision(route: ToolRoute, prompt: str | None = None) -> tuple[str, ...]:
     del prompt
     if route == ToolRoute.FILESYSTEM:
-        return ("exec_shell_full_command",)
+        return ("exec_shell_full_command", "fetch_url")
     return ()
 
 
 def decision_tool_names(decision: RouteDecision, prompt: str | None = None) -> tuple[str, ...]:
     del prompt
     if decision.tool_names:
-        return tuple(name for name in decision.tool_names if name == "exec_shell_full_command")
+        return tuple(name for name in decision.tool_names if name in {"exec_shell_full_command", "fetch_url"})
     return tool_names_for_decision(decision.route)
 
 
@@ -208,6 +232,8 @@ def _parse_raw_tool_call_decision(text: str) -> ToolRoute | None:
     if "<|tool_call>" not in text:
         return None
     if _extract_raw_tool_call_command(text):
+        return ToolRoute.FILESYSTEM
+    if _extract_raw_tool_call_url(text):
         return ToolRoute.FILESYSTEM
     if "exec_shell_full_command" in text or "call:shell" in text or "command" in text:
         return ToolRoute.FILESYSTEM
@@ -230,6 +256,25 @@ def _extract_raw_tool_call_command(content: str) -> str | None:
         return value["command"]
     if name in WEB_SEARCH_TOOL_ALIASES:
         return _web_search_command_from_args(value)
+    return None
+
+
+def _extract_raw_tool_call_url(content: str) -> str | None:
+    text = content.replace('<|"|>', '"')
+    match = re.search(
+        r"<\|tool_call\>\s*call:(?P<name>[A-Za-z0-9_-]+)\s*(?P<args>\{.*?\})\s*<tool_call\|>",
+        text,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return None
+    name = match.group("name")
+    if name not in FETCH_URL_TOOL_ALIASES:
+        return None
+    raw_args = match.group("args")
+    value = _parse_command_json_object(raw_args) or _extract_last_json_object(raw_args) or _extract_loose_key_value_object(raw_args)
+    if _has_url(value):
+        return value["url"]
     return None
 
 
@@ -327,6 +372,13 @@ def _has_command(value: dict[str, Any] | None) -> bool:
         return False
     command = value.get("command")
     return isinstance(command, str) and bool(command.strip())
+
+
+def _has_url(value: dict[str, Any] | None) -> bool:
+    if not isinstance(value, dict):
+        return False
+    url = value.get("url")
+    return isinstance(url, str) and bool(url.strip())
 
 
 def _looks_like_complete_json_object(text: str) -> bool:

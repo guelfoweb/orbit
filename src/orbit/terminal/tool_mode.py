@@ -3,8 +3,7 @@ from __future__ import annotations
 
 ToolSpec = str
 
-SHELL_FULL_TOOL_NAMES = ("exec_shell_full_command",)
-DEFAULT_ON_TOOL_NAMES = SHELL_FULL_TOOL_NAMES
+DEFAULT_ON_TOOL_NAMES = ("exec_shell_full_command", "fetch_url")
 
 SPECIAL_TOOL_SPECS = ("off", "on")
 USAGE = "off|on"

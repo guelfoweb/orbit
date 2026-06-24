@@ -6,6 +6,7 @@ from typing import Any
 
 from orbit.runtime.shell_guardrails import exec_shell_full_definition, execute_exec_shell_full_command
 from orbit.runtime.tool_arguments import parse_tool_arguments
+from orbit.runtime.web import execute_fetch_url, fetch_url_definition
 
 
 @dataclass(frozen=True)
@@ -14,7 +15,7 @@ class ToolResult:
     content: str
 
 
-TOOL_NAMES = ("exec_shell_full_command",)
+TOOL_NAMES = ("exec_shell_full_command", "fetch_url")
 DEFAULT_TOOL_NAMES = TOOL_NAMES
 
 
@@ -27,7 +28,7 @@ def default_tool_names() -> tuple[str, ...]:
 
 
 def tool_definitions(names: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    definitions = [exec_shell_full_definition()]
+    definitions = [exec_shell_full_definition(), fetch_url_definition()]
     if names is None:
         return definitions
     allowed = set(names)
@@ -48,4 +49,6 @@ def execute_tool(
     parsed = parse_tool_arguments(arguments)
     if isinstance(parsed, str):
         return ToolResult(name=name, content=parsed)
+    if name == "fetch_url":
+        return ToolResult(name=name, content=execute_fetch_url(parsed))
     return ToolResult(name=name, content=execute_exec_shell_full_command(parsed, workdir=workdir, user_prompt=user_prompt))
