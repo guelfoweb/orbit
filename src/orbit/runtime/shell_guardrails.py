@@ -136,6 +136,37 @@ _URL_CONTENT_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _TRIVIAL_URL_NONFETCH_RE = re.compile(r"^\s*(?:echo|printf|true|false|pwd)(?:\s|$)", re.IGNORECASE)
+_TRANSFER_PROGRESS_HEADER_RE = re.compile(
+    r"^\s*% Total\s+% Received\s+% Xferd\s+Average Speed\s+Time\s+Time\s+Time\s+Current\s*$",
+    re.IGNORECASE,
+)
+_TRANSFER_PROGRESS_COLUMNS_RE = re.compile(
+    r"^\s*Dload\s+Upload\s+Total\s+Spent\s+Left\s+Speed\s*$",
+    re.IGNORECASE,
+)
+_TRANSFER_PROGRESS_ROW_RE = re.compile(
+    r"^\s*\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+[-:\d]+\s+[-:\d]+\s+[-:\d]+\s+\d+\s*$"
+)
+_URL_FETCH_FAILURE_RE = re.compile(
+    r"\b(?:"
+    r"HTTP/\d(?:\.\d)?\s+[45]\d{2}\b|"
+    r"[45]\d{2}\s+(?:Not Found|Forbidden|Unauthorized|Internal Server Error|Bad Gateway|Service Unavailable)\b|"
+    r"Could not resolve host|"
+    r"Name or service not known|"
+    r"Temporary failure in name resolution|"
+    r"Connection refused|"
+    r"Failed to connect|"
+    r"Operation timed out|"
+    r"timed out|"
+    r"TLS|"
+    r"SSL|"
+    r"certificate|"
+    r"Proxy CONNECT aborted"
+    r")",
+    re.IGNORECASE,
+)
+_HTTP_STATUS_LINE_RE = re.compile(r"^\s*HTTP/\d(?:\.\d)?\s+\d{3}\b", re.IGNORECASE)
+_HTTP_HEADER_LINE_RE = re.compile(r"^[A-Za-z0-9-]+:\s+.+$")
 _MUTATION_PROMPT_RE = re.compile(
     r"\b(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
@@ -155,7 +186,7 @@ def exec_shell_full_definition() -> dict[str, Any]:
                 "Unrestricted local shell launched from the current workdir. May read, write, delete, execute, access network, and access paths outside workdir. "
                 "Use whatever commands are needed to complete the task. "
                 "For analysis, prefer direct evidence from content, source, binaries, strings, logs, archives, and fetched data, not only metadata. "
-                'For generic web search, use orbit-web-search "query"; for explicit URLs, use curl. '
+                'For generic web search, use orbit-web-search "query"; for explicit URL content requests, prefer fetch_url and use shell fetch commands only when needed. '
                 "Quote paths containing spaces."
             ),
             "parameters": {
@@ -315,6 +346,50 @@ def is_explicit_url_fetch_shell_command(command: str | None, *, requested_url: s
     return _TRIVIAL_URL_NONFETCH_RE.search(command) is None
 
 
+def looks_like_transfer_progress_only(text: str | None) -> bool:
+    if not text or not text.strip():
+        return False
+    cleaned = _strip_transfer_progress_noise(text)
+    return not bool(cleaned.strip())
+
+
+def looks_like_url_fetch_failure(text: str | None) -> bool:
+    if not text or not text.strip():
+        return False
+    if shell_failure_from_output(text) is not None:
+        return True
+    cleaned = _strip_transfer_progress_noise(text)
+    if not cleaned.strip():
+        return False
+    if _URL_FETCH_FAILURE_RE.search(cleaned):
+        return True
+    if _looks_like_http_headers_only(cleaned) and re.search(r"^\s*HTTP/\d(?:\.\d)?\s+[45]\d{2}\b", cleaned, re.IGNORECASE | re.MULTILINE):
+        return True
+    return False
+
+
+def looks_like_url_content_evidence(text: str | None) -> bool:
+    if not text or not text.strip():
+        return False
+    if shell_failure_from_output(text) is not None:
+        return False
+    if looks_like_transfer_progress_only(text):
+        return False
+    cleaned = _strip_transfer_progress_noise(text)
+    if not cleaned.strip():
+        return False
+    if looks_like_url_fetch_failure(cleaned):
+        return False
+    if _looks_like_http_headers_only(cleaned):
+        return False
+    if "shell_output_html_cleaned: true" in cleaned and "[no readable text extracted]" not in cleaned:
+        return True
+    if _looks_like_html_or_fragment(cleaned):
+        return True
+    compact = " ".join(line.strip() for line in cleaned.splitlines() if line.strip())
+    return len(compact) >= 40 or len(compact.split()) >= 6
+
+
 def is_shell_full_contract_error(content: str) -> bool:
     return content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX)
 
@@ -386,7 +461,7 @@ def build_shell_full_url_recovery_guard_prompt(
         details.append("A previous command still did not provide usable URL content or a real HTTP/network failure for that URL.")
     details.extend(
         [
-            "Before answering, use one appropriate exec_shell_full_command to retrieve the URL content or verify the real HTTP/network failure.",
+            "Before answering, use fetch_url or one other appropriate tool to retrieve the URL content or verify the real HTTP/network failure.",
             "Do not speculate about the page contents or existence from the URL alone.",
             "Do not replace the direct fetch with generic web search unless you already have direct fetch failure evidence.",
         ]
@@ -403,9 +478,7 @@ def build_shell_full_url_recovery_guard_prompt(
     details.extend(
         [
             "",
-            "Return only JSON:",
-            "",
-            '{"command":"..."}',
+            "Return only the tool call.",
         ]
     )
     return "\n".join(details)
@@ -592,6 +665,37 @@ def _postprocess_shell_full_output(
             return "shell_output_html_cleaned: true\ntext:\n[no readable text extracted]"
         return _bounded_text("\n".join(["shell_output_html_cleaned: true", "text:", text]), min(output_size, 4_000))
     return None
+
+
+def _strip_transfer_progress_noise(text: str) -> str:
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _TRANSFER_PROGRESS_HEADER_RE.match(stripped):
+            continue
+        if _TRANSFER_PROGRESS_COLUMNS_RE.match(stripped):
+            continue
+        if _TRANSFER_PROGRESS_ROW_RE.match(stripped):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _looks_like_http_headers_only(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    header_like = 0
+    for index, line in enumerate(lines):
+        if index == 0 and _HTTP_STATUS_LINE_RE.match(line):
+            header_like += 1
+            continue
+        if _HTTP_HEADER_LINE_RE.match(line):
+            header_like += 1
+            continue
+    return header_like == len(lines)
 
 
 def _read_pdf_target(raw_command: str, *, workdir: Path) -> str | None:

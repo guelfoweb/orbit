@@ -35,7 +35,7 @@ Return valid one-line JSON only:
 
 Environment: OS={os_name}; shell={shell_name}.
 
-Use given paths exactly. Use native commands in workdir. Generic web search: orbit-web-search "query"; explicit URLs: curl. Quote spaced paths.
+Use given paths exactly. Use native commands in workdir. Generic web search: orbit-web-search "query". For explicit URL fetch/read/explain/summarize/analyze requests, prefer the fetch_url tool; shell fetch commands such as curl are still allowed when needed. Quote spaced paths.
 
 Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
@@ -46,10 +46,11 @@ specs of this computer -> {{"command":"uname -a; lscpu; free -h; df -h"}}
 For analysis, prefer content, source, binaries, strings, logs, archives, or fetched data, not metadata."""
 ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shell_name=_detect_shell())
 TOOL_CALL_SYSTEM_PROMPT = (
-    "Call exec_shell_full_command exactly once and output no prose. "
-    "Use one compact one-line shell command. "
-    'Use orbit-web-search "query" for generic web search; use curl for explicit URLs. '
-    "Quote paths containing spaces. "
+    "Call exactly one available tool and output no prose. "
+    "Prefer fetch_url for explicit URL fetch/read/explain/summarize/analyze requests. "
+    'Use orbit-web-search "query" for generic web search. '
+    "Use exec_shell_full_command for local/system tasks or when another tool is more appropriate. "
+    "Quote paths containing spaces in shell commands. "
     "For analysis, collect direct evidence from content/source/strings/logs/archives/fetched data."
 )
 TOOL_CALL_JSON_RETRY_PROMPT = (

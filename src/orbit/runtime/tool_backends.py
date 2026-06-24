@@ -52,12 +52,13 @@ class HybridToolExecutor:
     ) -> ToolExecution:
         if name not in self.allowed_tool_names:
             return ToolExecution(ToolResult(name=name, content=f"error: tool not available for this turn: {name}"), "orbit")
-        if name != "exec_shell_full_command":
+        if name not in {"exec_shell_full_command", "fetch_url"}:
             return ToolExecution(ToolResult(name=name, content=f"error: unknown tool: {name}"), "orbit")
         parsed = parse_tool_arguments(arguments)
         if isinstance(parsed, str):
             return ToolExecution(ToolResult(name=name, content=parsed), "orbit")
-        contract_error = validate_shell_full_contract(parsed, user_prompt=self.user_prompt)
-        if contract_error:
-            return ToolExecution(ToolResult(name=name, content=contract_error), "orbit")
+        if name == "exec_shell_full_command":
+            contract_error = validate_shell_full_contract(parsed, user_prompt=self.user_prompt)
+            if contract_error:
+                return ToolExecution(ToolResult(name=name, content=contract_error), "orbit")
         return ToolExecution(execute_tool(name, parsed, workdir=self.workdir, chunk_budget=chunk_budget, user_prompt=self.user_prompt), "orbit")

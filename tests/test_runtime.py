@@ -4754,6 +4754,76 @@ EOF"""
 
         self.assertEqual(result.content, "Grounded after reset.")
 
+    def test_ask_with_tools_retries_when_url_fetch_only_returns_transfer_progress(self) -> None:
+        class UrlProgressOnlyBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"command":"python3 -c \\"import sys; sys.stderr.write(\'% Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\\\\n\'); sys.stderr.write(\'                                 Dload  Upload   Total   Spent    Left  Speed\\\\n\'); sys.stderr.write(\'  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\\\\n\')\\" https://example.com/doc"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="I still cannot confirm the page contents yet.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=8,
+                        completion_tokens=4,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    if "did not obtain usable content or a real HTTP/network failure" not in str(messages[-1]["content"]):
+                        raise AssertionError(messages[-1]["content"])
+                    return ChatResult(
+                        content='{"command":"python3 -c \\"print(\'<html><body>Central thesis: grounded evidence.</body></html>\')\\" https://example.com/doc"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=3,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Grounded after retry.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=12,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=UrlProgressOnlyBackend(), system_prompt="route system")
+            result = runtime.ask_with_tools(
+                "Fetch https://example.com/doc and explain the central thesis in Italian.",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "Grounded after retry.")
+
     def test_ask_with_tools_allows_grounded_url_failure_after_real_fetch_attempt(self) -> None:
         class UrlFailureBackend:
             def __init__(self) -> None:
@@ -4795,6 +4865,131 @@ EOF"""
             )
 
         self.assertEqual(result.content, "The URL returned an HTTP 404 error.")
+
+    def test_ask_with_tools_accepts_fetch_url_success_as_url_evidence(self) -> None:
+        class FetchUrlSuccessBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "fetch_url", "arguments": '{"url":"https://example.com/doc"}'},
+                            }
+                        ],
+                        prompt_tokens=8,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="Grounded final answer from fetch_url.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=FetchUrlSuccessBackend(), system_prompt="route system")
+            result = runtime.ask_with_tools(
+                "Fetch https://example.com/doc and summarize it.",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "Grounded final answer from fetch_url.")
+
+    def test_ask_with_tools_accepts_fetch_url_http_error_as_failure_evidence(self) -> None:
+        class FetchUrlFailureBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "fetch_url", "arguments": '{"url":"https://example.com/missing"}'},
+                            }
+                        ],
+                        prompt_tokens=8,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The page returned HTTP 404.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=FetchUrlFailureBackend(), system_prompt="route system")
+            result = runtime.ask_with_tools(
+                "Fetch https://example.com/missing and summarize it.",
+                temperature=0,
+                max_tokens=64,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "The page returned HTTP 404.")
+
+    def test_ask_with_tools_does_not_force_fetch_for_non_fetch_url_question(self) -> None:
+        class DomainOnlyBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                return ChatResult(
+                    content="The domain is example.com.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=6,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        runtime = ChatRuntime(backend=DomainOnlyBackend(), system_prompt="route system")
+        result = runtime.ask_with_tools(
+            "What is the domain in this URL: https://example.com/foo?",
+            temperature=0,
+            max_tokens=64,
+            workdir=Path("."),
+        )
+
+        self.assertEqual(result.content, "The domain is example.com.")
 
     def test_ask_auto_media_without_path_is_normal_chat_without_command_json(self) -> None:
         class MediaRouteBackend:

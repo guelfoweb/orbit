@@ -12,6 +12,7 @@ PREVIEW_INLINE_LIMIT = 120
 COMMAND_PREVIEW_LIMIT = 96
 DISPLAY_TOOL_NAMES = {
     "exec_shell_full_command": "exec",
+    "fetch_url": "fetch_url",
 }
 
 
@@ -24,6 +25,10 @@ def format_tool_call_event(name: str, args: str) -> str:
         command = _command_from_args(args)
         if command:
             return _format_shell_command_call(command)
+    if name == "fetch_url":
+        url = _url_from_args(args)
+        if url:
+            return f"Fetch: {_truncate_inline(url, limit=COMMAND_PREVIEW_LIMIT)}"
     return f"{display_tool_name(name)} {args}"
 
 
@@ -51,6 +56,18 @@ def _command_from_args(args: str) -> str | None:
         command = parsed.get("command")
         if isinstance(command, str) and command.strip():
             return command.strip()
+    return None
+
+
+def _url_from_args(args: str) -> str | None:
+    try:
+        parsed = json.loads(args)
+    except Exception:
+        return None
+    if isinstance(parsed, dict):
+        url = parsed.get("url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
     return None
 
 
@@ -106,6 +123,19 @@ def _tool_result_preview(content: str | None) -> str | None:
         return "rejected metadata-only output"
     if stripped.startswith("error:"):
         return stripped.splitlines()[0]
+    if "url_fetch: true" in content:
+        title = _metadata_value(content, "title")
+        if title and title != "null":
+            return title
+        preview = _body_preview(content, marker="text:")
+        if preview:
+            return preview
+        error = _metadata_value(content, "error")
+        status = _metadata_value(content, "status")
+        if error and error != "null":
+            return f"{status or 'fetch'}: {error}"
+        if status and status != "null":
+            return status
     path = _metadata_value(content, "path")
     if "shell_output_pdf_text: true" in content:
         preview = _body_preview(content, marker="content:")
@@ -160,7 +190,7 @@ def _lines_preview(content: str) -> str | None:
         line = raw.strip()
         if not line:
             continue
-        if line.startswith(("shell_output_", "path:", "extractor:", "chunk_index:", "total_chunks:", "chars:", "large_file_excerpt:")):
+        if line.startswith(("shell_output_", "path:", "extractor:", "chunk_index:", "total_chunks:", "chars:", "large_file_excerpt:", "url_fetch:", "url:", "final_url:", "http_status:", "content_type:", "encoding:", "title:", "text_truncated:", "status:", "error:")):
             continue
         if line == "[truncated]":
             continue

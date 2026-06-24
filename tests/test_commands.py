@@ -66,7 +66,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Model\n-------", status)
         self.assertIn("tools_mode: n/a", status)
         self.assertIn("thinking_mode: off", status)
-        self.assertIn("model_tools: exec_shell_full_command", status)
+        self.assertIn("model_tools: exec_shell_full_command, fetch_url", status)
         self.assertIn("memory_refresh_threshold: 6963/8192", status)
         self.assertIn("memory_refreshes: 0", status)
         self.assertIn("last_refresh_outcome: none", status)

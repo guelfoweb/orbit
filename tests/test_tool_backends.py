@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import io
 import subprocess
 import tempfile
 import time
@@ -9,6 +10,7 @@ from shutil import copyfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -16,7 +18,13 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.runtime.tool_backends import HybridToolExecutor
-from orbit.runtime.shell_guardrails import SHELL_FULL_CONTRACT_ERROR_PREFIX, validate_shell_full_contract
+from orbit.runtime.shell_guardrails import (
+    SHELL_FULL_CONTRACT_ERROR_PREFIX,
+    looks_like_transfer_progress_only,
+    looks_like_url_content_evidence,
+    looks_like_url_fetch_failure,
+    validate_shell_full_contract,
+)
 
 
 class FakeServerTools:
@@ -76,7 +84,8 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("Unrestricted local shell launched from the current workdir", description)
         self.assertIn("access paths outside workdir", description)
         self.assertIn("orbit-web-search", description)
-        self.assertIn("explicit URLs", description)
+        self.assertIn("explicit URL content requests", description)
+        self.assertIn("fetch_url", description)
         self.assertIn("Quote paths containing spaces", description)
 
     def test_ignores_server_tools(self) -> None:
@@ -132,6 +141,168 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertIn("web_search_results: true", execution.result.content)
         self.assertEqual(backend.executed, [])
+
+    def test_fetch_url_runs_internal_url_fetch(self) -> None:
+        class FakeHeaders:
+            def get_content_type(self) -> str:
+                return "text/html"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class FakeResponse:
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self) -> str:
+                return "https://example.com/final"
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, amount: int = -1) -> bytes:
+                del amount
+                return b"<html><title>Example</title><body>Hello web</body></html>"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+
+            with patch("orbit.runtime.web.urlopen", return_value=FakeResponse()):
+                execution = executor.execute(
+                    "fetch_url",
+                    {"url": "https://example.com"},
+                    chunk_budget={},
+                )
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("status: ok", execution.result.content)
+        self.assertIn("Hello web", execution.result.content)
+
+    def test_fetch_url_plain_text_returns_text(self) -> None:
+        class FakeHeaders:
+            def get_content_type(self) -> str:
+                return "text/plain"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class FakeResponse:
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self) -> str:
+                return "https://example.com/plain"
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, amount: int = -1) -> bytes:
+                del amount
+                return b"plain text body"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", return_value=FakeResponse()):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/plain"}, chunk_budget={})
+
+        self.assertIn("status: ok", execution.result.content)
+        self.assertIn("plain text body", execution.result.content)
+
+    def test_fetch_url_json_returns_text(self) -> None:
+        class FakeHeaders:
+            def get_content_type(self) -> str:
+                return "application/json"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class FakeResponse:
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self) -> str:
+                return "https://example.com/data.json"
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, amount: int = -1) -> bytes:
+                del amount
+                return b'{\"central_thesis\":\"human dignity\"}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", return_value=FakeResponse()):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/data.json"}, chunk_budget={})
+
+        self.assertIn("status: ok", execution.result.content)
+        self.assertIn("central_thesis", execution.result.content)
+
+    def test_fetch_url_xml_returns_text(self) -> None:
+        class FakeHeaders:
+            def get_content_type(self) -> str:
+                return "application/xml"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class FakeResponse:
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self) -> str:
+                return "https://example.com/data.xml"
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, amount: int = -1) -> bytes:
+                del amount
+                return b"<doc><thesis>human dignity</thesis></doc>"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", return_value=FakeResponse()):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/data.xml"}, chunk_budget={})
+
+        self.assertIn("status: ok", execution.result.content)
+        self.assertIn("<doc><thesis>human dignity</thesis></doc>", execution.result.content)
 
     def test_exec_shell_full_rejects_empty_internal_web_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,6 +360,190 @@ class HybridToolExecutorTests(unittest.TestCase):
 
         self.assertIsNotNone(error)
         self.assertIn("explicit URL requests require direct URL fetch", error)
+
+    def test_url_progress_meter_only_is_not_content_evidence(self) -> None:
+        progress = (
+            "% Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n"
+            "                                 Dload  Upload   Total   Spent    Left  Speed\n"
+            "  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\n"
+        )
+
+        self.assertTrue(looks_like_transfer_progress_only(progress))
+        self.assertFalse(looks_like_url_content_evidence(progress))
+        self.assertFalse(looks_like_url_fetch_failure(progress))
+
+    def test_url_html_cleaned_output_is_content_evidence(self) -> None:
+        content = "shell_output_html_cleaned: true\ntext:\nCentral thesis: human dignity and solidarity."
+
+        self.assertTrue(looks_like_url_content_evidence(content))
+        self.assertFalse(looks_like_url_fetch_failure(content))
+
+    def test_url_http_404_text_is_failure_evidence(self) -> None:
+        content = "HTTP/2 404\ncontent-type: text/html\nserver: envoy"
+
+        self.assertTrue(looks_like_url_fetch_failure(content))
+        self.assertFalse(looks_like_url_content_evidence(content))
+
+    def test_fetch_url_404_returns_structured_http_error(self) -> None:
+        error = HTTPError(
+            "https://example.com/missing",
+            404,
+            "Not Found",
+            None,
+            io.BytesIO(b"<html><title>404</title><body>Not Found</body></html>"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", side_effect=error):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/missing"}, chunk_budget={})
+
+        self.assertIn("status: http_error", execution.result.content)
+        self.assertIn("http_status: 404", execution.result.content)
+
+    def test_fetch_url_timeout_returns_structured_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", side_effect=TimeoutError()):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/slow"}, chunk_budget={})
+
+        self.assertIn("status: timeout", execution.result.content)
+
+    def test_fetch_url_dns_failure_returns_network_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", side_effect=URLError("Name or service not known")):
+                execution = executor.execute("fetch_url", {"url": "https://example.invalid"}, chunk_budget={})
+
+        self.assertIn("status: network_error", execution.result.content)
+
+    def test_fetch_url_binary_returns_unsupported_content(self) -> None:
+        class FakeHeaders:
+            def get_content_type(self) -> str:
+                return "application/octet-stream"
+
+            def get_content_charset(self):
+                return None
+
+        class FakeResponse:
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self) -> str:
+                return "https://example.com/file.bin"
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, amount: int = -1) -> bytes:
+                del amount
+                return b"\x00\x01\x02\x03"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", return_value=FakeResponse()):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/file.bin"}, chunk_budget={})
+
+        self.assertIn("status: unsupported_content", execution.result.content)
+
+    def test_fetch_url_empty_body_returns_empty_body_status(self) -> None:
+        class FakeHeaders:
+            def get_content_type(self) -> str:
+                return "text/html"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class FakeResponse:
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self) -> str:
+                return "https://example.com/empty"
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, amount: int = -1) -> bytes:
+                del amount
+                return b""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", return_value=FakeResponse()):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/empty"}, chunk_budget={})
+
+        self.assertIn("status: empty_body", execution.result.content)
+
+    def test_fetch_url_truncates_large_text_payloads(self) -> None:
+        class FakeHeaders:
+            def get_content_type(self) -> str:
+                return "text/plain"
+
+            def get_content_charset(self) -> str:
+                return "utf-8"
+
+        class FakeResponse:
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self) -> str:
+                return "https://example.com/large"
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, amount: int = -1) -> bytes:
+                del amount
+                return ("paragraph " * 3000).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("fetch_url",),
+            )
+            with patch("orbit.runtime.web.urlopen", return_value=FakeResponse()):
+                execution = executor.execute("fetch_url", {"url": "https://example.com/large"}, chunk_budget={})
+
+        self.assertIn("status: ok", execution.result.content)
+        self.assertIn("text_truncated: true", execution.result.content)
+        self.assertLess(len(execution.result.content), 14_500)
 
     def test_exec_shell_full_allows_listing_when_not_analysis_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
