@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -69,6 +71,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.max_tokens, 512)
         self.assertIsNone(config.context_tokens)
         self.assertEqual(config.tools, "off")
+        self.assertEqual(config.render_markdown, "live")
 
     def test_config_file_sets_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -85,6 +88,7 @@ class ConfigTests(unittest.TestCase):
                         "no_system": True,
                         "think": True,
                         "tools": "on",
+                        "render_markdown": "live",
                     }
                 ),
                 encoding="utf-8",
@@ -100,6 +104,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.no_system)
         self.assertTrue(config.think)
         self.assertEqual(config.tools, "on")
+        self.assertEqual(config.render_markdown, "live")
 
     def test_cli_flags_override_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +125,7 @@ class ConfigTests(unittest.TestCase):
                     "on",
                     "--tools",
                     "on",
+                    "--render-markdown-live",
                 )
             )
 
@@ -128,6 +134,46 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.context_tokens, 2048)
         self.assertTrue(config.think)
         self.assertEqual(config.tools, "on")
+        self.assertEqual(config.render_markdown, "live")
+
+    def test_env_can_enable_live_markdown_rendering(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_RENDER_MARKDOWN": "live"}):
+            config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json"))
+
+        self.assertEqual(config.render_markdown, "live")
+
+    def test_no_render_markdown_disables_default_live_rendering(self) -> None:
+        config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json", "--no-render-markdown"))
+
+        self.assertEqual(config.render_markdown, "plain")
+
+    def test_cli_has_precedence_over_markdown_render_env(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_RENDER_MARKDOWN": "off"}):
+            enabled = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json", "--render-markdown-live"))
+        self.assertEqual(enabled.render_markdown, "live")
+
+        with mock.patch.dict(os.environ, {"ORBIT_RENDER_MARKDOWN": "live"}):
+            disabled = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json", "--no-render-markdown"))
+        self.assertEqual(disabled.render_markdown, "plain")
+
+    def test_env_can_disable_markdown_rendering(self) -> None:
+        for value in ("0", "false", "off", "plain"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"ORBIT_RENDER_MARKDOWN": value}):
+                    config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json"))
+
+                self.assertEqual(config.render_markdown, "plain")
+
+    def test_cli_can_enable_live_markdown_rendering(self) -> None:
+        config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json", "--render-markdown-live"))
+
+        self.assertEqual(config.render_markdown, "live")
+
+    def test_no_render_markdown_forces_plain(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_RENDER_MARKDOWN": "live"}):
+            config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json", "--no-render-markdown"))
+
+        self.assertEqual(config.render_markdown, "plain")
 
     def test_config_rejects_unknown_tool_spec(self) -> None:
         with self.assertRaisesRegex(ValueError, "tools"):

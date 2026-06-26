@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ MAX_MAX_TOKENS = 4096
 MIN_CONTEXT_TOKENS = 512
 MAX_CONTEXT_TOKENS = 262_144
 DEFAULT_TOOLS = "off"
+MARKDOWN_RENDER_MODES = {"plain", "live"}
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class AppConfig:
     no_system: bool = False
     think: bool = DEFAULT_THINKING
     tools: ToolSpec = DEFAULT_TOOLS
+    render_markdown: str = "live"
 
 
 def add_config_arguments(parser: argparse.ArgumentParser) -> None:
@@ -47,6 +50,16 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-system", action="store_true", help="Do not send the default system prompt.")
     parser.add_argument("--think", help="Initial thinking mode: off or on.")
     parser.add_argument("--tools", help="Initial tool mode: off or on.")
+    parser.add_argument(
+        "--render-markdown-live",
+        action="store_true",
+        help="Render final answers with minimal live Markdown styling while streaming.",
+    )
+    parser.add_argument(
+        "--no-render-markdown",
+        action="store_true",
+        help="Disable Markdown rendering and keep plain-text streaming output.",
+    )
 
 
 def load_app_config(args: argparse.Namespace) -> AppConfig:
@@ -79,7 +92,9 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         no_system=_bool_value(values, "no_system", AppConfig.no_system),
         think=_bool_value_or_spec(values, "think", AppConfig.think),
         tools=_tool_spec_value(values),
+        render_markdown=_markdown_mode_value(values),
     )
+    cli_markdown = _cli_markdown_mode(args)
     return AppConfig(
         base_url=args.base_url if args.base_url is not None else config.base_url,
         workdir=Path(args.workdir).expanduser().resolve() if args.workdir is not None else config.workdir,
@@ -112,6 +127,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         no_system=args.no_system or config.no_system,
         think=normalize_think_spec(args.think) if args.think is not None else config.think,
         tools=normalize_tool_spec(args.tools) if args.tools is not None else config.tools,
+        render_markdown=cli_markdown if cli_markdown is not None else config.render_markdown,
     )
 
 
@@ -212,3 +228,36 @@ def _tool_spec_value(values: dict[str, Any]) -> ToolSpec:
     if isinstance(value, dict):
         value = DEFAULT_TOOLS
     return normalize_tool_spec(value, key="tool_mode")
+
+
+def _markdown_mode_value(values: dict[str, Any]) -> str:
+    mode = values.get("render_markdown")
+    if mode is not None:
+        return _normalize_markdown_mode(mode, key="render_markdown")
+    return _markdown_mode_from_env()
+
+
+def _markdown_mode_from_env() -> str:
+    mode = os.environ.get("ORBIT_RENDER_MARKDOWN")
+    if mode is not None:
+        return _normalize_markdown_mode(mode, key="ORBIT_RENDER_MARKDOWN")
+    return "live"
+
+
+def _cli_markdown_mode(args: argparse.Namespace) -> str | None:
+    if args.render_markdown_live:
+        return "live"
+    if args.no_render_markdown:
+        return "plain"
+    return None
+
+
+def _normalize_markdown_mode(value: Any, *, key: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"invalid {key}: expected string")
+    lowered = value.strip().lower()
+    if lowered in {"off", "false", "0", "plain", ""}:
+        return "plain"
+    if lowered in MARKDOWN_RENDER_MODES:
+        return lowered
+    raise ValueError(f"invalid {key}: expected one of plain, live")

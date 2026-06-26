@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 
 from orbit.backend.base import StreamProgress
-from orbit.terminal.theme import DIM, RESET, dim
+from orbit.terminal.theme import CYAN, DIM, RESET, dim
 
 
 SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
 PREFILL_COMPLETION_LABEL = "waiting for model..."
+MARKDOWN_HEADING = "\033[1m" + CYAN
+MARKDOWN_BOLD = "\033[1m"
+MARKDOWN_BOLD_OFF = "\033[22m"
+MARKDOWN_ITALIC = "\033[3m"
+MARKDOWN_ITALIC_OFF = "\033[23m"
 
 
 class StreamRenderer:
@@ -19,11 +25,14 @@ class StreamRenderer:
         prefill_estimate_seconds: float | None = None,
         prefill_estimate_tokens: int | None = None,
         thinking: bool = False,
+        render_markdown_mode: str = "plain",
     ) -> None:
         self.interval = interval
         self._prefill_estimate_seconds = prefill_estimate_seconds
         self._prefill_estimate_tokens = prefill_estimate_tokens
         self._thinking_filter = _ThinkingDisplayFilter() if thinking else None
+        self._markdown_mode = render_markdown_mode
+        self._markdown_live = _LiveMarkdownRenderer(enabled=render_markdown_mode == "live")
         self._started = False
         self._first_delta = False
         self._timer_active = False
@@ -54,7 +63,7 @@ class StreamRenderer:
             self._first_delta = True
             self._stop_timer(clear=True)
         if self._thinking_filter is None:
-            print(text, end="", flush=True)
+            self._write_visible_text(text)
             return
         for fragment, dimmed in self._thinking_filter.write(text):
             if not fragment:
@@ -62,6 +71,7 @@ class StreamRenderer:
             self._print_thinking_fragment(fragment, dimmed=dimmed)
 
     def event(self, text: str, *, restart_timer: bool = True, trailing_blank_line: bool = False) -> None:
+        self._flush_markdown_buffer(interrupted=False)
         self._stop_timer(clear=True)
         print(dim(text), flush=True)
         if trailing_blank_line:
@@ -87,7 +97,7 @@ class StreamRenderer:
         if self._started and not self._first_delta:
             self._render_wait_line()
 
-    def finish(self) -> None:
+    def finish(self, *, interrupted: bool = False) -> None:
         if self._thinking_filter is not None:
             for fragment, dimmed in self._thinking_filter.finish():
                 if fragment:
@@ -95,6 +105,7 @@ class StreamRenderer:
             if self._thinking_dim_open:
                 print(RESET, end="", flush=True)
                 self._thinking_dim_open = False
+        self._flush_markdown_buffer(interrupted=interrupted)
         if not self._started:
             return
         self._stop_timer(clear=not self._first_delta)
@@ -116,7 +127,25 @@ class StreamRenderer:
                 self._thinking_dim_open = True
             print(fragment, end="", flush=True)
             return
-        print(fragment, end="", flush=True)
+        self._write_visible_text(fragment)
+
+    def _write_visible_text(self, text: str) -> None:
+        try:
+            if self._markdown_mode == "live":
+                for chunk in self._markdown_live.write(text):
+                    print(chunk, end="", flush=True)
+                return
+            print(text, end="", flush=True)
+        except Exception:
+            print(text, end="", flush=True)
+
+    def _flush_markdown_buffer(self, *, interrupted: bool) -> None:
+        if self._markdown_mode == "live":
+            try:
+                for chunk in self._markdown_live.finish():
+                    print(chunk, end="", flush=True)
+            except Exception:
+                pass
 
     def _stop_timer(self, *, clear: bool) -> None:
         self._stop.set()
@@ -225,7 +254,7 @@ def _pad_to_terminal_width(text: str) -> str:
 
 
 def _visible_len(text: str) -> int:
-    return len(__import__("re").sub(r"\x1b\[[0-9;]*m", "", text))
+    return len(re.sub(r"\x1b\[[0-9;]*m", "", text))
 
 
 def format_elapsed(seconds: float) -> str:
@@ -389,3 +418,223 @@ def _strip_channel_markup(text: str) -> str:
         .replace("<|channel>final\n", "")
         .replace("<channel|>", "")
     )
+
+
+class _LiveMarkdownRenderer:
+    _INLINE_BUFFER_LIMIT = 160
+
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self._inside_code_fence = False
+        self._start_of_line = True
+        self._prefix = ""
+        self._line_style: str | None = None
+        self._style_open = False
+        self._inline_buffer = ""
+        self._discard_fence_line = False
+        self._last_visible_char = ""
+
+    def write(self, text: str) -> list[str]:
+        if not text:
+            return []
+        if not self.enabled:
+            return [text]
+        emitted: list[str] = []
+        for ch in text:
+            emitted.extend(self._write_char(ch))
+        return emitted
+
+    def finish(self) -> list[str]:
+        if not self.enabled:
+            return []
+        tail: list[str] = []
+        if self._prefix:
+            tail.append(self._emit(self._prefix))
+            self._prefix = ""
+        if self._inline_buffer:
+            tail.append(self._emit(self._inline_buffer))
+            self._inline_buffer = ""
+        if self._style_open:
+            tail.append(RESET)
+            self._style_open = False
+        return tail
+
+    def _write_char(self, ch: str) -> list[str]:
+        if self._discard_fence_line:
+            if ch == "\n":
+                self._discard_fence_line = False
+                self._start_of_line = True
+            return []
+        if self._start_of_line:
+            return self._write_line_start(ch)
+        if ch == "\n":
+            chunks = self._flush_inline_buffer()
+            chunk = self._emit(ch)
+            if self._style_open:
+                chunk += RESET
+                self._style_open = False
+            self._start_of_line = True
+            self._line_style = None
+            chunks.append(chunk)
+            return chunks
+        return self._write_inline_char(ch)
+
+    def _write_line_start(self, ch: str) -> list[str]:
+        self._prefix += ch
+        if ch == "\n":
+            chunk = self._emit(self._prefix)
+            self._prefix = ""
+            self._line_style = None
+            self._start_of_line = True
+            return [chunk]
+
+        decision = self._line_start_decision()
+        if decision is None:
+            return []
+        style, keep_start, visible_prefix = decision
+        prefix = self._prefix
+        self._prefix = ""
+        self._line_style = style
+        self._start_of_line = keep_start
+        if visible_prefix is None:
+            visible_prefix = prefix
+        if visible_prefix.startswith("**"):
+            return self._write_inline_text(visible_prefix)
+        if not visible_prefix:
+            return []
+        return [self._emit(visible_prefix)]
+
+    def _line_start_decision(self) -> tuple[str | None, bool, str | None] | None:
+        prefix = self._prefix
+        if prefix.startswith("```"):
+            self._inside_code_fence = not self._inside_code_fence
+            self._discard_fence_line = True
+            return DIM if self._inside_code_fence else None, False, ""
+        if prefix in {"#", "##", "###", "-", "*", "`", "``"}:
+            return None
+        if prefix.startswith("**") and len(prefix) >= 3:
+            return None, False, prefix
+        if prefix.startswith("*") and not prefix.startswith("* "):
+            return None, False, prefix
+        if prefix.startswith("-") and not prefix.startswith("- "):
+            return None, False, prefix
+        if re.fullmatch(r"\d+", prefix) or re.fullmatch(r"\d+\.", prefix):
+            return None
+        if prefix.startswith(("### ", "## ", "# ")):
+            return MARKDOWN_HEADING, False, ""
+        if prefix.startswith(("- ", "* ")) or re.fullmatch(r"\d+\. ", prefix):
+            return CYAN, False, prefix
+        if self._inside_code_fence and not prefix.startswith("```"):
+            return DIM, False, prefix
+        if len(prefix) >= 4 or prefix[0] not in "#-*`0123456789":
+            return None, False, prefix
+        if prefix.startswith("-") or prefix.startswith("*"):
+            return None, False, prefix
+        return None, False, prefix
+
+    def _emit(self, text: str) -> str:
+        if not text:
+            return ""
+        self._remember_visible_text(text)
+        if not self._line_style:
+            return text
+        if self._style_open:
+            return text
+        self._style_open = True
+        return f"{self._line_style}{text}"
+
+    def _write_inline_char(self, ch: str) -> list[str]:
+        if self._inside_code_fence:
+            return [self._emit(ch)]
+        self._inline_buffer += ch
+        return self._drain_inline_buffer()
+
+    def _write_inline_text(self, text: str) -> list[str]:
+        emitted: list[str] = []
+        for ch in text:
+            emitted.extend(self._write_inline_char(ch))
+        return emitted
+
+    def _drain_inline_buffer(self) -> list[str]:
+        emitted: list[str] = []
+        while self._inline_buffer:
+            start, marker = self._next_inline_marker()
+            if start < 0:
+                if self._inline_buffer.endswith(("*", "_")):
+                    plain = self._inline_buffer[:-1]
+                    if plain:
+                        emitted.append(self._emit(plain))
+                    self._inline_buffer = self._inline_buffer[-1]
+                    break
+                emitted.append(self._emit(self._inline_buffer))
+                self._inline_buffer = ""
+                break
+            if start > 0:
+                emitted.append(self._emit(self._inline_buffer[:start]))
+                self._inline_buffer = self._inline_buffer[start:]
+                continue
+            end = self._inline_buffer.find(marker, len(marker))
+            if end < 0:
+                if len(self._inline_buffer) > self._INLINE_BUFFER_LIMIT:
+                    emitted.append(self._emit(self._inline_buffer))
+                    self._inline_buffer = ""
+                break
+            content = self._inline_buffer[len(marker) : end]
+            if content:
+                emitted.append(self._emit(self._inline_style(content, marker=marker)))
+            self._inline_buffer = self._inline_buffer[end + len(marker) :]
+        return emitted
+
+    def _flush_inline_buffer(self) -> list[str]:
+        if not self._inline_buffer:
+            return []
+        chunk = self._emit(self._inline_buffer)
+        self._inline_buffer = ""
+        return [chunk]
+
+    def _next_inline_marker(self) -> tuple[int, str]:
+        candidates: list[tuple[int, str]] = []
+        for marker in ("**", "*", "_"):
+            idx = self._find_inline_marker(marker)
+            if idx >= 0:
+                candidates.append((idx, marker))
+        if not candidates:
+            return -1, ""
+        return min(candidates, key=lambda item: (item[0], -len(item[1])))
+
+    def _find_inline_marker(self, marker: str) -> int:
+        start = 0
+        while True:
+            idx = self._inline_buffer.find(marker, start)
+            if idx < 0:
+                return -1
+            next_idx = idx + len(marker)
+            if marker != "**" and next_idx < len(self._inline_buffer) and self._inline_buffer[next_idx].isspace():
+                start = idx + 1
+                continue
+            if marker == "_" and self._marker_inside_word(idx=idx, marker=marker):
+                start = idx + 1
+                continue
+            return idx
+
+    def _inline_style(self, text: str, *, marker: str) -> str:
+        if marker == "**":
+            open_style = MARKDOWN_BOLD
+            close_style = MARKDOWN_BOLD_OFF
+        else:
+            open_style = MARKDOWN_ITALIC
+            close_style = MARKDOWN_ITALIC_OFF
+        if self._line_style and self._style_open:
+            close_style = RESET + self._line_style
+        return f"{open_style}{text}{close_style}"
+
+    def _marker_inside_word(self, *, idx: int, marker: str) -> bool:
+        previous = self._inline_buffer[idx - 1] if idx > 0 else self._last_visible_char
+        next_idx = idx + len(marker)
+        next_char = self._inline_buffer[next_idx] if next_idx < len(self._inline_buffer) else ""
+        return bool(previous and previous.isalnum() and next_char and next_char.isalnum())
+
+    def _remember_visible_text(self, text: str) -> None:
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        if visible:
+            self._last_visible_char = visible[-1]

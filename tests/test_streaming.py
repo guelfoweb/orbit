@@ -4,6 +4,7 @@ import io
 import sys
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,326 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         self.assertIn("hello", stream.getvalue())
+
+    def test_plain_markdown_rendering_keeps_literal_text(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="plain")
+            renderer.write("Hello **world**\n\n")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "Hello **world**\n\n")
+
+    def test_live_markdown_rendering_does_not_apply_to_thinking_fragments(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(thinking=True, render_markdown_mode="live")
+            renderer.write("### Reasoning\nstep 1\n")
+            renderer.set_final_output_mode(True)
+            renderer.write("**Final** answer.\n")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("Thinking...", output)
+        self.assertIn("### Reasoning\nstep 1\n", output)
+        self.assertIn("\033[1mFinal\033[22m answer.\n", output)
+
+    def test_live_markdown_rendering_does_not_apply_to_tool_events(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.event("Read: **cat** README.md", restart_timer=False)
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("Read: **cat** README.md", output)
+        self.assertNotIn("\033[1mcat", output)
+
+    def test_live_markdown_rendering_styles_heading_immediately(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("# Title")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("Title", output)
+        self.assertNotIn("# Title", output)
+        self.assertIn("\033[1m\033[36m", output)
+
+    def test_live_markdown_rendering_handles_split_heading_marker(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("#")
+            renderer.write(" Title")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("Title", output)
+        self.assertNotIn("# Title", output)
+        self.assertIn("\033[1m\033[36m", output)
+
+    def test_live_markdown_rendering_emits_partial_paragraph_before_blank_line(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("This paragraph is still growing")
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "This paragraph is still growing")
+
+    def test_live_markdown_rendering_styles_list_immediately(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("- item")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("- item", output)
+        self.assertIn("\033[36m", output)
+
+    def test_live_markdown_rendering_emits_list_item_before_list_end(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("- first item")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("- first item", output)
+        self.assertNotEqual(output, "")
+
+    def test_live_markdown_rendering_handles_split_list_marker(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("1")
+            renderer.write(". item")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("1. item", output)
+        self.assertIn("\033[36m", output)
+
+    def test_live_markdown_rendering_styles_complete_inline_bold(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("The **first** item")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("The ", output)
+        self.assertIn("\033[1mfirst\033[22m", output)
+        self.assertIn(" item", output)
+        self.assertNotIn("**first**", output)
+
+    def test_live_markdown_rendering_styles_line_start_inline_bold(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("**First** item")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("\033[1mFirst\033[22m", output)
+        self.assertIn(" item", output)
+        self.assertNotIn("**First**", output)
+
+    def test_live_markdown_rendering_handles_split_inline_bold(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("The **bo")
+            renderer.write("ld** word")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("The ", output)
+        self.assertIn("\033[1mbold\033[22m", output)
+        self.assertIn(" word", output)
+        self.assertNotIn("**bold**", output)
+
+    def test_live_markdown_rendering_preserves_incomplete_inline_bold(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("The **first item")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "The **first item")
+
+    def test_live_markdown_rendering_styles_complete_inline_italic(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("The *first* and _second_ item")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("\033[3mfirst\033[23m", output)
+        self.assertIn("\033[3msecond\033[23m", output)
+        self.assertNotIn("*first*", output)
+        self.assertNotIn("_second_", output)
+
+    def test_live_markdown_rendering_handles_split_inline_italic(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("The *ita")
+            renderer.write("lic* word")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("\033[3mitalic\033[23m", output)
+        self.assertIn(" word", output)
+
+    def test_live_markdown_rendering_does_not_style_snake_case_as_italic(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("use snake_case_name here")
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "use snake_case_name here")
+
+    def test_live_markdown_rendering_does_not_hold_plain_asterisk_math(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("2 * 3 = 6")
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "2 * 3 = 6")
+
+    def test_live_markdown_rendering_restores_heading_style_after_inline_bold(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("# A **bold** title")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("\033[1mbold\033[0m\033[1m\033[36m", output)
+        self.assertIn(" title", output)
+
+    def test_live_markdown_rendering_shows_code_fence_before_close(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("```python\nprint('x')")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("print('x')", output)
+        self.assertNotIn("```python", output)
+        self.assertNotIn("python\n", output)
+        self.assertIn("\033[2m", output)
+
+    def test_live_markdown_rendering_handles_split_code_fence(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("`")
+            renderer.write("``python\nprint('x')")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("print('x')", output)
+        self.assertNotIn("```python", output)
+        self.assertNotIn("python\n", output)
+        self.assertIn("\033[2m", output)
+
+    def test_live_markdown_tables_fall_back_to_plain_text(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("| a | b |\n| - | - |\n")
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "| a | b |\n| - | - |\n")
+
+    def test_live_markdown_falls_back_to_plain_text_on_renderer_error(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            with mock.patch.object(renderer._markdown_live, "write", side_effect=RuntimeError("boom")):
+                renderer.write("hello **world**")
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "hello **world**")
 
     def test_thinking_mode_dims_reasoning_and_keeps_final_answer_normal(self) -> None:
         stream = io.StringIO()

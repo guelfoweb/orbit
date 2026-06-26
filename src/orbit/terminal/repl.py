@@ -103,6 +103,7 @@ class Repl:
             prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
             prefill_estimate_tokens=prefill_tokens,
             thinking=self.config.think,
+            render_markdown_mode=self.config.render_markdown,
         )
         checkpoint = len(self.runtime.messages)
         print()
@@ -134,7 +135,7 @@ class Repl:
                     on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
                 )
         except KeyboardInterrupt:
-            renderer.finish()
+            renderer.finish(interrupted=True)
             self.runtime.restore_message_count(checkpoint)
             print(dim("interrupted"), flush=True)
             return
@@ -318,6 +319,7 @@ class Repl:
             prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
             prefill_estimate_tokens=prefill_tokens,
             thinking=self.config.think,
+            render_markdown_mode=self.config.render_markdown,
         )
         checkpoint = len(self.runtime.messages)
         print()
@@ -333,7 +335,7 @@ class Repl:
                 on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
             )
         except KeyboardInterrupt:
-            renderer.finish()
+            renderer.finish(interrupted=True)
             self.runtime.restore_message_count(checkpoint)
             print(dim("interrupted"), flush=True)
             return
