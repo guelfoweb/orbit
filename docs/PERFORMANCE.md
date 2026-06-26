@@ -61,11 +61,27 @@ The main latency wins in Orbit have come from:
 - tools off by default
 - keeping chat and tool prompts separate
 - stable prompt prefixes for reuse
+- compact dedicated tools for common noisy tasks
+- local capability discovery in the tools-on prompt
 - bounded tool-result reinjection
+- content-evidence guards that prevent ungrounded retries from becoming user-visible answers
 - short final answers by policy
 - explicit memory refresh instead of uncontrolled context growth
 
-Implementation notes are in [TECHNIQUES.md](TECHNIQUES.md).
+Implementation notes are in [TECHNIQUES.md](TECHNIQUES.md) and [RUNTIME_TOOLING_AND_EVIDENCE.md](RUNTIME_TOOLING_AND_EVIDENCE.md).
+
+## Runtime tooling for lower prefill
+
+Large shell outputs are a major CPU-only bottleneck because they are reinjected into the next model pass.
+
+Orbit uses dedicated model-guided tools for common high-noise cases:
+
+- `fetch_url` normalizes direct URL fetch evidence instead of reinjecting curl progress meters or raw transport noise.
+- `list_directory` returns bounded deterministic listings instead of large `find`, `ls -R`, or `tree` output.
+- `system_info` returns compact machine specs instead of verbose `lscpu`, `free`, `df`, `uname`, or `/proc` dumps.
+- startup capability discovery tells the model which local document utilities are available before it chooses a command.
+
+These tools reduce context noise without adding deterministic task routing. The model still chooses the tool.
 
 ## Benchmark discipline
 
@@ -92,6 +108,12 @@ The dominant costs have usually been:
 - scheduler noise on CPU-only runs
 
 Micro-optimizing one function is less useful than reducing unnecessary inference work.
+
+## KV cache reuse planning
+
+KV cache reuse work must start from measurement, not implementation.
+
+The current planning document is [KV_CACHE_REUSE_PLAN.md](KV_CACHE_REUSE_PLAN.md). It defines stable prompt-prefix candidates, invalidation risks, and the benchmark matrix to run before any cache reuse patch.
 
 ## What Orbit intentionally does not optimize
 

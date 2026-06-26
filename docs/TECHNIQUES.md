@@ -4,6 +4,8 @@ This document summarizes the runtime techniques Orbit uses with its current loca
 
 The goal is not to replace the model with deterministic task logic. The model still decides when shell access is needed, which command to run, and how to write the final answer. The runtime shapes the contract, bounds expensive inputs, and keeps long sessions observable.
 
+For the evidence and tooling contract in more detail, see [RUNTIME_TOOLING_AND_EVIDENCE.md](RUNTIME_TOOLING_AND_EVIDENCE.md).
+
 ## Model-driven contract
 
 Orbit uses a small shell-oriented contract:
@@ -35,7 +37,14 @@ The user enables tools explicitly:
 /tools on
 ```
 
-`/tools on` exposes only `exec_shell_full_command`.
+`/tools on` exposes explicit local tools:
+
+- `exec_shell_full_command`
+- `fetch_url`
+- `list_directory`
+- `system_info`
+
+The model chooses which tool to call. Orbit does not auto-route user prompts to these tools.
 
 ## Separate chat and tools prompts
 
@@ -81,6 +90,14 @@ The runtime does not synthesize shell output locally. It may only:
 
 Interpretation stays model-generated.
 
+## Content evidence
+
+For file or URL content tasks, Orbit requires real content evidence or a real observed failure before accepting a final answer.
+
+Metadata-only output such as `ls`, `stat`, `file`, or directory listings is not enough for read/explain/summarize tasks, though it can satisfy metadata requests such as listing files or checking whether a file exists.
+
+The runtime may ask for bounded model-guided recovery, but the model still chooses the command or tool.
+
 ## Long file handling
 
 Small UTF-8 text or source files can be returned directly.
@@ -89,9 +106,11 @@ Large reads are converted into bounded chunks so the model sees real content wit
 
 ## PDF text extraction
 
-For PDF reading or analysis, Orbit prefers `pdftotext`. If unavailable, it falls back to filtered `strings`.
+For PDF reading or analysis through shell commands, Orbit can post-process PDF text extraction.
 
 There is no OCR and no raw PDF reinjection.
+
+Capability discovery also tells the model whether common document tools such as `pdftotext`, `pandoc`, LibreOffice, `file`, `unzip`, and Python are available locally.
 
 ## Web search and URL handling
 
@@ -101,9 +120,56 @@ Generic web search uses:
 orbit-web-search "query"
 ```
 
-Explicit URLs should be fetched with `curl`.
+Generic web search is best-effort and provider-dependent. Search prompts are optional online smoke tests for the local release path.
+
+Explicit URL content requests should use `fetch_url` when tools are enabled. Shell fetch commands remain available, but progress meters and transfer logs are not content evidence.
 
 HTML may be converted into readable text unless the user explicitly asks for source analysis.
+
+## Compact dedicated tools
+
+Dedicated tools reduce context noise while keeping tool choice model-guided:
+
+- `fetch_url` returns normalized URL content or observed fetch failures.
+- `list_directory` returns compact, stable, truncated directory listings without reading file contents.
+- `system_info` returns compact OS, CPU, RAM, disk, and Python runtime information without sensitive host/user/network details.
+
+`exec_shell_full_command` remains available for arbitrary local commands.
+
+## Capability discovery
+
+At startup, Orbit detects local document-related commands with `shutil.which` and stores the result in memory.
+
+When tools are enabled, a compact capability summary is included in the tool prompt so the model can avoid assuming absent utilities.
+
+This does not add an inference pass, choose commands, or install tools.
+
+Interactive commands:
+
+```text
+/tools status
+/tools refresh
+```
+
+These show or refresh the local capability cache without calling the model.
+
+## Terminal rendering
+
+Orbit supports minimal live Markdown rendering for final answers while streaming.
+
+The renderer is intentionally conservative:
+
+- it does not render thinking
+- it does not render tool events or raw tool output
+- it does not rewrite previous output
+- it does not build or change the answer text
+
+Plain output can be forced with:
+
+```bash
+orbit --no-render-markdown
+ORBIT_RENDER_MARKDOWN=plain orbit
+```
 
 ## Session memory
 
