@@ -613,6 +613,64 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
 
+    def test_ask_chat_does_not_retry_complete_markdown_answer_with_trailing_bold_closer(self) -> None:
+        class MarkdownCompleteBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.chat_calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(
+                self,
+                messages: list[Message],
+                *,
+                temperature: float,
+                max_tokens: int,
+                tools=None,
+                on_delta=None,
+                on_progress=None,
+            ) -> ChatResult:
+                self.chat_calls += 1
+                assert on_delta is not None
+                content = (
+                    "I am a large language model, trained by Google. I can help answer questions and explain topics.\n\n"
+                    "**What's on your mind today? Is there anything specific I can help you with?**"
+                )
+                on_delta(content)
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=2,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = MarkdownCompleteBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=False)
+        emitted: list[str] = []
+        phases: list[ModelPhaseStart] = []
+
+        result = runtime.ask_chat(
+            "hi, tell me something about yourself",
+            temperature=0,
+            max_tokens=512,
+            on_final_delta=emitted.append,
+            on_phase_start=phases.append,
+        )
+
+        self.assertEqual(backend.chat_calls, 1)
+        self.assertEqual("".join(emitted), result.content)
+        self.assertEqual(
+            [(phase.phase, phase.attempt, phase.reason) for phase in phases],
+            [("chat_final", 1, None)],
+        )
+
     def test_continue_last_response_uses_prompt_fallback_for_bullet_reasoning_length(self) -> None:
         class BulletReasoningBackend(FakeBackend):
             def __init__(self) -> None:
