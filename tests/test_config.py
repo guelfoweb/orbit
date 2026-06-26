@@ -25,6 +25,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("Environment: OS=", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("orbit-web-search", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("prefer the fetch_url tool", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("system_info", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("curl are still allowed", DEFAULT_SYSTEM_PROMPT)
 
     def test_command_system_prompt_sends_local_hardware_queries_to_shell(self) -> None:
@@ -34,6 +35,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("Environment: OS=", ROUTE_SYSTEM_PROMPT)
         self.assertIn("orbit-web-search", ROUTE_SYSTEM_PROMPT)
         self.assertIn("prefer the fetch_url tool", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("system_info", ROUTE_SYSTEM_PROMPT)
         self.assertIn("Quote spaced paths", ROUTE_SYSTEM_PROMPT)
         self.assertIn("not metadata", ROUTE_SYSTEM_PROMPT)
 
@@ -46,6 +48,7 @@ class ConfigTests(unittest.TestCase):
     def test_tool_call_prompt_mentions_quoted_shell_paths(self) -> None:
         self.assertIn("Call exactly one available tool", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("Prefer fetch_url", TOOL_CALL_SYSTEM_PROMPT)
+        self.assertIn("Prefer system_info", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("orbit-web-search", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("exec_shell_full_command", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("Quote paths containing spaces", TOOL_CALL_SYSTEM_PROMPT)
@@ -130,10 +133,10 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tools"):
             load_app_config(_parse("--tools", "browser"))
 
-    def test_tools_on_uses_shell_fetch_url_and_list_directory(self) -> None:
+    def test_tools_on_uses_shell_fetch_url_list_directory_and_system_info(self) -> None:
         names = allowed_tool_names_for_spec("on")
 
-        self.assertEqual(names, ("exec_shell_full_command", "fetch_url", "list_directory"))
+        self.assertEqual(names, ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
 
     def test_legacy_tools_object_config_key_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

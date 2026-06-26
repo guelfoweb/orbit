@@ -51,12 +51,22 @@ class RouteRequestTests(unittest.TestCase):
     def test_parse_tool_command_accepts_raw_list_directory_tool_call(self) -> None:
         self.assertEqual(parse_tool_command('<|tool_call>call:list_directory{"path":".","recursive":true}<tool_call|>'), ToolRoute.FILESYSTEM)
 
+    def test_parse_tool_command_accepts_raw_system_info_tool_call(self) -> None:
+        self.assertEqual(parse_tool_command('<|tool_call>call:system_info{"include_cpu":true}<tool_call|>'), ToolRoute.FILESYSTEM)
+
     def test_parse_command_decision_keeps_raw_list_directory_tool_scope(self) -> None:
         decision = parse_command_decision('<|tool_call>call:list_directory{"path":".","recursive":true}<tool_call|>')
 
         self.assertIsNotNone(decision)
         assert decision is not None
         self.assertEqual(decision_tool_names(decision), ("list_directory",))
+
+    def test_parse_command_decision_keeps_raw_system_info_tool_scope(self) -> None:
+        decision = parse_command_decision('<|tool_call>call:system_info{}<tool_call|>')
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision_tool_names(decision), ("system_info",))
 
     def test_parse_tool_command_accepts_parenthesized_shell_tool_call(self) -> None:
         self.assertEqual(parse_tool_command('<|tool_call>call(shell, "orbit-web-search \\"Mario Nobile\\"")<tool_call|>'), ToolRoute.FILESYSTEM)
@@ -109,6 +119,22 @@ class RouteRequestTests(unittest.TestCase):
         self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
         self.assertEqual(decision_tool_names(decision), ("list_directory",))
 
+    def test_parse_command_decision_from_tool_calls_accepts_system_info_arguments(self) -> None:
+        decision = parse_command_decision_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {"name": "system_info", "arguments": '{"include_cpu":true}'},
+                }
+            ]
+        )
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
+        self.assertEqual(decision_tool_names(decision), ("system_info",))
+
     def test_command_tool_call_from_content_uses_shell_command_json(self) -> None:
         tool_call = command_tool_call_from_content('{"command":"ls -F"}', ("exec_shell_full_command",))
 
@@ -132,6 +158,14 @@ class RouteRequestTests(unittest.TestCase):
         assert tool_call is not None
         self.assertEqual(tool_call["function"]["name"], "list_directory")
         self.assertEqual(json.loads(tool_call["function"]["arguments"]), {"path": ".", "recursive": True})
+
+    def test_command_tool_call_from_content_uses_system_info_json(self) -> None:
+        tool_call = command_tool_call_from_content('{"include_cpu": true, "include_memory": true}', ("exec_shell_full_command", "system_info"))
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        self.assertEqual(tool_call["function"]["name"], "system_info")
+        self.assertEqual(json.loads(tool_call["function"]["arguments"]), {"include_cpu": True, "include_memory": True})
 
     def test_command_tool_call_from_content_converts_raw_orbit_web_search(self) -> None:
         tool_call = command_tool_call_from_content(
@@ -284,6 +318,23 @@ EOF"}"""
         self.assertEqual(tool_call["function"]["name"], "list_directory")
         self.assertEqual(tool_call["function"]["arguments"], '{"path":".","recursive":true}')
 
+    def test_command_tool_call_from_tool_calls_keeps_system_info_tool_call(self) -> None:
+        tool_call = command_tool_call_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {"name": "system_info", "arguments": '{"include_cpu":true}'},
+                }
+            ],
+            ("exec_shell_full_command", "system_info"),
+        )
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        self.assertEqual(tool_call["function"]["name"], "system_info")
+        self.assertEqual(tool_call["function"]["arguments"], '{"include_cpu":true}')
+
     def test_command_tool_call_from_tool_calls_accepts_shell_alias(self) -> None:
         tool_call = command_tool_call_from_tool_calls(
             [
@@ -356,7 +407,7 @@ EOF"}""",
         self.assertIsNone(tool_call)
 
     def test_tool_names_for_decision_are_bounded(self) -> None:
-        self.assertEqual(tool_names_for_decision(ToolRoute.FILESYSTEM), ("exec_shell_full_command", "fetch_url", "list_directory"))
+        self.assertEqual(tool_names_for_decision(ToolRoute.FILESYSTEM), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
         self.assertEqual(tool_names_for_decision(ToolRoute.FILE_EDIT), ())
         self.assertEqual(tool_names_for_decision(ToolRoute.WEB), ())
 
@@ -371,6 +422,10 @@ EOF"}""",
     def test_command_stream_state_detects_complete_list_directory_json(self) -> None:
         self.assertEqual(command_stream_state('{"path":".","recursive":true}'), "route")
         self.assertEqual(command_stream_state('{"path"'), "pending")
+
+    def test_command_stream_state_detects_complete_system_info_json(self) -> None:
+        self.assertEqual(command_stream_state('{"include_cpu":true}'), "route")
+        self.assertEqual(command_stream_state('{"include_'), "pending")
 
     def test_command_stream_filter_suppresses_command_json(self) -> None:
         emitted: list[str] = []

@@ -14,6 +14,7 @@ DISPLAY_TOOL_NAMES = {
     "exec_shell_full_command": "exec",
     "fetch_url": "fetch_url",
     "list_directory": "list_directory",
+    "system_info": "system_info",
 }
 
 
@@ -35,6 +36,8 @@ def format_tool_call_event(name: str, args: str) -> str:
         if path:
             suffix = " recursive" if recursive else ""
             return f"ListDir{suffix}: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}"
+    if name == "system_info":
+        return "SystemInfo"
     return f"{display_tool_name(name)} {args}"
 
 
@@ -160,6 +163,9 @@ def _tool_result_preview(content: str | None) -> str | None:
             return f"directory listing {status or 'error'}"
         preview = _lines_preview(content)
         return preview or "directory listing"
+    if content.startswith("system_info:"):
+        preview = _lines_preview(content)
+        return preview or "system info"
     path = _metadata_value(content, "path")
     if "shell_output_pdf_text: true" in content:
         preview = _body_preview(content, marker="content:")

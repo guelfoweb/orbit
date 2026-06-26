@@ -187,6 +187,20 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("status: ok", execution.result.content)
         self.assertIn("Hello web", execution.result.content)
 
+    def test_system_info_runs_internal_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=Path(tmp),
+                allowed_tool_names=("system_info",),
+            )
+
+            execution = executor.execute("system_info", {"include_disks": False}, chunk_budget={})
+
+        self.assertEqual(execution.source, "orbit")
+        self.assertIn("system_info:", execution.result.content)
+        self.assertNotIn("Disk:", execution.result.content)
+
     def test_fetch_url_plain_text_returns_text(self) -> None:
         class FakeHeaders:
             def get_content_type(self) -> str:

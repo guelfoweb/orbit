@@ -52,7 +52,7 @@ class HybridToolExecutor:
     ) -> ToolExecution:
         if name not in self.allowed_tool_names:
             return ToolExecution(ToolResult(name=name, content=f"error: tool not available for this turn: {name}"), "orbit")
-        if name not in {"exec_shell_full_command", "fetch_url", "list_directory"}:
+        if name not in {"exec_shell_full_command", "fetch_url", "list_directory", "system_info"}:
             return ToolExecution(ToolResult(name=name, content=f"error: unknown tool: {name}"), "orbit")
         parsed = parse_tool_arguments(arguments)
         if isinstance(parsed, str):
