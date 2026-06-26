@@ -25,7 +25,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("/sessions clear", help_text())
         self.assertIn("/think [off|on]", help_text())
         self.assertIn("/status [ctx]", help_text())
-        self.assertIn("/tools [off|on]", help_text())
+        self.assertIn("/tools [off|on|status|refresh]", help_text())
         self.assertNotIn("Show or set tools: off or on.", help_text())
 
     def test_set_max_tokens_without_value_reports_current_value(self) -> None:

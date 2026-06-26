@@ -258,6 +258,11 @@ class Repl:
         value = command.removeprefix("/tools").strip().lower()
         if not value:
             return tools_text(self.tools_mode)
+        if value == "status":
+            return self.runtime.local_capabilities.format_tools_status()
+        if value == "refresh":
+            capabilities = self.runtime.refresh_local_capabilities()
+            return "tools capabilities refreshed\n" + capabilities.format_tools_status()
         try:
             self.tools_mode = normalize_tool_spec(value)
         except ValueError:

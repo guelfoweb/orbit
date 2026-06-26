@@ -16,6 +16,7 @@ from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
 from orbit.runtime.chat import _has_list_like_tool_result
+from orbit.runtime.capabilities import LocalCapabilities, LocalCapability
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.tool_loop import _should_guard_existing_file_rewrite
 from orbit.runtime.turn_trace import ModelPhaseStart
@@ -154,6 +155,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(steps[0].prompt_tokens, 1)
         self.assertEqual(steps[0].cached_tokens, 0)
 
+    def test_capability_discovery_does_not_invoke_model_at_startup(self) -> None:
+        backend = FakeBackend()
+
+        ChatRuntime(backend=backend, system_prompt=None)
+
+        self.assertEqual(backend.calls, 0)
+
     def test_continue_last_response_uses_chat_without_tools(self) -> None:
         backend = FakeBackend()
         runtime = ChatRuntime(backend=backend, system_prompt=None)
@@ -176,6 +184,73 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(runtime.messages[-2]["role"], "user")
         self.assertIn("stop reasoning now", runtime.messages[-2]["content"].lower())
+
+    def test_local_capabilities_are_added_to_tool_prompts(self) -> None:
+        backend = CaptureToolPromptBackend()
+        runtime = ChatRuntime(
+            backend=backend,
+            system_prompt=None,
+            local_capabilities=LocalCapabilities(
+                (
+                    LocalCapability("pdftotext", True, "/usr/bin/pdftotext", "document", "extract text from PDFs"),
+                    LocalCapability("pandoc", False, None, "document", "convert supported document formats to text"),
+                    LocalCapability("python3", True, "/usr/bin/python3", "python", "run Python helpers"),
+                )
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime.ask_with_tools(
+                "read pdf/piccolo.pdf and summarize it",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                max_loops=1,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.calls[0])
+        self.assertIn("Local tools available:", rendered)
+        self.assertIn("pdftotext", rendered)
+        self.assertIn("Unavailable: pandoc", rendered)
+
+    def test_local_capabilities_are_added_to_normal_tool_prompts(self) -> None:
+        backend = CaptureToolPromptBackend()
+        runtime = ChatRuntime(
+            backend=backend,
+            system_prompt=None,
+            local_capabilities=LocalCapabilities(
+                (LocalCapability("pdftotext", True, "/usr/bin/pdftotext", "document", "extract text from PDFs"),)
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime.ask_with_tools(
+                "list files",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                max_loops=1,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.calls[0])
+        self.assertIn("Local tools available:", rendered)
+
+    def test_local_capabilities_are_not_added_to_tools_off_chat(self) -> None:
+        backend = FakeBackend()
+        runtime = ChatRuntime(
+            backend=backend,
+            system_prompt=None,
+            local_capabilities=LocalCapabilities(
+                (LocalCapability("pdftotext", True, "/usr/bin/pdftotext", "document", "extract text from PDFs"),)
+            ),
+        )
+
+        runtime.ask("hello", temperature=0, max_tokens=32)
+
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
+        self.assertNotIn("Local tools available:", rendered)
 
     def test_continue_last_response_uses_prompt_fallback_for_open_reasoning(self) -> None:
         class FallbackBackend(FakeBackend):
@@ -849,6 +924,25 @@ class ToolCallingBackend:
             cached_tokens=10,
             prompt_tokens_per_second=80.0,
             generation_tokens_per_second=9.0,
+        )
+
+
+class CaptureToolPromptBackend:
+    def __init__(self) -> None:
+        self.calls: list[list[Message]] = []
+
+    def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+        self.calls.append(messages)
+        return ChatResult(
+            content="ok",
+            model="fake",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=1,
+            completion_tokens=1,
+            cached_tokens=0,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
         )
 
 
