@@ -48,6 +48,16 @@ class RouteRequestTests(unittest.TestCase):
     def test_parse_tool_command_accepts_raw_fetch_url_tool_call(self) -> None:
         self.assertEqual(parse_tool_command('<|tool_call>call:fetch_url{"url":"https://example.com"}<tool_call|>'), ToolRoute.FILESYSTEM)
 
+    def test_parse_tool_command_accepts_raw_list_directory_tool_call(self) -> None:
+        self.assertEqual(parse_tool_command('<|tool_call>call:list_directory{"path":".","recursive":true}<tool_call|>'), ToolRoute.FILESYSTEM)
+
+    def test_parse_command_decision_keeps_raw_list_directory_tool_scope(self) -> None:
+        decision = parse_command_decision('<|tool_call>call:list_directory{"path":".","recursive":true}<tool_call|>')
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision_tool_names(decision), ("list_directory",))
+
     def test_parse_tool_command_accepts_parenthesized_shell_tool_call(self) -> None:
         self.assertEqual(parse_tool_command('<|tool_call>call(shell, "orbit-web-search \\"Mario Nobile\\"")<tool_call|>'), ToolRoute.FILESYSTEM)
 
@@ -83,6 +93,22 @@ class RouteRequestTests(unittest.TestCase):
         self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
         self.assertEqual(decision_tool_names(decision), ("fetch_url",))
 
+    def test_parse_command_decision_from_tool_calls_accepts_list_directory_arguments(self) -> None:
+        decision = parse_command_decision_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {"name": "list_directory", "arguments": '{"path":".","recursive":true}'},
+                }
+            ]
+        )
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
+        self.assertEqual(decision_tool_names(decision), ("list_directory",))
+
     def test_command_tool_call_from_content_uses_shell_command_json(self) -> None:
         tool_call = command_tool_call_from_content('{"command":"ls -F"}', ("exec_shell_full_command",))
 
@@ -98,6 +124,14 @@ class RouteRequestTests(unittest.TestCase):
         assert tool_call is not None
         self.assertEqual(tool_call["function"]["name"], "fetch_url")
         self.assertEqual(tool_call["function"]["arguments"], '{"url": "https://example.com"}')
+
+    def test_command_tool_call_from_content_uses_list_directory_json(self) -> None:
+        tool_call = command_tool_call_from_content('{"path": ".", "recursive": true}', ("exec_shell_full_command", "list_directory"))
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        self.assertEqual(tool_call["function"]["name"], "list_directory")
+        self.assertEqual(json.loads(tool_call["function"]["arguments"]), {"path": ".", "recursive": True})
 
     def test_command_tool_call_from_content_converts_raw_orbit_web_search(self) -> None:
         tool_call = command_tool_call_from_content(
@@ -233,6 +267,23 @@ EOF"}"""
         self.assertEqual(tool_call["function"]["name"], "fetch_url")
         self.assertEqual(tool_call["function"]["arguments"], '{"url":"https://example.com"}')
 
+    def test_command_tool_call_from_tool_calls_keeps_list_directory_tool_call(self) -> None:
+        tool_call = command_tool_call_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {"name": "list_directory", "arguments": '{"path":".","recursive":true}'},
+                }
+            ],
+            ("exec_shell_full_command", "list_directory"),
+        )
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        self.assertEqual(tool_call["function"]["name"], "list_directory")
+        self.assertEqual(tool_call["function"]["arguments"], '{"path":".","recursive":true}')
+
     def test_command_tool_call_from_tool_calls_accepts_shell_alias(self) -> None:
         tool_call = command_tool_call_from_tool_calls(
             [
@@ -305,7 +356,7 @@ EOF"}""",
         self.assertIsNone(tool_call)
 
     def test_tool_names_for_decision_are_bounded(self) -> None:
-        self.assertEqual(tool_names_for_decision(ToolRoute.FILESYSTEM), ("exec_shell_full_command", "fetch_url"))
+        self.assertEqual(tool_names_for_decision(ToolRoute.FILESYSTEM), ("exec_shell_full_command", "fetch_url", "list_directory"))
         self.assertEqual(tool_names_for_decision(ToolRoute.FILE_EDIT), ())
         self.assertEqual(tool_names_for_decision(ToolRoute.WEB), ())
 
@@ -316,6 +367,10 @@ EOF"}""",
         self.assertEqual(command_stream_state('{"command":"ls -F"'), "pending")
         self.assertEqual(command_stream_state("Hello"), "not_command")
         self.assertEqual(command_stream_state('{"tool":"hammer"}'), "not_command")
+
+    def test_command_stream_state_detects_complete_list_directory_json(self) -> None:
+        self.assertEqual(command_stream_state('{"path":".","recursive":true}'), "route")
+        self.assertEqual(command_stream_state('{"path"'), "pending")
 
     def test_command_stream_filter_suppresses_command_json(self) -> None:
         emitted: list[str] = []

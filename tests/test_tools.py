@@ -16,15 +16,16 @@ from orbit.runtime.tools import default_tool_names, execute_tool, tool_definitio
 
 class ToolTests(unittest.TestCase):
     def test_shell_and_fetch_url_are_exposed(self) -> None:
-        self.assertEqual(tool_names(), ("exec_shell_full_command", "fetch_url"))
-        self.assertEqual(default_tool_names(), ("exec_shell_full_command", "fetch_url"))
+        self.assertEqual(tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory"))
+        self.assertEqual(default_tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory"))
         definitions = tool_definitions()
-        self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command", "fetch_url"])
+        self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command", "fetch_url", "list_directory"])
 
     def test_tool_definitions_respect_allowed_names(self) -> None:
         self.assertEqual(tool_definitions(("read_file",)), [])
         self.assertEqual(len(tool_definitions(("exec_shell_full_command",))), 1)
         self.assertEqual(len(tool_definitions(("fetch_url",))), 1)
+        self.assertEqual(len(tool_definitions(("list_directory",))), 1)
 
     def test_unknown_tool_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,6 +79,16 @@ class ToolTests(unittest.TestCase):
         self.assertIn("url_fetch: true", result.content)
         self.assertIn("status: ok", result.content)
         self.assertIn("title: Example", result.content)
+
+    def test_list_directory_runs_with_compact_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("hello", encoding="utf-8")
+
+            result = execute_tool("list_directory", {"path": "."}, workdir=root)
+
+        self.assertIn("directory_listing:", result.content)
+        self.assertIn("[file] README.md", result.content)
 
 
 if __name__ == "__main__":

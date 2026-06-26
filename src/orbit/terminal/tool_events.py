@@ -13,6 +13,7 @@ COMMAND_PREVIEW_LIMIT = 96
 DISPLAY_TOOL_NAMES = {
     "exec_shell_full_command": "exec",
     "fetch_url": "fetch_url",
+    "list_directory": "list_directory",
 }
 
 
@@ -29,6 +30,11 @@ def format_tool_call_event(name: str, args: str) -> str:
         url = _url_from_args(args)
         if url:
             return f"Fetch: {_truncate_inline(url, limit=COMMAND_PREVIEW_LIMIT)}"
+    if name == "list_directory":
+        path, recursive = _list_directory_from_args(args)
+        if path:
+            suffix = " recursive" if recursive else ""
+            return f"ListDir{suffix}: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}"
     return f"{display_tool_name(name)} {args}"
 
 
@@ -69,6 +75,18 @@ def _url_from_args(args: str) -> str | None:
         if isinstance(url, str) and url.strip():
             return url.strip()
     return None
+
+
+def _list_directory_from_args(args: str) -> tuple[str | None, bool]:
+    try:
+        parsed = json.loads(args)
+    except Exception:
+        return None, False
+    if isinstance(parsed, dict):
+        path = parsed.get("path")
+        recursive = parsed.get("recursive")
+        return (path if isinstance(path, str) and path.strip() else ".", bool(recursive) if isinstance(recursive, bool) else False)
+    return None, False
 
 
 def _format_shell_command_call(command: str) -> str:
@@ -136,6 +154,12 @@ def _tool_result_preview(content: str | None) -> str | None:
             return f"{status or 'fetch'}: {error}"
         if status and status != "null":
             return status
+    if content.startswith("directory_listing:"):
+        if "error=true" in content:
+            status = _metadata_inline_value(content, "status")
+            return f"directory listing {status or 'error'}"
+        preview = _lines_preview(content)
+        return preview or "directory listing"
     path = _metadata_value(content, "path")
     if "shell_output_pdf_text: true" in content:
         preview = _body_preview(content, marker="content:")
@@ -177,6 +201,12 @@ def _metadata_value(content: str, key: str) -> str | None:
     return value or None
 
 
+def _metadata_inline_value(content: str, key: str) -> str | None:
+    first = content.splitlines()[0] if content else ""
+    match = re.search(rf"\b{re.escape(key)}=([^\s]+)", first)
+    return match.group(1) if match else None
+
+
 def _body_preview(content: str, *, marker: str) -> str | None:
     if f"{marker}\n" not in content:
         return None
@@ -190,7 +220,7 @@ def _lines_preview(content: str) -> str | None:
         line = raw.strip()
         if not line:
             continue
-        if line.startswith(("shell_output_", "path:", "extractor:", "chunk_index:", "total_chunks:", "chars:", "large_file_excerpt:", "url_fetch:", "url:", "final_url:", "http_status:", "content_type:", "encoding:", "title:", "text_truncated:", "status:", "error:")):
+        if line.startswith(("shell_output_", "path:", "extractor:", "chunk_index:", "total_chunks:", "chars:", "large_file_excerpt:", "url_fetch:", "url:", "final_url:", "http_status:", "content_type:", "encoding:", "title:", "text_truncated:", "status:", "directory_listing:", "error:")):
             continue
         if line == "[truncated]":
             continue

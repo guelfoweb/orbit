@@ -29,13 +29,17 @@ CHAT_SYSTEM_PROMPT = "Answer normally for conversation, explanation, writing, op
 MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
 _COMMAND_SYSTEM_TEMPLATE = """Answer normally unless shell is needed.
 Shell tasks: files/edit/create/append/delete, system, URLs/web/search/fetch, execution, analysis.
-Return valid one-line JSON only:
+Return valid one-line JSON only.
 
+For shell:
 {{"command":"..."}}
+
+For compact directory listing:
+{{"path":".","recursive":false}}
 
 Environment: OS={os_name}; shell={shell_name}.
 
-Use given paths exactly. Use native commands in workdir. Generic web search: orbit-web-search "query". For explicit URL fetch/read/explain/summarize/analyze requests, prefer the fetch_url tool; shell fetch commands such as curl are still allowed when needed. Quote spaced paths.
+Use given paths exactly. Use native commands in workdir. For compact directory listings, prefer the list_directory JSON shape over shell commands like ls -R, find, or tree. Generic web search: orbit-web-search "query". For explicit URL fetch/read/explain/summarize/analyze requests, prefer the fetch_url tool; shell fetch commands such as curl are still allowed when needed. Quote spaced paths.
 
 Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
@@ -47,6 +51,7 @@ For analysis, prefer content, source, binaries, strings, logs, archives, or fetc
 ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shell_name=_detect_shell())
 TOOL_CALL_SYSTEM_PROMPT = (
     "Call exactly one available tool and output no prose. "
+    "Prefer list_directory for compact directory listings. "
     "Prefer fetch_url for explicit URL fetch/read/explain/summarize/analyze requests. "
     'Use orbit-web-search "query" for generic web search. '
     "Use exec_shell_full_command for local/system tasks or when another tool is more appropriate. "
