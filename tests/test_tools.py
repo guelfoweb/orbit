@@ -16,16 +16,17 @@ from orbit.runtime.tools import default_tool_names, execute_tool, tool_definitio
 
 class ToolTests(unittest.TestCase):
     def test_shell_and_fetch_url_are_exposed(self) -> None:
-        self.assertEqual(tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory"))
-        self.assertEqual(default_tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory"))
+        self.assertEqual(tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        self.assertEqual(default_tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
         definitions = tool_definitions()
-        self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command", "fetch_url", "list_directory"])
+        self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command", "fetch_url", "list_directory", "system_info"])
 
     def test_tool_definitions_respect_allowed_names(self) -> None:
         self.assertEqual(tool_definitions(("read_file",)), [])
         self.assertEqual(len(tool_definitions(("exec_shell_full_command",))), 1)
         self.assertEqual(len(tool_definitions(("fetch_url",))), 1)
         self.assertEqual(len(tool_definitions(("list_directory",))), 1)
+        self.assertEqual(len(tool_definitions(("system_info",))), 1)
 
     def test_unknown_tool_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +90,14 @@ class ToolTests(unittest.TestCase):
 
         self.assertIn("directory_listing:", result.content)
         self.assertIn("[file] README.md", result.content)
+
+    def test_system_info_runs_with_compact_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = execute_tool("system_info", {}, workdir=Path(tmp))
+
+        self.assertIn("system_info:", result.content)
+        self.assertIn("OS:", result.content)
+        self.assertIn("CPU:", result.content)
 
 
 if __name__ == "__main__":

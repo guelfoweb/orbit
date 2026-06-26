@@ -37,21 +37,25 @@ For shell:
 For compact directory listing:
 {{"path":".","recursive":false}}
 
+For compact local machine specs:
+{{"include_cpu":true,"include_memory":true,"include_disks":true,"include_os":true}}
+
 Environment: OS={os_name}; shell={shell_name}.
 
-Use given paths exactly. Use native commands in workdir. For compact directory listings, prefer the list_directory JSON shape over shell commands like ls -R, find, or tree. Generic web search: orbit-web-search "query". For explicit URL fetch/read/explain/summarize/analyze requests, prefer the fetch_url tool; shell fetch commands such as curl are still allowed when needed. Quote spaced paths.
+Use given paths exactly. Use native commands in workdir. For compact directory listings, prefer the list_directory JSON shape over shell commands like ls -R, find, or tree. For local machine specs, prefer the system_info JSON shape over noisy shell commands like lscpu, free, df, uname, or cat /proc/*. Generic web search: orbit-web-search "query". For explicit URL fetch/read/explain/summarize/analyze requests, prefer the fetch_url tool; shell fetch commands such as curl are still allowed when needed. Quote spaced paths.
 
 Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
 
 Example:
-specs of this computer -> {{"command":"uname -a; lscpu; free -h; df -h"}}
+specs of this computer -> {{"include_cpu":true,"include_memory":true,"include_disks":true,"include_os":true}}
 
 For analysis, prefer content, source, binaries, strings, logs, archives, or fetched data, not metadata."""
 ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shell_name=_detect_shell())
 TOOL_CALL_SYSTEM_PROMPT = (
     "Call exactly one available tool and output no prose. "
     "Prefer list_directory for compact directory listings. "
+    "Prefer system_info for compact local machine specs such as OS, CPU, RAM, disk, and Python runtime. "
     "Prefer fetch_url for explicit URL fetch/read/explain/summarize/analyze requests. "
     'Use orbit-web-search "query" for generic web search. '
     "Use exec_shell_full_command for local/system tasks or when another tool is more appropriate. "

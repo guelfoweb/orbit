@@ -6,6 +6,7 @@ from typing import Any
 
 from orbit.runtime.directory_listing import execute_list_directory, list_directory_definition
 from orbit.runtime.shell_guardrails import exec_shell_full_definition, execute_exec_shell_full_command
+from orbit.runtime.system_info import execute_system_info, system_info_definition
 from orbit.runtime.tool_arguments import parse_tool_arguments
 from orbit.runtime.web import execute_fetch_url, fetch_url_definition
 
@@ -16,7 +17,7 @@ class ToolResult:
     content: str
 
 
-TOOL_NAMES = ("exec_shell_full_command", "fetch_url", "list_directory")
+TOOL_NAMES = ("exec_shell_full_command", "fetch_url", "list_directory", "system_info")
 DEFAULT_TOOL_NAMES = TOOL_NAMES
 
 
@@ -29,7 +30,7 @@ def default_tool_names() -> tuple[str, ...]:
 
 
 def tool_definitions(names: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    definitions = [exec_shell_full_definition(), fetch_url_definition(), list_directory_definition()]
+    definitions = [exec_shell_full_definition(), fetch_url_definition(), list_directory_definition(), system_info_definition()]
     if names is None:
         return definitions
     allowed = set(names)
@@ -54,4 +55,6 @@ def execute_tool(
         return ToolResult(name=name, content=execute_fetch_url(parsed))
     if name == "list_directory":
         return ToolResult(name=name, content=execute_list_directory(parsed, workdir=workdir))
+    if name == "system_info":
+        return ToolResult(name=name, content=execute_system_info(parsed))
     return ToolResult(name=name, content=execute_exec_shell_full_command(parsed, workdir=workdir, user_prompt=user_prompt))
