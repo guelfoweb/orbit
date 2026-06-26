@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             workdir=config.workdir,
             tools=config.tools,
             thinking=config.think,
+            render_markdown_mode=config.render_markdown,
         )
     if args.image or args.audio:
         print("error: --image/--audio require a one-shot prompt", file=sys.stderr)
@@ -162,6 +163,7 @@ def _run_one_shot(
     workdir,
     tools: str,
     thinking: bool,
+    render_markdown_mode: str = "plain",
 ) -> int:
     prefill_estimator = PrefillEstimator()
     tools_enabled = tools_are_enabled(tools)
@@ -173,6 +175,7 @@ def _run_one_shot(
         prefill_estimate_seconds=_visible_prefill_seconds(prefill_seconds),
         prefill_estimate_tokens=prefill_tokens,
         thinking=thinking,
+        render_markdown_mode=render_markdown_mode,
     )
     started = time.monotonic()
     print()
@@ -219,7 +222,7 @@ def _run_one_shot(
                 ),
             )
     except KeyboardInterrupt:
-        renderer.finish()
+        renderer.finish(interrupted=True)
         print(dim("interrupted"), flush=True)
         return 130
     except ValueError as exc:
