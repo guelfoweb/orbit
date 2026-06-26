@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orbit.runtime.directory_listing import execute_list_directory, list_directory_definition
 from orbit.runtime.shell_guardrails import exec_shell_full_definition, execute_exec_shell_full_command
 from orbit.runtime.tool_arguments import parse_tool_arguments
 from orbit.runtime.web import execute_fetch_url, fetch_url_definition
@@ -15,7 +16,7 @@ class ToolResult:
     content: str
 
 
-TOOL_NAMES = ("exec_shell_full_command", "fetch_url")
+TOOL_NAMES = ("exec_shell_full_command", "fetch_url", "list_directory")
 DEFAULT_TOOL_NAMES = TOOL_NAMES
 
 
@@ -28,7 +29,7 @@ def default_tool_names() -> tuple[str, ...]:
 
 
 def tool_definitions(names: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    definitions = [exec_shell_full_definition(), fetch_url_definition()]
+    definitions = [exec_shell_full_definition(), fetch_url_definition(), list_directory_definition()]
     if names is None:
         return definitions
     allowed = set(names)
@@ -51,4 +52,6 @@ def execute_tool(
         return ToolResult(name=name, content=parsed)
     if name == "fetch_url":
         return ToolResult(name=name, content=execute_fetch_url(parsed))
+    if name == "list_directory":
+        return ToolResult(name=name, content=execute_list_directory(parsed, workdir=workdir))
     return ToolResult(name=name, content=execute_exec_shell_full_command(parsed, workdir=workdir, user_prompt=user_prompt))

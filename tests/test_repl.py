@@ -601,7 +601,7 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(runtime.ask_auto_calls, 1)
         self.assertEqual(runtime.ask_chat_calls, 0)
         self.assertIsNotNone(runtime.last_allowed_tool_names)
-        self.assertEqual(runtime.last_allowed_tool_names, ("exec_shell_full_command", "fetch_url"))
+        self.assertEqual(runtime.last_allowed_tool_names, ("exec_shell_full_command", "fetch_url", "list_directory"))
 
     def test_repl_reads_queued_prompt_before_new_input(self) -> None:
         runtime = CountingRuntime()

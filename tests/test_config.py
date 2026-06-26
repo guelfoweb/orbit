@@ -130,10 +130,10 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tools"):
             load_app_config(_parse("--tools", "browser"))
 
-    def test_tools_on_uses_shell_and_fetch_url(self) -> None:
+    def test_tools_on_uses_shell_fetch_url_and_list_directory(self) -> None:
         names = allowed_tool_names_for_spec("on")
 
-        self.assertEqual(names, ("exec_shell_full_command", "fetch_url"))
+        self.assertEqual(names, ("exec_shell_full_command", "fetch_url", "list_directory"))
 
     def test_legacy_tools_object_config_key_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
