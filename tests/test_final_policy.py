@@ -685,6 +685,12 @@ class FinalPolicyTests(unittest.TestCase):
         )
         self.assertEqual(completeness.status, "complete")
 
+    def test_final_answer_completeness_accepts_markdown_emphasis_closer_after_complete_sentence(self) -> None:
+        completeness = classify_final_answer_completeness(
+            "I can help with many tasks.\n\n**What's on your mind today? Is there anything specific I can help you with?**"
+        )
+        self.assertEqual(completeness.status, "complete")
+
     def test_final_answer_completeness_allows_normal_possibility_wording(self) -> None:
         completeness = classify_final_answer_completeness(
             "One possibility is that the user is comparing an essay with the adjective \"wise\", but the direct difference is that an essay is a written composition while wise describes judgment."

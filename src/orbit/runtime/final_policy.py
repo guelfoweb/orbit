@@ -466,7 +466,8 @@ def classify_final_answer_completeness(content: str, *, messages: list[Message] 
         return FinalAnswerCompleteness("incomplete_stub", "list_label_stub")
     if content.count("`") % 2 == 1:
         return FinalAnswerCompleteness("malformed_markdown", "unclosed_backtick")
-    if stripped.endswith((":", "-", "*")):
+    stub_text = re.sub(r"[*_~`]+$", "", stripped).rstrip()
+    if stub_text.endswith((":", "-", "*")):
         return FinalAnswerCompleteness("incomplete_stub", "trailing_stub")
     if looks_like_incomplete_final(content):
         return FinalAnswerCompleteness("incomplete_stub", "plain_incomplete")
