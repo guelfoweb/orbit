@@ -365,6 +365,7 @@ class ToolLoopEnvironment:
         on_phase_start: Callable[[ModelPhaseStart], None] | None,
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+        local_capabilities=None,
     ) -> ToolResultBundle:
         result = run_tool_loop(
             self.runtime,
@@ -380,6 +381,7 @@ class ToolLoopEnvironment:
             on_phase_start=on_phase_start,
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
+            local_capabilities=local_capabilities,
         )
         return ToolResultBundle(
             result=result,

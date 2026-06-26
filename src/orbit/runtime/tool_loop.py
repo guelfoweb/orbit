@@ -8,6 +8,7 @@ from typing import Callable
 
 from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
+from orbit.runtime.capabilities import LocalCapabilities
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
 from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
 from orbit.runtime.session_memory import should_refresh_for_append
@@ -87,6 +88,7 @@ def run_tool_loop(
     on_phase_start: Callable[[ModelPhaseStart], None] | None,
     tool_names: tuple[str, ...] | None,
     initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+    local_capabilities: LocalCapabilities | None = None,
 ) -> ChatResult:
     allowed_tool_names = tool_names or default_tool_names()
     executor = HybridToolExecutor(
@@ -106,6 +108,7 @@ def run_tool_loop(
     repair = turn.repair_state
     shell_full_enabled = "exec_shell_full_command" in allowed_tool_names
     url_content_required = requires_url_content_evidence(user_prompt)
+    capability_context = local_capabilities.format_prompt_summary() if local_capabilities is not None else None
     suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
 
     # These local helpers still couple policy and runtime counters in one place.
@@ -616,6 +619,8 @@ def run_tool_loop(
             )
     for loop_index in range(1, max_loops + 1):
         call_messages = with_tool_call_system_prompt(runtime.messages)
+        if capability_context:
+            call_messages = [*call_messages, {"role": "system", "content": capability_context}]
         executing_mutation_verification = repair.mutation_verification_pending
         executing_mutation_verification_repair = repair.mutation_verification_repair_pending
         executing_mutation_semantic_repair = repair.mutation_semantic_repair_pending

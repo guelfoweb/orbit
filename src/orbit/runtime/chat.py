@@ -7,6 +7,7 @@ import re
 
 from orbit.backend import ChatBackend, ChatResult
 from orbit.backend.base import Message, StreamProgress
+from orbit.runtime.capabilities import LocalCapabilities, discover_local_capabilities
 from orbit.runtime.client_state import ClientState
 from orbit.runtime.completion_budget import CompletionBudget
 from orbit.runtime.environments import (
@@ -107,12 +108,17 @@ class ChatRuntime:
     content_evidence_guard_commands: int = 0
     content_evidence_guard_successes: int = 0
     content_evidence_guard_failures: int = 0
+    local_capabilities: LocalCapabilities = field(default_factory=discover_local_capabilities)
 
     def __post_init__(self) -> None:
         if hasattr(self.backend, "thinking"):
             self.thinking_mode = bool(getattr(self.backend, "thinking"))
         if not self.messages and self.system_prompt:
             self.messages.append({"role": "system", "content": self.system_prompt})
+
+    def refresh_local_capabilities(self) -> LocalCapabilities:
+        self.local_capabilities = discover_local_capabilities()
+        return self.local_capabilities
 
     def ask(
         self,
@@ -587,6 +593,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
+            local_capabilities=self.local_capabilities,
         )
     def _stream_tool_thinking_plan(
         self,

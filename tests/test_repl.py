@@ -632,16 +632,32 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(repl.tools_mode, "off")
         self.assertEqual(
             repl._handle_tools_command("/tools bad"),
-            "error: usage: /tools [off|on]",
+            "error: usage: /tools [off|on|status|refresh]",
         )
         self.assertEqual(
             repl._handle_tools_command("/tools read_file"),
-            "error: usage: /tools [off|on]",
+            "error: usage: /tools [off|on|status|refresh]",
         )
         self.assertEqual(
             repl._handle_tools_command("/tools time"),
-            "error: usage: /tools [off|on]",
+            "error: usage: /tools [off|on|status|refresh]",
         )
+
+    def test_tools_status_and_refresh_show_local_capabilities(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+
+        status = repl._handle_tools_command("/tools status")
+
+        self.assertIn("Local capabilities", status)
+        self.assertIn("pdftotext", status)
+        self.assertEqual(runtime.ask_calls, 0)
+
+        refreshed = repl._handle_tools_command("/tools refresh")
+
+        self.assertIn("tools capabilities refreshed", refreshed)
+        self.assertIn("Local capabilities", refreshed)
+        self.assertEqual(runtime.ask_calls, 0)
 
     def test_tools_slash_command_is_handled_locally_in_repl_loop(self) -> None:
         runtime = CountingRuntime()
