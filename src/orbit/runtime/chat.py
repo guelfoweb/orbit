@@ -29,7 +29,7 @@ from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
 )
 from orbit.runtime.file_input_resolver import FileInputResolver
-from orbit.runtime.kv_diag import instrument_backend, model_call_context, user_request
+from orbit.runtime.kv_diag import emit_route_outcome, instrument_backend, model_call_context, user_request
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import (
     TOOL_CALL_JSON_RETRY_PROMPT,
@@ -327,9 +327,20 @@ class ChatRuntime:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
         command_content = first.content
         decision = parse_command_decision_from_tool_calls(first.tool_calls) or parse_command_decision(command_content)
+        route_outcome_emitted = False
+        if decision is not None:
+            _emit_route_outcome_for_result(first, decision=decision, outcome=_route_parsed_outcome(decision))
+            route_outcome_emitted = True
         if decision is None:
             explicit_web_search = _requires_explicit_web_search_tool(prompt, allowed_tool_names)
             if _should_force_tool_route_retry(prompt, allowed_tool_names, first.finish_reason):
+                _emit_route_outcome_for_result(
+                    first,
+                    decision=None,
+                    outcome="route_other_retry",
+                    retry_reason="explicit_web_search" if explicit_web_search else "length_without_decision_tool_related",
+                )
+                route_outcome_emitted = True
                 with self._temporary_backend_thinking(False):
                     route_retry_messages = _route_retry_messages(
                         self.messages,
@@ -364,6 +375,9 @@ class ChatRuntime:
                     on_model_step(ModelStepMetrics.from_result(loop=2, result=route_retry, phase="route_retry"))
                 retry_decision = parse_command_decision_from_tool_calls(route_retry.tool_calls) or parse_command_decision(route_retry.content)
                 if retry_decision is not None:
+                    _emit_route_outcome_for_result(route_retry, decision=retry_decision, outcome=_route_parsed_outcome(retry_decision))
+                    route_outcome_emitted = True
+                if retry_decision is not None:
                     first = route_retry
                     command_content = route_retry.content
                     decision = retry_decision
@@ -386,6 +400,14 @@ class ChatRuntime:
                 initial_shell_tool_call = command_tool_call_from_tool_calls(first.tool_calls, ("exec_shell_full_command",)) or command_tool_call_from_content(command_content, ("exec_shell_full_command",))
                 route_requires_chat_final = contains_control_channel_markup(first.content)
                 if route_requires_chat_final and first.finish_reason != "length":
+                    if not route_outcome_emitted:
+                        _emit_route_outcome_for_result(
+                            first,
+                            decision=None,
+                            outcome="route_invalid_output",
+                            retry_reason="control_channel_markup",
+                        )
+                        route_outcome_emitted = True
                     first = self._transport_environment().chat_final(
                         with_chat_system_prompt(self.messages),
                         temperature=temperature,
@@ -398,6 +420,14 @@ class ChatRuntime:
                     )
                     retried_empty_final = True
                 if first.finish_reason == "length":
+                    if not route_outcome_emitted:
+                        _emit_route_outcome_for_result(
+                            first,
+                            decision=None,
+                            outcome="route_no_decision_length_retry",
+                            retry_reason="length_without_decision",
+                        )
+                        route_outcome_emitted = True
                     if on_final_delta is None:
                         with model_call_context(phase="chat_final_retry", tools_mode="on"):
                             first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
@@ -414,6 +444,14 @@ class ChatRuntime:
                     if on_model_step:
                         on_model_step(ModelStepMetrics.from_result(loop=2, result=first, phase="chat_final_retry"))
                 if _is_empty_final_response(first):
+                    if not route_outcome_emitted:
+                        _emit_route_outcome_for_result(
+                            first,
+                            decision=None,
+                            outcome="route_invalid_output",
+                            retry_reason="empty_response",
+                        )
+                        route_outcome_emitted = True
                     retried_empty_final = True
                     first = self._transport_environment().chat_final(
                         self.messages,
@@ -424,6 +462,13 @@ class ChatRuntime:
                         on_model_step=on_model_step,
                         on_phase_start=on_phase_start,
                         loop=2,
+                    )
+                if not route_outcome_emitted:
+                    _emit_route_outcome_for_result(
+                        first,
+                        decision=None,
+                        outcome="route_direct_final_stop",
+                        retry_reason=None,
                     )
                 self.messages.append({"role": "assistant", "content": first.content})
                 if on_final_delta and not streamed_final_retry and not retried_empty_final:
@@ -928,6 +973,30 @@ def _should_force_tool_route_retry(prompt: str, allowed_tool_names: tuple[str, .
     if _requires_explicit_web_search_tool(prompt, allowed_tool_names):
         return True
     return finish_reason == "length" and _should_retry_route_as_tool_call(prompt, allowed_tool_names)
+
+
+def _route_parsed_outcome(decision: RouteDecision) -> str:
+    if decision.route == ToolRoute.CHAT:
+        return "route_parsed_chat"
+    return "route_parsed_tool"
+
+
+def _emit_route_outcome_for_result(
+    result: ChatResult,
+    *,
+    decision: RouteDecision | None,
+    outcome: str,
+    retry_reason: str | None = None,
+) -> None:
+    decision_type = decision.route.value if decision is not None else None
+    emit_route_outcome(
+        outcome=outcome,
+        finish_reason=result.finish_reason,
+        decision_type=decision_type,
+        output_chars=len(result.content),
+        output_tokens=result.completion_tokens,
+        retry_reason=retry_reason,
+    )
 
 
 def _route_retry_messages(messages: list[Message], *, explicit_web_search: bool) -> list[Message]:
