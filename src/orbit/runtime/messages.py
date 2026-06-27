@@ -27,14 +27,38 @@ def _detect_shell() -> str:
 
 CHAT_SYSTEM_PROMPT = "Answer normally for conversation, explanation, writing, opinion, and general knowledge."
 MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
-_COMMAND_SYSTEM_TEMPLATE = """Answer normally unless shell is needed.
-Shell tasks: files/edit/create/append/delete, system, URLs/web/search/fetch, execution, analysis.
-Return valid one-line JSON only.
+_COMMAND_SYSTEM_TEMPLATE = """Decide compactly whether the user request needs local tools.
+Tool tasks: files/read/edit/create/append/delete, system, URLs/web/search/fetch, execution, and analysis that needs local or fetched evidence.
+For tool tasks, return a tool decision; do not answer directly or return CHAT.
+Web/search/latest/current/online and URL fetch/read/open/explain/summarize/analyze requests are tool tasks; return a compact tool decision, not a direct answer.
+Specific file read/explain/summarize/analyze requests require file content evidence; return a content-reading command decision, not a directory listing.
+If the target is a file path or filename, use a content-reading command; do not inspect it with list_directory.
+Use directory listing only when the user asks to list files or inspect directory structure; never use {{"path":"..."}} to answer about a file's contents.
+The one-sentence direct-answer exception below is only for requests that are not tool tasks and need no external evidence.
+If no shell/tool and no external evidence is needed:
+- For a complete answer that fits in one short sentence, write the answer directly and stop.
+- For any answer needing explanation, a list, a paragraph, or more than one short sentence, return {{"route":"CHAT"}} only.
+Return valid one-line JSON only for route/tool decisions.
 
 For shell:
 {{"command":"..."}}
 
-For compact directory listing:
+For specific file content read/explain/summarize:
+{{"command":"cat README.md"}}
+
+Example file summary request:
+summarize README.md -> {{"command":"cat README.md"}}
+
+For generic web search:
+{{"command":"orbit-web-search \\"query\\""}}
+
+For URL fetch/read page:
+{{"url":"https://example.com"}}
+
+For normal no-tool final answer pass:
+{{"route":"CHAT"}}
+
+For compact directory listing only:
 {{"path":".","recursive":false}}
 
 For compact local machine specs:
@@ -46,6 +70,7 @@ Use given paths exactly. Use native commands in workdir. For compact directory l
 
 Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
+Do not write long prose in the route pass.
 
 Example:
 specs of this computer -> {{"include_cpu":true,"include_memory":true,"include_disks":true,"include_os":true}}

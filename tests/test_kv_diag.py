@@ -9,7 +9,14 @@ from unittest import mock
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
-from orbit.runtime.kv_diag import fingerprint_prompt, instrument_backend, model_call_context, request_context, reset_diagnostics_for_tests
+from orbit.runtime.kv_diag import (
+    emit_route_outcome,
+    fingerprint_prompt,
+    instrument_backend,
+    model_call_context,
+    request_context,
+    reset_diagnostics_for_tests,
+)
 from orbit.terminal.status import format_turn_status
 
 
@@ -34,6 +41,32 @@ class FakeBackend:
             prompt_tokens_per_second=12.5,
             generation_tokens_per_second=3.5,
         )
+
+
+class SequenceBackend:
+    def __init__(self, results: list[ChatResult]) -> None:
+        self.results = list(results)
+        self.calls = 0
+
+    def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+        self.calls += 1
+        if not self.results:
+            raise AssertionError("unexpected backend call")
+        return self.results.pop(0)
+
+
+def _result(content: str, *, finish_reason: str, prompt_tokens: int = 10, completion_tokens: int = 2, cached_tokens: int = 0) -> ChatResult:
+    return ChatResult(
+        content=content,
+        model="fake",
+        finish_reason=finish_reason,
+        tool_calls=[],
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        prompt_tokens_per_second=10.0,
+        generation_tokens_per_second=3.0,
+    )
 
 
 class KVDiagTests(unittest.TestCase):
@@ -213,6 +246,98 @@ class KVDiagTests(unittest.TestCase):
         self.assertTrue(any(event["component"] == "capability_summary" for event in mismatches))
         self.assertNotIn("same user prompt", raw_log)
         self.assertNotIn("python3, file", raw_log)
+
+    def test_route_direct_final_stop_is_observed_without_behavior_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                runtime = ChatRuntime(backend=SequenceBackend([_result("direct answer", finish_reason="stop")]), system_prompt=None)
+                result = runtime.ask_auto(
+                    "hi",
+                    temperature=0,
+                    max_tokens=32,
+                    workdir=Path(tmp),
+                    allowed_tool_names=("exec_shell_full_command", "fetch_url", "list_directory", "system_info"),
+                )
+
+            lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            outcomes = [line for line in lines if line["event"] == "kv_diag_route_outcome"]
+
+        self.assertEqual(result.content, "direct answer")
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]["outcome"], "route_direct_final_stop")
+        self.assertEqual(outcomes[0]["phase"], "route")
+        self.assertEqual(outcomes[0]["finish_reason"], "stop")
+        self.assertIsNone(outcomes[0]["decision_type"])
+        self.assertNotIn("direct answer", json.dumps(outcomes))
+
+    def test_route_no_decision_length_retry_is_observed_without_behavior_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            backend = SequenceBackend(
+                [
+                    _result("truncated route prose", finish_reason="length", prompt_tokens=12, completion_tokens=128, cached_tokens=8),
+                    _result("final answer", finish_reason="stop", prompt_tokens=20, completion_tokens=3, cached_tokens=19),
+                ]
+            )
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                runtime = ChatRuntime(backend=backend, system_prompt=None)
+                result = runtime.ask_auto(
+                    "hi, tell me something about yourself",
+                    temperature=0,
+                    max_tokens=32,
+                    workdir=Path(tmp),
+                    allowed_tool_names=("exec_shell_full_command", "fetch_url", "list_directory", "system_info"),
+                )
+
+            lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            outcomes = [line for line in lines if line["event"] == "kv_diag_route_outcome"]
+            calls = [line for line in lines if line["event"] == "kv_diag_model_call"]
+
+        self.assertEqual(result.content, "final answer")
+        self.assertEqual(backend.calls, 2)
+        self.assertEqual([call["phase"] for call in calls], ["route", "chat_final_retry"])
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]["outcome"], "route_no_decision_length_retry")
+        self.assertEqual(outcomes[0]["retry_reason"], "length_without_decision")
+        self.assertEqual(outcomes[0]["output_tokens"], 128)
+        self.assertNotIn("truncated route prose", json.dumps(outcomes))
+        self.assertNotIn("final answer", json.dumps(outcomes))
+
+    def test_route_outcome_event_is_metadata_only_for_required_classes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                backend = instrument_backend(FakeBackend())
+                with request_context(session_id="session"):
+                    with model_call_context(phase="route", tools_mode="on"):
+                        backend.chat([{"role": "user", "content": "secret prompt"}], temperature=0, max_tokens=32)
+                    for outcome, decision_type, retry_reason in (
+                        ("route_parsed_tool", "FILESYSTEM", None),
+                        ("route_parsed_chat", "CHAT", None),
+                        ("route_invalid_output", None, "empty_response"),
+                        ("route_other_retry", None, "explicit_web_search"),
+                    ):
+                        emit_route_outcome(
+                            outcome=outcome,
+                            finish_reason="stop",
+                            decision_type=decision_type,
+                            output_chars=123,
+                            output_tokens=7,
+                            retry_reason=retry_reason,
+                        )
+
+            lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            outcomes = [line for line in lines if line["event"] == "kv_diag_route_outcome"]
+            raw_log = json.dumps(lines)
+
+        self.assertEqual(
+            [event["outcome"] for event in outcomes],
+            ["route_parsed_tool", "route_parsed_chat", "route_invalid_output", "route_other_retry"],
+        )
+        self.assertTrue(all(event["request_id"] for event in outcomes))
+        self.assertTrue(all(event["model_call_id"] for event in outcomes))
+        self.assertNotIn("secret prompt", raw_log)
 
 
 if __name__ == "__main__":

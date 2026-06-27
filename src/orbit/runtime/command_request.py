@@ -169,6 +169,8 @@ def parse_command_decision(content: str) -> RouteDecision | None:
         return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",))
     if _has_system_info_args(value):
         return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",))
+    if _has_chat_route(value):
+        return RouteDecision(ToolRoute.CHAT)
     if _has_command(_extract_loose_command_object(text)):
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
     for line in text.splitlines():
@@ -181,6 +183,8 @@ def parse_command_decision(content: str) -> RouteDecision | None:
             return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",))
         if _has_system_info_args(value):
             return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",))
+        if _has_chat_route(value):
+            return RouteDecision(ToolRoute.CHAT)
     return None
 
 
@@ -199,13 +203,20 @@ def command_stream_state(text: str, *, max_prefix_chars: int = ROUTE_STREAM_PREF
         or _is_partial_prefix(stripped, '{"url"')
         or _is_partial_prefix(stripped, '{"path"')
         or _is_partial_prefix(stripped, '{"include_')
+        or _is_partial_prefix(stripped, '{"route"')
     ):
         return "pending"
     if stripped.startswith("<|tool_call>"):
         if "<tool_call|>" in stripped:
             return "route" if parse_tool_command(stripped) is not None else "not_command"
         return "pending"
-    if stripped.startswith('{"command"') or stripped.startswith('{"url"') or stripped.startswith('{"path"') or stripped.startswith('{"include_'):
+    if (
+        stripped.startswith('{"command"')
+        or stripped.startswith('{"url"')
+        or stripped.startswith('{"path"')
+        or stripped.startswith('{"include_')
+        or stripped.startswith('{"route"')
+    ):
         if _looks_like_complete_json_object(stripped):
             return "route" if parse_tool_command(stripped) is not None else "not_command"
         return "pending"
@@ -417,6 +428,15 @@ def _valid_system_info_args(value: dict[str, Any] | None) -> bool:
 
 def _system_info_args(value: dict[str, Any]) -> dict[str, Any]:
     return {key: value[key] for key in SYSTEM_INFO_KEYS if key in value}
+
+
+def _has_chat_route(value: dict[str, Any] | None) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if _has_command(value) or _has_url(value) or _has_list_directory_args(value) or _has_system_info_args(value):
+        return False
+    route = value.get("route")
+    return isinstance(route, str) and route.strip().upper() == ToolRoute.CHAT.value
 
 
 def _extract_loose_key_value_object(content: str) -> dict[str, Any] | None:

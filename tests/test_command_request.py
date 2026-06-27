@@ -36,6 +36,22 @@ class RouteRequestTests(unittest.TestCase):
     def test_parse_command_decision_rejects_chat_text(self) -> None:
         self.assertIsNone(parse_command_decision("Here is the answer."))
 
+    def test_parse_command_decision_accepts_chat_route_json(self) -> None:
+        decision = parse_command_decision('{"route":"CHAT"}')
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.route, ToolRoute.CHAT)
+        self.assertEqual(decision_tool_names(decision), ())
+
+    def test_parse_command_decision_does_not_let_chat_override_tool_json(self) -> None:
+        decision = parse_command_decision('{"route":"CHAT","command":"ls -F"}')
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
+        self.assertEqual(decision_tool_names(decision), ("exec_shell_full_command",))
+
     def test_parse_tool_command_accepts_raw_tool_call_with_tool_name(self) -> None:
         self.assertEqual(parse_tool_command('<|tool_call>call:exec_shell_full_command{"command":"ls -F"}<tool_call|>'), ToolRoute.FILESYSTEM)
 
@@ -166,6 +182,11 @@ class RouteRequestTests(unittest.TestCase):
         assert tool_call is not None
         self.assertEqual(tool_call["function"]["name"], "system_info")
         self.assertEqual(json.loads(tool_call["function"]["arguments"]), {"include_cpu": True, "include_memory": True})
+
+    def test_command_tool_call_from_content_ignores_chat_route_json(self) -> None:
+        tool_call = command_tool_call_from_content('{"route":"CHAT"}', ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+
+        self.assertIsNone(tool_call)
 
     def test_command_tool_call_from_content_converts_raw_orbit_web_search(self) -> None:
         tool_call = command_tool_call_from_content(
@@ -427,6 +448,10 @@ EOF"}""",
         self.assertEqual(command_stream_state('{"include_cpu":true}'), "route")
         self.assertEqual(command_stream_state('{"include_'), "pending")
 
+    def test_command_stream_state_detects_complete_chat_route_json(self) -> None:
+        self.assertEqual(command_stream_state('{"route":"CHAT"}'), "route")
+        self.assertEqual(command_stream_state('{"route"'), "pending")
+
     def test_command_stream_filter_suppresses_command_json(self) -> None:
         emitted: list[str] = []
         stream_filter = CommandStreamFilter(emitted.append)
@@ -439,6 +464,19 @@ EOF"}""",
         self.assertEqual(emitted, [])
         self.assertTrue(stream_filter.command_detected)
         self.assertEqual(stream_filter.content, '{"command":"ls -F"}')
+
+    def test_command_stream_filter_suppresses_chat_route_json(self) -> None:
+        emitted: list[str] = []
+        stream_filter = CommandStreamFilter(emitted.append)
+
+        stream_filter.write("{")
+        stream_filter.write('"route"')
+        stream_filter.write(':"CHAT"}')
+        stream_filter.finish()
+
+        self.assertEqual(emitted, [])
+        self.assertTrue(stream_filter.command_detected)
+        self.assertEqual(stream_filter.content, '{"route":"CHAT"}')
 
     def test_command_stream_filter_releases_normal_text(self) -> None:
         emitted: list[str] = []
