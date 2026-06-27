@@ -102,6 +102,28 @@ ORBIT_KV_DIAG=1 python3 scripts/bench_kv_diag.py
 
 The script writes raw diagnostic JSONL and a compact Markdown summary under `benchmarks/`. Benchmark outputs are local artifacts and should not be committed unless explicitly requested.
 
+## Phase 1B Collector
+
+Phase 1B keeps the same rule as Phase 1: diagnostics only, no cache or prompt behavior changes.
+
+When `ORBIT_KV_DIAG=1` is enabled, Orbit records per-request and per-model-call JSONL events:
+
+- `kv_diag_model_call`: one backend call, with `request_id`, `model_call_id`, `pass_index`, phase, prompt hashes, token metrics, and timing fields
+- `kv_diag_footer_metrics`: terminal footer metrics correlated back to the last model call that produced them
+- `kv_diag_request_summary`: aggregate counts, phases, token totals, and timing totals for one user request
+- `kv_diag_prefix_mismatch`: hash-only component mismatch when repeated calls in the same diagnostic scenario drift
+
+The collector logs hashes and lengths only. It must not log raw prompts, raw tool output, or user-visible content.
+
+The purpose of Phase 1B is to distinguish:
+
+- prompt instability
+- metric ambiguity
+- backend cache behavior
+- invalidation from reset, tool mode, or session changes
+
+It is not an optimization phase.
+
 ## Invalidation Risks
 
 KV reuse risks:

@@ -80,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=backend,
             system_prompt=None if config.no_system else config.system,
             context_tokens=context_tokens,
+            diagnostic_session_id=str(config.workdir),
         )
         prompt = " ".join(args.prompt)
         command_result = _handle_one_shot_command(prompt, runtime, config, backend)
@@ -111,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         system_prompt=None if config.no_system else config.system,
         messages=session_messages or [],
         context_tokens=context_tokens,
+        diagnostic_session_id=str(config.workdir),
     )
     history = PromptHistory.for_workdir(config.workdir)
     return Repl(runtime=runtime, backend=backend, config=config, session=session, history=history).run()

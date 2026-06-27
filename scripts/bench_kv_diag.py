@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", default="benchmarks")
     parser.add_argument("--max-tokens", default="120")
     parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument("--include-slow", action="store_true", help="Include slow network-dependent scenarios.")
     args = parser.parse_args(argv)
 
     root = Path.cwd()
@@ -47,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     diag_path = output_dir / f"kv_diag_{stamp}.jsonl"
     summary_path = output_dir / f"kv_diag_{stamp}.md"
 
-    scenarios = _scenarios(max_tokens=args.max_tokens, timeout=args.timeout)
+    scenarios = _scenarios(max_tokens=args.max_tokens, timeout=args.timeout, include_slow=args.include_slow)
     env = os.environ.copy()
     env["ORBIT_KV_DIAG"] = "1"
     env["ORBIT_KV_DIAG_FILE"] = str(diag_path)
@@ -62,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             workdir=args.workdir,
             env=env,
             root=root,
+            diag_path=diag_path,
         )
         rows.append(row)
         print(json.dumps(row, sort_keys=True), flush=True)
@@ -72,17 +74,27 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _scenarios(*, max_tokens: str, timeout: int) -> list[Scenario]:
+def _scenarios(*, max_tokens: str, timeout: int, include_slow: bool = False) -> list[Scenario]:
     base = ("--no-render-markdown", "--max-tokens", max_tokens)
-    return [
+    scenarios = [
         Scenario("tools_off_repeat", (*base, "--tools", "off"), "hi\nhi\n", timeout),
         Scenario("tools_on_repeat_no_tool_needed", (*base, "--tools", "on"), "hi\nhi\n", timeout),
-        Scenario("tools_on_same_prompt_repeat", (*base, "--tools", "on"), "tell me the specs of this computer\ntell me the specs of this computer\n", timeout),
+        Scenario("tools_on_same_session_repeat", (*base, "--tools", "on"), "hi, tell me something about yourself\nhi, tell me something about yourself\n", timeout),
         Scenario("tools_on_after_reset", (*base, "--tools", "on"), "hi\n/reset\nhi\n", timeout),
         Scenario("tools_on_off_switch", (*base, "--tools", "off"), "hi\n/tools on\nhi\n/tools off\nhi\n", timeout),
         Scenario("list_directory_repeat", (*base, "--tools", "on"), "list files in the workdir\nlist files in the workdir\n", timeout),
         Scenario("system_info_repeat", (*base, "--tools", "on"), "tell me the specs of this computer\ntell me the specs of this computer\n", timeout),
     ]
+    if include_slow:
+        scenarios.append(
+            Scenario(
+                "fetch_url_smoke_slow",
+                (*base, "--tools", "on", "--max-tokens", "256"),
+                "fetch https://www.vatican.va/content/leo-xiv/it/encyclicals/documents/20260515-magnifica-humanitas.html and explain the central thesis in Italian\n",
+                max(timeout, 360),
+            )
+        )
+    return scenarios
 
 
 def _run_scenario(
@@ -93,13 +105,15 @@ def _run_scenario(
     workdir: str,
     env: dict[str, str],
     root: Path,
+    diag_path: Path,
 ) -> dict[str, object]:
     cmd = _command(orbit_bin, module) + ["--workdir", workdir, *scenario.args]
+    diag_offset = diag_path.stat().st_size if diag_path.exists() else 0
     started = time.monotonic()
     try:
         proc = subprocess.run(
             cmd,
-            input=scenario.stdin,
+            input=_with_exit(scenario.stdin),
             cwd=root,
             env=env,
             text=True,
@@ -115,12 +129,15 @@ def _run_scenario(
         returncode = None
     elapsed = round(time.monotonic() - started, 2)
     footer = _last_footer(raw)
+    diag_events = _read_diag_events(diag_path, offset=diag_offset)
+    diag_summary = _summarize_diag_events(diag_events)
     return {
         "scenario": scenario.name,
         "returncode": returncode,
         "timeout": timeout,
         "elapsed_s": elapsed,
         **footer,
+        **diag_summary,
     }
 
 
@@ -150,26 +167,70 @@ def _write_summary(path: Path, rows: list[dict[str, object]], diag_path: Path) -
         "",
         f"Raw diagnostic JSONL: `{diag_path}`",
         "",
-        "| Scenario | Tokens | Cached | Cache | Prefill/s | Gen/s | Stop | Wall |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
+        "| Scenario | Requests | Calls | Phases | Tokens/call | Cached/call | Footer corr | Stop | Wall |",
+        "| --- | ---: | ---: | --- | --- | --- | --- | --- | ---: |",
     ]
     for row in rows:
         tokens = "-"
-        if "prompt_tokens" in row:
+        if row.get("prompt_tokens_by_call"):
+            tokens = str(row.get("prompt_tokens_by_call"))
+        elif "prompt_tokens" in row:
             tokens = f"{row.get('prompt_tokens')}->{row.get('generated_tokens')}"
         lines.append(
-            "| {scenario} | {tokens} | {cached} | {cache} | {pf} | {gen} | {stop} | {wall} |".format(
+            "| {scenario} | {requests} | {calls} | {phases} | {tokens} | {cached} | {footer} | {stop} | {wall} |".format(
                 scenario=row["scenario"],
+                requests=row.get("requests", "-"),
+                calls=row.get("model_calls", "-"),
+                phases=row.get("phases", "-"),
                 tokens=tokens,
-                cached=row.get("cached_tokens", "-"),
-                cache=f"{row.get('cache_pct')}%" if "cache_pct" in row else "-",
-                pf=row.get("prefill_tps", "-"),
-                gen=row.get("generation_tps", "-"),
+                cached=row.get("cached_tokens_by_call", row.get("cached_tokens", "-")),
+                footer="yes" if row.get("footer_correlation_present") else "no",
                 stop="timeout" if row.get("timeout") else row.get("finish_reason", "-"),
                 wall=row.get("elapsed_s", "-"),
             )
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _with_exit(stdin: str | None) -> str:
+    text = stdin or ""
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + "/exit\n"
+
+
+def _read_diag_events(path: Path, *, offset: int) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as handle:
+        handle.seek(offset)
+        events = []
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return events
+
+
+def _summarize_diag_events(events: list[dict[str, object]]) -> dict[str, object]:
+    calls = [event for event in events if event.get("event") == "kv_diag_model_call"]
+    summaries = [event for event in events if event.get("event") == "kv_diag_request_summary"]
+    footers = [event for event in events if event.get("event") == "kv_diag_footer_metrics"]
+    call_ids = {event.get("model_call_id") for event in calls}
+    footer_correlation = any(event.get("model_call_id") in call_ids for event in footers)
+    return {
+        "requests": len(summaries) or len({event.get("request_id") for event in calls if event.get("request_id")}),
+        "model_calls": len(calls),
+        "phases": ",".join(str(event.get("phase")) for event in calls) if calls else "-",
+        "prompt_tokens_by_call": ",".join(str(event.get("prompt_tokens")) for event in calls) if calls else "",
+        "cached_tokens_by_call": ",".join(str(event.get("cached_tokens")) for event in calls) if calls else "",
+        "evaluated_tokens_by_call": ",".join(str(event.get("evaluated_tokens")) for event in calls) if calls else "",
+        "footer_correlation_present": footer_correlation,
+    }
 
 
 def _to_text(value: str | bytes | None) -> str:

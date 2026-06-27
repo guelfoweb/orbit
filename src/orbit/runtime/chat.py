@@ -29,7 +29,7 @@ from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
 )
 from orbit.runtime.file_input_resolver import FileInputResolver
-from orbit.runtime.kv_diag import instrument_backend, model_call_context
+from orbit.runtime.kv_diag import instrument_backend, model_call_context, user_request
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import (
     TOOL_CALL_JSON_RETRY_PROMPT,
@@ -110,6 +110,7 @@ class ChatRuntime:
     content_evidence_guard_successes: int = 0
     content_evidence_guard_failures: int = 0
     local_capabilities: LocalCapabilities = field(default_factory=discover_local_capabilities)
+    diagnostic_session_id: str = "default"
 
     def __post_init__(self) -> None:
         self.backend = instrument_backend(self.backend)
@@ -122,6 +123,7 @@ class ChatRuntime:
         self.local_capabilities = discover_local_capabilities()
         return self.local_capabilities
 
+    @user_request
     def ask(
         self,
         prompt: str,
@@ -149,6 +151,7 @@ class ChatRuntime:
         )
         return self._remember_visible_result(result)
 
+    @user_request
     def ask_chat(
         self,
         prompt: str,
@@ -176,6 +179,7 @@ class ChatRuntime:
         )
         return self._remember_visible_result(result)
 
+    @user_request
     def continue_last_response(
         self,
         *,
@@ -196,6 +200,7 @@ class ChatRuntime:
         )
         return self._remember_visible_result(_tool_loop_result_value(result))
 
+    @user_request
     def ask_with_tools(
         self,
         prompt: str,
@@ -238,6 +243,7 @@ class ChatRuntime:
         )
         return self._remember_visible_result(result.result)
 
+    @user_request
     def ask_auto(
         self,
         prompt: str,
