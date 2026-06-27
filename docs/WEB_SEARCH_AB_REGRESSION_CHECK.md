@@ -173,11 +173,19 @@ No backend, KV/cache, MTP, final policy, tool selection runtime, or deterministi
 | --- | --- | ---: | --- | --- | --- | --- |
 | web search generic | `route -> final_from_tool` | 2 | `route_parsed_tool` | `exec_shell_full_command` / `orbit-web-search` | no | PASS |
 | fetch URL | `route -> final_from_tool` | 2 | `route_parsed_tool` | `fetch_url` | no | PASS |
-| `what is 2+2?` | `route` | 1 | `route_direct_final_stop` | none | no | PASS |
+| `what is 2+2?` | `route -> chat_final` | 2 | `route_parsed_chat` | none | no | PASS correctness, slower than ideal |
+| `hi` | `route -> chat_final` | 2 | `route_parsed_chat` | none | no | PASS correctness, slower than ideal |
 | `Who was Dante Alighieri?` | `route -> chat_final` | 2 | `route_parsed_chat` | none | no | PASS |
 | `read README.md and explain it` | `route -> final_from_tool` | 2 | `route_parsed_tool` | `exec_shell_full_command` / `cat README.md` | no | PASS |
+| `summarize README.md` | `route -> final_from_tool` | 2 | `route_parsed_tool` | `exec_shell_full_command` / `cat README.md` | no | PASS |
 | `list files in the workdir` | `route -> final_from_tool` | 2 | `route_parsed_tool` | `list_directory` | no | PASS |
 
 Observed `route_no_decision_length_retry`: `0`.
 
-The refinement restores the expected web/fetch route shape while preserving model-guided routing. The model still chooses the tool decision; the runtime does not map prompts to tools deterministically.
+The refinement restores the expected web/fetch and file-content route shape while preserving model-guided routing. The model still chooses the tool decision; the runtime does not map prompts to tools deterministically.
+
+Residual caveat:
+
+- trivial no-tool prompts such as `what is 2+2?` and `hi` currently choose compact `{"route":"CHAT"}` and therefore use two model calls
+- this is a performance caveat, not a correctness/evidence blocker
+- do not fix it by weakening file/web evidence routing or adding runtime deterministic shortcuts

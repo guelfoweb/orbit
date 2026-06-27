@@ -31,8 +31,9 @@ _COMMAND_SYSTEM_TEMPLATE = """Decide compactly whether the user request needs lo
 Tool tasks: files/read/edit/create/append/delete, system, URLs/web/search/fetch, execution, and analysis that needs local or fetched evidence.
 For tool tasks, return a tool decision; do not answer directly or return CHAT.
 Web/search/latest/current/online and URL fetch/read/open/explain/summarize/analyze requests are tool tasks; return a compact tool decision, not a direct answer.
-File read/explain/summarize/analyze requests require file content evidence; do not use directory listing for file content tasks.
-Use directory listing only when the user asks to list files or inspect directory structure.
+Specific file read/explain/summarize/analyze requests require file content evidence; return a content-reading command decision, not a directory listing.
+If the target is a file path or filename, use a content-reading command; do not inspect it with list_directory.
+Use directory listing only when the user asks to list files or inspect directory structure; never use {{"path":"..."}} to answer about a file's contents.
 The one-sentence direct-answer exception below is only for requests that are not tool tasks and need no external evidence.
 If no shell/tool and no external evidence is needed:
 - For a complete answer that fits in one short sentence, write the answer directly and stop.
@@ -42,8 +43,11 @@ Return valid one-line JSON only for route/tool decisions.
 For shell:
 {{"command":"..."}}
 
-For file content read:
+For specific file content read/explain/summarize:
 {{"command":"cat README.md"}}
+
+Example file summary request:
+summarize README.md -> {{"command":"cat README.md"}}
 
 For generic web search:
 {{"command":"orbit-web-search \\"query\\""}}
@@ -54,7 +58,7 @@ For URL fetch/read page:
 For normal no-tool final answer pass:
 {{"route":"CHAT"}}
 
-For compact directory listing:
+For compact directory listing only:
 {{"path":".","recursive":false}}
 
 For compact local machine specs:

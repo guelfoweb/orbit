@@ -124,7 +124,8 @@ Direct route response classification:
 
 Notes:
 
-- `hi` still chooses compact `{"route":"CHAT"}` in this model/build, but `what is 2+2?` preserves one-pass direct final. The merge criterion does not require both trivial scenarios to remain direct.
+- After the later web/file evidence refinement, both `hi` and `what is 2+2?` choose compact `{"route":"CHAT"}` in the sampled model/build. This leaves a performance caveat for trivial no-tool prompts, but preserves correctness and evidence routing for web, URL fetch, and file-content tasks.
+- Do not recover one-pass trivial chat by weakening file/web evidence instructions or adding deterministic runtime routing.
 - `Who was Dante Alighieri?` hit the normal final-answer `max_tokens` budget in the sampled runs. The route pass itself stayed compact and did not retry from `length`.
 
 ## Why Not KV First
