@@ -19,6 +19,7 @@ from .bindings import (
 )
 from .chat_template import NativeMessage, render_gemma4_chat
 from .events import NativeCompletion, NativeProgress, NativeTimings
+from .kv_diag import emit_prompt_cache_event
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
@@ -880,6 +881,7 @@ class NativeLlamaClient:
         if not prompt_tokens:
             raise RuntimeError("failed to count prompt tokens")
 
+        previous_prompt_tokens = list(self._session.cached_prompt_tokens)
         reused = self._prepare_memory_for_prompt(prompt_tokens)
         processed = 0
         step = max(1, min(self.config.progress_step, self.config.batch_size))
@@ -909,6 +911,14 @@ class NativeLlamaClient:
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
+        )
+        emit_prompt_cache_event(
+            prompt_tokens=prompt_tokens,
+            previous_prompt_tokens=previous_prompt_tokens,
+            reused_prompt_tokens=reused,
+            output_tokens=generated,
+            cancelled=cancelled,
+            slot_id=self._session.session_id,
         )
         return NativeTimings(
             prompt_tokens=n_prompt,

@@ -211,12 +211,23 @@ class _DiagnosticBackend:
         call_context = _next_call_context(_PHASE.get() or "continue", _TOOLS_MODE.get())
         started = time.monotonic()
         result = self._backend.continue_current(*args, **kwargs)
+        envelope = _request_envelope_metadata(
+            self._backend,
+            messages=None,
+            tools=None,
+            streamed=kwargs.get("on_delta") is not None,
+            cache_prompt=None,
+            continue_current=True,
+            runtime_session_key_hash=call_context.get("session_id_hash"),
+            layout_common_prefix=None,
+        )
         event = {
             "event": "kv_diag_model_call",
             **call_context,
             "phase": call_context["phase"],
             "tools_mode": call_context["tools_mode"],
             "streamed": kwargs.get("on_delta") is not None,
+            "request_envelope": envelope,
             **_empty_prompt_fingerprint_fields(),
             "wall_ms": _elapsed_ms(started),
             **_result_metrics(result),
@@ -242,10 +253,21 @@ class _DiagnosticBackend:
         result = invoke()
         components = _component_changes(call_context["request_id"], phase, tools_mode, fingerprint)
         layout_common_prefix = _layout_common_prefix(call_context["request_id"], phase, tools_mode, fingerprint)
+        envelope = _request_envelope_metadata(
+            self._backend,
+            messages=messages,
+            tools=tools,
+            streamed=streamed,
+            cache_prompt=True,
+            continue_current=False,
+            runtime_session_key_hash=call_context.get("session_id_hash"),
+            layout_common_prefix=layout_common_prefix,
+        )
         event = {
             "event": "kv_diag_model_call",
             **call_context,
             "streamed": streamed,
+            "request_envelope": envelope,
             "prompt_chars": fingerprint.prompt_chars,
             "prompt_tokens_estimate": fingerprint.prompt_tokens_estimate,
             "stable_prefix_chars": fingerprint.stable_prefix_chars,
@@ -313,6 +335,57 @@ def _result_metrics(result: ChatResult) -> dict[str, Any]:
         "generation_tps": result.generation_tokens_per_second,
         "finish_reason": result.finish_reason,
     }
+
+
+def _request_envelope_metadata(
+    backend: Any,
+    *,
+    messages: list[Message] | None,
+    tools: list[dict[str, Any]] | None,
+    streamed: bool,
+    cache_prompt: bool | None,
+    continue_current: bool,
+    runtime_session_key_hash: str | None,
+    layout_common_prefix: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "backend_class": type(backend).__name__,
+        "endpoint": _backend_endpoint(backend, continue_current=continue_current),
+        "stream": streamed,
+        "cache_prompt": cache_prompt,
+        "continue_current": continue_current,
+        "session_identity_present": False,
+        "session_identity_hash": None,
+        "runtime_session_key_hash": runtime_session_key_hash,
+        "message_count": len(messages or []),
+        "role_sequence": _role_sequence(messages or []),
+        "tools_parameter_present": bool(tools),
+        "tool_count": len(tools or []),
+        "prompt_layout_common_tokens_estimate": (
+            layout_common_prefix.get("common_tokens_estimate") if isinstance(layout_common_prefix, dict) else None
+        ),
+    }
+
+
+def _backend_endpoint(backend: Any, *, continue_current: bool) -> str | None:
+    if type(backend).__name__ != "LlamaServerBackend":
+        return None
+    if continue_current:
+        return "/chat/continue/stream"
+    props = getattr(backend, "_props_cache", None)
+    if not isinstance(props, dict):
+        return None
+    if props.get("backend") == "orbit-native":
+        return "/chat/stream"
+    return "/v1/chat/completions"
+
+
+def _role_sequence(messages: list[Message]) -> list[str]:
+    roles: list[str] = []
+    for message in messages:
+        role = message.get("role")
+        roles.append(role if isinstance(role, str) else "unknown")
+    return roles
 
 
 def emit_footer_metrics(

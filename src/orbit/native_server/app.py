@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _has_open_thought_channel
+from orbit.native_llama.kv_diag import request_context as native_kv_request_context
 from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
 from orbit.native_server.protocol import (
     ContinueRequest,
@@ -271,7 +272,8 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
         try:
             if self.path == "/chat":
                 try:
-                    self._json(self._state().chat(payload))
+                    with native_kv_request_context(endpoint="/chat", payload=payload):
+                        self._json(self._state().chat(payload))
                 except RuntimeError as exc:
                     self._json(self._state().error_result(str(exc), payload), status=500)
                 return
@@ -299,7 +301,8 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                 self._openai_stream(payload)
             else:
                 try:
-                    self._json(openai_chat_response(self._state().chat(payload)))
+                    with native_kv_request_context(endpoint="/v1/chat/completions", payload=payload):
+                        self._json(openai_chat_response(self._state().chat(payload)))
                 except RuntimeError as exc:
                     self._json(openai_chat_response(self._state().error_result(str(exc), payload)), status=500)
                 except ValueError as exc:
@@ -362,11 +365,12 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             emit({"model": self._state().model_alias, "choices": [{"delta": {"content": text}}]})
 
         try:
-            result = self._state().chat(
-                payload,
-                on_token=on_token,
-                should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
-            )
+            with native_kv_request_context(endpoint="/v1/chat/completions", payload=payload):
+                result = self._state().chat(
+                    payload,
+                    on_token=on_token,
+                    should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
+                )
             disconnect.disarm()
             emit(openai_chat_response(result, content=""))
             self.wfile.write(sse_data("[DONE]"))
@@ -425,12 +429,13 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             )
 
         try:
-            result = self._state().complete(
-                request,
-                on_progress=on_progress,
-                on_token=on_token,
-                should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
-            )
+            with native_kv_request_context(endpoint="/chat/stream", payload=payload):
+                result = self._state().complete(
+                    request,
+                    on_progress=on_progress,
+                    on_token=on_token,
+                    should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
+                )
             disconnect.disarm()
             emit("metrics", {"usage": result["usage"], "timings": result["timings"], "native": result["native"]})
             emit("done", {"finish_reason": result["finish_reason"], "session_id": request.session_id})
