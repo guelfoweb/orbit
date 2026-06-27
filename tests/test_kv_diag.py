@@ -43,6 +43,27 @@ class FakeBackend:
         )
 
 
+class LlamaServerBackend(FakeBackend):
+    def __init__(self, *, native: bool = True) -> None:
+        super().__init__()
+        self._props_cache = {"backend": "orbit-native"} if native else {}
+
+
+class ContinueBackend:
+    def continue_current(self, *, max_tokens: int, on_delta=None, on_progress=None) -> ChatResult:
+        return ChatResult(
+            content="ok",
+            model="fake",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=3,
+            completion_tokens=1,
+            cached_tokens=1,
+            prompt_tokens_per_second=10.0,
+            generation_tokens_per_second=3.0,
+        )
+
+
 class SequenceBackend:
     def __init__(self, results: list[ChatResult]) -> None:
         self.results = list(results)
@@ -101,11 +122,83 @@ class KVDiagTests(unittest.TestCase):
         self.assertIn("prompt_layout_hash", payload)
         self.assertIn("prompt_layout", payload)
         self.assertIn("prompt_layout_common_prefix", payload)
+        self.assertIn("request_envelope", payload)
+        self.assertEqual(payload["request_envelope"]["message_count"], 2)
+        self.assertEqual(payload["request_envelope"]["role_sequence"], ["system", "user"])
+        self.assertFalse(payload["request_envelope"]["tools_parameter_present"])
         self.assertEqual(payload["prompt_tokens"], 10)
         self.assertEqual(payload["cached_tokens"], 4)
         self.assertEqual(payload["reused_tokens"], 4)
         self.assertEqual(payload["evaluated_tokens"], 6)
         self.assertNotIn("placeholder payload alpha", json.dumps(payload))
+
+    def test_request_envelope_diagnostics_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                backend = instrument_backend(LlamaServerBackend())
+                messages = [
+                    {"role": "system", "content": "runtime policy placeholder"},
+                    {"role": "user", "content": "placeholder payload delta"},
+                ]
+                tools = [{"type": "function", "function": {"name": "list_directory", "parameters": {"marker": "schema payload"}}}]
+                with request_context(session_id="session-key-placeholder"):
+                    with model_call_context(phase="route", tools_mode="on"):
+                        backend.chat(messages, temperature=0, max_tokens=32, tools=tools)
+
+            payload = next(
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["event"] == "kv_diag_model_call"
+            )
+            envelope = payload["request_envelope"]
+            raw_log = json.dumps(payload)
+
+        self.assertEqual(envelope["backend_class"], "LlamaServerBackend")
+        self.assertEqual(envelope["endpoint"], "/chat/stream")
+        self.assertFalse(envelope["stream"])
+        self.assertTrue(envelope["cache_prompt"])
+        self.assertFalse(envelope["continue_current"])
+        self.assertFalse(envelope["session_identity_present"])
+        self.assertIsNone(envelope["session_identity_hash"])
+        self.assertEqual(envelope["message_count"], 2)
+        self.assertEqual(envelope["role_sequence"], ["system", "user"])
+        self.assertTrue(envelope["tools_parameter_present"])
+        self.assertEqual(envelope["tool_count"], 1)
+        self.assertIn("runtime_session_key_hash", envelope)
+        self.assertIn("prompt_layout_common_tokens_estimate", envelope)
+        self.assertNotIn("placeholder payload delta", raw_log)
+        self.assertNotIn("runtime policy placeholder", raw_log)
+        self.assertNotIn("schema payload", raw_log)
+        self.assertNotIn("session-key-placeholder", raw_log)
+
+    def test_continue_current_envelope_is_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                backend = instrument_backend(ContinueBackend())
+                with request_context(session_id="session-key-placeholder"):
+                    with model_call_context(phase="continue", tools_mode="off"):
+                        backend.continue_current(max_tokens=8)
+
+            payload = next(
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["event"] == "kv_diag_model_call"
+            )
+            envelope = payload["request_envelope"]
+            raw_log = json.dumps(payload)
+
+        self.assertEqual(envelope["backend_class"], "ContinueBackend")
+        self.assertIsNone(envelope["endpoint"])
+        self.assertFalse(envelope["stream"])
+        self.assertIsNone(envelope["cache_prompt"])
+        self.assertTrue(envelope["continue_current"])
+        self.assertEqual(envelope["message_count"], 0)
+        self.assertEqual(envelope["role_sequence"], [])
+        self.assertFalse(envelope["tools_parameter_present"])
+        self.assertEqual(envelope["tool_count"], 0)
+        self.assertNotIn("session-key-placeholder", raw_log)
 
     def test_prompt_layout_diagnostics_are_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
