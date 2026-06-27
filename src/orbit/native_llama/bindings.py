@@ -201,8 +201,24 @@ class LlamaLibrary:
         lib.llama_get_memory.restype = c_void_p
         lib.llama_memory_clear.argtypes = [c_void_p, c_bool]
         lib.llama_memory_clear.restype = None
+        lib.llama_memory_seq_cp.argtypes = [c_void_p, c_int32, c_int32, c_int32, c_int32]
+        lib.llama_memory_seq_cp.restype = None
+        lib.llama_memory_seq_keep.argtypes = [c_void_p, c_int32]
+        lib.llama_memory_seq_keep.restype = None
         lib.llama_memory_seq_rm.argtypes = [c_void_p, c_int32, c_int32, c_int32]
         lib.llama_memory_seq_rm.restype = c_bool
+        lib.llama_state_get_size.argtypes = [c_void_p]
+        lib.llama_state_get_size.restype = c_size_t
+        lib.llama_state_get_data.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t]
+        lib.llama_state_get_data.restype = c_size_t
+        lib.llama_state_set_data.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t]
+        lib.llama_state_set_data.restype = c_size_t
+        lib.llama_state_seq_get_size.argtypes = [c_void_p, c_int32]
+        lib.llama_state_seq_get_size.restype = c_size_t
+        lib.llama_state_seq_get_data.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t, c_int32]
+        lib.llama_state_seq_get_data.restype = c_size_t
+        lib.llama_state_seq_set_data.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t, c_int32]
+        lib.llama_state_seq_set_data.restype = c_size_t
 
         lib.llama_model_get_vocab.argtypes = [c_void_p]
         lib.llama_model_get_vocab.restype = c_void_p
