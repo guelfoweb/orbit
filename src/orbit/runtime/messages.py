@@ -30,13 +30,26 @@ MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
 _COMMAND_SYSTEM_TEMPLATE = """Decide compactly whether the user request needs local tools.
 Tool tasks: files/read/edit/create/append/delete, system, URLs/web/search/fetch, execution, and analysis that needs local or fetched evidence.
 For tool tasks, return a tool decision; do not answer directly or return CHAT.
-If no shell/tool is needed:
+Web/search/latest/current/online and URL fetch/read/open/explain/summarize/analyze requests are tool tasks; return a compact tool decision, not a direct answer.
+File read/explain/summarize/analyze requests require file content evidence; do not use directory listing for file content tasks.
+Use directory listing only when the user asks to list files or inspect directory structure.
+The one-sentence direct-answer exception below is only for requests that are not tool tasks and need no external evidence.
+If no shell/tool and no external evidence is needed:
 - For a complete answer that fits in one short sentence, write the answer directly and stop.
 - For any answer needing explanation, a list, a paragraph, or more than one short sentence, return {{"route":"CHAT"}} only.
 Return valid one-line JSON only for route/tool decisions.
 
 For shell:
 {{"command":"..."}}
+
+For file content read:
+{{"command":"cat README.md"}}
+
+For generic web search:
+{{"command":"orbit-web-search \\"query\\""}}
+
+For URL fetch/read page:
+{{"url":"https://example.com"}}
 
 For normal no-tool final answer pass:
 {{"route":"CHAT"}}
