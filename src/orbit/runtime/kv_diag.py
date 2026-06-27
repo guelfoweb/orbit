@@ -342,6 +342,37 @@ def emit_footer_metrics(
     )
 
 
+def emit_route_outcome(
+    *,
+    outcome: str,
+    finish_reason: str | None,
+    decision_type: str | None,
+    output_chars: int | None,
+    output_tokens: int | None,
+    retry_reason: str | None,
+) -> None:
+    if not enabled() or _LAST_MODEL_CALL is None:
+        return
+    _emit(
+        {
+            "event": "kv_diag_route_outcome",
+            "session_id_hash": _LAST_MODEL_CALL.get("session_id_hash"),
+            "request_id": _LAST_MODEL_CALL.get("request_id"),
+            "model_call_id": _LAST_MODEL_CALL.get("model_call_id"),
+            "call_id": _LAST_MODEL_CALL.get("call_id"),
+            "pass_index": _LAST_MODEL_CALL.get("pass_index"),
+            "phase": _LAST_MODEL_CALL.get("phase"),
+            "tools_mode": _LAST_MODEL_CALL.get("tools_mode"),
+            "finish_reason": finish_reason,
+            "decision_type": decision_type,
+            "output_chars": output_chars,
+            "output_tokens": output_tokens,
+            "retry_reason": retry_reason,
+            "outcome": outcome,
+        }
+    )
+
+
 def _next_call_context(phase: str, tools_mode: str | None) -> dict[str, Any]:
     request = _REQUEST.get()
     call_id = next(_CALL_IDS)
@@ -372,7 +403,7 @@ def _record_model_call(event: dict[str, Any]) -> None:
     global _LAST_MODEL_CALL
     _LAST_MODEL_CALL = {
         key: event.get(key)
-        for key in ("session_id_hash", "request_id", "model_call_id", "call_id", "pass_index", "phase")
+        for key in ("session_id_hash", "request_id", "model_call_id", "call_id", "pass_index", "phase", "tools_mode")
     }
     request = _REQUEST.get()
     if request is not None:
