@@ -23,7 +23,13 @@ from orbit.terminal.tool_mode import allowed_tool_names_for_spec
 
 class ConfigTests(unittest.TestCase):
     def test_default_system_prompt_allows_attached_media_answers(self) -> None:
-        self.assertIn("Answer normally unless shell is needed", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("Decide compactly whether the user request needs local tools", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("files/read/edit/create/append/delete", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("do not answer directly or return CHAT", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("fits in one short sentence", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("needing explanation, a list, a paragraph", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn('{"route":"CHAT"}', DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("Do not write long prose in the route pass", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("Environment: OS=", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("orbit-web-search", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("prefer the fetch_url tool", DEFAULT_SYSTEM_PROMPT)
@@ -32,7 +38,13 @@ class ConfigTests(unittest.TestCase):
 
     def test_command_system_prompt_sends_local_hardware_queries_to_shell(self) -> None:
         self.assertIn('{"command":"..."}', ROUTE_SYSTEM_PROMPT)
-        self.assertIn("Return valid one-line JSON only", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("Return valid one-line JSON only for route/tool decisions", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("Tool tasks: files/read/edit/create/append/delete", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("do not answer directly or return CHAT", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("fits in one short sentence", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("needing explanation, a list, a paragraph", ROUTE_SYSTEM_PROMPT)
+        self.assertIn('{"route":"CHAT"}', ROUTE_SYSTEM_PROMPT)
+        self.assertIn("Do not write long prose in the route pass", ROUTE_SYSTEM_PROMPT)
         self.assertIn("Use native commands", ROUTE_SYSTEM_PROMPT)
         self.assertIn("Environment: OS=", ROUTE_SYSTEM_PROMPT)
         self.assertIn("orbit-web-search", ROUTE_SYSTEM_PROMPT)
@@ -58,7 +70,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_command_prompt_mentions_shell_full_path_quoting(self) -> None:
         self.assertIn("Quote spaced paths", ROUTE_SYSTEM_PROMPT)
-        self.assertIn("files/edit/create/append/delete", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("files/read/edit/create/append/delete", ROUTE_SYSTEM_PROMPT)
         self.assertIn("source, binaries, strings, logs, archives", ROUTE_SYSTEM_PROMPT)
 
     def test_missing_config_uses_defaults(self) -> None:

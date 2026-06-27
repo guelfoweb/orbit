@@ -27,12 +27,19 @@ def _detect_shell() -> str:
 
 CHAT_SYSTEM_PROMPT = "Answer normally for conversation, explanation, writing, opinion, and general knowledge."
 MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
-_COMMAND_SYSTEM_TEMPLATE = """Answer normally unless shell is needed.
-Shell tasks: files/edit/create/append/delete, system, URLs/web/search/fetch, execution, analysis.
-Return valid one-line JSON only.
+_COMMAND_SYSTEM_TEMPLATE = """Decide compactly whether the user request needs local tools.
+Tool tasks: files/read/edit/create/append/delete, system, URLs/web/search/fetch, execution, and analysis that needs local or fetched evidence.
+For tool tasks, return a tool decision; do not answer directly or return CHAT.
+If no shell/tool is needed:
+- For a complete answer that fits in one short sentence, write the answer directly and stop.
+- For any answer needing explanation, a list, a paragraph, or more than one short sentence, return {{"route":"CHAT"}} only.
+Return valid one-line JSON only for route/tool decisions.
 
 For shell:
 {{"command":"..."}}
+
+For normal no-tool final answer pass:
+{{"route":"CHAT"}}
 
 For compact directory listing:
 {{"path":".","recursive":false}}
@@ -46,6 +53,7 @@ Use given paths exactly. Use native commands in workdir. For compact directory l
 
 Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
+Do not write long prose in the route pass.
 
 Example:
 specs of this computer -> {{"include_cpu":true,"include_memory":true,"include_disks":true,"include_os":true}}
