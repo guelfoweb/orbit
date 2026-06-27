@@ -13,7 +13,7 @@ from itertools import count
 from typing import Any, Callable, Iterator
 
 from orbit.backend.base import ChatResult, Message, StreamProgress
-from orbit.runtime.session_memory import estimate_message_tokens
+from orbit.runtime.session_memory import estimate_message_tokens, estimate_text_tokens
 
 
 _PHASE: contextvars.ContextVar[str | None] = contextvars.ContextVar("orbit_kv_diag_phase", default=None)
@@ -22,6 +22,7 @@ _REQUEST: contextvars.ContextVar["_RequestState | None"] = contextvars.ContextVa
 _CALL_IDS = count(1)
 _REQUEST_IDS = count(1)
 _LAST_BY_SCENARIO: dict[str, dict[str, str | None]] = {}
+_LAST_LAYOUT_BY_SCENARIO: dict[str, list[dict[str, Any]]] = {}
 _LAST_MODEL_CALL: dict[str, Any] | None = None
 
 
@@ -37,6 +38,8 @@ class PromptFingerprint:
     capability_summary_hash: str | None
     runtime_policy_hash: str | None
     conversation_prefix_hash: str
+    prompt_layout_hash: str
+    prompt_layout: list[dict[str, Any]]
 
 
 @dataclass
@@ -58,6 +61,7 @@ def reset_diagnostics_for_tests() -> None:
     _CALL_IDS = count(1)
     _REQUEST_IDS = count(1)
     _LAST_BY_SCENARIO.clear()
+    _LAST_LAYOUT_BY_SCENARIO.clear()
     _LAST_MODEL_CALL = None
 
 
@@ -115,6 +119,7 @@ def instrument_backend(backend: Any) -> Any:
 def fingerprint_prompt(messages: list[Message], tools: list[dict[str, Any]] | None = None) -> PromptFingerprint:
     rendered_messages = _canonical_json(messages)
     tool_schema = _canonical_json(tools or [])
+    prompt_layout = _prompt_layout(messages, tools or [])
     runtime_policy = _runtime_policy(messages)
     capability_summary = _capability_summary(messages)
     stable_components = {
@@ -135,6 +140,8 @@ def fingerprint_prompt(messages: list[Message], tools: list[dict[str, Any]] | No
         capability_summary_hash=_hash(capability_summary) if capability_summary is not None else None,
         runtime_policy_hash=_hash(runtime_policy) if runtime_policy is not None else None,
         conversation_prefix_hash=_hash(conversation_prefix),
+        prompt_layout_hash=_hash(_layout_identity(prompt_layout)),
+        prompt_layout=prompt_layout,
     )
 
 
@@ -234,6 +241,7 @@ class _DiagnosticBackend:
         started = time.monotonic()
         result = invoke()
         components = _component_changes(call_context["request_id"], phase, tools_mode, fingerprint)
+        layout_common_prefix = _layout_common_prefix(call_context["request_id"], phase, tools_mode, fingerprint)
         event = {
             "event": "kv_diag_model_call",
             **call_context,
@@ -248,6 +256,10 @@ class _DiagnosticBackend:
             "capability_summary_hash": fingerprint.capability_summary_hash,
             "runtime_policy_hash": fingerprint.runtime_policy_hash,
             "conversation_prefix_hash": fingerprint.conversation_prefix_hash,
+            "prompt_layout_hash": fingerprint.prompt_layout_hash,
+            "prompt_layout_order": [block["component"] for block in fingerprint.prompt_layout],
+            "prompt_layout": fingerprint.prompt_layout,
+            "prompt_layout_common_prefix": layout_common_prefix,
             "changed_components": components,
             "wall_ms": _elapsed_ms(started),
             "prefill_ms": progress_timings.prefill_ms(started) if progress_timings is not None else None,
@@ -422,6 +434,10 @@ def _empty_prompt_fingerprint_fields() -> dict[str, Any]:
         "capability_summary_hash": None,
         "runtime_policy_hash": None,
         "conversation_prefix_hash": None,
+        "prompt_layout_hash": None,
+        "prompt_layout_order": [],
+        "prompt_layout": [],
+        "prompt_layout_common_prefix": None,
         "changed_components": [],
     }
 
@@ -482,6 +498,150 @@ def _component_changes(request_id: str | None, phase: str, tools_mode: str | Non
             }
         )
     return changed
+
+
+def _layout_common_prefix(
+    request_id: str | None,
+    phase: str,
+    tools_mode: str | None,
+    fingerprint: PromptFingerprint,
+) -> dict[str, Any]:
+    scenario = f"{phase}:{tools_mode or 'unknown'}:{fingerprint.first_user_message_hash or 'no_user'}"
+    current = fingerprint.prompt_layout
+    previous = _LAST_LAYOUT_BY_SCENARIO.get(scenario)
+    _LAST_LAYOUT_BY_SCENARIO[scenario] = current
+    if previous is None:
+        return {
+            "previous_seen": False,
+            "common_blocks": 0,
+            "common_chars_estimate": 0,
+            "common_tokens_estimate": 0,
+            "common_prefix_hash": None,
+            "first_divergence_component": None,
+            "previous_first_divergence_component": None,
+        }
+    common = 0
+    for previous_block, current_block in zip(previous, current):
+        if previous_block.get("hash") != current_block.get("hash") or previous_block.get("component") != current_block.get("component"):
+            break
+        common += 1
+    common_blocks = current[:common]
+    current_divergence = current[common].get("component") if common < len(current) else None
+    previous_divergence = previous[common].get("component") if common < len(previous) else None
+    event = {
+        "previous_seen": True,
+        "common_blocks": common,
+        "common_chars_estimate": sum(int(block.get("chars", 0)) for block in common_blocks),
+        "common_tokens_estimate": sum(int(block.get("tokens_estimate", 0)) for block in common_blocks),
+        "common_prefix_hash": _hash(_layout_identity(common_blocks)) if common_blocks else None,
+        "first_divergence_component": current_divergence,
+        "previous_first_divergence_component": previous_divergence,
+    }
+    if current_divergence or previous_divergence:
+        _emit(
+            {
+                "event": "kv_diag_prompt_layout_mismatch",
+                "request_id": request_id,
+                "phase": phase,
+                "tools_mode": tools_mode,
+                **event,
+            }
+        )
+    return event
+
+
+def _prompt_layout(messages: list[Message], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    char_offset = 0
+    token_offset = 0
+    for index, message in enumerate(messages):
+        component = _message_component(message, index=index)
+        serialized = _canonical_json(message)
+        tokens = estimate_message_tokens([message])
+        block = _layout_block(
+            index=len(blocks),
+            component=component,
+            source="messages",
+            role=str(message.get("role") or "unknown"),
+            serialized=serialized,
+            token_estimate=tokens,
+            char_offset=char_offset,
+            token_offset=token_offset,
+        )
+        blocks.append(block)
+        char_offset = block["end_char_estimate"]
+        token_offset = block["end_token_estimate"]
+    if tools:
+        serialized = _canonical_json(tools)
+        tokens = estimate_text_tokens(serialized)
+        block = _layout_block(
+            index=len(blocks),
+            component="tool_schema_parameter",
+            source="tools_parameter",
+            role=None,
+            serialized=serialized,
+            token_estimate=tokens,
+            char_offset=char_offset,
+            token_offset=token_offset,
+        )
+        block["tool_count"] = len(tools)
+        blocks.append(block)
+    return blocks
+
+
+def _layout_block(
+    *,
+    index: int,
+    component: str,
+    source: str,
+    role: str | None,
+    serialized: str,
+    token_estimate: int,
+    char_offset: int,
+    token_offset: int,
+) -> dict[str, Any]:
+    chars = len(serialized)
+    return {
+        "index": index,
+        "component": component,
+        "source": source,
+        "role": role,
+        "hash": _hash(serialized),
+        "chars": chars,
+        "tokens_estimate": token_estimate,
+        "start_char_estimate": char_offset,
+        "end_char_estimate": char_offset + chars,
+        "start_token_estimate": token_offset,
+        "end_token_estimate": token_offset + token_estimate,
+    }
+
+
+def _message_component(message: Message, *, index: int) -> str:
+    role = str(message.get("role") or "unknown")
+    content = message.get("content")
+    if role == "system" and isinstance(content, str):
+        if content.startswith("Local tools available:"):
+            return "capability_summary"
+        return "runtime_policy" if index == 0 else "system_instruction"
+    if role == "user":
+        return "user_message"
+    if role == "assistant":
+        return "assistant_history"
+    if role == "tool":
+        return "tool_result"
+    return f"{role}_message"
+
+
+def _layout_identity(layout: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "component": block.get("component"),
+            "source": block.get("source"),
+            "role": block.get("role"),
+            "hash": block.get("hash"),
+        }
+        for block in layout
+    ]
 
 
 def _emit(payload: dict[str, Any]) -> None:

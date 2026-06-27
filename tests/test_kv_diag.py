@@ -78,7 +78,7 @@ class KVDiagTests(unittest.TestCase):
             log_path = Path(tmp) / "diag.jsonl"
             with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "0", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
                 runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None)
-                runtime.ask_chat("secret prompt text", temperature=0, max_tokens=32)
+                runtime.ask_chat("placeholder payload alpha", temperature=0, max_tokens=32)
 
             self.assertFalse(log_path.exists())
 
@@ -87,7 +87,7 @@ class KVDiagTests(unittest.TestCase):
             log_path = Path(tmp) / "diag.jsonl"
             with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
                 runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None)
-                runtime.ask_chat("secret prompt text", temperature=0, max_tokens=32)
+                runtime.ask_chat("placeholder payload alpha", temperature=0, max_tokens=32)
 
             payload = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
 
@@ -98,11 +98,79 @@ class KVDiagTests(unittest.TestCase):
         self.assertEqual(payload["phase"], "chat_final")
         self.assertIn("stable_prefix_hash", payload)
         self.assertIn("full_prompt_hash", payload)
+        self.assertIn("prompt_layout_hash", payload)
+        self.assertIn("prompt_layout", payload)
+        self.assertIn("prompt_layout_common_prefix", payload)
         self.assertEqual(payload["prompt_tokens"], 10)
         self.assertEqual(payload["cached_tokens"], 4)
         self.assertEqual(payload["reused_tokens"], 4)
         self.assertEqual(payload["evaluated_tokens"], 6)
-        self.assertNotIn("secret prompt text", json.dumps(payload))
+        self.assertNotIn("placeholder payload alpha", json.dumps(payload))
+
+    def test_prompt_layout_diagnostics_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                backend = instrument_backend(FakeBackend())
+                messages = [
+                    {"role": "system", "content": "policy text"},
+                    {"role": "user", "content": "placeholder payload beta"},
+                ]
+                tools = [{"type": "function", "function": {"name": "system_info", "parameters": {"placeholder": "schema metadata"}}}]
+                with request_context(session_id="session"):
+                    with model_call_context(phase="route", tools_mode="on"):
+                        backend.chat(messages, temperature=0, max_tokens=32, tools=tools)
+
+            payload = next(
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["event"] == "kv_diag_model_call"
+            )
+            raw_log = json.dumps(payload)
+
+        self.assertEqual(payload["prompt_layout_order"], ["runtime_policy", "user_message", "tool_schema_parameter"])
+        self.assertEqual(payload["prompt_layout"][0]["source"], "messages")
+        self.assertEqual(payload["prompt_layout"][-1]["source"], "tools_parameter")
+        self.assertEqual(payload["prompt_layout"][-1]["tool_count"], 1)
+        self.assertIn("start_token_estimate", payload["prompt_layout"][0])
+        self.assertIn("end_token_estimate", payload["prompt_layout"][0])
+        self.assertFalse(payload["prompt_layout_common_prefix"]["previous_seen"])
+        self.assertNotIn("placeholder payload beta", raw_log)
+        self.assertNotIn("schema metadata", raw_log)
+        self.assertNotIn("policy text", raw_log)
+
+    def test_prompt_layout_mismatch_event_contains_only_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                backend = instrument_backend(FakeBackend())
+                first = [
+                    {"role": "system", "content": "policy"},
+                    {"role": "user", "content": "placeholder repeated payload"},
+                ]
+                second = [
+                    {"role": "system", "content": "policy"},
+                    {"role": "assistant", "content": "placeholder assistant payload"},
+                    {"role": "user", "content": "placeholder repeated payload"},
+                ]
+                with request_context(session_id="session"):
+                    with model_call_context(phase="route", tools_mode="on"):
+                        backend.chat(first, temperature=0, max_tokens=32)
+                    with model_call_context(phase="route", tools_mode="on"):
+                        backend.chat(second, temperature=0, max_tokens=32)
+
+            lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            mismatch = next(line for line in lines if line["event"] == "kv_diag_prompt_layout_mismatch")
+            second_call = [line for line in lines if line["event"] == "kv_diag_model_call"][-1]
+            raw_log = json.dumps(lines)
+
+        self.assertEqual(mismatch["common_blocks"], 1)
+        self.assertEqual(mismatch["first_divergence_component"], "assistant_history")
+        self.assertEqual(mismatch["previous_first_divergence_component"], "user_message")
+        self.assertTrue(second_call["prompt_layout_common_prefix"]["previous_seen"])
+        self.assertEqual(second_call["prompt_layout_common_prefix"]["common_blocks"], 1)
+        self.assertNotIn("placeholder repeated payload", raw_log)
+        self.assertNotIn("placeholder assistant payload", raw_log)
 
     def test_stable_prefix_hash_is_stable_for_identical_inputs(self) -> None:
         messages = [
@@ -227,11 +295,11 @@ class KVDiagTests(unittest.TestCase):
                 backend = instrument_backend(FakeBackend())
                 first = [
                     {"role": "system", "content": "Local tools available: python3."},
-                    {"role": "user", "content": "same user prompt"},
+                    {"role": "user", "content": "placeholder repeated payload"},
                 ]
                 second = [
                     {"role": "system", "content": "Local tools available: python3, file."},
-                    {"role": "user", "content": "same user prompt"},
+                    {"role": "user", "content": "placeholder repeated payload"},
                 ]
                 with request_context(session_id="session"):
                     with model_call_context(phase="tool_call", tools_mode="on"):
@@ -244,7 +312,7 @@ class KVDiagTests(unittest.TestCase):
             raw_log = json.dumps(lines)
 
         self.assertTrue(any(event["component"] == "capability_summary" for event in mismatches))
-        self.assertNotIn("same user prompt", raw_log)
+        self.assertNotIn("placeholder repeated payload", raw_log)
         self.assertNotIn("python3, file", raw_log)
 
     def test_route_direct_final_stop_is_observed_without_behavior_change(self) -> None:
@@ -311,7 +379,7 @@ class KVDiagTests(unittest.TestCase):
                 backend = instrument_backend(FakeBackend())
                 with request_context(session_id="session"):
                     with model_call_context(phase="route", tools_mode="on"):
-                        backend.chat([{"role": "user", "content": "secret prompt"}], temperature=0, max_tokens=32)
+                        backend.chat([{"role": "user", "content": "placeholder payload gamma"}], temperature=0, max_tokens=32)
                     for outcome, decision_type, retry_reason in (
                         ("route_parsed_tool", "FILESYSTEM", None),
                         ("route_parsed_chat", "CHAT", None),
@@ -337,7 +405,7 @@ class KVDiagTests(unittest.TestCase):
         )
         self.assertTrue(all(event["request_id"] for event in outcomes))
         self.assertTrue(all(event["model_call_id"] for event in outcomes))
-        self.assertNotIn("secret prompt", raw_log)
+        self.assertNotIn("placeholder payload gamma", raw_log)
 
 
 if __name__ == "__main__":
