@@ -24,6 +24,7 @@ from orbit.runtime.final_policy import (
     last_user_text,
     looks_like_incomplete_final,
 )
+from orbit.runtime.kv_diag import current_tools_mode, model_call_context
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import TOOL_CALL_JSON_RETRY_PROMPT
 from orbit.runtime.thinking_mode import ThinkingMode, last_assistant_has_open_reasoning
@@ -102,13 +103,14 @@ class TransportEnvironment:
     ) -> ChatResult:
         if on_phase_start:
             on_phase_start(ModelPhaseStart("chat_final", streamed=on_final_delta is not None, attempt=1))
-        result = self.chat_once(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            on_final_delta=on_final_delta,
-            on_progress=on_progress,
-        )
+        with model_call_context(phase="chat_final", tools_mode=current_tools_mode() or "off"):
+            result = self.chat_once(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+            )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="chat_final"))
         completeness = classify_final_answer_completeness(result.content, messages=messages)
@@ -147,13 +149,14 @@ class TransportEnvironment:
             )
         retry_context = self.backend_thinking(False) if with_final_only_retry else nullcontext()
         with retry_context:
-            retry = self.chat_once(
-                retry_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                on_final_delta=on_final_delta,
-                on_progress=on_progress,
-            )
+            with model_call_context(phase=retry_phase, tools_mode=current_tools_mode() or "off"):
+                retry = self.chat_once(
+                    retry_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop + 1, result=retry, phase=retry_phase))
         retry_completeness = classify_final_answer_completeness(retry.content, messages=retry_messages)
@@ -222,31 +225,33 @@ class TransportEnvironment:
     ) -> ChatResult:
         try:
             with self.backend_thinking(False):
+                with model_call_context(phase="tool_call", tools_mode="on"):
+                    if on_final_delta is None:
+                        return self.runtime.backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+                    return self.runtime.backend.chat_stream(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        tools=tools,
+                        on_delta=on_final_delta,
+                        on_progress=on_progress,
+                    )
+        except RuntimeError as exc:
+            if not is_tool_argument_json_error(exc):
+                raise
+        retry_messages = [*messages, {"role": "system", "content": TOOL_CALL_JSON_RETRY_PROMPT}]
+        with self.backend_thinking(False):
+            with model_call_context(phase="tool_call_json_retry", tools_mode="on"):
                 if on_final_delta is None:
-                    return self.runtime.backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+                    return self.runtime.backend.chat(retry_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
                 return self.runtime.backend.chat_stream(
-                    messages,
+                    retry_messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     tools=tools,
                     on_delta=on_final_delta,
                     on_progress=on_progress,
                 )
-        except RuntimeError as exc:
-            if not is_tool_argument_json_error(exc):
-                raise
-        retry_messages = [*messages, {"role": "system", "content": TOOL_CALL_JSON_RETRY_PROMPT}]
-        with self.backend_thinking(False):
-            if on_final_delta is None:
-                return self.runtime.backend.chat(retry_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
-            return self.runtime.backend.chat_stream(
-                retry_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                tools=tools,
-                on_delta=on_final_delta,
-                on_progress=on_progress,
-            )
 
     @contextmanager
     def backend_thinking(self, value: bool):
@@ -297,13 +302,14 @@ class PureChatEnvironment:
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("tool_plan", streamed=on_final_delta is not None, attempt=1, reason="chat_thinking"))
             with self.transport.backend_thinking(True):
-                thinking_result = self.transport.chat_once(
-                    thinking_messages,
-                    temperature=temperature,
-                    max_tokens=thinking_max_tokens,
-                    on_final_delta=on_final_delta,
-                    on_progress=on_progress,
-                )
+                with model_call_context(phase="chat_thinking", tools_mode="off"):
+                    thinking_result = self.transport.chat_once(
+                        thinking_messages,
+                        temperature=temperature,
+                        max_tokens=thinking_max_tokens,
+                        on_final_delta=on_final_delta,
+                        on_progress=on_progress,
+                    )
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop, result=thinking_result, phase="chat_thinking"))
             final_messages = [
@@ -424,16 +430,17 @@ class FinalFromToolEnvironment:
                 )
             )
         with self.transport.backend_thinking(False):
-            if on_final_delta is None:
-                result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
-            else:
-                result = self.runtime.backend.chat_stream(
-                    policy.messages,
-                    temperature=temperature,
-                    max_tokens=policy.max_tokens,
-                    on_delta=final_delta,
-                    on_progress=on_progress,
-                )
+            with model_call_context(phase="final_from_tool", tools_mode="on"):
+                if on_final_delta is None:
+                    result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
+                else:
+                    result = self.runtime.backend.chat_stream(
+                        policy.messages,
+                        temperature=temperature,
+                        max_tokens=policy.max_tokens,
+                        on_delta=final_delta,
+                        on_progress=on_progress,
+                    )
         best_non_empty_result = result if result.content.strip() else None
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
@@ -458,16 +465,17 @@ class FinalFromToolEnvironment:
                     )
                 )
             with self.transport.backend_thinking(False):
-                if on_final_delta is None:
-                    retry_candidate = self.runtime.backend.chat(retry_messages, temperature=temperature, max_tokens=retry_max_tokens)
-                else:
-                    retry_candidate = self.runtime.backend.chat_stream(
-                        retry_messages,
-                        temperature=temperature,
-                        max_tokens=retry_max_tokens,
-                        on_delta=final_delta,
-                        on_progress=on_progress,
-                    )
+                with model_call_context(phase="final_from_tool_retry", tools_mode="on"):
+                    if on_final_delta is None:
+                        retry_candidate = self.runtime.backend.chat(retry_messages, temperature=temperature, max_tokens=retry_max_tokens)
+                    else:
+                        retry_candidate = self.runtime.backend.chat_stream(
+                            retry_messages,
+                            temperature=temperature,
+                            max_tokens=retry_max_tokens,
+                            on_delta=final_delta,
+                            on_progress=on_progress,
+                        )
             if retry_candidate.content.strip():
                 best_non_empty_result = retry_candidate
             result = _prefer_non_empty_retry_result(previous_result, retry_candidate)
@@ -517,16 +525,17 @@ class FinalFromToolEnvironment:
                     )
                 )
             with self.transport.backend_thinking(False):
-                if on_final_delta is None:
-                    result = self.runtime.backend.chat(repair_messages, temperature=temperature, max_tokens=repair_max_tokens)
-                else:
-                    result = self.runtime.backend.chat_stream(
-                        repair_messages,
-                        temperature=temperature,
-                        max_tokens=repair_max_tokens,
-                        on_delta=final_delta,
-                        on_progress=on_progress,
-                    )
+                with model_call_context(phase="final_from_tool_completion_repair", tools_mode="on"):
+                    if on_final_delta is None:
+                        result = self.runtime.backend.chat(repair_messages, temperature=temperature, max_tokens=repair_max_tokens)
+                    else:
+                        result = self.runtime.backend.chat_stream(
+                            repair_messages,
+                            temperature=temperature,
+                            max_tokens=repair_max_tokens,
+                            on_delta=final_delta,
+                            on_progress=on_progress,
+                        )
             if result.content.strip():
                 best_non_empty_result = result
             if on_model_step:
@@ -564,16 +573,17 @@ class FinalFromToolEnvironment:
                     )
                 )
             with self.transport.backend_thinking(False):
-                if on_final_delta is None:
-                    candidate = self.runtime.backend.chat(compact_messages, temperature=temperature, max_tokens=compact_max_tokens)
-                else:
-                    candidate = self.runtime.backend.chat_stream(
-                        compact_messages,
-                        temperature=temperature,
-                        max_tokens=compact_max_tokens,
-                        on_delta=final_delta,
-                        on_progress=on_progress,
-                    )
+                with model_call_context(phase="final_from_tool_compact_retry", tools_mode="on"):
+                    if on_final_delta is None:
+                        candidate = self.runtime.backend.chat(compact_messages, temperature=temperature, max_tokens=compact_max_tokens)
+                    else:
+                        candidate = self.runtime.backend.chat_stream(
+                            compact_messages,
+                            temperature=temperature,
+                            max_tokens=compact_max_tokens,
+                            on_delta=final_delta,
+                            on_progress=on_progress,
+                        )
             if candidate.content.strip():
                 best_non_empty_result = candidate
             if on_model_step:

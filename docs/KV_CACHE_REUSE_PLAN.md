@@ -94,6 +94,14 @@ Metrics to record:
 
 Use `orbit bench-core` for public regression coverage and add temporary local scripts only for deeper profiling.
 
+For phase-1 cache diagnostics, use:
+
+```bash
+ORBIT_KV_DIAG=1 python3 scripts/bench_kv_diag.py
+```
+
+The script writes raw diagnostic JSONL and a compact Markdown summary under `benchmarks/`. Benchmark outputs are local artifacts and should not be committed unless explicitly requested.
+
 ## Invalidation Risks
 
 KV reuse risks:
