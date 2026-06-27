@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from orbit.backend.base import ChatResult
+from orbit.runtime.kv_diag import emit_footer_metrics
 from orbit.runtime.session_memory import MemoryRefresh, estimate_message_tokens
 from orbit.terminal.streaming import format_elapsed
 
@@ -12,6 +13,12 @@ def format_turn_status(
     estimated_context_tokens: int | None = None,
     context_tokens: int | None = None,
 ) -> str:
+    emit_footer_metrics(
+        result,
+        elapsed_seconds=elapsed_seconds,
+        estimated_context_tokens=estimated_context_tokens,
+        context_tokens=context_tokens,
+    )
     parts = []
     if result.model:
         parts.append(f"model: {result.model}")

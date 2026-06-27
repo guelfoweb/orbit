@@ -7,7 +7,8 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import wraps
 from itertools import count
 from typing import Any, Callable, Iterator
 
@@ -17,8 +18,11 @@ from orbit.runtime.session_memory import estimate_message_tokens
 
 _PHASE: contextvars.ContextVar[str | None] = contextvars.ContextVar("orbit_kv_diag_phase", default=None)
 _TOOLS_MODE: contextvars.ContextVar[str | None] = contextvars.ContextVar("orbit_kv_diag_tools_mode", default=None)
+_REQUEST: contextvars.ContextVar["_RequestState | None"] = contextvars.ContextVar("orbit_kv_diag_request", default=None)
 _CALL_IDS = count(1)
+_REQUEST_IDS = count(1)
 _LAST_BY_SCENARIO: dict[str, dict[str, str | None]] = {}
+_LAST_MODEL_CALL: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -35,19 +39,57 @@ class PromptFingerprint:
     conversation_prefix_hash: str
 
 
+@dataclass
+class _RequestState:
+    session_id_hash: str
+    request_id: str
+    started: float
+    pass_index: int = 0
+    model_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
 def enabled() -> bool:
     value = os.environ.get("ORBIT_KV_DIAG", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def reset_diagnostics_for_tests() -> None:
-    global _CALL_IDS
+    global _CALL_IDS, _REQUEST_IDS, _LAST_MODEL_CALL
     _CALL_IDS = count(1)
+    _REQUEST_IDS = count(1)
     _LAST_BY_SCENARIO.clear()
+    _LAST_MODEL_CALL = None
 
 
 def current_tools_mode() -> str | None:
     return _TOOLS_MODE.get()
+
+
+@contextlib.contextmanager
+def request_context(*, session_id: str | None = None) -> Iterator[None]:
+    if not enabled() or _REQUEST.get() is not None:
+        yield
+        return
+    state = _RequestState(
+        session_id_hash=_hash(session_id or "default"),
+        request_id=f"req_{next(_REQUEST_IDS):06d}",
+        started=time.monotonic(),
+    )
+    token = _REQUEST.set(state)
+    try:
+        yield
+    finally:
+        _emit_request_summary(state)
+        _REQUEST.reset(token)
+
+
+def user_request(method: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with request_context(session_id=getattr(self, "diagnostic_session_id", "default")):
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 @contextlib.contextmanager
@@ -159,19 +201,21 @@ class _DiagnosticBackend:
         )
 
     def continue_current(self, *args: Any, **kwargs: Any) -> ChatResult:
+        call_context = _next_call_context(_PHASE.get() or "continue", _TOOLS_MODE.get())
         started = time.monotonic()
         result = self._backend.continue_current(*args, **kwargs)
-        _emit(
-            {
-                "event": "kv_diag_model_call",
-                "call_id": next(_CALL_IDS),
-                "phase": _PHASE.get() or "continue",
-                "tools_mode": _TOOLS_MODE.get(),
-                "streamed": kwargs.get("on_delta") is not None,
-                "wall_ms": _elapsed_ms(started),
-                **_result_metrics(result),
-            }
-        )
+        event = {
+            "event": "kv_diag_model_call",
+            **call_context,
+            "phase": call_context["phase"],
+            "tools_mode": call_context["tools_mode"],
+            "streamed": kwargs.get("on_delta") is not None,
+            **_empty_prompt_fingerprint_fields(),
+            "wall_ms": _elapsed_ms(started),
+            **_result_metrics(result),
+        }
+        _record_model_call(event)
+        _emit(event)
         return result
 
     def _record_call(
@@ -183,37 +227,35 @@ class _DiagnosticBackend:
         invoke: Callable[[], ChatResult],
         progress_timings: "_ProgressTimings | None" = None,
     ) -> ChatResult:
-        call_id = next(_CALL_IDS)
         phase = _PHASE.get() or "unknown"
         tools_mode = _TOOLS_MODE.get() or ("on" if tools else "off")
+        call_context = _next_call_context(phase, tools_mode)
         fingerprint = fingerprint_prompt(messages, tools)
         started = time.monotonic()
         result = invoke()
-        components = _component_changes(phase, tools_mode, fingerprint)
-        _emit(
-            {
-                "event": "kv_diag_model_call",
-                "call_id": call_id,
-                "phase": phase,
-                "tools_mode": tools_mode,
-                "streamed": streamed,
-                "prompt_chars": fingerprint.prompt_chars,
-                "prompt_tokens_estimate": fingerprint.prompt_tokens_estimate,
-                "stable_prefix_chars": fingerprint.stable_prefix_chars,
-                "stable_prefix_hash": fingerprint.stable_prefix_hash,
-                "full_prompt_hash": fingerprint.full_prompt_hash,
-                "first_user_message_hash": fingerprint.first_user_message_hash,
-                "tool_schema_hash": fingerprint.tool_schema_hash,
-                "capability_summary_hash": fingerprint.capability_summary_hash,
-                "runtime_policy_hash": fingerprint.runtime_policy_hash,
-                "conversation_prefix_hash": fingerprint.conversation_prefix_hash,
-                "changed_components": components,
-                "wall_ms": _elapsed_ms(started),
-                "prefill_ms": progress_timings.prefill_ms(started) if progress_timings is not None else None,
-                "generation_ms": progress_timings.generation_ms() if progress_timings is not None else None,
-                **_result_metrics(result),
-            }
-        )
+        components = _component_changes(call_context["request_id"], phase, tools_mode, fingerprint)
+        event = {
+            "event": "kv_diag_model_call",
+            **call_context,
+            "streamed": streamed,
+            "prompt_chars": fingerprint.prompt_chars,
+            "prompt_tokens_estimate": fingerprint.prompt_tokens_estimate,
+            "stable_prefix_chars": fingerprint.stable_prefix_chars,
+            "stable_prefix_hash": fingerprint.stable_prefix_hash,
+            "full_prompt_hash": fingerprint.full_prompt_hash,
+            "first_user_message_hash": fingerprint.first_user_message_hash,
+            "tool_schema_hash": fingerprint.tool_schema_hash,
+            "capability_summary_hash": fingerprint.capability_summary_hash,
+            "runtime_policy_hash": fingerprint.runtime_policy_hash,
+            "conversation_prefix_hash": fingerprint.conversation_prefix_hash,
+            "changed_components": components,
+            "wall_ms": _elapsed_ms(started),
+            "prefill_ms": progress_timings.prefill_ms(started) if progress_timings is not None else None,
+            "generation_ms": progress_timings.generation_ms() if progress_timings is not None else None,
+            **_result_metrics(result),
+        }
+        _record_model_call(event)
+        _emit(event)
         return result
 
 
@@ -261,7 +303,129 @@ def _result_metrics(result: ChatResult) -> dict[str, Any]:
     }
 
 
-def _component_changes(phase: str, tools_mode: str | None, fingerprint: PromptFingerprint) -> list[str]:
+def emit_footer_metrics(
+    result: ChatResult,
+    *,
+    elapsed_seconds: float | None = None,
+    estimated_context_tokens: int | None = None,
+    context_tokens: int | None = None,
+) -> None:
+    if not enabled() or _LAST_MODEL_CALL is None:
+        return
+    prompt_tokens = result.prompt_tokens
+    cache_percent = None
+    if prompt_tokens and result.cached_tokens is not None:
+        cache_percent = (result.cached_tokens / prompt_tokens) * 100
+    _emit(
+        {
+            "event": "kv_diag_footer_metrics",
+            "session_id_hash": _LAST_MODEL_CALL.get("session_id_hash"),
+            "request_id": _LAST_MODEL_CALL.get("request_id"),
+            "model_call_id": _LAST_MODEL_CALL.get("model_call_id"),
+            "call_id": _LAST_MODEL_CALL.get("call_id"),
+            "pass_index": _LAST_MODEL_CALL.get("pass_index"),
+            "phase": _LAST_MODEL_CALL.get("phase"),
+            "footer": {
+                "model": result.model,
+                "ctx_used": estimated_context_tokens,
+                "ctx_total": context_tokens,
+                "input_tokens": result.prompt_tokens,
+                "output_tokens": result.completion_tokens,
+                "cached_tokens": result.cached_tokens,
+                "cache_percent": cache_percent,
+                "prefill_tok_s": result.prompt_tokens_per_second,
+                "generation_tok_s": result.generation_tokens_per_second,
+                "finish_reason": result.finish_reason,
+                "wall_ms": int(elapsed_seconds * 1000) if elapsed_seconds is not None else None,
+            },
+        }
+    )
+
+
+def _next_call_context(phase: str, tools_mode: str | None) -> dict[str, Any]:
+    request = _REQUEST.get()
+    call_id = next(_CALL_IDS)
+    model_call_id = f"mc_{call_id:06d}"
+    if request is None:
+        return {
+            "session_id_hash": None,
+            "request_id": None,
+            "model_call_id": model_call_id,
+            "call_id": call_id,
+            "pass_index": None,
+            "phase": phase,
+            "tools_mode": tools_mode,
+        }
+    request.pass_index += 1
+    return {
+        "session_id_hash": request.session_id_hash,
+        "request_id": request.request_id,
+        "model_call_id": model_call_id,
+        "call_id": call_id,
+        "pass_index": request.pass_index,
+        "phase": phase,
+        "tools_mode": tools_mode,
+    }
+
+
+def _record_model_call(event: dict[str, Any]) -> None:
+    global _LAST_MODEL_CALL
+    _LAST_MODEL_CALL = {
+        key: event.get(key)
+        for key in ("session_id_hash", "request_id", "model_call_id", "call_id", "pass_index", "phase")
+    }
+    request = _REQUEST.get()
+    if request is not None:
+        request.model_calls.append(event)
+
+
+def _empty_prompt_fingerprint_fields() -> dict[str, Any]:
+    return {
+        "prompt_chars": None,
+        "prompt_tokens_estimate": None,
+        "stable_prefix_chars": None,
+        "stable_prefix_hash": None,
+        "full_prompt_hash": None,
+        "first_user_message_hash": None,
+        "tool_schema_hash": None,
+        "capability_summary_hash": None,
+        "runtime_policy_hash": None,
+        "conversation_prefix_hash": None,
+        "changed_components": [],
+    }
+
+
+def _emit_request_summary(state: _RequestState) -> None:
+    calls = state.model_calls
+    _emit(
+        {
+            "event": "kv_diag_request_summary",
+            "session_id_hash": state.session_id_hash,
+            "request_id": state.request_id,
+            "model_calls": len(calls),
+            "phases": [call.get("phase") for call in calls],
+            "total_prompt_tokens": _sum_optional(call.get("prompt_tokens") for call in calls),
+            "total_cached_tokens": _sum_optional(call.get("cached_tokens") for call in calls),
+            "total_evaluated_tokens": _sum_optional(call.get("evaluated_tokens") for call in calls),
+            "total_prefill_ms": _sum_optional(call.get("prefill_ms") for call in calls),
+            "total_generation_ms": _sum_optional(call.get("generation_ms") for call in calls),
+            "wall_ms": _elapsed_ms(state.started),
+            "finish_reasons": [call.get("finish_reason") for call in calls],
+        }
+    )
+
+
+def _sum_optional(values: Iterator[Any]) -> int | None:
+    total = 0
+    seen = False
+    for value in values:
+        if isinstance(value, (int, float)):
+            total += int(value)
+            seen = True
+    return total if seen else None
+
+
+def _component_changes(request_id: str | None, phase: str, tools_mode: str | None, fingerprint: PromptFingerprint) -> list[str]:
     scenario = f"{phase}:{tools_mode or 'unknown'}:{fingerprint.first_user_message_hash or 'no_user'}"
     current = {
         "stable_prefix": fingerprint.stable_prefix_hash,
@@ -275,7 +439,18 @@ def _component_changes(phase: str, tools_mode: str | None, fingerprint: PromptFi
     _LAST_BY_SCENARIO[scenario] = current
     if previous is None:
         return []
-    return [name for name, value in current.items() if previous.get(name) != value]
+    changed = [name for name, value in current.items() if previous.get(name) != value]
+    for name in changed:
+        _emit(
+            {
+                "event": "kv_diag_prefix_mismatch",
+                "request_id": request_id,
+                "component": name,
+                "previous_hash": previous.get(name),
+                "current_hash": current.get(name),
+            }
+        )
+    return changed
 
 
 def _emit(payload: dict[str, Any]) -> None:
