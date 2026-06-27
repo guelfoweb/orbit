@@ -29,6 +29,7 @@ from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
 )
 from orbit.runtime.file_input_resolver import FileInputResolver
+from orbit.runtime.kv_diag import instrument_backend, model_call_context
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import (
     TOOL_CALL_JSON_RETRY_PROMPT,
@@ -111,6 +112,7 @@ class ChatRuntime:
     local_capabilities: LocalCapabilities = field(default_factory=discover_local_capabilities)
 
     def __post_init__(self) -> None:
+        self.backend = instrument_backend(self.backend)
         if hasattr(self.backend, "thinking"):
             self.thinking_mode = bool(getattr(self.backend, "thinking"))
         if not self.messages and self.system_prompt:
@@ -303,17 +305,18 @@ class ChatRuntime:
         with self._temporary_backend_thinking(False):
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("route", streamed=False, attempt=1, reason="tool_decision"))
-            if on_progress is None:
-                first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
-            else:
-                route_stream_filter = CommandStreamFilter(route_streamed_chunks.append) if on_final_delta is not None else None
-                first = self.backend.chat_stream(
-                    command_messages,
-                    temperature=temperature,
-                    max_tokens=command_max_tokens,
-                    on_delta=route_stream_filter.write if route_stream_filter is not None else (lambda _text: None),
-                    on_progress=on_progress,
-                )
+            with model_call_context(phase="route", tools_mode="on"):
+                if on_progress is None:
+                    first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
+                else:
+                    route_stream_filter = CommandStreamFilter(route_streamed_chunks.append) if on_final_delta is not None else None
+                    first = self.backend.chat_stream(
+                        command_messages,
+                        temperature=temperature,
+                        max_tokens=command_max_tokens,
+                        on_delta=route_stream_filter.write if route_stream_filter is not None else (lambda _text: None),
+                        on_progress=on_progress,
+                    )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
         command_content = first.content
@@ -336,19 +339,21 @@ class ChatRuntime:
                             )
                         )
                     if on_progress is None:
-                        route_retry = self.backend.chat(
-                            route_retry_messages,
-                            temperature=temperature,
-                            max_tokens=command_max_tokens,
-                        )
+                        with model_call_context(phase="route_retry", tools_mode="on"):
+                            route_retry = self.backend.chat(
+                                route_retry_messages,
+                                temperature=temperature,
+                                max_tokens=command_max_tokens,
+                            )
                     else:
-                        route_retry = self.backend.chat_stream(
-                            route_retry_messages,
-                            temperature=temperature,
-                            max_tokens=command_max_tokens,
-                            on_delta=lambda _text: None,
-                            on_progress=on_progress,
-                        )
+                        with model_call_context(phase="route_retry", tools_mode="on"):
+                            route_retry = self.backend.chat_stream(
+                                route_retry_messages,
+                                temperature=temperature,
+                                max_tokens=command_max_tokens,
+                                on_delta=lambda _text: None,
+                                on_progress=on_progress,
+                            )
                 if on_model_step:
                     on_model_step(ModelStepMetrics.from_result(loop=2, result=route_retry, phase="route_retry"))
                 retry_decision = parse_command_decision_from_tool_calls(route_retry.tool_calls) or parse_command_decision(route_retry.content)
@@ -388,16 +393,18 @@ class ChatRuntime:
                     retried_empty_final = True
                 if first.finish_reason == "length":
                     if on_final_delta is None:
-                        first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
+                        with model_call_context(phase="chat_final_retry", tools_mode="on"):
+                            first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
                     else:
                         streamed_final_retry = True
-                        first = self.backend.chat_stream(
-                            self.messages,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            on_delta=on_final_delta,
-                            on_progress=on_progress,
-                        )
+                        with model_call_context(phase="chat_final_retry", tools_mode="on"):
+                            first = self.backend.chat_stream(
+                                self.messages,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                on_delta=on_final_delta,
+                                on_progress=on_progress,
+                            )
                     if on_model_step:
                         on_model_step(ModelStepMetrics.from_result(loop=2, result=first, phase="chat_final_retry"))
                 if _is_empty_final_response(first):
@@ -423,16 +430,17 @@ class ChatRuntime:
                 return self._remember_visible_result(first)
         if decision.route == ToolRoute.CHAT:
             chat_messages = with_chat_system_prompt(self.messages)
-            result = self._chat_final(
-                chat_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                on_final_delta=on_final_delta,
-                on_progress=on_progress,
-                on_model_step=on_model_step,
-                on_phase_start=on_phase_start,
-                loop=2,
-            )
+            with model_call_context(phase="chat_final", tools_mode="on"):
+                result = self._chat_final(
+                    chat_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
+                    loop=2,
+                )
             self.messages.append({"role": "assistant", "content": result.content})
             return self._remember_visible_result(result)
         if decision.route == ToolRoute.MEDIA:
@@ -625,13 +633,14 @@ class ChatRuntime:
         with self._transport_environment().backend_thinking(True):
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("tool_plan", streamed=True, attempt=1, reason="pre_tool_thinking"))
-            result = self.backend.chat_stream(
-                planning_messages,
-                temperature=temperature,
-                max_tokens=CompletionBudget(max_tokens).internal(ROUTE_MAX_TOKENS),
-                on_delta=thought_filter.write,
-                on_progress=on_progress,
-            )
+            with model_call_context(phase="tool_plan", tools_mode="on"):
+                result = self.backend.chat_stream(
+                    planning_messages,
+                    temperature=temperature,
+                    max_tokens=CompletionBudget(max_tokens).internal(ROUTE_MAX_TOKENS),
+                    on_delta=thought_filter.write,
+                    on_progress=on_progress,
+                )
         thought_filter.finish()
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=result, phase="tool_plan"))

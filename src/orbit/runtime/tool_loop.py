@@ -10,6 +10,7 @@ from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.capabilities import LocalCapabilities
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
+from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
 from orbit.runtime.session_memory import should_refresh_for_append
 from orbit.runtime.shell_guardrails import (
@@ -743,11 +744,13 @@ def run_tool_loop(
                 use_tool_prompt=state.used_tool_call_prompt,
             )
         if result.finish_reason == "length" and not result.tool_calls:
-            result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+            with model_call_context(phase="tool_call_retry", tools_mode="on"):
+                result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
         if not result.tool_calls and _is_empty_final_response(result):
-            result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=tool_max_tokens, tools=tools)
+            with model_call_context(phase="tool_call_retry", tools_mode="on"):
+                result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=tool_max_tokens, tools=tools)
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
             if not result.tool_calls and _is_empty_final_response(result):
