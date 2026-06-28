@@ -35,14 +35,19 @@ def _stub_library() -> SimpleNamespace:
         "llama_state_seq_get_data",
         "llama_state_seq_set_data",
         "llama_model_get_vocab",
+        "llama_vocab_n_tokens",
         "llama_model_chat_template",
         "llama_chat_apply_template",
         "llama_tokenize",
         "llama_token_to_piece",
         "llama_vocab_is_eog",
         "llama_batch_get_one",
+        "llama_batch_init",
+        "llama_batch_free",
         "llama_decode",
+        "llama_synchronize",
         "llama_time_us",
+        "llama_get_logits_ith",
         "llama_sampler_chain_init",
         "llama_sampler_chain_add",
         "llama_sampler_init_greedy",
@@ -71,6 +76,11 @@ class NativeBindingsTests(unittest.TestCase):
         self.assertEqual(len(library.lib.llama_state_seq_get_size.argtypes), 2)
         self.assertEqual(len(library.lib.llama_state_seq_get_data.argtypes), 4)
         self.assertEqual(len(library.lib.llama_state_seq_set_data.argtypes), 4)
+        self.assertEqual(len(library.lib.llama_vocab_n_tokens.argtypes), 1)
+        self.assertEqual(len(library.lib.llama_batch_init.argtypes), 3)
+        self.assertEqual(len(library.lib.llama_batch_free.argtypes), 1)
+        self.assertEqual(len(library.lib.llama_synchronize.argtypes), 1)
+        self.assertEqual(len(library.lib.llama_get_logits_ith.argtypes), 2)
 
 
 if __name__ == "__main__":
