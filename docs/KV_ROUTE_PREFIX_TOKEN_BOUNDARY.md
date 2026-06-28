@@ -78,6 +78,49 @@ Current status:
 - isolated token-boundary probe: PASS
 - real native tokenizer boundary: not executed in this worktree
 
+## Real Tokenizer Attempt
+
+Worktree:
+
+```text
+/home/guelfoweb/LAB/orbit-kv-route-anchor-runtime
+```
+
+Environment discovery:
+
+```text
+ORBIT_LLAMA_LIB_DIR: unset
+ORBIT_LLAMA_ROOT: unset
+```
+
+`resolve_paths()` failed before model loading:
+
+```text
+libllama.so not found.
+Searched: /home/guelfoweb/LAB/orbit-kv-route-anchor-runtime/src/orbit/native_llama/vendor/lib/libllama.so.
+Provide ORBIT_LLAMA_LIB_DIR, --llama-root, or ORBIT_LLAMA_ROOT, or package native libraries under orbit/native_llama/vendor/lib.
+```
+
+Scenarios requested for real-tokenizer probing:
+
+| Scenario | Result |
+| --- | --- |
+| short chat route | not executed, native library unavailable |
+| trivial route | not executed, native library unavailable |
+| medium no-tool route | not executed, native library unavailable |
+| listing route | not executed, native library unavailable |
+| file-read route | not executed, native library unavailable |
+| web/fetch route | not executed, native library unavailable |
+
+Boundary verdict for the real native tokenizer:
+
+```text
+BLOCKED_BY_ENVIRONMENT
+```
+
+This is not a technical FAIL of the boundary. It means the real tokenizer could
+not be loaded in this worktree.
+
 ## Implication
 
 The next route-prefix-anchor step is blocked until this probe is run against the
