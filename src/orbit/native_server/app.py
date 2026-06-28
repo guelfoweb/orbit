@@ -61,6 +61,7 @@ class OrbitNativeServer:
                 stop=request.stop,
                 tools=request.tools,
                 thinking=thinking,
+                route_prefix_anchor=request.route_prefix_anchor,
                 on_progress=on_progress,
                 on_token=collect,
                 should_cancel=should_cancel,

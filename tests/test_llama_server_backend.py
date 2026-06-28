@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 import json
+import os
 import tempfile
 from pathlib import Path
 import sys
@@ -19,8 +21,10 @@ from orbit.backend.llama_server import (
     _parse_model_info,
     _parse_native_stream,
 )
+from orbit.backend.base import ChatResult
 from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
 from orbit.backend import model_names
+from orbit.runtime.kv_diag import model_call_context
 from urllib.error import URLError
 
 
@@ -52,7 +56,7 @@ class LlamaServerBackendTests(unittest.TestCase):
         backend = LlamaServerBackend(base_url="http://127.0.0.1:12120", model="fake", timeout=1)
 
         with self.assertRaisesRegex(Exception, "cannot connect to backend server at http://127.0.0.1:12120"):
-            with unittest.mock.patch("orbit.backend.llama_server.urlopen", side_effect=URLError("[Errno 111] Connection refused")):
+            with mock.patch("orbit.backend.llama_server.urlopen", side_effect=URLError("[Errno 111] Connection refused")):
                 backend._get_json("/health")
 
     def test_continue_current_uses_native_continue_stream_endpoint_for_non_stream_call(self) -> None:
@@ -263,6 +267,67 @@ class LlamaServerBackendTests(unittest.TestCase):
         )
 
         self.assertTrue(payload["thinking"])
+
+    def test_route_prefix_anchor_payload_is_limited_to_route_tools_on(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payloads: list[dict[str, object]] = []
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, _path: str, payload: dict[str, object], *, on_delta, on_progress) -> ChatResult:
+                self.payloads.append(payload)
+                return ChatResult(
+                    content="ok",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = Backend()
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=False):
+            backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+            with model_call_context(phase="route", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+            with model_call_context(phase="final_from_tool", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertNotIn("route_prefix_anchor", backend.payloads[0])
+        self.assertTrue(backend.payloads[1]["route_prefix_anchor"])
+        self.assertNotIn("route_prefix_anchor", backend.payloads[2])
+
+    def test_route_prefix_anchor_payload_is_not_sent_to_non_native_backend(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payload: dict[str, object] | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "openai-compatible"}
+
+            def _post_json(self, _path: str, payload: dict[str, object]) -> dict[str, object]:
+                self.payload = payload
+                return {
+                    "model": "fake",
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }
+
+        backend = Backend()
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=False):
+            with model_call_context(phase="route", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertIsNotNone(backend.payload)
+        assert backend.payload is not None
+        self.assertNotIn("route_prefix_anchor", backend.payload)
 
     def test_parse_chat_result_extracts_content_and_metrics(self) -> None:
         result = _parse_chat_result(

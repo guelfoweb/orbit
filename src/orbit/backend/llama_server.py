@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -10,6 +11,7 @@ from urllib.request import Request, urlopen
 from .base import ChatResult, Message, ModelInfo, StreamProgress
 from .model_names import resolve_model_display_name
 from .payloads import ChatPayloadOptions, build_chat_payload
+from orbit.runtime.kv_diag import current_phase, current_tools_mode
 
 
 class LlamaServerError(RuntimeError):
@@ -35,6 +37,7 @@ class LlamaServerBackend:
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
     ) -> ChatResult:
+        native_backend = self._is_orbit_native_backend()
         payload = build_chat_payload(
             ChatPayloadOptions(
                 model=self.request_model_name(),
@@ -43,9 +46,10 @@ class LlamaServerBackend:
                 max_tokens=max_tokens,
                 thinking=self.thinking,
                 tools=tools,
+                route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
             )
         )
-        if self._is_orbit_native_backend():
+        if native_backend:
             return self._with_display_model(
                 self._post_native_stream(
                     "/chat/stream",
@@ -67,6 +71,7 @@ class LlamaServerBackend:
         on_delta: Callable[[str], None],
         on_progress: Callable[[StreamProgress], None] | None = None,
     ) -> ChatResult:
+        native_backend = self._is_orbit_native_backend()
         payload = build_chat_payload(
             ChatPayloadOptions(
                 model=self.request_model_name(),
@@ -76,9 +81,10 @@ class LlamaServerBackend:
                 thinking=self.thinking,
                 tools=tools,
                 stream=True,
+                route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
             )
         )
-        if self._is_orbit_native_backend():
+        if native_backend:
             return self._with_display_model(
                 self._post_native_stream(
                     "/chat/stream",
@@ -689,3 +695,12 @@ def _int_or_none(value: object) -> int | None:
 
 def _float_or_none(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
+
+
+def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
+    if not native_backend:
+        return False
+    value = os.environ.get("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", "")
+    if value.strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    return current_phase() == "route" and current_tools_mode() == "on"

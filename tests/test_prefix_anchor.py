@@ -161,6 +161,42 @@ class PrefixAnchorTests(unittest.TestCase):
         self.assertFalse(restored_state.valid)
         self.assertEqual(restored_state.invalidation_reason, "checkpoint_restore_size_mismatch")
         self.assertEqual(metadata["fallback_reason"], "checkpoint_restore_size_mismatch")
+        self.assertTrue(metadata["anchor_invalidated"])
+        self.assertEqual(metadata["invalidation_reason"], "checkpoint_restore_size_mismatch")
+
+    def test_restore_rejects_token_count_mismatch(self) -> None:
+        kwargs = self._stable_kwargs()
+        key = compute_prefix_anchor_key(**kwargs)
+        state = PrefixAnchorState(
+            prefix_hash=key,
+            token_count=24,
+            model_id=kwargs["model_id"],
+            template_id=kwargs["template_id"],
+            tool_schema_hash=kwargs["tool_schema_hash"],
+            capability_summary_hash=kwargs["capability_summary_hash"],
+            runtime_policy_hash=kwargs["runtime_policy_hash"],
+            route_contract_hash=kwargs["route_contract_hash"],
+            backend_version=kwargs["backend_version"],
+            native_version=kwargs["native_version"],
+            tools_mode=kwargs["tools_mode"],
+            checkpoint_size=4,
+            checkpoint_data=b"abcd",
+            valid=True,
+        )
+        ok, restored_state, metadata = restore_prefix_anchor(
+            state,
+            lib=_FakeLib(b"abcd"),
+            ctx=object(),
+            prefix_hash=key,
+            token_count=25,
+            enabled=True,
+            **kwargs,
+        )
+        self.assertFalse(ok)
+        self.assertFalse(restored_state.valid)
+        self.assertEqual(restored_state.invalidation_reason, "token_count_changed")
+        self.assertEqual(metadata["fallback_reason"], "token_count_changed")
+        self.assertTrue(metadata["anchor_invalidated"])
 
     def test_can_use_prefix_anchor_rejects_changed_capabilities(self) -> None:
         kwargs = self._stable_kwargs()
@@ -202,6 +238,8 @@ class PrefixAnchorTests(unittest.TestCase):
         metadata = anchor_metadata(state, enabled=True, anchor_hit=True, restore_attempted=True, restore_used=True)
         self.assertTrue(metadata["anchor_enabled"])
         self.assertEqual(metadata["anchor_key_hash"], "anchor-key-alpha")
+        self.assertEqual(metadata["checkpoint_size_bytes"], 12)
+        self.assertFalse(metadata["anchor_invalidated"])
         self.assertTrue(metadata["anchor_hit"])
         self.assertTrue(metadata["restore_attempted"])
         self.assertTrue(metadata["restore_used"])

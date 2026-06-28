@@ -117,6 +117,44 @@ def emit_prompt_cache_event(
     _emit(event)
 
 
+def emit_route_prefix_anchor_event(metadata: dict[str, Any]) -> None:
+    if not enabled():
+        return
+    request = _CURRENT_REQUEST.get()
+    event = {
+        "event": "kv_diag_route_prefix_anchor",
+        "phase": _safe_str(metadata.get("phase")) or "route",
+        "backend_request_id": request.backend_request_id if request else None,
+        "endpoint": request.endpoint if request else None,
+        "stream": request.stream if request else None,
+        "cache_prompt": request.cache_prompt if request else None,
+        "session_id_hash": request.session_id_hash if request else None,
+        "message_count": request.message_count if request else None,
+        "role_sequence": request.role_sequence if request else [],
+        "tools_parameter_present": request.tools_parameter_present if request else False,
+        "tool_count": request.tool_count if request else 0,
+        "route_anchor_enabled": bool(metadata.get("route_anchor_enabled")),
+        "route_anchor_attempted": bool(metadata.get("route_anchor_attempted")),
+        "route_anchor_hit": bool(metadata.get("route_anchor_hit")),
+        "route_anchor_miss": bool(metadata.get("route_anchor_miss")),
+        "capture_attempted": bool(metadata.get("capture_attempted")),
+        "restore_attempted": bool(metadata.get("restore_attempted")),
+        "restore_used": bool(metadata.get("restore_used")),
+        "fallback_reason": _safe_str(metadata.get("fallback_reason")),
+        "prefix_hash": _safe_str(metadata.get("prefix_hash")),
+        "prefix_token_count": _safe_int(metadata.get("prefix_token_count")),
+        "checkpoint_size": _safe_int(metadata.get("checkpoint_size")),
+        "checkpoint_size_bytes": _safe_int(metadata.get("checkpoint_size_bytes")) or _safe_int(metadata.get("checkpoint_size")),
+        "checkpoint_age_ms": _safe_int(metadata.get("checkpoint_age_ms")),
+        "anchor_invalidated": bool(metadata.get("anchor_invalidated")),
+        "invalidation_reason": _safe_str(metadata.get("invalidation_reason")),
+        "cached_tokens": _safe_int(metadata.get("cached_tokens")),
+        "evaluated_tokens": _safe_int(metadata.get("evaluated_tokens")),
+        "lcp_tokens": _safe_int(metadata.get("lcp_tokens")),
+    }
+    _emit(event)
+
+
 def _cache_miss_reason(
     *,
     cache_prompt: bool | None,
@@ -162,6 +200,18 @@ def _hash_tokens(tokens: list[int]) -> str:
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _safe_str(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    return None
 
 
 def _emit(payload: dict[str, Any]) -> None:

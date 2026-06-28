@@ -69,6 +69,10 @@ def current_tools_mode() -> str | None:
     return _TOOLS_MODE.get()
 
 
+def current_phase() -> str | None:
+    return _PHASE.get()
+
+
 @contextlib.contextmanager
 def request_context(*, session_id: str | None = None) -> Iterator[None]:
     if not enabled() or _REQUEST.get() is not None:

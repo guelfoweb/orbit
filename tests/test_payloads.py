@@ -53,5 +53,27 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(payload["messages"][0]["role"], "user")
         self.assertEqual(payload["messages"][0]["content"], "hello")
 
+    def test_build_chat_payload_includes_route_prefix_anchor_only_when_requested(self) -> None:
+        baseline = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0,
+                max_tokens=32,
+            )
+        )
+        experimental = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0,
+                max_tokens=32,
+                route_prefix_anchor=True,
+            )
+        )
+
+        self.assertNotIn("route_prefix_anchor", baseline)
+        self.assertTrue(experimental["route_prefix_anchor"])
+
 if __name__ == "__main__":
     unittest.main()

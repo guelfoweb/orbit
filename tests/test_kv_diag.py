@@ -19,6 +19,7 @@ from orbit.runtime.kv_diag import (
 )
 from orbit.native_llama.kv_diag import (
     emit_prompt_cache_event as emit_native_prompt_cache_event,
+    emit_route_prefix_anchor_event as emit_native_route_prefix_anchor_event,
     request_context as native_request_context,
     reset_diagnostics_for_tests as reset_native_diagnostics_for_tests,
 )
@@ -657,6 +658,66 @@ class KVDiagTests(unittest.TestCase):
         self.assertEqual(event["cache_miss_reason"], "prefix_mismatch_at_token_0")
         self.assertEqual(event["longest_common_prefix_tokens"], 0)
         self.assertEqual(event["first_mismatch_token"], 0)
+
+    def test_native_route_prefix_anchor_diagnostics_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            payload = {
+                "cache_prompt": True,
+                "stream": True,
+                "route_prefix_anchor": True,
+                "messages": [
+                    {"role": "system", "content": "runtime route policy placeholder"},
+                    {"role": "user", "content": "placeholder route request"},
+                ],
+            }
+            metadata = {
+                "route_anchor_enabled": True,
+                "route_anchor_attempted": True,
+                "route_anchor_hit": True,
+                "route_anchor_miss": False,
+                "capture_attempted": False,
+                "restore_attempted": True,
+                "restore_used": True,
+                "fallback_reason": None,
+                "prefix_hash": "prefix-hash-placeholder",
+                "prefix_token_count": 693,
+                "checkpoint_size": 2048,
+                "checkpoint_size_bytes": 2048,
+                "checkpoint_age_ms": 42,
+                "anchor_invalidated": False,
+                "invalidation_reason": None,
+                "cached_tokens": 693,
+                "evaluated_tokens": 21,
+                "lcp_tokens": 693,
+                "phase": "route",
+            }
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                with native_request_context(endpoint="/chat/stream", payload=payload):
+                    emit_native_route_prefix_anchor_event(metadata)
+
+            event = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+            raw_log = json.dumps(event)
+
+        self.assertEqual(event["event"], "kv_diag_route_prefix_anchor")
+        self.assertEqual(event["phase"], "route")
+        self.assertTrue(event["route_anchor_enabled"])
+        self.assertTrue(event["route_anchor_attempted"])
+        self.assertTrue(event["route_anchor_hit"])
+        self.assertTrue(event["restore_attempted"])
+        self.assertTrue(event["restore_used"])
+        self.assertEqual(event["prefix_hash"], "prefix-hash-placeholder")
+        self.assertEqual(event["prefix_token_count"], 693)
+        self.assertEqual(event["cached_tokens"], 693)
+        self.assertEqual(event["evaluated_tokens"], 21)
+        self.assertEqual(event["lcp_tokens"], 693)
+        self.assertEqual(event["checkpoint_size_bytes"], 2048)
+        self.assertEqual(event["checkpoint_age_ms"], 42)
+        self.assertFalse(event["anchor_invalidated"])
+        self.assertIsNone(event["invalidation_reason"])
+        self.assertEqual(event["role_sequence"], ["system", "user"])
+        self.assertNotIn("runtime route policy placeholder", raw_log)
+        self.assertNotIn("placeholder route request", raw_log)
 
 
 if __name__ == "__main__":

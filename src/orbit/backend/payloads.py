@@ -15,6 +15,7 @@ class ChatPayloadOptions:
     tools: list[dict[str, Any]] | None = None
     stream: bool = False
     cache_prompt: bool = True
+    route_prefix_anchor: bool = False
 
 
 def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
@@ -29,6 +30,8 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
     }
     if options.stream:
         payload["stream"] = True
+    if options.route_prefix_anchor:
+        payload["route_prefix_anchor"] = True
     if options.tools:
         payload["tools"] = options.tools
         payload["tool_choice"] = "auto"
