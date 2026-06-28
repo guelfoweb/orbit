@@ -6,6 +6,7 @@ import hashlib
 from typing import Any, Callable
 
 from .bindings import LlamaBatch, llama_pos, llama_seq_id, llama_token
+from .chat_template import RoutePromptSegments
 from .prefix_anchor import (
     PrefixAnchorState,
     capture_prefix_anchor,
@@ -51,6 +52,57 @@ class PrefixAnchorProbeResult:
         }
 
 
+@dataclass(frozen=True)
+class RouteBoundaryTokenProbeResult:
+    token_prefix_ok: bool
+    reason: str | None
+    stable_prefix_token_count: int
+    full_prompt_token_count: int
+    token_lcp_with_stable_prefix: int
+    divergence_index: int | None
+    stable_prefix_hash: str
+    full_prompt_hash: str
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "route_boundary_token_prefix_ok": self.token_prefix_ok,
+            "reason": self.reason,
+            "stable_prefix_token_count": self.stable_prefix_token_count,
+            "full_prompt_token_count": self.full_prompt_token_count,
+            "token_lcp_with_stable_prefix": self.token_lcp_with_stable_prefix,
+            "divergence_index": self.divergence_index,
+            "stable_prefix_hash": self.stable_prefix_hash,
+            "full_prompt_hash": self.full_prompt_hash,
+        }
+
+
+def probe_route_boundary_token_prefix(
+    *,
+    segments: RoutePromptSegments,
+    tokenize: TokenizeFn,
+) -> RouteBoundaryTokenProbeResult:
+    stable_tokens = list(tokenize(segments.stable_prefix_text))
+    full_tokens = list(tokenize(segments.full_prompt_text))
+    lcp = _longest_common_prefix(stable_tokens, full_tokens)
+    reason = None
+    if not stable_tokens:
+        reason = "empty_stable_prefix_tokens"
+    elif len(full_tokens) < len(stable_tokens):
+        reason = "full_shorter_than_stable_prefix"
+    elif lcp != len(stable_tokens):
+        reason = "stable_prefix_not_token_prefix"
+    return RouteBoundaryTokenProbeResult(
+        token_prefix_ok=reason is None,
+        reason=reason,
+        stable_prefix_token_count=len(stable_tokens),
+        full_prompt_token_count=len(full_tokens),
+        token_lcp_with_stable_prefix=lcp,
+        divergence_index=None if reason is None else lcp,
+        stable_prefix_hash=segments.stable_prefix_hash,
+        full_prompt_hash=segments.full_prompt_hash,
+    )
+
+
 def split_prompt_by_token_prefix(
     *,
     tokenize: TokenizeFn,
@@ -67,6 +119,14 @@ def split_prompt_by_token_prefix(
         return prefix_tokens, [], full_tokens, "prefix_not_token_prefix"
     suffix_tokens = full_tokens[len(prefix_tokens) :]
     return prefix_tokens, suffix_tokens, full_tokens, None
+
+
+def _longest_common_prefix(first: list[int], second: list[int]) -> int:
+    common = 0
+    max_common = min(len(first), len(second))
+    while common < max_common and first[common] == second[common]:
+        common += 1
+    return common
 
 
 def probe_prefix_anchor_equivalence(
