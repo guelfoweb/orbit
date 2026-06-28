@@ -52,8 +52,8 @@ tuple. The summary can vary by machine, but its order is stable for a given
 environment.
 
 No timestamp, counter, session id, or dynamic path was found in the stable
-route prefix. This preserves the route-prefix boundary needed by the opt-in KV
-prefix-anchor experiment.
+route prefix. This preserves the route-prefix boundary needed by the native
+route KV prefix-anchor auto path.
 
 ### Chat Final And Tool Final
 
@@ -82,8 +82,8 @@ checks. No broad rewrite is recommended before RC2.
 - The route prompt is necessarily dense because it encodes evidence boundaries,
   tool distinctions, and no-long-prose behavior. Compressing it before RC2 would
   risk regressing file/web/listing correctness.
-- The tools-on prompt remains large. The opt-in prefix-anchor experiment helps
-  repeated route passes, but the first capture miss remains expensive.
+- The tools-on prompt remains large. Route prefix-anchor auto mode helps
+  repeated eligible route passes, but the first capture miss remains expensive.
 - Generic web smoke can vary with provider/network behavior and should remain
   optional or interpreted conservatively.
 
@@ -116,7 +116,8 @@ Stability:
 Performance:
 
 - No prompt token reduction was attempted.
-- Route prefix-anchor remains default OFF and opt-in only.
+- Route prefix-anchor remains bounded to native route/tools-on and can be
+  disabled with `ORBIT_KV_PREFIX_ANCHOR=off`.
 
 KV:
 

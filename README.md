@@ -151,6 +151,9 @@ What this means:
 - `orbit server --mtp` enables the experimental MTP path explicitly.
 - MTP can improve some workloads, but Orbit keeps it off by default because stability has priority.
 - if native libs are missing, Orbit exits with a short error telling you to build them with `python3 scripts/build_native.py` or use `--llama-root` / `ORBIT_LLAMA_ROOT`
+- native route KV prefix-anchor runs in safe auto mode by default for eligible
+  tools-on route calls; disable it with `ORBIT_KV_PREFIX_ANCHOR=off` if you need
+  the baseline prefill path
 - experimental multi-turn raw MTP chat reuse remains debug-only behind:
   - `ORBIT_MTP_CHAT_REUSE_RAW=1`
   - `ORBIT_MTP_CHAT_REUSE_DEBUG=1`

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -11,6 +10,7 @@ from urllib.request import Request, urlopen
 from .base import ChatResult, Message, ModelInfo, StreamProgress
 from .model_names import resolve_model_display_name
 from .payloads import ChatPayloadOptions, build_chat_payload
+from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.kv_diag import current_phase, current_tools_mode
 
 
@@ -700,7 +700,6 @@ def _float_or_none(value: object) -> float | None:
 def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     if not native_backend:
         return False
-    value = os.environ.get("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", "")
-    if value.strip().lower() not in {"1", "true", "yes", "on"}:
+    if not prefix_anchor_enabled():
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
