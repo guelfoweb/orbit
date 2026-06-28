@@ -4,11 +4,15 @@ This index maps the KV/cache work after `v0.0.1-rc1`. It is a navigation aid
 only. It does not replace the detailed reports and does not change any runtime
 policy.
 
-## Current Opt-In Path
+## Current Auto Path
 
 - `KV_ROUTE_PREFIX_ANCHOR_RUNTIME_EXPERIMENT.md` documents the current
-  `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` route-prefix anchor experiment.
-- The experiment is default OFF.
+  native route-prefix anchor path.
+- `ORBIT_KV_PREFIX_ANCHOR=auto` is the default when unset.
+- `ORBIT_KV_PREFIX_ANCHOR=off` is the explicit kill switch.
+- The legacy `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` still enables auto mode when
+  `ORBIT_KV_PREFIX_ANCHOR` is unset.
+- `ORBIT_KV_PREFIX_ANCHOR=off` wins over the legacy experiment flag.
 - Scope is native backend, tools-on route pass only.
 - It must not be broadened to `chat_final`, `final_from_tool`, `tool_call`, or
   file/web/listing special paths without new benchmark evidence.
@@ -61,9 +65,11 @@ policy.
 
 ## Release Guidance
 
-For RC2 preparation, treat the prefix-anchor experiment as opt-in only:
+For RC2 preparation, treat route prefix-anchor as a bounded auto feature with a
+kill switch:
 
-- keep `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT` default OFF
+- keep `ORBIT_KV_PREFIX_ANCHOR=auto` as the default
+- document `ORBIT_KV_PREFIX_ANCHOR=off` for disabling the feature
 - keep historical no-go/reject reports available
-- keep the isolated probe while the experiment remains active
+- keep the isolated probe while the runtime path remains active
 - require unit tests, compile checks, and native OFF/ON smoke before any release

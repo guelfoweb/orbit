@@ -6,12 +6,27 @@ import hashlib
 import json
 import os
 import time
-from typing import Any
+from typing import Any, Mapping
+
+
+def prefix_anchor_mode(environ: Mapping[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    configured = env.get("ORBIT_KV_PREFIX_ANCHOR")
+    if configured is not None:
+        value = configured.strip().lower()
+        if value == "auto":
+            return "auto"
+        if value == "off":
+            return "off"
+        return "off"
+    legacy = env.get("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", "")
+    if legacy.strip().lower() in {"1", "true", "yes", "on"}:
+        return "auto"
+    return "auto"
 
 
 def prefix_anchor_enabled() -> bool:
-    value = os.environ.get("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return prefix_anchor_mode() == "auto"
 
 
 @dataclass(frozen=True)

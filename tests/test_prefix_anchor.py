@@ -12,6 +12,7 @@ from orbit.native_llama.prefix_anchor import (
     compute_prefix_anchor_key,
     invalidate_prefix_anchor,
     prefix_anchor_enabled,
+    prefix_anchor_mode,
     restore_prefix_anchor,
 )
 
@@ -57,9 +58,44 @@ class PrefixAnchorTests(unittest.TestCase):
             "tools_mode": "on",
         }
 
-    def test_flag_default_off(self) -> None:
+    def test_flag_default_auto(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR", None)
             os.environ.pop("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", None)
+            self.assertEqual(prefix_anchor_mode(), "auto")
+            self.assertTrue(prefix_anchor_enabled())
+
+    def test_flag_off_disables_anchor(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR": "off"}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", None)
+            self.assertEqual(prefix_anchor_mode(), "off")
+            self.assertFalse(prefix_anchor_enabled())
+
+    def test_flag_auto_enables_anchor(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR": "auto"}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", None)
+            self.assertEqual(prefix_anchor_mode(), "auto")
+            self.assertTrue(prefix_anchor_enabled())
+
+    def test_legacy_experiment_enables_anchor_when_new_flag_unset(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR", None)
+            self.assertEqual(prefix_anchor_mode(), "auto")
+            self.assertTrue(prefix_anchor_enabled())
+
+    def test_new_off_flag_wins_over_legacy_experiment(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"ORBIT_KV_PREFIX_ANCHOR": "off", "ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"},
+            clear=False,
+        ):
+            self.assertEqual(prefix_anchor_mode(), "off")
+            self.assertFalse(prefix_anchor_enabled())
+
+    def test_invalid_flag_value_falls_back_to_off(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR": "invalid"}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", None)
+            self.assertEqual(prefix_anchor_mode(), "off")
             self.assertFalse(prefix_anchor_enabled())
 
     def test_key_stable_for_stable_input(self) -> None:

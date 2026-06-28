@@ -2,6 +2,10 @@
 
 Commit reviewed: `7e810a5` (`origin/main`, PR #57 merged).
 
+Status note: this is a historical cleanup review from before route
+prefix-anchor auto mode. Current configuration is documented in `KV_INDEX.md`
+and `KV_ROUTE_PREFIX_ANCHOR_RUNTIME_EXPERIMENT.md`.
+
 This review is intentionally non-destructive. It does not change runtime
 behavior, prompts, tool selection, final policy, evidence policy, or KV/cache
 behavior. It only records cleanup candidates found after the KV diagnostics and
@@ -11,7 +15,8 @@ prefix-anchor work landed on `main`.
 
 The KV line now contains three categories of material:
 
-- production opt-in experiment code for `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1`
+- production route prefix-anchor code, now controlled by
+  `ORBIT_KV_PREFIX_ANCHOR=auto|off`
 - diagnostics/probe code used to justify and validate that experiment
 - historical analysis documents that explain rejected/no-go branches
 
@@ -148,17 +153,19 @@ Why risky:
 
 Recommendation:
 
-- Do not remove while `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT` exists.
+- Do not remove while route prefix-anchor remains active.
 
 ## Things To Not Touch
 
-### Feature flag default
+### Feature configuration
 
-Do not change `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT` default behavior.
+Do not broaden route prefix-anchor beyond the validated auto-mode scope without
+new benchmark evidence.
 
 Reason:
 
-- The experiment is explicitly opt-in.
+- The feature is bounded to native route/tools-on and keeps
+  `ORBIT_KV_PREFIX_ANCHOR=off` as a kill switch.
 - Checkpoint memory cost is material, about 238 MB in the local benchmark.
 - The first capture miss remains expensive.
 
@@ -169,7 +176,7 @@ Do not broaden route-prefix-anchor usage beyond:
 - native backend
 - `phase=route`
 - `tools_mode=on`
-- explicit `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1`
+- `ORBIT_KV_PREFIX_ANCHOR=auto` default, with `off` as kill switch
 
 Reason:
 
@@ -247,7 +254,6 @@ Also run a native smoke if the removal touches runtime-facing prefix-anchor code
 
 ## Recommendation
 
-Do not perform code removal yet. The safest immediate cleanup is limited to
-unused imports and a documentation index. Keep the historical KV reports and the
-isolated probe code until the opt-in prefix-anchor experiment is either promoted
-or explicitly retired.
+Do not perform code removal yet. Keep the historical KV reports and the isolated
+probe code while route prefix-anchor remains active, unless a future cleanup
+preserves their safety rationale elsewhere.

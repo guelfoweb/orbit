@@ -1,15 +1,19 @@
 # RC2 Readiness Review
 
-Commit analyzed: `7e810a5` (`origin/main`, PR #57 merged).
+Commit analyzed: `1e82599` (`origin/main`, PR #59 merged).
 
 This document prepares for a possible RC2. It does not publish a release, create
 a tag, or change version metadata.
 
 ## Feature State
 
-`ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` is available as an opt-in experiment.
+Native route KV prefix-anchor is available in auto mode.
 
-- Default: OFF
+- Default: `ORBIT_KV_PREFIX_ANCHOR=auto` when unset
+- Kill switch: `ORBIT_KV_PREFIX_ANCHOR=off`
+- Legacy compatibility: `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` enables auto mode
+  only when `ORBIT_KV_PREFIX_ANCHOR` is unset
+- Precedence: `ORBIT_KV_PREFIX_ANCHOR=off` wins over the legacy experiment flag
 - Scope: native backend, tools-on route pass only
 - Excluded: `chat_final`, `final_from_tool`, `tool_call`
 - No deterministic routing
@@ -38,8 +42,13 @@ Status: PASS in this branch.
 
 Native smoke should be run with the same model and workdir used for PR #57:
 
-- OFF: `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT` unset
-- ON: `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1`
+- Default auto: `ORBIT_KV_PREFIX_ANCHOR` unset and
+  `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT` unset
+- Kill switch: `ORBIT_KV_PREFIX_ANCHOR=off`
+- Legacy compatibility: `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` with
+  `ORBIT_KV_PREFIX_ANCHOR` unset
+- Off-wins check: `ORBIT_KV_PREFIX_ANCHOR=off` and
+  `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1`
 
 Scenarios:
 
@@ -86,26 +95,41 @@ ON anchor events:
 The two medium final answers ended with `finish_reason=length` because the smoke
 used `--max-tokens 64`; this was not a route retry or repair path.
 
+Promotion configuration smoke:
+
+| Mode | Env | Repeat route cached/evaluated | Result |
+| --- | --- | --- | --- |
+| default auto | `ORBIT_KV_PREFIX_ANCHOR` unset, legacy unset | `693 / 33` | restore hit |
+| kill switch | `ORBIT_KV_PREFIX_ANCHOR=off` | `4 / 722` | no anchor payload/event |
+| legacy compatibility | legacy experiment set, new env unset | `693 / 33` | restore hit |
+| off wins | `ORBIT_KV_PREFIX_ANCHOR=off` plus legacy set | `4 / 722` | no anchor payload/event |
+
+PR #59 regression smoke also passed: a local listing followed by an explicit web
+request executed `Web: orbit-web-search ...` and did not reuse stale local
+evidence. That explicit web request used the legitimate
+`route -> route_retry -> final_from_tool` fallback for `explicit_web_search`.
+
 ## Expected Acceptance Criteria
 
-- OFF remains baseline.
-- ON produces restore hits on repeated tools-on route calls.
-- ON does not increase `model_calls`.
-- ON does not increase repair/retry.
+- Default auto produces restore hits on repeated eligible tools-on route calls.
+- Kill switch remains baseline.
+- Auto mode does not increase `model_calls`.
+- Auto mode does not increase repair/retry.
 - `route_no_decision_length_retry` remains zero or does not regress.
 - file-read preserves content evidence and does not use directory listing as a
   substitute.
 - listing preserves `list_directory`.
 - web/fetch remain `route -> final_from_tool` when provider/network succeeds.
 - checkpoint memory cost remains documented.
-- prefix-anchor remains default OFF.
+- prefix-anchor remains bounded to native route/tools-on with
+  `ORBIT_KV_PREFIX_ANCHOR=off` available as a kill switch.
 
 ## Risks
 
 - First capture miss remains expensive.
 - Checkpoint memory cost is material.
 - Web smoke depends on provider/network behavior.
-- The experiment is not ready to be default.
+- First capture miss remains baseline-cost even in auto mode.
 
 ## Recommendation
 
@@ -114,5 +138,7 @@ Recommendation: ready for RC2 after normal release packaging checks.
 Do not publish RC2 until:
 
 - no unexpected worktree changes remain
-- release notes explicitly state that prefix-anchor is opt-in and default OFF
+- release notes explicitly state that prefix-anchor is default auto, bounded to
+  eligible native route calls, and can be disabled with
+  `ORBIT_KV_PREFIX_ANCHOR=off`
 - the release command/tagging step is explicitly authorized

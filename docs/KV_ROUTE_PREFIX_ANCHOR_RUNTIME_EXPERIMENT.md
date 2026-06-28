@@ -1,16 +1,24 @@
-# KV Route Prefix Anchor Runtime Experiment
+# KV Route Prefix Anchor Runtime
 
 ## Scope
 
-This experiment adds an opt-in native KV prefix-anchor path for Orbit route calls.
+This document describes the native KV prefix-anchor path for Orbit route calls.
 
-Feature flag:
+Configuration:
 
 ```text
-ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1
+ORBIT_KV_PREFIX_ANCHOR=auto   # default when unset
+ORBIT_KV_PREFIX_ANCHOR=off    # explicit kill switch
 ```
 
-Default is off. With the flag off, the payload, prompt rendering, routing, tool selection, final policy, and native cache behavior stay on the baseline path.
+`auto` is the default. `off` disables the feature and returns to the baseline
+payload and prefill path. The legacy `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1`
+still enables auto mode when `ORBIT_KV_PREFIX_ANCHOR` is unset. If
+`ORBIT_KV_PREFIX_ANCHOR=off` is set, it wins over the legacy flag.
+Unrecognized `ORBIT_KV_PREFIX_ANCHOR` values fall back to `off`.
+
+With the kill switch set to `off`, the payload, prompt rendering, routing, tool
+selection, final policy, and native cache behavior stay on the baseline path.
 
 The only eligible production path is:
 
@@ -20,14 +28,16 @@ The only eligible production path is:
 - no thinking mode
 - no multimodal payload
 
-The experiment does not apply to `chat_final`, `final_from_tool`, or `tool_call`.
+The feature does not apply to `chat_final`, `final_from_tool`, or `tool_call`.
 File-read, web/fetch, and directory-listing requests may benefit only from the
 shared route prefix before the model decides which tool to use. They are not
 special-cased and no post-route tool/final path is anchored.
 
 ## Design
 
-The runtime already marks model calls with phase metadata. When the feature flag is enabled, the HTTP backend adds a metadata-only `route_prefix_anchor=true` payload field only while the current model call context is `phase=route` and `tools_mode=on`.
+The runtime already marks model calls with phase metadata. In auto mode, the
+HTTP backend adds a metadata-only `route_prefix_anchor=true` payload field only
+while the current model call context is `phase=route` and `tools_mode=on`.
 
 The native client then performs conservative validation before attempting anchor use:
 
@@ -54,9 +64,9 @@ For the tested Gemma 4 12B Q4_K_M model at `ctx=8192`, the route checkpoint was:
 - prefix token count: 693
 - checkpoint size: 238,454,176 bytes
 
-This is a material memory cost and is the main reason the experiment remains
-opt-in. The checkpoint is invalidated or bypassed if any compatibility input
-changes:
+This is a material memory cost and is the main reason the feature remains
+limited to eligible native route calls and keeps an explicit kill switch. The
+checkpoint is invalidated or bypassed if any compatibility input changes:
 
 - prefix hash
 - token count
@@ -180,29 +190,61 @@ Notes:
 - Web/fetch stayed at `route -> final_from_tool`.
 - `route_no_decision_length_retry` was not observed in the tested scenarios.
 - The A/B run was intentionally bounded for CPU runtime. It is sufficient to
-  validate the opt-in experiment and known risks, but not sufficient to promote
-  the feature to default.
+  validate the guarded route-prefix path and known risks. It does not imply that
+  every request will be faster: the first capture may remain baseline-cost and
+  benefit is expected on repeated eligible route calls.
+
+## Auto Mode Promotion Smoke
+
+The auto-mode promotion was rechecked with the same local native server profile:
+`ctx=8192`, `threads=6`, `threads-batch=6`, `batch=256`, and `ubatch=128`.
+
+Configuration smoke:
+
+| Mode | Env | Repeat route cached/evaluated | Anchor event | Result |
+| --- | --- | --- | --- | --- |
+| default auto | `ORBIT_KV_PREFIX_ANCHOR` unset, legacy unset | `693 / 33` | restore hit | PASS |
+| kill switch | `ORBIT_KV_PREFIX_ANCHOR=off` | `4 / 722` | no anchor payload/event | PASS |
+| legacy compatibility | legacy experiment set, new env unset | `693 / 33` | restore hit | PASS |
+| off wins | `ORBIT_KV_PREFIX_ANCHOR=off` plus legacy set | `4 / 722` | no anchor payload/event | PASS |
+
+Functional smoke:
+
+| Scenario | Observed path | Model calls | Result |
+| --- | --- | ---: | --- |
+| `read README.md and explain it` | `route -> final_from_tool` with `Read:` | 2 | content evidence preserved |
+| `list files in the workdir` | `route -> final_from_tool` with `ListDir:` | 2 | listing preserved |
+| valid web search | `route -> final_from_tool` with `Web:` | 2 | web tool preserved |
+| `fetch https://example.com and summarize it` | `route -> final_from_tool` with `Fetch:` | 2 | fetch path preserved |
+| local listing followed by explicit web request | `route -> final_from_tool`, then `route -> route_retry -> final_from_tool` with `Web:` | 2, then 3 | no stale local evidence reuse |
+
+The explicit web request after local listing used the existing
+`explicit_web_search` fallback path, so the second request legitimately used
+`route -> route_retry -> final_from_tool`. No `tool not available` event was
+observed.
 
 ## Current Verdict
 
-Promote as opt-in experiment, not default.
+Promote to safe auto mode with an explicit kill switch.
 
 The route-prefix anchor is technically effective and preserves the tested
 model-guided control flow. It significantly reduces evaluated route tokens after
 the first capture miss, including a measured cache-miss medium route changing
 from `4 / 714` cached/evaluated to `693 / 25`.
 
-It should remain behind `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` because:
+It remains constrained because:
 
 - the first capture miss is expensive;
 - checkpoint memory is large for this model and context;
-- more repeated-run data is needed before considering any default behavior;
-- the benchmark should be repeated with a longer final budget for medium prompts.
+- it applies only to native backend `route` calls with tools on;
+- unsupported, mismatched, invalid, or failed checkpoint/restore paths fall back
+  to baseline;
+- `ORBIT_KV_PREFIX_ANCHOR=off` is available as a kill switch.
 
-Merge criteria for the opt-in experiment are satisfied:
+Merge criteria for auto mode are satisfied:
 
-- flag off preserves baseline payload and behavior;
-- flag on is limited to route tools-on on the native backend;
+- default auto is limited to route tools-on on the native backend;
+- explicit `off` preserves baseline payload and behavior;
 - no deterministic routing, tool selection, final policy, or evidence policy changes;
 - fallback returns to baseline on validation or restore failure;
 - file-read, web/fetch, and listing paths remain model-guided and evidence-safe;

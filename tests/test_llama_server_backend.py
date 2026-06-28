@@ -292,9 +292,13 @@ class LlamaServerBackendTests(unittest.TestCase):
                 )
 
         backend = Backend()
-        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=False):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR", None)
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", None)
             backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
             with model_call_context(phase="route", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+            with model_call_context(phase="route", tools_mode="off"):
                 backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
             with model_call_context(phase="final_from_tool", tools_mode="on"):
                 backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
@@ -302,6 +306,109 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertNotIn("route_prefix_anchor", backend.payloads[0])
         self.assertTrue(backend.payloads[1]["route_prefix_anchor"])
         self.assertNotIn("route_prefix_anchor", backend.payloads[2])
+        self.assertNotIn("route_prefix_anchor", backend.payloads[3])
+
+    def test_route_prefix_anchor_legacy_experiment_flag_still_enables_auto_mode(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payload: dict[str, object] | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, _path: str, payload: dict[str, object], *, on_delta, on_progress) -> ChatResult:
+                self.payload = payload
+                return ChatResult(
+                    content="ok",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = Backend()
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR", None)
+            with model_call_context(phase="route", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertIsNotNone(backend.payload)
+        assert backend.payload is not None
+        self.assertTrue(backend.payload["route_prefix_anchor"])
+
+    def test_route_prefix_anchor_off_wins_over_legacy_flag(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payload: dict[str, object] | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, _path: str, payload: dict[str, object], *, on_delta, on_progress) -> ChatResult:
+                self.payload = payload
+                return ChatResult(
+                    content="ok",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = Backend()
+        with mock.patch.dict(
+            os.environ,
+            {"ORBIT_KV_PREFIX_ANCHOR": "off", "ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"},
+            clear=False,
+        ):
+            with model_call_context(phase="route", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertIsNotNone(backend.payload)
+        assert backend.payload is not None
+        self.assertNotIn("route_prefix_anchor", backend.payload)
+
+    def test_route_prefix_anchor_invalid_mode_falls_back_to_off(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payload: dict[str, object] | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, _path: str, payload: dict[str, object], *, on_delta, on_progress) -> ChatResult:
+                self.payload = payload
+                return ChatResult(
+                    content="ok",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = Backend()
+        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR": "maybe"}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", None)
+            with model_call_context(phase="route", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertIsNotNone(backend.payload)
+        assert backend.payload is not None
+        self.assertNotIn("route_prefix_anchor", backend.payload)
 
     def test_route_prefix_anchor_payload_is_not_sent_to_non_native_backend(self) -> None:
         class Backend(LlamaServerBackend):
@@ -321,7 +428,9 @@ class LlamaServerBackendTests(unittest.TestCase):
                 }
 
         backend = Backend()
-        with mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=False):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR", None)
+            os.environ.pop("ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT", None)
             with model_call_context(phase="route", tools_mode="on"):
                 backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
 
