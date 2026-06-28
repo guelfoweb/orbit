@@ -222,6 +222,8 @@ class LlamaLibrary:
 
         lib.llama_model_get_vocab.argtypes = [c_void_p]
         lib.llama_model_get_vocab.restype = c_void_p
+        lib.llama_vocab_n_tokens.argtypes = [c_void_p]
+        lib.llama_vocab_n_tokens.restype = c_int32
         lib.llama_model_chat_template.argtypes = [c_void_p, c_char_p]
         lib.llama_model_chat_template.restype = c_char_p
         lib.llama_chat_apply_template.argtypes = [
@@ -242,10 +244,18 @@ class LlamaLibrary:
 
         lib.llama_batch_get_one.argtypes = [POINTER(llama_token), c_int32]
         lib.llama_batch_get_one.restype = LlamaBatch
+        lib.llama_batch_init.argtypes = [c_int32, c_int32, c_int32]
+        lib.llama_batch_init.restype = LlamaBatch
+        lib.llama_batch_free.argtypes = [LlamaBatch]
+        lib.llama_batch_free.restype = None
         lib.llama_decode.argtypes = [c_void_p, LlamaBatch]
         lib.llama_decode.restype = c_int32
+        lib.llama_synchronize.argtypes = [c_void_p]
+        lib.llama_synchronize.restype = None
         lib.llama_time_us.argtypes = []
         lib.llama_time_us.restype = ctypes.c_int64
+        lib.llama_get_logits_ith.argtypes = [c_void_p, c_int32]
+        lib.llama_get_logits_ith.restype = POINTER(c_float)
 
         lib.llama_sampler_chain_init.argtypes = [LlamaSamplerChainParams]
         lib.llama_sampler_chain_init.restype = c_void_p
