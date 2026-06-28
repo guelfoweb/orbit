@@ -19,6 +19,7 @@ from orbit.runtime.kv_diag import (
 )
 from orbit.native_llama.kv_diag import (
     emit_prompt_cache_event as emit_native_prompt_cache_event,
+    emit_route_prefix_anchor_event as emit_native_route_prefix_anchor_event,
     request_context as native_request_context,
     reset_diagnostics_for_tests as reset_native_diagnostics_for_tests,
 )
@@ -237,6 +238,70 @@ class KVDiagTests(unittest.TestCase):
         self.assertNotIn("placeholder payload beta", raw_log)
         self.assertNotIn("schema metadata", raw_log)
         self.assertNotIn("policy text", raw_log)
+
+    def test_route_prefix_boundary_diagnostics_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                backend = instrument_backend(FakeBackend())
+                messages = [
+                    {"role": "system", "content": "route policy placeholder"},
+                    {"role": "user", "content": "placeholder route payload"},
+                ]
+                with request_context(session_id="session"):
+                    with model_call_context(phase="route", tools_mode="on"):
+                        backend.chat(messages, temperature=0, max_tokens=32)
+
+            payload = next(
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["event"] == "kv_diag_model_call"
+            )
+            boundary = payload["route_prefix_boundary"]
+            raw_log = json.dumps(payload)
+
+        self.assertTrue(boundary["route_prefix_boundary_available"])
+        self.assertIsNone(boundary["failure_reason"])
+        self.assertIsInstance(boundary["stable_prefix_hash"], str)
+        self.assertGreater(boundary["stable_prefix_char_len"], 0)
+        self.assertGreater(boundary["stable_prefix_token_count_estimate"], 0)
+        self.assertGreater(boundary["dynamic_suffix_char_len"], 0)
+        self.assertEqual(boundary["first_dynamic_component"], "user_message")
+        self.assertNotIn("placeholder route payload", raw_log)
+        self.assertNotIn("route policy placeholder", raw_log)
+
+    def test_route_prefix_boundary_hash_changes_with_schema_and_capabilities(self) -> None:
+        messages = [
+            {"role": "system", "content": "route policy placeholder"},
+            {"role": "system", "content": "Local tools available: python3."},
+            {"role": "user", "content": "placeholder route payload"},
+        ]
+        first = fingerprint_prompt(
+            messages,
+            tools=[{"type": "function", "function": {"name": "tool_alpha", "parameters": {}}}],
+        )
+        second = fingerprint_prompt(
+            [
+                {"role": "system", "content": "route policy placeholder"},
+                {"role": "system", "content": "Local tools available: python3, file."},
+                {"role": "user", "content": "placeholder route payload"},
+            ],
+            tools=[{"type": "function", "function": {"name": "tool_alpha", "parameters": {}}}],
+        )
+        third = fingerprint_prompt(
+            messages,
+            tools=[{"type": "function", "function": {"name": "tool_beta", "parameters": {}}}],
+        )
+
+        from orbit.runtime.kv_diag import _route_prefix_boundary_metadata
+
+        first_boundary = _route_prefix_boundary_metadata("route", "on", first)
+        second_boundary = _route_prefix_boundary_metadata("route", "on", second)
+        third_boundary = _route_prefix_boundary_metadata("route", "on", third)
+
+        self.assertTrue(first_boundary["route_prefix_boundary_available"])
+        self.assertNotEqual(first_boundary["stable_prefix_hash"], second_boundary["stable_prefix_hash"])
+        self.assertNotEqual(first_boundary["stable_prefix_hash"], third_boundary["stable_prefix_hash"])
 
     def test_prompt_layout_mismatch_event_contains_only_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -593,6 +658,66 @@ class KVDiagTests(unittest.TestCase):
         self.assertEqual(event["cache_miss_reason"], "prefix_mismatch_at_token_0")
         self.assertEqual(event["longest_common_prefix_tokens"], 0)
         self.assertEqual(event["first_mismatch_token"], 0)
+
+    def test_native_route_prefix_anchor_diagnostics_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            payload = {
+                "cache_prompt": True,
+                "stream": True,
+                "route_prefix_anchor": True,
+                "messages": [
+                    {"role": "system", "content": "runtime route policy placeholder"},
+                    {"role": "user", "content": "placeholder route request"},
+                ],
+            }
+            metadata = {
+                "route_anchor_enabled": True,
+                "route_anchor_attempted": True,
+                "route_anchor_hit": True,
+                "route_anchor_miss": False,
+                "capture_attempted": False,
+                "restore_attempted": True,
+                "restore_used": True,
+                "fallback_reason": None,
+                "prefix_hash": "prefix-hash-placeholder",
+                "prefix_token_count": 693,
+                "checkpoint_size": 2048,
+                "checkpoint_size_bytes": 2048,
+                "checkpoint_age_ms": 42,
+                "anchor_invalidated": False,
+                "invalidation_reason": None,
+                "cached_tokens": 693,
+                "evaluated_tokens": 21,
+                "lcp_tokens": 693,
+                "phase": "route",
+            }
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                with native_request_context(endpoint="/chat/stream", payload=payload):
+                    emit_native_route_prefix_anchor_event(metadata)
+
+            event = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+            raw_log = json.dumps(event)
+
+        self.assertEqual(event["event"], "kv_diag_route_prefix_anchor")
+        self.assertEqual(event["phase"], "route")
+        self.assertTrue(event["route_anchor_enabled"])
+        self.assertTrue(event["route_anchor_attempted"])
+        self.assertTrue(event["route_anchor_hit"])
+        self.assertTrue(event["restore_attempted"])
+        self.assertTrue(event["restore_used"])
+        self.assertEqual(event["prefix_hash"], "prefix-hash-placeholder")
+        self.assertEqual(event["prefix_token_count"], 693)
+        self.assertEqual(event["cached_tokens"], 693)
+        self.assertEqual(event["evaluated_tokens"], 21)
+        self.assertEqual(event["lcp_tokens"], 693)
+        self.assertEqual(event["checkpoint_size_bytes"], 2048)
+        self.assertEqual(event["checkpoint_age_ms"], 42)
+        self.assertFalse(event["anchor_invalidated"])
+        self.assertIsNone(event["invalidation_reason"])
+        self.assertEqual(event["role_sequence"], ["system", "user"])
+        self.assertNotIn("runtime route policy placeholder", raw_log)
+        self.assertNotIn("placeholder route request", raw_log)
 
 
 if __name__ == "__main__":

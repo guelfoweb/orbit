@@ -18,6 +18,7 @@ class ChatRequest:
     stop: tuple[str, ...]
     stream: bool
     tools: list[dict[str, Any]]
+    route_prefix_anchor: bool
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
         stop=_stop_sequences(payload.get("stop")),
         stream=payload.get("stream") is True,
         tools=_tools_from_payload(payload.get("tools")),
+        route_prefix_anchor=payload.get("route_prefix_anchor") is True,
     )
 
 

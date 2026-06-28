@@ -38,7 +38,19 @@ class _FakeClient:
         self.last_mtp_completion = type("Probe", (), {"success": False})()
         self.mtp_fallback_reason = None
 
-    def complete_chat_text(self, messages, *, max_tokens, stop, tools, thinking, on_progress=None, on_token=None, should_cancel=None):
+    def complete_chat_text(
+        self,
+        messages,
+        *,
+        max_tokens,
+        stop,
+        tools,
+        thinking,
+        route_prefix_anchor=False,
+        on_progress=None,
+        on_token=None,
+        should_cancel=None,
+    ):
         self.calls.append(thinking)
         return _FakeCompletion()
 

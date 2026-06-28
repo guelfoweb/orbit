@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from orbit.native_llama.chat_template import render_gemma4_chat
+from orbit.native_llama.chat_template import render_gemma4_chat, render_gemma4_route_prompt_segments
 
 
 class NativeChatTemplateTests(unittest.TestCase):
@@ -127,6 +127,39 @@ class NativeChatTemplateTests(unittest.TestCase):
         )
 
         self.assertIn("Thinking mode is off. Do not reveal chain-of-thought.", prompt)
+
+    def test_route_prompt_segments_recompose_byte_identical_prompt(self) -> None:
+        messages = [
+            {"role": "system", "content": "route policy placeholder"},
+            {"role": "user", "content": "placeholder task payload"},
+        ]
+
+        baseline = render_gemma4_chat(messages)
+        segments = render_gemma4_route_prompt_segments(messages)
+
+        self.assertTrue(segments.boundary_available)
+        self.assertEqual(segments.full_prompt_text, baseline)
+        self.assertEqual(segments.stable_prefix_text + segments.dynamic_suffix_text, baseline)
+        self.assertTrue(segments.stable_prefix_text.startswith("<bos><|turn>system\n"))
+        self.assertIn("<|turn>user\n", segments.dynamic_suffix_text)
+        self.assertNotEqual(segments.stable_prefix_hash, segments.full_prompt_hash)
+
+    def test_route_prompt_segment_hash_changes_with_tool_schema(self) -> None:
+        messages = [
+            {"role": "system", "content": "route policy placeholder"},
+            {"role": "user", "content": "placeholder task payload"},
+        ]
+        first = render_gemma4_route_prompt_segments(
+            messages,
+            tools=[{"type": "function", "function": {"name": "tool_alpha", "parameters": {}}}],
+        )
+        second = render_gemma4_route_prompt_segments(
+            messages,
+            tools=[{"type": "function", "function": {"name": "tool_beta", "parameters": {}}}],
+        )
+
+        self.assertNotEqual(first.stable_prefix_hash, second.stable_prefix_hash)
+        self.assertEqual(first.dynamic_suffix_text, second.dynamic_suffix_text)
 
 
 if __name__ == "__main__":

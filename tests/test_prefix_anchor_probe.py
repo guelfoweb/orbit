@@ -5,9 +5,11 @@ import unittest
 
 from orbit.native_llama.prefix_anchor_probe import (
     PrefixAnchorProbeResult,
+    probe_route_boundary_token_prefix,
     probe_prefix_anchor_equivalence,
     split_prompt_by_token_prefix,
 )
+from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
 
 
 def _token_value(value: object) -> int:
@@ -98,6 +100,57 @@ class _FailingRestoreLib(_FakeLib):
 
 
 class PrefixAnchorProbeTests(unittest.TestCase):
+    def test_route_boundary_token_probe_reports_valid_token_prefix(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [
+                {"role": "system", "content": "route policy placeholder"},
+                {"role": "user", "content": "placeholder task payload"},
+            ]
+        )
+        mapping = {
+            segments.stable_prefix_text: [1, 2, 3],
+            segments.full_prompt_text: [1, 2, 3, 4, 5],
+        }
+        result = probe_route_boundary_token_prefix(
+            segments=segments,
+            tokenize=lambda text: mapping[text],
+        )
+        metadata = result.to_metadata()
+
+        self.assertTrue(result.token_prefix_ok)
+        self.assertIsNone(result.reason)
+        self.assertEqual(result.stable_prefix_token_count, 3)
+        self.assertEqual(result.full_prompt_token_count, 5)
+        self.assertEqual(result.token_lcp_with_stable_prefix, 3)
+        self.assertIsNone(result.divergence_index)
+        self.assertTrue(metadata["route_boundary_token_prefix_ok"])
+        self.assertNotIn("placeholder task payload", str(metadata))
+        self.assertNotIn("route policy placeholder", str(metadata))
+
+    def test_route_boundary_token_probe_reports_mismatch_without_raw_tokens(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [
+                {"role": "system", "content": "route policy placeholder"},
+                {"role": "user", "content": "placeholder task payload"},
+            ]
+        )
+        mapping = {
+            segments.stable_prefix_text: [1, 2, 3],
+            segments.full_prompt_text: [1, 2, 9, 4],
+        }
+        result = probe_route_boundary_token_prefix(
+            segments=segments,
+            tokenize=lambda text: mapping[text],
+        )
+        metadata = result.to_metadata()
+
+        self.assertFalse(result.token_prefix_ok)
+        self.assertEqual(result.reason, "stable_prefix_not_token_prefix")
+        self.assertEqual(result.token_lcp_with_stable_prefix, 2)
+        self.assertEqual(result.divergence_index, 2)
+        self.assertNotIn("[1, 2, 3]", str(metadata))
+        self.assertNotIn("placeholder task payload", str(metadata))
+
     def test_split_prompt_by_token_prefix_rejects_non_prefix_boundary(self) -> None:
         def tokenize(text: str) -> list[int]:
             mapping = {
