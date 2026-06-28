@@ -61,18 +61,16 @@ The unit tests cover both outcomes with synthetic tokenizers:
 The tests also verify that metadata does not contain raw prompt text or raw
 token arrays.
 
-## Local Native Tokenizer Result
+## Initial Local Native Tokenizer Attempt
 
-The real native tokenizer check was attempted in this worktree, but the native
-runtime library was not available:
+The first real native tokenizer check was attempted in this worktree, but the
+native runtime library was not available:
 
 ```text
 libllama.so not found
 ```
 
-Therefore this report does **not** claim a real backend-tokenizer PASS or FAIL.
-
-Current status:
+Initial status:
 
 - text boundary: PASS
 - isolated token-boundary probe: PASS
@@ -112,7 +110,7 @@ Scenarios requested for real-tokenizer probing:
 | file-read route | not executed, native library unavailable |
 | web/fetch route | not executed, native library unavailable |
 
-Boundary verdict for the real native tokenizer:
+Boundary verdict for that attempt:
 
 ```text
 BLOCKED_BY_ENVIRONMENT
@@ -121,18 +119,62 @@ BLOCKED_BY_ENVIRONMENT
 This is not a technical FAIL of the boundary. It means the real tokenizer could
 not be loaded in this worktree.
 
+## Real Tokenizer Attempt With Configured Native Library
+
+The tokenizer check was rerun with the native library configured explicitly:
+
+```text
+ORBIT_LLAMA_LIB_DIR=/home/guelfoweb/LAB/orbit/src/orbit/native_llama/vendor/lib
+```
+
+Resolved environment:
+
+| Field | Value |
+| --- | --- |
+| Native library | `/home/guelfoweb/LAB/orbit/src/orbit/native_llama/vendor/lib/libllama.so` |
+| Model id | `gemma4-12b-it-q4km` |
+| Tokenizer API | `NativeLlamaClient.tokenize` |
+
+The probe used neutral synthetic route prompts and recorded metadata only.
+
+| Scenario | token prefix ok | stable tokens | full tokens | LCP with stable | divergence |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| short chat route | true | 693 | 707 | 693 | none |
+| trivial route | true | 693 | 712 | 693 | none |
+| medium no-tool route | true | 693 | 722 | 693 | none |
+| listing route | true | 693 | 711 | 693 | none |
+| file-read route | true | 693 | 712 | 693 | none |
+| web route | true | 693 | 714 | 693 | none |
+| fetch route | true | 693 | 715 | 693 | none |
+
+Metadata hashes:
+
+| Scenario | stable prefix hash | full prompt hash |
+| --- | --- | --- |
+| short chat route | `16216b5e9e8f642e170bba51c2b94f13` | `74dbcc3158d62908f8c13857156935a8` |
+| trivial route | `16216b5e9e8f642e170bba51c2b94f13` | `31b7ccd1158d9b7cb04029d6302bcb88` |
+| medium no-tool route | `16216b5e9e8f642e170bba51c2b94f13` | `b1835d8363ca448eb7690b12681d56e1` |
+| listing route | `16216b5e9e8f642e170bba51c2b94f13` | `c5443a543919c9cd40ebc526111a41a5` |
+| file-read route | `16216b5e9e8f642e170bba51c2b94f13` | `9aa39b271c9244d9b3ee37d2753835b3` |
+| web route | `16216b5e9e8f642e170bba51c2b94f13` | `e3772f6fd62762d655cb9f74fc1db15d` |
+| fetch route | `16216b5e9e8f642e170bba51c2b94f13` | `8a0a01742957f3fdd55099ed22b1c650` |
+
+Boundary verdict for the configured real native tokenizer:
+
+```text
+PASS
+```
+
+The stable route prefix is a true token-prefix of the rendered full route prompt
+for all tested scenarios.
+
 ## Implication
 
-The next route-prefix-anchor step is blocked until this probe is run against the
-real native tokenizer in an environment where the native library and target
-model are available.
+The next route-prefix-anchor step is now a bounded route-prefix
+checkpoint/restore runtime experiment behind
+`ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1`.
 
-If the real tokenizer result is PASS:
-
-- next step is a bounded route-prefix checkpoint/restore experiment behind
-  `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1`
-
-If the real tokenizer result is FAIL:
+If a future scenario fails this token-prefix invariant:
 
 - next step is a boundary/tokenization fix that preserves the exact rendered
   prompt semantics
