@@ -5,10 +5,9 @@ from dataclasses import dataclass
 import hashlib
 from typing import Any, Callable
 
-from .bindings import LlamaBatch, llama_pos, llama_seq_id, llama_token
+from .bindings import llama_pos, llama_seq_id, llama_token
 from .chat_template import RoutePromptSegments
 from .prefix_anchor import (
-    PrefixAnchorState,
     capture_prefix_anchor,
     compute_prefix_anchor_key,
     restore_prefix_anchor,

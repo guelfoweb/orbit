@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import codecs
-from ctypes import POINTER, byref, c_char, cast, c_float, c_ubyte, create_string_buffer, c_void_p, sizeof
+from ctypes import POINTER, byref, c_char, cast, c_ubyte, create_string_buffer, c_void_p, sizeof
 from dataclasses import dataclass, replace
 from pathlib import Path
 import threading
