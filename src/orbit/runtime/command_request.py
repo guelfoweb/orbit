@@ -10,7 +10,7 @@ from typing import Any
 from orbit.runtime.tool_arguments import parse_tool_arguments_or_empty
 
 SHELL_TOOL_ALIASES = {"exec_shell_full_command", "shell"}
-WEB_SEARCH_TOOL_ALIASES = {"orbit-web-search"}
+WEB_SEARCH_TOOL_ALIASES = {"orbit-web-search", "orbit_web_search"}
 FETCH_URL_TOOL_ALIASES = {"fetch_url"}
 LIST_DIRECTORY_TOOL_ALIASES = {"list_directory"}
 LIST_DIRECTORY_KEYS = ("path", "recursive", "max_depth", "max_entries", "include_hidden", "dirs_first", "files_only", "dirs_only")

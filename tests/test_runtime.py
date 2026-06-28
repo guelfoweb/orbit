@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from shutil import copyfile
 import sys
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -1801,6 +1802,149 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "Mario Nobile is an Italian public official.")
         self.assertEqual(backend.calls, 3)
 
+    def test_ask_with_tools_normalizes_orbit_web_search_underscore_tool_call(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "orbit_web_search",
+                                    "arguments": '{"query":"sample topic"}',
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="sample result",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            with patch("orbit.runtime.shell_guardrails.search_web", return_value="web_search_results: true\nquery: sample topic"):
+                result = runtime.ask_with_tools(
+                    "search online for sample topic",
+                    temperature=0,
+                    max_tokens=64,
+                    workdir=Path(tmp),
+                )
+
+        self.assertEqual(result.content, "sample result")
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(tool_messages[0]["name"], "exec_shell_full_command")
+        self.assertIn("web_search_results: true", str(tool_messages[0]["content"]))
+        self.assertNotIn("tool not available", str(tool_messages[0]["content"]))
+
+    def test_new_web_turn_uses_latest_tool_evidence_not_previous_local_result(self) -> None:
+        class RoutedBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.final_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-web",
+                                "type": "function",
+                                "function": {
+                                    "name": "orbit_web_search",
+                                    "arguments": '{"query":"sample topic"}',
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                self.final_messages = messages
+                return ChatResult(
+                    content="sample web answer",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=7,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = RoutedBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            runtime.messages.extend(
+                [
+                    {"role": "user", "content": "read local fixture"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-old",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat fixture.txt"}),
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-old",
+                        "name": "exec_shell_full_command",
+                        "content": "old_local_fixture_evidence: true\ncontent:\nold local content",
+                    },
+                    {"role": "assistant", "content": "old local answer"},
+                ]
+            )
+            with patch("orbit.runtime.shell_guardrails.search_web", return_value="web_search_results: true\nquery: sample topic\nresults:\n- current web evidence"):
+                result = runtime.ask_with_tools(
+                    "search online for sample topic",
+                    temperature=0,
+                    max_tokens=64,
+                    workdir=Path(tmp),
+                )
+
+        self.assertEqual(result.content, "sample web answer")
+        self.assertIsNotNone(backend.final_messages)
+        final_rendered = "\n".join(str(message.get("content", "")) for message in backend.final_messages or [])
+        self.assertIn("current web evidence", final_rendered)
+        self.assertNotIn("old_local_fixture_evidence", final_rendered)
+
     def test_ask_auto_retries_route_as_tool_call_after_length_without_decision(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
@@ -1944,6 +2088,8 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.calls, 5)
         self.assertIsNotNone(backend.retry_messages)
         self.assertEqual(backend.retry_messages[0]["content"], TOOL_CALL_SYSTEM_PROMPT)
+        self.assertIn("latest user request only", backend.retry_messages[-1]["content"])
+        self.assertIn("ignore older tool results", backend.retry_messages[-1]["content"])
 
     def test_shell_full_analysis_metadata_only_command_gets_one_model_retry(self) -> None:
         class ShellFullAnalysisBackend:

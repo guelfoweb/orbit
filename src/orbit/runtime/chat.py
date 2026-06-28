@@ -1003,6 +1003,7 @@ def _route_retry_messages(messages: list[Message], *, explicit_web_search: bool)
     reminder = (
         "The user explicitly asked for an online/web search. "
         "Do not answer from memory. "
+        "Use the latest user request only, and ignore older tool results or file/page content unless that latest request refers to them. "
         "Return exactly one shell tool call now that performs the search. Output no prose."
         if explicit_web_search
         else

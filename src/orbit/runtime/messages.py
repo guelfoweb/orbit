@@ -79,6 +79,8 @@ For analysis, prefer content, source, binaries, strings, logs, archives, or fetc
 ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shell_name=_detect_shell())
 TOOL_CALL_SYSTEM_PROMPT = (
     "Call exactly one available tool and output no prose. "
+    "Operate on the latest user request only. "
+    "Ignore older tool results, file/page content, or prior task context unless the latest user request explicitly refers to them. "
     "Prefer list_directory for compact directory listings. "
     "Prefer system_info for compact local machine specs such as OS, CPU, RAM, disk, and Python runtime. "
     "Prefer fetch_url for explicit URL fetch/read/explain/summarize/analyze requests. "

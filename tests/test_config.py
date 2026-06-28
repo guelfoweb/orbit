@@ -91,6 +91,8 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("Prefer system_info", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("orbit-web-search", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("exec_shell_full_command", TOOL_CALL_SYSTEM_PROMPT)
+        self.assertIn("latest user request", TOOL_CALL_SYSTEM_PROMPT)
+        self.assertIn("Ignore older tool results", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("Quote paths containing spaces", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("collect direct evidence", TOOL_CALL_SYSTEM_PROMPT)
 

@@ -413,6 +413,37 @@ EOF"}""",
         self.assertEqual(tool_call["function"]["name"], "exec_shell_full_command")
         self.assertEqual(tool_call["function"]["arguments"], "{\"command\": \"orbit-web-search 'Dante Alighieri'\"}")
 
+    def test_command_tool_call_from_tool_calls_accepts_orbit_web_search_underscore_alias(self) -> None:
+        tool_call = command_tool_call_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {"name": "orbit_web_search", "arguments": '{"query":"sample topic"}'},
+                }
+            ],
+            ("exec_shell_full_command",),
+        )
+
+        self.assertIsNotNone(tool_call)
+        assert tool_call is not None
+        self.assertEqual(tool_call["function"]["name"], "exec_shell_full_command")
+        self.assertEqual(tool_call["function"]["arguments"], "{\"command\": \"orbit-web-search 'sample topic'\"}")
+
+    def test_command_tool_call_from_tool_calls_rejects_unknown_web_search_like_name(self) -> None:
+        tool_call = command_tool_call_from_tool_calls(
+            [
+                {
+                    "id": "raw-tool-call-1",
+                    "type": "function",
+                    "function": {"name": "orbit_websearch", "arguments": '{"query":"sample topic"}'},
+                }
+            ],
+            ("exec_shell_full_command",),
+        )
+
+        self.assertIsNone(tool_call)
+
     def test_command_tool_call_from_tool_calls_rejects_alias_without_command(self) -> None:
         tool_call = command_tool_call_from_tool_calls(
             [
