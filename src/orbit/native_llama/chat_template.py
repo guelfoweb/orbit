@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import hashlib
 import json
 from typing import Any
 
 
 NativeMessage = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RoutePromptSegments:
+    stable_prefix_text: str
+    dynamic_suffix_text: str
+    full_prompt_text: str
+    stable_prefix_hash: str
+    full_prompt_hash: str
+    stable_prefix_char_len: int
+
+    @property
+    def boundary_available(self) -> bool:
+        return self.stable_prefix_text + self.dynamic_suffix_text == self.full_prompt_text
 
 
 def render_gemma4_chat(
@@ -14,7 +30,51 @@ def render_gemma4_chat(
     add_generation_prompt: bool = True,
     thinking: bool = False,
 ) -> str:
+    full, _stable_end = _render_gemma4_chat_with_boundary(
+        messages,
+        tools=tools,
+        add_generation_prompt=add_generation_prompt,
+        thinking=thinking,
+    )
+    return full
+
+
+def render_gemma4_route_prompt_segments(
+    messages: list[NativeMessage],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    add_generation_prompt: bool = True,
+    thinking: bool = False,
+) -> RoutePromptSegments:
+    """Render route prompt segments without changing the rendered prompt."""
+
+    full, stable_end = _render_gemma4_chat_with_boundary(
+        messages,
+        tools=tools,
+        add_generation_prompt=add_generation_prompt,
+        thinking=thinking,
+    )
+    stable = full[:stable_end]
+    suffix = full[stable_end:]
+    return RoutePromptSegments(
+        stable_prefix_text=stable,
+        dynamic_suffix_text=suffix,
+        full_prompt_text=full,
+        stable_prefix_hash=_hash_text(stable),
+        full_prompt_hash=_hash_text(full),
+        stable_prefix_char_len=len(stable),
+    )
+
+
+def _render_gemma4_chat_with_boundary(
+    messages: list[NativeMessage],
+    *,
+    tools: list[dict[str, Any]] | None,
+    add_generation_prompt: bool,
+    thinking: bool,
+) -> tuple[str, int]:
     chunks: list[str] = ["<bos>"]
+    stable_end = 0
     start = 0
     if messages and messages[0].get("role") in {"system", "developer"}:
         chunks.append("<|turn>system\n")
@@ -26,6 +86,7 @@ def render_gemma4_chat(
             chunks.append("\n\n")
             chunks.append(tool_text)
         chunks.append("<turn|>\n")
+        stable_end = len("".join(chunks))
         start = 1
     elif tools:
         chunks.append("<|turn>system\n")
@@ -33,8 +94,10 @@ def render_gemma4_chat(
             chunks.append("<|think|>\n")
         chunks.append(_render_tools(tools))
         chunks.append("<turn|>\n")
+        stable_end = len("".join(chunks))
     elif thinking:
         chunks.append("<|turn>system\n<|think|>\n<turn|>\n")
+        stable_end = len("".join(chunks))
 
     for message in messages[start:]:
         role = message.get("role")
@@ -57,7 +120,8 @@ def render_gemma4_chat(
         chunks.append("<|turn>model\n")
         if not thinking:
             chunks.append("<|channel>thought\n<channel|>")
-    return "".join(chunks)
+    full = "".join(chunks)
+    return full, stable_end
 
 
 def _content_text(message: NativeMessage) -> str:
@@ -185,3 +249,7 @@ def _strip_thinking(text: str) -> str:
         else:
             result += part
     return result
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]

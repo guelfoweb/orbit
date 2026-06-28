@@ -253,6 +253,7 @@ class _DiagnosticBackend:
         result = invoke()
         components = _component_changes(call_context["request_id"], phase, tools_mode, fingerprint)
         layout_common_prefix = _layout_common_prefix(call_context["request_id"], phase, tools_mode, fingerprint)
+        route_prefix_boundary = _route_prefix_boundary_metadata(phase, tools_mode, fingerprint)
         envelope = _request_envelope_metadata(
             self._backend,
             messages=messages,
@@ -282,6 +283,7 @@ class _DiagnosticBackend:
             "prompt_layout_order": [block["component"] for block in fingerprint.prompt_layout],
             "prompt_layout": fingerprint.prompt_layout,
             "prompt_layout_common_prefix": layout_common_prefix,
+            "route_prefix_boundary": route_prefix_boundary,
             "changed_components": components,
             "wall_ms": _elapsed_ms(started),
             "prefill_ms": progress_timings.prefill_ms(started) if progress_timings is not None else None,
@@ -511,6 +513,7 @@ def _empty_prompt_fingerprint_fields() -> dict[str, Any]:
         "prompt_layout_order": [],
         "prompt_layout": [],
         "prompt_layout_common_prefix": None,
+        "route_prefix_boundary": None,
         "changed_components": [],
     }
 
@@ -621,6 +624,51 @@ def _layout_common_prefix(
             }
         )
     return event
+
+
+def _route_prefix_boundary_metadata(
+    phase: str,
+    tools_mode: str | None,
+    fingerprint: PromptFingerprint,
+) -> dict[str, Any]:
+    if phase != "route" or tools_mode != "on":
+        return {
+            "route_prefix_boundary_available": False,
+            "failure_reason": "not_route_tools_on",
+        }
+    stable_blocks: list[dict[str, Any]] = []
+    for block in fingerprint.prompt_layout:
+        if block.get("source") == "messages" and block.get("role") == "system":
+            stable_blocks.append(block)
+            continue
+        break
+    if not stable_blocks:
+        return {
+            "route_prefix_boundary_available": False,
+            "failure_reason": "missing_leading_system_prefix",
+        }
+    stable_chars = sum(int(block.get("chars", 0)) for block in stable_blocks)
+    stable_tokens = sum(int(block.get("tokens_estimate", 0)) for block in stable_blocks)
+    return {
+        "route_prefix_boundary_available": True,
+        "failure_reason": None,
+        "stable_prefix_hash": _hash(
+            {
+                "blocks": _layout_identity(stable_blocks),
+                "tool_schema_hash": fingerprint.tool_schema_hash,
+                "capability_summary_hash": fingerprint.capability_summary_hash,
+            }
+        ),
+        "stable_prefix_char_len": stable_chars,
+        "stable_prefix_token_count_estimate": stable_tokens,
+        "dynamic_suffix_char_len": max(0, fingerprint.prompt_chars - stable_chars),
+        "full_prompt_hash": fingerprint.full_prompt_hash,
+        "first_dynamic_component": (
+            fingerprint.prompt_layout[len(stable_blocks)].get("component")
+            if len(stable_blocks) < len(fingerprint.prompt_layout)
+            else None
+        ),
+    }
 
 
 def _prompt_layout(messages: list[Message], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
