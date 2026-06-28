@@ -131,6 +131,8 @@ Environment:
 - backend: native Orbit server, CPU, `ctx=8192`
 - server port: local dedicated test server
 - `ORBIT_KV_DIAG=1`
+- workdir: repository root
+- max tokens: 64 for all smoke prompts
 
 Observed route-prefix checkpoint:
 
@@ -147,18 +149,23 @@ Representative results:
 
 | Scenario | Flag | Phases | Route cached/evaluated | Request cached/evaluated | Wall | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| `hi` | off | `route -> chat_final` | `0 / 706` | `4 / 736` | ~61s | `CHAT` |
-| `hi` first eligible | on | `route -> chat_final` | `0 / 706` | `4 / 736` | ~62s | capture miss |
+| `hi` | off | `route -> chat_final` | `0 / 706` | `4 / 736` | ~60s | `CHAT` |
+| `hi` first eligible | on | `route -> chat_final` | `0 / 706` | `4 / 736` | ~64s | capture miss |
 | `hi` repeat | on | `route -> chat_final` | `693 / 13` | `697 / 43` | ~8.6s | restore hit |
+| `what is 2+2?` | off | `route` | `4 / 708` | `4 / 708` | ~59s | direct route final |
 | `what is 2+2?` | on | `route` | `693 / 19` | `693 / 19` | ~2.4s | direct route final |
-| medium no-tool 1 | off warm | `route -> chat_final` | `696 / 27` | `700 / 74` | ~36s | warm baseline control |
-| medium no-tool 1 | on | `route -> chat_final` | `693 / 30` | `697 / 77` | ~37s | restore hit |
-| medium no-tool 2 | off | `route -> chat_final` | `4 / 714` | `8 / 756` | ~95s | cache miss |
-| medium no-tool 2 | on | `route -> chat_final` | `693 / 25` | `697 / 67` | ~39s | restore hit |
-| `list files in the workdir` | on | `route -> final_from_tool` | `693 / 18` | `1386 / 149` | ~35s | `list_directory` preserved |
-| `read edit-target.txt and explain it` | on | `route -> tool_call -> tool_call -> final_from_tool` | `693 / 21` | `1055 / 896` | ~120s | content-read path preserved |
-| `fetch https://example.com and summarize it` | on | `route -> final_from_tool` | `693 / 21` | `1386 / 169` | ~34s | fetch path preserved |
-| web search prompt | on | `route -> final_from_tool` | `693 / 21` | `1386 / 457` | ~60s | web path preserved |
+| medium no-tool 1 | off warm | `route -> chat_final` | `693 / 30` | `697 / 77` | ~27s | warm baseline control |
+| medium no-tool 1 | on | `route -> chat_final` | `693 / 30` | `697 / 77` | ~28s | restore hit |
+| medium no-tool 2 | off | `route -> chat_final` | `4 / 714` | `8 / 756` | ~79s | cache miss |
+| medium no-tool 2 | on | `route -> chat_final` | `693 / 25` | `697 / 67` | ~26s | restore hit |
+| `list files in the workdir` | off | `route -> final_from_tool` | `4 / 707` | `711 / 874` | ~93s | `list_directory` preserved |
+| `list files in the workdir` | on | `route -> final_from_tool` | `693 / 18` | `1386 / 199` | ~41s | `list_directory` preserved |
+| `read README.md and explain it` | off warm | `route -> final_from_tool` | `696 / 16` | `1404 / 424` | ~64s | `Read` content evidence preserved |
+| `read README.md and explain it` | on | `route -> final_from_tool` | `693 / 19` | `1386 / 442` | ~64s | `Read` content evidence preserved |
+| web search prompt | off warm | `route -> final_from_tool` | `696 / 18` | `1406 / 447` | ~59s | `orbit-web-search` preserved |
+| web search prompt | on | `route -> final_from_tool` | `693 / 21` | `1386 / 467` | ~62s | `orbit-web-search` preserved |
+| `fetch https://example.com and summarize it` | off warm | `route -> final_from_tool` | `696 / 18` | `1406 / 149` | ~32s | fetch path preserved |
+| `fetch https://example.com and summarize it` | on | `route -> final_from_tool` | `693 / 21` | `1386 / 169` | ~33s | fetch path preserved |
 
 The medium no-tool scenarios used synthetic prompts:
 
@@ -169,7 +176,7 @@ Notes:
 
 - The first `on` request must pay capture cost. The benefit appears after the checkpoint exists.
 - One medium smoke used a small output budget and stopped final generation with `finish_reason=length`; the route phase still completed normally and did not enter repair/retry.
-- File-read correctness was checked with an existing fixture file. The route selected a content-reading path, not `list_directory`.
+- File-read correctness was checked with `README.md`. The route selected a content-reading path, not `list_directory`.
 - Web/fetch stayed at `route -> final_from_tool`.
 - `route_no_decision_length_retry` was not observed in the tested scenarios.
 - The A/B run was intentionally bounded for CPU runtime. It is sufficient to
