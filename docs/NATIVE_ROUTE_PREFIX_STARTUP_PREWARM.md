@@ -5,16 +5,20 @@
 This document describes the first controlled runtime integration for native route
 prefix prewarm.
 
-The feature is opt-in and does not change default runtime behavior.
+The feature now runs by default when the native server starts with tools enabled.
+It can still be disabled explicitly.
 
 ```bash
-ORBIT_KV_PREFIX_PREWARM=off      # default
-ORBIT_KV_PREFIX_PREWARM=startup  # opt-in synchronous startup prewarm
+ORBIT_KV_PREFIX_PREWARM=startup  # default synchronous startup prewarm
+ORBIT_KV_PREFIX_PREWARM=off      # disable startup prewarm
 ```
 
 `ORBIT_KV_PREFIX_ANCHOR=off` disables startup prewarm even when
-`ORBIT_KV_PREFIX_PREWARM=startup` is set. The legacy
-`ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` does not override `off`.
+`ORBIT_KV_PREFIX_PREWARM=startup` is set or the prewarm variable is unset. The
+legacy `ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT=1` does not override `off`.
+
+`ORBIT_TOOLS=off` disables startup route tools-on prewarm because there is no
+tools-on route prefix to prepare for startup.
 
 Invalid `ORBIT_KV_PREFIX_PREWARM` values fall back to `off`.
 
@@ -40,7 +44,6 @@ No model response is generated during prewarm.
 
 Startup prewarm does not introduce:
 
-- automatic default prewarm
 - background prewarm
 - `/tools on` lifecycle integration
 - `/chat` or `/chat/stream` integration
@@ -59,8 +62,8 @@ Startup prewarm does not introduce:
 
 ## Lifecycle
 
-`ORBIT_KV_PREFIX_PREWARM=startup` runs after the native model/client is loaded and
-before the HTTP server starts serving requests.
+`ORBIT_KV_PREFIX_PREWARM=startup` runs after the native model/client is loaded
+and before the HTTP server starts serving requests.
 
 This location is intentional:
 
@@ -79,7 +82,8 @@ observed around 49-59 seconds.
 
 Startup prewarm is eligible only when:
 
-- `ORBIT_KV_PREFIX_PREWARM=startup`
+- `ORBIT_KV_PREFIX_PREWARM` is unset or `startup`
+- tools are enabled for startup
 - `ORBIT_KV_PREFIX_ANCHOR` is not `off`
 - native backend/client is loaded
 - route prefix-anchor support is available
@@ -87,8 +91,9 @@ Startup prewarm is eligible only when:
 
 It is skipped when:
 
-- `ORBIT_KV_PREFIX_PREWARM` is unset or `off`
+- `ORBIT_KV_PREFIX_PREWARM=off`
 - `ORBIT_KV_PREFIX_PREWARM` has an unrecognized value
+- `ORBIT_TOOLS=off`
 - `ORBIT_KV_PREFIX_ANCHOR=off`
 - a native client request/context is already active
 - the prefix-anchor hook reports an ineligible state
@@ -117,6 +122,8 @@ When `ORBIT_KV_DIAG=1` is enabled, startup prewarm emits metadata only:
 
 - `prewarm_enabled`
 - `prewarm_mode`
+- `tools_default_enabled`
+- `tools_startup_enabled`
 - `prewarm_attempted`
 - `prewarm_succeeded`
 - `prewarm_skipped_reason`
@@ -147,10 +154,11 @@ cache tool results, file contents, web results, PDF contents, or user history.
 
 Required validation for this integration:
 
-- default/unset `ORBIT_KV_PREFIX_PREWARM` does not prewarm
+- default/unset `ORBIT_KV_PREFIX_PREWARM` prewarms when tools are enabled
 - `ORBIT_KV_PREFIX_PREWARM=off` does not prewarm
 - `ORBIT_KV_PREFIX_PREWARM=startup` invokes the native prefill-only hook
 - `ORBIT_KV_PREFIX_ANCHOR=off` skips startup prewarm
+- `ORBIT_TOOLS=off` skips startup prewarm
 - invalid prewarm values fall back to `off`
 - hook success yields `restore_ready=true`
 - hook failure leaves the server usable with `restore_ready=false`

@@ -48,6 +48,13 @@ class Repl:
             self.history.load()
         print(dim("orbit interactive mode. Type /help for commands."))
         print(dim(f"tools: {self.tools_mode}"))
+        if tools_are_enabled(self.tools_mode or "off"):
+            print(
+                danger(
+                    "warning: tools on gives the model unrestricted local shell access. Commands may read, modify, delete files, execute programs, or access network. "
+                    "Use only in an isolated lab."
+                )
+            )
         print(dim(f"think: {'on' if self.config.think else 'off'}"))
         if has_existing_session_context(self.runtime.messages):
             print(dim("recent session context:"))

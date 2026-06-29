@@ -19,7 +19,8 @@ MIN_MAX_TOKENS = 32
 MAX_MAX_TOKENS = 4096
 MIN_CONTEXT_TOKENS = 512
 MAX_CONTEXT_TOKENS = 262_144
-DEFAULT_TOOLS = "off"
+DEFAULT_TOOLS = "on"
+TOOLS_ENV = "ORBIT_TOOLS"
 MARKDOWN_RENDER_MODES = {"plain", "live"}
 
 
@@ -224,10 +225,22 @@ def _bool_value_or_spec(values: dict[str, Any], key: str, default: bool) -> bool
 
 
 def _tool_spec_value(values: dict[str, Any]) -> ToolSpec:
-    value = values.get("tool_mode", values.get("tools", DEFAULT_TOOLS))
+    env_value = os.environ.get(TOOLS_ENV)
+    if env_value is not None:
+        return _tool_spec_from_env(env_value)
+    value = values.get("tool_mode", values.get("tools"))
+    if value is None:
+        value = DEFAULT_TOOLS
     if isinstance(value, dict):
         value = DEFAULT_TOOLS
     return normalize_tool_spec(value, key="tool_mode")
+
+
+def _tool_spec_from_env(value: str) -> ToolSpec:
+    try:
+        return normalize_tool_spec(value, key=TOOLS_ENV)
+    except ValueError:
+        return "off"
 
 
 def _markdown_mode_value(values: dict[str, Any]) -> str:

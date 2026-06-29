@@ -160,6 +160,8 @@ def emit_route_prefix_prewarm_event(metadata: dict[str, Any]) -> None:
         return
     event = {
         "event": "kv_diag_route_prefix_prewarm",
+        "tools_default_enabled": bool(metadata.get("tools_default_enabled")),
+        "tools_startup_enabled": bool(metadata.get("tools_startup_enabled")),
         "prewarm_enabled": bool(metadata.get("prewarm_enabled")),
         "prewarm_mode": _safe_str(metadata.get("prewarm_mode")),
         "prewarm_attempted": bool(metadata.get("prewarm_attempted")),
