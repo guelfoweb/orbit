@@ -155,6 +155,30 @@ def emit_route_prefix_anchor_event(metadata: dict[str, Any]) -> None:
     _emit(event)
 
 
+def emit_route_prefix_prewarm_event(metadata: dict[str, Any]) -> None:
+    if not enabled():
+        return
+    event = {
+        "event": "kv_diag_route_prefix_prewarm",
+        "prewarm_enabled": bool(metadata.get("prewarm_enabled")),
+        "prewarm_mode": _safe_str(metadata.get("prewarm_mode")),
+        "prewarm_attempted": bool(metadata.get("prewarm_attempted")),
+        "prewarm_succeeded": bool(metadata.get("prewarm_succeeded")),
+        "prewarm_skipped_reason": _safe_str(metadata.get("prewarm_skipped_reason")),
+        "prewarm_failed_reason": _safe_str(metadata.get("prewarm_failed_reason")),
+        "prewarm_prefix_token_count": _safe_int(metadata.get("prewarm_prefix_token_count")),
+        "prewarm_checkpoint_size_bytes": _safe_int(metadata.get("prewarm_checkpoint_size_bytes")),
+        "prewarm_ms": _safe_int(metadata.get("prewarm_ms")),
+        "decode_calls": _safe_int(metadata.get("decode_calls")),
+        "sampled_tokens": _safe_int(metadata.get("sampled_tokens")),
+        "generated_tokens": _safe_int(metadata.get("generated_tokens")),
+        "sampler_touched": bool(metadata.get("sampler_touched")),
+        "session_history_touched": bool(metadata.get("session_history_touched")),
+        "restore_ready": bool(metadata.get("restore_ready")),
+    }
+    _emit(event)
+
+
 def _cache_miss_reason(
     *,
     cache_prompt: bool | None,
