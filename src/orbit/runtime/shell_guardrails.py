@@ -28,10 +28,18 @@ SEARCH_SHELL_OUTPUT_BYTES = 800
 SHELL_FAILURE_STREAM_CHARS = 1200
 SHELL_READ_FILE_THRESHOLD_BYTES = 8 * 1024
 SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
+SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX = "error: read-only request rejected mutating shell command"
 SHELL_FULL_CONTRACT_RETRY_PROMPT = (
     "The previous shell-full command was rejected because it only listed metadata. "
     "Use the available exec_shell_full_command tool now to inspect source/content/string evidence. "
     "Return only the tool call."
+)
+SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT = (
+    "The previous shell-full command was rejected because the latest user request only asks to read, inspect, search, "
+    "summarize, or explain content, but the command would modify local state.\n\n"
+    "Do not write, edit, replace, delete, move, rename, install, commit, or otherwise mutate files or system state for this turn.\n\n"
+    "Either answer from existing valid evidence, or return exactly one non-mutating tool call that gathers the missing evidence:\n\n"
+    '{"command":"..."}'
 )
 SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT = (
     "Your previous command inspected only metadata or listings.\n\n"
@@ -311,6 +319,20 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
     return None
 
 
+def validate_read_only_shell_mutation(arguments: dict[str, Any], *, user_prompt: str | None) -> str | None:
+    raw_command = arguments.get("command")
+    if not isinstance(raw_command, str) or not raw_command.strip():
+        return None
+    if not is_read_only_user_request(user_prompt):
+        return None
+    if not is_mutating_shell_command(raw_command):
+        return None
+    return (
+        f"{SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX}. "
+        "Use a non-mutating command or answer from existing evidence unless the latest user request explicitly asks for a change."
+    )
+
+
 def _requires_direct_content_evidence(user_prompt: str) -> bool:
     if _ANALYSIS_PROMPT_RE.search(user_prompt):
         return True
@@ -392,6 +414,10 @@ def looks_like_url_content_evidence(text: str | None) -> bool:
 
 def is_shell_full_contract_error(content: str) -> bool:
     return content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX)
+
+
+def is_shell_full_read_only_mutation_error(content: str) -> bool:
+    return content.startswith(SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX)
 
 
 def build_shell_full_file_recovery_guard_prompt(
@@ -542,23 +568,38 @@ def is_repairable_shell_error(content: str) -> bool:
 
 
 def should_verify_shell_mutation(command: str, *, user_prompt: str | None) -> bool:
-    if user_prompt and _READ_ONLY_PROMPT_RE.search(user_prompt) and not _MUTATION_PROMPT_RE.search(user_prompt):
+    if is_read_only_user_request(user_prompt):
         return False
     return is_mutating_shell_command(command)
+
+
+def is_read_only_user_request(user_prompt: str | None) -> bool:
+    if not user_prompt:
+        return False
+    if _NEGATED_MUTATION_PROMPT_RE.search(user_prompt):
+        return True
+    intent_text = _without_user_paths_and_urls(user_prompt)
+    return _READ_ONLY_PROMPT_RE.search(user_prompt) is not None and _MUTATION_PROMPT_RE.search(intent_text) is None
 
 
 def is_mutative_user_request(user_prompt: str | None) -> bool:
     if not user_prompt:
         return False
+    intent_text = _without_user_paths_and_urls(user_prompt)
     if _NEGATED_MUTATION_PROMPT_RE.search(user_prompt) and not re.search(
         r"\b(?:fix|update|change|create|write|rename|refactor|edit)\b.*\b(?:file|code|implementation|config|test)\b",
-        user_prompt,
+        intent_text,
         re.IGNORECASE,
     ):
         return False
-    if _READ_ONLY_PROMPT_RE.search(user_prompt) and not _MUTATION_PROMPT_RE.search(user_prompt):
+    if _READ_ONLY_PROMPT_RE.search(user_prompt) and not _MUTATION_PROMPT_RE.search(intent_text):
         return False
-    return _MUTATION_PROMPT_RE.search(user_prompt) is not None
+    return _MUTATION_PROMPT_RE.search(intent_text) is not None
+
+
+def _without_user_paths_and_urls(text: str) -> str:
+    without_urls = _URL_RE.sub(" ", text)
+    return _USER_PATH_RE.sub(" ", without_urls)
 
 
 def is_mutating_shell_command(command: str) -> bool:
@@ -970,8 +1011,38 @@ def _has_shell_write_operator(command: str) -> bool:
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return ">" in command
-    return any(token in {">", ">>", "2>", "2>>", "&>", "&>>"} for token in tokens) or bool(re.search(r"(^|[^<>])>{1,2}[^&]", command))
+        return bool(re.search(r"(^|[^<>])>{1,2}[^&]", _without_shell_quoted_strings(command)))
+    return any(token in {">", ">>", "2>", "2>>", "&>", "&>>"} for token in tokens) or bool(
+        re.search(r"(^|[^<>])>{1,2}[^&]", _without_shell_quoted_strings(command))
+    )
+
+
+def _without_shell_quoted_strings(command: str) -> str:
+    chars: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in command:
+        if escaped:
+            chars.append(" " if quote else char)
+            escaped = False
+            continue
+        if char == "\\":
+            chars.append(" " if quote else char)
+            escaped = bool(quote)
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+                chars.append(char)
+            else:
+                chars.append(" ")
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            chars.append(char)
+            continue
+        chars.append(char)
+    return "".join(chars)
 
 
 def _looks_like_html(content: str) -> bool:

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from orbit.runtime.shell_guardrails import validate_shell_full_contract
+from orbit.runtime.shell_guardrails import validate_read_only_shell_mutation, validate_shell_full_contract
 from orbit.runtime.tool_arguments import parse_tool_arguments
 from orbit.runtime.tools import ToolResult, execute_tool, tool_definitions
 
@@ -58,6 +58,9 @@ class HybridToolExecutor:
         if isinstance(parsed, str):
             return ToolExecution(ToolResult(name=name, content=parsed), "orbit")
         if name == "exec_shell_full_command":
+            read_only_mutation_error = validate_read_only_shell_mutation(parsed, user_prompt=self.user_prompt)
+            if read_only_mutation_error:
+                return ToolExecution(ToolResult(name=name, content=read_only_mutation_error), "orbit")
             contract_error = validate_shell_full_contract(parsed, user_prompt=self.user_prompt)
             if contract_error:
                 return ToolExecution(ToolResult(name=name, content=contract_error), "orbit")

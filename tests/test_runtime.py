@@ -26,6 +26,8 @@ from orbit.runtime.shell_guardrails import (
     SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT,
     SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT,
     SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT,
+    SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX,
+    SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT,
     SHELL_FULL_SEMANTIC_REPAIR_PROMPT,
     should_verify_shell_mutation,
 )
@@ -6285,6 +6287,87 @@ EOF"""
 
         self.assertEqual(result.content, "done")
         self.assertEqual(_last_tool_message(runtime)["content"], "")
+
+    def test_read_only_request_rejects_mutating_shell_command_before_execution(self) -> None:
+        class ReadOnlyMutationBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"sed -i 's/beta/delta/' note.txt\"}"},
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                            }
+                        ],
+                        prompt_tokens=12,
+                        completion_tokens=2,
+                        cached_tokens=8,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="read completed",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=20,
+                    completion_tokens=3,
+                    cached_tokens=10,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+            backend = ReadOnlyMutationBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "read note.txt and explain it",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+            content = (workdir / "note.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "read completed")
+        self.assertEqual(content, "alpha\nbeta\ngamma\n")
+        self.assertEqual(backend.calls, 3)
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertTrue(tool_messages)
+        self.assertIn(SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX, tool_messages[0]["content"])
+        self.assertIn("beta", tool_messages[-1]["content"])
+        self.assertEqual(backend.messages_seen[1][-1]["content"], SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT)
 
     def test_ask_with_tools_can_replace_unique_text_in_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

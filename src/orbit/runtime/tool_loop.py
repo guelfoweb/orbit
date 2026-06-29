@@ -34,9 +34,11 @@ from orbit.runtime.shell_guardrails import (
     is_mutative_user_request,
     is_repairable_shell_error,
     is_shell_full_contract_error,
+    is_shell_full_read_only_mutation_error,
     is_shell_full_execution_error,
     looks_like_broad_file_rewrite,
     requires_url_content_evidence,
+    SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT,
     shell_repair_prompt,
     should_verify_shell_mutation,
 )
@@ -330,6 +332,7 @@ def run_tool_loop(
         command = _shell_command_from_tool_call(tool_call)
         raw_arguments = _shell_raw_arguments_from_tool_call(tool_call)
         command_is_mutating = bool(command and is_mutating_shell_command(command))
+        read_only_mutation_rejected = is_shell_full_read_only_mutation_error(tool_result.content)
         command_is_content_evidence = bool(command and is_content_evidence_shell_command(command))
         command_is_url_fetch = bool(
             command
@@ -344,7 +347,7 @@ def run_tool_loop(
             turn.url_fetch_attempted = True
         if tool_result.name == "fetch_url":
             turn.url_fetch_attempted = True
-        if command_is_mutating:
+        if command_is_mutating and not read_only_mutation_rejected:
             turn.shell_mutation_attempted = True
         if is_content_evidence_guard:
             runtime.content_evidence_guard_commands += 1
@@ -371,6 +374,9 @@ def run_tool_loop(
                 runtime.completion_guard_successes += 1
             else:
                 runtime.completion_guard_failures += 1
+        if read_only_mutation_rejected:
+            repair.read_only_mutation_retry_pending = True
+            return
         if is_shell_full_contract_error(tool_result.content):
             if command and is_metadata_only_shell_command(command):
                 turn.metadata_only_rejections += 1
@@ -625,6 +631,7 @@ def run_tool_loop(
         executing_mutation_verification = repair.mutation_verification_pending
         executing_mutation_verification_repair = repair.mutation_verification_repair_pending
         executing_mutation_semantic_repair = repair.mutation_semantic_repair_pending
+        executing_read_only_mutation_retry = repair.read_only_mutation_retry_pending
         executing_content_evidence_guard = turn.pending_content_evidence_guard
         executing_file_recovery_guard = turn.pending_file_recovery_guard
         executing_url_recovery_guard = turn.pending_url_recovery_guard
@@ -636,6 +643,8 @@ def run_tool_loop(
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT}]
         elif repair.mutation_semantic_repair_pending:
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_SEMANTIC_REPAIR_PROMPT}]
+        elif repair.read_only_mutation_retry_pending:
+            call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT}]
         elif turn.pending_content_evidence_guard:
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT}]
         elif turn.pending_analysis_completion_guard:
@@ -655,6 +664,7 @@ def run_tool_loop(
                 repair.shell_repair_prompt_pending is not None
                 or repair.shell_empty_result_check_pending
                 or repair.mutation_semantic_repair_pending
+                or repair.read_only_mutation_retry_pending
                 or turn.pending_content_evidence_guard
                 or turn.pending_analysis_completion_guard
                 or turn.pending_url_recovery_guard
@@ -793,6 +803,7 @@ def run_tool_loop(
                 executing_mutation_verification
                 or executing_mutation_verification_repair
                 or executing_mutation_semantic_repair
+                or executing_read_only_mutation_retry
                 or executing_content_evidence_guard
                 or executing_file_recovery_guard
                 or executing_url_recovery_guard
