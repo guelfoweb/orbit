@@ -75,6 +75,14 @@ _EXPLICIT_WEB_SEARCH_RE = re.compile(
     r"\b(?:search\s+(?:online|the\s+web|web)|web\s+search|look\s+up\s+online|find\s+online|cerca\s+(?:online|sul\s+web|nel\s+web))\b",
     re.IGNORECASE,
 )
+_FILE_CONTENT_ACTION_RE = re.compile(
+    r"\b(?:read|show|print|explain|summari[sz]e|analy[sz]e|review|inspect|open|cat|leggi|spiega|riassumi|analizza|mostra)\b",
+    re.IGNORECASE,
+)
+_FILE_LIKE_REFERENCE_RE = re.compile(
+    r"(?:[\"'`])[^\"'`\n]+?\.[A-Za-z0-9]{1,8}(?:[\"'`])|(?:^|[\s(])[A-Za-z0-9_./-]+?\.[A-Za-z0-9]{1,8}(?=$|[\s),:;])",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -333,18 +341,27 @@ class ChatRuntime:
             route_outcome_emitted = True
         if decision is None:
             explicit_web_search = _requires_explicit_web_search_tool(prompt, allowed_tool_names)
+            file_content_evidence = _requires_file_content_evidence_retry(prompt, allowed_tool_names, first.finish_reason)
             if _should_force_tool_route_retry(prompt, allowed_tool_names, first.finish_reason):
+                retry_reason = (
+                    "explicit_web_search"
+                    if explicit_web_search
+                    else "file_content_evidence"
+                    if file_content_evidence
+                    else "length_without_decision_tool_related"
+                )
                 _emit_route_outcome_for_result(
                     first,
                     decision=None,
                     outcome="route_other_retry",
-                    retry_reason="explicit_web_search" if explicit_web_search else "length_without_decision_tool_related",
+                    retry_reason=retry_reason,
                 )
                 route_outcome_emitted = True
                 with self._temporary_backend_thinking(False):
                     route_retry_messages = _route_retry_messages(
                         self.messages,
                         explicit_web_search=explicit_web_search,
+                        file_content_evidence=file_content_evidence,
                     )
                     if on_phase_start:
                         on_phase_start(
@@ -352,7 +369,7 @@ class ChatRuntime:
                                 "route_retry",
                                 streamed=False,
                                 attempt=2,
-                                reason="explicit_web_search" if explicit_web_search else "length_without_decision",
+                                reason=retry_reason,
                             )
                         )
                     if on_progress is None:
@@ -382,7 +399,7 @@ class ChatRuntime:
                     command_content = route_retry.content
                     decision = retry_decision
             if decision is None:
-                if explicit_web_search:
+                if explicit_web_search or file_content_evidence:
                     bundle = self._run_tool_loop(
                         temperature=temperature,
                         max_tokens=max_tokens,
@@ -972,7 +989,17 @@ def _requires_explicit_web_search_tool(prompt: str, allowed_tool_names: tuple[st
 def _should_force_tool_route_retry(prompt: str, allowed_tool_names: tuple[str, ...] | None, finish_reason: str | None) -> bool:
     if _requires_explicit_web_search_tool(prompt, allowed_tool_names):
         return True
+    if _requires_file_content_evidence_retry(prompt, allowed_tool_names, finish_reason):
+        return True
     return finish_reason == "length" and _should_retry_route_as_tool_call(prompt, allowed_tool_names)
+
+
+def _requires_file_content_evidence_retry(prompt: str, allowed_tool_names: tuple[str, ...] | None, finish_reason: str | None) -> bool:
+    if finish_reason != "stop":
+        return False
+    if "exec_shell_full_command" not in set(allowed_tool_names or ()):
+        return False
+    return bool(_FILE_CONTENT_ACTION_RE.search(prompt) and _FILE_LIKE_REFERENCE_RE.search(prompt))
 
 
 def _route_parsed_outcome(decision: RouteDecision) -> str:
@@ -999,19 +1026,34 @@ def _emit_route_outcome_for_result(
     )
 
 
-def _route_retry_messages(messages: list[Message], *, explicit_web_search: bool) -> list[Message]:
-    reminder = (
-        "The user explicitly asked for an online/web search. "
-        "Do not answer from memory. "
-        "Use the latest user request only, and ignore older tool results or file/page content unless that latest request refers to them. "
-        "Return exactly one shell tool call now that performs the search. Output no prose."
-        if explicit_web_search
-        else
-        "The previous routing pass did not return a valid decision. "
-        "Return exactly one shell tool call now if shell/web/file access is needed. Output no prose."
-    )
+def _route_retry_messages(
+    messages: list[Message],
+    *,
+    explicit_web_search: bool,
+    file_content_evidence: bool = False,
+) -> list[Message]:
+    if explicit_web_search:
+        reminder = (
+            "The user explicitly asked for an online/web search. "
+            "Do not answer from memory. "
+            "Use the latest user request only, and ignore older tool results or file/page content unless that latest request refers to them. "
+            "Return exactly one shell tool call now that performs the search. Output no prose."
+        )
+    elif file_content_evidence:
+        reminder = (
+            "The latest user request asks for a specific file's contents. "
+            "Do not answer from directory listings, older tool results, or assumptions. "
+            'Return a compact JSON command decision such as {"command":"cat requested-file"} that reads the requested file content. '
+            "Output no prose."
+        )
+    else:
+        reminder = (
+            "The previous routing pass did not return a valid decision. "
+            "Return exactly one shell tool call now if shell/web/file access is needed. Output no prose."
+        )
+    retry_messages = with_command_system_prompt(messages) if file_content_evidence else with_tool_call_system_prompt(messages)
     return [
-        *with_tool_call_system_prompt(messages),
+        *retry_messages,
         {"role": "user", "content": reminder},
     ]
 
