@@ -21,8 +21,8 @@ Expected behavior:
 
 Saved diffs:
 
-- `/home/guelfoweb/LAB/orbit-backups/readonly-mutation-investigation/A_main_default.edit-target.diff`
-- `/home/guelfoweb/LAB/orbit-backups/readonly-mutation-investigation/B_pr67_off.edit-target.diff`
+- `orbit-backups/readonly-mutation-investigation/A_main_default.edit-target.diff`
+- `orbit-backups/readonly-mutation-investigation/B_pr67_off.edit-target.diff`
 
 ## Diagnosis
 
