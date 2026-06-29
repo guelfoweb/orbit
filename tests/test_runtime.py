@@ -4921,6 +4921,178 @@ EOF"""
         self.assertNotIn("I cannot confirm the content of the file yet.", str(backend.messages_seen[3]))
         self.assertNotIn("I still cannot confirm the content of the file.", str(backend.messages_seen[4]))
 
+    def test_ask_auto_retries_direct_final_when_latest_turn_requires_file_content_after_listing(self) -> None:
+        class FileEvidenceRouteBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="README.md contains project documentation.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    if "specific file's contents" not in messages[-1]["content"]:
+                        raise AssertionError(messages[-1]["content"])
+                    return ChatResult(
+                        content='{"command":"cat README.md"}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The README content was read and summarized.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "README.md").write_text("Orbit README content", encoding="utf-8")
+            backend = FileEvidenceRouteBackend()
+            runtime = ChatRuntime(
+                backend=backend,
+                system_prompt="route system",
+                messages=[
+                    {"role": "system", "content": "route system"},
+                    {"role": "user", "content": "list files in the workdir"},
+                    {"role": "assistant", "content": "", "tool_calls": []},
+                    {"role": "tool", "name": "list_directory", "tool_call_id": "call-list", "content": "README.md"},
+                    {"role": "assistant", "content": "README.md"},
+                ],
+            )
+
+            result = runtime.ask_auto(
+                "read README.md and explain it",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "The README content was read and summarized.")
+        self.assertEqual(backend.calls, 3)
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(tool_messages[-1]["name"], "exec_shell_full_command")
+        self.assertIn("Orbit README content", tool_messages[-1]["content"])
+
+    def test_ask_auto_uses_tool_loop_when_file_content_route_retry_still_has_no_decision(self) -> None:
+        class FileEvidenceToolLoopBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_seen: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_seen.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="README.md appears to be documentation.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=6,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 2:
+                    return ChatResult(
+                        content="I should inspect the file first.",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat README.md\"}"},
+                            }
+                        ],
+                        prompt_tokens=8,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The README content was read after the fallback.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=9,
+                    completion_tokens=3,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "README.md").write_text("Orbit README content", encoding="utf-8")
+            backend = FileEvidenceToolLoopBackend()
+            runtime = ChatRuntime(
+                backend=backend,
+                system_prompt="route system",
+                messages=[
+                    {"role": "system", "content": "route system"},
+                    {"role": "user", "content": "list files in the workdir"},
+                    {"role": "tool", "name": "list_directory", "tool_call_id": "call-list", "content": "README.md"},
+                    {"role": "assistant", "content": "README.md"},
+                ],
+            )
+
+            result = runtime.ask_auto(
+                "read README.md and explain it",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "The README content was read after the fallback.")
+        self.assertEqual(backend.calls, 4)
+        self.assertIsNone(backend.tools_seen[0])
+        self.assertIsNone(backend.tools_seen[1])
+        self.assertIsNotNone(backend.tools_seen[2])
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(tool_messages[-1]["name"], "exec_shell_full_command")
+        self.assertIn("Orbit README content", tool_messages[-1]["content"])
+
     def test_ask_with_tools_requires_real_url_fetch_before_answering(self) -> None:
         class UrlRecoveryBackend:
             def __init__(self) -> None:
