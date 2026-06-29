@@ -3,8 +3,12 @@ from __future__ import annotations
 from ctypes import c_float
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+import threading
 import unittest
+from unittest.mock import patch
 
+from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, NativeRoutePrefixPrefillResult
 from orbit.native_llama.prefix_anchor_probe import (
     PrefixPrefillOnlyProbeResult,
     PrefixAnchorProbeResult,
@@ -14,6 +18,7 @@ from orbit.native_llama.prefix_anchor_probe import (
     split_prompt_by_token_prefix,
 )
 from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
+from orbit.native_llama.prefix_anchor import PrefixAnchorState
 
 
 def _token_value(value: object) -> int:
@@ -53,6 +58,12 @@ class _FakeLib:
 
     def llama_batch_free(self, _batch) -> None:
         return None
+
+    def llama_batch_get_one(self, token_ptr, n_tokens: int):
+        batch = _FakeBatch(n_tokens)
+        for index in range(n_tokens):
+            batch.token[index] = token_ptr[index]
+        return batch
 
     def llama_decode(self, _ctx, batch) -> int:
         for index in range(batch.n_tokens):
@@ -106,6 +117,36 @@ class _FailingRestoreLib(_FakeLib):
     def llama_state_seq_set_data(self, _ctx, buffer, size: int, _seq_id: int) -> int:
         _ = bytes(buffer[:size])
         return size - 1
+
+
+class _FailingDecodeLib(_FakeLib):
+    def llama_decode(self, _ctx, batch) -> int:
+        _ = batch
+        return 1
+
+
+def _prefill_hook_client(segments, *, lib=None) -> NativeLlamaClient:
+    client = NativeLlamaClient.__new__(NativeLlamaClient)
+    client.paths = SimpleNamespace(model=Path("model-alpha.gguf"))
+    client.config = NativeClientConfig(batch_size=2, progress_step=2)
+    client.lib = SimpleNamespace(lib=lib or _FakeLib())
+    client._vocab = object()
+    client.cancel_event = threading.Event()
+    client._session = SimpleNamespace(
+        ctx_tgt=object(),
+        cached_prompt_tokens=[],
+        continuation_ready=False,
+        in_flight=False,
+        cancel_requested=False,
+    )
+    client._route_prefix_anchor_state = PrefixAnchorState()
+    client._route_prefix_prefill_lock = threading.Lock()
+    mapping = {
+        segments.stable_prefix_text: [1, 2, 3, 4],
+        segments.full_prompt_text: [1, 2, 3, 4, 5],
+    }
+    client.tokenize = lambda text: mapping[text]
+    return client
 
 
 class PrefixAnchorProbeTests(unittest.TestCase):
@@ -329,6 +370,147 @@ class PrefixAnchorProbeTests(unittest.TestCase):
         self.assertNotIn("prefix text", rendered)
         self.assertNotIn("full text", rendered)
         self.assertNotIn("placeholder", rendered)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_native_prefill_hook_captures_checkpoint_without_generation(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        client = _prefill_hook_client(segments)
+
+        result = client.capture_route_prefix_prefill_only(segments)
+        metadata = result.to_metadata()
+
+        self.assertTrue(result.attempted)
+        self.assertTrue(result.succeeded)
+        self.assertFalse(result.skipped)
+        self.assertTrue(result.restore_ready)
+        self.assertEqual(result.prefix_token_count, 4)
+        self.assertGreater(result.checkpoint_size_bytes or 0, 0)
+        self.assertEqual(result.decode_calls, 2)
+        self.assertEqual(result.sampled_tokens, 0)
+        self.assertEqual(result.generated_tokens, 0)
+        self.assertFalse(result.sampler_touched)
+        self.assertFalse(result.session_history_touched)
+        self.assertTrue(client._route_prefix_anchor_state.valid)
+        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 3, 4])
+        self.assertNotIn("route policy placeholder", str(metadata))
+        self.assertNotIn("[1, 2, 3, 4]", str(metadata))
+
+    @patch.dict("os.environ", {"ORBIT_KV_PREFIX_ANCHOR": "off"}, clear=True)
+    def test_native_prefill_hook_skips_when_anchor_disabled(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        lib = _FakeLib()
+        client = _prefill_hook_client(segments, lib=lib)
+
+        result = client.capture_route_prefix_prefill_only(segments)
+
+        self.assertFalse(result.attempted)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "anchor_disabled")
+        self.assertEqual(lib.current_tokens, [])
+        self.assertFalse(client._route_prefix_anchor_state.valid)
+
+    @patch.dict("os.environ", {"ORBIT_KV_PREFIX_ANCHOR": "off", "ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=True)
+    def test_native_prefill_hook_off_wins_over_legacy_flag(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        result = _prefill_hook_client(segments).capture_route_prefix_prefill_only(segments)
+
+        self.assertFalse(result.attempted)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "anchor_disabled")
+
+    @patch.dict("os.environ", {"ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"}, clear=True)
+    def test_native_prefill_hook_legacy_flag_enables_when_new_var_unset(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        result = _prefill_hook_client(segments).capture_route_prefix_prefill_only(segments)
+
+        self.assertTrue(result.succeeded)
+        self.assertTrue(result.restore_ready)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_native_prefill_hook_skips_tools_off(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        result = _prefill_hook_client(segments).capture_route_prefix_prefill_only(
+            segments,
+            tools_mode="off",
+        )
+
+        self.assertFalse(result.attempted)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "tools_mode_ineligible")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_native_prefill_hook_fails_safely_on_decode_error(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        client = _prefill_hook_client(segments, lib=_FailingDecodeLib())
+
+        result = client.capture_route_prefix_prefill_only(segments)
+
+        self.assertTrue(result.attempted)
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.failed_reason, "prefix_decode_failed:RuntimeError")
+        self.assertFalse(result.restore_ready)
+        self.assertFalse(client._route_prefix_anchor_state.valid)
+        self.assertEqual(client._session.cached_prompt_tokens, [])
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_native_prefill_hook_skips_when_context_is_active(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        client = _prefill_hook_client(segments)
+        client._session.cached_prompt_tokens = [9]
+
+        result = client.capture_route_prefix_prefill_only(segments)
+
+        self.assertFalse(result.attempted)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "active_context_present")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_native_prefill_hook_skips_concurrent_capture(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": "route policy placeholder"}]
+        )
+        client = _prefill_hook_client(segments)
+        self.assertTrue(client._route_prefix_prefill_lock.acquire(blocking=False))
+        try:
+            result = client.capture_route_prefix_prefill_only(segments)
+        finally:
+            client._route_prefix_prefill_lock.release()
+
+        self.assertFalse(result.attempted)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "prefill_in_flight")
+
+    def test_native_prefill_result_metadata_stays_content_free(self) -> None:
+        result = NativeRoutePrefixPrefillResult(
+            attempted=True,
+            succeeded=True,
+            skipped=False,
+            prefix_hash="prefix-hash-alpha",
+            prefix_token_count=4,
+            checkpoint_size_bytes=12,
+            prefill_ms=3.5,
+            decode_calls=2,
+            restore_ready=True,
+        )
+        rendered = str(result.to_metadata())
+
+        self.assertNotIn("prompt body", rendered)
+        self.assertNotIn("token ids", rendered)
+        self.assertNotIn("command result", rendered)
 
 
 if __name__ == "__main__":
