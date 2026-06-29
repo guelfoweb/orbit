@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from ctypes import c_float
+import importlib.util
+from pathlib import Path
 import unittest
 
 from orbit.native_llama.prefix_anchor_probe import (
+    PrefixPrefillOnlyProbeResult,
     PrefixAnchorProbeResult,
     probe_route_boundary_token_prefix,
+    probe_route_prefix_prefill_only,
     probe_prefix_anchor_equivalence,
     split_prompt_by_token_prefix,
 )
@@ -35,6 +39,7 @@ class _FakeLib:
         self.state_payload = b""
         self.logits_rows: list[object] = []
         self.clears = 0
+        self.time_us = 1000
 
     def llama_get_memory(self, _ctx):
         return object()
@@ -52,10 +57,14 @@ class _FakeLib:
     def llama_decode(self, _ctx, batch) -> int:
         for index in range(batch.n_tokens):
             self.current_tokens.append(_token_value(batch.token[index]))
+        self.time_us += 5000
         return 0
 
     def llama_synchronize(self, _ctx) -> None:
         return None
+
+    def llama_time_us(self) -> int:
+        return self.time_us
 
     def llama_state_seq_get_size(self, _ctx, _seq_id: int) -> int:
         payload = ",".join(str(token) for token in self.current_tokens).encode("ascii")
@@ -169,6 +178,81 @@ class PrefixAnchorProbeTests(unittest.TestCase):
         self.assertEqual(full_tokens, [10, 99, 12])
         self.assertEqual(suffix_tokens, [])
         self.assertEqual(reason, "prefix_not_token_prefix")
+
+    def test_prefill_only_probe_captures_checkpoint_without_sampling_or_generation(self) -> None:
+        result = probe_route_prefix_prefill_only(
+            lib=_FakeLib(),
+            ctx=object(),
+            tokenize=lambda text: {"prefix": [1, 2, 3]}[text],
+            prefix_text="prefix",
+            prefix_hash="prefix-hash-alpha",
+            model_id="model-alpha",
+            template_id="template-alpha",
+            tool_schema_hash="tool-hash-alpha",
+            capability_summary_hash="caps-hash-alpha",
+            backend_version="backend-alpha",
+            native_version="native-alpha",
+        )
+        metadata = result.to_metadata()
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.reason)
+        self.assertEqual(result.prefix_token_count, 3)
+        self.assertGreater(result.checkpoint_size, 0)
+        self.assertEqual(result.decode_calls, 1)
+        self.assertEqual(result.sampled_tokens, 0)
+        self.assertEqual(result.generated_tokens, 0)
+        self.assertFalse(result.sampler_touched)
+        self.assertFalse(result.session_history_touched)
+        self.assertNotIn("raw prefix body", str(metadata))
+        self.assertNotIn("[1, 2, 3]", str(metadata))
+
+    def test_prefill_only_probe_decodes_prefix_in_chunks(self) -> None:
+        result = probe_route_prefix_prefill_only(
+            lib=_FakeLib(),
+            ctx=object(),
+            tokenize=lambda text: {"prefix": [1, 2, 3, 4, 5]}[text],
+            prefix_text="prefix",
+            prefix_hash="prefix-hash-alpha",
+            model_id="model-alpha",
+            template_id="template-alpha",
+            tool_schema_hash="tool-hash-alpha",
+            capability_summary_hash="caps-hash-alpha",
+            backend_version="backend-alpha",
+            native_version="native-alpha",
+            decode_step=2,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.decode_calls, 3)
+        self.assertEqual(result.sampled_tokens, 0)
+        self.assertEqual(result.generated_tokens, 0)
+
+    def test_prefill_only_probe_metadata_stays_content_free(self) -> None:
+        result = PrefixPrefillOnlyProbeResult(
+            ok=True,
+            reason=None,
+            prefix_hash="prefix-hash-alpha",
+            prefix_token_count=3,
+            checkpoint_size=12,
+            prefill_ms=5.0,
+            decode_calls=1,
+        )
+        rendered = str(result.to_metadata())
+
+        self.assertNotIn("prefix text", rendered)
+        self.assertNotIn("user content", rendered)
+        self.assertNotIn("tool output", rendered)
+
+    def test_prefill_only_probe_script_imports_without_running_probe(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "probe_native_route_prefix_prefill_only.py"
+        spec = importlib.util.spec_from_file_location("probe_native_route_prefix_prefill_only", script)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertTrue(callable(module.main))
 
     def test_probe_reports_equivalent_restore_for_stable_tokens(self) -> None:
         mapping = {
