@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import select
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -9,11 +10,18 @@ import socket
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 
-from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _has_open_thought_channel
-from orbit.native_llama.kv_diag import request_context as native_kv_request_context
+from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
+from orbit.native_llama.client import (
+    NativeClientConfig,
+    NativeLlamaClient,
+    NativeRoutePrefixPrefillResult,
+    _has_open_thought_channel,
+)
+from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_context as native_kv_request_context
 from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
+from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.native_server.protocol import (
     ContinueRequest,
     DEFAULT_SESSION_ID,
@@ -27,11 +35,15 @@ from orbit.native_server.protocol import (
     trim_at_stop,
     validate_session_id,
 )
+from orbit.runtime.messages import ROUTE_SYSTEM_PROMPT
 
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 12120
 DEFAULT_ALIAS = "gemma4:12b-it-native"
+PREFIX_PREWARM_ENV = "ORBIT_KV_PREFIX_PREWARM"
+PREFIX_PREWARM_OFF = "off"
+PREFIX_PREWARM_STARTUP = "startup"
 
 
 class OrbitNativeServer:
@@ -558,6 +570,7 @@ def run_server(argv: list[str] | None = None) -> int:
         if not args.verbose_llama_log:
             client.set_quiet_logging()
         client.load()
+        prewarm_startup_route_prefix(client)
     except (FileNotFoundError, RuntimeError) as exc:
         print(_format_native_bootstrap_error(exc), file=sys.stderr)
         return 1
@@ -573,6 +586,80 @@ def run_server(argv: list[str] | None = None) -> int:
         client.close()
         httpd.server_close()
     return 0
+
+
+def route_prefix_prewarm_mode(environ: Mapping[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    value = env.get(PREFIX_PREWARM_ENV, PREFIX_PREWARM_OFF).strip().lower()
+    if value in {"", PREFIX_PREWARM_OFF}:
+        return PREFIX_PREWARM_OFF
+    if value == PREFIX_PREWARM_STARTUP:
+        return PREFIX_PREWARM_STARTUP
+    return PREFIX_PREWARM_OFF
+
+
+def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefixPrefillResult:
+    mode = route_prefix_prewarm_mode()
+    if mode != PREFIX_PREWARM_STARTUP:
+        result = _startup_prewarm_skipped("disabled")
+        _emit_startup_prewarm_diag(mode=mode, result=result)
+        return result
+    if not prefix_anchor_enabled():
+        result = _startup_prewarm_skipped("anchor_disabled")
+        _emit_startup_prewarm_diag(mode=mode, result=result)
+        return result
+    try:
+        segments = render_gemma4_route_prompt_segments(
+            [{"role": "system", "content": ROUTE_SYSTEM_PROMPT}],
+            thinking=False,
+        )
+        result = client.capture_route_prefix_prefill_only(segments, tools_mode="on")
+    except Exception as exc:
+        result = NativeRoutePrefixPrefillResult(
+            attempted=True,
+            succeeded=False,
+            skipped=False,
+            failed_reason=f"startup_prewarm_failed:{type(exc).__name__}",
+            restore_ready=False,
+        )
+    _emit_startup_prewarm_diag(mode=mode, result=result)
+    return result
+
+
+def _startup_prewarm_skipped(reason: str) -> NativeRoutePrefixPrefillResult:
+    return NativeRoutePrefixPrefillResult(
+        attempted=False,
+        succeeded=False,
+        skipped=True,
+        skip_reason=reason,
+        sampled_tokens=0,
+        generated_tokens=0,
+        sampler_touched=False,
+        session_history_touched=False,
+        restore_ready=False,
+    )
+
+
+def _emit_startup_prewarm_diag(*, mode: str, result: NativeRoutePrefixPrefillResult) -> None:
+    emit_route_prefix_prewarm_event(
+        {
+            "prewarm_enabled": mode == PREFIX_PREWARM_STARTUP,
+            "prewarm_mode": mode,
+            "prewarm_attempted": result.attempted,
+            "prewarm_succeeded": result.succeeded,
+            "prewarm_skipped_reason": result.skip_reason,
+            "prewarm_failed_reason": result.failed_reason,
+            "prewarm_prefix_token_count": result.prefix_token_count,
+            "prewarm_checkpoint_size_bytes": result.checkpoint_size_bytes,
+            "prewarm_ms": int(result.prefill_ms) if result.prefill_ms is not None else None,
+            "decode_calls": result.decode_calls,
+            "sampled_tokens": result.sampled_tokens,
+            "generated_tokens": result.generated_tokens,
+            "sampler_touched": result.sampler_touched,
+            "session_history_touched": result.session_history_touched,
+            "restore_ready": result.restore_ready,
+        }
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

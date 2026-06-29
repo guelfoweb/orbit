@@ -5,10 +5,88 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from orbit.native_llama.client import NativeRoutePrefixPrefillResult
 from orbit.native_llama.native_names import runtime_library_filename
-from orbit.native_server.app import build_parser, resolve_bootstrap_paths, run_server
+from orbit.native_server.app import (
+    PREFIX_PREWARM_OFF,
+    PREFIX_PREWARM_STARTUP,
+    build_parser,
+    prewarm_startup_route_prefix,
+    resolve_bootstrap_paths,
+    route_prefix_prewarm_mode,
+    run_server,
+)
+
+
+class _FakeNativeClient:
+    instances: list["_FakeNativeClient"] = []
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.loaded = False
+        self.closed = False
+        self.capture_calls = 0
+        self.raise_on_capture = False
+        _FakeNativeClient.instances.append(self)
+
+    def set_quiet_logging(self) -> None:
+        return None
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def capture_route_prefix_prefill_only(self, segments, *, tools_mode: str = "on", should_cancel=None):
+        del should_cancel
+        self.capture_calls += 1
+        if self.raise_on_capture:
+            raise RuntimeError("synthetic capture failure")
+        if tools_mode != "on":
+            return NativeRoutePrefixPrefillResult(
+                attempted=False,
+                succeeded=False,
+                skipped=True,
+                skip_reason="tools_mode_ineligible",
+            )
+        if not getattr(segments, "boundary_available", False):
+            return NativeRoutePrefixPrefillResult(
+                attempted=True,
+                succeeded=False,
+                skipped=False,
+                failed_reason="route_boundary_unavailable",
+            )
+        return NativeRoutePrefixPrefillResult(
+            attempted=True,
+            succeeded=True,
+            skipped=False,
+            prefix_hash="prefix-hash-alpha",
+            prefix_token_count=693,
+            checkpoint_size_bytes=238454176,
+            prefill_ms=12.0,
+            decode_calls=3,
+            restore_ready=True,
+        )
+
+
+class _FakeHTTPServer:
+    instances: list["_FakeHTTPServer"] = []
+
+    def __init__(self, address, handler) -> None:
+        self.address = address
+        self.handler = handler
+        self.orbit_state = None
+        self.closed = False
+        _FakeHTTPServer.instances.append(self)
+
+    def serve_forever(self) -> None:
+        return None
+
+    def server_close(self) -> None:
+        self.closed = True
 
 
 class NativeServerBootstrapTests(unittest.TestCase):
@@ -87,6 +165,76 @@ class NativeServerBootstrapTests(unittest.TestCase):
         args = build_parser().parse_args([])
 
         self.assertEqual(args.port, 12120)
+
+    def test_route_prefix_prewarm_defaults_to_off(self) -> None:
+        self.assertEqual(route_prefix_prewarm_mode({}), PREFIX_PREWARM_OFF)
+
+    def test_route_prefix_prewarm_accepts_startup(self) -> None:
+        self.assertEqual(route_prefix_prewarm_mode({"ORBIT_KV_PREFIX_PREWARM": "startup"}), PREFIX_PREWARM_STARTUP)
+
+    def test_route_prefix_prewarm_invalid_value_falls_back_to_off(self) -> None:
+        self.assertEqual(route_prefix_prewarm_mode({"ORBIT_KV_PREFIX_PREWARM": "soon"}), PREFIX_PREWARM_OFF)
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_startup_prewarm_default_off_skips_without_capture(self) -> None:
+        client = _FakeNativeClient()
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "disabled")
+        self.assertEqual(client.capture_calls, 0)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_startup_prewarm_explicit_off_skips_without_capture(self) -> None:
+        client = _FakeNativeClient()
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "disabled")
+        self.assertEqual(client.capture_calls, 0)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "startup"}, clear=True)
+    def test_startup_prewarm_invokes_native_hook(self) -> None:
+        client = _FakeNativeClient()
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.succeeded)
+        self.assertTrue(result.restore_ready)
+        self.assertEqual(result.sampled_tokens, 0)
+        self.assertEqual(result.generated_tokens, 0)
+        self.assertEqual(client.capture_calls, 1)
+
+    @mock.patch.dict(
+        "os.environ",
+        {"ORBIT_KV_PREFIX_PREWARM": "startup", "ORBIT_KV_PREFIX_ANCHOR": "off", "ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"},
+        clear=True,
+    )
+    def test_startup_prewarm_anchor_off_wins_without_capture(self) -> None:
+        client = _FakeNativeClient()
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "anchor_disabled")
+        self.assertEqual(client.capture_calls, 0)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "startup"}, clear=True)
+    def test_startup_prewarm_failure_is_metadata_only_and_safe(self) -> None:
+        client = _FakeNativeClient()
+        client.raise_on_capture = True
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+        rendered = str(result.to_metadata())
+
+        self.assertTrue(result.attempted)
+        self.assertFalse(result.succeeded)
+        self.assertFalse(result.restore_ready)
+        self.assertEqual(result.failed_reason, "startup_prewarm_failed:RuntimeError")
+        self.assertNotIn("synthetic capture failure", rendered)
+        self.assertNotIn("route policy", rendered)
 
     def test_bootstrap_supports_legacy_direct_model_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +325,41 @@ class NativeServerBootstrapTests(unittest.TestCase):
         output = stderr.getvalue()
         self.assertIn("error: native MTP shim inputs are missing.", output)
         self.assertIn("--llama-root", output)
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_run_server_default_does_not_startup_prewarm(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(_FakeNativeClient.instances), 1)
+        self.assertEqual(_FakeNativeClient.instances[0].capture_calls, 0)
+        self.assertTrue(_FakeNativeClient.instances[0].closed)
+        self.assertTrue(_FakeHTTPServer.instances[0].closed)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "startup"}, clear=True)
+    def test_run_server_startup_prewarm_invokes_hook_before_serving(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(_FakeNativeClient.instances), 1)
+        self.assertEqual(_FakeNativeClient.instances[0].capture_calls, 1)
+        self.assertIsNotNone(_FakeHTTPServer.instances[0].orbit_state)
 
 
 if __name__ == "__main__":
