@@ -73,6 +73,44 @@ class _RouteAnchorRuntimePlan:
     metadata: dict[str, object]
 
 
+@dataclass(frozen=True)
+class NativeRoutePrefixPrefillResult:
+    attempted: bool
+    succeeded: bool
+    skipped: bool
+    skip_reason: str | None = None
+    failed_reason: str | None = None
+    prefix_hash: str | None = None
+    prefix_token_count: int | None = None
+    checkpoint_size_bytes: int | None = None
+    prefill_ms: float | None = None
+    decode_calls: int | None = None
+    sampled_tokens: int = 0
+    generated_tokens: int = 0
+    sampler_touched: bool = False
+    session_history_touched: bool = False
+    restore_ready: bool = False
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "attempted": self.attempted,
+            "succeeded": self.succeeded,
+            "skipped": self.skipped,
+            "skip_reason": self.skip_reason,
+            "failed_reason": self.failed_reason,
+            "prefix_hash": self.prefix_hash,
+            "prefix_token_count": self.prefix_token_count,
+            "checkpoint_size_bytes": self.checkpoint_size_bytes,
+            "prefill_ms": self.prefill_ms,
+            "decode_calls": self.decode_calls,
+            "sampled_tokens": self.sampled_tokens,
+            "generated_tokens": self.generated_tokens,
+            "sampler_touched": self.sampler_touched,
+            "session_history_touched": self.session_history_touched,
+            "restore_ready": self.restore_ready,
+        }
+
+
 class NativeLlamaClient:
     def __init__(self, paths: NativeLlamaPaths, config: NativeClientConfig | None = None) -> None:
         self.paths = paths
@@ -101,6 +139,7 @@ class NativeLlamaClient:
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = 0
         self._route_prefix_anchor_state = PrefixAnchorState()
+        self._route_prefix_prefill_lock = threading.Lock()
 
     def session_snapshot(self, session_id: str = DEFAULT_NATIVE_SESSION_ID) -> NativeSessionSnapshot:
         if session_id != self._session.session_id:
@@ -359,6 +398,122 @@ class NativeLlamaClient:
             on_token=on_token,
             should_cancel=should_cancel,
         )
+
+    def capture_route_prefix_prefill_only(
+        self,
+        segments: RoutePromptSegments,
+        *,
+        tools_mode: str = "on",
+        should_cancel=None,
+    ) -> NativeRoutePrefixPrefillResult:
+        if tools_mode != "on":
+            return _route_prefix_prefill_skipped("tools_mode_ineligible")
+        if not prefix_anchor_enabled():
+            return _route_prefix_prefill_skipped("anchor_disabled")
+        if not self._session.ctx_tgt or not self._vocab:
+            return _route_prefix_prefill_failed("native_client_not_loaded")
+        if self._session.in_flight:
+            return _route_prefix_prefill_skipped("native_request_in_flight")
+        if self._session.continuation_ready or self._session.cached_prompt_tokens:
+            return _route_prefix_prefill_skipped("active_context_present")
+        if not self._route_prefix_prefill_lock.acquire(blocking=False):
+            return _route_prefix_prefill_skipped("prefill_in_flight")
+        try:
+            if self._session.in_flight:
+                return _route_prefix_prefill_skipped("native_request_in_flight")
+            if self._session.continuation_ready or self._session.cached_prompt_tokens:
+                return _route_prefix_prefill_skipped("active_context_present")
+            if not segments.boundary_available:
+                return _route_prefix_prefill_failed("route_boundary_unavailable")
+            prompt_tokens = self.tokenize(segments.full_prompt_text)
+            if not prompt_tokens:
+                return _route_prefix_prefill_failed("empty_full_prompt_tokens")
+            plan = self._route_anchor_plan(segments.full_prompt_text, prompt_tokens, segments)
+            if plan is None:
+                return _route_prefix_prefill_failed("route_anchor_plan_unavailable")
+
+            self.reset_cancel()
+            self._clear_target_memory()
+            token_array = (llama_token * len(plan.prefix_tokens))(*plan.prefix_tokens)
+            step = max(1, min(self.config.progress_step, self.config.batch_size))
+            processed = 0
+            decode_calls = 0
+            lib = self.lib.lib
+            start_us = int(lib.llama_time_us()) if hasattr(lib, "llama_time_us") else 0
+            try:
+                while processed < len(plan.prefix_tokens) and not self.cancel_event.is_set():
+                    if should_cancel and should_cancel():
+                        self.cancel()
+                        break
+                    end = min(processed + step, len(plan.prefix_tokens))
+                    processed = self._decode_prompt_range(
+                        token_array,
+                        processed=processed,
+                        end=end,
+                        step=step,
+                        total=len(plan.prefix_tokens),
+                        on_progress=None,
+                        should_cancel=should_cancel,
+                    )
+                    decode_calls += 1
+            except Exception as exc:
+                self._clear_target_memory()
+                self._route_prefix_anchor_state = PrefixAnchorState()
+                return _route_prefix_prefill_failed(
+                    f"prefix_decode_failed:{type(exc).__name__}",
+                    prefix_hash=plan.prefix_hash,
+                    prefix_token_count=len(plan.prefix_tokens),
+                    decode_calls=max(1, decode_calls),
+                )
+            end_us = int(lib.llama_time_us()) if hasattr(lib, "llama_time_us") else start_us
+            prefill_ms = max(0.0, (end_us - start_us) / 1000.0)
+            if processed != len(plan.prefix_tokens) or self.cancel_event.is_set():
+                self._clear_target_memory()
+                self._route_prefix_anchor_state = PrefixAnchorState()
+                return _route_prefix_prefill_failed(
+                    "cancelled",
+                    prefix_hash=plan.prefix_hash,
+                    prefix_token_count=len(plan.prefix_tokens),
+                    prefill_ms=prefill_ms,
+                    decode_calls=decode_calls,
+                )
+
+            state, capture_meta = capture_prefix_anchor(
+                lib=self.lib.lib,
+                ctx=self._session.ctx_tgt,
+                prefix_hash=plan.prefix_hash,
+                token_count=len(plan.prefix_tokens),
+                enabled=True,
+                **self._route_anchor_state_kwargs(plan),
+            )
+            if not state.valid:
+                reason = str(capture_meta.get("fallback_reason") or state.invalidation_reason or "capture_failed")
+                self._clear_target_memory()
+                self._route_prefix_anchor_state = PrefixAnchorState()
+                return _route_prefix_prefill_failed(
+                    reason,
+                    prefix_hash=plan.prefix_hash,
+                    prefix_token_count=len(plan.prefix_tokens),
+                    prefill_ms=prefill_ms,
+                    decode_calls=decode_calls,
+                )
+
+            self._route_prefix_anchor_state = state
+            self._session.cached_prompt_tokens = list(plan.prefix_tokens)
+            self._session.continuation_ready = False
+            return NativeRoutePrefixPrefillResult(
+                attempted=True,
+                succeeded=True,
+                skipped=False,
+                prefix_hash=plan.prefix_hash,
+                prefix_token_count=len(plan.prefix_tokens),
+                checkpoint_size_bytes=state.checkpoint_size,
+                prefill_ms=prefill_ms,
+                decode_calls=decode_calls,
+                restore_ready=True,
+            )
+        finally:
+            self._route_prefix_prefill_lock.release()
 
     def complete_chat(
         self,
@@ -1418,6 +1573,37 @@ def _route_anchor_metadata_from_prefix(metadata: dict[str, object], *, prefix_ha
         "anchor_invalidated": bool(metadata.get("anchor_invalidated")),
         "invalidation_reason": metadata.get("invalidation_reason"),
     }
+
+
+def _route_prefix_prefill_skipped(reason: str) -> NativeRoutePrefixPrefillResult:
+    return NativeRoutePrefixPrefillResult(
+        attempted=False,
+        succeeded=False,
+        skipped=True,
+        skip_reason=reason,
+    )
+
+
+def _route_prefix_prefill_failed(
+    reason: str,
+    *,
+    prefix_hash: str | None = None,
+    prefix_token_count: int | None = None,
+    checkpoint_size_bytes: int | None = None,
+    prefill_ms: float | None = None,
+    decode_calls: int | None = None,
+) -> NativeRoutePrefixPrefillResult:
+    return NativeRoutePrefixPrefillResult(
+        attempted=True,
+        succeeded=False,
+        skipped=False,
+        failed_reason=reason,
+        prefix_hash=prefix_hash,
+        prefix_token_count=prefix_token_count,
+        checkpoint_size_bytes=checkpoint_size_bytes,
+        prefill_ms=prefill_ms,
+        decode_calls=decode_calls,
+    )
 
 
 def _strip_control_channels(content: str) -> str:

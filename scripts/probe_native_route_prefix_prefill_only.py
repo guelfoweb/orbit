@@ -14,9 +14,7 @@ if str(SRC) not in sys.path:
 
 from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
-from orbit.native_llama.native_names import runtime_library_filename
 from orbit.native_llama.paths import DEFAULT_MODEL_ID, resolve_legacy_paths, resolve_paths
-from orbit.native_llama.prefix_anchor_probe import probe_route_prefix_prefill_only
 from orbit.runtime.messages import ROUTE_SYSTEM_PROMPT
 
 
@@ -55,24 +53,11 @@ def main(argv: list[str] | None = None) -> int:
             if not segments.boundary_available:
                 print(json.dumps({"probe_ok": False, "reason": "route_boundary_unavailable"}, sort_keys=True))
                 return 2
-            result = probe_route_prefix_prefill_only(
-                lib=client.lib.lib,
-                ctx=client._session.ctx_tgt,
-                tokenize=client.tokenize,
-                prefix_text=segments.stable_prefix_text,
-                prefix_hash=segments.stable_prefix_hash,
-                model_id=str(paths.model),
-                template_id="gemma4-route-prefix-v1",
-                tool_schema_hash=segments.stable_prefix_hash,
-                capability_summary_hash=segments.stable_prefix_hash,
-                runtime_policy_hash=segments.stable_prefix_hash,
-                route_contract_hash=segments.stable_prefix_hash,
-                backend_version="orbit-native",
-                native_version=runtime_library_filename("llama"),
-                tools_mode="on",
-            )
-            print(json.dumps(result.to_metadata(), sort_keys=True))
-            return 0 if result.ok else 2
+            result = client.capture_route_prefix_prefill_only(segments)
+            metadata = result.to_metadata()
+            metadata["probe_ok"] = result.succeeded
+            print(json.dumps(metadata, sort_keys=True))
+            return 0 if result.succeeded else 2
         finally:
             client.close()
     except Exception as exc:
