@@ -33,6 +33,7 @@ class ToolRepairState:
     """
 
     contract_retry_pending: bool = False
+    read_only_mutation_retry_pending: bool = False
     shell_empty_result_check_pending: bool = False
     shell_empty_result_check_used: bool = False
     shell_error_final_pending: bool = False
@@ -49,6 +50,7 @@ class ToolRepairState:
     def has_pending(self) -> bool:
         return (
             self.contract_retry_pending
+            or self.read_only_mutation_retry_pending
             or self.shell_empty_result_check_pending
             or self.shell_repair_prompt_pending is not None
             or self.mutation_verification_pending
@@ -160,6 +162,7 @@ class ToolTurnState:
 
     def clear_pending_after_model_call(self) -> None:
         self.repair_state.shell_repair_prompt_pending = None
+        self.repair_state.read_only_mutation_retry_pending = False
         self.repair_state.shell_empty_result_check_pending = False
         self.repair_state.mutation_verification_pending = False
         self.repair_state.mutation_verification_repair_pending = False
