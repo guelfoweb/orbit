@@ -75,6 +75,38 @@ class RouteBoundaryTokenProbeResult:
         }
 
 
+@dataclass(frozen=True)
+class PrefixPrefillOnlyProbeResult:
+    ok: bool
+    reason: str | None
+    prefix_hash: str
+    prefix_token_count: int
+    checkpoint_size: int
+    prefill_ms: float
+    decode_calls: int
+    sampled_tokens: int = 0
+    generated_tokens: int = 0
+    sampler_touched: bool = False
+    session_history_touched: bool = False
+    seq_id: int = 0
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "probe_ok": self.ok,
+            "reason": self.reason,
+            "prefix_hash": self.prefix_hash,
+            "prefix_token_count": self.prefix_token_count,
+            "checkpoint_size_bytes": self.checkpoint_size,
+            "prefill_ms": self.prefill_ms,
+            "decode_calls": self.decode_calls,
+            "sampled_tokens": self.sampled_tokens,
+            "generated_tokens": self.generated_tokens,
+            "sampler_touched": self.sampler_touched,
+            "session_history_touched": self.session_history_touched,
+            "seq_id": self.seq_id,
+        }
+
+
 def probe_route_boundary_token_prefix(
     *,
     segments: RoutePromptSegments,
@@ -118,6 +150,121 @@ def split_prompt_by_token_prefix(
         return prefix_tokens, [], full_tokens, "prefix_not_token_prefix"
     suffix_tokens = full_tokens[len(prefix_tokens) :]
     return prefix_tokens, suffix_tokens, full_tokens, None
+
+
+def probe_route_prefix_prefill_only(
+    *,
+    lib: Any,
+    ctx: Any,
+    tokenize: TokenizeFn,
+    prefix_text: str,
+    prefix_hash: str,
+    seq_id: int = 0,
+    model_id: str | None = None,
+    template_id: str | None = None,
+    tool_schema_hash: str | None = None,
+    capability_summary_hash: str | None = None,
+    runtime_policy_hash: str | None = "probe-runtime-policy",
+    route_contract_hash: str | None = "probe-route-contract",
+    backend_version: str | None = None,
+    native_version: str | None = None,
+    tools_mode: str | None = "tools-on-route",
+    decode_step: int = 256,
+) -> PrefixPrefillOnlyProbeResult:
+    prefix_tokens = list(tokenize(prefix_text))
+    if not prefix_tokens:
+        return PrefixPrefillOnlyProbeResult(
+            ok=False,
+            reason="empty_prefix_tokens",
+            prefix_hash=prefix_hash,
+            prefix_token_count=0,
+            checkpoint_size=0,
+            prefill_ms=0.0,
+            decode_calls=0,
+            seq_id=seq_id,
+        )
+
+    anchor_key = compute_prefix_anchor_key(
+        model_id=model_id,
+        template_id=template_id,
+        tool_schema_hash=tool_schema_hash,
+        capability_summary_hash=capability_summary_hash,
+        runtime_policy_hash=runtime_policy_hash,
+        route_contract_hash=route_contract_hash,
+        backend_version=backend_version,
+        native_version=native_version,
+        tools_mode=tools_mode,
+    )
+    anchor_kwargs = {
+        "model_id": model_id,
+        "template_id": template_id,
+        "tool_schema_hash": tool_schema_hash,
+        "capability_summary_hash": capability_summary_hash,
+        "runtime_policy_hash": runtime_policy_hash,
+        "route_contract_hash": route_contract_hash,
+        "backend_version": backend_version,
+        "native_version": native_version,
+        "tools_mode": tools_mode,
+    }
+
+    _clear_context(lib, ctx)
+    start_us = int(lib.llama_time_us()) if hasattr(lib, "llama_time_us") else 0
+    decode_calls = 0
+    step = max(1, decode_step)
+    try:
+        for offset in range(0, len(prefix_tokens), step):
+            chunk = prefix_tokens[offset : offset + step]
+            _decode_tokens(lib, ctx, chunk, seq_id=seq_id, start_pos=offset)
+            decode_calls += 1
+    except Exception as exc:
+        return PrefixPrefillOnlyProbeResult(
+            ok=False,
+            reason=f"prefix_decode_failed:{type(exc).__name__}",
+            prefix_hash=prefix_hash,
+            prefix_token_count=len(prefix_tokens),
+            checkpoint_size=0,
+            prefill_ms=0.0,
+            decode_calls=max(1, decode_calls),
+            seq_id=seq_id,
+        )
+    end_us = int(lib.llama_time_us()) if hasattr(lib, "llama_time_us") else start_us
+    prefill_ms = max(0.0, (end_us - start_us) / 1000.0)
+
+    state, capture_meta = capture_prefix_anchor(
+        lib=lib,
+        ctx=ctx,
+        seq_id=seq_id,
+        prefix_hash=anchor_key,
+        token_count=len(prefix_tokens),
+        enabled=True,
+        **anchor_kwargs,
+    )
+    if not state.valid:
+        return PrefixPrefillOnlyProbeResult(
+            ok=False,
+            reason=str(capture_meta.get("fallback_reason") or state.invalidation_reason or "capture_failed"),
+            prefix_hash=prefix_hash,
+            prefix_token_count=len(prefix_tokens),
+            checkpoint_size=0,
+            prefill_ms=prefill_ms,
+            decode_calls=decode_calls,
+            seq_id=seq_id,
+        )
+
+    return PrefixPrefillOnlyProbeResult(
+        ok=True,
+        reason=None,
+        prefix_hash=prefix_hash,
+        prefix_token_count=len(prefix_tokens),
+        checkpoint_size=state.checkpoint_size,
+        prefill_ms=prefill_ms,
+        decode_calls=decode_calls,
+        sampled_tokens=0,
+        generated_tokens=0,
+        sampler_touched=False,
+        session_history_touched=False,
+        seq_id=seq_id,
+    )
 
 
 def _longest_common_prefix(first: list[int], second: list[int]) -> int:
