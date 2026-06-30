@@ -6,7 +6,13 @@ import unittest
 from unittest import mock
 
 from orbit.native_llama.native_names import runtime_library_filename
-from orbit.native_llama.paths import BUNDLED_SOURCE_ROOT, DEFAULT_VENDOR_LIB_DIR, LEGACY_MODEL_ID, resolve_legacy_paths, resolve_paths
+from orbit.native_llama.paths import (
+    BUNDLED_SOURCE_ROOT,
+    DEFAULT_VENDOR_LIB_DIR,
+    LEGACY_MODEL_ID,
+    resolve_legacy_paths,
+    resolve_paths,
+)
 
 
 class NativePathsTests(unittest.TestCase):
@@ -25,6 +31,8 @@ class NativePathsTests(unittest.TestCase):
             mmproj.write_text("mmproj", encoding="utf-8")
 
             with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib), mock.patch(
+                "orbit.native_llama.paths.DEFAULT_VENDOR_BUILD_BIN", root / "missing-vendor-build-bin"
+            ), mock.patch(
                 "orbit.native_llama.paths.BUNDLED_SOURCE_ROOT", root / "missing-bundled-source"
             ):
                 paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
@@ -32,6 +40,35 @@ class NativePathsTests(unittest.TestCase):
         self.assertIsNone(paths.llama_root)
         self.assertEqual(paths.build_bin, vendor_lib)
         self.assertEqual(paths.library, vendor_lib / runtime_library_filename("llama"))
+        self.assertEqual(paths.model, target)
+
+    def test_prefers_packaged_soname_runtime_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vendor_lib = root / "vendor/lib"
+            vendor_build_bin = root / "vendor/build/llama.cpp/bin"
+            models_dir = root / "models"
+            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            vendor_lib.mkdir(parents=True)
+            vendor_build_bin.mkdir(parents=True)
+            library_name = runtime_library_filename("llama")
+            (vendor_lib / library_name).write_text("", encoding="utf-8")
+            (vendor_build_bin / library_name).write_text("", encoding="utf-8")
+            (vendor_build_bin / "libllama.so.0").write_text("", encoding="utf-8")
+            (vendor_build_bin / "libllama-common.so.0").write_text("", encoding="utf-8")
+            target.parent.mkdir(parents=True)
+            target.write_text("target", encoding="utf-8")
+            mmproj.write_text("mmproj", encoding="utf-8")
+
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib), mock.patch(
+                "orbit.native_llama.paths.DEFAULT_VENDOR_BUILD_BIN", vendor_build_bin
+            ), mock.patch("orbit.native_llama.paths.BUNDLED_SOURCE_ROOT", root / "missing-bundled-source"):
+                paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
+
+        self.assertIsNone(paths.llama_root)
+        self.assertEqual(paths.build_bin, vendor_build_bin)
+        self.assertEqual(paths.library, vendor_build_bin / runtime_library_filename("llama"))
         self.assertEqual(paths.model, target)
 
     def test_resolves_runtime_from_orbit_llama_lib_dir_without_llama_root(self) -> None:
@@ -49,6 +86,7 @@ class NativePathsTests(unittest.TestCase):
 
             with (
                 mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", root / "missing-vendor-lib"),
+                mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_BUILD_BIN", root / "missing-vendor-build-bin"),
                 mock.patch("orbit.native_llama.paths.DEFAULT_LLAMA_LIB_DIR", env_lib),
             ):
                 paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
@@ -74,6 +112,8 @@ class NativePathsTests(unittest.TestCase):
             mmproj.write_text("mmproj", encoding="utf-8")
 
             with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib), mock.patch(
+                "orbit.native_llama.paths.DEFAULT_VENDOR_BUILD_BIN", root / "missing-vendor-build-bin"
+            ), mock.patch(
                 "orbit.native_llama.paths.BUNDLED_SOURCE_ROOT", bundled
             ):
                 paths = resolve_paths(llama_root=None, models_dir=models_dir, hf_cache=root / "hf")
@@ -135,7 +175,9 @@ class NativePathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             missing_vendor = root / "vendor/lib"
-            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", missing_vendor):
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", missing_vendor), mock.patch(
+                "orbit.native_llama.paths.DEFAULT_VENDOR_BUILD_BIN", root / "missing-vendor-build-bin"
+            ):
                 with self.assertRaises(FileNotFoundError) as ctx:
                     resolve_paths(llama_root=None, models_dir=root / "models", hf_cache=root / "hf")
 

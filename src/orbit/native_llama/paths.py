@@ -11,6 +11,7 @@ from .native_names import runtime_library_filename
 
 DEFAULT_VENDOR_LIB_DIR = PACKAGE_NATIVE_ROOT / "lib"
 DEFAULT_VENDOR_SHIM_DIR = PACKAGE_NATIVE_ROOT / "shim"
+DEFAULT_VENDOR_BUILD_BIN = PACKAGE_NATIVE_ROOT / "build" / "llama.cpp" / "bin"
 BUNDLED_SOURCE_ROOT = PACKAGE_NATIVE_ROOT / "source" / "llama.cpp"
 DEFAULT_LLAMA_LIB_DIR = Path(os.environ["ORBIT_LLAMA_LIB_DIR"]).expanduser().resolve() if os.environ.get("ORBIT_LLAMA_LIB_DIR") else None
 BUNDLED_SOURCE_ROOT = PACKAGE_NATIVE_ROOT / "source" / "llama.cpp"
@@ -120,6 +121,9 @@ def _resolve_model(
 
 def _resolve_native_runtime(llama_root: Path | None) -> tuple[Path | None, Path, Path]:
     library_name = runtime_library_filename("llama")
+    vendored_soname_library = DEFAULT_VENDOR_BUILD_BIN / library_name
+    if _has_packaged_soname_runtime(DEFAULT_VENDOR_BUILD_BIN) and vendored_soname_library.exists():
+        return None, DEFAULT_VENDOR_BUILD_BIN, vendored_soname_library
     vendored_library = DEFAULT_VENDOR_LIB_DIR / library_name
     if vendored_library.exists():
         return None, DEFAULT_VENDOR_LIB_DIR, vendored_library
@@ -142,6 +146,10 @@ def _resolve_native_runtime(llama_root: Path | None) -> tuple[Path | None, Path,
         f"Searched: {searched_text}. "
         "Provide ORBIT_LLAMA_LIB_DIR, --llama-root, or ORBIT_LLAMA_ROOT, or package native libraries under orbit/native_llama/vendor/lib."
     )
+
+
+def _has_packaged_soname_runtime(path: Path) -> bool:
+    return (path / "libllama.so.0").exists() and (path / "libllama-common.so.0").exists()
 
 
 def _resolve_build_source_root(llama_root: Path | None) -> Path | None:
