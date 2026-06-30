@@ -7,7 +7,8 @@ import ctypes
 import os
 import subprocess
 
-from .build_support import compile_cpp_helper
+from .bindings import load_native_cdll, native_cdll_flags
+from .build_support import DEFAULT_VENDOR_BUILD_BIN, compile_cpp_helper
 from .mtp_completion import MtpCompletionResult
 from .native_artifacts import packaged_shim_path, require_legacy_llama_root
 from .native_names import persistent_mtp_shim_filename, platform_runtime_libs
@@ -16,6 +17,8 @@ from .paths import NativeLlamaPaths
 _REQUIRED_SHIM_SYMBOLS = (
     "orbit_mtp_session_complete",
     "orbit_mtp_session_set_followup_suffix_tokens",
+    "orbit_mtp_session_last_first_sample_trace_json",
+    "orbit_mtp_session_request_boundary_refill_marker",
 )
 
 MtpTokenCallback = CFUNCTYPE(None, c_char_p, c_void_p)
@@ -35,6 +38,7 @@ class PersistentMtpSessionRuntime:
     handle: c_void_p
     ctx_dft: c_void_p
     spec: c_void_p
+    library: object | None = None
     rss_before_kb: int | None = None
     rss_after_init_kb: int | None = None
     rss_peak_kb: int | None = None
@@ -49,12 +53,12 @@ class PersistentMtpLibrary:
         self._configure_api()
 
     def _load_library(self) -> CDLL:
-        flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
+        flags = native_cdll_flags()
         for dep in platform_runtime_libs():
             path = self.build_bin / dep
             if path.exists():
-                self._handles.append(ctypes.CDLL(str(path), mode=flags))
-        return ctypes.CDLL(str(self.shim_path), mode=flags)
+                self._handles.append(load_native_cdll(path, mode=flags))
+        return load_native_cdll(self.shim_path, mode=flags)
 
     def _configure_api(self) -> None:
         lib = self.lib
@@ -134,6 +138,15 @@ class PersistentMtpLibrary:
         lib.orbit_mtp_session_last_checkpoint_count.restype = c_int32
         lib.orbit_mtp_session_last_restore_count.argtypes = [c_void_p]
         lib.orbit_mtp_session_last_restore_count.restype = c_int32
+        if hasattr(lib, "orbit_mtp_session_last_timing_json"):
+            lib.orbit_mtp_session_last_timing_json.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_timing_json.restype = c_char_p
+        if hasattr(lib, "orbit_mtp_session_last_output_token_hashes_json"):
+            lib.orbit_mtp_session_last_output_token_hashes_json.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_output_token_hashes_json.restype = c_char_p
+        if hasattr(lib, "orbit_mtp_session_last_first_sample_trace_json"):
+            lib.orbit_mtp_session_last_first_sample_trace_json.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_first_sample_trace_json.restype = c_char_p
 
 
 def build_persistent_mtp_shim(
@@ -162,12 +175,22 @@ def build_persistent_mtp_shim(
     )
 
 
+def _persistent_mtp_link_bin(paths: NativeLlamaPaths) -> Path:
+    """Choose a link directory with the SONAME symlinks required by the shim."""
+    build_bin = paths.build_bin
+    if (build_bin / "libllama.so.0").exists() and (build_bin / "libllama-common.so.0").exists():
+        return build_bin
+    if (DEFAULT_VENDOR_BUILD_BIN / "libllama.so.0").exists() and (DEFAULT_VENDOR_BUILD_BIN / "libllama-common.so.0").exists():
+        return DEFAULT_VENDOR_BUILD_BIN
+    return build_bin
+
+
 def _shim_exports_required_symbols(path: Path) -> bool:
     if not path.exists() or not path.is_file():
         return False
-    flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
+    flags = native_cdll_flags()
     try:
-        lib = ctypes.CDLL(str(path), mode=flags)
+        lib = load_native_cdll(path, mode=flags)
     except OSError:
         return False
     return all(hasattr(lib, symbol) for symbol in _REQUIRED_SHIM_SYMBOLS)
@@ -189,7 +212,12 @@ def create_persistent_mtp_session(
 ) -> PersistentMtpSessionRuntime:
     if not paths.mtp_available or paths.draft_mtp_model is None:
         raise RuntimeError(paths.fallback_reason or "draft-mtp-unavailable")
-    shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=build_dir, runner=runner)
+    shim = build_persistent_mtp_shim(
+        llama_root=llama_root,
+        build_dir=build_dir,
+        build_bin=_persistent_mtp_link_bin(paths),
+        runner=runner,
+    )
     library = library_factory(paths.build_bin, shim)
     handle = library.lib.orbit_mtp_session_create(
         str(paths.draft_mtp_model).encode(),
@@ -206,10 +234,25 @@ def create_persistent_mtp_session(
         handle=c_void_p(handle),
         ctx_dft=library.lib.orbit_mtp_session_ctx_dft(handle),
         spec=library.lib.orbit_mtp_session_spec(handle),
+        library=library,
         rss_before_kb=_long_or_none(library.lib.orbit_mtp_session_rss_before_kb(handle)),
         rss_after_init_kb=_long_or_none(library.lib.orbit_mtp_session_rss_after_init_kb(handle)),
         rss_peak_kb=_long_or_none(library.lib.orbit_mtp_session_rss_peak_kb(handle)),
     )
+
+
+def _runtime_library(
+    *,
+    paths: NativeLlamaPaths,
+    runtime: PersistentMtpSessionRuntime,
+    build_dir: Path | None,
+    library_factory,
+    llama_root: Path,
+) -> object:
+    if runtime.library is not None and hasattr(runtime.library, "lib"):
+        return runtime.library
+    shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=build_dir, build_bin=_persistent_mtp_link_bin(paths))
+    return library_factory(paths.build_bin, shim)
 
 
 def reset_persistent_mtp_session(
@@ -221,8 +264,13 @@ def reset_persistent_mtp_session(
     library_factory=PersistentMtpLibrary,
     llama_root: Path,
 ) -> PersistentMtpSessionRuntime:
-    shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=build_dir)
-    library = library_factory(paths.build_bin, shim)
+    library = _runtime_library(
+        paths=paths,
+        runtime=runtime,
+        build_dir=build_dir,
+        library_factory=library_factory,
+        llama_root=llama_root,
+    )
     ok = library.lib.orbit_mtp_session_reset(runtime.handle, ctx_tgt)
     if not ok:
         raise RuntimeError(_decode_error(library.lib.orbit_mtp_last_error()))
@@ -230,6 +278,7 @@ def reset_persistent_mtp_session(
         handle=runtime.handle,
         ctx_dft=library.lib.orbit_mtp_session_ctx_dft(runtime.handle),
         spec=library.lib.orbit_mtp_session_spec(runtime.handle),
+        library=library,
         rss_before_kb=runtime.rss_before_kb,
         rss_after_init_kb=runtime.rss_after_init_kb,
         rss_peak_kb=runtime.rss_peak_kb,
@@ -244,8 +293,13 @@ def free_persistent_mtp_session(
     library_factory=PersistentMtpLibrary,
     llama_root: Path,
 ) -> None:
-    shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=build_dir)
-    library = library_factory(paths.build_bin, shim)
+    library = _runtime_library(
+        paths=paths,
+        runtime=runtime,
+        build_dir=build_dir,
+        library_factory=library_factory,
+        llama_root=llama_root,
+    )
     library.lib.orbit_mtp_session_free(runtime.handle)
 
 
@@ -264,8 +318,13 @@ def run_persistent_mtp_completion(
 ) -> MtpCompletionResult:
     if runtime is None:
         return MtpCompletionResult(enabled=True, success=False, error="persistent-mtp-uninitialized")
-    shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=build_dir)
-    library = library_factory(paths.build_bin, shim)
+    library = _runtime_library(
+        paths=paths,
+        runtime=runtime,
+        build_dir=build_dir,
+        library_factory=library_factory,
+        llama_root=llama_root,
+    )
     if on_token is not None:
         def _token_cb(text: bytes | None, _user_data) -> None:
             if text:
@@ -294,6 +353,7 @@ def run_persistent_mtp_completion(
             success=False,
             error=_decode_error(library.lib.orbit_mtp_last_error()),
         )
+    trace_enabled = _trace_enabled()
     return MtpCompletionResult(
         enabled=True,
         success=True,
@@ -322,6 +382,12 @@ def run_persistent_mtp_completion(
         rollback_tokens_total=int(library.lib.orbit_mtp_session_last_rollback_tokens_total(runtime.handle)),
         checkpoint_count=int(library.lib.orbit_mtp_session_last_checkpoint_count(runtime.handle)),
         restore_count=int(library.lib.orbit_mtp_session_last_restore_count(runtime.handle)),
+        trace_json=None,
+        timing_json=_optional_trace_text(library.lib, "orbit_mtp_session_last_timing_json", runtime.handle) if trace_enabled else None,
+        validate_trace_json=None,
+        target_decode_trace_json=None,
+        output_token_hashes_json=_optional_trace_text(library.lib, "orbit_mtp_session_last_output_token_hashes_json", runtime.handle) if trace_enabled else None,
+        first_sample_trace_json=_optional_trace_text(library.lib, "orbit_mtp_session_last_first_sample_trace_json", runtime.handle) if trace_enabled else None,
     )
 
 
@@ -335,6 +401,18 @@ def _decode_text(value: bytes | None) -> str:
     if not value:
         return ""
     return value.decode(errors="replace")
+
+
+def _optional_trace_text(lib, name: str, handle: c_void_p) -> str | None:
+    getter = getattr(lib, name, None)
+    if getter is None:
+        return None
+    return _decode_text(getter(handle))
+
+
+def _trace_enabled() -> bool:
+    value = os.environ.get("ORBIT_MTP_TRACE")
+    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _long_or_none(value: int | None) -> int | None:

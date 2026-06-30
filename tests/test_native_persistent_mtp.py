@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,12 @@ from unittest import mock
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.paths import NativeLlamaPaths
-from orbit.native_llama.persistent_mtp import PersistentMtpSessionRuntime, build_persistent_mtp_shim, run_persistent_mtp_completion
+from orbit.native_llama.persistent_mtp import (
+    PersistentMtpSessionRuntime,
+    _persistent_mtp_link_bin,
+    build_persistent_mtp_shim,
+    run_persistent_mtp_completion,
+)
 
 
 class NativePersistentMtpTests(unittest.TestCase):
@@ -40,6 +46,51 @@ class NativePersistentMtpTests(unittest.TestCase):
 
         self.assertEqual(shim, packaged)
         mocked_compile.assert_called_once()
+
+    def test_persistent_mtp_link_bin_uses_runtime_bin_when_sonames_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            build_bin = Path(tmp) / "bin"
+            build_bin.mkdir()
+            (build_bin / "libllama.so.0").write_text("", encoding="utf-8")
+            (build_bin / "libllama-common.so.0").write_text("", encoding="utf-8")
+            paths = self._paths()
+            paths = NativeLlamaPaths(
+                llama_root=paths.llama_root,
+                build_bin=build_bin,
+                library=build_bin / "libllama.so",
+                model=paths.model,
+                draft_mtp_model=paths.draft_mtp_model,
+                mtp_available=paths.mtp_available,
+                fallback_reason=paths.fallback_reason,
+                model_id=paths.model_id,
+            )
+
+            self.assertEqual(_persistent_mtp_link_bin(paths), build_bin)
+
+    def test_persistent_mtp_link_bin_falls_back_to_vendor_soname_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            build_bin = Path(tmp) / "lib"
+            vendor_bin = Path(tmp) / "vendor-bin"
+            build_bin.mkdir()
+            vendor_bin.mkdir()
+            (build_bin / "libllama.so").write_text("", encoding="utf-8")
+            (build_bin / "libllama-common.so").write_text("", encoding="utf-8")
+            (vendor_bin / "libllama.so.0").write_text("", encoding="utf-8")
+            (vendor_bin / "libllama-common.so.0").write_text("", encoding="utf-8")
+            paths = self._paths()
+            paths = NativeLlamaPaths(
+                llama_root=paths.llama_root,
+                build_bin=build_bin,
+                library=build_bin / "libllama.so",
+                model=paths.model,
+                draft_mtp_model=paths.draft_mtp_model,
+                mtp_available=paths.mtp_available,
+                fallback_reason=paths.fallback_reason,
+                model_id=paths.model_id,
+            )
+
+            with mock.patch("orbit.native_llama.persistent_mtp.DEFAULT_VENDOR_BUILD_BIN", vendor_bin):
+                self.assertEqual(_persistent_mtp_link_bin(paths), vendor_bin)
 
     def _paths(self, *, mtp_available: bool = True, fallback_reason: str | None = None) -> NativeLlamaPaths:
         return NativeLlamaPaths(
@@ -258,6 +309,125 @@ class NativePersistentMtpTests(unittest.TestCase):
             )
 
         self.assertTrue(result.success)
+        self.assertIsNone(result.trace_json)
+        self.assertIsNone(result.timing_json)
+        self.assertIsNone(result.validate_trace_json)
+        self.assertIsNone(result.target_decode_trace_json)
+        self.assertIsNone(result.output_token_hashes_json)
+        self.assertIsNone(result.first_sample_trace_json)
+
+    def test_run_persistent_mtp_completion_exposes_stable_metadata_trace_when_enabled(self) -> None:
+        class FakeLib:
+            def orbit_mtp_session_complete(self, _handle, _ctx_tgt, _prompt, _max_tokens, _token_cb, _progress_cb, _user_data):
+                return True
+
+            def orbit_mtp_session_last_content(self, _handle):
+                return b"ok"
+
+            def orbit_mtp_session_last_output_tokens(self, _handle):
+                return 1
+
+            def orbit_mtp_session_last_draft_tokens_total(self, _handle):
+                return 3
+
+            def orbit_mtp_session_last_accepted_tokens_total(self, _handle):
+                return 2
+
+            def orbit_mtp_session_last_rejected_tokens_total(self, _handle):
+                return 1
+
+            def orbit_mtp_session_last_reused_draft_tokens_total(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_reused_accepted_tokens_total(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_reused_rejected_tokens_total(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_acceptance_ratio(self, _handle):
+                return 2 / 3
+
+            def orbit_mtp_session_last_fresh_acceptance_ratio(self, _handle):
+                return 2 / 3
+
+            def orbit_mtp_session_last_consumed_acceptance_ratio(self, _handle):
+                return 0.0
+
+            def orbit_mtp_session_last_target_decode_calls(self, _handle):
+                return 2
+
+            def orbit_mtp_session_last_draft_decode_calls(self, _handle):
+                return 1
+
+            def orbit_mtp_session_last_elapsed_ms(self, _handle):
+                return 12.5
+
+            def orbit_mtp_session_last_tokens_per_second(self, _handle):
+                return 80.0
+
+            def orbit_mtp_session_last_full_accept_steps(self, _handle):
+                return 1
+
+            def orbit_mtp_session_last_replay_steps(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_partial_accept_steps(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_partial_no_replay_steps(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_replay_fallback_steps(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_seq_rm_supported(self, _handle):
+                return True
+
+            def orbit_mtp_session_last_rollback_tokens_total(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_checkpoint_count(self, _handle):
+                return 1
+
+            def orbit_mtp_session_last_restore_count(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_timing_json(self, _handle):
+                return b'{"target_validate":{"total_ms":10.0}}'
+
+            def orbit_mtp_session_last_output_token_hashes_json(self, _handle):
+                return b"[11,22]"
+
+            def orbit_mtp_session_last_first_sample_trace_json(self, _handle):
+                return b'{"path_name":"mtp","prompt_count":23,"last_logits_hash":999,"first_sample_hash":11}'
+
+        class FakeLibrary:
+            def __init__(self, _build_bin, _shim_path) -> None:
+                self.lib = FakeLib()
+
+        runtime = PersistentMtpSessionRuntime(handle=object(), ctx_dft=object(), spec=object())
+        with mock.patch.dict("os.environ", {"ORBIT_MTP_TRACE": "1"}), mock.patch(
+            "orbit.native_llama.persistent_mtp.build_persistent_mtp_shim",
+            return_value=Path("/tmp/fake.so"),
+        ):
+            result = run_persistent_mtp_completion(
+                llama_root=Path("/llama"),
+                paths=self._paths(),
+                runtime=runtime,
+                ctx_tgt=object(),
+                prompt="hello",
+                max_tokens=8,
+                library_factory=FakeLibrary,
+            )
+
+        self.assertTrue(result.success)
+        self.assertIsNone(result.trace_json)
+        self.assertIsNone(result.validate_trace_json)
+        self.assertIsNone(result.target_decode_trace_json)
+        self.assertEqual(result.timing_json, '{"target_validate":{"total_ms":10.0}}')
+        self.assertEqual(result.output_token_hashes_json, "[11,22]")
+        self.assertEqual(result.first_sample_trace_json, '{"path_name":"mtp","prompt_count":23,"last_logits_hash":999,"first_sample_hash":11}')
 
 
 if __name__ == "__main__":

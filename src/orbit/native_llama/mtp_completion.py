@@ -39,6 +39,12 @@ class MtpCompletionResult:
     rollback_tokens_total: int = 0
     checkpoint_count: int = 0
     restore_count: int = 0
+    trace_json: str | None = None
+    timing_json: str | None = None
+    validate_trace_json: str | None = None
+    target_decode_trace_json: str | None = None
+    output_token_hashes_json: str | None = None
+    first_sample_trace_json: str | None = None
 
 
 def run_mtp_completion(

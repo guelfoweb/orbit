@@ -104,6 +104,58 @@ static uint64_t stable_hash_string(const std::string & value) {
     return hash;
 }
 
+static uint64_t stable_hash_tokens(const std::vector<llama_token> & tokens) {
+    uint64_t hash = 1469598103934665603ull;
+    for (llama_token token : tokens) {
+        const uint32_t value = (uint32_t) token;
+        for (int i = 0; i < 4; ++i) {
+            hash ^= (uint64_t) ((value >> (i * 8)) & 0xffu);
+            hash *= 1099511628211ull;
+        }
+    }
+    return hash;
+}
+
+static uint64_t stable_hash_token(llama_token token) {
+    const std::vector<llama_token> tokens = {token};
+    return stable_hash_tokens(tokens);
+}
+
+static uint64_t stable_hash_logits(llama_context * ctx, const llama_vocab * vocab) {
+    if (!ctx || !vocab) {
+        return 0;
+    }
+    const float * logits = llama_get_logits_ith(ctx, -1);
+    if (!logits) {
+        return 0;
+    }
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+    if (n_vocab <= 0) {
+        return 0;
+    }
+    const auto * bytes = reinterpret_cast<const unsigned char *>(logits);
+    uint64_t hash = 1469598103934665603ull;
+    const size_t size = (size_t) n_vocab * sizeof(float);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= (uint64_t) bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static uint64_t stable_hash_frontier(int32_t min_pos, int32_t max_pos) {
+    uint64_t hash = 1469598103934665603ull;
+    const int32_t values[2] = {min_pos, max_pos};
+    for (int32_t pos : values) {
+        const uint32_t value = (uint32_t) pos;
+        for (int i = 0; i < 4; ++i) {
+            hash ^= (uint64_t) ((value >> (i * 8)) & 0xffu);
+            hash *= 1099511628211ull;
+        }
+    }
+    return hash;
+}
+
 static long rss_kb() {
     FILE * f = std::fopen("/proc/self/status", "r");
     if (!f) {
@@ -160,6 +212,9 @@ struct orbit_mtp_session {
     std::string last_timing_json;
     std::string last_validate_trace_json;
     std::string last_target_decode_trace_json;
+    std::vector<uint64_t> last_output_token_hashes;
+    std::string last_output_token_hashes_json;
+    std::string last_first_sample_trace_json;
     phase_stat phase_prefix_restore;
     phase_stat phase_suffix_decode_target;
     phase_stat phase_draft_generation;
@@ -208,10 +263,26 @@ struct orbit_trace_step {
     std::vector<llama_token> draft;
     std::vector<llama_token> accepted_ids;
     int accepted_draft = 0;
+    int rejected_draft = 0;
     int sampled_id = -1;
     int rejected_id = -1;
     std::string resolution;
     int validated_count = 0;
+    std::string draft_origin = "unknown";
+    bool draft_is_fresh = false;
+    bool need_replay_before = false;
+    int validate_n_tok = 0;
+    int32_t validate_pos0 = -1;
+    int32_t old_n_past = -1;
+    int32_t new_n_past = -1;
+    int32_t prompt_tgt_len = -1;
+    int32_t prompt_dft_len = -1;
+    uint64_t prompt_tgt_hash = 0;
+    uint64_t ctx_tgt_frontier_hash = 0;
+    uint64_t ctx_dft_frontier_hash = 0;
+    uint64_t sampler_state_hash_before = 0;
+    uint64_t sampler_state_hash_after = 0;
+    int remaining_generation_cap = 0;
     int checkpoint_total = 0;
     int restore_total = 0;
     int32_t kv_tgt_before_min = -1;
@@ -338,24 +409,19 @@ static std::vector<llama_token> tail_tokens(const std::vector<llama_token> & tok
 
 static std::string token_vec_json(const llama_vocab * vocab, const std::vector<llama_token> & tokens) {
     std::ostringstream out;
-    out << "[";
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (i > 0) {
-            out << ",";
-        }
-        out << "{\"id\":" << (int) tokens[i] << ",\"piece\":\"" << token_piece_json(vocab, tokens[i]) << "\"}";
-    }
-    out << "]";
+    (void) vocab;
+    out << "{\"count\":" << tokens.size() << ",\"hash\":" << stable_hash_tokens(tokens) << "}";
     return out.str();
 }
 
 static std::string optional_rejected_json(const llama_vocab * vocab, const std::vector<llama_token> & draft, int accepted_draft) {
+    (void) vocab;
     if (accepted_draft < 0 || accepted_draft >= (int) draft.size()) {
         return "null";
     }
     std::ostringstream out;
     const auto tok = draft[(size_t) accepted_draft];
-    out << "{\"id\":" << (int) tok << ",\"piece\":\"" << token_piece_json(vocab, tok) << "\"}";
+    out << "{\"hash\":" << stable_hash_token(tok) << "}";
     return out.str();
 }
 
@@ -363,19 +429,35 @@ static std::string trace_step_json(const llama_vocab * vocab, const orbit_trace_
     std::ostringstream out;
     out
         << "{\"index\":" << step.index
-        << ",\"sampler_before\":\"" << json_escape(step.sampler_before) << "\""
-        << ",\"sampler_after\":\"" << json_escape(step.sampler_after) << "\""
         << ",\"sampler_before_hash\":" << step.sampler_before_hash
         << ",\"sampler_after_hash\":" << step.sampler_after_hash
-        << ",\"draft\":" << token_vec_json(vocab, step.draft)
-        << ",\"accepted_ids\":" << token_vec_json(vocab, step.accepted_ids)
+        << ",\"draft_count\":" << step.draft.size()
+        << ",\"draft_hash\":" << stable_hash_tokens(step.draft)
+        << ",\"accepted_id_count\":" << step.accepted_ids.size()
+        << ",\"accepted_hash\":" << stable_hash_tokens(step.accepted_ids)
         << ",\"accepted_draft\":" << step.accepted_draft
-        << ",\"sampled_id\":" << step.sampled_id
-        << ",\"rejected_id\":" << step.rejected_id
+        << ",\"rejected_draft\":" << step.rejected_draft
+        << ",\"sampled_hash\":" << (step.sampled_id >= 0 ? stable_hash_token((llama_token) step.sampled_id) : 0)
+        << ",\"rejected_hash\":" << (step.rejected_id >= 0 ? stable_hash_token((llama_token) step.rejected_id) : 0)
         << ",\"first_rejected\":" << optional_rejected_json(vocab, step.draft, step.accepted_draft)
         << ",\"resolution\":\"" << step.resolution << "\""
-        << ",\"id_last_before\":" << step.id_last_before
-        << ",\"id_last_after\":" << step.id_last_after
+        << ",\"draft_origin\":\"" << json_escape(step.draft_origin) << "\""
+        << ",\"draft_is_fresh\":" << (step.draft_is_fresh ? "true" : "false")
+        << ",\"need_replay_before\":" << (step.need_replay_before ? "true" : "false")
+        << ",\"validate_n_tok\":" << step.validate_n_tok
+        << ",\"validate_pos0\":" << step.validate_pos0
+        << ",\"old_n_past\":" << step.old_n_past
+        << ",\"new_n_past\":" << step.new_n_past
+        << ",\"prompt_tgt_len\":" << step.prompt_tgt_len
+        << ",\"prompt_dft_len\":" << step.prompt_dft_len
+        << ",\"prompt_tgt_hash\":" << step.prompt_tgt_hash
+        << ",\"ctx_tgt_frontier_hash\":" << step.ctx_tgt_frontier_hash
+        << ",\"ctx_dft_frontier_hash\":" << step.ctx_dft_frontier_hash
+        << ",\"sampler_state_hash_before\":" << step.sampler_state_hash_before
+        << ",\"sampler_state_hash_after\":" << step.sampler_state_hash_after
+        << ",\"remaining_generation_cap\":" << step.remaining_generation_cap
+        << ",\"id_last_before_hash\":" << stable_hash_token((llama_token) step.id_last_before)
+        << ",\"id_last_after_hash\":" << stable_hash_token((llama_token) step.id_last_after)
         << ",\"n_past_before\":" << step.n_past_before
         << ",\"n_past_after\":" << step.n_past_after
         << ",\"prompt_tgt_size_before\":" << step.prompt_tgt_size_before
@@ -383,7 +465,6 @@ static std::string trace_step_json(const llama_vocab * vocab, const orbit_trace_
         << ",\"prompt_tgt_pos_next_before\":" << step.prompt_tgt_pos_next_before
         << ",\"prompt_tgt_pos_next_after\":" << step.prompt_tgt_pos_next_after
         << ",\"residual_draft_size_after\":" << step.residual_draft_size_after
-        << ",\"residual_draft_after\":" << step.residual_draft_after_json
         << ",\"validated_count\":" << step.validated_count
         << ",\"checkpoint_total\":" << step.checkpoint_total
         << ",\"restore_total\":" << step.restore_total
@@ -409,7 +490,6 @@ static std::string trace_step_json(const llama_vocab * vocab, const orbit_trace_
             << ",\"next_draft_origin\":\"" << json_escape(step.next_draft_origin) << "\""
             << ",\"next_draft_is_fresh\":" << (step.next_draft_is_fresh ? "true" : "false")
             << ",\"next_draft_size\":" << step.next_draft_size
-            << ",\"next_draft_tokens\":" << step.next_draft_tokens_json
             << ",\"next_validate_n_tok\":" << step.next_validate_n_tok
             << ",\"fresh_draft_tokens_contrib\":" << step.fresh_draft_tokens_contrib
             << ",\"fresh_accepted_tokens_contrib\":" << step.fresh_accepted_tokens_contrib
@@ -426,8 +506,7 @@ static std::string trace_step_json(const llama_vocab * vocab, const orbit_trace_
             << ",\"memory_clear_count\":" << step.memory_clear_count
             << ",\"seq_rm_count\":" << step.seq_rm_count
             << ",\"replay_count\":" << step.replay_count
-            << ",\"prefill_count\":" << step.prefill_count
-            << ",\"pre_sample_state\":" << step.pre_sample_state_json;
+            << ",\"prefill_count\":" << step.prefill_count;
     }
     out << "}";
     return out.str();
@@ -486,6 +565,76 @@ static std::string int32_vec_json(const std::vector<int32_t> & values) {
     return out.str();
 }
 
+static std::string uint64_vec_json(const std::vector<uint64_t> & values) {
+    std::ostringstream out;
+    out << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+    out << "]";
+    return out.str();
+}
+
+static std::string first_sample_trace_json(
+    const char * path_name,
+    const std::vector<llama_token> & prompt_tgt,
+    llama_context * ctx_tgt,
+    const llama_vocab * vocab_tgt,
+    llama_memory_t mem_tgt,
+    int32_t n_past,
+    int last_prefill_batch_n_tokens,
+    int logits_row_count,
+    int n_outputs,
+    const std::string & sampler_before,
+    llama_token first_sample,
+    const std::string & sampler_after,
+    int generated_count_after,
+    bool request_boundary_restore_used,
+    bool request_boundary_logits_refreshed
+) {
+    const int32_t min_before = mem_tgt ? llama_memory_seq_pos_min(mem_tgt, 0) : -1;
+    const int32_t max_before = mem_tgt ? llama_memory_seq_pos_max(mem_tgt, 0) : -1;
+    std::ostringstream out;
+    out
+        << "{\"path_name\":\"" << json_escape(path_name ? path_name : "mtp") << "\""
+        << ",\"prompt_hash\":" << stable_hash_tokens(prompt_tgt)
+        << ",\"prompt_count\":" << prompt_tgt.size()
+        << ",\"ctx_n_past\":" << n_past
+        << ",\"ctx_frontier_min\":" << min_before
+        << ",\"ctx_frontier_max\":" << max_before
+        << ",\"ctx_frontier_hash\":" << stable_hash_frontier(min_before, max_before)
+        << ",\"ctx_max_pos\":" << max_before
+        << ",\"batch_n_tokens\":" << last_prefill_batch_n_tokens
+        << ",\"logits_row_count\":" << logits_row_count
+        << ",\"n_outputs\":" << n_outputs
+        << ",\"last_logits_hash\":" << stable_hash_logits(ctx_tgt, vocab_tgt)
+        << ",\"sampler_config_hash\":" << stable_hash_string("common_sampler:top_k=1:temp=0:top_p=1:min_p=0:repeat=1")
+        << ",\"sampler_state_hash\":" << stable_hash_string(sampler_before)
+        << ",\"sampler_chain_type\":\"common_sampler(top_k,temp)\""
+        << ",\"seed_hash\":null"
+        << ",\"temperature\":0"
+        << ",\"top_k\":1"
+        << ",\"top_p\":1"
+        << ",\"min_p\":0"
+        << ",\"repeat_penalty\":1"
+        << ",\"generated_count\":0"
+        << ",\"first_sample_hash\":" << stable_hash_token(first_sample)
+        << ",\"sampler_state_hash_after\":" << stable_hash_string(sampler_after)
+        << ",\"ctx_frontier_min_after\":" << (mem_tgt ? llama_memory_seq_pos_min(mem_tgt, 0) : -1)
+        << ",\"ctx_frontier_max_after\":" << (mem_tgt ? llama_memory_seq_pos_max(mem_tgt, 0) : -1)
+        << ",\"ctx_frontier_hash_after\":" << stable_hash_frontier(
+            mem_tgt ? llama_memory_seq_pos_min(mem_tgt, 0) : -1,
+            mem_tgt ? llama_memory_seq_pos_max(mem_tgt, 0) : -1)
+        << ",\"generated_count_after\":" << generated_count_after
+        << ",\"request_boundary_restore_used\":" << (request_boundary_restore_used ? "true" : "false")
+        << ",\"request_boundary_logits_refreshed\":" << (request_boundary_logits_refreshed ? "true" : "false")
+        << "}";
+    return out.str();
+}
+
 static std::string target_decode_trace_json(const llama_vocab * vocab, const std::vector<orbit_target_decode_trace> & items) {
     std::ostringstream out;
     out << "[";
@@ -505,8 +654,9 @@ static std::string target_decode_trace_json(const llama_vocab * vocab, const std
             << ",\"batch_n_outputs_requested\":" << item.batch_logits_count
             << ",\"logits_count\":" << item.batch_logits_count
             << ",\"output_reserve_n_outputs\":" << item.output_reserve_n_outputs
-            << ",\"logits_flags\":" << int_vec_json(item.logits_flags)
-            << ",\"token_ids\":" << token_vec_json(vocab, item.token_ids)
+            << ",\"logits_flag_count\":" << item.logits_flags.size()
+            << ",\"token_count\":" << item.token_ids.size()
+            << ",\"token_hash\":" << stable_hash_tokens(item.token_ids)
             << ",\"positions\":" << int32_vec_json(item.positions)
             << ",\"seq_ids\":" << int32_vec_json(item.seq_ids)
             << "}";
@@ -1298,6 +1448,10 @@ extern "C" const char * orbit_mtp_last_error() {
     return g_last_error.c_str();
 }
 
+extern "C" bool orbit_mtp_session_request_boundary_refill_marker() {
+    return true;
+}
+
 extern "C" void * orbit_mtp_session_create(
     const char * draft_model_path,
     void * ctx_tgt_ptr,
@@ -1481,6 +1635,9 @@ extern "C" bool orbit_mtp_session_complete(
     session->last_timing_json = "{}";
     session->last_validate_trace_json = "[]";
     session->last_target_decode_trace_json = "[]";
+    session->last_output_token_hashes.clear();
+    session->last_output_token_hashes_json = "[]";
+    session->last_first_sample_trace_json = "{}";
     session->phase_prefix_restore = {};
     session->phase_suffix_decode_target = {};
     session->phase_draft_generation = {};
@@ -1542,6 +1699,7 @@ extern "C" bool orbit_mtp_session_complete(
     const int32_t progress_generation_phase = 1;
     auto emit_output_token = [&](llama_token token) {
         session->last_output_tokens++;
+        session->last_output_token_hashes.push_back(stable_hash_token(token));
         if (progress_callback) {
             progress_callback(progress_generation_phase, session->last_output_tokens, max_tokens, callback_user_data);
         }
@@ -1567,14 +1725,17 @@ extern "C" bool orbit_mtp_session_complete(
     const bool debug_partial = partial_debug_enabled();
     bool frontier_trace_before_first_partial = true;
     const size_t reusable_request_prefix =
-        session->request_boundary_ckpt.empty() ? 0 : session->request_boundary_prompt_tgt.size();
+        session->request_boundary_ckpt.data_dft.empty() ? 0 : session->request_boundary_prompt_tgt.size();
     const bool can_restore_request_boundary =
-        !session->request_boundary_ckpt.empty() &&
+        !session->request_boundary_ckpt.data_dft.empty() &&
         is_token_prefix(session->request_boundary_prompt_tgt, prompt_tgt);
     bool used_request_boundary = false;
+    bool request_boundary_logits_refreshed = false;
+    int last_target_prefill_batch_n_tokens = 0;
 
     while ((int) generated.size() < std::max(1, std::min(32, (int) max_tokens))) {
         const auto loop_phase_start = std::chrono::steady_clock::now();
+        const bool loop_need_replay_before = need_replay;
         if (need_replay) {
             const bool replay_is_recovery = is_recovery_replay;
             const auto replay_phase_start = std::chrono::steady_clock::now();
@@ -1608,10 +1769,63 @@ extern "C" bool orbit_mtp_session_complete(
                 if (use_request_boundary) {
                     {
                         const auto phase_start = std::chrono::steady_clock::now();
-                        session->request_boundary_ckpt.load_tgt(ctx_tgt, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         session->request_boundary_ckpt.load_dft(session->ctx_dft, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         phase_add(session->phase_prefix_restore, phase_start);
                     }
+                    {
+                        const auto phase_start = std::chrono::steady_clock::now();
+                        llama_memory_clear(mem_tgt, true);
+                        phase_add(session->phase_seq_rm, phase_start);
+                    }
+                    session->debug_memory_clear_count++;
+                    const size_t chunk_size = (size_t) std::max<uint32_t>(1, session->n_batch);
+                    for (size_t offset = 0; offset < prompt_tgt.size(); offset += chunk_size) {
+                        const size_t count = std::min(chunk_size, prompt_tgt.size() - offset);
+                        std::vector<llama_token> chunk(
+                            prompt_tgt.begin() + (ptrdiff_t) offset,
+                            prompt_tgt.begin() + (ptrdiff_t) (offset + count));
+                        const auto batch_build_start = std::chrono::steady_clock::now();
+                        llama_batch refresh_tgt = llama_batch_init((int32_t) count, 0, 1);
+                        fill_target_prefill_batch(refresh_tgt, chunk, (int32_t) offset);
+                        last_target_prefill_batch_n_tokens = refresh_tgt.n_tokens;
+                        phase_add(session->phase_batch_build, batch_build_start);
+                        const long long decode_started_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                        double decode_ms = 0.0;
+                        session->debug_prefill_target_suffix_count++;
+                        {
+                            const auto phase_start = std::chrono::steady_clock::now();
+                            if (llama_decode(ctx_tgt, refresh_tgt) != 0) {
+                                decode_ms = elapsed_ms(phase_start);
+                                target_decode_traces.push_back(make_target_decode_trace(
+                                    "request_boundary_target_refill",
+                                    trace_step_index,
+                                    0,
+                                    0,
+                                    refresh_tgt,
+                                    decode_started_us,
+                                    decode_ms));
+                                phase_add(session->phase_suffix_decode_target, phase_start);
+                                llama_batch_free(refresh_tgt);
+                                common_sampler_free(smpl);
+                                set_error("failed to refill restored target prompt");
+                                return false;
+                            }
+                            decode_ms = elapsed_ms(phase_start);
+                            phase_add(session->phase_suffix_decode_target, phase_start);
+                        }
+                        target_decode_traces.push_back(make_target_decode_trace(
+                            "request_boundary_target_refill",
+                            trace_step_index,
+                            0,
+                            0,
+                            refresh_tgt,
+                            decode_started_us,
+                            decode_ms));
+                        session->last_target_decode_calls++;
+                        llama_batch_free(refresh_tgt);
+                    }
+                    request_boundary_logits_refreshed = true;
                     used_request_boundary = true;
                 } else {
                     const size_t chunk_size = (size_t) std::max<uint32_t>(1, session->n_batch);
@@ -1623,6 +1837,7 @@ extern "C" bool orbit_mtp_session_complete(
                         const auto batch_build_start = std::chrono::steady_clock::now();
                         llama_batch prefill_tgt = llama_batch_init((int32_t) count, 0, 1);
                         fill_target_prefill_batch(prefill_tgt, chunk, (int32_t) offset);
+                        last_target_prefill_batch_n_tokens = prefill_tgt.n_tokens;
                         phase_add(session->phase_batch_build, batch_build_start);
                         const long long decode_started_us = std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1690,6 +1905,7 @@ extern "C" bool orbit_mtp_session_complete(
                             const auto batch_build_start = std::chrono::steady_clock::now();
                             llama_batch prefill_tgt = llama_batch_init((int32_t) count, 0, 1);
                             fill_target_prefill_batch(prefill_tgt, chunk, process_pos0 + (int32_t) offset);
+                            last_target_prefill_batch_n_tokens = prefill_tgt.n_tokens;
                             phase_add(session->phase_batch_build, batch_build_start);
                             const long long decode_started_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1775,11 +1991,6 @@ extern "C" bool orbit_mtp_session_complete(
                         llama_memory_seq_pos_max(mem_tgt, 0));
                     {
                         const auto phase_start = std::chrono::steady_clock::now();
-                        session->request_boundary_ckpt.update_tgt(ctx_tgt, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                        phase_add(session->phase_ctx_tgt_checkpoint, phase_start);
-                    }
-                    {
-                        const auto phase_start = std::chrono::steady_clock::now();
                         session->request_boundary_ckpt.update_dft(session->ctx_dft, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         phase_add(session->phase_ctx_dft_checkpoint, phase_start);
                     }
@@ -1799,12 +2010,30 @@ extern "C" bool orbit_mtp_session_complete(
             draft_is_fresh = false;
             n_past = (int32_t) prompt_tgt.size();
             if (generated.empty()) {
+                const std::string first_sampler_before = common_sampler_prev_str(smpl, ctx_tgt, 8);
                 {
                     const auto phase_start = std::chrono::steady_clock::now();
                     id_last = common_sampler_sample(smpl, ctx_tgt, -1);
                     common_sampler_accept(smpl, id_last, true);
                     phase_add(session->phase_sampler_ops, phase_start);
                 }
+                const std::string first_sampler_after = common_sampler_prev_str(smpl, ctx_tgt, 8);
+                session->last_first_sample_trace_json = first_sample_trace_json(
+                    "mtp",
+                    prompt_tgt,
+                    ctx_tgt,
+                    vocab_tgt,
+                    mem_tgt,
+                    n_past,
+                    last_target_prefill_batch_n_tokens,
+                    1,
+                    1,
+                    first_sampler_before,
+                    id_last,
+                    first_sampler_after,
+                    1,
+                    used_request_boundary,
+                    request_boundary_logits_refreshed);
                 if (llama_vocab_is_eog(vocab_tgt, id_last)) {
                     goto done;
                 }
@@ -1911,8 +2140,8 @@ extern "C" bool orbit_mtp_session_complete(
                         << "{"
                         << "\"step_index\":" << (trace_step_index + 1)
                         << ",\"draft_index\":" << (int) i
-                        << ",\"input_token\":{\"id\":" << (int) input_token << ",\"piece\":\"" << token_piece_json(vocab_tgt, input_token) << "\"}"
-                        << ",\"sampled_draft_token\":{\"id\":" << (int) sampled_token << ",\"piece\":\"" << token_piece_json(vocab_tgt, sampled_token) << "\"}"
+                        << ",\"input_token_hash\":" << stable_hash_token(input_token)
+                        << ",\"sampled_draft_token_hash\":" << stable_hash_token(sampled_token)
                         << ",\"prompt_tgt_size\":" << prompt_tgt.size()
                         << ",\"n_past\":" << n_past
                         << ",\"ctx_tgt_max_before\":" << draft_ctx_tgt_max_before
@@ -2047,20 +2276,35 @@ extern "C" bool orbit_mtp_session_complete(
         trace_step.debug_enabled = debug_partial;
         trace_step.sampler_before = common_sampler_prev_str(smpl, ctx_tgt, 8);
         trace_step.sampler_before_hash = stable_hash_string(trace_step.sampler_before);
+        trace_step.sampler_state_hash_before = trace_step.sampler_before_hash;
         trace_step.draft = draft;
+        trace_step.draft_origin = draft.empty() ? "empty" : (draft_is_fresh ? "fresh" : "reused");
+        trace_step.draft_is_fresh = draft_is_fresh;
+        trace_step.need_replay_before = loop_need_replay_before;
         trace_step.sampled_id = -1;
         trace_step.rejected_id = -1;
         trace_step.validated_count = (int) validate_tokens.size();
+        trace_step.validate_n_tok = (int) validate_tokens.size();
+        trace_step.validate_pos0 = validate_pos0;
         trace_step.checkpoint_total = session->last_checkpoint_count;
         trace_step.restore_total = session->last_restore_count;
         trace_step.id_last_before = (int) id_last;
         trace_step.n_past_before = n_past;
+        trace_step.old_n_past = n_past;
         trace_step.prompt_tgt_size_before = (int32_t) prompt_tgt.size();
+        trace_step.prompt_tgt_len = (int32_t) prompt_tgt.size();
+        trace_step.prompt_dft_len = llama_memory_seq_pos_max(mem_dft, 0) >= 0
+            ? llama_memory_seq_pos_max(mem_dft, 0) + 1
+            : -1;
+        trace_step.prompt_tgt_hash = stable_hash_tokens(prompt_tgt);
         trace_step.prompt_tgt_pos_next_before = n_past;
         trace_step.kv_tgt_before_min = llama_memory_seq_pos_min(mem_tgt, 0);
         trace_step.kv_tgt_before_max = llama_memory_seq_pos_max(mem_tgt, 0);
         trace_step.kv_dft_before_min = llama_memory_seq_pos_min(mem_dft, 0);
         trace_step.kv_dft_before_max = llama_memory_seq_pos_max(mem_dft, 0);
+        trace_step.ctx_tgt_frontier_hash = stable_hash_frontier(trace_step.kv_tgt_before_min, trace_step.kv_tgt_before_max);
+        trace_step.ctx_dft_frontier_hash = stable_hash_frontier(trace_step.kv_dft_before_min, trace_step.kv_dft_before_max);
+        trace_step.remaining_generation_cap = std::max(0, std::max(1, std::min(32, (int) max_tokens)) - (int) generated.size());
         if (debug_partial) {
             trace_step.partial_state_before_json = partial_state_json(
                 vocab_tgt,
@@ -2142,6 +2386,7 @@ extern "C" bool orbit_mtp_session_complete(
         const int rejected = std::max(0, (int) trace_step.draft.size() - accepted);
         trace_step.accepted_ids = ids;
         trace_step.accepted_draft = accepted;
+        trace_step.rejected_draft = rejected;
         trace_step.fresh_draft_tokens_contrib = draft_is_fresh ? (int) trace_step.draft.size() : 0;
         trace_step.fresh_accepted_tokens_contrib = draft_is_fresh ? accepted : 0;
         trace_step.fresh_rejected_tokens_contrib = draft_is_fresh ? rejected : 0;
@@ -2156,6 +2401,7 @@ extern "C" bool orbit_mtp_session_complete(
             : 0.0;
         trace_step.sampler_after = common_sampler_prev_str(smpl, ctx_tgt, 8);
         trace_step.sampler_after_hash = stable_hash_string(trace_step.sampler_after);
+        trace_step.sampler_state_hash_after = trace_step.sampler_after_hash;
         trace_step.sampled_id = ids.empty() ? -1 : (int) ids.back();
         trace_step.rejected_id = (accepted >= 0 && accepted < (int) trace_step.draft.size()) ? (int) trace_step.draft[(size_t) accepted] : -1;
         trace_step.id_last_after = ids.empty() ? (int) id_last : (int) ids.back();
@@ -2186,6 +2432,7 @@ extern "C" bool orbit_mtp_session_complete(
             trace_step.kv_dft_after_min = llama_memory_seq_pos_min(mem_dft, 0);
             trace_step.kv_dft_after_max = llama_memory_seq_pos_max(mem_dft, 0);
             trace_step.n_past_after = n_past;
+            trace_step.new_n_past = n_past;
             trace_step.prompt_tgt_size_after = (int32_t) prompt_tgt.size();
             trace_step.prompt_tgt_pos_next_after = n_past;
             trace_step.residual_draft_size_after = (int32_t) draft.size();
@@ -2267,6 +2514,7 @@ extern "C" bool orbit_mtp_session_complete(
         trace_step.kv_dft_after_min = llama_memory_seq_pos_min(mem_dft, 0);
         trace_step.kv_dft_after_max = llama_memory_seq_pos_max(mem_dft, 0);
         trace_step.n_past_after = n_past;
+        trace_step.new_n_past = n_past;
         trace_step.prompt_tgt_size_after = (int32_t) prompt_tgt.size();
         trace_step.prompt_tgt_pos_next_after = n_past;
         trace_step.residual_draft_size_after = (int32_t) draft.size();
@@ -2306,10 +2554,37 @@ done:
     }
     session->last_validate_trace_json = validate_trace_json(validate_traces);
     session->last_target_decode_trace_json = target_decode_trace_json(vocab_tgt, target_decode_traces);
+    session->last_output_token_hashes_json = uint64_vec_json(session->last_output_token_hashes);
     {
+        const double suffix_target_prefill_ms = session->phase_suffix_decode_target.total_ms;
+        const double speculative_loop_including_suffix_ms = session->phase_loop_total.total_ms;
+        const double speculative_loop_ms = std::max(0.0, speculative_loop_including_suffix_ms - suffix_target_prefill_ms);
+        const double checkpoint_restore_ms =
+            session->phase_prefix_restore.total_ms +
+            session->phase_ctx_tgt_checkpoint.total_ms +
+            session->phase_ctx_tgt_restore.total_ms +
+            session->phase_ctx_dft_checkpoint.total_ms +
+            session->phase_ctx_dft_restore.total_ms;
+        const double sampler_ms =
+            session->phase_sampler_clone.total_ms +
+            session->phase_sampler_restore.total_ms +
+            session->phase_sampler_ops.total_ms;
+        const double non_loop_overhead_ms = std::max(0.0, session->last_elapsed_ms - speculative_loop_including_suffix_ms);
         std::ostringstream out;
         out
             << "{"
+            << "\"summary\":{"
+            << "\"total_wall_ms\":" << session->last_elapsed_ms << ","
+            << "\"suffix_target_prefill_ms\":" << suffix_target_prefill_ms << ","
+            << "\"speculative_loop_ms\":" << speculative_loop_ms << ","
+            << "\"speculative_loop_including_suffix_ms\":" << speculative_loop_including_suffix_ms << ","
+            << "\"target_validate_ms\":" << session->phase_target_validate.total_ms << ","
+            << "\"draft_generation_ms\":" << session->phase_draft_generation.total_ms << ","
+            << "\"checkpoint_restore_ms\":" << checkpoint_restore_ms << ","
+            << "\"sampler_ms\":" << sampler_ms << ","
+            << "\"seq_rm_ms\":" << session->phase_seq_rm.total_ms << ","
+            << "\"non_loop_overhead_ms\":" << non_loop_overhead_ms
+            << "},"
             << "\"prompt_prefix_restore\":" << phase_json(session->phase_prefix_restore) << ","
             << "\"suffix_decode_target\":" << phase_json(session->phase_suffix_decode_target) << ","
             << "\"draft_generation\":" << phase_json(session->phase_draft_generation) << ","
@@ -2484,4 +2759,14 @@ extern "C" const char * orbit_mtp_session_last_validate_trace_json(void * handle
 extern "C" const char * orbit_mtp_session_last_target_decode_trace_json(void * handle) {
     auto * session = static_cast<orbit_mtp_session *>(handle);
     return session ? session->last_target_decode_trace_json.c_str() : "[]";
+}
+
+extern "C" const char * orbit_mtp_session_last_output_token_hashes_json(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_output_token_hashes_json.c_str() : "[]";
+}
+
+extern "C" const char * orbit_mtp_session_last_first_sample_trace_json(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_first_sample_trace_json.c_str() : "{}";
 }
