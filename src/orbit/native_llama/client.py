@@ -530,6 +530,7 @@ class NativeLlamaClient:
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
+        allow_mtp_experimental: bool | None = None,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -573,6 +574,8 @@ class NativeLlamaClient:
             prompt=prompt,
         ) if route_prefix_anchor else None
         allow_mtp = not tools and route_anchor_segments is None
+        if allow_mtp_experimental is False:
+            allow_mtp = False
         return self.complete_prompt(
             prompt,
             max_tokens=max_tokens,
@@ -593,6 +596,7 @@ class NativeLlamaClient:
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
+        allow_mtp_experimental: bool | None = None,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -605,6 +609,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
+            allow_mtp_experimental=allow_mtp_experimental,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
@@ -649,6 +654,7 @@ class NativeLlamaClient:
         tools: list[dict] | None,
         thinking: bool,
         route_prefix_anchor: bool = False,
+        allow_mtp_experimental: bool | None = None,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -714,6 +720,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
+            allow_mtp_experimental=allow_mtp_experimental,
             on_progress=on_progress,
             on_token=collect,
             should_cancel=should_cancel,

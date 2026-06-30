@@ -19,6 +19,7 @@ class ChatRequest:
     stream: bool
     tools: list[dict[str, Any]]
     route_prefix_anchor: bool
+    allow_mtp_experimental: bool | None
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
         stream=payload.get("stream") is True,
         tools=_tools_from_payload(payload.get("tools")),
         route_prefix_anchor=payload.get("route_prefix_anchor") is True,
+        allow_mtp_experimental=_optional_bool(payload.get("allow_mtp_experimental")),
     )
 
 
@@ -158,6 +160,12 @@ def _tools_from_payload(value: object) -> list[dict[str, Any]]:
 
 
 def _thinking_mode(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _optional_bool(value: object) -> bool | None:
     if isinstance(value, bool):
         return value
     return None
