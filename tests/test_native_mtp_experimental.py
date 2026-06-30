@@ -328,6 +328,55 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertTrue(kwargs["allow_mtp_experimental"])
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_chat_respects_explicit_allow_mtp_false(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client.apply_chat_template = mock.Mock(return_value="prompt")
+        expected = NativeTimings(
+            prompt_tokens=10,
+            output_tokens=2,
+            reused_prompt_tokens=3,
+            evaluated_prompt_tokens=7,
+            prefill_ms=12.0,
+            generation_ms=34.0,
+        )
+        client.complete_prompt = mock.Mock(return_value=expected)
+
+        result = client.complete_chat(
+            [{"role": "user", "content": "hello"}],
+            max_tokens=16,
+            allow_mtp_experimental=False,
+        )
+
+        self.assertEqual(result, expected)
+        kwargs = client.complete_prompt.call_args.kwargs
+        self.assertFalse(kwargs["allow_mtp_experimental"])
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_chat_does_not_force_mtp_on_when_explicit_true_conflicts_with_tools(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client.apply_chat_template = mock.Mock(return_value="prompt")
+        expected = NativeTimings(
+            prompt_tokens=10,
+            output_tokens=2,
+            reused_prompt_tokens=3,
+            evaluated_prompt_tokens=7,
+            prefill_ms=12.0,
+            generation_ms=34.0,
+        )
+        client.complete_prompt = mock.Mock(return_value=expected)
+
+        result = client.complete_chat(
+            [{"role": "user", "content": "read note.txt"}],
+            max_tokens=16,
+            tools=[{"type": "function", "function": {"name": "exec_shell_full_command"}}],
+            allow_mtp_experimental=True,
+        )
+
+        self.assertEqual(result, expected)
+        kwargs = client.complete_prompt.call_args.kwargs
+        self.assertFalse(kwargs["allow_mtp_experimental"])
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_complete_chat_disables_mtp_during_tool_call_rounds(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client.apply_chat_template = mock.Mock(return_value="prompt")

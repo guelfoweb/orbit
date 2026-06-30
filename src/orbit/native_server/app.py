@@ -75,6 +75,7 @@ class OrbitNativeServer:
                 tools=request.tools,
                 thinking=thinking,
                 route_prefix_anchor=request.route_prefix_anchor,
+                allow_mtp_experimental=request.allow_mtp_experimental,
                 on_progress=on_progress,
                 on_token=collect,
                 should_cancel=should_cancel,

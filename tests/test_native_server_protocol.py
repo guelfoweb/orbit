@@ -31,6 +31,7 @@ class NativeServerProtocolTests(unittest.TestCase):
         self.assertEqual(request.stop, ())
         self.assertEqual(request.tools, [])
         self.assertFalse(request.route_prefix_anchor)
+        self.assertIsNone(request.allow_mtp_experimental)
 
     def test_parse_chat_request_accepts_thinking_flag(self) -> None:
         request = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "thinking": True})
@@ -68,6 +69,15 @@ class NativeServerProtocolTests(unittest.TestCase):
     def test_parse_chat_request_accepts_route_prefix_anchor_flag(self) -> None:
         request = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "route_prefix_anchor": True})
         self.assertTrue(request.route_prefix_anchor)
+
+    def test_parse_chat_request_accepts_allow_mtp_flag(self) -> None:
+        disabled = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "allow_mtp_experimental": False})
+        enabled = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "allow_mtp_experimental": True})
+        ignored = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "allow_mtp_experimental": "false"})
+
+        self.assertFalse(disabled.allow_mtp_experimental)
+        self.assertTrue(enabled.allow_mtp_experimental)
+        self.assertIsNone(ignored.allow_mtp_experimental)
 
     def test_parse_chat_request_rejects_malformed_payloads(self) -> None:
         bad_payloads = [

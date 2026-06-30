@@ -37,6 +37,7 @@ class _FakeClient:
         self.mtp_decode_probe = type("Probe", (), {"enabled": False, "success": False, "error": None})()
         self.last_mtp_completion = type("Probe", (), {"success": False})()
         self.mtp_fallback_reason = None
+        self.allow_mtp_calls: list[bool | None] = []
 
     def complete_chat_text(
         self,
@@ -47,11 +48,13 @@ class _FakeClient:
         tools,
         thinking,
         route_prefix_anchor=False,
+        allow_mtp_experimental=None,
         on_progress=None,
         on_token=None,
         should_cancel=None,
     ):
         self.calls.append(thinking)
+        self.allow_mtp_calls.append(allow_mtp_experimental)
         return _FakeCompletion()
 
     def session_snapshot(self, session_id: str):
@@ -125,6 +128,16 @@ class NativeServerThinkTests(unittest.TestCase):
 
         self.assertEqual(result["finish_reason"], "stop")
         self.assertEqual(server.client.calls, [True])
+
+    def test_allow_mtp_flag_is_passed_to_native_client(self) -> None:
+        server = OrbitNativeServer(client=_FakeClient(thinking=False), model_alias="m")
+
+        result = server.complete(
+            parse_chat_request({"messages": [{"role": "user", "content": "hello"}], "allow_mtp_experimental": False})
+        )
+
+        self.assertEqual(result["finish_reason"], "stop")
+        self.assertEqual(server.client.allow_mtp_calls, [False])
 
     def test_server_returns_postprocessed_completion_content_not_raw_chunks(self) -> None:
         client = _FakeClient(thinking=False)

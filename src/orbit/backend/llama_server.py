@@ -47,6 +47,7 @@ class LlamaServerBackend:
                 thinking=self.thinking,
                 tools=tools,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
+                allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
             )
         )
         if native_backend:
@@ -82,6 +83,7 @@ class LlamaServerBackend:
                 tools=tools,
                 stream=True,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
+                allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
             )
         )
         if native_backend:
@@ -703,3 +705,14 @@ def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     if not prefix_anchor_enabled():
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
+
+
+def _allow_mtp_experimental_requested(*, native_backend: bool) -> bool | None:
+    if not native_backend:
+        return None
+    if current_tools_mode() != "on":
+        return None
+    phase = current_phase()
+    if phase == "chat_final_retry" or phase.startswith("final_from_tool"):
+        return False
+    return None

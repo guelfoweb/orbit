@@ -308,6 +308,71 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertNotIn("route_prefix_anchor", backend.payloads[2])
         self.assertNotIn("route_prefix_anchor", backend.payloads[3])
 
+    def test_allow_mtp_false_payload_is_limited_to_native_tools_final_fallbacks(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payloads: list[dict[str, object]] = []
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, _path: str, payload: dict[str, object], *, on_delta, on_progress) -> ChatResult:
+                self.payloads.append(payload)
+                return ChatResult(
+                    content="ok",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = Backend()
+        backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+        with model_call_context(phase="chat_final_retry", tools_mode="on"):
+            backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+        with model_call_context(phase="final_from_tool", tools_mode="on"):
+            backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+        with model_call_context(phase="final_from_tool_retry", tools_mode="on"):
+            backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+        with model_call_context(phase="chat_final_retry", tools_mode="off"):
+            backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertNotIn("allow_mtp_experimental", backend.payloads[0])
+        self.assertFalse(backend.payloads[1]["allow_mtp_experimental"])
+        self.assertFalse(backend.payloads[2]["allow_mtp_experimental"])
+        self.assertFalse(backend.payloads[3]["allow_mtp_experimental"])
+        self.assertNotIn("allow_mtp_experimental", backend.payloads[4])
+
+    def test_allow_mtp_payload_is_not_sent_to_non_native_backend(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payload: dict[str, object] | None = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "openai-compatible"}
+
+            def _post_json(self, _path: str, payload: dict[str, object]) -> dict[str, object]:
+                self.payload = payload
+                return {
+                    "model": "fake",
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }
+
+        backend = Backend()
+        with model_call_context(phase="chat_final_retry", tools_mode="on"):
+            backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertIsNotNone(backend.payload)
+        assert backend.payload is not None
+        self.assertNotIn("allow_mtp_experimental", backend.payload)
+
     def test_route_prefix_anchor_legacy_experiment_flag_still_enables_auto_mode(self) -> None:
         class Backend(LlamaServerBackend):
             def __init__(self) -> None:
