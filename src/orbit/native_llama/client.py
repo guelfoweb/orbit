@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import codecs
-from ctypes import POINTER, byref, c_char, cast, c_ubyte, create_string_buffer, c_void_p, sizeof
+import ctypes
+import hashlib
+from ctypes import POINTER, byref, c_char, c_float, cast, c_ubyte, create_string_buffer, c_void_p, sizeof
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
 import threading
 
@@ -138,6 +141,9 @@ class NativeLlamaClient:
         self._persistent_mtp_runtime: PersistentMtpSessionRuntime | None = None
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = 0
+        self.last_target_only_token_hashes: list[int] = []
+        self.last_target_only_first_sample_trace: dict[str, object] | None = None
+        self._last_prompt_decode_batch_n_tokens = 0
         self._route_prefix_anchor_state = PrefixAnchorState()
         self._route_prefix_prefill_lock = threading.Lock()
 
@@ -179,7 +185,8 @@ class NativeLlamaClient:
         if self._model:
             lib.llama_model_free(self._model)
             self._model = None
-        lib.llama_backend_free()
+        # llama.cpp backend globals are process-wide; freeing them per client can
+        # corrupt teardown after mixed target-only/MTP client lifetimes.
 
     def cancel(self) -> None:
         self._session.cancel_requested = True
@@ -1144,6 +1151,7 @@ class NativeLlamaClient:
                 self.cancel()
                 break
             n = min(step, end - processed)
+            self._last_prompt_decode_batch_n_tokens = int(n)
             token_ptr = cast(byref(token_array, processed * sizeof(llama_token)), POINTER(llama_token))
             batch = lib.llama_batch_get_one(token_ptr, n)
             decode_rc = lib.llama_decode(self._session.ctx_tgt, batch)
@@ -1382,6 +1390,8 @@ class NativeLlamaClient:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
         lib.llama_sampler_reset(self._session.sampler)
+        self.last_target_only_token_hashes = []
+        self.last_target_only_first_sample_trace = None
         generated = 0
         gen_start = lib.llama_time_us()
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
@@ -1389,10 +1399,25 @@ class NativeLlamaClient:
             if should_cancel and should_cancel():
                 self.cancel()
                 break
+            first_sample_before = None
+            if generated == 0 and _mtp_trace_enabled():
+                first_sample_before = self._target_only_first_sample_metadata(path_name="target_only", generated_count=generated)
             token = lib.llama_sampler_sample(self._session.sampler, self._session.ctx_tgt, -1)
             lib.llama_sampler_accept(self._session.sampler, token)
             if lib.llama_vocab_is_eog(self._vocab, token):
                 break
+            self.last_target_only_token_hashes.append(_stable_token_hash(int(token)))
+            if first_sample_before is not None:
+                first_sample_after = self._target_only_first_sample_metadata(path_name="target_only", generated_count=generated + 1)
+                self.last_target_only_first_sample_trace = {
+                    **first_sample_before,
+                    "first_sample_hash": self.last_target_only_token_hashes[-1],
+                    "sampler_state_hash_after": None,
+                    "ctx_frontier_min_after": first_sample_after.get("ctx_frontier_min"),
+                    "ctx_frontier_max_after": first_sample_after.get("ctx_frontier_max"),
+                    "ctx_frontier_hash_after": first_sample_after.get("ctx_frontier_hash"),
+                    "generated_count_after": generated + 1,
+                }
             text = decoder.decode(self._token_to_bytes(token), final=False)
             if text and on_token:
                 on_token(text)
@@ -1411,6 +1436,56 @@ class NativeLlamaClient:
             on_token(text)
         gen_ms = (lib.llama_time_us() - gen_start) / 1000.0
         return generated, gen_ms, self.cancel_event.is_set()
+
+    def _target_only_first_sample_metadata(self, *, path_name: str, generated_count: int) -> dict[str, object]:
+        if not self._session.ctx_tgt or not self._vocab:
+            return {}
+        lib = self.lib.lib
+        mem = lib.llama_get_memory(self._session.ctx_tgt)
+        frontier_min = int(lib.llama_memory_seq_pos_min(mem, 0)) if mem and hasattr(lib, "llama_memory_seq_pos_min") else -1
+        frontier_max = int(lib.llama_memory_seq_pos_max(mem, 0)) if mem and hasattr(lib, "llama_memory_seq_pos_max") else -1
+        prompt_tokens = list(self._session.cached_prompt_tokens)
+        return {
+            "path_name": path_name,
+            "prompt_hash": _stable_tokens_hash_hex(prompt_tokens),
+            "prompt_count": len(prompt_tokens),
+            "ctx_n_past": frontier_max + 1 if frontier_max >= 0 else 0,
+            "ctx_frontier_min": frontier_min,
+            "ctx_frontier_max": frontier_max,
+            "ctx_frontier_hash": _stable_frontier_hash_hex(frontier_min, frontier_max),
+            "ctx_max_pos": frontier_max,
+            "batch_n_tokens": self._last_prompt_decode_batch_n_tokens,
+            "logits_row_count": 1,
+            "n_outputs": 1,
+            "last_logits_hash": self._last_logits_hash(),
+            "sampler_config_hash": _canonical_greedy_sampler_hash(),
+            "sampler_state_hash": None,
+            "sampler_chain_type": "llama_sampler_chain+greedy",
+            "seed_hash": None,
+            "temperature": 0.0,
+            "top_k": 1,
+            "top_p": 1.0,
+            "min_p": 0.0,
+            "repeat_penalty": 1.0,
+            "generated_count": generated_count,
+        }
+
+    def _last_logits_hash(self) -> int | None:
+        if not self._session.ctx_tgt or not self._vocab:
+            return None
+        lib = self.lib.lib
+        ptr = lib.llama_get_logits_ith(self._session.ctx_tgt, -1)
+        if not ptr:
+            return None
+        n_vocab = int(lib.llama_vocab_n_tokens(self._vocab))
+        if n_vocab <= 0:
+            return None
+        payload = ctypes.string_at(ptr, n_vocab * sizeof(c_float))
+        hash_value = 1469598103934665603
+        for byte in payload:
+            hash_value ^= byte
+            hash_value = (hash_value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+        return hash_value
 
     def tokenize(self, prompt: str) -> list[int]:
         if not self._vocab:
@@ -1515,6 +1590,44 @@ def _prepare_mtp_prompt(prompt: str, *, thinking: bool = False) -> str:
             return prompt
         return _strip_thinking_prompt(prompt)
     return render_gemma4_chat([{"role": "user", "content": prompt}], thinking=thinking)
+
+
+def _canonical_greedy_sampler_hash() -> str:
+    return hashlib.sha256(b'{"min_p":0.0,"repeat_penalty":1.0,"sampler":"greedy","temperature":0.0,"top_k":1,"top_p":1.0}').hexdigest()[:16]
+
+
+def _mtp_trace_enabled() -> bool:
+    value = os.environ.get("ORBIT_MTP_TRACE")
+    return value not in (None, "", "0", "false", "False", "off", "OFF")
+
+
+def _stable_tokens_hash_hex(tokens: list[int]) -> int:
+    hash_value = 1469598103934665603
+    for token in tokens:
+        value = int(token) & 0xFFFFFFFF
+        for shift in range(0, 32, 8):
+            hash_value ^= (value >> shift) & 0xFF
+            hash_value = (hash_value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return hash_value
+
+
+def _stable_frontier_hash_hex(frontier_min: int, frontier_max: int) -> int:
+    hash_value = 1469598103934665603
+    for pos in (frontier_min, frontier_max):
+        value = int(pos) & 0xFFFFFFFF
+        for shift in range(0, 32, 8):
+            hash_value ^= (value >> shift) & 0xFF
+            hash_value = (hash_value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return hash_value
+
+
+def _stable_token_hash(token: int) -> int:
+    hash_value = 1469598103934665603
+    value = token & 0xFFFFFFFF
+    for shift in range(0, 32, 8):
+        hash_value ^= (value >> shift) & 0xFF
+        hash_value = (hash_value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return hash_value
 
 
 def _strip_thinking_prompt(prompt: str) -> str:

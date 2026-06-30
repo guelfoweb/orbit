@@ -29,6 +29,26 @@ llama_token = c_int32
 llama_pos = c_int32
 llama_seq_id = c_int32
 
+
+_CDLL_CACHE: dict[tuple[str, int], CDLL] = {}
+
+
+def native_cdll_flags() -> int:
+    return (
+        getattr(os, "RTLD_GLOBAL", 0)
+        | getattr(os, "RTLD_NOW", 0)
+        | getattr(os, "RTLD_NODELETE", 0)
+    )
+
+
+def load_native_cdll(path: Path, *, mode: int) -> CDLL:
+    key = (str(path.resolve()), mode)
+    lib = _CDLL_CACHE.get(key)
+    if lib is None:
+        lib = ctypes.CDLL(str(path), mode=mode)
+        _CDLL_CACHE[key] = lib
+    return lib
+
 LlamaProgressCallback = CFUNCTYPE(c_bool, c_float, c_void_p)
 GgmlAbortCallback = CFUNCTYPE(c_bool, c_void_p)
 GgmlLogCallback = CFUNCTYPE(None, c_int, c_char_p, c_void_p)
@@ -159,7 +179,7 @@ class LlamaLibrary:
         self._configure_api()
 
     def _load_library(self, name: str) -> CDLL:
-        flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
+        flags = native_cdll_flags()
         # Load dependencies explicitly because LD_LIBRARY_PATH cannot be changed
         # reliably after Python startup.
         for dep in platform_runtime_libs():
@@ -168,10 +188,10 @@ class LlamaLibrary:
             path = self.build_bin / dep
             if path.exists():
                 try:
-                    self._handles.append(ctypes.CDLL(str(path), mode=flags))
+                    self._handles.append(load_native_cdll(path, mode=flags))
                 except OSError:
                     pass
-        return ctypes.CDLL(str(self.build_bin / name), mode=flags)
+        return load_native_cdll(self.build_bin / name, mode=flags)
 
     def _configure_api(self) -> None:
         lib = self.lib
@@ -219,6 +239,14 @@ class LlamaLibrary:
         lib.llama_state_seq_get_data.restype = c_size_t
         lib.llama_state_seq_set_data.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t, c_int32]
         lib.llama_state_seq_set_data.restype = c_size_t
+        lib.llama_get_memory.argtypes = [c_void_p]
+        lib.llama_get_memory.restype = c_void_p
+        if hasattr(lib, "llama_memory_seq_pos_min"):
+            lib.llama_memory_seq_pos_min.argtypes = [c_void_p, llama_seq_id]
+            lib.llama_memory_seq_pos_min.restype = llama_pos
+        if hasattr(lib, "llama_memory_seq_pos_max"):
+            lib.llama_memory_seq_pos_max.argtypes = [c_void_p, llama_seq_id]
+            lib.llama_memory_seq_pos_max.restype = llama_pos
 
         lib.llama_model_get_vocab.argtypes = [c_void_p]
         lib.llama_model_get_vocab.restype = c_void_p
@@ -275,8 +303,8 @@ class LlamaLibrary:
 
 class MtmdLibrary:
     def __init__(self, build_bin: Path) -> None:
-        flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 0)
-        self.lib = ctypes.CDLL(str(build_bin / runtime_library_filename("mtmd")), mode=flags)
+        flags = native_cdll_flags()
+        self.lib = load_native_cdll(build_bin / runtime_library_filename("mtmd"), mode=flags)
         self._configure_api()
 
     def _configure_api(self) -> None:
