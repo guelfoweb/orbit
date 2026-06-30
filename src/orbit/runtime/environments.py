@@ -415,7 +415,8 @@ class FinalFromToolEnvironment:
         call_messages = self.runtime._with_final_tool_prompt() if use_tool_prompt else self.runtime.messages
         policy = build_final_tool_policy(call_messages, max_tokens=max_tokens, streamed=on_final_delta is not None)
         stream_buffer = _BufferedDeltaSink() if on_final_delta is not None and policy.incomplete_retry_allowed else None
-        final_delta = stream_buffer.write if stream_buffer is not None else on_final_delta
+        direct_delta = _ForwardingDeltaSink(on_final_delta) if on_final_delta is not None and stream_buffer is None else None
+        final_delta = stream_buffer.write if stream_buffer is not None else (direct_delta.write if direct_delta is not None else on_final_delta)
         used_retry_or_repair_pass = False
         repair_attempt = 0
         repair_failed = False
@@ -454,7 +455,10 @@ class FinalFromToolEnvironment:
             used_retry_or_repair_pass = True
             previous_result = result
             retry_messages = [*policy.messages, final_tool_retry_instruction()]
-            retry_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)
+            retry_max_tokens = final_tool_retry_max_tokens(
+                max_tokens,
+                web_fetch_result=policy.web_fetch_result or policy.web_search_result,
+            )
             if on_phase_start:
                 on_phase_start(
                     ModelPhaseStart(
@@ -610,6 +614,8 @@ class FinalFromToolEnvironment:
             else:
                 for chunk in stream_buffer.chunks:
                     on_final_delta(chunk)
+        elif direct_delta is not None and on_final_delta is not None and not direct_delta.chunks and result.content:
+            on_final_delta(result.content)
         self.runtime.messages.append({"role": "assistant", "content": result.content})
         return FinalAnswerResult(
             result=result,
@@ -927,6 +933,18 @@ class _BufferedDeltaSink:
     def write(self, text: str) -> None:
         if text:
             self.chunks.append(text)
+
+
+class _ForwardingDeltaSink:
+    def __init__(self, on_delta: Callable[[str], None]) -> None:
+        self._on_delta = on_delta
+        self.chunks: list[str] = []
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        self.chunks.append(text)
+        self._on_delta(text)
 
 
 def _prefer_compact_retry_result(candidate: ChatResult, original: ChatResult, *, messages: list[Message]) -> bool:

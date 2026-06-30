@@ -1862,6 +1862,66 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn("web_search_results: true", str(tool_messages[0]["content"]))
         self.assertNotIn("tool not available", str(tool_messages[0]["content"]))
 
+    def test_empty_web_search_route_uses_brief_final_prompt(self) -> None:
+        class EmptyWebSearchBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.max_tokens_seen: list[int] = []
+                self.final_messages: list[Message] | None = None
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.max_tokens_seen.append(max_tokens)
+                if self.calls == 1:
+                    return ChatResult(
+                        content='{"command":"orbit-web-search \\"sample topic\\""}',
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=10,
+                        completion_tokens=8,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                self.final_messages = messages
+                return ChatResult(
+                    content="No web search results were found for the query.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=38,
+                    completion_tokens=10,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = EmptyWebSearchBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            with patch(
+                "orbit.runtime.shell_guardrails.search_web",
+                return_value="web_search_results: true\nresults: none",
+            ):
+                result = runtime.ask_auto(
+                    "search online for sample topic",
+                    temperature=0,
+                    max_tokens=512,
+                    workdir=Path(tmp),
+                    allowed_tool_names=("exec_shell_full_command",),
+                )
+
+        self.assertEqual(result.content, "No web search results were found for the query.")
+        self.assertEqual(backend.calls, 2)
+        self.assertEqual(backend.max_tokens_seen, [128, 72])
+        self.assertIsNotNone(backend.final_messages)
+        self.assertEqual(backend.final_messages[0]["content"], FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.final_messages or [])
+        self.assertIn("web_search_results: true", rendered)
+        self.assertIn("results: none", rendered)
+        self.assertNotIn("Decide compactly whether the user request needs local tools", rendered)
+
     def test_new_web_turn_uses_latest_tool_evidence_not_previous_local_result(self) -> None:
         class RoutedBackend:
             def __init__(self) -> None:
@@ -6724,6 +6784,72 @@ EOF"""
         self.assertEqual(result.content, "Mario Nobile is an Italian public official.")
         self.assertEqual(emitted, ["Mario Nobile is an Italian public official."])
         self.assertEqual(backend.chat_stream_calls, 2)
+
+    def test_final_from_web_search_streams_and_stops_on_length_without_hidden_retry(self) -> None:
+        class WebSearchLengthBackend:
+            def __init__(self) -> None:
+                self.chat_stream_calls = 0
+                self.max_tokens_seen: list[int] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                raise AssertionError("streaming path expected")
+
+            def chat_stream(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None, on_delta=None, on_progress=None) -> ChatResult:
+                self.chat_stream_calls += 1
+                self.max_tokens_seen.append(max_tokens)
+                if self.chat_stream_calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"orbit-web-search 'sample topic'\"}"},
+                            }
+                        ],
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        cached_tokens=None,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                assert on_delta is not None
+                on_delta("partial web search answer")
+                return ChatResult(
+                    content="partial web search answer",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=72,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        emitted: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = WebSearchLengthBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            with patch(
+                "orbit.runtime.shell_guardrails.search_web",
+                return_value="web_search_results: true\nquery: sample topic\nresults:\n- one result",
+            ):
+                result = runtime.ask_with_tools(
+                    "search online for sample topic",
+                    temperature=0,
+                    max_tokens=512,
+                    workdir=Path(tmp),
+                    on_final_delta=emitted.append,
+                )
+
+        self.assertEqual(result.content, "partial web search answer")
+        self.assertEqual(result.finish_reason, "length")
+        self.assertEqual(emitted, ["partial web search answer"])
+        self.assertEqual(backend.chat_stream_calls, 2)
+        self.assertEqual(backend.max_tokens_seen, [96, 72])
 
     def test_ask_with_tools_emits_tool_call_event(self) -> None:
         events: list[tuple[str, str]] = []
