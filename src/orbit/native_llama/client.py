@@ -572,10 +572,11 @@ class NativeLlamaClient:
             thinking=thinking,
             prompt=prompt,
         ) if route_prefix_anchor else None
+        allow_mtp = not tools and route_anchor_segments is None
         return self.complete_prompt(
             prompt,
             max_tokens=max_tokens,
-            allow_mtp_experimental=not tools,
+            allow_mtp_experimental=allow_mtp,
             thinking=thinking,
             route_anchor_segments=route_anchor_segments,
             on_progress=on_progress,
