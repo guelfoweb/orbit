@@ -589,7 +589,7 @@ def run_tool_loop(
                         on_model_step=on_model_step,
                         on_phase_start=on_phase_start,
                         loop=state.tool_rounds + 1,
-                        use_tool_prompt=state.used_tool_call_prompt,
+                        use_tool_prompt=state.used_tool_call_prompt or _is_empty_web_search_result(tool_result),
                     )
         if (
             not repair.shell_error_final_pending
@@ -915,7 +915,7 @@ def run_tool_loop(
                     on_model_step=on_model_step,
                     on_phase_start=on_phase_start,
                     loop=loop_index + 1,
-                    use_tool_prompt=state.used_tool_call_prompt,
+                    use_tool_prompt=state.used_tool_call_prompt or _is_empty_web_search_result(tool_result),
                 )
         if repair.shell_error_final_pending:
             turn.mark_finalizable()
@@ -970,6 +970,16 @@ def _tool_call_max_tokens(max_tokens: int, *, mutative: bool, file_recovery: boo
 
 def _is_empty_final_response(result: ChatResult) -> bool:
     return not result.tool_calls and result.finish_reason == "stop" and not result.content.strip()
+
+
+def _is_empty_web_search_result(tool_result) -> bool:
+    if getattr(tool_result, "name", None) != "exec_shell_full_command":
+        return False
+    content = getattr(tool_result, "content", None)
+    if not isinstance(content, str):
+        return False
+    lowered = content.lower()
+    return "web_search_results: true" in lowered and re.search(r"(?m)^results:\s*none\s*$", lowered) is not None
 
 
 def _last_user_text(messages: list[Message]) -> str | None:

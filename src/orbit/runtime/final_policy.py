@@ -69,6 +69,7 @@ class FinalToolPolicy:
     length_retry_allowed: bool
     incomplete_retry_allowed: bool
     web_fetch_result: bool
+    web_search_result: bool
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
     large_file_excerpt = has_large_file_excerpt(call_messages)
     exhaustive_document_request = is_exhaustive_document_request(prompt)
     web_fetch_result = has_html_cleaned_tool_result(call_messages)
+    web_search_result = has_web_search_tool_result(call_messages)
     pdf_text_result = has_pdf_text_tool_result(call_messages)
     list_like_result = has_list_like_tool_result(call_messages) and is_compact_list_request(prompt)
     shell_full_result = has_tool_result(call_messages, "exec_shell_full_command")
@@ -226,6 +228,7 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
             large_file_excerpt=large_file_excerpt,
             exhaustive_document_request=exhaustive_document_request,
             web_fetch_result=web_fetch_result,
+            web_search_result=web_search_result,
             pdf_text_result=pdf_text_result,
             list_like_result=list_like_result,
             operational_status_result=operational_status_result,
@@ -234,8 +237,9 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
             brief_request=brief_request,
         ),
         length_retry_allowed=(not streamed and (large_file_excerpt or web_fetch_result)),
-        incomplete_retry_allowed=shell_full_result and not (web_fetch_result or list_like_result or operational_status_result),
+        incomplete_retry_allowed=shell_full_result and not (web_fetch_result or web_search_result or list_like_result or operational_status_result),
         web_fetch_result=web_fetch_result,
+        web_search_result=web_search_result,
     )
 
 
@@ -245,6 +249,7 @@ def final_tool_max_tokens(
     large_file_excerpt: bool,
     exhaustive_document_request: bool,
     web_fetch_result: bool,
+    web_search_result: bool,
     pdf_text_result: bool,
     list_like_result: bool,
     operational_status_result: bool = False,
@@ -254,7 +259,7 @@ def final_tool_max_tokens(
 ) -> int:
     if large_file_excerpt:
         return min(max_tokens, EXHAUSTIVE_LARGE_FILE_FINAL_MAX_TOKENS if exhaustive_document_request else LARGE_FILE_FINAL_MAX_TOKENS)
-    if web_fetch_result:
+    if web_fetch_result or web_search_result:
         return min(max_tokens, WEB_FETCH_FINAL_MAX_TOKENS)
     if pdf_text_result:
         return min(max_tokens, PDF_BRIEF_FINAL_MAX_TOKENS if brief_request else PDF_FINAL_MAX_TOKENS)
@@ -435,6 +440,8 @@ def final_from_tool_retry_reason(
 
 
 def final_from_tool_compact_retry_reason(result: ChatResult, *, messages: list[Message]) -> str | None:
+    if has_web_search_tool_result(messages):
+        return None
     if not _has_long_shell_tool_result(messages):
         return None
     if result.finish_reason == "length" and result.content.strip():
@@ -612,6 +619,22 @@ def has_html_cleaned_tool_result(messages: list[Message]) -> bool:
         content = message.get("content")
         return isinstance(content, str) and "shell_output_html_cleaned: true" in content
     return False
+
+
+def has_web_search_tool_result(messages: list[Message]) -> bool:
+    tool_message, command = last_successful_shell_result_and_command(messages)
+    if tool_message is None:
+        return False
+    content = tool_message.get("content")
+    if isinstance(content, str) and "web_search_results: true" in content:
+        return True
+    if not command:
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(tokens and tokens[0] == "orbit-web-search")
 
 
 def has_pdf_text_tool_result(messages: list[Message]) -> bool:
