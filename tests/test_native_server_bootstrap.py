@@ -104,7 +104,9 @@ class NativeServerBootstrapTests(unittest.TestCase):
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
 
-            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib):
+            with mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", vendor_lib), mock.patch(
+                "orbit.native_llama.paths.DEFAULT_VENDOR_BUILD_BIN", root / "missing-vendor-build-bin"
+            ):
                 args = build_parser().parse_args(["--models-dir", str(models_dir), "--hf-cache", str(root / "hf")])
                 paths = resolve_bootstrap_paths(args)
 
@@ -127,6 +129,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
 
             with (
                 mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_LIB_DIR", root / "missing-vendor-lib"),
+                mock.patch("orbit.native_llama.paths.DEFAULT_VENDOR_BUILD_BIN", root / "missing-vendor-build-bin"),
                 mock.patch("orbit.native_llama.paths.DEFAULT_LLAMA_LIB_DIR", env_lib),
             ):
                 args = build_parser().parse_args(["--models-dir", str(models_dir), "--hf-cache", str(root / "hf")])

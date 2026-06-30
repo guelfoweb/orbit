@@ -51,6 +51,7 @@ to explain is:
 | MTP-027 | First-request MTP target suffix prefill is required in the current persistent path. | Without a compatible request-boundary checkpoint, Orbit clears/replays target and draft memory, then decodes the prompt suffix to place target KV at the prompt frontier before validation. | Treating this as avoidable without a valid prefix/request-boundary checkpoint can leave target KV missing or stale. | Investigate reuse/persistent prompt frontier separately; do not remove suffix prefill from the MTP path. |
 | MTP-028 | MTP output is not yet proven equivalent to target-only under a prompt-matched control. | Phase 4 target-only with the MTP-prepared prompt used `23` prompt tokens and produced a stable hash different from MTP first-run and second-run hashes. | Any performance optimization before equivalence is explained can preserve a fast but wrong path. | Build a metadata-only equivalence harness around the exact prompt text hash/length, sampler config hash, first-sample state, and per-step frontier. |
 | MTP-029 | Phase 4 alignment trace did not show target/draft KV frontier mismatch. | Across three first-run and three second-run MTP traces, `ctx_tgt` and `ctx_dft` frontier min/max matched before each validate; draft origin was consistently `fresh`; replay-before appeared once at request start. | Acceptance may still be low due to sampler/config or draft quality, but not due to the basic frontier mismatch fields collected here. | Do not patch frontier/KV rollback logic based on current data. |
+| MTP-030 | Mixed target-only/MTP benchmark still aborts at process teardown. | The first post-PR #72 validation benchmark completed 18 rows, wrote metadata JSON, then exited with `double free or corruption (!prev)` and exit code 134. | MTP cannot be considered stable for broader use until repeated mixed-client/session lifetimes exit cleanly. | Reproduce the 18-row harness with lifetime counters; isolate whether target-only client, MTP reset, mmproj context, CDLL cache, or process-global llama.cpp cleanup still owns memory twice. |
 
 ## Candidate Fix Points, Without Patching Runtime
 
@@ -989,6 +990,75 @@ Residual risks:
   Orbit/vendor changes. Future vendor refreshes should record the upstream commit
   explicitly and rerun the lifecycle harness.
 
+## Post-PR 72 Validation Benchmark
+
+After PR #72 was merged, a short validation benchmark was run against `main`
+`b6ad0481b6302b1c79f04f1403aaa1b101df0a35`.
+
+The temporary harness:
+
+- used `ORBIT_MTP_TRACE=1`;
+- loaded target-only and MTP-enabled native clients in one Python process;
+- used repository models under `models/`;
+- used `ctx=8192`, `threads=6`, `threads-batch=6`, `batch=256`,
+  `ubatch=128`;
+- ran three repetitions each for `response_short` and `response_medium`;
+- collected target-only baseline, MTP first request, and MTP second identical
+  request rows;
+- wrote only metadata hashes, counts, and timings.
+
+The harness produced a complete JSON result with 18 completion rows, then
+aborted during teardown:
+
+```text
+double free or corruption (!prev)
+exit code: 134
+```
+
+This reopens the lifetime/teardown blocker for mixed target-only/MTP benchmark
+processes. The previous PR #72 linkage/lifetime changes remain necessary, but
+they are not sufficient for this longer mixed-client benchmark.
+
+Aggregated results before teardown:
+
+| Prompt | Scenario | Runs | Wall ms avg | Refill ms avg | Spec loop ms avg | Target validate ms avg | Draft ms avg | Generation ms avg | Acceptance |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| response_short | target-only baseline | 3 | 9139.895 | n/a | n/a | n/a | n/a | 6588.005 | n/a |
+| response_short | MTP first request | 3 | 7381.530 | 1394.750 | 5985.537 | 5193.330 | 595.129 | 7380.301 | 0.381 |
+| response_short | MTP second identical | 3 | 7814.371 | 1588.383 | 6224.740 | 5253.133 | 608.663 | 7813.138 | 0.381 |
+| response_medium | target-only baseline | 3 | 16906.423 | n/a | n/a | n/a | n/a | 13701.029 | n/a |
+| response_medium | MTP first request | 3 | 12749.564 | 2256.660 | 10491.033 | 9153.290 | 1092.203 | 12747.715 | 0.462 |
+| response_medium | MTP second identical | 3 | 12691.774 | 2162.367 | 10527.433 | 9043.203 | 1083.620 | 12689.795 | 0.462 |
+
+Correctness observations from the completed rows:
+
+- each scenario had stable output hashes across its three runs;
+- MTP first and second identical requests had matching output-token-hash
+  sequence hashes for each prompt;
+- MTP first and second identical requests had matching first-sample hashes for
+  each prompt;
+- no per-completion MTP fallback occurred.
+
+Stability verdict:
+
+- FAIL for this pass because process teardown aborted after the benchmark.
+
+Performance verdict:
+
+- Inconclusive for defaults. MTP showed lower end-to-end wall time than
+  target-only for the two prompts in this short run, but stability failure blocks
+  any default-enablement conclusion.
+- Target validate remains the dominant loop cost.
+- The request-boundary target refill cost is material and should remain tracked.
+
+Recommendation:
+
+- keep MTP explicit/experimental;
+- do not optimize acceptance, validate rows, or refill until the teardown abort
+  is resolved;
+- next patch candidate is a narrow lifetime reproducer and fix for the 18-row
+  mixed target-only/MTP benchmark.
+
 ## Minimal Test And Benchmark Plan
 
 ### Local Unit Suite
@@ -1063,3 +1133,84 @@ Collect:
 - Fallback after MTP failure must still use standard generation.
 - Tools, routing, final policy, evidence policy, and prompts must remain
   untouched.
+
+## MTP-030 Follow-Up: Mixed Teardown Root Cause And Fix
+
+The mixed target-only/MTP teardown abort was reduced with a temporary
+process-per-scenario harness.
+
+Minimal reproducer:
+
+```text
+target-only completion -> MTP completion -> explicit client cleanup
+ORBIT_MTP_TRACE=0
+mmproj disabled
+```
+
+Reduction matrix:
+
+| Scenario | Runtime path | Trace | Result |
+| --- | --- | --- | --- |
+| target-only only, repeated | split runtime | off | PASS |
+| MTP first only, repeated | split runtime | off | PASS |
+| MTP first+second, repeated | split runtime | off | PASS |
+| target-only then MTP | split runtime | off | FAIL, exit 134 |
+| target-only then MTP | split runtime | on | FAIL, exit 134 |
+| target-only then MTP | unified runtime bin | off | PASS, 3/3 |
+
+Root cause:
+
+- `resolve_paths()` selected `src/orbit/native_llama/vendor/lib` for the
+  target-only Python client runtime.
+- The persistent MTP shim linked against
+  `src/orbit/native_llama/vendor/build/llama.cpp/bin` because that directory
+  contains the required SONAME entries (`libllama.so.0`,
+  `libllama-common.so.0`, and ggml SONAMEs).
+- A mixed process could therefore load two llama.cpp runtime instances with
+  separate process-wide backend/global state.
+- Teardown after using both paths could double-free or corrupt shared global
+  state.
+
+Fix:
+
+- Native runtime resolution now prefers the packaged vendor build bin when it
+  exposes the SONAME runtime needed by the MTP shim.
+- `vendor/lib` remains the fallback when no packaged SONAME runtime is
+  available.
+- This keeps target-only and MTP shim usage on the same llama.cpp runtime
+  path in the local packaged build.
+
+Post-fix reproduction:
+
+```text
+target-only completion -> MTP completion -> explicit client cleanup
+ORBIT_MTP_TRACE=0
+mmproj disabled
+3/3 runs exited 0
+```
+
+Post-fix 18-row benchmark:
+
+| Prompt | Scenario | Runs | Exit codes | Wall ms avg | Refill ms avg | Spec loop ms avg | Target validate ms avg | Draft ms avg | Generation ms avg | Acceptance |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| response_short | target-only baseline | 3 | 0 | 6778.707 | n/a | n/a | n/a | n/a | 5044.464 | n/a |
+| response_short | MTP first request | 3 | 0 | 5215.916 | 1073.164 | 4141.823 | 3566.127 | 446.265 | 5214.993 | 0.381 |
+| response_short | MTP second identical | 3 | 0 | 5255.835 | 1061.765 | 4193.210 | 3510.967 | 446.878 | 5254.986 | 0.381 |
+| response_medium | target-only baseline | 3 | 0 | 12038.292 | n/a | n/a | n/a | n/a | 9767.841 | n/a |
+| response_medium | MTP first request | 3 | 0 | 8914.028 | 1502.527 | 7409.923 | 6435.117 | 807.487 | 8912.465 | 0.462 |
+| response_medium | MTP second identical | 3 | 0 | 9032.386 | 1536.167 | 7495.057 | 6421.367 | 802.408 | 9031.243 | 0.462 |
+
+Correctness/stability observations after the fix:
+
+- MTP first and second identical requests kept matching output-token-hash
+  sequence hashes for each prompt.
+- MTP first and second identical requests kept matching first-sample hashes for
+  each prompt.
+- No per-completion MTP fallback occurred.
+- The full mixed 18-row benchmark exited 0.
+
+Status:
+
+- Stability blocker resolved for the current text-generation mixed benchmark.
+- Performance remains scenario-dependent and should not be generalized from
+  this short run.
