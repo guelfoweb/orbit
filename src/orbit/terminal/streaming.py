@@ -231,11 +231,12 @@ class StreamRenderer:
 
     def _working_phase_detail(self) -> str | None:
         if self._progress is not None:
+            prefix = f"{self._phase_label} " if self._phase_label else ""
             if self._progress.phase == "prefill":
-                return "prefill"
+                return f"{prefix}prefill"
             if self._progress.phase == "generation":
-                return "generation"
-            return self._progress.phase
+                return f"{prefix}generation"
+            return f"{prefix}{self._progress.phase}"
         if self._prefill_estimate_seconds and self._prefill_estimate_seconds >= 1:
             return "prefill estimate"
         return None

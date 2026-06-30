@@ -45,6 +45,16 @@ class NativeStreamingTests(unittest.TestCase):
 
         self.assertEqual("".join(deltas), "I was developed by Google DeepMind.")
 
+    def test_leading_thought_label_filter_streams_plain_answer_without_newline(self) -> None:
+        stream = _LeadingThoughtLabelFilter()
+
+        deltas: list[str] = []
+        deltas.extend(stream.write("I cannot"))
+        deltas.extend(stream.write(" confirm that."))
+        deltas.extend(stream.finish())
+
+        self.assertEqual(deltas, ["I cannot", " confirm that."])
+
     def test_stop_filter_does_not_emit_stop_sequence(self) -> None:
         emitted: list[str] = []
         stream = _StopSequenceStreamFilter(("STOP",), emit=emitted.append)

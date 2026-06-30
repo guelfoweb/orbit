@@ -1910,6 +1910,8 @@ class _ControlChannelStreamFilter:
 
 
 class _LeadingThoughtLabelFilter:
+    _LABEL = "thought"
+
     def __init__(self) -> None:
         self._buffer = ""
         self._resolved = False
@@ -1920,6 +1922,11 @@ class _LeadingThoughtLabelFilter:
         self._buffer += text
         newline_index = self._find_newline(self._buffer)
         if newline_index < 0:
+            if not self._could_still_be_plain_thought_label(self._buffer):
+                self._resolved = True
+                buffered = self._buffer
+                self._buffer = ""
+                return [buffered]
             return []
         first_line = self._buffer[:newline_index]
         rest = self._buffer[newline_index + 1 :]
@@ -1944,3 +1951,8 @@ class _LeadingThoughtLabelFilter:
             if idx >= 0:
                 return idx if marker == "\n" else idx + (0 if marker == "\r" else 1)
         return -1
+
+    @classmethod
+    def _could_still_be_plain_thought_label(cls, text: str) -> bool:
+        stripped = text.strip().lower()
+        return bool(stripped) and cls._LABEL.startswith(stripped)
