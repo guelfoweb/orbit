@@ -44,6 +44,7 @@ DEFAULT_ALIAS = "gemma4:12b-it-native"
 PREFIX_PREWARM_ENV = "ORBIT_KV_PREFIX_PREWARM"
 PREFIX_PREWARM_OFF = "off"
 PREFIX_PREWARM_STARTUP = "startup"
+TOOLS_ENV = "ORBIT_TOOLS"
 
 
 class OrbitNativeServer:
@@ -590,23 +591,38 @@ def run_server(argv: list[str] | None = None) -> int:
 
 def route_prefix_prewarm_mode(environ: Mapping[str, str] | None = None) -> str:
     env = os.environ if environ is None else environ
-    value = env.get(PREFIX_PREWARM_ENV, PREFIX_PREWARM_OFF).strip().lower()
-    if value in {"", PREFIX_PREWARM_OFF}:
+    value = env.get(PREFIX_PREWARM_ENV, PREFIX_PREWARM_STARTUP).strip().lower()
+    if value == PREFIX_PREWARM_OFF:
         return PREFIX_PREWARM_OFF
-    if value == PREFIX_PREWARM_STARTUP:
+    if value in {"", PREFIX_PREWARM_STARTUP}:
         return PREFIX_PREWARM_STARTUP
     return PREFIX_PREWARM_OFF
 
 
+def tools_startup_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    value = env.get(TOOLS_ENV, "on").strip().lower()
+    if value == "on":
+        return True
+    if value == "off":
+        return False
+    return False
+
+
 def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefixPrefillResult:
     mode = route_prefix_prewarm_mode()
+    tools_enabled = tools_startup_enabled()
     if mode != PREFIX_PREWARM_STARTUP:
         result = _startup_prewarm_skipped("disabled")
-        _emit_startup_prewarm_diag(mode=mode, result=result)
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
+        return result
+    if not tools_enabled:
+        result = _startup_prewarm_skipped("tools_disabled")
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
         return result
     if not prefix_anchor_enabled():
         result = _startup_prewarm_skipped("anchor_disabled")
-        _emit_startup_prewarm_diag(mode=mode, result=result)
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
         return result
     try:
         segments = render_gemma4_route_prompt_segments(
@@ -622,7 +638,7 @@ def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefix
             failed_reason=f"startup_prewarm_failed:{type(exc).__name__}",
             restore_ready=False,
         )
-    _emit_startup_prewarm_diag(mode=mode, result=result)
+    _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
     return result
 
 
@@ -640,10 +656,12 @@ def _startup_prewarm_skipped(reason: str) -> NativeRoutePrefixPrefillResult:
     )
 
 
-def _emit_startup_prewarm_diag(*, mode: str, result: NativeRoutePrefixPrefillResult) -> None:
+def _emit_startup_prewarm_diag(*, mode: str, tools_enabled: bool, result: NativeRoutePrefixPrefillResult) -> None:
     emit_route_prefix_prewarm_event(
         {
-            "prewarm_enabled": mode == PREFIX_PREWARM_STARTUP,
+            "tools_default_enabled": tools_startup_enabled({}),
+            "tools_startup_enabled": tools_enabled,
+            "prewarm_enabled": mode == PREFIX_PREWARM_STARTUP and tools_enabled,
             "prewarm_mode": mode,
             "prewarm_attempted": result.attempted,
             "prewarm_succeeded": result.succeeded,

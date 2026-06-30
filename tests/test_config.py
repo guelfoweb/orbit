@@ -110,8 +110,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.workdir, Path(".").resolve())
         self.assertEqual(config.max_tokens, 512)
         self.assertIsNone(config.context_tokens)
-        self.assertEqual(config.tools, "off")
+        self.assertEqual(config.tools, "on")
         self.assertEqual(config.render_markdown, "live")
+
+    def test_orbit_tools_env_can_disable_default_tools(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_TOOLS": "off"}):
+            config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json"))
+
+        self.assertEqual(config.tools, "off")
+
+    def test_invalid_orbit_tools_env_falls_back_to_off(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_TOOLS": "browser"}):
+            config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json"))
+
+        self.assertEqual(config.tools, "off")
+
+    def test_orbit_tools_env_overrides_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"tools": "on"}), encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"ORBIT_TOOLS": "off"}):
+                config = load_app_config(_parse("--config", str(path)))
+
+        self.assertEqual(config.tools, "off")
 
     def test_config_file_sets_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,7 +253,7 @@ class ConfigTests(unittest.TestCase):
 
             config = load_app_config(_parse("--config", str(path)))
 
-        self.assertEqual(config.tools, "off")
+        self.assertEqual(config.tools, "on")
 
     def test_legacy_model_config_key_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

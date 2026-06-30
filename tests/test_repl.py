@@ -154,7 +154,8 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(code, 0)
         output = stdout.getvalue()
         self.assertIn("\033[2morbit interactive mode. Type /help for commands.\033[0m", output)
-        self.assertIn("\033[2mtools: off\033[0m", output)
+        self.assertIn("\033[2mtools: on\033[0m", output)
+        self.assertIn("warning: tools on", output)
         self.assertIn("recent session context:", output)
         self.assertIn("user: first question", output)
         self.assertIn("assistant: first answer", output)
@@ -182,7 +183,7 @@ class ReplTests(unittest.TestCase):
         repl = Repl(
             runtime=runtime,
             backend=backend,
-            config=AppConfig(workdir=Path(".")),
+            config=AppConfig(workdir=Path("."), tools="off"),
         )
         before = list(runtime.messages)
         stdout = io.StringIO()
@@ -579,9 +580,20 @@ class ReplTests(unittest.TestCase):
         self.assertTrue(repl.can_continue)
         self.assertIn("/continue", stdout.getvalue())
 
-    def test_tools_are_off_by_default_and_chat_path_is_used(self) -> None:
+    def test_tools_are_on_by_default_and_auto_path_is_used(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            repl._ask("hello")
+
+        self.assertEqual(repl.tools_mode, "on")
+        self.assertEqual(runtime.ask_auto_calls, 1)
+        self.assertEqual(runtime.ask_chat_calls, 0)
+
+    def test_explicit_tools_off_uses_chat_path(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path("."), tools="off"))
 
         with contextlib.redirect_stdout(io.StringIO()):
             repl._ask("hello")
@@ -622,7 +634,7 @@ class ReplTests(unittest.TestCase):
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
 
-        self.assertIn("tools: off", repl._handle_tools_command("/tools"))
+        self.assertIn("tools: on", repl._handle_tools_command("/tools"))
         tools_on = repl._handle_tools_command("/tools on")
         self.assertIn("tools: on", tools_on)
         self.assertIn("warning: tools on", tools_on)

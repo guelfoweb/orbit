@@ -2,7 +2,7 @@
 
 Minimal local CLI for running Gemma 4 with the native `orbit server` backend.
 
-Orbit is designed for local execution, streaming output, optional shell tools, and a simple terminal workflow. The normal setup uses Orbit's native backend and does not require an external `llama-server` process at runtime.
+Orbit is designed for local execution, streaming output, shell tools, and a simple terminal workflow. The normal setup uses Orbit's native backend and does not require an external `llama-server` process at runtime.
 
 The native backend still depends on native libraries derived from `llama.cpp`/`ggml`, built either from Orbit's vendored sources or from a documented developer fallback such as `--llama-root`. Zero-build packaging remains future work. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
 
@@ -12,7 +12,7 @@ Linux is the main target environment. macOS may work. Windows is not a target en
 
 - chats with a local model through a small terminal CLI
 - streams answers and runtime metrics
-- exposes unrestricted local shell only when `/tools on` is enabled
+- exposes unrestricted local shell tools by default, with explicit `/tools off`, `--tools off`, or `ORBIT_TOOLS=off` controls
 - keeps the tool loop model-driven
 - supports local image and audio input when the backend is started with multimodal support
 - supports native MTP when target and draft models are available
@@ -112,6 +112,28 @@ Stable default server, with MTP disabled:
 
 ```bash
 orbit server
+```
+
+By default, the native server performs startup route-prefix prewarm for the
+tools-on route prefix. This shifts the first tools-on route prefill cost to
+startup. To disable only startup prewarm:
+
+```bash
+ORBIT_KV_PREFIX_PREWARM=off orbit server
+```
+
+To disable route prefix-anchor and prewarm:
+
+```bash
+ORBIT_KV_PREFIX_ANCHOR=off orbit server
+```
+
+The terminal client starts with tools enabled by default. To start without local
+shell tools:
+
+```bash
+ORBIT_TOOLS=off orbit
+orbit --tools off "hello"
 ```
 
 To get a reasonable CPU/RAM starting profile, you can first run `scripts/suggest-server-profile.sh`; it checks local CPU and RAM and prints conservative environment-variable suggestions to review before export.

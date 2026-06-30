@@ -60,7 +60,7 @@ class CliTests(unittest.TestCase):
         completed = _run_cli("", "/tools")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("tools: off", completed.stdout)
+        self.assertIn("tools: on", completed.stdout)
         self.assertIn("/tools off = chat only", completed.stdout)
         self.assertIn("/tools on  = unrestricted local shell", completed.stdout)
         self.assertNotIn("/tools files", completed.stdout)

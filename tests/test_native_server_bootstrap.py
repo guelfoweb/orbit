@@ -18,6 +18,7 @@ from orbit.native_server.app import (
     resolve_bootstrap_paths,
     route_prefix_prewarm_mode,
     run_server,
+    tools_startup_enabled,
 )
 
 
@@ -166,24 +167,39 @@ class NativeServerBootstrapTests(unittest.TestCase):
 
         self.assertEqual(args.port, 12120)
 
-    def test_route_prefix_prewarm_defaults_to_off(self) -> None:
-        self.assertEqual(route_prefix_prewarm_mode({}), PREFIX_PREWARM_OFF)
+    def test_route_prefix_prewarm_defaults_to_startup(self) -> None:
+        self.assertEqual(route_prefix_prewarm_mode({}), PREFIX_PREWARM_STARTUP)
 
     def test_route_prefix_prewarm_accepts_startup(self) -> None:
         self.assertEqual(route_prefix_prewarm_mode({"ORBIT_KV_PREFIX_PREWARM": "startup"}), PREFIX_PREWARM_STARTUP)
+
+    def test_route_prefix_prewarm_accepts_off(self) -> None:
+        self.assertEqual(route_prefix_prewarm_mode({"ORBIT_KV_PREFIX_PREWARM": "off"}), PREFIX_PREWARM_OFF)
 
     def test_route_prefix_prewarm_invalid_value_falls_back_to_off(self) -> None:
         self.assertEqual(route_prefix_prewarm_mode({"ORBIT_KV_PREFIX_PREWARM": "soon"}), PREFIX_PREWARM_OFF)
 
     @mock.patch.dict("os.environ", {}, clear=True)
-    def test_startup_prewarm_default_off_skips_without_capture(self) -> None:
+    def test_tools_startup_enabled_defaults_to_true(self) -> None:
+        self.assertTrue(tools_startup_enabled())
+
+    @mock.patch.dict("os.environ", {"ORBIT_TOOLS": "off"}, clear=True)
+    def test_tools_startup_enabled_accepts_off(self) -> None:
+        self.assertFalse(tools_startup_enabled())
+
+    @mock.patch.dict("os.environ", {"ORBIT_TOOLS": "browser"}, clear=True)
+    def test_tools_startup_enabled_invalid_value_falls_back_to_false(self) -> None:
+        self.assertFalse(tools_startup_enabled())
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_startup_prewarm_default_invokes_native_hook(self) -> None:
         client = _FakeNativeClient()
 
         result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
 
-        self.assertTrue(result.skipped)
-        self.assertEqual(result.skip_reason, "disabled")
-        self.assertEqual(client.capture_calls, 0)
+        self.assertTrue(result.succeeded)
+        self.assertTrue(result.restore_ready)
+        self.assertEqual(client.capture_calls, 1)
 
     @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
     def test_startup_prewarm_explicit_off_skips_without_capture(self) -> None:
@@ -193,6 +209,16 @@ class NativeServerBootstrapTests(unittest.TestCase):
 
         self.assertTrue(result.skipped)
         self.assertEqual(result.skip_reason, "disabled")
+        self.assertEqual(client.capture_calls, 0)
+
+    @mock.patch.dict("os.environ", {"ORBIT_TOOLS": "off"}, clear=True)
+    def test_startup_prewarm_tools_off_skips_without_capture(self) -> None:
+        client = _FakeNativeClient()
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "tools_disabled")
         self.assertEqual(client.capture_calls, 0)
 
     @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "startup"}, clear=True)
@@ -327,25 +353,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertIn("--llama-root", output)
 
     @mock.patch.dict("os.environ", {}, clear=True)
-    def test_run_server_default_does_not_startup_prewarm(self) -> None:
-        _FakeNativeClient.instances.clear()
-        _FakeHTTPServer.instances.clear()
-        with (
-            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
-            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
-            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
-            mock.patch("sys.stdout", new_callable=io.StringIO),
-        ):
-            code = run_server([])
-
-        self.assertEqual(code, 0)
-        self.assertEqual(len(_FakeNativeClient.instances), 1)
-        self.assertEqual(_FakeNativeClient.instances[0].capture_calls, 0)
-        self.assertTrue(_FakeNativeClient.instances[0].closed)
-        self.assertTrue(_FakeHTTPServer.instances[0].closed)
-
-    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "startup"}, clear=True)
-    def test_run_server_startup_prewarm_invokes_hook_before_serving(self) -> None:
+    def test_run_server_default_startup_prewarm_invokes_hook_before_serving(self) -> None:
         _FakeNativeClient.instances.clear()
         _FakeHTTPServer.instances.clear()
         with (
@@ -359,6 +367,24 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(_FakeNativeClient.instances), 1)
         self.assertEqual(_FakeNativeClient.instances[0].capture_calls, 1)
+        self.assertTrue(_FakeNativeClient.instances[0].closed)
+        self.assertTrue(_FakeHTTPServer.instances[0].closed)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_run_server_explicit_prewarm_off_skips_hook(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(_FakeNativeClient.instances), 1)
+        self.assertEqual(_FakeNativeClient.instances[0].capture_calls, 0)
         self.assertIsNotNone(_FakeHTTPServer.instances[0].orbit_state)
 
 
