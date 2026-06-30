@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from orbit.native_llama.chat_template import RoutePromptSegments
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.mtp_completion import MtpCompletionResult
@@ -349,6 +350,41 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(result, expected)
         kwargs = client.complete_prompt.call_args.kwargs
         self.assertFalse(kwargs["allow_mtp_experimental"])
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_chat_disables_mtp_when_route_prefix_anchor_is_available(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client.apply_chat_template = mock.Mock(return_value="route prompt")
+        segments = RoutePromptSegments(
+            stable_prefix_text="route ",
+            dynamic_suffix_text="prompt",
+            full_prompt_text="route prompt",
+            stable_prefix_hash="prefix-hash",
+            full_prompt_hash="full-hash",
+            stable_prefix_char_len=len("route "),
+        )
+        client._route_anchor_segments_for_prompt = mock.Mock(return_value=segments)
+        expected = NativeTimings(
+            prompt_tokens=10,
+            output_tokens=2,
+            reused_prompt_tokens=8,
+            evaluated_prompt_tokens=2,
+            prefill_ms=3.0,
+            generation_ms=4.0,
+        )
+        client.complete_prompt = mock.Mock(return_value=expected)
+
+        result = client.complete_chat(
+            [{"role": "system", "content": "route"}, {"role": "user", "content": "hi"}],
+            max_tokens=16,
+            route_prefix_anchor=True,
+        )
+
+        self.assertEqual(result, expected)
+        client._route_anchor_segments_for_prompt.assert_called_once()
+        kwargs = client.complete_prompt.call_args.kwargs
+        self.assertFalse(kwargs["allow_mtp_experimental"])
+        self.assertIs(kwargs["route_anchor_segments"], segments)
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_complete_prompt_can_use_mtp_even_when_should_cancel_callback_is_present(self, _mocked_lib) -> None:
