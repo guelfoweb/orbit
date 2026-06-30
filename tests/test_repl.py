@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.backend.base import ChatResult, Message
+from orbit.backend.base import ChatResult, Message, StreamProgress
 from orbit.runtime import ChatRuntime
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.config import AppConfig
@@ -35,6 +35,7 @@ from orbit.terminal.repl_input import (
 from orbit.terminal.repl import Repl
 from orbit.terminal.repl import _phase_progress_label, _phase_starts_final_output, _prefill_profile_for_turn
 from orbit.terminal.session_preview import format_recent_session_messages
+from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE
 from orbit.runtime.turn_trace import ModelPhaseStart
@@ -324,6 +325,14 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(renderer.events, [])
         self.assertEqual(renderer.phase_label, "forced final")
         self.assertEqual(renderer.final_output_mode, [True, True, True])
+
+    def test_working_phase_detail_combines_phase_label_and_progress(self) -> None:
+        renderer = StreamRenderer()
+
+        renderer.set_phase_label("tool decision")
+        renderer.progress(StreamProgress(phase="generation", current=3, total=128, percent=2))
+
+        self.assertEqual(renderer._working_phase_detail(), "tool decision generation")
 
     def test_prefill_profile_for_turn_uses_chat_when_tools_off(self) -> None:
         self.assertEqual(_prefill_profile_for_turn([], tools_enabled=False), CHAT_PREFILL_PROFILE)

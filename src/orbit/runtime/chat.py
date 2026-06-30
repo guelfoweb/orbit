@@ -42,8 +42,8 @@ from orbit.runtime.messages import (
 )
 
 from orbit.runtime.command_request import (
-    CommandStreamFilter,
     ToolRoute,
+    command_stream_state,
     decision_tool_names,
     parse_command_decision,
     parse_command_decision_from_tool_calls,
@@ -313,8 +313,7 @@ class ChatRuntime:
         command_max_tokens = CompletionBudget(max_tokens).internal(ROUTE_MAX_TOKENS)
         streamed_final_retry = False
         retried_empty_final = False
-        route_stream_filter = None
-        route_streamed_chunks: list[str] = []
+        route_abort_reason: str | None = None
         command_messages = with_command_system_prompt(self.messages)
         with self._temporary_backend_thinking(False):
             if on_phase_start:
@@ -323,14 +322,28 @@ class ChatRuntime:
                 if on_progress is None:
                     first = self.backend.chat(command_messages, temperature=temperature, max_tokens=command_max_tokens)
                 else:
-                    route_stream_filter = CommandStreamFilter(route_streamed_chunks.append) if on_final_delta is not None else None
-                    first = self.backend.chat_stream(
-                        command_messages,
-                        temperature=temperature,
-                        max_tokens=command_max_tokens,
-                        on_delta=route_stream_filter.write if route_stream_filter is not None else (lambda _text: None),
-                        on_progress=on_progress,
-                    )
+                    route_stream_filter = _RouteDecisionStreamAbort()
+                    try:
+                        first = self.backend.chat_stream(
+                            command_messages,
+                            temperature=temperature,
+                            max_tokens=command_max_tokens,
+                            on_delta=route_stream_filter.write,
+                            on_progress=on_progress,
+                        )
+                    except _RouteNotCommandAbort as exc:
+                        route_abort_reason = "route_not_command"
+                        first = ChatResult(
+                            content=exc.content,
+                            model=None,
+                            finish_reason="length",
+                            tool_calls=[],
+                            prompt_tokens=None,
+                            completion_tokens=exc.chunks,
+                            cached_tokens=None,
+                            prompt_tokens_per_second=None,
+                            generation_tokens_per_second=None,
+                        )
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=1, result=first, phase="route"))
         command_content = first.content
@@ -437,14 +450,24 @@ class ChatRuntime:
                     )
                     retried_empty_final = True
                 if first.finish_reason == "length":
+                    retry_reason = route_abort_reason or "length_without_decision"
                     if not route_outcome_emitted:
                         _emit_route_outcome_for_result(
                             first,
                             decision=None,
                             outcome="route_no_decision_length_retry",
-                            retry_reason="length_without_decision",
+                            retry_reason=retry_reason,
                         )
                         route_outcome_emitted = True
+                    if on_phase_start:
+                        on_phase_start(
+                            ModelPhaseStart(
+                                "chat_final_retry",
+                                streamed=on_final_delta is not None,
+                                attempt=2,
+                                reason=retry_reason,
+                            )
+                        )
                     if on_final_delta is None:
                         with model_call_context(phase="chat_final_retry", tools_mode="on"):
                             first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
@@ -489,12 +512,7 @@ class ChatRuntime:
                     )
                 self.messages.append({"role": "assistant", "content": first.content})
                 if on_final_delta and not streamed_final_retry and not retried_empty_final:
-                    if route_stream_filter is not None:
-                        route_stream_filter.finish()
-                        for chunk in route_streamed_chunks:
-                            on_final_delta(chunk)
-                    else:
-                        on_final_delta(first.content)
+                    on_final_delta(first.content)
                 return self._remember_visible_result(first)
         if decision.route == ToolRoute.CHAT:
             chat_messages = with_chat_system_prompt(self.messages)
@@ -945,6 +963,29 @@ class _ThoughtOnlyDeltaFilter:
                 break
             self._buffer = self._buffer[start + len(self._THOUGHT_START) :]
             self._in_thought = True
+
+
+class _RouteNotCommandAbort(Exception):
+    def __init__(self, content: str, *, chunks: int) -> None:
+        super().__init__("route stream produced non-command prose")
+        self.content = content
+        self.chunks = chunks
+
+
+class _RouteDecisionStreamAbort:
+    """Stop an internal route stream once it cannot still become a route decision."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._chunks = 0
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        self._chunks += 1
+        self._buffer += text
+        if command_stream_state(self._buffer) == "not_command":
+            raise _RouteNotCommandAbort(self._buffer, chunks=self._chunks)
 
 
 class _BufferedDeltaSink:

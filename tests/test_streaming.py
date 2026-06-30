@@ -578,7 +578,7 @@ class StreamingRendererTests(unittest.TestCase):
         renderer.set_phase_label("forced final")
         renderer.progress(StreamProgress(phase="prefill", current=243, total=935, percent=25))
 
-        self.assertEqual(renderer._working_phase_prefix(), " [prefill]")
+        self.assertEqual(renderer._working_phase_prefix(), " [forced final prefill]")
         self.assertEqual(renderer._working_status(5), "5s, 243/935 tk (25%)")
 
     def test_wait_timer_omits_repeated_generation_label_from_status(self) -> None:
@@ -593,7 +593,7 @@ class StreamingRendererTests(unittest.TestCase):
         renderer.set_phase_label("final answer")
         renderer.progress(StreamProgress(phase="generation", current=7, total=512, percent=1))
 
-        self.assertEqual(renderer._working_phase_prefix(), " [generation]")
+        self.assertEqual(renderer._working_phase_prefix(), " [final answer generation]")
 
     def test_wait_timer_names_generation_progress_explicitly(self) -> None:
         renderer = StreamRenderer()

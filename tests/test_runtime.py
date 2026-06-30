@@ -4548,7 +4548,7 @@ EOF"""
         self.assertEqual(backend.chat_calls, 0)
         self.assertEqual(backend.chat_stream_calls, 2)
 
-    def test_ask_auto_replays_streamed_route_answer_when_tools_are_on_and_no_tool_is_used(self) -> None:
+    def test_ask_auto_aborts_streamed_route_prose_and_streams_final_retry(self) -> None:
         class StreamingRouteAnswerBackend:
             def __init__(self) -> None:
                 self.chat_calls = 0
@@ -4563,9 +4563,22 @@ EOF"""
                 assert on_delta is not None
                 assert on_progress is not None
                 on_progress(type("P", (), {"phase": "generation", "current": 12, "total": 128, "percent": 9})())
-                on_delta("plain answer")
+                if self.chat_stream_calls == 1:
+                    on_delta("plain route prose")
+                    return ChatResult(
+                        content="plain route prose",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=5,
+                        completion_tokens=3,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                on_delta("final answer")
                 return ChatResult(
-                    content="plain answer",
+                    content="final answer",
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -4578,6 +4591,7 @@ EOF"""
 
         emitted: list[str] = []
         progress: list[tuple[str, int, int, int]] = []
+        phases: list[tuple[str, str | None]] = []
         backend = StreamingRouteAnswerBackend()
         runtime = ChatRuntime(backend=backend, system_prompt="route system")
 
@@ -4588,14 +4602,16 @@ EOF"""
             workdir=Path("."),
             on_final_delta=emitted.append,
             on_progress=lambda item: progress.append((item.phase, item.current, item.total, item.percent)),
+            on_phase_start=lambda phase: phases.append((phase.phase, phase.reason)),
             allowed_tool_names=("exec_shell_full_command",),
         )
 
-        self.assertEqual(result.content, "plain answer")
-        self.assertEqual(emitted, ["plain answer"])
-        self.assertEqual(progress, [("generation", 12, 128, 9)])
+        self.assertEqual(result.content, "final answer")
+        self.assertEqual(emitted, ["final answer"])
+        self.assertIn(("chat_final_retry", "route_not_command"), phases)
+        self.assertEqual(progress, [("generation", 12, 128, 9), ("generation", 12, 128, 9)])
         self.assertEqual(backend.chat_calls, 0)
-        self.assertEqual(backend.chat_stream_calls, 1)
+        self.assertEqual(backend.chat_stream_calls, 2)
 
     def test_ask_auto_discards_route_thought_and_runs_chat_final(self) -> None:
         class StreamingRouteThoughtBackend:
@@ -4698,6 +4714,7 @@ EOF"""
                 )
 
         emitted: list[str] = []
+        phases: list[tuple[str, bool, int | None, str | None]] = []
         backend = StreamingRouteLengthBackend()
         runtime = ChatRuntime(backend=backend, system_prompt="route system")
 
@@ -4708,11 +4725,13 @@ EOF"""
             workdir=Path("."),
             on_final_delta=emitted.append,
             on_progress=lambda _item: None,
+            on_phase_start=lambda phase: phases.append((phase.phase, phase.streamed, phase.attempt, phase.reason)),
             allowed_tool_names=("exec_shell_full_command",),
         )
 
         self.assertEqual(result.content, "<|channel>thought\nvisible thinking<channel|>visible answer")
         self.assertEqual(emitted, ["<|channel>thought\nvisible thinking", "<channel|>visible answer"])
+        self.assertIn(("chat_final_retry", True, 2, "route_not_command"), phases)
         self.assertEqual(backend.chat_calls, 0)
         self.assertEqual(backend.chat_stream_calls, 2)
 
