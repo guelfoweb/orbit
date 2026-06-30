@@ -1,65 +1,38 @@
 # orbit
 
-Minimal local CLI for running Gemma 4 with the native `orbit server` backend.
+Orbit is a small Python-first local runtime for Gemma 4 12B on CPU-only
+machines. The primary path is the native `orbit server` backend, using
+vendored `llama.cpp`/`ggml` libraries built and loaded by Orbit. It does not
+require an external `llama-server` process for normal use.
 
-Orbit is designed for local execution, streaming output, shell tools, and a simple terminal workflow. The normal setup uses Orbit's native backend and does not require an external `llama-server` process at runtime.
+Orbit stays model-driven. The runtime enforces safety, size, timeout, context,
+and tool-contract boundaries, but the model decides whether to answer directly
+or use exposed tools.
 
-The native backend still depends on native libraries derived from `llama.cpp`/`ggml`, built either from Orbit's vendored sources or from a documented developer fallback such as `--llama-root`. Zero-build packaging remains future work. See [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md).
+Linux is the main target environment. macOS may work. Windows is not a target.
 
-Linux is the main target environment. macOS may work. Windows is not a target environment.
+## Current Scope
 
-## What it does
+- local CLI and native HTTP server for Gemma 4 12B
+- CPU-first native backend
+- shell tools when tools mode is enabled
+- streaming terminal output and compact progress phases
+- route-prefix KV anchor and startup prewarm enabled by default
+- optional multimodal image/audio support when the matching `mmproj` is loaded
+- experimental native MTP with `orbit server --mtp`
 
-- chats with a local model through a small terminal CLI
-- streams answers and runtime metrics
-- exposes unrestricted local shell tools by default, with explicit `/tools off`, `--tools off`, or `ORBIT_TOOLS=off` controls
-- keeps the tool loop model-driven
-- supports local image and audio input when the backend is started with multimodal support
-- supports native MTP when target and draft models are available
-- stores lightweight sessions and prompt history under `~/.orbit`
-
-Orbit stays model-driven. The runtime enforces safety, size, timeout, and tool-contract boundaries, but it does not deterministically solve user tasks.
-
-## Backend stance
-
-- Primary backend path: native `orbit server`
-- Compatibility path: `llama-server` or another OpenAI-compatible local backend
-- CLI default base URL: `http://127.0.0.1:12120`
-
-If your native server runs on another port, pass `--base-url`.
-
-## CPU-first native build
-
-Orbit is designed, tested, and supported primarily for CPU-only local execution.
-
-The vendored native self-build path is CPU-only in this release:
-
-```bash
-python3 scripts/build_native.py
-```
-
-GPU acceleration is not part of Orbit's supported vendored self-build path yet. Advanced users who want CUDA, Metal, Vulkan, or ROCm should build `llama.cpp` natively on the target GPU machine and point Orbit to that build through the documented developer fallback:
-
-```bash
-orbit server --llama-root /path/to/gpu-enabled/llama.cpp
-```
-
-This keeps Orbit's default path portable and stable while still allowing advanced GPU experiments through upstream `llama.cpp` builds.
+MTP is supported for local testing, but it remains experimental. Do not treat it
+as production-ready or as a guaranteed performance win.
 
 ## Requirements
 
 - Python 3.11 or newer
 - Linux recommended
-- a local Gemma 4 target GGUF model
+- Gemma 4 12B target GGUF
+- optional Gemma 4 `mmproj` GGUF for multimodal input
+- optional MTP draft GGUF for `orbit server --mtp`
 
-Optional artifacts:
-
-- MTP draft GGUF for native speculative decoding
-- matching `mmproj` GGUF for multimodal image/audio input
-
-## Quick start
-
-### 1. Install Orbit
+## Install
 
 ```bash
 git clone https://github.com/guelfoweb/orbit.git
@@ -69,216 +42,191 @@ python3 -m venv .venv
 pip install -e .
 ```
 
-This installs the Python package and CLI.
-
-### 2. Build the native backend libraries
-
-If `vendor/lib/` does not already contain the required CPU native libraries, build them explicitly:
+Build the vendored native libraries if they are not already present:
 
 ```bash
 python3 scripts/build_native.py
 ```
 
-This uses Orbit's vendored `llama.cpp` sources and writes local build output under `src/orbit/native_llama/vendor/`.
-
-Developer fallback:
-
-- `--llama-root /path/to/llama.cpp`
-- `ORBIT_LLAMA_ROOT=/path/to/llama.cpp`
-
-### 3. Download models
-
-Download only the target model:
+Download model artifacts as needed:
 
 ```bash
 orbit download ggml-org/gemma-4-12B-it-GGUF
-```
-
-Download only the multimodal projector:
-
-```bash
 orbit download ggml-org/gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
-```
-
-Download only the MTP draft:
-
-```bash
 orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
 ```
 
-### 4. Start the native backend
+## Quick Start
 
-Stable default server, with MTP disabled:
-
-```bash
-orbit server
-```
-
-By default, the native server performs startup route-prefix prewarm for the
-tools-on route prefix. This shifts the first tools-on route prefill cost to
-startup. To disable only startup prewarm:
+Start the native server with MTP enabled:
 
 ```bash
-ORBIT_KV_PREFIX_PREWARM=off orbit server
+PYTHONPATH=src .venv/bin/orbit server --mtp
 ```
 
-To disable route prefix-anchor and prewarm:
+The current release gate expects:
+
+- native backend loaded
+- MTP initialized when `--mtp` is used
+- multimodal capability detected when `mmproj` is available
+- route-prefix KV prewarm completed
+- no duplicate `llama.cpp` runtime loaded
+- clean shutdown without double-free, SIGABRT, or segfault
+
+In another terminal:
 
 ```bash
-ORBIT_KV_PREFIX_ANCHOR=off orbit server
+.venv/bin/orbit --workdir workdir --tools on --think off "hi, how are you?"
 ```
 
-The terminal client starts with tools enabled by default. To start without local
-shell tools:
+For route/KV diagnostics:
 
 ```bash
-ORBIT_TOOLS=off orbit
-orbit --tools off "hello"
+ORBIT_KV_DIAG=1 .venv/bin/orbit --workdir workdir --tools on --think off "hi"
 ```
 
-To get a reasonable CPU/RAM starting profile, you can first run `scripts/suggest-server-profile.sh`; it checks local CPU and RAM and prints conservative environment-variable suggestions to review before export.
+`ORBIT_KV_DIAG=1` is diagnostic only. It is not required for normal use.
 
-If native libraries are not packaged inside Orbit yet, use:
+## Tools
+
+Tools are enabled by default in the current server/client flow.
+
+Tools mode exposes unrestricted local shell access through the model-facing
+shell tool. Use it only in an isolated lab or safe workdir.
+
+Disable tools at server startup:
 
 ```bash
-orbit server --llama-root /path/to/llama.cpp
+ORBIT_TOOLS=off .venv/bin/orbit server --mtp
 ```
 
-Optional experimental MTP mode:
+Disable tools for a client/session:
 
 ```bash
-orbit server --mtp
+.venv/bin/orbit --tools off "hello"
 ```
 
-With a multimodal projector:
-
-```bash
-  orbit server \
-  --port 12120 \
-  --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
-```
-
-You can combine MTP and multimodal flags when both artifacts are available:
-
-```bash
-  orbit server \
-  --port 12120 \
-  --mtp \
-  --mmproj models/ggml-org--gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
-```
-
-What this means:
-
-- `orbit server` starts the stable native backend without MTP.
-- `orbit server --mtp` enables the experimental MTP path explicitly.
-- MTP can improve some workloads, but Orbit keeps it off by default because stability has priority.
-- if native libs are missing, Orbit exits with a short error telling you to build them with `python3 scripts/build_native.py` or use `--llama-root` / `ORBIT_LLAMA_ROOT`
-- native route KV prefix-anchor runs in safe auto mode by default for eligible
-  tools-on route calls; disable it with `ORBIT_KV_PREFIX_ANCHOR=off` if you need
-  the baseline prefill path
-- experimental multi-turn raw MTP chat reuse remains debug-only behind:
-  - `ORBIT_MTP_CHAT_REUSE_RAW=1`
-  - `ORBIT_MTP_CHAT_REUSE_DEBUG=1`
-
-### 5. Check the server
-
-After startup, you can verify that the server is healthy:
-
-```bash
-orbit --health
-```
-
-Inside the interactive client, you can inspect backend state with:
+Interactive toggles:
 
 ```text
-/health
-/props
-```
-
-Expected `/props` values:
-
-- default server:
-  - `backend_mode=no-mtp`
-  - `mtp_enabled=false`
-- with `--mtp`:
-  - `backend_mode=mtp-ready`
-  - `mtp_enabled=true`
-
-### 6. Start Orbit
-
-```bash
-orbit
-```
-
-Inside Orbit, tools are off by default:
-
-```text
+/tools off
 /tools on
 ```
 
-## One-shot usage
+`--tools off` is client/session-side. If a server was already started with
+tools enabled, it may already have performed startup route-prefix prewarm.
+
+## KV Prefix Anchor and Prewarm
+
+Route-prefix KV anchor is enabled by default in auto mode. Startup prewarm is
+also enabled by default for the tools-on route prefix.
+
+Disable only startup prewarm:
 
 ```bash
-orbit "Say who you are in one short sentence."
-orbit --image workdir/media/image1.jpg "Describe this image."
-orbit --audio workdir/media/audio1.wav "Transcribe or summarize this audio."
+ORBIT_KV_PREFIX_PREWARM=off .venv/bin/orbit server --mtp
 ```
 
-## Thinking mode
+Disable route-prefix anchor and prewarm:
 
-Orbit supports runtime thinking visibility:
+```bash
+ORBIT_KV_PREFIX_ANCHOR=off .venv/bin/orbit server --mtp
+```
+
+The prewarm cost is paid at startup. It does not remove CPU work; it shifts part
+of the first tools-on route cost before the first user request.
+
+## Streaming and Progress
+
+Orbit uses classic terminal UX, not a full-screen TUI. Progress phases
+distinguish internal routing from final-answer generation:
+
+- `tool decision`
+- `final answer`
+- `final retry`
+
+Internal route prose is not accepted as a final answer. If the route stream
+violates the route contract, Orbit can abort that internal route generation and
+fall back to the existing final-answer retry path.
+
+When the backend emits token deltas, final answers stream. If a backend returns
+only final content without deltas, Orbit prints the returned content when the
+call completes.
+
+## Thinking Mode
 
 ```text
 /think off
 /think on
 ```
 
-- `think off`: do not request visible reasoning
-- `think on`: request visible reasoning first, then the final answer
+`think off` is the normal mode. `think on` requests visible reasoning when the
+backend/model supports it. Think-on paths can be much slower on CPU.
 
-The backend and model must actually support visible reasoning for this to appear correctly.
+## Multimodal Input
 
-## Interactive commands
+When the matching `mmproj` is available and detected by the native server:
+
+```bash
+.venv/bin/orbit --image workdir/media/image1.jpg "Describe this image."
+.venv/bin/orbit --audio workdir/media/audio1.wav "Summarize this audio."
+```
+
+Multimodal capability should be visible through `/v1/models` and `/props`.
+
+## Useful Commands
 
 ```text
-/compact [tools]  Compact memory or old tool results.
-/continue         Continue the last answer if it reached max_tokens.
 /health           Check backend health.
-/help             Show this help.
+/props            Show backend properties when available.
+/status [ctx]     Show runtime status or estimated context usage.
 /max-tokens [n]   Show or set output token limit for following turns.
 /think [off|on]   Show or set thinking visibility.
+/tools [off|on]   Show or set shell tool access.
+/continue         Continue the last answer if it reached max_tokens.
 /reset            Clear current conversation and saved session.
 /sessions clear   Delete all saved sessions for this workdir.
-/status [ctx]     Show runtime status or estimated context usage.
-/tools [off|on]   Show or set shell tool access.
 /exit             Exit interactive mode.
 ```
 
-`/max-tokens <n>` affects only the current runtime. It does not rewrite config or session files.
+## CPU Notes
 
-## Compatibility path
+Orbit targets local CPU-first operation. Some paths are expected to be slow:
 
-Orbit can still talk to compatible local HTTP backends through `--base-url`. Keep this as compatibility or comparison, not as the preferred product path.
+- web-search final answers with large evidence
+- `read` over large files
+- visible thinking
+- first requests after cold server startup
+- experimental MTP paths
+
+Do not interpret MTP as a general speed guarantee. Measure the actual workload.
+
+## Compatibility
+
+The preferred runtime is native `orbit server`. Orbit can still talk to a local
+OpenAI-compatible HTTP backend through `--base-url`, but that is a compatibility
+or comparison path, not the primary product path.
 
 ## Troubleshooting
 
-- backend unavailable: check `orbit --health --base-url ...`
-- native libraries missing: run `python3 scripts/build_native.py`, or use `--llama-root` / `ORBIT_LLAMA_ROOT` as a developer fallback
-- model not found: verify the Orbit models cache or explicit model paths
-- multimodal unavailable: ensure the matching `mmproj` is present and the backend was started with it
-- MTP unavailable: ensure both target and draft models are available and the backend was started with the experimental MTP path
+- backend unavailable: run `.venv/bin/orbit --health --base-url ...`
+- native libraries missing: run `python3 scripts/build_native.py`
+- model not found: verify the Orbit model cache under `models/`
+- multimodal unavailable: verify the matching `mmproj` is present
+- MTP unavailable: verify both target and draft artifacts are present and start
+  the server with `--mtp`
+- slow web/read/think-on output: expected on CPU; inspect footer metrics and
+  use `ORBIT_KV_DIAG=1` only when diagnosing cache behavior
 
-## Benchmarks and prompts
+## Regression Prompts and Checks
 
+- manual prompts: [docs/PROMPTS.md](docs/PROMPTS.md)
+- release confidence: [docs/RELEASE_CONFIDENCE.md](docs/RELEASE_CONFIDENCE.md)
 - performance notes: [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
 - native packaging roadmap: [docs/NATIVE_PACKAGING_ROADMAP.md](docs/NATIVE_PACKAGING_ROADMAP.md)
-- runtime techniques: [docs/TECHNIQUES.md](docs/TECHNIQUES.md)
-- manual regression prompts: [docs/PROMPTS.md](docs/PROMPTS.md)
-- release confidence suite: [docs/RELEASE_CONFIDENCE.md](docs/RELEASE_CONFIDENCE.md)
-
-## Maintenance commands
 
 ```bash
-orbit bench-core --base-url http://127.0.0.1:12120
-orbit release-confidence --base-url http://127.0.0.1:12120 --keep-failed
+python3 -m unittest discover -s tests -q
+python3 -m compileall -q src tests scripts
+git diff --check
 ```
