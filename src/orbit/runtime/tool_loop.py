@@ -10,6 +10,7 @@ from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.capabilities import LocalCapabilities
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
+from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
 from orbit.runtime.session_memory import should_refresh_for_append
@@ -100,6 +101,10 @@ def run_tool_loop(
         allowed_tool_names=allowed_tool_names,
         user_prompt=_last_user_text(runtime.messages),
     )
+    evidence_store = runtime.evidence_store
+    if evidence_store is None:
+        evidence_store = EvidenceStore.for_workdir(Path(workdir))
+        runtime.evidence_store = evidence_store
     tools = executor.tool_definitions()
     last_result: ChatResult | None = None
     state = ToolLoopState(allowed_tool_names)
@@ -469,10 +474,17 @@ def run_tool_loop(
                     requested_path_exists=True,
                 )
                 return
-            if is_repairable_shell_error(tool_result.content) and repair.shell_repair_retries < MAX_SHELL_REPAIR_RETRIES:
+            if (
+                is_repairable_shell_error(tool_result.content)
+                and direct_requested_read_failed
+                and repair.shell_repair_retries < MAX_SHELL_REPAIR_RETRIES
+            ):
                 repair.shell_repair_retries += 1
                 repair.shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
                 return
+            # A shell command that actually executed and returned a non-zero
+            # result is still valid evidence. Do not open a generic repair loop
+            # here; bounded finalization can explain the failure from evidence.
             repair.shell_error_final_pending = True
             turn.mark_exhausted()
             return
@@ -579,7 +591,14 @@ def run_tool_loop(
                 )
                 if on_tool_result:
                     on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
-                runtime.messages.append(tool_result_message(tool_call, tool_result))
+                runtime.messages.append(
+                    tool_result_message(
+                        tool_call,
+                        tool_result,
+                        evidence_store=evidence_store,
+                        metadata=_tool_evidence_metadata(tool_call, source=execution.source),
+                    )
+                )
                 if should_handoff_to_final_from_tool():
                     return runtime._answer_from_tool_results(
                         temperature=temperature,
@@ -612,6 +631,7 @@ def run_tool_loop(
                     on_phase_start=on_phase_start,
                     loop=state.tool_rounds + 1,
                     use_tool_prompt=state.used_tool_call_prompt,
+                    compact_window=repair.shell_error_final_pending,
                 )
         if state.round_limit_reached() and not has_pending_internal_request():
             return runtime._answer_from_tool_results(
@@ -752,6 +772,7 @@ def run_tool_loop(
                 on_phase_start=on_phase_start,
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
+                compact_window=True,
             )
         if result.finish_reason == "length" and not result.tool_calls:
             with model_call_context(phase="tool_call_retry", tools_mode="on"):
@@ -905,7 +926,14 @@ def run_tool_loop(
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
             if should_refresh_for_append(runtime.messages, tool_result.content, context_tokens=runtime.context_tokens):
                 runtime.refresh_memory_if_needed(temperature=temperature, force=True)
-            runtime.messages.append(tool_result_message(tool_call, tool_result))
+            runtime.messages.append(
+                tool_result_message(
+                    tool_call,
+                    tool_result,
+                    evidence_store=evidence_store,
+                    metadata=_tool_evidence_metadata(tool_call, source=execution.source),
+                )
+            )
             if should_handoff_to_final_from_tool():
                 return runtime._answer_from_tool_results(
                     temperature=temperature,
@@ -1010,6 +1038,27 @@ def _shell_raw_arguments_from_tool_call(tool_call: dict[str, object]) -> str | N
         return None
     arguments = function.get("arguments")
     return arguments if isinstance(arguments, str) and arguments.strip() else None
+
+
+def _tool_evidence_metadata(tool_call: dict[str, object], *, source: str) -> dict[str, object]:
+    metadata: dict[str, object] = {"source": source}
+    command = _shell_command_from_tool_call(tool_call)
+    if command:
+        metadata["command"] = command
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        if isinstance(name, str):
+            metadata["tool_call_name"] = name
+        args = parse_tool_arguments_or_empty(function.get("arguments"))
+        if isinstance(args, dict):
+            query = args.get("query")
+            url = args.get("url")
+            if isinstance(query, str) and query.strip():
+                metadata["query"] = query
+            if isinstance(url, str) and url.strip():
+                metadata["url"] = url
+    return metadata
 
 
 def _should_guard_existing_file_rewrite(

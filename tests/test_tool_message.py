@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
 from orbit.runtime.tools import ToolResult
 
@@ -57,6 +59,29 @@ class ToolMessageTests(unittest.TestCase):
                 "content": "hello",
             },
         )
+
+    def test_tool_result_message_uses_evidence_card_when_store_is_available(self) -> None:
+        tool_call = {
+            "id": "call-1",
+            "function": {"name": "exec_shell_full_command", "arguments": {"command": "cat big.txt"}},
+        }
+        raw = "start\n" + ("secret middle " * 200) + "\nend"
+        result = ToolResult(name="exec_shell_full_command", content=raw)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            message = tool_result_message(tool_call, result, evidence_store=store)
+
+            self.assertEqual(message["role"], "tool")
+            self.assertEqual(message["tool_call_id"], "call-1")
+            self.assertEqual(message["name"], "exec_shell_full_command")
+            self.assertIn("tool_evidence_ref: true", message["content"])
+            self.assertIn("raw_ref:", message["content"])
+            self.assertNotIn("evidence_excerpt:", message["content"])
+            self.assertNotIn("tool_evidence_card: true", message["content"])
+            self.assertLess(len(str(message["content"])), len(raw))
+            self.assertNotIn(raw, message["content"])
+            self.assertEqual(store.load_raw(message["evidence_id"]), raw)
 
 
 if __name__ == "__main__":

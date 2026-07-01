@@ -15,8 +15,15 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
+from orbit.runtime.evidence import (
+    EvidenceStore,
+    build_final_evidence_context,
+    build_route_evidence_context,
+    build_evidence_record,
+    tool_evidence_ref,
+)
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
-from orbit.runtime.chat import _has_list_like_tool_result
+from orbit.runtime.chat import _has_list_like_tool_result, _should_attempt_route_repair
 from orbit.runtime.capabilities import LocalCapabilities, LocalCapability
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.tool_loop import _should_guard_existing_file_rewrite
@@ -56,7 +63,855 @@ class FakeBackend:
         )
 
 
+class SequenceBackend:
+    def __init__(self, results: list[ChatResult]) -> None:
+        self.results = list(results)
+        self.messages_by_call: list[list[Message]] = []
+        self.max_tokens_by_call: list[int] = []
+
+    def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+        self.messages_by_call.append(messages)
+        self.max_tokens_by_call.append(max_tokens)
+        if not self.results:
+            raise AssertionError("unexpected model call")
+        return self.results.pop(0)
+
+
 class RuntimeTests(unittest.TestCase):
+    def test_reset_clears_evidence_store_memory_without_deleting_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", "raw content", metadata={"command": "pwd"})
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [{"role": "user", "content": "run pwd"}]
+
+            runtime.reset()
+
+            self.assertEqual(runtime.messages, [])
+            self.assertEqual(store.recent_records(1), [])
+            self.assertIsNone(build_route_evidence_context(store))
+            self.assertIsNone(build_final_evidence_context(store))
+            self.assertTrue((store.root / f"{record.evidence_id}.txt").exists())
+
+    def test_chat_final_retry_uses_evidence_card_without_raw_tool_bloat(self) -> None:
+        raw = "web_search_results: true\nquery: OpenAI\nresults:\n" + ("raw-result " * 500)
+        record = build_evidence_record(
+            "exec_shell_full_command",
+            raw,
+            {"command": 'orbit-web-search "OpenAI"'},
+        )
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content="This is prose, not route JSON.",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=128,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="Google designed me.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=4,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            store.records[record.evidence_id] = record
+            store.raw_cache[record.evidence_id] = raw
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "search online for OpenAI"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "function": {"name": "exec_shell_full_command", "arguments": '{"command":"orbit-web-search \\"OpenAI\\""}'}}]},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record),
+                    "evidence_id": record.evidence_id,
+                },
+                {"role": "assistant", "content": "OpenAI is an AI company."},
+            ]
+
+            result = runtime.ask_auto(
+                "who designed you?",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "Google designed me.")
+        retry_messages = backend.messages_by_call[1]
+        rendered = "\n".join(str(message.get("content", "")) for message in retry_messages)
+        self.assertIn("tool_evidence_card: true", rendered)
+        self.assertIn("raw_ref:", rendered)
+        self.assertLess(len(rendered), len(raw))
+        self.assertNotIn(raw, rendered)
+
+    def test_route_prompt_includes_recent_evidence_context_without_raw(self) -> None:
+        raw = "web_search_results: true\nquery: OpenAI\nresults:\n" + ("raw-result " * 500)
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route":"CHAT"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="The previous search results discussed OpenAI.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=7,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", raw, metadata={"command": 'orbit-web-search "OpenAI"'})
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "search online for OpenAI"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "OpenAI is an AI company. " * 200},
+            ]
+
+            result = runtime.ask_auto("what did the search results say?", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        self.assertEqual(result.content, "The previous search results discussed OpenAI.")
+        route_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[0])
+        final_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[1])
+        self.assertIn("available_evidence:", route_rendered)
+        self.assertIn("tool_evidence_card=true", route_rendered)
+        self.assertIn("what did the search results say?", route_rendered)
+        self.assertNotIn("choose CHAT", route_rendered)
+        self.assertIn(record.raw_ref, route_rendered)
+        self.assertNotIn(raw, route_rendered)
+        self.assertNotIn("tool_evidence_ref: true", route_rendered)
+        self.assertNotIn("OpenAI is an AI company. OpenAI is an AI company.", route_rendered)
+        self.assertIn("evidence_context:", final_rendered)
+        self.assertIn("evidence_excerpt", final_rendered)
+        self.assertNotIn("tool_evidence_ref: true", final_rendered)
+        self.assertNotIn("OpenAI is an AI company. OpenAI is an AI company.", final_rendered)
+
+    def test_post_tool_route_window_excludes_full_history_and_audit_marker(self) -> None:
+        raw = "\n".join(f"line-{index}" for index in range(120))
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route":"CHAT"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="The output listed line-0 through line-119.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=8,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": "python3 -c 'for i in range(120): print(i)'"},
+            )
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run the line printer"},
+                {"role": "assistant", "content": "previous final answer " * 200},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\nlegacy raw " + raw,
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            result = runtime.ask_auto("summarize that output", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        self.assertEqual(result.content, "The output listed line-0 through line-119.")
+        route_messages = backend.messages_by_call[0]
+        route_rendered = "\n".join(str(message.get("content", "")) for message in route_messages)
+        self.assertIn("summarize that output", route_rendered)
+        self.assertIn("available_evidence:", route_rendered)
+        self.assertIn("tool_evidence_card=true", route_rendered)
+        self.assertIn(record.raw_ref, route_rendered)
+        self.assertNotIn("legacy raw", route_rendered)
+        self.assertNotIn("tool_evidence_ref: true", route_rendered)
+        self.assertNotIn("previous final answer previous final answer", route_rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in route_messages))
+
+    def test_post_tool_chat_final_uses_evidence_window_without_full_history(self) -> None:
+        raw = "\n".join(f"line-{index}" for index in range(120))
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route":"CHAT"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="The output listed line-0 through line-119.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=8,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": "python3 -c 'for i in range(120): print(i)'"},
+            )
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run the line printer"},
+                {"role": "assistant", "content": "previous final answer " * 200},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\nlegacy raw " + raw,
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            result = runtime.ask_auto("summarize that output", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        self.assertEqual(result.content, "The output listed line-0 through line-119.")
+        final_messages = backend.messages_by_call[1]
+        final_rendered = "\n".join(str(message.get("content", "")) for message in final_messages)
+        self.assertIn("summarize that output", final_rendered)
+        self.assertIn("evidence_context:", final_rendered)
+        self.assertIn(record.raw_ref, final_rendered)
+        self.assertNotIn("legacy raw", final_rendered)
+        self.assertNotIn("tool_evidence_ref: true", final_rendered)
+        self.assertNotIn("previous final answer previous final answer", final_rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in final_messages))
+
+    def test_post_tool_chat_final_keeps_short_previous_assistant_for_reference(self) -> None:
+        raw = "exit_code: 0\nSTDOUT:\n./src/orbit/runtime/evidence.py\nSTDERR:\n(empty)"
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route":"CHAT"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="It was found in src/orbit/runtime/evidence.py.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=9,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", raw, metadata={"command": "grep -r EvidenceStore ."})
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "search files for EvidenceStore"},
+                {"role": "assistant", "content": "EvidenceStore was found in src/orbit/runtime/evidence.py."},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record),
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            result = runtime.ask_auto("where was it found?", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        self.assertEqual(result.content, "It was found in src/orbit/runtime/evidence.py.")
+        final_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[1])
+        self.assertIn("EvidenceStore was found in src/orbit/runtime/evidence.py.", final_rendered)
+        self.assertIn("where was it found?", final_rendered)
+        self.assertIn("evidence_context:", final_rendered)
+        self.assertIn(record.raw_ref, final_rendered)
+        self.assertNotIn("tool_evidence_ref: true", final_rendered)
+
+    def test_route_without_evidence_keeps_existing_history_window(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route":"CHAT"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="Final answer.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=2,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            runtime.messages = [{"role": "assistant", "content": "older assistant context"}]
+            result = runtime.ask_auto("hello?", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        self.assertEqual(result.content, "Final answer.")
+        route_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[0])
+        self.assertIn("older assistant context", route_rendered)
+
+    def test_chat_final_retry_gets_recent_final_evidence_without_raw(self) -> None:
+        raw = "exit_code: 0\nSTDOUT:\n/home/example/project\nSTDERR:\n(empty)"
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content="Plain prose route drift.",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=128,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="That was /home/example/project.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=6,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", raw, metadata={"command": "pwd"})
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "function": {"name": "exec_shell_full_command", "arguments": '{"command":"pwd"}'}}]},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "The command printed /home/example/project."},
+            ]
+
+            result = runtime.ask_auto("what directory was that?", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        self.assertEqual(result.content, "That was /home/example/project.")
+        retry_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[1])
+        self.assertIn("evidence_context:", retry_rendered)
+        self.assertIn("/home/example/project", retry_rendered)
+        self.assertIn(record.raw_ref, retry_rendered)
+        self.assertEqual(backend.max_tokens_by_call, [32, 192])
+
+    def test_chat_final_retry_without_evidence_keeps_requested_budget(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content="Plain prose route drift.",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=128,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="A short direct answer.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=5,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            result = runtime.ask_auto("hello?", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        self.assertEqual(result.content, "A short direct answer.")
+        self.assertEqual(backend.max_tokens_by_call, [32, 32])
+
+    def test_chat_final_retry_window_is_compact_and_excludes_tool_history_raw(self) -> None:
+        raw = "exit_code: 0\nSTDOUT:\n/home/example/project\nSTDERR:\n(empty)"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", raw, metadata={"command": "pwd"})
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run pwd"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "function": {"name": "exec_shell_full_command", "arguments": '{"command":"pwd"}'}}]},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\n" + ("legacy raw " * 300),
+                    "evidence_id": record.evidence_id,
+                },
+                {"role": "assistant", "content": "The command printed /home/example/project."},
+                {"role": "user", "content": "what directory was that?"},
+            ]
+
+            messages = runtime._chat_final_retry_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("what directory was that?", rendered)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn("/home/example/project", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertNotIn("legacy raw", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in messages))
+
+    def test_chat_final_retry_medium_evidence_uses_compact_context(self) -> None:
+        raw = "\n".join(f"line-{index}" for index in range(120))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": "python3 -c 'for i in range(120): print(i)'"},
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run the line printer"},
+                {"role": "assistant", "content": "previous final answer " * 200},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\nlegacy raw " + raw,
+                    "evidence_id": record.evidence_id,
+                },
+                {"role": "user", "content": "summarize that output"},
+            ]
+
+            messages = runtime._chat_final_retry_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("summarize that output", rendered)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertIn(record.raw_sha256[:16], rendered)
+        self.assertIn("line-0", rendered)
+        self.assertIn("line-119", rendered)
+        self.assertNotIn("legacy raw", rendered)
+        self.assertNotIn("previous final answer previous final answer", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in messages))
+
+    def test_final_from_tool_with_evidence_uses_compact_window(self) -> None:
+        raw = "\n".join(f"line-{index}" for index in range(120))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": "python3 -c 'for i in range(120): print(i)'"},
+            )
+            backend = FakeBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run the line printer"},
+                {"role": "assistant", "content": "previous answer " * 100},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\nlegacy raw " + raw,
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            runtime._answer_from_tool_results(
+                temperature=0,
+                max_tokens=64,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                loop=1,
+                use_tool_prompt=True,
+            )
+
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
+        self.assertIn("run the line printer", rendered)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertIn(record.raw_sha256[:16], rendered)
+        self.assertIn("line-0", rendered)
+        self.assertIn("line-119", rendered)
+        self.assertNotIn("legacy raw", rendered)
+        self.assertNotIn("previous answer previous answer", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in backend.messages))
+
+    def test_final_from_tool_small_evidence_view_is_opt_in_without_tool_prompt(self) -> None:
+        raw = "/home/example/project\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", raw, metadata={"command": "pwd"})
+            backend = FakeBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run pwd"},
+                {"role": "assistant", "content": "previous answer " * 100},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\nlegacy raw " + raw,
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            runtime._answer_from_tool_results(
+                temperature=0,
+                max_tokens=64,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                loop=1,
+                use_tool_prompt=False,
+            )
+
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
+        self.assertIn("run pwd", rendered)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn("/home/example/project", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertNotIn("legacy raw", rendered)
+        self.assertNotIn("previous answer previous answer", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in backend.messages))
+
+    def test_final_from_tool_small_evidence_keeps_legacy_with_tool_prompt(self) -> None:
+        raw = "/home/example/project\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", raw, metadata={"command": "pwd"})
+            backend = FakeBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run pwd"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record),
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            runtime._answer_from_tool_results(
+                temperature=0,
+                max_tokens=64,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                loop=1,
+                use_tool_prompt=True,
+            )
+
+        self.assertTrue(any(message.get("role") == "tool" for message in backend.messages))
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
+        self.assertIn("evidence_context:", rendered)
+
+    def test_final_from_tool_small_evidence_excludes_web_and_medium(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            web_store = EvidenceStore(Path(tmp) / "web.evidence")
+            web_record = web_store.add(
+                "exec_shell_full_command",
+                "web_search_results: true\nquery: OpenAI\nresults:\n1. title: OpenAI",
+                metadata={"command": 'orbit-web-search "OpenAI"'},
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=web_store)
+            runtime.messages = [{"role": "user", "content": "search"}, {"role": "tool", "content": tool_evidence_ref(web_record)}]
+            self.assertFalse(runtime._should_use_final_small_evidence_view(use_tool_prompt=False))
+
+            medium_store = EvidenceStore(Path(tmp) / "medium.evidence")
+            medium_record = medium_store.add(
+                "exec_shell_full_command",
+                "x" * 600,
+                metadata={"command": "cat medium.txt"},
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=medium_store)
+            runtime.messages = [{"role": "user", "content": "read"}, {"role": "tool", "content": tool_evidence_ref(medium_record)}]
+            self.assertFalse(runtime._should_use_final_small_evidence_view(use_tool_prompt=False))
+
+    def test_final_from_tool_without_evidence_store_keeps_legacy_window(self) -> None:
+        backend = FakeBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+        runtime.messages = [
+            {"role": "user", "content": "run pwd"},
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "exec_shell_full_command",
+                "content": "exit_code: 0\nSTDOUT:\n/home/example/project",
+            },
+        ]
+
+        runtime._answer_from_tool_results(
+            temperature=0,
+            max_tokens=64,
+            on_final_delta=None,
+            on_progress=None,
+            on_model_step=None,
+            loop=1,
+            use_tool_prompt=True,
+        )
+
+        self.assertTrue(any(message.get("role") == "tool" for message in backend.messages))
+
+    def test_chat_final_completion_repair_uses_compact_search_evidence(self) -> None:
+        raw = "\n".join(
+            [
+                "./src/orbit/runtime/evidence.py:42:class EvidenceStore:",
+                "./src/orbit/runtime/tool_loop.py:17:from orbit.runtime.evidence import EvidenceStore",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": 'grep -R "EvidenceStore" .'},
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "search files for EvidenceStore"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "The term EvidenceStore was found in ./src/orbit/runtime/evidence.py "
+                        "and ./src/orbit/runtime/tool_loop.py. "
+                        + ("extra detail " * 80)
+                    ),
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\nlegacy raw " + raw,
+                    "evidence_id": record.evidence_id,
+                },
+                {"role": "user", "content": "where was it found?"},
+            ]
+
+            messages = runtime.chat_final_completion_repair_messages("Answer directly now.")
+
+        assert messages is not None
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("where was it found?", rendered)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn("./src/orbit/runtime/evidence.py", rendered)
+        self.assertIn("EvidenceStore", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertIn(record.raw_sha256[:16], rendered)
+        self.assertIn("Answer directly now.", rendered)
+        self.assertIn("The term EvidenceStore was found", rendered)
+        self.assertNotIn("legacy raw", rendered)
+        self.assertNotIn("extra detail extra detail extra detail extra detail", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in messages))
+
+    def test_near_empty_route_length_skips_route_repair(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content="...",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="That was /home/example/project.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=6,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            result = runtime.ask_auto(
+                "what directory was that?",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "That was /home/example/project.")
+        self.assertEqual(len(backend.messages_by_call), 2)
+        retry_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[1])
+        self.assertIn("what directory was that?", retry_rendered)
+
+    def test_partial_route_artifact_still_allows_route_repair(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route"',
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=2,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content='{"route":"CHAT"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="Final answer.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=2,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            result = runtime.ask_auto(
+                "what directory was that?",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(result.content, "Final answer.")
+        self.assertEqual(len(backend.messages_by_call), 3)
+
+    def test_route_repair_detection_is_structural(self) -> None:
+        self.assertFalse(
+            _should_attempt_route_repair(
+                ChatResult(
+                    content="...",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+            )
+        )
+        self.assertTrue(
+            _should_attempt_route_repair(
+                ChatResult(
+                    content='{"command"',
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+            )
+        )
+
     def test_exec_shell_wc_result_is_not_list_like(self) -> None:
         messages: list[Message] = [
             {
@@ -2963,7 +3818,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.calls, 4)
         self.assertIsNotNone(backend.second_call_messages)
 
-    def test_shell_full_failed_initial_command_gets_one_model_retry(self) -> None:
+    def test_shell_full_failed_initial_command_finalizes_from_error_evidence(self) -> None:
         class FailedShellCommandBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -2976,7 +3831,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 self.tools_seen.append(tools)
                 if self.calls == 1:
                     return ChatResult(
-                        content=json.dumps({"command": "sed -i 's/<title>.*</title>/<title>test</title>/' index.html"}),
+                        content=json.dumps({"command": "command_that_does_not_exist_123"}),
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -2987,42 +3842,25 @@ class ToolRuntimeTests(unittest.TestCase):
                         generation_tokens_per_second=None,
                     )
                 if self.calls == 2:
+                    assert tools is None
+                    rendered_messages = str(messages)
+                    assert "evidence_context:" in rendered_messages
+                    assert "tool_evidence_card: true" in rendered_messages
+                    assert "shell_command_failed" in rendered_messages
+                    assert "The previous shell command failed." not in rendered_messages
                     return ChatResult(
-                        content="",
-                        model="fake",
-                        finish_reason="tool_calls",
-                        tool_calls=[
-                            {
-                                "id": "call-2",
-                                "type": "function",
-                                "function": {
-                                    "name": "exec_shell_full_command",
-                                    "arguments": json.dumps(
-                                        {"command": "perl -0pi -e 's|<title>.*?</title>|<title>test</title>|s' index.html"}
-                                    ),
-                                },
-                            }
-                        ],
-                        prompt_tokens=6,
-                        completion_tokens=1,
-                        cached_tokens=0,
-                        prompt_tokens_per_second=None,
-                        generation_tokens_per_second=None,
-                    )
-                if self.calls == 3:
-                    return ChatResult(
-                        content="no further tool call",
+                        content="reported command failure",
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
                         prompt_tokens=7,
-                        completion_tokens=1,
+                        completion_tokens=3,
                         cached_tokens=0,
                         prompt_tokens_per_second=None,
                         generation_tokens_per_second=None,
                     )
                 return ChatResult(
-                    content="title updated",
+                    content="unexpected extra call",
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -3035,33 +3873,22 @@ class ToolRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            (workdir / "index.html").write_text("<html><head><title>\nOld\n</title></head></html>\n", encoding="utf-8")
             backend = FailedShellCommandBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="route system")
 
             result = runtime.ask_auto(
-                'sostituisci il title della pagina con "test"',
+                "run a missing command",
                 temperature=0,
                 max_tokens=32,
                 workdir=workdir,
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-            content = (workdir / "index.html").read_text(encoding="utf-8")
-
-        self.assertEqual(result.content, "title updated")
-        self.assertEqual(backend.calls, 4)
+        self.assertEqual(result.content, "reported command failure")
+        self.assertEqual(backend.calls, 2)
         self.assertIsNone(backend.tools_seen[0])
-        self.assertIsNotNone(backend.tools_seen[1])
-        self.assertIsNotNone(backend.tools_seen[2])
-        self.assertIsNone(backend.tools_seen[3])
-        retry_prompt = backend.messages_seen[1][-1]["content"]
-        self.assertIn("The previous shell command failed.", retry_prompt)
-        self.assertIn("Exit code:", retry_prompt)
-        self.assertIn("STDOUT:", retry_prompt)
-        self.assertIn("STDERR:", retry_prompt)
-        self.assertIn('{"command":"..."}', retry_prompt)
-        self.assertIn("<title>test</title>", content)
+        self.assertIsNone(backend.tools_seen[1])
+        self.assertEqual(len([message for message in runtime.messages if message.get("role") == "tool"]), 1)
 
     def test_shell_full_non_repairable_error_does_not_retry(self) -> None:
         class NonRepairableBackend:
@@ -3113,7 +3940,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIsNone(backend.tools_seen[0])
         self.assertIsNone(backend.tools_seen[1])
 
-    def test_shell_full_generic_nonzero_error_gets_repair_retry(self) -> None:
+    def test_shell_full_generic_nonzero_error_finalizes_without_repair_retry(self) -> None:
         class GenericErrorBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -3137,19 +3964,25 @@ class ToolRuntimeTests(unittest.TestCase):
                         generation_tokens_per_second=None,
                     )
                 if self.calls == 2:
+                    assert tools is None
+                    rendered_messages = str(messages)
+                    assert "evidence_context:" in rendered_messages
+                    assert "tool_evidence_card: true" in rendered_messages
+                    assert "custom parser exploded at token 7" in rendered_messages
+                    assert "The previous shell command failed." not in rendered_messages
                     return ChatResult(
-                        content=json.dumps({"command": "printf repaired"}),
+                        content="reported parser failure",
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
                         prompt_tokens=6,
-                        completion_tokens=1,
+                        completion_tokens=3,
                         cached_tokens=0,
                         prompt_tokens_per_second=None,
                         generation_tokens_per_second=None,
                     )
                 return ChatResult(
-                    content="repaired",
+                    content="unexpected extra call",
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -3172,15 +4005,10 @@ class ToolRuntimeTests(unittest.TestCase):
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-        self.assertEqual(result.content, "repaired")
-        self.assertEqual(backend.calls, 4)
+        self.assertEqual(result.content, "reported parser failure")
+        self.assertEqual(backend.calls, 2)
         self.assertIsNone(backend.tools_seen[0])
-        self.assertIsNotNone(backend.tools_seen[1])
-        self.assertIsNotNone(backend.tools_seen[2])
-        self.assertIsNone(backend.tools_seen[3])
-        retry_prompt = backend.messages_seen[1][-1]["content"]
-        self.assertIn("Exit code: 2", retry_prompt)
-        self.assertIn("custom parser exploded at token 7", retry_prompt)
+        self.assertIsNone(backend.tools_seen[1])
 
     def test_shell_full_repair_loop_stops_after_two_failed_retries(self) -> None:
         class AlwaysFailingBackend:

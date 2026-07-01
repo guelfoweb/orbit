@@ -124,17 +124,21 @@ class TransportEnvironment:
         retry_reason = "empty_or_invalid"
         with_final_only_retry = False
         if not completeness.is_complete:
+            repair_instruction = (
+                "Stop reasoning and provide the final answer only. "
+                "No thinking, no plan, no headings, no bullet list unless explicitly requested. "
+                "Answer the user directly now."
+            )
             retry_messages = [
                 *messages,
                 {
                     "role": "user",
-                    "content": (
-                        "Stop reasoning and provide the final answer only. "
-                        "No thinking, no plan, no headings, no bullet list unless explicitly requested. "
-                        "Answer the user directly now."
-                    ),
+                    "content": repair_instruction,
                 },
             ]
+            compact_repair_messages = self.runtime.chat_final_completion_repair_messages(repair_instruction)
+            if compact_repair_messages is not None:
+                retry_messages = compact_repair_messages
             retry_phase = "chat_final_completion_repair"
             retry_reason = completeness.status
             with_final_only_retry = True
@@ -411,8 +415,17 @@ class FinalFromToolEnvironment:
         on_phase_start: Callable[[ModelPhaseStart], None] | None,
         loop: int,
         use_tool_prompt: bool,
+        compact_window: bool = False,
     ) -> FinalAnswerResult:
-        call_messages = self.runtime._with_final_tool_prompt() if use_tool_prompt else self.runtime.messages
+        if (
+            compact_window
+            or self.runtime._should_use_final_small_evidence_view(use_tool_prompt=use_tool_prompt)
+            or self.runtime._should_compact_final_from_tool_window()
+        ):
+            call_messages = self.runtime._compact_final_from_tool_messages()
+        else:
+            call_messages = self.runtime._with_final_tool_prompt() if use_tool_prompt else self.runtime.messages
+            call_messages = self.runtime._with_final_evidence_context(call_messages)
         policy = build_final_tool_policy(call_messages, max_tokens=max_tokens, streamed=on_final_delta is not None)
         stream_buffer = _BufferedDeltaSink() if on_final_delta is not None and policy.incomplete_retry_allowed else None
         direct_delta = _ForwardingDeltaSink(on_final_delta) if on_final_delta is not None and stream_buffer is None else None
