@@ -235,8 +235,9 @@ def build_final_evidence_context(store: EvidenceStore | None, *, limit: int = RE
     for index, record in enumerate(records, start=1):
         parts.append(f"- evidence {index}:")
         parts.append(record.final_card)
-        parts.append("bounded_raw_excerpt:")
-        parts.append(store.raw_excerpt(record) if store is not None else f"raw_evidence_unavailable: {record.raw_ref}")
+        if _final_context_needs_raw_excerpt(record):
+            parts.append("bounded_raw_excerpt:")
+            parts.append(store.raw_excerpt(record) if store is not None else f"raw_evidence_unavailable: {record.raw_ref}")
     return "\n".join(parts)
 
 
@@ -417,6 +418,16 @@ def _compact_final_card(record: EvidenceRecord) -> str:
     ]
     lines.extend(_card_metadata_lines(record, compact=True))
     return "\n".join(lines)
+
+
+def _final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:
+    if record.kind == "web_search" and record.metadata.get("top_snippets"):
+        return False
+    if record.kind == "grep_search" and (
+        record.metadata.get("first_matches") or record.metadata.get("file_paths")
+    ):
+        return False
+    return True
 
 
 def _post_tool_route_card(record: EvidenceRecord) -> str:
