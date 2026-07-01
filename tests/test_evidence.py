@@ -324,6 +324,59 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn("raw_evidence_unavailable", missing)
             self.assertIn(record.raw_ref, missing)
 
+    def test_final_context_does_not_duplicate_structured_grep_raw_excerpt(self) -> None:
+        raw = "\n".join(
+            [
+                "STDOUT:",
+                "src/orbit/runtime/evidence.py:17:class EvidenceStore:",
+                "tests/test_evidence.py:23:EvidenceStore(Path(tmp))",
+                "STDERR:",
+                "(empty)",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": 'grep -R "EvidenceStore" src tests'},
+            )
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn(record.raw_ref, context)
+            self.assertIn("src/orbit/runtime/evidence.py:17: class EvidenceStore:", context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
+
+    def test_final_context_does_not_duplicate_structured_web_raw_excerpt(self) -> None:
+        raw = "\n".join(
+            [
+                "web_search_results: true",
+                "query: OpenAI",
+                "results:",
+                "1. title: OpenAI",
+                "   url: https://openai.com/",
+                "   snippet: AI research and deployment.",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": 'orbit-web-search "OpenAI"'},
+            )
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn(record.raw_ref, context)
+            self.assertIn("AI research and deployment.", context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
+
 
 def _store_with(record, content: str) -> EvidenceStore:
     store = EvidenceStore(Path("/tmp/orbit-test-unused-session.evidence"))
