@@ -25,6 +25,13 @@ from orbit.runtime.environments import (
     contradicts_successful_pdf_extraction as _contradicts_successful_pdf_extraction,
     unsupported_tool_mode_result as _unsupported_tool_mode_result,
 )
+from orbit.runtime.evidence import (
+    EvidenceStore,
+    build_compact_final_evidence_context,
+    build_final_evidence_context,
+    build_post_tool_route_evidence_context,
+    build_route_evidence_context,
+)
 from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
 )
@@ -67,6 +74,10 @@ from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
 ROUTE_MAX_TOKENS = 128
+EVIDENCE_CHAT_FINAL_RETRY_MIN_TOKENS = 192
+FINAL_FROM_TOOL_COMPACT_MIN_RAW_CHARS = 512
+FINAL_SMALL_EVIDENCE_MAX_RAW_CHARS = 500
+FINAL_SMALL_EVIDENCE_KINDS = {"shell", "unknown", "grep_search"}
 _ROUTE_TOOL_RETRY_PROMPT_RE = re.compile(
     r"\b(?:search|online|web|url|http|https|read|show|print|inspect|analy[sz]e|review|list|find|grep|curl|fetch|directory|folder|file|path|pdf|html|source|current\s+directory|computer|system|specs?)\b|[/\\]|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}\b",
     re.IGNORECASE,
@@ -119,6 +130,7 @@ class ChatRuntime:
     content_evidence_guard_failures: int = 0
     local_capabilities: LocalCapabilities = field(default_factory=discover_local_capabilities)
     diagnostic_session_id: str = "default"
+    evidence_store: EvidenceStore | None = None
 
     def __post_init__(self) -> None:
         self.backend = instrument_backend(self.backend)
@@ -314,7 +326,7 @@ class ChatRuntime:
         streamed_final_retry = False
         retried_empty_final = False
         route_abort_reason: str | None = None
-        command_messages = with_command_system_prompt(self.messages)
+        command_messages = self._route_messages()
         with self._temporary_backend_thinking(False):
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("route", streamed=False, attempt=1, reason="tool_decision"))
@@ -355,7 +367,11 @@ class ChatRuntime:
         if decision is None:
             explicit_web_search = _requires_explicit_web_search_tool(prompt, allowed_tool_names)
             file_content_evidence = _requires_file_content_evidence_retry(prompt, allowed_tool_names, first.finish_reason)
-            if _should_force_tool_route_retry(prompt, allowed_tool_names, first.finish_reason):
+            if _should_force_tool_route_retry(
+                prompt,
+                allowed_tool_names,
+                first.finish_reason,
+            ) and not _should_skip_route_repair(first):
                 retry_reason = (
                     "explicit_web_search"
                     if explicit_web_search
@@ -376,6 +392,7 @@ class ChatRuntime:
                         explicit_web_search=explicit_web_search,
                         file_content_evidence=file_content_evidence,
                     )
+                    route_retry_messages = self._with_route_evidence_context(route_retry_messages)
                     if on_phase_start:
                         on_phase_start(
                             ModelPhaseStart(
@@ -439,7 +456,7 @@ class ChatRuntime:
                         )
                         route_outcome_emitted = True
                     first = self._transport_environment().chat_final(
-                        with_chat_system_prompt(self.messages),
+                        self._with_final_evidence_context(with_chat_system_prompt(self.messages)),
                         temperature=temperature,
                         max_tokens=max_tokens,
                         on_final_delta=on_final_delta,
@@ -468,16 +485,22 @@ class ChatRuntime:
                                 reason=retry_reason,
                             )
                         )
+                    retry_messages = self._chat_final_retry_messages()
+                    retry_max_tokens = self._chat_final_retry_max_tokens(max_tokens)
                     if on_final_delta is None:
                         with model_call_context(phase="chat_final_retry", tools_mode="on"):
-                            first = self.backend.chat(self.messages, temperature=temperature, max_tokens=max_tokens)
+                            first = self.backend.chat(
+                                retry_messages,
+                                temperature=temperature,
+                                max_tokens=retry_max_tokens,
+                            )
                     else:
                         streamed_final_retry = True
                         with model_call_context(phase="chat_final_retry", tools_mode="on"):
                             first = self.backend.chat_stream(
-                                self.messages,
+                                retry_messages,
                                 temperature=temperature,
-                                max_tokens=max_tokens,
+                                max_tokens=retry_max_tokens,
                                 on_delta=on_final_delta,
                                 on_progress=on_progress,
                             )
@@ -494,7 +517,7 @@ class ChatRuntime:
                         route_outcome_emitted = True
                     retried_empty_final = True
                     first = self._transport_environment().chat_final(
-                        self.messages,
+                        self._with_final_evidence_context(self.messages),
                         temperature=temperature,
                         max_tokens=max_tokens,
                         on_final_delta=on_final_delta,
@@ -515,7 +538,7 @@ class ChatRuntime:
                     on_final_delta(first.content)
                 return self._remember_visible_result(first)
         if decision.route == ToolRoute.CHAT:
-            chat_messages = with_chat_system_prompt(self.messages)
+            chat_messages = self._chat_final_messages()
             with model_call_context(phase="chat_final", tools_mode="on"):
                 result = self._chat_final(
                     chat_messages,
@@ -742,6 +765,7 @@ class ChatRuntime:
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         loop: int,
         use_tool_prompt: bool,
+        compact_window: bool = False,
     ) -> ChatResult:
         return self._final_from_tool_environment().answer(
             temperature=temperature,
@@ -752,6 +776,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
             loop=loop,
             use_tool_prompt=use_tool_prompt,
+            compact_window=compact_window,
         ).result
 
     def _chat_final(
@@ -819,6 +844,8 @@ class ChatRuntime:
 
     def reset(self) -> None:
         self.messages.clear()
+        if self.evidence_store is not None:
+            self.evidence_store.clear_memory()
         self.client_state.reset()
         self.last_memory_refresh = None
         self.last_memory_refresh_message_count = None
@@ -896,6 +923,126 @@ class ChatRuntime:
 
     def _with_final_tool_prompt(self) -> list[Message]:
         return with_final_tool_system_prompt(self.messages)
+
+    def _compact_final_from_tool_messages(self) -> list[Message]:
+        messages: list[Message] = []
+        latest_user = _latest_user_message(self.messages)
+        if latest_user is not None:
+            messages.append(latest_user)
+        context = build_compact_final_evidence_context(self.evidence_store)
+        final_messages = with_final_tool_system_prompt(messages)
+        if not context:
+            return final_messages
+        return [*final_messages, {"role": "system", "content": context}]
+
+    def _should_use_final_small_evidence_view(self, *, use_tool_prompt: bool) -> bool:
+        if use_tool_prompt or self.evidence_store is None:
+            return False
+        record = next(iter(self.evidence_store.recent_records(1)), None)
+        if record is None:
+            return False
+        if record.kind not in FINAL_SMALL_EVIDENCE_KINDS:
+            return False
+        if record.raw_chars > FINAL_SMALL_EVIDENCE_MAX_RAW_CHARS:
+            return False
+        return not _latest_tool_message_has_legacy_direct_content(self.messages)
+
+    def _should_compact_final_from_tool_window(self) -> bool:
+        if self.evidence_store is None:
+            return False
+        record = next(iter(self.evidence_store.recent_records(1)), None)
+        if record is None:
+            return False
+        if record.kind in {"web_search", "fetch"}:
+            return False
+        return record.raw_chars >= FINAL_FROM_TOOL_COMPACT_MIN_RAW_CHARS
+
+    def _with_route_evidence_context(self, messages: list[Message]) -> list[Message]:
+        context = build_route_evidence_context(self.evidence_store)
+        if not context:
+            return messages
+        return [*messages, {"role": "system", "content": context}]
+
+    def _route_messages(self) -> list[Message]:
+        if self._should_use_post_tool_route_window():
+            return self._post_tool_route_messages()
+        return self._with_route_evidence_context(with_command_system_prompt(self.messages))
+
+    def _should_use_post_tool_route_window(self) -> bool:
+        if self.evidence_store is None or not self.evidence_store.recent_records(1):
+            return False
+        return _latest_user_message(self.messages) is not None
+
+    def _post_tool_route_messages(self) -> list[Message]:
+        messages: list[Message] = []
+        latest_user = _latest_user_message(self.messages)
+        if latest_user is not None:
+            messages.append(latest_user)
+        route_messages = with_command_system_prompt(messages)
+        context = build_post_tool_route_evidence_context(self.evidence_store)
+        if not context:
+            return route_messages
+        return [*route_messages, {"role": "system", "content": context}]
+
+    def _with_final_evidence_context(self, messages: list[Message]) -> list[Message]:
+        context = build_final_evidence_context(self.evidence_store)
+        if not context:
+            return messages
+        return [*messages, {"role": "system", "content": context}]
+
+    def _chat_final_messages(self) -> list[Message]:
+        if self.evidence_store is None or not self.evidence_store.recent_records(1):
+            return self._with_final_evidence_context(with_chat_system_prompt(self.messages))
+        messages: list[Message] = []
+        assistant = _latest_short_assistant_message(self.messages)
+        if assistant is not None:
+            messages.append(assistant)
+        latest_user = _latest_user_message(self.messages)
+        if latest_user is not None:
+            messages.append(latest_user)
+        return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages))
+
+    def _with_chat_final_retry_evidence_context(self, messages: list[Message]) -> list[Message]:
+        if self._should_compact_final_from_tool_window():
+            context = build_compact_final_evidence_context(self.evidence_store)
+        else:
+            context = build_final_evidence_context(self.evidence_store)
+        if not context:
+            return messages
+        return [*messages, {"role": "system", "content": context}]
+
+    def _chat_final_retry_messages(self) -> list[Message]:
+        messages: list[Message] = []
+        latest_user = _latest_user_message(self.messages)
+        assistant = _latest_short_assistant_message(self.messages)
+        if assistant is not None:
+            messages.append(assistant)
+        if latest_user is not None:
+            messages.append(latest_user)
+        return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages))
+
+    def chat_final_completion_repair_messages(self, repair_instruction: str) -> list[Message] | None:
+        if self.evidence_store is None or not self.evidence_store.recent_records(1):
+            return None
+        latest_user = _latest_user_message(self.messages)
+        if latest_user is None:
+            return None
+        window: list[Message] = []
+        assistant = _latest_assistant_excerpt_message(self.messages)
+        if assistant is not None:
+            window.append(assistant)
+        window.append(latest_user)
+        messages = with_chat_system_prompt(window)
+        context = build_compact_final_evidence_context(self.evidence_store)
+        if context:
+            messages.append({"role": "system", "content": context})
+        messages.append({"role": "user", "content": repair_instruction})
+        return messages
+
+    def _chat_final_retry_max_tokens(self, max_tokens: int) -> int:
+        if self.evidence_store is not None and self.evidence_store.recent_records(1):
+            return max(max_tokens, EVIDENCE_CHAT_FINAL_RETRY_MIN_TOKENS)
+        return max_tokens
 
     def refresh_memory_if_needed(self, *, temperature: float, force: bool = False) -> bool:
         if not force and self._memory_refresh_in_cooldown():
@@ -1035,6 +1182,30 @@ def _should_force_tool_route_retry(prompt: str, allowed_tool_names: tuple[str, .
     return finish_reason == "length" and _should_retry_route_as_tool_call(prompt, allowed_tool_names)
 
 
+def _should_attempt_route_repair(result: ChatResult) -> bool:
+    if result.tool_calls:
+        return True
+    text = result.content.strip()
+    if not text:
+        return False
+    if command_stream_state(text) == "pending":
+        return True
+    if text.startswith("<|tool_call>"):
+        return True
+    if text.startswith("{") and any(key in text for key in ('"command"', '"url"', '"path"', '"route"', '"include_')):
+        return True
+    return False
+
+
+def _should_skip_route_repair(result: ChatResult) -> bool:
+    if result.finish_reason != "length" or _should_attempt_route_repair(result):
+        return False
+    text = result.content.strip()
+    if result.completion_tokens is not None:
+        return result.completion_tokens <= 2 and len(text) <= 16
+    return len(text) <= 16
+
+
 def _requires_file_content_evidence_retry(prompt: str, allowed_tool_names: tuple[str, ...] | None, finish_reason: str | None) -> bool:
     if finish_reason != "stop":
         return False
@@ -1097,6 +1268,53 @@ def _route_retry_messages(
         *retry_messages,
         {"role": "user", "content": reminder},
     ]
+
+
+def _latest_user_message(messages: list[Message]) -> Message | None:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return dict(message)
+    return None
+
+
+def _latest_short_assistant_message(messages: list[Message], *, max_chars: int = 600) -> Message | None:
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip() and len(content) <= max_chars:
+            return {"role": "assistant", "content": content}
+    return None
+
+
+def _latest_assistant_excerpt_message(messages: list[Message], *, max_chars: int = 140) -> Message | None:
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            text = content.strip()
+            if len(text) > max_chars:
+                text = text[:max_chars].rstrip() + "..."
+            return {"role": "assistant", "content": text}
+    return None
+
+
+def _latest_tool_message_has_legacy_direct_content(messages: list[Message]) -> bool:
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content", ""))
+        return any(
+            marker in content
+            for marker in (
+                "shell-full output",
+                "large_file_excerpt: true",
+                "pdf_text_result: true",
+                "fetch_url_result: true",
+            )
+        )
+    return False
 
 
 def _tool_loop_result_value(result):
