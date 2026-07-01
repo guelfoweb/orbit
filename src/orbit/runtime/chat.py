@@ -31,6 +31,7 @@ from orbit.runtime.evidence import (
     build_final_evidence_context,
     build_post_tool_route_evidence_context,
     build_route_evidence_context,
+    build_web_final_evidence_context,
 )
 from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
@@ -934,6 +935,26 @@ class ChatRuntime:
         if not context:
             return final_messages
         return [*final_messages, {"role": "system", "content": context}]
+
+    def _web_final_from_tool_messages(self) -> list[Message]:
+        messages: list[Message] = []
+        latest_user = _latest_user_message(self.messages)
+        if latest_user is not None:
+            messages.append(latest_user)
+        final_messages = with_final_tool_system_prompt(messages)
+        context = build_web_final_evidence_context(self.evidence_store)
+        if not context:
+            return final_messages
+        return [*final_messages, {"role": "system", "content": context}]
+
+    def _should_use_web_final_view(self, *, use_tool_prompt: bool) -> bool:
+        if use_tool_prompt or self.evidence_store is None:
+            return False
+        record = next(iter(self.evidence_store.recent_records(1)), None)
+        if record is None or record.kind != "web_search":
+            return False
+        snippets = record.metadata.get("top_snippets")
+        return isinstance(snippets, list) and bool(snippets)
 
     def _should_use_final_small_evidence_view(self, *, use_tool_prompt: bool) -> bool:
         if use_tool_prompt or self.evidence_store is None:

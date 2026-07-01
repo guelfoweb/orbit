@@ -15,6 +15,7 @@ from orbit.runtime.evidence import (
     build_final_evidence_context,
     build_post_tool_route_evidence_context,
     build_route_evidence_context,
+    build_web_final_evidence_context,
     build_evidence_record,
     tool_evidence_ref,
 )
@@ -376,6 +377,38 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn(record.raw_ref, context)
             self.assertIn("AI research and deployment.", context)
             self.assertNotIn("bounded_raw_excerpt:", context)
+
+    def test_web_final_context_is_structured_bounded_and_keeps_refs(self) -> None:
+        raw = "\n".join(
+            [
+                "web_search_results: true",
+                "query: OpenAI",
+                "results:",
+                "1. title: OpenAI",
+                "   url: https://openai.com/",
+                "   snippet: " + ("AI research and deployment " * 40),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": 'orbit-web-search "OpenAI"'},
+            )
+
+            context = build_web_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn("web_search_evidence: true", context)
+            self.assertIn("query: OpenAI", context)
+            self.assertIn(record.raw_ref, context)
+            self.assertIn(record.raw_sha256[:16], context)
+            self.assertIn(f"size: {record.raw_chars} chars", context)
+            self.assertIn("top_snippets:", context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
+            self.assertNotIn("AI research and deployment " * 20, context)
 
 
 def _store_with(record, content: str) -> EvidenceStore:

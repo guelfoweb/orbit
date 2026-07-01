@@ -22,6 +22,7 @@ RAW_EXCERPT_CHARS = 900
 COMPACT_FINAL_RAW_EXCERPT_CHARS = 500
 POST_TOOL_ROUTE_TEXT_CHARS = 180
 ROUTE_OUTPUT_EXCERPT_CHARS = 400
+WEB_FINAL_SNIPPET_CHARS = 220
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,39 @@ def build_compact_final_evidence_context(store: EvidenceStore | None, *, limit: 
             if store is not None
             else f"raw_evidence_unavailable: {record.raw_ref}"
         )
+    return "\n".join(parts)
+
+
+def build_web_final_evidence_context(store: EvidenceStore | None) -> str | None:
+    record = next(iter(store.recent_records(1)), None) if store is not None else None
+    if record is None or record.kind != "web_search":
+        return None
+    snippets = record.metadata.get("top_snippets")
+    if not isinstance(snippets, list) or not snippets:
+        return None
+    parts = [
+        "evidence_context:",
+        "- evidence 1:",
+        "tool_evidence_card: true",
+        "web_search_evidence: true",
+        f"tool: {record.tool_name}",
+        f"kind: {record.kind}",
+        f"status: {record.status}",
+        f"raw_ref: {record.raw_ref}",
+        f"sha256: {record.raw_sha256[:16]}",
+        f"size: {record.raw_chars} chars, {record.raw_lines} lines",
+    ]
+    for key in ("query", "result_count", "top_domains", "top_titles"):
+        value = record.metadata.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, list):
+            parts.append(f"{key}: {'; '.join(str(item) for item in value[:3])}")
+        else:
+            parts.append(f"{key}: {value}")
+    parts.append("top_snippets:")
+    for item in snippets[:3]:
+        parts.append(f"- {_bounded_text(str(item), WEB_FINAL_SNIPPET_CHARS)}")
     return "\n".join(parts)
 
 
