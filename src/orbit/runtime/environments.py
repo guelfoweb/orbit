@@ -417,7 +417,9 @@ class FinalFromToolEnvironment:
         use_tool_prompt: bool,
         compact_window: bool = False,
     ) -> FinalAnswerResult:
-        if (
+        if self.runtime._should_use_web_final_view(use_tool_prompt=use_tool_prompt):
+            call_messages = self.runtime._web_final_from_tool_messages()
+        elif (
             compact_window
             or self.runtime._should_use_final_small_evidence_view(use_tool_prompt=use_tool_prompt)
             or self.runtime._should_compact_final_from_tool_window()

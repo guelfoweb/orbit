@@ -711,6 +711,71 @@ class RuntimeTests(unittest.TestCase):
             runtime.messages = [{"role": "user", "content": "read"}, {"role": "tool", "content": tool_evidence_ref(medium_record)}]
             self.assertFalse(runtime._should_use_final_small_evidence_view(use_tool_prompt=False))
 
+    def test_web_final_from_tool_uses_compact_web_view_without_full_history(self) -> None:
+        class MaxTokenBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.max_tokens_seen: list[int] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.max_tokens_seen.append(max_tokens)
+                return super().chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+
+        raw = "\n".join(
+            [
+                "web_search_results: true",
+                "query: OpenAI",
+                "results:",
+                "1. title: OpenAI",
+                "   url: https://openai.com/",
+                "   snippet: AI research and deployment.",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": 'orbit-web-search "OpenAI"'},
+            )
+            backend = MaxTokenBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "search online for OpenAI"},
+                {"role": "assistant", "content": "previous answer " * 100},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record) + "\nlegacy raw " + raw,
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            runtime._answer_from_tool_results(
+                temperature=0,
+                max_tokens=128,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                loop=1,
+                use_tool_prompt=False,
+            )
+
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
+        self.assertTrue(runtime._should_use_web_final_view(use_tool_prompt=False))
+        self.assertFalse(runtime._should_use_web_final_view(use_tool_prompt=True))
+        self.assertEqual(backend.max_tokens_seen, [256])
+        self.assertIn("search online for OpenAI", rendered)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn("web_search_evidence: true", rendered)
+        self.assertIn("AI research and deployment.", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertIn(record.raw_sha256[:16], rendered)
+        self.assertNotIn("legacy raw", rendered)
+        self.assertNotIn("previous answer previous answer", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in backend.messages))
+
     def test_final_from_tool_without_evidence_store_keeps_legacy_window(self) -> None:
         backend = FakeBackend()
         runtime = ChatRuntime(backend=backend, system_prompt=None)
