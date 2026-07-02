@@ -949,10 +949,14 @@ class ChatRuntime:
         return [*final_messages, {"role": "system", "content": context}]
 
     def _should_use_web_final_view(self, *, use_tool_prompt: bool) -> bool:
-        if use_tool_prompt or self.evidence_store is None:
+        if self.evidence_store is None:
             return False
         record = next(iter(self.evidence_store.recent_records(1)), None)
         if record is None or record.kind != "web_search":
+            return False
+        if record.status == "none":
+            return True
+        if use_tool_prompt:
             return False
         snippets = record.metadata.get("top_snippets")
         return isinstance(snippets, list) and bool(snippets)

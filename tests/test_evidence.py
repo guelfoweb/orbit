@@ -478,6 +478,31 @@ class EvidenceTests(unittest.TestCase):
             self.assertNotIn("bounded_raw_excerpt:", context)
             self.assertNotIn("AI research and deployment " * 20, context)
 
+    def test_web_final_context_handles_results_none_without_raw_excerpt(self) -> None:
+        raw = "web_search_results: true\nresults: none"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": 'orbit-web-search "OpenAI information"'},
+            )
+
+            context = build_web_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn("web_search_evidence: true", context)
+            self.assertIn("status: none", context)
+            self.assertIn("query: OpenAI information", context)
+            self.assertIn("result_count: 0", context)
+            self.assertIn(record.raw_ref, context)
+            self.assertIn(record.raw_sha256[:16], context)
+            self.assertNotIn("top_snippets:", context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
+            self.assertNotIn("web_search_results: true", context)
+            self.assertNotIn("results: none", context)
+
 
 def _store_with(record, content: str) -> EvidenceStore:
     store = EvidenceStore(Path("/tmp/orbit-test-unused-session.evidence"))

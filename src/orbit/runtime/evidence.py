@@ -267,7 +267,7 @@ def build_web_final_evidence_context(store: EvidenceStore | None) -> str | None:
     if record is None or record.kind != "web_search":
         return None
     snippets = record.metadata.get("top_snippets")
-    if not isinstance(snippets, list) or not snippets:
+    if (not isinstance(snippets, list) or not snippets) and record.status != "none":
         return None
     parts = [
         "evidence_context:",
@@ -289,9 +289,10 @@ def build_web_final_evidence_context(store: EvidenceStore | None) -> str | None:
             parts.append(f"{key}: {'; '.join(str(item) for item in value[:3])}")
         else:
             parts.append(f"{key}: {value}")
-    parts.append("top_snippets:")
-    for item in snippets[:3]:
-        parts.append(f"- {_bounded_text(str(item), WEB_FINAL_SNIPPET_CHARS)}")
+    if isinstance(snippets, list) and snippets:
+        parts.append("top_snippets:")
+        for item in snippets[:3]:
+            parts.append(f"- {_bounded_text(str(item), WEB_FINAL_SNIPPET_CHARS)}")
     return "\n".join(parts)
 
 
@@ -346,7 +347,7 @@ def _status_for(kind: str, content: str, metadata: dict[str, object]) -> str:
 def _enriched_metadata(kind: str, content: str, metadata: dict[str, object]) -> dict[str, object]:
     enriched = dict(metadata)
     if kind == "web_search":
-        enriched.update(_web_metadata(content))
+        enriched.update(_web_metadata(content, metadata))
     elif kind in {"shell", "grep_search", "unknown"}:
         enriched.update(_shell_metadata(content))
     if kind == "grep_search":
@@ -355,8 +356,8 @@ def _enriched_metadata(kind: str, content: str, metadata: dict[str, object]) -> 
     return enriched
 
 
-def _web_metadata(content: str) -> dict[str, object]:
-    query = _line_value(content, "query")
+def _web_metadata(content: str, metadata: dict[str, object]) -> dict[str, object]:
+    query = _line_value(content, "query") or _web_query_from_command(str(metadata.get("command") or ""))
     titles = re.findall(r"^\d+\.\s+title:\s*(.+)$", content, re.MULTILINE)
     urls = re.findall(r"^\s+url:\s*(.+)$", content, re.MULTILINE)
     snippets = re.findall(r"^\s+snippet:\s*(.+)$", content, re.MULTILINE)
@@ -622,6 +623,22 @@ def _grep_query_from_command(command: str) -> str:
                 if candidate.startswith("-"):
                     continue
                 return candidate
+    return ""
+
+
+def _web_query_from_command(command: str) -> str:
+    if not command:
+        return ""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return ""
+    if not parts:
+        return ""
+    for index, part in enumerate(parts):
+        if part in {"orbit-web-search", "orbit_web_search"} or part.endswith(("/orbit-web-search", "/orbit_web_search")):
+            if index + 1 < len(parts):
+                return parts[index + 1]
     return ""
 
 
