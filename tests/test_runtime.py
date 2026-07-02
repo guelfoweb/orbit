@@ -2909,8 +2909,13 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(backend.final_messages)
         self.assertEqual(backend.final_messages[0]["content"], FINAL_FROM_TOOL_SYSTEM_PROMPT)
         rendered = "\n".join(str(message.get("content", "")) for message in backend.final_messages or [])
-        self.assertIn("web_search_results: true", rendered)
-        self.assertIn("results: none", rendered)
+        self.assertTrue(runtime._should_use_web_final_view(use_tool_prompt=True))
+        self.assertIn("web_search_evidence: true", rendered)
+        self.assertIn("status: none", rendered)
+        self.assertIn("query: sample topic", rendered)
+        self.assertIn("result_count: 0", rendered)
+        self.assertNotIn("web_search_results: true", rendered)
+        self.assertNotIn("results: none", rendered)
         self.assertNotIn("Decide compactly whether the user request needs local tools", rendered)
 
     def test_new_web_turn_uses_latest_tool_evidence_not_previous_local_result(self) -> None:
