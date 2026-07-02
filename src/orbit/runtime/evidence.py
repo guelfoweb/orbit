@@ -22,6 +22,7 @@ RAW_EXCERPT_CHARS = 900
 COMPACT_FINAL_RAW_EXCERPT_CHARS = 500
 POST_TOOL_ROUTE_TEXT_CHARS = 180
 POST_TOOL_ROUTE_OUTPUT_CHARS = 80
+POST_TOOL_ROUTE_SMALL_RAW_CHARS = 200
 ROUTE_OUTPUT_EXCERPT_CHARS = 400
 WEB_FINAL_SNIPPET_CHARS = 220
 
@@ -475,21 +476,23 @@ def _compact_final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:
 
 
 def _post_tool_route_card(record: EvidenceRecord) -> str:
+    tool_name = _short_tool_name(record.tool_name)
     fields = [
         "tool_evidence_card=true",
-        f"t={_short_tool_name(record.tool_name)}",
         f"k={record.kind}",
         f"st={record.status}",
-        f"raw_ref={record.raw_ref}",
-        f"hash={record.raw_sha256[:16]}",
-        f"size={record.raw_chars}c/{record.raw_lines}l",
+        f"sz={record.raw_chars}c/{record.raw_lines}l",
     ]
+    if tool_name != record.kind:
+        fields.insert(1, f"t={tool_name}")
     if record.kind == "grep_search":
         keys = ("query", "files_count", "file_paths")
     elif record.kind == "web_search":
         keys = ("query", "result_count", "top_domains")
     elif record.kind in {"shell", "unknown"}:
         keys = ("exit_code", "stdout_chars", "stderr_chars", "stdout_excerpt", "stderr_excerpt")
+        if record.raw_chars <= POST_TOOL_ROUTE_SMALL_RAW_CHARS:
+            keys = ("command", *keys)
     else:
         keys = ("query", "command", "result_count", "top_domains", "top_titles")
     for key in keys:
