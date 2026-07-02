@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from orbit.backend import ChatResult
 from orbit.backend.base import Message
+from orbit.runtime.completion_budget import resolve_max_tokens
 
 
 FINAL_FROM_TOOL_MIN_TOKENS = 256
@@ -82,7 +83,14 @@ class FinalAnswerCompleteness:
         return self.status == "complete"
 
 
-def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streamed: bool) -> FinalToolPolicy:
+def build_final_tool_policy(
+    messages: list[Message],
+    *,
+    max_tokens: int,
+    streamed: bool,
+    evidence_kind: str | None = None,
+    evidence_chars: int | None = None,
+) -> FinalToolPolicy:
     prompt = last_user_text(messages)
     call_messages = prepare_final_tool_messages(messages)
     large_file_excerpt = has_large_file_excerpt(call_messages)
@@ -235,6 +243,8 @@ def build_final_tool_policy(messages: list[Message], *, max_tokens: int, streame
             compact_shell_analysis_result=compact_shell_analysis_result,
             brief_shell_result=brief_shell_result,
             brief_request=brief_request,
+            evidence_kind=evidence_kind,
+            evidence_chars=evidence_chars,
         ),
         length_retry_allowed=(not streamed and (large_file_excerpt or web_fetch_result)),
         incomplete_retry_allowed=shell_full_result and not (web_fetch_result or web_search_result or list_like_result or operational_status_result),
@@ -256,22 +266,42 @@ def final_tool_max_tokens(
     compact_shell_analysis_result: bool = False,
     brief_shell_result: bool = False,
     brief_request: bool = False,
+    evidence_kind: str | None = None,
+    evidence_chars: int | None = None,
 ) -> int:
     if large_file_excerpt:
-        return min(max_tokens, EXHAUSTIVE_LARGE_FILE_FINAL_MAX_TOKENS if exhaustive_document_request else LARGE_FILE_FINAL_MAX_TOKENS)
-    if web_fetch_result or web_search_result:
+        if exhaustive_document_request:
+            return resolve_max_tokens("final_from_tool", max_tokens, evidence_kind="read", evidence_chars=evidence_chars)
+        return min(
+            resolve_max_tokens("final_from_tool", max_tokens, evidence_kind="read", evidence_chars=evidence_chars),
+            LARGE_FILE_FINAL_MAX_TOKENS,
+        )
+    if web_fetch_result and not web_search_result:
         return min(max_tokens, WEB_FETCH_FINAL_MAX_TOKENS)
+    if web_search_result:
+        return resolve_max_tokens("final_from_tool", max_tokens, evidence_kind="web_search", evidence_chars=evidence_chars)
     if pdf_text_result:
-        return min(max_tokens, PDF_BRIEF_FINAL_MAX_TOKENS if brief_request else PDF_FINAL_MAX_TOKENS)
+        if brief_request:
+            return min(max_tokens, PDF_BRIEF_FINAL_MAX_TOKENS)
+        return min(
+            resolve_max_tokens("final_from_tool", max_tokens, evidence_kind="read", evidence_chars=evidence_chars),
+            PDF_FINAL_MAX_TOKENS,
+        )
     if list_like_result:
         return min(max_tokens, LIST_FINAL_MAX_TOKENS)
     if operational_status_result:
         return min(max_tokens, OPERATIONAL_STATUS_FINAL_MAX_TOKENS)
     if compact_shell_analysis_result:
-        return min(max_tokens, LONG_SHELL_ANALYSIS_FINAL_MAX_TOKENS)
+        return min(
+            resolve_max_tokens("final_from_tool", max_tokens, evidence_kind=evidence_kind or "shell", evidence_chars=evidence_chars),
+            LONG_SHELL_ANALYSIS_FINAL_MAX_TOKENS,
+        )
     if brief_shell_result:
-        return min(max_tokens, BRIEF_SHELL_FINAL_MAX_TOKENS)
-    return max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS)
+        return min(
+            resolve_max_tokens("final_from_tool", max_tokens, evidence_kind=evidence_kind or "shell", evidence_chars=evidence_chars),
+            BRIEF_SHELL_FINAL_MAX_TOKENS,
+        )
+    return resolve_max_tokens("final_from_tool", max_tokens, evidence_kind=evidence_kind, evidence_chars=evidence_chars)
 
 
 def prepare_final_tool_messages(messages: list[Message]) -> list[Message]:
@@ -388,10 +418,26 @@ def _truncate_with_marker(text: str, *, head_chars: int, tail_chars: int) -> str
     return f"{head}\n{FINAL_TOOL_TRUNCATION_MARKER}\n{tail}"
 
 
-def final_tool_retry_max_tokens(max_tokens: int, *, web_fetch_result: bool) -> int:
-    return min(
-        max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS),
-        WEB_FETCH_FINAL_MAX_TOKENS if web_fetch_result else max(max_tokens, FINAL_FROM_TOOL_MIN_TOKENS),
+def final_tool_retry_max_tokens(
+    max_tokens: int,
+    *,
+    web_fetch_result: bool,
+    web_search_result: bool = False,
+    previous_finish_reason: str | None = None,
+) -> int:
+    if web_search_result:
+        return resolve_max_tokens(
+            "final_from_tool_retry",
+            max_tokens,
+            evidence_kind="web_search",
+            previous_finish_reason=previous_finish_reason,
+        )
+    if web_fetch_result:
+        return min(max_tokens, WEB_FETCH_FINAL_MAX_TOKENS)
+    return resolve_max_tokens(
+        "final_from_tool_retry",
+        max_tokens,
+        previous_finish_reason=previous_finish_reason,
     )
 
 
@@ -416,7 +462,7 @@ def final_tool_compact_retry_instruction() -> Message:
 
 
 def final_tool_compact_retry_max_tokens(max_tokens: int, *, messages: list[Message] | None = None) -> int:
-    return min(COMPACT_FINAL_RETRY_MAX_TOKENS, max(COMPACT_FINAL_RETRY_MIN_TOKENS, max_tokens))
+    return resolve_max_tokens("repair", max_tokens)
 
 
 def final_from_tool_retry_reason(

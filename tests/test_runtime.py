@@ -771,7 +771,7 @@ class RuntimeTests(unittest.TestCase):
         rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
         self.assertTrue(runtime._should_use_web_final_view(use_tool_prompt=False))
         self.assertFalse(runtime._should_use_web_final_view(use_tool_prompt=True))
-        self.assertEqual(backend.max_tokens_seen, [256])
+        self.assertEqual(backend.max_tokens_seen, [192])
         self.assertIn("search online for OpenAI", rendered)
         self.assertIn("evidence_context:", rendered)
         self.assertIn("web_search_evidence: true", rendered)
@@ -2307,7 +2307,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "chat answer")
         self.assertEqual(emitted, ["chat answer"])
-        self.assertEqual(backend.max_tokens_seen, [128])
+        self.assertEqual(backend.max_tokens_seen, [64])
         self.assertIsNone(backend.tools)
 
     def test_ask_auto_streams_full_answer_after_truncated_probe(self) -> None:
@@ -2355,7 +2355,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "full answer")
         self.assertEqual(emitted, ["full ", "answer"])
-        self.assertEqual(backend.chat_max_tokens, [128])
+        self.assertEqual(backend.chat_max_tokens, [64])
         self.assertEqual(backend.stream_max_tokens, [512])
 
     def test_ask_auto_retries_empty_chat_response_once(self) -> None:
@@ -2904,7 +2904,7 @@ class ToolRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.content, "No web search results were found for the query.")
         self.assertEqual(backend.calls, 2)
-        self.assertEqual(backend.max_tokens_seen, [128, 72])
+        self.assertEqual(backend.max_tokens_seen, [64, 192])
         self.assertIsNotNone(backend.final_messages)
         self.assertEqual(backend.final_messages[0]["content"], FINAL_FROM_TOOL_SYSTEM_PROMPT)
         rendered = "\n".join(str(message.get("content", "")) for message in backend.final_messages or [])
@@ -7847,7 +7847,7 @@ EOF"""
         self.assertEqual(result.finish_reason, "length")
         self.assertEqual(emitted, ["partial web search answer"])
         self.assertEqual(backend.chat_stream_calls, 2)
-        self.assertEqual(backend.max_tokens_seen, [96, 72])
+        self.assertEqual(backend.max_tokens_seen, [96, 192])
 
     def test_ask_with_tools_emits_tool_call_event(self) -> None:
         events: list[tuple[str, str]] = []
