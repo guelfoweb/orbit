@@ -21,6 +21,7 @@ RECENT_EVIDENCE_LIMIT = 2
 RAW_EXCERPT_CHARS = 900
 COMPACT_FINAL_RAW_EXCERPT_CHARS = 500
 POST_TOOL_ROUTE_TEXT_CHARS = 180
+POST_TOOL_ROUTE_OUTPUT_CHARS = 80
 ROUTE_OUTPUT_EXCERPT_CHARS = 400
 WEB_FINAL_SNIPPET_CHARS = 220
 
@@ -250,12 +251,13 @@ def build_compact_final_evidence_context(store: EvidenceStore | None, *, limit: 
     for index, record in enumerate(records, start=1):
         parts.append(f"- evidence {index}:")
         parts.append(_compact_final_card(record))
-        parts.append("bounded_raw_excerpt:")
-        parts.append(
-            store.raw_excerpt(record, max_chars=COMPACT_FINAL_RAW_EXCERPT_CHARS)
-            if store is not None
-            else f"raw_evidence_unavailable: {record.raw_ref}"
-        )
+        if _compact_final_context_needs_raw_excerpt(record):
+            parts.append("bounded_raw_excerpt:")
+            parts.append(
+                store.raw_excerpt(record, max_chars=COMPACT_FINAL_RAW_EXCERPT_CHARS)
+                if store is not None
+                else f"raw_evidence_unavailable: {record.raw_ref}"
+            )
     return "\n".join(parts)
 
 
@@ -464,6 +466,14 @@ def _final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:
     return True
 
 
+def _compact_final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:
+    if record.status != "error" and record.kind in {"shell", "unknown"} and (
+        record.metadata.get("stdout_excerpt") or record.metadata.get("stderr_excerpt")
+    ):
+        return False
+    return _final_context_needs_raw_excerpt(record)
+
+
 def _post_tool_route_card(record: EvidenceRecord) -> str:
     fields = [
         "tool_evidence_card=true",
@@ -486,11 +496,18 @@ def _post_tool_route_card(record: EvidenceRecord) -> str:
         value = record.metadata.get(key)
         if value in (None, "", [], {}):
             continue
+        if key in {"stdout_chars", "stderr_chars"} and value == 0:
+            continue
+        max_chars = (
+            POST_TOOL_ROUTE_OUTPUT_CHARS
+            if key in {"stdout_excerpt", "stderr_excerpt"}
+            else POST_TOOL_ROUTE_TEXT_CHARS
+        )
         if isinstance(value, list):
-            items = [_bounded_text(str(item), POST_TOOL_ROUTE_TEXT_CHARS) for item in value[:1]]
+            items = [_bounded_text(str(item), max_chars) for item in value[:1]]
             fields.append(f"{_route_key(key)}={' | '.join(items)}")
         else:
-            fields.append(f"{_route_key(key)}={_bounded_text(str(value), POST_TOOL_ROUTE_TEXT_CHARS)}")
+            fields.append(f"{_route_key(key)}={_bounded_text(str(value), max_chars)}")
     return "; ".join(fields)
 
 
@@ -623,8 +640,13 @@ def _bounded_text(content: str, max_chars: int) -> str:
     stripped = content.strip()
     if len(stripped) <= max_chars:
         return stripped
-    head_chars = max(0, max_chars - TAIL_CHARS - 40)
-    return f"{stripped[:head_chars].rstrip()}\n[...bounded...]\n{stripped[-TAIL_CHARS:].lstrip()}"
+    marker = "\n[...bounded...]\n"
+    if max_chars <= len(marker) + 20:
+        return stripped[:max_chars].rstrip()
+    remaining = max_chars - len(marker)
+    tail_chars = min(TAIL_CHARS, max(10, remaining // 2))
+    head_chars = max(0, remaining - tail_chars)
+    return f"{stripped[:head_chars].rstrip()}{marker}{stripped[-tail_chars:].lstrip()}"
 
 
 def _route_output_excerpt(content: str | None) -> str:
