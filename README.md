@@ -15,14 +15,15 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 
 - local CLI and native HTTP server for Gemma 4 12B
 - CPU-first native backend
-- shell tools when tools mode is enabled
+- explicit shell tools when tools mode is enabled
 - streaming terminal output and compact progress phases
 - route-prefix KV anchor and startup prewarm enabled by default
 - optional multimodal image/audio support when the matching `mmproj` is loaded
-- experimental native MTP with `orbit server --mtp`
+- native MTP with runtime guardrails through `orbit server --mtp`
+- EvidenceStore-backed post-tool evidence handling
 
-MTP is supported for local testing, but it remains experimental. Do not treat it
-as production-ready or as a guaranteed performance win.
+MTP is supported in the native server path with runtime guardrails. It is not
+always-on for every internal completion and is not a guaranteed performance win.
 
 ## Requirements
 
@@ -76,7 +77,13 @@ The current release gate expects:
 In another terminal:
 
 ```bash
-.venv/bin/orbit --workdir workdir --tools on --think off "hi, how are you?"
+.venv/bin/orbit --workdir workdir --think off "hi, how are you?"
+```
+
+Enable tools only when you want to expose model-driven shell access:
+
+```bash
+.venv/bin/orbit --workdir workdir --tools on --think off
 ```
 
 For route/KV diagnostics:
@@ -89,12 +96,11 @@ ORBIT_KV_DIAG=1 .venv/bin/orbit --workdir workdir --tools on --think off "hi"
 
 ## Tools
 
-Tools are enabled by default in the current server/client flow.
+Tools are off by default. Tools-on mode exposes unrestricted local shell access
+through the model-facing shell tool. Use it only in an isolated lab or safe
+workdir.
 
-Tools mode exposes unrestricted local shell access through the model-facing
-shell tool. Use it only in an isolated lab or safe workdir.
-
-Disable tools at server startup:
+Keep tools disabled at server startup:
 
 ```bash
 ORBIT_TOOLS=off .venv/bin/orbit server --mtp
@@ -115,6 +121,23 @@ Interactive toggles:
 
 `--tools off` is client/session-side. If a server was already started with
 tools enabled, it may already have performed startup route-prefix prewarm.
+
+## Tool Evidence
+
+Orbit keeps tool results auditable without putting large raw outputs back into
+the prompt.
+
+After a tool runs:
+
+- raw evidence is preserved in runtime memory and sidecar files
+- prompt history stores bounded audit markers, not large raw tool output
+- route/final/retry prompts receive compact EvidenceStore projections
+- web, shell, grep/search, read, and unknown outputs use bounded evidence cards
+- `/reset` clears in-memory evidence for the current session
+
+This keeps post-tool follow-ups model-driven while reducing prompt bloat. The
+model still decides whether to answer or use a tool; the runtime only enforces
+size, safety, and tool-contract boundaries.
 
 ## KV Prefix Anchor and Prewarm
 
@@ -193,13 +216,21 @@ Multimodal capability should be visible through `/v1/models` and `/props`.
 
 Orbit targets local CPU-first operation. Some paths are expected to be slow:
 
-- web-search final answers with large evidence
-- `read` over large files
+- final/retry completions with low KV reuse
+- web/read over large or noisy evidence
 - visible thinking
 - first requests after cold server startup
-- experimental MTP paths
+- MTP paths that do not benefit a specific completion
 
 Do not interpret MTP as a general speed guarantee. Measure the actual workload.
+For post-tool issues, first check whether raw evidence is leaking into the
+prompt, whether a redundant tool call happened, and whether the final footer
+shows a large prompt or simply slow CPU prefill.
+
+Future work includes a Dynamic Completion Budget Policy: route, tool, final,
+and repair calls should get per-completion-kind output budgets so Orbit can
+avoid both truncation and overly long internal generations without changing
+prompt policy.
 
 ## Compatibility
 
@@ -229,4 +260,17 @@ or comparison path, not the primary product path.
 python3 -m unittest discover -s tests -q
 python3 -m compileall -q src tests scripts
 git diff --check
+```
+
+Useful local smoke before a release candidate:
+
+```text
+/tools on
+/think off
+run pwd
+what directory was that?
+run command_that_does_not_exist_123
+what happened?
+search online for information about OpenAI
+what did the search results say?
 ```
