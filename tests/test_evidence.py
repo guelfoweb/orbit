@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from orbit.runtime.evidence import (
     EvidenceStore,
+    build_compact_final_evidence_context,
     build_final_evidence_context,
     build_post_tool_route_evidence_context,
     build_route_evidence_context,
@@ -134,6 +135,17 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("head", record.route_card)
         self.assertIn("tail", record.route_card)
         self.assertNotIn("x" * 1000, record.route_card)
+
+    def test_post_tool_route_excerpt_respects_small_cap(self) -> None:
+        content = "\n".join(f"line-{index}" for index in range(120))
+        record = build_evidence_record("exec_shell_full_command", content, {"command": "python3 print-lines.py"})
+        context = build_post_tool_route_evidence_context(_store_with(record, content)) or ""
+
+        self.assertIn("stdout_excerpt=", context)
+        excerpt = context.split("stdout_excerpt=", 1)[1]
+        self.assertLessEqual(len(excerpt), 80)
+        self.assertIn("[...bounded...]", excerpt)
+        self.assertNotIn("line-20 | line-21 | line-22 | line-23 | line-24", excerpt)
 
     def test_unknown_small_output_has_bounded_route_excerpt(self) -> None:
         record = build_evidence_record("custom_tool", "useful value\n", {})
@@ -377,6 +389,41 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn(record.raw_ref, context)
             self.assertIn("AI research and deployment.", context)
             self.assertNotIn("bounded_raw_excerpt:", context)
+
+    def test_compact_final_context_does_not_duplicate_shell_excerpt(self) -> None:
+        raw = "\n".join(f"line-{index}" for index in range(120))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": "python3 print-lines.py"},
+            )
+
+            context = build_compact_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn(record.raw_ref, context)
+            self.assertIn(record.raw_sha256[:16], context)
+            self.assertIn("stdout_excerpt:", context)
+            self.assertIn("line-0", context)
+            self.assertIn("line-119", context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
+
+    def test_compact_final_context_keeps_error_raw_excerpt(self) -> None:
+        raw = "shell_command_failed: true\nexit_code: 127\nSTDOUT:\n(empty)\nSTDERR:\nmissing command\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            store.add("exec_shell_full_command", raw, metadata={"command": "missing-command"})
+
+            context = build_compact_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn("bounded_raw_excerpt:", context)
+            self.assertIn("shell_command_failed: true", context)
+            self.assertIn("missing command", context)
 
     def test_web_final_context_is_structured_bounded_and_keeps_refs(self) -> None:
         raw = "\n".join(
