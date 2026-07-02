@@ -1611,6 +1611,38 @@ class RuntimeTests(unittest.TestCase):
             ],
         )
 
+    def test_chat_final_does_not_repair_plain_stop_answer(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content="The output contains sequential lines from line-0 through line-119",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=12,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+            ]
+        )
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime._transport_environment().chat_final(
+            [{"role": "user", "content": "summarize that output"}],
+            temperature=0,
+            max_tokens=64,
+            on_final_delta=None,
+            on_progress=None,
+            on_model_step=None,
+            on_phase_start=None,
+            loop=1,
+        )
+
+        self.assertEqual(result.content, "The output contains sequential lines from line-0 through line-119")
+        self.assertEqual(len(backend.messages_by_call), 1)
+
     def test_ask_chat_does_not_retry_complete_markdown_answer_with_trailing_bold_closer(self) -> None:
         class MarkdownCompleteBackend(FakeBackend):
             def __init__(self) -> None:
