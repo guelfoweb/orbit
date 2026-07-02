@@ -342,7 +342,7 @@ def run_persistent_mtp_completion(
         runtime.handle,
         ctx_tgt,
         prompt.encode(),
-        max(1, min(max_tokens, 32)),
+        max(1, max_tokens),
         token_cb,
         progress_cb,
         None,

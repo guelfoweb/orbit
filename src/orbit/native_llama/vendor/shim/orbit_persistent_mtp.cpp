@@ -1692,8 +1692,9 @@ extern "C" bool orbit_mtp_session_complete(
         set_error("failed to initialize common sampler");
         return false;
     }
+    const int generation_limit = std::max(1, (int) max_tokens);
     std::vector<llama_token> generated;
-    generated.reserve((size_t) std::max(1, std::min(32, (int) max_tokens)));
+    generated.reserve((size_t) generation_limit);
     const auto t0 = std::chrono::steady_clock::now();
     const int32_t progress_prefill_phase = 0;
     const int32_t progress_generation_phase = 1;
@@ -1733,7 +1734,7 @@ extern "C" bool orbit_mtp_session_complete(
     bool request_boundary_logits_refreshed = false;
     int last_target_prefill_batch_n_tokens = 0;
 
-    while ((int) generated.size() < std::max(1, std::min(32, (int) max_tokens))) {
+    while ((int) generated.size() < generation_limit) {
         const auto loop_phase_start = std::chrono::steady_clock::now();
         const bool loop_need_replay_before = need_replay;
         if (need_replay) {
@@ -2054,7 +2055,7 @@ extern "C" bool orbit_mtp_session_complete(
                         common_sampler_prev_str(smpl, ctx_tgt, 8),
                         &tok));
                 }
-                if ((int) generated.size() >= std::max(1, std::min(32, (int) max_tokens))) {
+                if ((int) generated.size() >= generation_limit) {
                     goto done;
                 }
             }
@@ -2093,7 +2094,7 @@ extern "C" bool orbit_mtp_session_complete(
 
             common_speculative_get_draft_params(session->spec, 0) = {
                 true,
-                std::min(ORBIT_MTP_DRAFT_N_MAX, std::max(1, std::min(32, (int) max_tokens)) - (int) generated.size()),
+                std::min(ORBIT_MTP_DRAFT_N_MAX, generation_limit - (int) generated.size()),
                 (llama_pos) n_past,
                 id_last,
                 &prompt_tgt,
@@ -2304,7 +2305,7 @@ extern "C" bool orbit_mtp_session_complete(
         trace_step.kv_dft_before_max = llama_memory_seq_pos_max(mem_dft, 0);
         trace_step.ctx_tgt_frontier_hash = stable_hash_frontier(trace_step.kv_tgt_before_min, trace_step.kv_tgt_before_max);
         trace_step.ctx_dft_frontier_hash = stable_hash_frontier(trace_step.kv_dft_before_min, trace_step.kv_dft_before_max);
-        trace_step.remaining_generation_cap = std::max(0, std::max(1, std::min(32, (int) max_tokens)) - (int) generated.size());
+        trace_step.remaining_generation_cap = std::max(0, generation_limit - (int) generated.size());
         if (debug_partial) {
             trace_step.partial_state_before_json = partial_state_json(
                 vocab_tgt,
@@ -2456,7 +2457,7 @@ extern "C" bool orbit_mtp_session_complete(
             }
         }
 
-        for (size_t i = 0; i < ids.size() && (int) generated.size() < std::max(1, std::min(32, (int) max_tokens)); ++i) {
+        for (size_t i = 0; i < ids.size() && (int) generated.size() < generation_limit; ++i) {
             if (!boundary_committed_live) {
                 prompt_tgt.push_back(id_last);
             }
