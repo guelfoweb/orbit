@@ -23,7 +23,13 @@ from orbit.runtime.evidence import (
     tool_evidence_ref,
 )
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TOOL_CALL_JSON_RETRY_PROMPT, TOOL_CALL_SYSTEM_PROMPT
-from orbit.runtime.chat import _has_list_like_tool_result, _should_attempt_route_repair
+from orbit.runtime.chat import (
+    _RouteDecisionStreamAbort,
+    _RouteNotCommandAbort,
+    _has_list_like_tool_result,
+    _should_attempt_route_repair,
+    _should_skip_route_repair,
+)
 from orbit.runtime.capabilities import LocalCapabilities, LocalCapability
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.tool_loop import _should_guard_existing_file_rewrite
@@ -970,6 +976,38 @@ class RuntimeTests(unittest.TestCase):
                     tool_calls=[],
                     prompt_tokens=None,
                     completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+            )
+        )
+
+    def test_route_repair_skips_empty_length_output_without_artifact(self) -> None:
+        self.assertTrue(
+            _should_skip_route_repair(
+                ChatResult(
+                    content="",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=128,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+            )
+        )
+        self.assertFalse(
+            _should_skip_route_repair(
+                ChatResult(
+                    content='{"command"',
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=128,
                     cached_tokens=None,
                     prompt_tokens_per_second=None,
                     generation_tokens_per_second=None,
@@ -5537,6 +5575,22 @@ EOF"""
         self.assertEqual(progress, [("generation", 12, 128, 9), ("generation", 12, 128, 9)])
         self.assertEqual(backend.chat_calls, 0)
         self.assertEqual(backend.chat_stream_calls, 2)
+
+    def test_route_stream_abort_stops_whitespace_only_route(self) -> None:
+        route_filter = _RouteDecisionStreamAbort()
+
+        with self.assertRaises(_RouteNotCommandAbort) as raised:
+            for _ in range(8):
+                route_filter.write(" ")
+
+        self.assertEqual(raised.exception.chunks, 8)
+
+    def test_route_stream_abort_allows_whitespace_before_command_prefix(self) -> None:
+        route_filter = _RouteDecisionStreamAbort()
+
+        for _ in range(3):
+            route_filter.write(" ")
+        route_filter.write("{")
 
     def test_ask_auto_discards_route_thought_and_runs_chat_final(self) -> None:
         class StreamingRouteThoughtBackend:

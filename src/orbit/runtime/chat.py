@@ -1143,6 +1143,8 @@ class _RouteNotCommandAbort(Exception):
 class _RouteDecisionStreamAbort:
     """Stop an internal route stream once it cannot still become a route decision."""
 
+    _MAX_PENDING_WHITESPACE_CHUNKS = 8
+
     def __init__(self) -> None:
         self._buffer = ""
         self._chunks = 0
@@ -1152,6 +1154,8 @@ class _RouteDecisionStreamAbort:
             return
         self._chunks += 1
         self._buffer += text
+        if not self._buffer.strip() and self._chunks >= self._MAX_PENDING_WHITESPACE_CHUNKS:
+            raise _RouteNotCommandAbort(self._buffer, chunks=self._chunks)
         if command_stream_state(self._buffer) == "not_command":
             raise _RouteNotCommandAbort(self._buffer, chunks=self._chunks)
 
@@ -1222,6 +1226,8 @@ def _should_skip_route_repair(result: ChatResult) -> bool:
     if result.finish_reason != "length" or _should_attempt_route_repair(result):
         return False
     text = result.content.strip()
+    if not text:
+        return True
     if result.completion_tokens is not None:
         return result.completion_tokens <= 2 and len(text) <= 16
     return len(text) <= 16
