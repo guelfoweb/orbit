@@ -1013,7 +1013,7 @@ class NativeLlamaClient:
 
         mtp_prompt = _prepare_mtp_prompt(prompt, thinking=thinking)
         streamed_parts: list[str] = []
-        generation_cap = max(1, min(max_tokens, 32))
+        generation_cap = max(1, max_tokens)
         self._last_completion_generation_cap = generation_cap
         result = run_persistent_mtp_completion(
             llama_root=self.paths.llama_root,

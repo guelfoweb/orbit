@@ -104,6 +104,31 @@ class NativeMtpExperimentalTests(unittest.TestCase):
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_passes_full_budget_to_persistent_runner(self, _mocked_lib, mocked_run) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+        client._persistent_mtp_runtime = object()
+        client.tokenize = lambda prompt: [1, 2, 3]
+        mocked_run.return_value = MtpCompletionResult(
+            enabled=True,
+            success=True,
+            error=None,
+            content="ok",
+            output_tokens=33,
+            elapsed_ms=12.5,
+        )
+
+        timings = client._try_complete_with_mtp_experimental("hello", max_tokens=128)
+
+        self.assertIsNotNone(timings)
+        self.assertEqual(mocked_run.call_args.kwargs["max_tokens"], 128)
+        self.assertEqual(client._last_completion_generation_cap, 128)
+        self.assertEqual(timings.output_tokens, 33)
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_try_complete_with_mtp_experimental_strips_control_channel_tokens(self, _mocked_lib, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
