@@ -147,6 +147,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("[...bounded...]", excerpt)
         self.assertNotIn("line-20 | line-21 | line-22 | line-23 | line-24", excerpt)
 
+    def test_post_tool_route_card_uses_compact_operational_metadata(self) -> None:
+        content = "useful value\n"
+        record = build_evidence_record("exec_shell_full_command", content, {"command": "printf useful"})
+        context = build_post_tool_route_evidence_context(_store_with(record, content)) or ""
+
+        self.assertIn("tool_evidence_card=true", context)
+        self.assertIn("sz=", context)
+        self.assertIn("cmd=printf useful", context)
+        self.assertIn("stdout_excerpt=useful value", context)
+        self.assertNotIn("raw_ref=", context)
+        self.assertNotIn("hash=", context)
+
+    def test_post_tool_route_omits_command_for_medium_shell_output(self) -> None:
+        content = "\n".join(f"line-{index}" for index in range(120))
+        record = build_evidence_record("exec_shell_full_command", content, {"command": "python3 print-lines.py"})
+        context = build_post_tool_route_evidence_context(_store_with(record, content)) or ""
+
+        self.assertNotIn("cmd=python3 print-lines.py", context)
+        self.assertIn("stdout_excerpt=", context)
+
     def test_unknown_small_output_has_bounded_route_excerpt(self) -> None:
         record = build_evidence_record("custom_tool", "useful value\n", {})
 
