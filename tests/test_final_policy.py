@@ -300,7 +300,7 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertNotIn("'- Finding: ... Fix: ...'", policy.messages[-1]["content"])
         self.assertIn("Answer the latest user request directly and concisely", policy.messages[-1]["content"])
         self.assertIn("Prefer the most recent relevant shell result", policy.messages[-1]["content"])
-        self.assertEqual(policy.max_tokens, 256)
+        self.assertEqual(policy.max_tokens, 192)
 
     def test_compact_retry_max_tokens_stays_default_for_non_shell_policy(self) -> None:
         messages = [

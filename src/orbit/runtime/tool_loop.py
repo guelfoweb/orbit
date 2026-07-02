@@ -10,6 +10,7 @@ from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.capabilities import LocalCapabilities
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
+from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
@@ -991,9 +992,11 @@ def _bounded_internal_max_tokens(max_tokens: int, internal_max: int) -> int:
 
 def _tool_call_max_tokens(max_tokens: int, *, mutative: bool, file_recovery: bool = False) -> int:
     if file_recovery:
-        return _bounded_internal_max_tokens(max_tokens, FILE_RECOVERY_TOOL_CALL_MAX_TOKENS)
+        return resolve_max_tokens("tool_call_file_recovery", max_tokens)
     internal_max = MUTATIVE_TOOL_CALL_MAX_TOKENS if mutative else TOOL_CALL_MAX_TOKENS
-    return _bounded_internal_max_tokens(max_tokens, internal_max)
+    if mutative:
+        return _bounded_internal_max_tokens(max_tokens, internal_max)
+    return resolve_max_tokens("tool_call", max_tokens)
 
 
 def _is_empty_final_response(result: ChatResult) -> bool:

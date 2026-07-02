@@ -9,7 +9,7 @@ from orbit.backend import ChatBackend, ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.capabilities import LocalCapabilities, discover_local_capabilities
 from orbit.runtime.client_state import ClientState
-from orbit.runtime.completion_budget import CompletionBudget
+from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.environments import (
     ContinueEnvironment,
     FileInputEnvironment,
@@ -74,8 +74,6 @@ from orbit.runtime.tool_result_compaction import (
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
-ROUTE_MAX_TOKENS = 128
-EVIDENCE_CHAT_FINAL_RETRY_MIN_TOKENS = 192
 FINAL_FROM_TOOL_COMPACT_MIN_RAW_CHARS = 512
 FINAL_SMALL_EVIDENCE_MAX_RAW_CHARS = 500
 FINAL_SMALL_EVIDENCE_KINDS = {"shell", "unknown", "grep_search"}
@@ -323,7 +321,7 @@ class ChatRuntime:
                 tool_names=("exec_shell_full_command",),
             )
             return self._remember_visible_result(_tool_loop_result_value(bundle))
-        command_max_tokens = CompletionBudget(max_tokens).internal(ROUTE_MAX_TOKENS)
+        command_max_tokens = resolve_max_tokens("route", max_tokens)
         streamed_final_retry = False
         retried_empty_final = False
         route_abort_reason: str | None = None
@@ -459,7 +457,7 @@ class ChatRuntime:
                     first = self._transport_environment().chat_final(
                         self._with_final_evidence_context(with_chat_system_prompt(self.messages)),
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=resolve_max_tokens("chat", max_tokens),
                         on_final_delta=on_final_delta,
                         on_progress=on_progress,
                         on_model_step=on_model_step,
@@ -487,7 +485,10 @@ class ChatRuntime:
                             )
                         )
                     retry_messages = self._chat_final_retry_messages()
-                    retry_max_tokens = self._chat_final_retry_max_tokens(max_tokens)
+                    retry_max_tokens = self._chat_final_retry_max_tokens(
+                        max_tokens,
+                        previous_finish_reason=first.finish_reason,
+                    )
                     if on_final_delta is None:
                         with model_call_context(phase="chat_final_retry", tools_mode="on"):
                             first = self.backend.chat(
@@ -520,7 +521,7 @@ class ChatRuntime:
                     first = self._transport_environment().chat_final(
                         self._with_final_evidence_context(self.messages),
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=resolve_max_tokens("chat", max_tokens),
                         on_final_delta=on_final_delta,
                         on_progress=on_progress,
                         on_model_step=on_model_step,
@@ -747,7 +748,7 @@ class ChatRuntime:
                 result = self.backend.chat_stream(
                     planning_messages,
                     temperature=temperature,
-                    max_tokens=CompletionBudget(max_tokens).internal(ROUTE_MAX_TOKENS),
+                    max_tokens=resolve_max_tokens("route", max_tokens),
                     on_delta=thought_filter.write,
                     on_progress=on_progress,
                 )
@@ -795,7 +796,7 @@ class ChatRuntime:
         result = self._transport_environment().chat_final(
             messages,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=resolve_max_tokens("chat", max_tokens),
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
@@ -1060,9 +1061,13 @@ class ChatRuntime:
         messages.append({"role": "user", "content": repair_instruction})
         return messages
 
-    def _chat_final_retry_max_tokens(self, max_tokens: int) -> int:
+    def _chat_final_retry_max_tokens(self, max_tokens: int, *, previous_finish_reason: str | None = None) -> int:
         if self.evidence_store is not None and self.evidence_store.recent_records(1):
-            return max(max_tokens, EVIDENCE_CHAT_FINAL_RETRY_MIN_TOKENS)
+            return resolve_max_tokens(
+                "chat_final_retry",
+                max_tokens,
+                previous_finish_reason=previous_finish_reason,
+            )
         return max_tokens
 
     def refresh_memory_if_needed(self, *, temperature: float, force: bool = False) -> bool:

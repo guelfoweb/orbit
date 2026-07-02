@@ -8,7 +8,7 @@ import re
 
 from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
-from orbit.runtime.completion_budget import CompletionBudget
+from orbit.runtime.completion_budget import CompletionBudget, resolve_max_tokens
 from orbit.runtime.continue_controller import ContinueController
 from orbit.runtime.file_input_resolver import FileInputResolver
 from orbit.runtime.final_policy import (
@@ -159,7 +159,11 @@ class TransportEnvironment:
                 retry = self.chat_once(
                     retry_messages,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=resolve_max_tokens(
+                        "repair",
+                        max_tokens,
+                        previous_finish_reason=result.finish_reason,
+                    ),
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                 )
@@ -293,6 +297,7 @@ class PureChatEnvironment:
         self.runtime.messages.append({"role": "user", "content": user_content})
         if self.runtime.thinking_mode:
             thinking_max_tokens = CompletionBudget(max_tokens).internal(CHAT_THINKING_MAX_TOKENS)
+            chat_max_tokens = resolve_max_tokens("chat", max_tokens)
             thinking_messages = [
                 *call_messages,
                 {
@@ -335,7 +340,7 @@ class PureChatEnvironment:
                 result = self.transport.chat_final(
                     final_messages,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=chat_max_tokens,
                     on_final_delta=on_final_delta,
                     on_progress=on_progress,
                     on_model_step=on_model_step,
@@ -347,7 +352,7 @@ class PureChatEnvironment:
         result = self.transport.chat_final(
             call_messages,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=resolve_max_tokens("chat", max_tokens),
             on_final_delta=on_final_delta,
             on_progress=on_progress,
             on_model_step=on_model_step,
@@ -430,7 +435,14 @@ class FinalFromToolEnvironment:
         else:
             call_messages = self.runtime._with_final_tool_prompt() if use_tool_prompt else self.runtime.messages
             call_messages = self.runtime._with_final_evidence_context(call_messages)
-        policy = build_final_tool_policy(call_messages, max_tokens=max_tokens, streamed=on_final_delta is not None)
+        evidence_kind, evidence_chars = self._latest_evidence_budget_metadata()
+        policy = build_final_tool_policy(
+            call_messages,
+            max_tokens=max_tokens,
+            streamed=on_final_delta is not None,
+            evidence_kind=evidence_kind,
+            evidence_chars=evidence_chars,
+        )
         stream_buffer = _BufferedDeltaSink() if on_final_delta is not None and policy.incomplete_retry_allowed else None
         direct_delta = _ForwardingDeltaSink(on_final_delta) if on_final_delta is not None and stream_buffer is None else None
         final_delta = stream_buffer.write if stream_buffer is not None else (direct_delta.write if direct_delta is not None else on_final_delta)
@@ -474,7 +486,9 @@ class FinalFromToolEnvironment:
             retry_messages = [*policy.messages, final_tool_retry_instruction()]
             retry_max_tokens = final_tool_retry_max_tokens(
                 max_tokens,
-                web_fetch_result=policy.web_fetch_result or policy.web_search_result,
+                web_fetch_result=policy.web_fetch_result,
+                web_search_result=policy.web_search_result,
+                previous_finish_reason=result.finish_reason,
             )
             if on_phase_start:
                 on_phase_start(
@@ -535,7 +549,13 @@ class FinalFromToolEnvironment:
                 )
             )
             repair_messages = [*policy.messages, {"role": "user", "content": repair_instruction}]
-            repair_max_tokens = final_tool_retry_max_tokens(max_tokens, web_fetch_result=policy.web_fetch_result)
+            repair_max_tokens = resolve_max_tokens(
+                "repair",
+                max_tokens,
+                evidence_kind=evidence_kind,
+                evidence_chars=evidence_chars,
+                previous_finish_reason=result.finish_reason,
+            )
             if on_phase_start:
                 on_phase_start(
                     ModelPhaseStart(
@@ -642,6 +662,17 @@ class FinalFromToolEnvironment:
             compact_retry_attempted=compact_retry_attempted,
             compact_retry_failed=compact_retry_failed,
         )
+
+    def _latest_evidence_budget_metadata(self) -> tuple[str | None, int | None]:
+        store = self.runtime.evidence_store
+        if store is None:
+            return None, None
+        record = next(iter(store.recent_records(1)), None)
+        if record is None:
+            return None, None
+        if record.kind in {"shell", "unknown"} and record.status == "error":
+            return "shell_error", record.raw_chars
+        return record.kind, record.raw_chars
 
 
 @dataclass(frozen=True)
