@@ -116,6 +116,8 @@ class TransportEnvironment:
         completeness = classify_final_answer_completeness(result.content, messages=messages)
         if not repair_incomplete_final and not is_empty_final_response(result):
             return result
+        if _is_acceptable_plain_stop_final(result, completeness):
+            return result
         if not is_empty_final_response(result) and completeness.is_complete:
             return result
 
@@ -853,6 +855,12 @@ def merge_chat_results(first: ChatResult, second: ChatResult) -> ChatResult:
 
 def is_empty_final_response(result: ChatResult) -> bool:
     return not result.tool_calls and result.finish_reason == "stop" and not result.content.strip()
+
+
+def _is_acceptable_plain_stop_final(result: ChatResult, completeness) -> bool:
+    if result.finish_reason != "stop" or is_empty_final_response(result):
+        return False
+    return completeness.status == "incomplete_stub" and completeness.detail == "plain_incomplete"
 
 
 def unsupported_tool_mode_result(result: ChatResult) -> ChatResult:
