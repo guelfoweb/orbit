@@ -153,8 +153,9 @@ class EvidenceTests(unittest.TestCase):
         context = build_post_tool_route_evidence_context(_store_with(record, content)) or ""
 
         self.assertIn("tool_evidence_card=true", context)
+        self.assertIn("result_available=true", context)
         self.assertIn("sz=", context)
-        self.assertIn("cmd=printf useful", context)
+        self.assertIn("observed_cmd=printf useful", context)
         self.assertIn("stdout_excerpt=useful value", context)
         self.assertNotIn("raw_ref=", context)
         self.assertNotIn("hash=", context)
@@ -164,7 +165,7 @@ class EvidenceTests(unittest.TestCase):
         record = build_evidence_record("exec_shell_full_command", content, {"command": "python3 print-lines.py"})
         context = build_post_tool_route_evidence_context(_store_with(record, content)) or ""
 
-        self.assertNotIn("cmd=python3 print-lines.py", context)
+        self.assertNotIn("observed_cmd=python3 print-lines.py", context)
         self.assertIn("stdout_excerpt=", context)
 
     def test_unknown_small_output_has_bounded_route_excerpt(self) -> None:
