@@ -277,6 +277,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("summarize that output", route_rendered)
         self.assertIn("available_evidence:", route_rendered)
         self.assertIn("tool_evidence_card=true", route_rendered)
+        self.assertIn("result_available=true", route_rendered)
         self.assertNotIn(record.raw_ref, route_rendered)
         self.assertNotIn("legacy raw", route_rendered)
         self.assertNotIn("tool_evidence_ref: true", route_rendered)

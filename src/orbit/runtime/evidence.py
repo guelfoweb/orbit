@@ -479,6 +479,7 @@ def _post_tool_route_card(record: EvidenceRecord) -> str:
     tool_name = _short_tool_name(record.tool_name)
     fields = [
         "tool_evidence_card=true",
+        "result_available=true",
         f"k={record.kind}",
         f"st={record.status}",
         f"sz={record.raw_chars}c/{record.raw_lines}l",
@@ -520,7 +521,7 @@ def _short_tool_name(tool_name: str) -> str:
 
 def _route_key(key: str) -> str:
     return {
-        "command": "cmd",
+        "command": "observed_cmd",
         "exit_code": "exit",
         "stdout_chars": "stdout",
         "stderr_chars": "stderr",
