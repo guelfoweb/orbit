@@ -216,7 +216,7 @@ def build_route_evidence_context(store: EvidenceStore | None, *, limit: int = RE
     parts = ["available_evidence:"]
     for index, record in enumerate(records, start=1):
         parts.append(f"- evidence {index}:")
-        parts.append(record.route_card)
+        parts.append(_route_operational_card(record))
     return "\n".join(parts)
 
 
@@ -477,13 +477,16 @@ def _compact_final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:
 
 
 def _post_tool_route_card(record: EvidenceRecord) -> str:
+    return _route_operational_card(record)
+
+
+def _route_operational_card(record: EvidenceRecord) -> str:
     tool_name = _short_tool_name(record.tool_name)
     fields = [
         "tool_evidence_card=true",
         "result_available=true",
         f"k={record.kind}",
         f"st={record.status}",
-        f"sz={record.raw_chars}c/{record.raw_lines}l",
     ]
     if tool_name != record.kind:
         fields.insert(1, f"t={tool_name}")

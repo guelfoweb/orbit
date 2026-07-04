@@ -154,11 +154,11 @@ class EvidenceTests(unittest.TestCase):
 
         self.assertIn("tool_evidence_card=true", context)
         self.assertIn("result_available=true", context)
-        self.assertIn("sz=", context)
         self.assertIn("observed_cmd=printf useful", context)
         self.assertIn("stdout_excerpt=useful value", context)
         self.assertNotIn("raw_ref=", context)
         self.assertNotIn("hash=", context)
+        self.assertNotIn("sha256", context)
 
     def test_post_tool_route_omits_command_for_medium_shell_output(self) -> None:
         content = "\n".join(f"line-{index}" for index in range(120))
@@ -319,7 +319,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn("tool_evidence_card: true", marker)
         self.assertNotIn("raw raw raw", marker)
 
-    def test_route_context_exposes_store_cards_without_raw_or_policy_instruction(self) -> None:
+    def test_route_context_exposes_operational_cards_without_audit_metadata_or_raw(self) -> None:
         raw = "web_search_results: true\nquery: OpenAI\nresults:\n" + ("raw-result " * 500)
         with tempfile.TemporaryDirectory() as tmp:
             store = EvidenceStore(Path(tmp) / "session.evidence")
@@ -330,12 +330,43 @@ class EvidenceTests(unittest.TestCase):
             self.assertIsNotNone(context)
             assert context is not None
             self.assertIn("available_evidence:", context)
-            self.assertIn("tool_evidence_card: true", context)
-            self.assertIn(record.raw_ref, context)
+            self.assertIn("tool_evidence_card=true", context)
+            self.assertIn("result_available=true", context)
+            self.assertIn("k=web_search", context)
+            self.assertIn("st=ok", context)
+            self.assertIn("query=OpenAI", context)
+            self.assertIn("results=", context)
+            self.assertNotIn(record.raw_ref, context)
+            self.assertNotIn("raw_ref", context)
+            self.assertNotIn(record.raw_sha256[:16], context)
+            self.assertNotIn("sha256", context)
             self.assertNotIn("choose CHAT", context)
             self.assertNotIn("choose FINAL", context)
             self.assertNotIn(raw, context)
             self.assertLess(len(context), len(raw))
+
+    def test_route_context_preserves_shell_error_operational_details(self) -> None:
+        raw = "shell_command_failed: true\nexit_code: 127\nSTDOUT:\n(empty)\nSTDERR:\nmissing command\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", raw, metadata={"command": "missing-command"})
+
+            context = build_route_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn("tool_evidence_card=true", context)
+            self.assertIn("result_available=true", context)
+            self.assertIn("k=shell", context)
+            self.assertIn("st=error", context)
+            self.assertIn("observed_cmd=missing-command", context)
+            self.assertIn("exit=127", context)
+            self.assertIn("stderr_excerpt=missing command", context)
+            self.assertNotIn(record.raw_ref, context)
+            self.assertNotIn("raw_ref", context)
+            self.assertNotIn(record.raw_sha256[:16], context)
+            self.assertNotIn("sha256", context)
+            self.assertNotIn(raw, context)
 
     def test_final_context_uses_bounded_excerpt_and_degrades_when_sidecar_missing(self) -> None:
         raw = "head\n" + ("body " * 500) + "\ntail"

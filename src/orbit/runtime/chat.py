@@ -1020,7 +1020,7 @@ class ChatRuntime:
         if self.evidence_store is None or not self.evidence_store.recent_records(1):
             return self._with_final_evidence_context(with_chat_system_prompt(self.messages))
         messages: list[Message] = []
-        assistant = _latest_short_assistant_message(self.messages)
+        assistant = _latest_operational_assistant_message(self.messages)
         if assistant is not None:
             messages.append(assistant)
         latest_user = _latest_user_message(self.messages)
@@ -1040,7 +1040,10 @@ class ChatRuntime:
     def _chat_final_retry_messages(self) -> list[Message]:
         messages: list[Message] = []
         latest_user = _latest_user_message(self.messages)
-        assistant = _latest_short_assistant_message(self.messages)
+        if self.evidence_store is not None and self.evidence_store.recent_records(1):
+            assistant = _latest_operational_assistant_message(self.messages)
+        else:
+            assistant = _latest_short_assistant_message(self.messages)
         if assistant is not None:
             messages.append(assistant)
         if latest_user is not None:
@@ -1321,6 +1324,10 @@ def _latest_short_assistant_message(messages: list[Message], *, max_chars: int =
         if isinstance(content, str) and content.strip() and len(content) <= max_chars:
             return {"role": "assistant", "content": content}
     return None
+
+
+def _latest_operational_assistant_message(messages: list[Message], *, max_chars: int = 160) -> Message | None:
+    return _latest_assistant_excerpt_message(messages, max_chars=max_chars)
 
 
 def _latest_assistant_excerpt_message(messages: list[Message], *, max_chars: int = 140) -> Message | None:
