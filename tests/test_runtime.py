@@ -219,7 +219,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("evidence_context:", final_rendered)
         self.assertIn("evidence_excerpt", final_rendered)
         self.assertNotIn("tool_evidence_ref: true", final_rendered)
-        self.assertNotIn("OpenAI is an AI company. OpenAI is an AI company.", final_rendered)
+        self.assertNotIn("OpenAI is an AI company. " * 20, final_rendered)
+        self.assertIn("OpenAI is an AI company.", final_rendered)
+        self.assertIn("...", final_rendered)
 
     def test_post_tool_route_window_excludes_full_history_and_audit_marker(self) -> None:
         raw = "\n".join(f"line-{index}" for index in range(120))
@@ -284,6 +286,74 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("previous final answer previous final answer", route_rendered)
         self.assertFalse(any(message.get("role") == "tool" for message in route_messages))
 
+    def test_explicit_shell_run_after_web_evidence_still_executes_tool(self) -> None:
+        web_raw = "\n".join(
+            [
+                "web_search_results: true",
+                "query: OpenAI",
+                "results:",
+                "1. title: OpenAI",
+                "   url: https://openai.com/",
+                "   snippet: AI research and deployment.",
+            ]
+        )
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"command":"python3 -c \\"print(42)\\""}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=1,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="The command printed 42.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=5,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            web_record = store.add(
+                "exec_shell_full_command",
+                web_raw,
+                metadata={"command": 'orbit-web-search "OpenAI"'},
+            )
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "search online for OpenAI"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(web_record), "evidence_id": web_record.evidence_id},
+                {"role": "assistant", "content": "OpenAI is an AI company."},
+            ]
+
+            result = runtime.ask_auto(
+                'run python3 -c "print(42)"',
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "The command printed 42.")
+        self.assertEqual(len(backend.messages_by_call), 2)
+        self.assertEqual(store.recent_records(1)[0].kind, "shell")
+        self.assertEqual(store.recent_records(1)[0].metadata.get("stdout_excerpt"), "42")
+        route_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[0])
+        self.assertIn('run python3 -c "print(42)"', route_rendered)
+        self.assertIn("available_evidence:", route_rendered)
+        self.assertIn("tool_evidence_card=true", route_rendered)
+        self.assertNotIn(web_record.raw_ref, route_rendered)
+
     def test_post_tool_chat_final_uses_evidence_window_without_full_history(self) -> None:
         raw = "\n".join(f"line-{index}" for index in range(120))
         backend = SequenceBackend(
@@ -342,7 +412,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn(record.raw_ref, final_rendered)
         self.assertNotIn("legacy raw", final_rendered)
         self.assertNotIn("tool_evidence_ref: true", final_rendered)
-        self.assertNotIn("previous final answer previous final answer", final_rendered)
+        self.assertNotIn("previous final answer " * 20, final_rendered)
+        self.assertIn("previous final answer", final_rendered)
+        self.assertIn("...", final_rendered)
         self.assertFalse(any(message.get("role") == "tool" for message in final_messages))
 
     def test_post_tool_chat_final_keeps_short_previous_assistant_for_reference(self) -> None:
@@ -546,6 +618,57 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("legacy raw", rendered)
         self.assertFalse(any(message.get("role") == "tool" for message in messages))
 
+    def test_chat_final_retry_excerpts_long_assistant_when_evidence_is_available(self) -> None:
+        raw = "\n".join(f"line-{index}" for index in range(20))
+        assistant_lines = "\n".join(f"assistant-copy-{index}" for index in range(20))
+        assistant_answer = f"The previous answer copied the output:\n{assistant_lines}"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": "python3 -c 'for i in range(20): print(i)'"},
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run the line printer"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(record),
+                    "evidence_id": record.evidence_id,
+                },
+                {"role": "assistant", "content": assistant_answer},
+                {"role": "user", "content": "summarize the output"},
+            ]
+
+            messages = runtime._chat_final_retry_messages()
+
+        assistant_messages = [message for message in messages if message.get("role") == "assistant"]
+        self.assertEqual(len(assistant_messages), 1)
+        assistant_content = str(assistant_messages[0].get("content", ""))
+        self.assertLessEqual(len(assistant_content), 203)
+        self.assertTrue(assistant_content.endswith("..."))
+        self.assertNotIn("assistant-copy-19", assistant_content)
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertIn("line-19", rendered)
+
+    def test_chat_final_retry_without_evidence_keeps_short_assistant_unchanged(self) -> None:
+        runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None)
+        runtime.messages = [
+            {"role": "assistant", "content": "short assistant context"},
+            {"role": "user", "content": "continue"},
+        ]
+
+        messages = runtime._chat_final_retry_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("short assistant context", rendered)
+        self.assertNotIn("short assistant context...", rendered)
+
     def test_chat_final_retry_medium_evidence_uses_compact_context(self) -> None:
         raw = "\n".join(f"line-{index}" for index in range(120))
         with tempfile.TemporaryDirectory() as tmp:
@@ -579,7 +702,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("line-0", rendered)
         self.assertIn("line-119", rendered)
         self.assertNotIn("legacy raw", rendered)
-        self.assertNotIn("previous final answer previous final answer", rendered)
+        self.assertNotIn("previous final answer " * 20, rendered)
+        self.assertIn("previous final answer", rendered)
+        self.assertIn("...", rendered)
         self.assertFalse(any(message.get("role") == "tool" for message in messages))
 
     def test_final_from_tool_with_evidence_uses_compact_window(self) -> None:
