@@ -534,6 +534,104 @@ class EvidenceTests(unittest.TestCase):
             self.assertNotIn("web_search_results: true", context)
             self.assertNotIn("results: none", context)
 
+    def test_final_context_uses_shell_dual_view_for_previous_error_and_latest_ok(self) -> None:
+        previous_raw = "\n".join(
+            [
+                "shell_command_failed: true",
+                "exit_code: 127",
+                "STDOUT:",
+                "(empty)",
+                "STDERR:",
+                "command_that_does_not_exist_123: not found",
+            ]
+        )
+        latest_raw = "\n".join(
+            [
+                "STDOUT:",
+                *[f"line-{index}" for index in range(20)],
+                "STDERR:",
+                "(empty)",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            previous = store.add(
+                "exec_shell_full_command",
+                previous_raw,
+                metadata={"command": "command_that_does_not_exist_123"},
+            )
+            latest = store.add(
+                "exec_shell_full_command",
+                latest_raw,
+                metadata={"command": "python3 -c 'for i in range(20): print(f\"line-{i}\")'"},
+            )
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn("shell_dual_view:", context)
+            self.assertIn("previous_failed_shell:", context)
+            self.assertIn('command="command_that_does_not_exist_123"', context)
+            self.assertIn("status=error", context)
+            self.assertIn("exit_code=127", context)
+            self.assertIn('error_summary="command_that_does_not_exist_123: not found"', context)
+            self.assertIn('stderr_excerpt="command_that_does_not_exist_123: not found"', context)
+            self.assertIn("latest_shell:", context)
+            self.assertIn("status=ok", context)
+            self.assertIn("output_lines=20", context)
+            self.assertIn("line-0", context)
+            self.assertIn("line-19", context)
+            self.assertNotIn(previous.final_card, context)
+            self.assertNotIn(latest.final_card, context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
+            self.assertNotIn(previous.raw_ref, context)
+            self.assertNotIn(latest.raw_ref, context)
+
+    def test_final_context_keeps_legacy_view_for_two_successful_shell_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            first = store.add(
+                "exec_shell_full_command",
+                "STDOUT:\nalpha\nSTDERR:\n(empty)\n",
+                metadata={"command": "printf alpha"},
+            )
+            second = store.add(
+                "exec_shell_full_command",
+                "STDOUT:\nbeta\nSTDERR:\n(empty)\n",
+                metadata={"command": "printf beta"},
+            )
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertNotIn("shell_dual_view:", context)
+            self.assertIn(first.final_card, context)
+            self.assertIn(second.final_card, context)
+
+    def test_final_context_keeps_legacy_view_when_latest_shell_is_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            first = store.add(
+                "exec_shell_full_command",
+                "STDOUT:\nalpha\nSTDERR:\n(empty)\n",
+                metadata={"command": "printf alpha"},
+            )
+            second = store.add(
+                "exec_shell_full_command",
+                "shell_command_failed: true\nexit_code: 2\nSTDOUT:\n(empty)\nSTDERR:\nboom\n",
+                metadata={"command": "broken"},
+            )
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertNotIn("shell_dual_view:", context)
+            self.assertIn(first.final_card, context)
+            self.assertIn(second.final_card, context)
+
 
 def _store_with(record, content: str) -> EvidenceStore:
     store = EvidenceStore(Path("/tmp/orbit-test-unused-session.evidence"))
