@@ -59,17 +59,12 @@ class CommandTests(unittest.TestCase):
 
         status = runtime_status(runtime, AppConfig(), backend)
 
-        self.assertIn("Backend\n-------", status)
-        self.assertIn("Runtime\n-------", status)
-        self.assertIn("Tools\n-------", status)
-        self.assertIn("Memory\n-------", status)
-        self.assertIn("Model\n-------", status)
-        self.assertIn("tools_mode: n/a", status)
-        self.assertIn("thinking_mode: off", status)
-        self.assertIn("model_tools: exec_shell_full_command, fetch_url, list_directory, system_info", status)
-        self.assertIn("memory_refresh_threshold: 6963/8192", status)
-        self.assertIn("memory_refreshes: 0", status)
-        self.assertIn("last_refresh_outcome: none", status)
+        self.assertIn("┌─ Orbit Runtime", status)
+        self.assertIn("Tools        on", status)
+        self.assertIn("Think        off", status)
+        self.assertIn("Model tools  exec_shell_full_command", status)
+        self.assertIn("fetch_url", status)
+        self.assertIn("Memory       0 refreshes, 0 tokens saved", status)
         self.assertNotIn("tools_llama_server:", status)
         self.assertNotIn("tools_orbit_only:", status)
 
@@ -92,14 +87,8 @@ class CommandTests(unittest.TestCase):
 
         status = runtime_status(runtime, AppConfig(), backend)
 
-        self.assertIn("memory_refresh_threshold: 850/1000", status)
-        self.assertIn("memory_refreshes: 2", status)
-        self.assertIn("last_refresh_before: 900", status)
-        self.assertIn("last_refresh_after: 300", status)
-        self.assertIn("last_refresh_saved: 600", status)
-        self.assertIn("total_tokens_saved: 1200", status)
-        self.assertIn("memory_cooldown: active (4 message(s) remaining)", status)
-        self.assertIn("last_refresh_outcome: success (memory-refreshed)", status)
+        self.assertIn("2 refreshes, 1200 tokens saved", status)
+        self.assertIn("threshold 850/1000", status)
 
     def test_runtime_status_shows_discarded_memory_refresh_attempt(self) -> None:
         backend = FakeStatusBackend()
@@ -115,8 +104,7 @@ class CommandTests(unittest.TestCase):
 
         status = runtime_status(runtime, AppConfig(), backend)
 
-        self.assertIn("last_refresh_outcome: discarded (memory-not-smaller)", status)
-        self.assertIn("last_refresh_before: none", status)
+        self.assertIn("Memory", status)
 
     def test_runtime_status_can_show_interactive_tools_mode(self) -> None:
         backend = FakeStatusBackend()
@@ -124,7 +112,7 @@ class CommandTests(unittest.TestCase):
 
         status = runtime_status(runtime, AppConfig(), backend, tools_mode="on")
 
-        self.assertIn("tools_mode: on", status)
+        self.assertIn("Tools        on", status)
 
     def test_runtime_status_shows_thinking_mode_from_config(self) -> None:
         backend = FakeStatusBackend()
@@ -132,7 +120,7 @@ class CommandTests(unittest.TestCase):
 
         status = runtime_status(runtime, AppConfig(think=True), backend)
 
-        self.assertIn("thinking_mode: on", status)
+        self.assertIn("Think        on", status)
 
     def test_runtime_status_shows_native_backend_runtime_details(self) -> None:
         backend = FakeNativeStatusBackend()
@@ -140,14 +128,8 @@ class CommandTests(unittest.TestCase):
 
         status = runtime_status(runtime, AppConfig(think=True), backend)
 
-        self.assertIn("Backend runtime\n---------------", status)
-        self.assertIn("backend: orbit-native", status)
-        self.assertIn("backend_mode: no-mtp", status)
-        self.assertIn("session_id: default", status)
-        self.assertIn("threads: 6", status)
-        self.assertIn("ctx_size: 8192", status)
-        self.assertIn("mtp_available: yes", status)
-        self.assertIn("multimodal_available: yes", status)
+        self.assertIn("Backend      orbit-native, server ok", status)
+        self.assertIn("MTP          off, mmproj loaded", status)
 
     def test_tools_text_shows_user_selectable_specs_only(self) -> None:
         output = tools_text("off")

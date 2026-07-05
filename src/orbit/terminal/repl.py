@@ -16,6 +16,7 @@ from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens, estimate_prefill_tokens_after_tool_result
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE, PrefillEstimator, prefill_profile_for_phase
 from orbit.terminal.repl_input import clear_input_echo, read_prompt_input, replace_input_echo
+from orbit.terminal.runtime_status import collect_runtime_status, format_startup_banner
 from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
 from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
 from orbit.terminal.streaming import StreamRenderer
@@ -46,8 +47,9 @@ class Repl:
     def run(self) -> int:
         if self.history:
             self.history.load()
-        print(dim("orbit interactive mode. Type /help for commands."))
-        print(dim(f"tools: {self.tools_mode}"))
+        status = collect_runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode)
+        for line in format_startup_banner(status).splitlines():
+            print(dim(line))
         if tools_are_enabled(self.tools_mode or "off"):
             print(
                 danger(
@@ -55,7 +57,6 @@ class Repl:
                     "Use only in an isolated lab."
                 )
             )
-        print(dim(f"think: {'on' if self.config.think else 'off'}"))
         if has_existing_session_context(self.runtime.messages):
             print(dim("recent session context:"))
             for line in format_recent_session_messages(self.runtime.messages):
