@@ -234,6 +234,9 @@ def build_final_evidence_context(store: EvidenceStore | None, *, limit: int = RE
     records = store.recent_records(limit) if store is not None else []
     if not records:
         return None
+    dual_shell_view = _build_shell_dual_view(store, records)
+    if dual_shell_view is not None:
+        return dual_shell_view
     parts = ["evidence_context:"]
     for index, record in enumerate(records, start=1):
         parts.append(f"- evidence {index}:")
@@ -474,6 +477,87 @@ def _compact_final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:
     ):
         return False
     return _final_context_needs_raw_excerpt(record)
+
+
+def _build_shell_dual_view(store: EvidenceStore | None, records: list[EvidenceRecord]) -> str | None:
+    if store is None or len(records) != 2:
+        return None
+    previous, latest = records
+    if previous.kind != "shell" or latest.kind != "shell":
+        return None
+    if previous.status != "error" or latest.status != "ok":
+        return None
+    latest_stdout_excerpt = str(latest.metadata.get("stdout_excerpt") or "").strip()
+    if not latest_stdout_excerpt:
+        return None
+    parts = [
+        "evidence_context:",
+        "shell_dual_view:",
+        "The session has two recent shell results.",
+        "",
+        "previous_failed_shell:",
+        *_shell_dual_previous_failed_lines(previous),
+        "",
+        "latest_shell:",
+        *_shell_dual_latest_lines(store, latest),
+    ]
+    return "\n".join(parts)
+
+
+def _shell_dual_previous_failed_lines(record: EvidenceRecord) -> list[str]:
+    lines: list[str] = []
+    command = str(record.metadata.get("command") or "").strip()
+    if command:
+        lines.append(f'command="{_bounded_text(command, POST_TOOL_ROUTE_TEXT_CHARS)}"')
+    lines.append("status=error")
+    exit_code = record.metadata.get("exit_code")
+    if exit_code not in (None, ""):
+        lines.append(f"exit_code={exit_code}")
+    error_summary = _shell_error_summary(record)
+    if error_summary:
+        lines.append(f'error_summary="{error_summary}"')
+    stderr_excerpt = str(record.metadata.get("stderr_excerpt") or "").strip()
+    if stderr_excerpt:
+        lines.append(f'stderr_excerpt="{_bounded_text(stderr_excerpt, POST_TOOL_ROUTE_OUTPUT_CHARS)}"')
+    return lines
+
+
+def _shell_dual_latest_lines(store: EvidenceStore, record: EvidenceRecord) -> list[str]:
+    lines: list[str] = []
+    command = str(record.metadata.get("command") or "").strip()
+    if command:
+        lines.append(f'command="{_bounded_text(command, POST_TOOL_ROUTE_TEXT_CHARS)}"')
+    lines.append("status=ok")
+    output_lines = _shell_stdout_line_count(store, record)
+    if output_lines is not None:
+        lines.append(f"output_lines={output_lines}")
+    stdout_excerpt = str(record.metadata.get("stdout_excerpt") or "").strip()
+    if stdout_excerpt:
+        lines.append(f'stdout_excerpt="{_bounded_text(stdout_excerpt, ROUTE_OUTPUT_EXCERPT_CHARS)}"')
+    return lines
+
+
+def _shell_error_summary(record: EvidenceRecord) -> str:
+    stderr_excerpt = str(record.metadata.get("stderr_excerpt") or "").strip()
+    if stderr_excerpt:
+        return _bounded_text(stderr_excerpt, POST_TOOL_ROUTE_OUTPUT_CHARS)
+    stdout_excerpt = str(record.metadata.get("stdout_excerpt") or "").strip()
+    if stdout_excerpt:
+        return _bounded_text(stdout_excerpt, POST_TOOL_ROUTE_OUTPUT_CHARS)
+    return ""
+
+
+def _shell_stdout_line_count(store: EvidenceStore, record: EvidenceRecord) -> int | None:
+    try:
+        raw = store.load_raw(record.evidence_id)
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return None
+    stdout = _section_text(raw, "STDOUT:", "STDERR:")
+    source = stdout if stdout is not None else raw
+    stripped = source.strip()
+    if not stripped or stripped == "(empty)":
+        return 0
+    return len(stripped.splitlines())
 
 
 def _post_tool_route_card(record: EvidenceRecord) -> str:
