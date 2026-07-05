@@ -154,8 +154,11 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()
-        self.assertIn("\033[2morbit interactive mode. Type /help for commands.\033[0m", output)
-        self.assertIn("\033[2mtools: on\033[0m", output)
+        self.assertIn("\033[2m┌─ Orbit Runtime", output)
+        self.assertIn("Version", output)
+        self.assertIn("Tools        on", output)
+        self.assertIn("Workdir", output)
+        self.assertIn("Type /help for commands, /status for runtime details.", output)
         self.assertIn("warning: tools on", output)
         self.assertIn("recent session context:", output)
         self.assertIn("user: first question", output)

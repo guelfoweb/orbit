@@ -32,10 +32,11 @@ class CliTests(unittest.TestCase):
         completed = _run_cli("", "/status")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("base_url: http://127.0.0.1:12120", completed.stdout)
-        self.assertIn("server:", completed.stdout)
-        self.assertIn("messages: 1", completed.stdout)
+        self.assertIn("┌─ Orbit Runtime", completed.stdout)
+        self.assertIn("Backend", completed.stdout)
+        self.assertIn("Messages     1", completed.stdout)
         self.assertNotIn("model: fake", completed.stdout)
+        self.assertNotIn("Type /help for commands", completed.stdout)
 
     def test_one_shot_status_context_command_does_not_call_model(self) -> None:
         completed = _run_cli("", "/status ctx")
@@ -95,17 +96,15 @@ class CliTests(unittest.TestCase):
         completed = _run_cli("/status\n/exit\n")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("orbit interactive mode", completed.stdout)
-        self.assertIn("base_url: http://127.0.0.1:12120", completed.stdout)
-        self.assertIn("server:", completed.stdout)
-        self.assertIn("messages: 1", completed.stdout)
-        self.assertIn("workdir:", completed.stdout)
+        self.assertIn("Type /help for commands, /status for runtime details.", completed.stdout)
+        self.assertIn("┌─ Orbit Runtime", completed.stdout)
+        self.assertIn("Messages     1", completed.stdout)
 
     def test_repl_status_context_command_does_not_call_model(self) -> None:
         completed = _run_cli("/status ctx\n/exit\n")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("orbit interactive mode", completed.stdout)
+        self.assertIn("Type /help for commands, /status for runtime details.", completed.stdout)
         self.assertIn("Context\n-------", completed.stdout)
         self.assertIn("tool_result:", completed.stdout)
 
@@ -126,14 +125,14 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         self.assertIn("max_tokens: 512", completed.stdout)
-        self.assertIn("max_tokens: 2048", completed.stdout)
+        self.assertIn("Max tokens   2048", completed.stdout)
 
     def test_repl_think_command_updates_status(self) -> None:
         completed = _run_cli("/think on\n/status\n/exit\n")
 
         self.assertEqual(completed.returncode, 0)
         self.assertIn("think: on", completed.stdout)
-        self.assertIn("thinking_mode: on", completed.stdout)
+        self.assertIn("Think        on", completed.stdout)
 
     def test_one_shot_length_footer_suggests_larger_budget(self) -> None:
         class FakeRuntime:
