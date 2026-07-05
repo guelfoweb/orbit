@@ -168,6 +168,87 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn("observed_cmd=python3 print-lines.py", context)
         self.assertIn("stdout_excerpt=", context)
 
+    def test_final_context_compacts_previous_failed_shell_record(self) -> None:
+        failed = "\n".join(
+            [
+                "shell_command_failed: true",
+                "exit_code: 127",
+                "STDOUT:",
+                "(empty)",
+                "STDERR:",
+                "command not found",
+            ]
+        )
+        latest = "\n".join(f"line-{index}" for index in range(20))
+        failed_record = build_evidence_record(
+            "exec_shell_full_command",
+            failed,
+            {"command": "command_that_does_not_exist_123"},
+        )
+        latest_record = build_evidence_record(
+            "exec_shell_full_command",
+            latest,
+            {"command": "python3 -c 'for i in range(20): print(i)'"},
+        )
+        context = build_final_evidence_context(_store_with_records((failed_record, failed), (latest_record, latest))) or ""
+
+        self.assertIn("previous_failed_tool_result_compact:", context)
+        self.assertIn("status=error", context)
+        self.assertIn("failed=true", context)
+        self.assertIn("exit_code=127", context)
+        self.assertIn('observed_cmd="command_that_does_not_exist_123"', context)
+        self.assertIn('error_summary="command not found"', context)
+        self.assertIn("line-19", context)
+        self.assertNotIn("raw_ref: evidence:", context.split("previous_failed_tool_result_compact:", 1)[1].split("- evidence 2:", 1)[0])
+        self.assertNotIn("sha256:", context.split("previous_failed_tool_result_compact:", 1)[1].split("- evidence 2:", 1)[0])
+
+    def test_final_context_compacts_previous_successful_shell_record_generically(self) -> None:
+        previous = "previous output\n"
+        latest = "\n".join(f"line-{index}" for index in range(20))
+        previous_record = build_evidence_record(
+            "exec_shell_full_command",
+            previous,
+            {"command": "printf previous"},
+        )
+        latest_record = build_evidence_record(
+            "exec_shell_full_command",
+            latest,
+            {"command": "python3 -c 'for i in range(20): print(i)'"},
+        )
+        context = build_final_evidence_context(_store_with_records((previous_record, previous), (latest_record, latest))) or ""
+
+        self.assertIn("previous_tool_evidence_compact: kind=shell status=ok", context)
+        self.assertNotIn("previous_failed_tool_result_compact:", context)
+
+    def test_final_context_does_not_compact_when_latest_shell_is_error(self) -> None:
+        previous = "previous output\n"
+        latest = "\n".join(
+            [
+                "shell_command_failed: true",
+                "exit_code: 127",
+                "STDOUT:",
+                "(empty)",
+                "STDERR:",
+                "command not found",
+            ]
+        )
+        previous_record = build_evidence_record(
+            "exec_shell_full_command",
+            previous,
+            {"command": "printf previous"},
+        )
+        latest_record = build_evidence_record(
+            "exec_shell_full_command",
+            latest,
+            {"command": "command_that_does_not_exist_123"},
+        )
+        context = build_final_evidence_context(_store_with_records((previous_record, previous), (latest_record, latest))) or ""
+
+        self.assertNotIn("previous_tool_evidence_compact:", context)
+        self.assertNotIn("previous_failed_tool_result_compact:", context)
+        self.assertIn("command: command_that_does_not_exist_123", context)
+        self.assertIn("stderr_excerpt: command not found", context)
+
     def test_unknown_small_output_has_bounded_route_excerpt(self) -> None:
         record = build_evidence_record("custom_tool", "useful value\n", {})
 
@@ -442,6 +523,94 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn("AI research and deployment.", context)
             self.assertNotIn("bounded_raw_excerpt:", context)
 
+    def test_final_context_compacts_previous_shell_when_latest_shell_ok(self) -> None:
+        previous_raw = "shell_command_failed: true\nexit_code: 127\nSTDOUT:\n(empty)\nSTDERR:\ncommand not found\n"
+        latest_raw = "\n".join(f"line-{index}" for index in range(20))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            previous = store.add(
+                "exec_shell_full_command",
+                previous_raw,
+                metadata={"command": "command_that_does_not_exist_123"},
+            )
+            latest = store.add(
+                "exec_shell_full_command",
+                latest_raw,
+                metadata={"command": "python3 print-lines.py"},
+            )
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn(
+                "previous_failed_tool_result_compact:",
+                context,
+            )
+            self.assertIn("status=error", context)
+            self.assertIn("failed=true", context)
+            self.assertIn("exit_code=127", context)
+            self.assertIn('observed_cmd="command_that_does_not_exist_123"', context)
+            self.assertIn('error_summary="command not found"', context)
+            self.assertIn(latest.raw_ref, context)
+            self.assertNotIn(previous.raw_ref, context)
+            self.assertNotIn(previous.raw_sha256[:16], context)
+            self.assertNotIn("shell_command_failed: true", context)
+            self.assertNotIn("command: command_that_does_not_exist_123", context)
+            self.assertIn("bounded_raw_excerpt:", context)
+            self.assertIn("line-0", context)
+            self.assertIn("line-19", context)
+
+    def test_final_context_does_not_compact_when_latest_shell_is_error(self) -> None:
+        previous_raw = "exit_code: 0\nSTDOUT:\n/home/example/project\nSTDERR:\n(empty)\n"
+        latest_raw = "shell_command_failed: true\nexit_code: 127\nSTDOUT:\n(empty)\nSTDERR:\ncommand not found\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            previous = store.add("exec_shell_full_command", previous_raw, metadata={"command": "pwd"})
+            latest = store.add("exec_shell_full_command", latest_raw, metadata={"command": "missing-command"})
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertNotIn("previous_tool_evidence_compact:", context)
+            self.assertIn(previous.raw_ref, context)
+            self.assertIn(latest.raw_ref, context)
+            self.assertIn("exit_code: 127", context)
+
+    def test_final_context_does_not_compact_when_latest_is_non_shell(self) -> None:
+        previous_raw = "shell_command_failed: true\nexit_code: 127\nSTDOUT:\n(empty)\nSTDERR:\ncommand not found\n"
+        latest_raw = "\n".join(
+            [
+                "web_search_results: true",
+                "query: OpenAI",
+                "results:",
+                "1. title: OpenAI",
+                "   url: https://openai.com/",
+                "   snippet: AI research and deployment.",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            previous = store.add(
+                "exec_shell_full_command",
+                previous_raw,
+                metadata={"command": "missing-command"},
+            )
+            latest = store.add(
+                "exec_shell_full_command",
+                latest_raw,
+                metadata={"command": 'orbit-web-search "OpenAI"'},
+            )
+
+            context = build_final_evidence_context(store)
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertNotIn("previous_tool_evidence_compact:", context)
+            self.assertIn(previous.raw_ref, context)
+            self.assertIn(latest.raw_ref, context)
+
     def test_compact_final_context_does_not_duplicate_shell_excerpt(self) -> None:
         raw = "\n".join(f"line-{index}" for index in range(120))
         with tempfile.TemporaryDirectory() as tmp:
@@ -539,6 +708,15 @@ def _store_with(record, content: str) -> EvidenceStore:
     store = EvidenceStore(Path("/tmp/orbit-test-unused-session.evidence"))
     store.records[record.evidence_id] = record
     store.raw_cache[record.evidence_id] = content
+    return store
+
+
+def _store_with_records(*items: tuple[object, str]) -> EvidenceStore:
+    store = EvidenceStore(Path("/tmp/orbit-test-unused-session.evidence"))
+    for record, content in items:
+        assert hasattr(record, "evidence_id")
+        store.records[record.evidence_id] = record
+        store.raw_cache[record.evidence_id] = content
     return store
 
 

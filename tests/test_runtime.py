@@ -223,6 +223,94 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("OpenAI is an AI company.", final_rendered)
         self.assertIn("...", final_rendered)
 
+    def test_chat_final_retry_keeps_previous_failed_shell_signal_compact(self) -> None:
+        failed_raw = "\n".join(
+            [
+                "shell_command_failed: true",
+                "exit_code: 127",
+                "STDOUT:",
+                "(empty)",
+                "STDERR:",
+                "command not found",
+            ]
+        )
+        latest_raw = "\n".join(f"line-{index}" for index in range(20))
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content="This is prose, not route JSON.",
+                    model="fake",
+                    finish_reason="length",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=128,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="The failed output came from the missing command with exit code 127.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=10,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            failed_record = store.add(
+                "exec_shell_full_command",
+                failed_raw,
+                metadata={"command": "command_that_does_not_exist_123"},
+            )
+            latest_record = store.add(
+                "exec_shell_full_command",
+                latest_raw,
+                metadata={"command": "python3 -c 'for i in range(20): print(i)'"},
+            )
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run command_that_does_not_exist_123"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(failed_record),
+                    "evidence_id": failed_record.evidence_id,
+                },
+                {"role": "assistant", "content": "The command failed because it was not found."},
+                {"role": "user", "content": "run python3 -c 'for i in range(20): print(i)'"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-2",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(latest_record),
+                    "evidence_id": latest_record.evidence_id,
+                },
+                {"role": "assistant", "content": "\n".join(f"line-{index}" for index in range(20))},
+            ]
+
+            result = runtime.ask_auto(
+                "summarize the failed output",
+                temperature=0,
+                max_tokens=32,
+                workdir=Path(tmp),
+            )
+
+        self.assertEqual(result.content, "The failed output came from the missing command with exit code 127.")
+        retry_rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[1])
+        self.assertIn("previous_failed_tool_result_compact:", retry_rendered)
+        self.assertIn("failed=true", retry_rendered)
+        self.assertIn("exit_code=127", retry_rendered)
+        self.assertIn("command not found", retry_rendered)
+        self.assertNotIn("bounded_raw_excerpt:\n" + failed_raw, retry_rendered)
+        self.assertIn("line-19", retry_rendered)
+
     def test_post_tool_route_window_excludes_full_history_and_audit_marker(self) -> None:
         raw = "\n".join(f"line-{index}" for index in range(120))
         backend = SequenceBackend(
@@ -654,6 +742,49 @@ class RuntimeTests(unittest.TestCase):
         rendered = "\n".join(str(message.get("content", "")) for message in messages)
         self.assertIn("evidence_context:", rendered)
         self.assertIn(record.raw_ref, rendered)
+        self.assertIn("line-19", rendered)
+
+    def test_chat_final_retry_compacts_previous_shell_when_latest_shell_ok(self) -> None:
+        previous_raw = "shell_command_failed: true\nexit_code: 127\nSTDOUT:\n(empty)\nSTDERR:\ncommand not found\n"
+        latest_raw = "\n".join(f"line-{index}" for index in range(20))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            previous = store.add(
+                "exec_shell_full_command",
+                previous_raw,
+                metadata={"command": "command_that_does_not_exist_123"},
+            )
+            latest = store.add(
+                "exec_shell_full_command",
+                latest_raw,
+                metadata={"command": "python3 print-lines.py"},
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "assistant", "content": "The command failed because it was not found."},
+                {"role": "user", "content": "run python3 print-lines.py"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-2",
+                    "name": "exec_shell_full_command",
+                    "content": tool_evidence_ref(latest),
+                    "evidence_id": latest.evidence_id,
+                },
+                {"role": "assistant", "content": latest_raw},
+                {"role": "user", "content": "summarize the output"},
+            ]
+
+            messages = runtime._chat_final_retry_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("previous_failed_tool_result_compact:", rendered)
+        self.assertIn("status=error", rendered)
+        self.assertIn("failed=true", rendered)
+        self.assertIn("exit_code=127", rendered)
+        self.assertIn('observed_cmd="command_that_does_not_exist_123"', rendered)
+        self.assertIn(latest.raw_ref, rendered)
+        self.assertNotIn(previous.raw_ref, rendered)
+        self.assertNotIn("shell_command_failed: true", rendered)
         self.assertIn("line-19", rendered)
 
     def test_chat_final_retry_without_evidence_keeps_short_assistant_unchanged(self) -> None:

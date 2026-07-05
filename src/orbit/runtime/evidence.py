@@ -25,6 +25,7 @@ POST_TOOL_ROUTE_OUTPUT_CHARS = 80
 POST_TOOL_ROUTE_SMALL_RAW_CHARS = 200
 ROUTE_OUTPUT_EXCERPT_CHARS = 400
 WEB_FINAL_SNIPPET_CHARS = 220
+PREVIOUS_SHELL_FINAL_COMPACT_CHARS = 120
 
 
 @dataclass(frozen=True)
@@ -235,8 +236,13 @@ def build_final_evidence_context(store: EvidenceStore | None, *, limit: int = RE
     if not records:
         return None
     parts = ["evidence_context:"]
+    compact_previous_shell = _should_compact_previous_shell_in_final_context(records)
+    latest_index = len(records) - 1
     for index, record in enumerate(records, start=1):
         parts.append(f"- evidence {index}:")
+        if compact_previous_shell and index - 1 == latest_index - 1:
+            parts.append(_previous_shell_final_compact_line(record))
+            continue
         parts.append(record.final_card)
         if _final_context_needs_raw_excerpt(record):
             parts.append("bounded_raw_excerpt:")
@@ -456,6 +462,64 @@ def _compact_final_card(record: EvidenceRecord) -> str:
     ]
     lines.extend(_card_metadata_lines(record, compact=True))
     return "\n".join(lines)
+
+
+def _should_compact_previous_shell_in_final_context(records: list[EvidenceRecord]) -> bool:
+    if len(records) != 2:
+        return False
+    previous, latest = records
+    if previous.kind != "shell" or latest.kind != "shell":
+        return False
+    if latest.status != "ok":
+        return False
+    return bool(
+        latest.metadata.get("stdout_excerpt")
+        or latest.metadata.get("stderr_excerpt")
+        or latest.metadata.get("head_excerpt")
+    )
+
+
+def _previous_shell_final_compact_line(record: EvidenceRecord) -> str:
+    if record.status == "error":
+        return _previous_failed_shell_final_compact_block(record)
+    fields = ["previous_tool_evidence_compact: kind=shell", f"status={record.status}"]
+    command = str(record.metadata.get("command") or "").strip()
+    if command:
+        fields.append(f'observed_cmd="{_single_line_bounded_text(command, POST_TOOL_ROUTE_TEXT_CHARS)}"')
+    exit_code = str(record.metadata.get("exit_code") or "").strip()
+    if exit_code:
+        fields.append(f"exit_code={exit_code}")
+    observation = _compact_shell_observation(record)
+    if observation:
+        fields.append(f'observation="{observation}"')
+    return " ".join(fields)
+
+
+def _previous_failed_shell_final_compact_block(record: EvidenceRecord) -> str:
+    lines = [
+        "previous_failed_tool_result_compact:",
+        "kind=shell",
+        "status=error",
+        "failed=true",
+    ]
+    command = str(record.metadata.get("command") or "").strip()
+    if command:
+        lines.append(f'observed_cmd="{_single_line_bounded_text(command, POST_TOOL_ROUTE_TEXT_CHARS)}"')
+    exit_code = str(record.metadata.get("exit_code") or "").strip()
+    if exit_code:
+        lines.append(f"exit_code={exit_code}")
+    error_summary = _compact_shell_observation(record)
+    if error_summary:
+        lines.append(f'error_summary="{error_summary}"')
+    return "\n".join(lines)
+
+
+def _compact_shell_observation(record: EvidenceRecord) -> str:
+    for key in ("stderr_excerpt", "stdout_excerpt"):
+        value = str(record.metadata.get(key) or "").strip()
+        if value:
+            return _single_line_bounded_text(value, PREVIOUS_SHELL_FINAL_COMPACT_CHARS)
+    return ""
 
 
 def _final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:
@@ -680,6 +744,10 @@ def _route_output_excerpt(content: str | None) -> str:
     if not stripped or stripped == "(empty)":
         return ""
     return _bounded_text(stripped, ROUTE_OUTPUT_EXCERPT_CHARS).replace("\n", " | ")
+
+
+def _single_line_bounded_text(content: str, max_chars: int) -> str:
+    return _bounded_text(content, max_chars).replace("\n", " | ")
 
 
 def _compat_excerpt(record: EvidenceRecord) -> str:
