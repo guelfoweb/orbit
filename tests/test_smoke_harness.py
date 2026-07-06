@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from orbit.runtime.turn_trace import ModelStepMetrics
 
@@ -62,6 +63,104 @@ class SmokeHarnessTests(unittest.TestCase):
     def test_correctness_categorizer_detects_fake_shell20_without_tool_call(self) -> None:
         self.assertEqual(smoke_harness.check_shell20("line-19", []), "fake_tool_output")
         self.assertEqual(smoke_harness.check_shell20("line-19", ["exec_shell_full_command"]), "correct")
+
+    def test_mtp_state_marks_failed_props_as_not_usable(self) -> None:
+        state = smoke_harness.mtp_state_from_props(
+            {
+                "mtp_experimental_enabled": True,
+                "mtp_initialized": False,
+                "mtp_last_completion_success": False,
+                "mtp_failure_reason": "failed to decode target prefill suffix",
+            }
+        )
+
+        self.assertEqual(state["status"], "failed")
+        self.assertFalse(state["usable"])
+        self.assertEqual(state["failure_reason"], "failed to decode target prefill suffix")
+
+    def test_mtp_state_marks_session_ready_without_attempt_as_ready(self) -> None:
+        state = smoke_harness.mtp_state_from_props(
+            {
+                "mtp_experimental_enabled": True,
+                "mtp_initialized": True,
+                "mtp_last_completion_success": False,
+                "mtp_failure_reason": None,
+                "mtp_fallback_reason": None,
+            }
+        )
+
+        self.assertEqual(state["status"], "ready")
+        self.assertFalse(state["usable"])
+
+    def test_environment_summary_uses_mtp_state_fields(self) -> None:
+        class Backend:
+            def model_info(self):
+                return type("Info", (), {"id": "m"})()
+
+        args = smoke_harness.build_parser().parse_args([])
+        env = smoke_harness.environment_summary(
+            args=args,
+            backend=Backend(),
+            props={
+                "backend": "orbit-native",
+                "model_id": "m",
+                "multimodal_available": True,
+                "mtp_experimental_enabled": True,
+                "mtp_initialized": False,
+                "mtp_last_completion_success": False,
+                "mtp_failure_reason": "probe failed",
+            },
+        )
+
+        self.assertEqual(env["mtp"], "failed")
+        self.assertFalse(env["mtp_usable"])
+        self.assertEqual(env["mtp_failure_reason"], "probe failed")
+
+    def test_main_mtp_required_fails_when_post_run_props_not_usable(self) -> None:
+        initial = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        final = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": False,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": "failed to decode target prefill suffix",
+            "mtp_fallback_reason": "failed to decode target prefill suffix",
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value=initial), \
+            mock.patch.object(smoke_harness, "fresh_backend_props", return_value=final), \
+            mock.patch.object(smoke_harness, "run_scenario", return_value=[]), \
+            mock.patch.object(smoke_harness, "write_jsonl"), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(["--scenario", "simple_chat", "--no-web", "--output-dir", tmp, "--mtp-required"])
+
+        self.assertEqual(rc, 2)
+
+    def test_main_mtp_required_passes_when_post_run_props_usable(self) -> None:
+        props = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": True,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value=props), \
+            mock.patch.object(smoke_harness, "fresh_backend_props", return_value=props), \
+            mock.patch.object(smoke_harness, "run_scenario", return_value=[]), \
+            mock.patch.object(smoke_harness, "write_jsonl"), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(["--scenario", "simple_chat", "--no-web", "--output-dir", tmp, "--mtp-required"])
+
+        self.assertEqual(rc, 0)
 
     def test_jsonl_output_contains_environment_and_step_rows(self) -> None:
         report = smoke_harness.StepReport(

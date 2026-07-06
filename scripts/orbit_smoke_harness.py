@@ -118,6 +118,33 @@ class ProbeBackend:
         return self._backend.continue_current(max_tokens=max_tokens, on_delta=on_delta, on_progress=on_progress)
 
 
+def mtp_state_from_props(props: dict[str, object]) -> dict[str, object]:
+    requested = bool(props.get("mtp_experimental_enabled"))
+    session_ready = bool(props.get("mtp_initialized"))
+    last_success = props.get("mtp_last_completion_success") is True
+    failure_reason = first_nonempty_str(props.get("mtp_failure_reason"), props.get("mtp_fallback_reason"))
+    attempted = last_success or failure_reason is not None
+    usable = bool(requested and session_ready and last_success and failure_reason is None)
+    if usable:
+        status = "on"
+    elif failure_reason is not None:
+        status = "failed"
+    elif requested and session_ready:
+        status = "ready"
+    elif requested:
+        status = "requested"
+    else:
+        status = "off"
+    return {
+        "requested": requested,
+        "session_ready": session_ready,
+        "attempted": attempted,
+        "usable": usable,
+        "status": status,
+        "failure_reason": failure_reason,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -129,9 +156,10 @@ def main(argv: list[str] | None = None) -> int:
     markdown_path = Path(args.markdown) if args.markdown else output_dir / f"orbit_smoke_{stamp}.md"
 
     backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
-    env = environment_summary(args=args, backend=backend)
-    if args.mtp_required and env.get("mtp") != "on":
-        print("error: --mtp-required set but backend does not report MTP enabled", file=sys.stderr)
+    initial_props = safe_backend_props(backend)
+    initial_mtp = mtp_state_from_props(initial_props)
+    if args.mtp_required and not (initial_mtp["requested"] or initial_mtp["usable"]):
+        print("error: --mtp-required set but backend does not report MTP requested/enabled", file=sys.stderr)
         return 2
 
     reports: list[StepReport] = []
@@ -145,8 +173,15 @@ def main(argv: list[str] | None = None) -> int:
                 temperature=args.temperature,
             )
         )
+    env = environment_summary(args=args, backend=backend, props=fresh_backend_props(args.base_url, args.timeout))
     write_jsonl(jsonl_path, env, reports)
     write_markdown(markdown_path, env, reports)
+    if args.mtp_required:
+        final_mtp = mtp_state_from_props(fresh_backend_props(args.base_url, args.timeout))
+        if not final_mtp["usable"]:
+            reason = final_mtp["failure_reason"] or final_mtp["status"]
+            print(f"error: --mtp-required set but backend MTP is not usable ({reason})", file=sys.stderr)
+            return 2
     print(f"jsonl={jsonl_path}")
     print(f"markdown={markdown_path}")
     return 0
@@ -381,10 +416,11 @@ def model_step_to_json(metric: ModelStepMetrics) -> dict[str, object]:
     }
 
 
-def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend) -> dict[str, object]:
-    props = safe_backend_props(backend)
+def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend, props: dict[str, object] | None = None) -> dict[str, object]:
+    props = props if props is not None else safe_backend_props(backend)
     info = safe_model_info(backend)
     host = collect_host_info()
+    mtp = mtp_state_from_props(props)
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "command": " ".join(sys.argv),
@@ -392,7 +428,11 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "version": __version__,
         "model": getattr(info, "id", None) or props.get("model_id") or "unknown",
         "backend": props.get("backend") or "unknown",
-        "mtp": on_off(props.get("mtp_enabled")),
+        "mtp": mtp["status"],
+        "mtp_requested": mtp["requested"],
+        "mtp_session_ready": mtp["session_ready"],
+        "mtp_usable": mtp["usable"],
+        "mtp_failure_reason": mtp["failure_reason"],
         "mmproj": "loaded" if props.get("multimodal_available") is True else ("missing" if props else "unknown"),
         "cpu": host.cpu,
         "cores": {"physical": host.physical_cores, "logical": host.logical_cores},
@@ -406,6 +446,13 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
 def safe_backend_props(backend: LlamaServerBackend) -> dict[str, object]:
     try:
         return backend.backend_props()
+    except Exception:
+        return {}
+
+
+def fresh_backend_props(base_url: str, timeout: float) -> dict[str, object]:
+    try:
+        return LlamaServerBackend(base_url=base_url, timeout=timeout).backend_props()
     except Exception:
         return {}
 
@@ -442,6 +489,15 @@ def on_off(value: object) -> str:
     if value is False:
         return "off"
     return "unknown"
+
+
+def first_nonempty_str(*values: object) -> str | None:
+    for value in values:
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                return text
+    return None
 
 
 def acceleration_mode(props: dict[str, object]) -> str:
