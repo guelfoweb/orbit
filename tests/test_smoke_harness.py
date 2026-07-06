@@ -21,6 +21,31 @@ SPEC.loader.exec_module(smoke_harness)
 
 
 class SmokeHarnessTests(unittest.TestCase):
+    def _step_report(self, *, notes: str = "", answer_excerpt: str = "", finish_reason: str = "stop") -> smoke_harness.StepReport:
+        return smoke_harness.StepReport(
+            case="simple_chat",
+            step=1,
+            prompt="hi",
+            prompt_kind="chat",
+            completion_kind="chat_final",
+            route_tokens=None,
+            final_tokens=12,
+            prompt_tokens=12,
+            cached_tokens=4,
+            evaluated_tokens=8,
+            finish_reason=finish_reason,
+            tool_calls=0,
+            tool_names=[],
+            wall_ms=10.0,
+            correctness_category="correct",
+            raw_leak=False,
+            fake_output=False,
+            loop=False,
+            notes=notes,
+            answer_excerpt=answer_excerpt,
+            model_steps=[],
+        )
+
     def test_parser_accepts_output_and_selection_options(self) -> None:
         args = smoke_harness.build_parser().parse_args(
             [
@@ -161,6 +186,104 @@ class SmokeHarnessTests(unittest.TestCase):
             rc = smoke_harness.main(["--scenario", "simple_chat", "--no-web", "--output-dir", tmp, "--mtp-required"])
 
         self.assertEqual(rc, 0)
+
+    def test_main_mtp_required_uses_settled_final_props_over_stale_cancelled_state(self) -> None:
+        initial = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        stale = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": "cancelled",
+            "mtp_fallback_reason": "cancelled",
+        }
+        healthy = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": True,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        captured_env: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value=initial), \
+            mock.patch.object(smoke_harness, "fresh_backend_props", side_effect=[stale, healthy, healthy]), \
+            mock.patch.object(smoke_harness, "run_scenario", return_value=[]), \
+            mock.patch.object(smoke_harness, "write_jsonl", side_effect=lambda _p, env, _r: captured_env.append(env)), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(["--scenario", "simple_chat", "--no-web", "--output-dir", tmp, "--mtp-required"])
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(captured_env)
+        self.assertEqual(captured_env[0]["mtp"], "on")
+        self.assertTrue(captured_env[0]["mtp_usable"])
+
+    def test_main_timeout_with_healthy_final_props_fails_as_timeout_not_mtp(self) -> None:
+        initial = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        healthy = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": True,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        report = self._step_report(
+            notes="exception",
+            answer_excerpt="LlamaServerError: backend server request timed out after 60s",
+            finish_reason="error",
+        )
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value=initial), \
+            mock.patch.object(smoke_harness, "fresh_backend_props", return_value=healthy), \
+            mock.patch.object(smoke_harness, "run_scenario", return_value=[report]), \
+            mock.patch.object(smoke_harness, "write_jsonl"), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(["--scenario", "shell20", "--no-web", "--output-dir", tmp])
+
+        self.assertEqual(rc, 1)
+
+    def test_main_correct_scenario_with_failed_final_props_still_fails_mtp_required(self) -> None:
+        initial = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        failed = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": False,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": "failed to decode target prefill suffix",
+            "mtp_fallback_reason": "failed to decode target prefill suffix",
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value=initial), \
+            mock.patch.object(smoke_harness, "fresh_backend_props", return_value=failed), \
+            mock.patch.object(smoke_harness, "run_scenario", return_value=[self._step_report()]), \
+            mock.patch.object(smoke_harness, "write_jsonl"), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(["--scenario", "simple_chat", "--no-web", "--output-dir", tmp, "--mtp-required"])
+
+        self.assertEqual(rc, 2)
 
     def test_jsonl_output_contains_environment_and_step_rows(self) -> None:
         report = smoke_harness.StepReport(

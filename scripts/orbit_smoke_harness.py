@@ -173,15 +173,20 @@ def main(argv: list[str] | None = None) -> int:
                 temperature=args.temperature,
             )
         )
-    env = environment_summary(args=args, backend=backend, props=fresh_backend_props(args.base_url, args.timeout))
+    final_props = settled_backend_props(args.base_url, args.timeout)
+    env = environment_summary(args=args, backend=backend, props=final_props)
     write_jsonl(jsonl_path, env, reports)
     write_markdown(markdown_path, env, reports)
+    scenario_failure = scenario_failure_reason(reports)
     if args.mtp_required:
-        final_mtp = mtp_state_from_props(fresh_backend_props(args.base_url, args.timeout))
+        final_mtp = mtp_state_from_props(final_props)
         if not final_mtp["usable"]:
             reason = final_mtp["failure_reason"] or final_mtp["status"]
             print(f"error: --mtp-required set but backend MTP is not usable ({reason})", file=sys.stderr)
             return 2
+    if scenario_failure is not None:
+        print(f"error: scenario failed ({scenario_failure})", file=sys.stderr)
+        return 1
     print(f"jsonl={jsonl_path}")
     print(f"markdown={markdown_path}")
     return 0
@@ -457,11 +462,46 @@ def fresh_backend_props(base_url: str, timeout: float) -> dict[str, object]:
         return {}
 
 
+def settled_backend_props(base_url: str, timeout: float, *, settle_seconds: float = 2.0, poll_interval: float = 0.2) -> dict[str, object]:
+    props = fresh_backend_props(base_url, timeout)
+    if not props:
+        return {}
+    last_serialized = json.dumps(props, sort_keys=True, ensure_ascii=False)
+    deadline = time.monotonic() + max(0.0, settle_seconds)
+    while time.monotonic() < deadline:
+        state = mtp_state_from_props(props)
+        if state["usable"]:
+            return props
+        if state["failure_reason"] is None and not state["requested"]:
+            return props
+        time.sleep(poll_interval)
+        refreshed = fresh_backend_props(base_url, timeout)
+        if not refreshed:
+            return props
+        serialized = json.dumps(refreshed, sort_keys=True, ensure_ascii=False)
+        props = refreshed
+        if serialized == last_serialized and state["failure_reason"] != "cancelled":
+            return props
+        last_serialized = serialized
+    return props
+
+
 def safe_model_info(backend: LlamaServerBackend):
     try:
         return backend.model_info()
     except Exception:
         return None
+
+
+def scenario_failure_reason(reports: list[StepReport]) -> str | None:
+    for report in reports:
+        if report.notes != "exception":
+            continue
+        text = report.answer_excerpt.lower()
+        if "timed out" in text or "timeout" in text:
+            return "timeout"
+        return "error"
+    return None
 
 
 def git_head() -> str:
