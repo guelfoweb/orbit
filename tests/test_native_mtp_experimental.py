@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from orbit.native_llama.chat_template import RoutePromptSegments
@@ -24,6 +25,15 @@ class NativeMtpExperimentalTests(unittest.TestCase):
             fallback_reason=fallback_reason,
             model_id="gemma4-12b-it-q4km",
         )
+
+    def _enable_mock_persistent_mtp(self, client: NativeLlamaClient, mocked_reset) -> object:
+        runtime = object()
+        reset_runtime = SimpleNamespace(ctx_dft=object(), spec=object())
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+        client._persistent_mtp_runtime = runtime
+        mocked_reset.return_value = reset_runtime
+        return reset_runtime
 
     def test_parser_accepts_mtp_flag(self) -> None:
         args = build_parser().parse_args(["--mtp"])
@@ -53,13 +63,12 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(client.last_mtp_completion.error, "thinking-mode")
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_returns_timings_on_success(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_returns_timings_on_success(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        reset_runtime = self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
@@ -101,15 +110,18 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(client.last_mtp_completion.replay_fallback_steps, 0)
         self.assertFalse(client.last_mtp_completion.seq_rm_supported)
         self.assertEqual(client.last_mtp_completion.rollback_tokens_total, 0)
+        mocked_reset.assert_called_once()
+        self.assertIs(client._persistent_mtp_runtime, reset_runtime)
+        self.assertIs(client._session.ctx_dft, reset_runtime.ctx_dft)
+        self.assertIs(client._session.spec, reset_runtime.spec)
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_passes_full_budget_to_persistent_runner(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_passes_full_budget_to_persistent_runner(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
@@ -128,13 +140,12 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(timings.output_tokens, 33)
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_strips_control_channel_tokens(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_strips_control_channel_tokens(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
@@ -161,13 +172,12 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(client.last_mtp_completion.acceptance_ratio, 2 / 3)
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_avoids_double_emit_when_streaming_callback_is_used(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_avoids_double_emit_when_streaming_callback_is_used(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
 
         def fake_run(**kwargs):
@@ -191,13 +201,12 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual("".join(emitted), "ok")
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_maps_prefill_and_generation_progress(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_maps_prefill_and_generation_progress(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
         progress = []
 
@@ -224,13 +233,12 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(progress, [("prefill", 12, 48), ("generation", 2, 32)])
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_wraps_raw_prompt_in_gemma_chat_template(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_wraps_raw_prompt_in_gemma_chat_template(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
         mocked_run.return_value = MtpCompletionResult(
             enabled=True,
@@ -248,13 +256,12 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertIn("Say only: ok.", called_prompt)
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_reuses_cached_prompt_tokens_from_previous_turn(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_reuses_cached_prompt_tokens_from_previous_turn(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
         client._session.cached_prompt_tokens = [1, 2, 3]
         mocked_run.return_value = MtpCompletionResult(
@@ -280,18 +287,33 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(timings.reused_prompt_tokens, 2)
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_try_complete_with_mtp_experimental_falls_back_on_helper_error(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_falls_back_on_helper_error(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         mocked_run.return_value = MtpCompletionResult(enabled=True, success=False, error="mtp helper failed")
 
         result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
 
         self.assertIsNone(result)
         self.assertEqual(client.mtp_fallback_reason, "mtp helper failed")
+
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_falls_back_on_reset_error(self, _mocked_lib, mocked_reset) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+        client._persistent_mtp_runtime = object()
+        mocked_reset.side_effect = RuntimeError("reset failed")
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "reset failed")
+        self.assertFalse(client._session.mtp_enabled)
+        self.assertEqual(client._session.mtp_failure_reason, "reset failed")
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_try_complete_with_mtp_experimental_falls_back_when_persistent_session_is_uninitialized(self, _mocked_lib) -> None:
@@ -304,13 +326,66 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(client.mtp_fallback_reason, "persistent-mtp-uninitialized")
 
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
-    def test_complete_prompt_clears_stale_cancel_before_mtp_attempt(self, _mocked_lib, mocked_run) -> None:
+    def test_try_complete_with_mtp_experimental_recovers_after_cancelled_helper_failure(
+        self,
+        _mocked_lib,
+        mocked_reset,
+        mocked_run,
+    ) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        runtime = self._enable_mock_persistent_mtp(client, mocked_reset)
+
+        def _cancelled_failure(*args, **kwargs):
+            client.cancel()
+            return MtpCompletionResult(enabled=True, success=False, error="failed to decode target prefill suffix")
+
+        mocked_run.side_effect = _cancelled_failure
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "cancelled")
+        self.assertTrue(client._session.mtp_enabled)
+        self.assertFalse(client._session.mtp_failed)
+        self.assertIsNone(client._session.mtp_failure_reason)
+        self.assertIs(client._persistent_mtp_runtime, runtime)
+        self.assertEqual(client.last_mtp_completion.error, "cancelled")
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_disables_mtp_when_cancelled_recovery_reset_fails(
+        self,
+        _mocked_lib,
+        mocked_reset,
+        mocked_run,
+    ) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        self._enable_mock_persistent_mtp(client, mocked_reset)
+        mocked_reset.side_effect = [mocked_reset.return_value, RuntimeError("reset after cancel failed")]
+
+        def _cancelled_failure(*args, **kwargs):
+            client.cancel()
+            return MtpCompletionResult(enabled=True, success=False, error="failed to decode target prefill suffix")
+
+        mocked_run.side_effect = _cancelled_failure
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertFalse(client._session.mtp_enabled)
+        self.assertTrue(client._session.mtp_failed)
+        self.assertEqual(client._session.mtp_failure_reason, "reset after cancel failed")
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_complete_prompt_clears_stale_cancel_before_mtp_attempt(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
-        client._session.ctx_tgt = object()
-        client._session.mtp_enabled = True
-        client._persistent_mtp_runtime = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
         client.tokenize = lambda prompt: [1, 2, 3]
         client.cancel()
         mocked_run.return_value = MtpCompletionResult(

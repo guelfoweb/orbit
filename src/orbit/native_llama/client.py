@@ -1012,6 +1012,26 @@ class NativeLlamaClient:
             return None
 
         mtp_prompt = _prepare_mtp_prompt(prompt, thinking=thinking)
+        try:
+            # The persistent shim's request-boundary reuse can leave target/draft
+            # state that fails the next target suffix prefill. Resetting here
+            # keeps MTP usable without changing prompt, route, or tool behavior.
+            runtime = reset_persistent_mtp_session(
+                llama_root=self.paths.llama_root,
+                paths=self.paths,
+                runtime=self._persistent_mtp_runtime,
+                ctx_tgt=self._session.ctx_tgt,
+            )
+        except Exception as exc:
+            self.mtp_fallback_reason = str(exc) or "persistent-mtp-reset-failed"
+            self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
+            self._session.mtp_failed = True
+            self._session.mtp_failure_reason = self.mtp_fallback_reason
+            self._session.mtp_enabled = False
+            return None
+        self._persistent_mtp_runtime = runtime
+        self._session.ctx_dft = runtime.ctx_dft
+        self._session.spec = runtime.spec
         streamed_parts: list[str] = []
         generation_cap = max(1, max_tokens)
         self._last_completion_generation_cap = generation_cap
@@ -1033,6 +1053,28 @@ class NativeLlamaClient:
             result = replace(result, content=_strip_control_channels(result.content))
         self.last_mtp_completion = result
         if not result.success:
+            if self.cancel_event.is_set():
+                self.mtp_fallback_reason = "cancelled"
+                self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error="cancelled")
+                try:
+                    runtime = reset_persistent_mtp_session(
+                        llama_root=self.paths.llama_root,
+                        paths=self.paths,
+                        runtime=self._persistent_mtp_runtime,
+                        ctx_tgt=self._session.ctx_tgt,
+                    )
+                except Exception as exc:
+                    self._session.mtp_failed = True
+                    self._session.mtp_failure_reason = str(exc) or "persistent-mtp-reset-failed-after-cancel"
+                    self._session.mtp_enabled = False
+                    return None
+                self._persistent_mtp_runtime = runtime
+                self._session.ctx_dft = runtime.ctx_dft
+                self._session.spec = runtime.spec
+                self._session.mtp_failed = False
+                self._session.mtp_failure_reason = None
+                self._session.mtp_enabled = True
+                return None
             self.mtp_fallback_reason = result.error or "mtp-experimental-failed"
             self._session.mtp_failed = True
             self._session.mtp_failure_reason = self.mtp_fallback_reason
