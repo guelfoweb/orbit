@@ -328,6 +328,60 @@ class NativeMtpExperimentalTests(unittest.TestCase):
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
     @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_recovers_after_cancelled_helper_failure(
+        self,
+        _mocked_lib,
+        mocked_reset,
+        mocked_run,
+    ) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        runtime = self._enable_mock_persistent_mtp(client, mocked_reset)
+
+        def _cancelled_failure(*args, **kwargs):
+            client.cancel()
+            return MtpCompletionResult(enabled=True, success=False, error="failed to decode target prefill suffix")
+
+        mocked_run.side_effect = _cancelled_failure
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "cancelled")
+        self.assertTrue(client._session.mtp_enabled)
+        self.assertFalse(client._session.mtp_failed)
+        self.assertIsNone(client._session.mtp_failure_reason)
+        self.assertIs(client._persistent_mtp_runtime, runtime)
+        self.assertEqual(client.last_mtp_completion.error, "cancelled")
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_try_complete_with_mtp_experimental_disables_mtp_when_cancelled_recovery_reset_fails(
+        self,
+        _mocked_lib,
+        mocked_reset,
+        mocked_run,
+    ) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        self._enable_mock_persistent_mtp(client, mocked_reset)
+        mocked_reset.side_effect = [mocked_reset.return_value, RuntimeError("reset after cancel failed")]
+
+        def _cancelled_failure(*args, **kwargs):
+            client.cancel()
+            return MtpCompletionResult(enabled=True, success=False, error="failed to decode target prefill suffix")
+
+        mocked_run.side_effect = _cancelled_failure
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertFalse(client._session.mtp_enabled)
+        self.assertTrue(client._session.mtp_failed)
+        self.assertEqual(client._session.mtp_failure_reason, "reset after cancel failed")
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_complete_prompt_clears_stale_cancel_before_mtp_attempt(self, _mocked_lib, mocked_reset, mocked_run) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client._vocab = object()
