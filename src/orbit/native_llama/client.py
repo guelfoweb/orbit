@@ -1012,6 +1012,26 @@ class NativeLlamaClient:
             return None
 
         mtp_prompt = _prepare_mtp_prompt(prompt, thinking=thinking)
+        try:
+            # The persistent shim's request-boundary reuse can leave target/draft
+            # state that fails the next target suffix prefill. Resetting here
+            # keeps MTP usable without changing prompt, route, or tool behavior.
+            runtime = reset_persistent_mtp_session(
+                llama_root=self.paths.llama_root,
+                paths=self.paths,
+                runtime=self._persistent_mtp_runtime,
+                ctx_tgt=self._session.ctx_tgt,
+            )
+        except Exception as exc:
+            self.mtp_fallback_reason = str(exc) or "persistent-mtp-reset-failed"
+            self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
+            self._session.mtp_failed = True
+            self._session.mtp_failure_reason = self.mtp_fallback_reason
+            self._session.mtp_enabled = False
+            return None
+        self._persistent_mtp_runtime = runtime
+        self._session.ctx_dft = runtime.ctx_dft
+        self._session.spec = runtime.spec
         streamed_parts: list[str] = []
         generation_cap = max(1, max_tokens)
         self._last_completion_generation_cap = generation_cap
