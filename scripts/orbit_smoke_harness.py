@@ -4,12 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,17 +175,23 @@ def main(argv: list[str] | None = None) -> int:
                 workdir=Path(args.workdir),
                 max_tokens=args.max_tokens,
                 temperature=args.temperature,
+                timeout=args.timeout,
             )
         )
-    env = environment_summary(args=args, backend=backend, props=fresh_backend_props(args.base_url, args.timeout))
+    final_props = settled_backend_props(args.base_url, args.timeout)
+    env = environment_summary(args=args, backend=backend, props=final_props)
     write_jsonl(jsonl_path, env, reports)
     write_markdown(markdown_path, env, reports)
     if args.mtp_required:
-        final_mtp = mtp_state_from_props(fresh_backend_props(args.base_url, args.timeout))
+        final_mtp = mtp_state_from_props(final_props)
         if not final_mtp["usable"]:
             reason = final_mtp["failure_reason"] or final_mtp["status"]
             print(f"error: --mtp-required set but backend MTP is not usable ({reason})", file=sys.stderr)
             return 2
+    scenario_failure = scenario_failure_reason(reports)
+    if scenario_failure is not None:
+        print(f"error: scenario failed ({scenario_failure})", file=sys.stderr)
+        return 1
     print(f"jsonl={jsonl_path}")
     print(f"markdown={markdown_path}")
     return 0
@@ -289,6 +299,7 @@ def run_scenario(
     workdir: Path,
     max_tokens: int,
     temperature: float,
+    timeout: float,
 ) -> list[StepReport]:
     runtime = ChatRuntime(
         backend=ProbeBackend(backend),
@@ -297,21 +308,92 @@ def run_scenario(
     )
     reports: list[StepReport] = []
     for index, step in enumerate(scenario.steps, start=1):
-        reports.append(
-            run_step(
+        report = run_step(
+            runtime,
+            scenario=scenario.name,
+            step_index=index,
+            step=step,
+            workdir=workdir,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            base_url=backend.base_url,
+            timeout=timeout,
+        )
+        reports.append(report)
+        if report.finish_reason in {"timeout", "error"}:
+            break
+    return reports
+
+
+def run_step(
+    runtime: ChatRuntime,
+    *,
+    scenario: str,
+    step_index: int,
+    step: SmokeStep,
+    workdir: Path,
+    max_tokens: int,
+    temperature: float,
+    base_url: str,
+    timeout: float,
+) -> StepReport:
+    result_queue: queue.Queue[StepReport] = queue.Queue(maxsize=1)
+
+    worker = threading.Thread(
+        target=lambda: result_queue.put(
+            _run_step_inner(
                 runtime,
-                scenario=scenario.name,
-                step_index=index,
+                scenario=scenario,
+                step_index=step_index,
                 step=step,
                 workdir=workdir,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+        ),
+        daemon=True,
+    )
+    started = time.perf_counter()
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        cancel_requested = request_backend_cancel(base_url, timeout=min(5.0, max(1.0, timeout)))
+        props_after = wait_for_backend_idle(base_url, timeout=min(5.0, max(1.0, timeout)))
+        worker.join(min(2.0, max(0.5, timeout / 10.0)))
+        notes = "timeout"
+        if cancel_requested:
+            notes += ",cancel_requested"
+        if props_after.get("in_flight") is False:
+            notes += ",cleanup_ok"
+        elif props_after:
+            notes += ",cleanup_pending"
+        return StepReport(
+            case=scenario,
+            step=step_index,
+            prompt=step.prompt,
+            prompt_kind=step.mode,
+            completion_kind="timeout",
+            route_tokens=None,
+            final_tokens=None,
+            prompt_tokens=None,
+            cached_tokens=None,
+            evaluated_tokens=None,
+            finish_reason="timeout",
+            tool_calls=0,
+            tool_names=[],
+            wall_ms=round((time.perf_counter() - started) * 1000, 1),
+            correctness_category="not_evaluated",
+            raw_leak=False,
+            fake_output=False,
+            loop=False,
+            notes=notes,
+            answer_excerpt="timeout",
+            model_steps=[],
         )
-    return reports
+    return result_queue.get()
 
 
-def run_step(
+def _run_step_inner(
     runtime: ChatRuntime,
     *,
     scenario: str,
@@ -457,11 +539,71 @@ def fresh_backend_props(base_url: str, timeout: float) -> dict[str, object]:
         return {}
 
 
+def request_backend_cancel(base_url: str, timeout: float) -> bool:
+    request = Request(
+        f"{base_url.rstrip('/')}/cancel",
+        data=json.dumps({"session_id": "default"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError):
+        return False
+    return payload.get("status") == "cancel_requested"
+
+
+def wait_for_backend_idle(base_url: str, timeout: float, *, poll_interval: float = 0.2) -> dict[str, object]:
+    deadline = time.monotonic() + max(0.0, timeout)
+    latest: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        latest = fresh_backend_props(base_url, timeout=min(2.0, max(0.5, timeout)))
+        if latest and latest.get("in_flight") is False:
+            return latest
+        time.sleep(poll_interval)
+    return latest
+
+
+def settled_backend_props(base_url: str, timeout: float, *, settle_seconds: float = 3.0, poll_interval: float = 0.2) -> dict[str, object]:
+    props = fresh_backend_props(base_url, timeout)
+    if not props:
+        return {}
+    deadline = time.monotonic() + max(0.0, settle_seconds)
+    last_serialized = json.dumps(props, sort_keys=True, ensure_ascii=False)
+    while time.monotonic() < deadline:
+        if props.get("in_flight") is False:
+            failure_reason = first_nonempty_str(props.get("mtp_failure_reason"), props.get("mtp_fallback_reason"))
+            if failure_reason not in {"cancelled", "timeout"}:
+                return props
+        time.sleep(poll_interval)
+        refreshed = fresh_backend_props(base_url, timeout=min(2.0, max(0.5, timeout)))
+        if not refreshed:
+            return props
+        serialized = json.dumps(refreshed, sort_keys=True, ensure_ascii=False)
+        props = refreshed
+        if serialized == last_serialized and props.get("in_flight") is False:
+            return props
+        last_serialized = serialized
+    return props
+
+
 def safe_model_info(backend: LlamaServerBackend):
     try:
         return backend.model_info()
     except Exception:
         return None
+
+
+def scenario_failure_reason(reports: list[StepReport]) -> str | None:
+    for report in reports:
+        if report.finish_reason == "timeout" or "timeout" in report.notes:
+            return "timeout"
+        if report.notes == "exception":
+            return "error"
+        if report.finish_reason == "error":
+            return "error"
+    return None
 
 
 def git_head() -> str:

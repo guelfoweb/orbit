@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -244,6 +245,169 @@ class SmokeHarnessTests(unittest.TestCase):
         )
 
         self.assertEqual(row["evaluated_tokens"], 60)
+
+    def test_run_step_timeout_requests_cancel_and_returns_timeout_report(self) -> None:
+        runtime = mock.Mock()
+
+        def slow_ask_chat(*args, **kwargs):
+            time.sleep(0.2)
+            raise AssertionError("worker should have been abandoned after timeout")
+
+        runtime.ask_chat.side_effect = slow_ask_chat
+        with mock.patch.object(smoke_harness, "request_backend_cancel", return_value=True) as mocked_cancel, \
+            mock.patch.object(smoke_harness, "wait_for_backend_idle", return_value={"in_flight": False}):
+            report = smoke_harness.run_step(
+                runtime,
+                scenario="simple_chat",
+                step_index=1,
+                step=smoke_harness.SmokeStep("hi", mode="chat", checker_name="nonempty"),
+                workdir=Path("workdir"),
+                max_tokens=16,
+                temperature=0.0,
+                base_url="http://127.0.0.1:12120",
+                timeout=0.01,
+            )
+
+        mocked_cancel.assert_called_once()
+        self.assertEqual(report.finish_reason, "timeout")
+        self.assertEqual(report.completion_kind, "timeout")
+        self.assertIn("cancel_requested", report.notes)
+        self.assertIn("cleanup_ok", report.notes)
+
+    def test_main_returns_timeout_failure_when_report_times_out(self) -> None:
+        timeout_report = smoke_harness.StepReport(
+            case="shell20",
+            step=1,
+            prompt="run python3 -c 'for i in range(20): print(f\"line-{i}\")'",
+            prompt_kind="auto",
+            completion_kind="timeout",
+            route_tokens=None,
+            final_tokens=None,
+            prompt_tokens=None,
+            cached_tokens=None,
+            evaluated_tokens=None,
+            finish_reason="timeout",
+            tool_calls=0,
+            tool_names=[],
+            wall_ms=60001.0,
+            correctness_category="not_evaluated",
+            raw_leak=False,
+            fake_output=False,
+            loop=False,
+            notes="timeout,cancel_requested,cleanup_ok",
+            answer_excerpt="timeout",
+            model_steps=[],
+        )
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value={}), \
+            mock.patch.object(smoke_harness, "fresh_backend_props", return_value={}), \
+            mock.patch.object(smoke_harness, "run_scenario", return_value=[timeout_report]), \
+            mock.patch.object(smoke_harness, "write_jsonl"), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(["--scenario", "shell20", "--no-web", "--output-dir", tmp, "--timeout", "60"])
+
+        self.assertEqual(rc, 1)
+
+    def test_wait_for_backend_idle_returns_when_inflight_clears(self) -> None:
+        with mock.patch.object(
+            smoke_harness,
+            "fresh_backend_props",
+            side_effect=[{"in_flight": True}, {"in_flight": False, "mtp_enabled": True}],
+        ):
+            props = smoke_harness.wait_for_backend_idle("http://127.0.0.1:12120", 1.0, poll_interval=0.0)
+
+        self.assertEqual(props.get("in_flight"), False)
+
+    def test_settled_backend_props_waits_past_cancelled_snapshot(self) -> None:
+        with mock.patch.object(
+            smoke_harness,
+            "fresh_backend_props",
+            side_effect=[
+                {"in_flight": False, "mtp_fallback_reason": "cancelled", "mtp_failure_reason": None},
+                {"in_flight": False, "mtp_fallback_reason": None, "mtp_failure_reason": None, "mtp_initialized": True},
+            ],
+        ):
+            props = smoke_harness.settled_backend_props("http://127.0.0.1:12120", 1.0, settle_seconds=0.5, poll_interval=0.0)
+
+        self.assertIsNone(props.get("mtp_fallback_reason"))
+        self.assertTrue(props.get("mtp_initialized"))
+
+    def test_run_scenario_stops_after_timeout_report(self) -> None:
+        scenario = smoke_harness.SmokeScenario(
+            "shell20",
+            (
+                smoke_harness.SmokeStep("first"),
+                smoke_harness.SmokeStep("second"),
+            ),
+        )
+        timeout_report = smoke_harness.StepReport(
+            case="shell20",
+            step=1,
+            prompt="first",
+            prompt_kind="auto",
+            completion_kind="timeout",
+            route_tokens=None,
+            final_tokens=None,
+            prompt_tokens=None,
+            cached_tokens=None,
+            evaluated_tokens=None,
+            finish_reason="timeout",
+            tool_calls=0,
+            tool_names=[],
+            wall_ms=60000.0,
+            correctness_category="not_evaluated",
+            raw_leak=False,
+            fake_output=False,
+            loop=False,
+            notes="timeout",
+            answer_excerpt="timeout",
+            model_steps=[],
+        )
+        with mock.patch.object(smoke_harness, "run_step", return_value=timeout_report) as mocked_run_step, \
+            mock.patch.object(smoke_harness, "ChatRuntime"):
+            reports = smoke_harness.run_scenario(
+                scenario,
+                backend=mock.Mock(base_url="http://127.0.0.1:12120"),
+                workdir=Path("workdir"),
+                max_tokens=128,
+                temperature=0.0,
+                timeout=60.0,
+            )
+
+        self.assertEqual(len(reports), 1)
+        mocked_run_step.assert_called_once()
+
+    def test_main_uses_settled_props_for_environment_row(self) -> None:
+        initial = {
+            "backend": "orbit-native",
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": False,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        settled = {
+            "backend": "orbit-native",
+            "model_id": "m",
+            "multimodal_available": True,
+            "mtp_experimental_enabled": True,
+            "mtp_initialized": True,
+            "mtp_last_completion_success": True,
+            "mtp_failure_reason": None,
+            "mtp_fallback_reason": None,
+        }
+        captured_env: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value=initial), \
+            mock.patch.object(smoke_harness, "settled_backend_props", return_value=settled), \
+            mock.patch.object(smoke_harness, "run_scenario", return_value=[]), \
+            mock.patch.object(smoke_harness, "write_jsonl", side_effect=lambda _p, env, _r: captured_env.append(env)), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(["--scenario", "simple_chat", "--no-web", "--output-dir", tmp, "--mtp-required"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured_env[0]["mtp"], "on")
+        self.assertTrue(captured_env[0]["mtp_usable"])
 
 
 if __name__ == "__main__":
