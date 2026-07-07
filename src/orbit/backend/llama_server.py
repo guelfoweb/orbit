@@ -11,7 +11,7 @@ from .base import ChatResult, Message, ModelInfo, StreamProgress
 from .model_names import resolve_model_display_name
 from .payloads import ChatPayloadOptions, build_chat_payload
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
-from orbit.runtime.kv_diag import current_phase, current_tools_mode
+from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 
 
 class LlamaServerError(RuntimeError):
@@ -50,6 +50,7 @@ class LlamaServerBackend:
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
             )
         )
+        _attach_native_kv_diag_payload(payload, native_backend=native_backend)
         if native_backend:
             return self._with_display_model(
                 self._post_native_stream(
@@ -86,6 +87,7 @@ class LlamaServerBackend:
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
             )
         )
+        _attach_native_kv_diag_payload(payload, native_backend=native_backend)
         if native_backend:
             return self._with_display_model(
                 self._post_native_stream(
@@ -716,3 +718,14 @@ def _allow_mtp_experimental_requested(*, native_backend: bool) -> bool | None:
     if phase == "chat_final_retry" or phase.startswith("final_from_tool"):
         return False
     return None
+
+
+def _attach_native_kv_diag_payload(payload: dict[str, Any], *, native_backend: bool) -> None:
+    if not native_backend or not kv_diag_enabled():
+        return
+    phase = current_phase()
+    tools_mode = current_tools_mode()
+    if phase is not None:
+        payload["_orbit_kv_phase"] = phase
+    if tools_mode is not None:
+        payload["_orbit_kv_tools_mode"] = tools_mode

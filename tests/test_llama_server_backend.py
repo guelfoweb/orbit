@@ -308,6 +308,41 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertNotIn("route_prefix_anchor", backend.payloads[2])
         self.assertNotIn("route_prefix_anchor", backend.payloads[3])
 
+    def test_native_kv_diag_payload_carries_phase_only_when_enabled(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payloads: list[dict[str, object]] = []
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_native_stream(self, _path: str, payload: dict[str, object], *, on_delta, on_progress) -> ChatResult:
+                self.payloads.append(payload)
+                return ChatResult(
+                    content="ok",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = Backend()
+        with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "0"}, clear=False):
+            with model_call_context(phase="route", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+        with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1"}, clear=False):
+            with model_call_context(phase="final_from_tool", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+
+        self.assertNotIn("_orbit_kv_phase", backend.payloads[0])
+        self.assertEqual(backend.payloads[1]["_orbit_kv_phase"], "final_from_tool")
+        self.assertEqual(backend.payloads[1]["_orbit_kv_tools_mode"], "on")
+
     def test_allow_mtp_false_payload_is_limited_to_native_tools_final_fallbacks(self) -> None:
         class Backend(LlamaServerBackend):
             def __init__(self) -> None:
