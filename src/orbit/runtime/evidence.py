@@ -40,6 +40,11 @@ class EvidenceRecord:
     metadata: dict[str, object]
     route_card: str
     final_card: str
+    evidence_sequence: int | None = None
+    tool_call_id: str | None = None
+    user_turn_id: str | None = None
+    producer_model_call_id: str | None = None
+    produced_by_phase: str | None = None
 
 
 class EvidenceStore:
@@ -69,7 +74,12 @@ class EvidenceStore:
                 self.records[record.evidence_id] = record
 
     def add(self, tool_name: str, content: str, *, metadata: dict[str, object] | None = None) -> EvidenceRecord:
-        record = build_evidence_record(tool_name, content, metadata or {})
+        record = build_evidence_record(
+            tool_name,
+            content,
+            metadata or {},
+            evidence_sequence=self._next_sequence(),
+        )
         self.records[record.evidence_id] = record
         self.raw_cache[record.evidence_id] = content
         try:
@@ -104,6 +114,14 @@ class EvidenceStore:
             return []
         return list(self.records.values())[-limit:]
 
+    def _next_sequence(self) -> int:
+        sequences = [
+            record.evidence_sequence
+            for record in self.records.values()
+            if isinstance(record.evidence_sequence, int)
+        ]
+        return (max(sequences) if sequences else 0) + 1
+
     def raw_excerpt(self, record: EvidenceRecord, *, max_chars: int = RAW_EXCERPT_CHARS) -> str:
         try:
             raw = self.load_raw(record.evidence_id)
@@ -122,8 +140,26 @@ class EvidenceStore:
         return data if isinstance(data, dict) else {}
 
 
-def build_evidence_record(tool_name: str, content: str, metadata: dict[str, object] | None = None) -> EvidenceRecord:
+def build_evidence_record(
+    tool_name: str,
+    content: str,
+    metadata: dict[str, object] | None = None,
+    *,
+    evidence_sequence: int | None = None,
+    tool_call_id: str | None = None,
+    user_turn_id: str | None = None,
+    producer_model_call_id: str | None = None,
+    produced_by_phase: str | None = None,
+) -> EvidenceRecord:
     metadata = dict(metadata or {})
+    tool_call_id = _optional_str(tool_call_id if tool_call_id is not None else metadata.get("tool_call_id"))
+    user_turn_id = _optional_str(user_turn_id if user_turn_id is not None else metadata.get("user_turn_id"))
+    producer_model_call_id = _optional_str(
+        producer_model_call_id if producer_model_call_id is not None else metadata.get("producer_model_call_id")
+    )
+    produced_by_phase = _optional_str(
+        produced_by_phase if produced_by_phase is not None else metadata.get("produced_by_phase")
+    )
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     evidence_id = f"ev_{uuid.uuid4().hex[:12]}_{digest[:16]}"
     kind = _classify_kind(tool_name, content, metadata)
@@ -143,6 +179,11 @@ def build_evidence_record(tool_name: str, content: str, metadata: dict[str, obje
         metadata=enriched,
         route_card="",
         final_card="",
+        evidence_sequence=evidence_sequence,
+        tool_call_id=tool_call_id,
+        user_turn_id=user_turn_id,
+        producer_model_call_id=producer_model_call_id,
+        produced_by_phase=produced_by_phase,
     )
     return EvidenceRecord(
         **{**asdict(base), "route_card": route_card(base), "final_card": final_card(base)}
@@ -164,6 +205,11 @@ def _record_from_index(value: dict[str, object]) -> EvidenceRecord | None:
             metadata=dict(metadata) if isinstance(metadata, dict) else {},
             route_card="",
             final_card="",
+            evidence_sequence=_optional_int(value.get("evidence_sequence")),
+            tool_call_id=_optional_str(value.get("tool_call_id")),
+            user_turn_id=_optional_str(value.get("user_turn_id")),
+            producer_model_call_id=_optional_str(value.get("producer_model_call_id")),
+            produced_by_phase=_optional_str(value.get("produced_by_phase")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -311,8 +357,28 @@ def _record_with_sidecar_status(record: EvidenceRecord, status: str) -> Evidence
         metadata=metadata,
         route_card="",
         final_card="",
+        evidence_sequence=record.evidence_sequence,
+        tool_call_id=record.tool_call_id,
+        user_turn_id=record.user_turn_id,
+        producer_model_call_id=record.producer_model_call_id,
+        produced_by_phase=record.produced_by_phase,
     )
     return EvidenceRecord(**{**asdict(updated), "route_card": route_card(updated), "final_card": final_card(updated)})
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) -> str:

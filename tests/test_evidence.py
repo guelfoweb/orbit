@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -42,6 +43,66 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(store.load_raw(record.evidence_id), "raw content")
             self.assertTrue((store.root / "index.json").exists())
             self.assertTrue((store.root / f"{record.evidence_id}.txt").exists())
+            self.assertEqual(record.evidence_sequence, 1)
+            self.assertIsNone(record.user_turn_id)
+            self.assertIsNone(record.producer_model_call_id)
+            self.assertIsNone(record.produced_by_phase)
+
+    def test_lineage_fields_roundtrip_and_sequence_increments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            first = store.add(
+                "exec_shell_full_command",
+                "first",
+                metadata={"command": "printf first", "tool_call_id": "call_1"},
+            )
+            second = store.add(
+                "exec_shell_full_command",
+                "second",
+                metadata={"command": "printf second", "tool_call_id": "call_2"},
+            )
+
+            reloaded = EvidenceStore(store.root)
+            reloaded.load_index()
+            loaded = reloaded.recent_records(2)
+
+            self.assertEqual([record.evidence_sequence for record in loaded], [1, 2])
+            self.assertEqual([record.tool_call_id for record in loaded], ["call_1", "call_2"])
+            self.assertEqual(first.evidence_sequence, 1)
+            self.assertEqual(second.evidence_sequence, 2)
+
+    def test_old_index_without_lineage_loads_with_null_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = build_evidence_record("exec_shell_full_command", "legacy", {"command": "pwd"})
+            store.root.mkdir(parents=True)
+            (store.root / f"{record.evidence_id}.txt").write_text("legacy", encoding="utf-8")
+            legacy = {
+                record.evidence_id: {
+                    "evidence_id": record.evidence_id,
+                    "tool_name": record.tool_name,
+                    "kind": record.kind,
+                    "raw_ref": record.raw_ref,
+                    "raw_sha256": record.raw_sha256,
+                    "raw_chars": record.raw_chars,
+                    "raw_lines": record.raw_lines,
+                    "status": record.status,
+                    "metadata": record.metadata,
+                    "route_card": record.route_card,
+                    "final_card": record.final_card,
+                }
+            }
+            (store.root / "index.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+            reloaded = EvidenceStore(store.root)
+            reloaded.load_index()
+            loaded = reloaded.recent_records(1)[0]
+
+            self.assertIsNone(loaded.evidence_sequence)
+            self.assertIsNone(loaded.tool_call_id)
+            self.assertIsNone(loaded.user_turn_id)
+            self.assertIsNone(loaded.producer_model_call_id)
+            self.assertIsNone(loaded.produced_by_phase)
 
     def test_for_workdir_reloads_index_and_lazy_raw(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

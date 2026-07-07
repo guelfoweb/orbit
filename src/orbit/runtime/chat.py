@@ -37,7 +37,7 @@ from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
 )
 from orbit.runtime.file_input_resolver import FileInputResolver
-from orbit.runtime.kv_diag import emit_route_outcome, instrument_backend, model_call_context, user_request
+from orbit.runtime.kv_diag import emit_evidence_lineage, emit_route_outcome, instrument_backend, model_call_context, user_request
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import (
     TOOL_CALL_JSON_RETRY_PROMPT,
@@ -932,6 +932,7 @@ class ChatRuntime:
         if latest_user is not None:
             messages.append(latest_user)
         context = build_compact_final_evidence_context(self.evidence_store)
+        self._emit_evidence_lineage_context(context_kind="compact_final", consumer_phase="final_from_tool", limit=1)
         final_messages = with_final_tool_system_prompt(messages)
         if not context:
             return final_messages
@@ -1012,6 +1013,7 @@ class ChatRuntime:
 
     def _with_final_evidence_context(self, messages: list[Message]) -> list[Message]:
         context = build_final_evidence_context(self.evidence_store)
+        self._emit_evidence_lineage_context(context_kind="final", consumer_phase="final", limit=2)
         if not context:
             return messages
         return [*messages, {"role": "system", "content": context}]
@@ -1026,16 +1028,39 @@ class ChatRuntime:
         latest_user = _latest_user_message(self.messages)
         if latest_user is not None:
             messages.append(latest_user)
-        return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages))
+        return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages), consumer_phase="chat_final")
 
-    def _with_chat_final_retry_evidence_context(self, messages: list[Message]) -> list[Message]:
+    def _with_chat_final_retry_evidence_context(self, messages: list[Message], *, consumer_phase: str) -> list[Message]:
         if self._should_compact_final_from_tool_window():
             context = build_compact_final_evidence_context(self.evidence_store)
+            self._emit_evidence_lineage_context(context_kind="compact_final", consumer_phase=consumer_phase, limit=1)
         else:
             context = build_final_evidence_context(self.evidence_store)
+            self._emit_evidence_lineage_context(context_kind="final", consumer_phase=consumer_phase, limit=2)
         if not context:
             return messages
         return [*messages, {"role": "system", "content": context}]
+
+    def _emit_evidence_lineage_context(self, *, context_kind: str, consumer_phase: str, limit: int) -> None:
+        if self.evidence_store is None:
+            return
+        records = self.evidence_store.recent_records(limit)
+        for index, record in enumerate(records, start=1):
+            emit_evidence_lineage(
+                {
+                    "context_kind": context_kind,
+                    "phase": consumer_phase,
+                    "card_index": index,
+                    "evidence_id": record.evidence_id,
+                    "evidence_sequence": record.evidence_sequence,
+                    "tool_call_id": record.tool_call_id,
+                    "user_turn_id": record.user_turn_id,
+                    "producer_model_call_id": record.producer_model_call_id,
+                    "produced_by_phase": record.produced_by_phase,
+                    "kind": record.kind,
+                    "status": record.status,
+                }
+            )
 
     def _chat_final_retry_messages(self) -> list[Message]:
         messages: list[Message] = []
@@ -1048,7 +1073,7 @@ class ChatRuntime:
             messages.append(assistant)
         if latest_user is not None:
             messages.append(latest_user)
-        return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages))
+        return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages), consumer_phase="chat_final_retry")
 
     def chat_final_completion_repair_messages(self, repair_instruction: str) -> list[Message] | None:
         if self.evidence_store is None or not self.evidence_store.recent_records(1):
