@@ -593,6 +593,8 @@ class KVDiagTests(unittest.TestCase):
             payload = {
                 "cache_prompt": True,
                 "stream": True,
+                "_orbit_kv_phase": "final_from_tool",
+                "_orbit_kv_tools_mode": "on",
                 "session_id": "session-key-placeholder",
                 "messages": [
                     {"role": "system", "content": "runtime policy placeholder"},
@@ -619,12 +621,20 @@ class KVDiagTests(unittest.TestCase):
         self.assertEqual(event["endpoint"], "/chat/stream")
         self.assertTrue(event["stream"])
         self.assertTrue(event["cache_prompt"])
+        self.assertEqual(event["phase"], "final_from_tool")
+        self.assertEqual(event["tools_mode"], "on")
         self.assertEqual(event["slot_id"], "default")
         self.assertEqual(event["prompt_tokens"], 4)
         self.assertEqual(event["previous_prompt_tokens"], 3)
+        self.assertIsNotNone(event["previous_tokenized_prompt_hash"])
+        self.assertNotEqual(event["previous_tokenized_prompt_hash"], event["current_tokenized_prompt_hash"])
+        self.assertEqual(event["current_tokenized_prompt_hash"], event["tokenized_prompt_hash"])
         self.assertEqual(event["tokenized_prefix_length"], 2)
         self.assertEqual(event["longest_common_prefix_tokens"], 2)
+        self.assertEqual(event["first_mismatch_index"], 2)
         self.assertEqual(event["first_mismatch_token"], 2)
+        self.assertEqual(event["previous_token_at_mismatch"], 99)
+        self.assertEqual(event["current_token_at_mismatch"], 33)
         self.assertEqual(event["cached_tokens"], 2)
         self.assertEqual(event["evaluated_tokens"], 2)
         self.assertEqual(event["output_tokens"], 3)
@@ -657,7 +667,10 @@ class KVDiagTests(unittest.TestCase):
 
         self.assertEqual(event["cache_miss_reason"], "prefix_mismatch_at_token_0")
         self.assertEqual(event["longest_common_prefix_tokens"], 0)
+        self.assertEqual(event["first_mismatch_index"], 0)
         self.assertEqual(event["first_mismatch_token"], 0)
+        self.assertEqual(event["previous_token_at_mismatch"], 1)
+        self.assertEqual(event["current_token_at_mismatch"], 5)
 
     def test_native_route_prefix_anchor_diagnostics_are_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

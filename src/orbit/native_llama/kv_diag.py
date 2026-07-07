@@ -24,6 +24,8 @@ class NativeDiagRequest:
     endpoint: str | None
     stream: bool | None
     cache_prompt: bool | None
+    phase: str | None
+    tools_mode: str | None
     session_id_hash: str | None
     tools_parameter_present: bool
     tool_count: int
@@ -51,6 +53,8 @@ def request_context(*, endpoint: str | None, payload: dict[str, Any]) -> Iterato
         endpoint=endpoint,
         stream=payload.get("stream") is True,
         cache_prompt=payload.get("cache_prompt") if isinstance(payload.get("cache_prompt"), bool) else None,
+        phase=_safe_str(payload.get("_orbit_kv_phase")),
+        tools_mode=_safe_str(payload.get("_orbit_kv_tools_mode")),
         session_id_hash=_hash(str(payload.get("session_id") or "default")),
         tools_parameter_present=isinstance(payload.get("tools"), list) and bool(payload.get("tools")),
         tool_count=len(payload.get("tools")) if isinstance(payload.get("tools"), list) else 0,
@@ -80,12 +84,17 @@ def emit_prompt_cache_event(
     prompt_count = len(prompt_tokens)
     previous_count = len(previous_prompt_tokens)
     first_mismatch_token = common if common < min(prompt_count, previous_count) else None
+    previous_token_at_mismatch = (
+        previous_prompt_tokens[common] if first_mismatch_token is not None and common < previous_count else None
+    )
+    current_token_at_mismatch = prompt_tokens[common] if first_mismatch_token is not None and common < prompt_count else None
     evaluated = max(0, prompt_count - reused_prompt_tokens)
     event = {
         "event": "kv_diag_native_cache",
         "backend_request_id": request.backend_request_id if request else None,
         "model_call_id": None,
-        "phase": None,
+        "phase": request.phase if request else None,
+        "tools_mode": request.tools_mode if request else None,
         "endpoint": request.endpoint if request else None,
         "stream": request.stream if request else None,
         "cache_prompt": request.cache_prompt if request else None,
@@ -98,11 +107,16 @@ def emit_prompt_cache_event(
         "tool_count": request.tool_count if request else 0,
         "prompt_tokens": prompt_count,
         "previous_prompt_tokens": previous_count,
+        "current_tokenized_prompt_hash": _hash_tokens(prompt_tokens),
+        "previous_tokenized_prompt_hash": _hash_tokens(previous_prompt_tokens) if previous_prompt_tokens else None,
         "tokenized_prompt_hash": _hash_tokens(prompt_tokens),
         "tokenized_prefix_hash": _hash_tokens(prompt_tokens[:common]) if common else None,
         "tokenized_prefix_length": common,
         "longest_common_prefix_tokens": common,
+        "first_mismatch_index": first_mismatch_token,
         "first_mismatch_token": first_mismatch_token,
+        "previous_token_at_mismatch": previous_token_at_mismatch,
+        "current_token_at_mismatch": current_token_at_mismatch,
         "cached_tokens": reused_prompt_tokens,
         "evaluated_tokens": evaluated,
         "output_tokens": output_tokens,
