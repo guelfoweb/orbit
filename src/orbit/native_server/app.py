@@ -222,6 +222,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             session = state.session_info()
             runtime = state.runtime_info()
             mtp_last_completion = _mtp_last_completion_payload(state.client)
+            mtp_config = _mtp_config_payload(state.client)
             self._json(
                 {
                     "model_path": str(state.client.paths.model),
@@ -251,6 +252,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_experimental_enabled": state.client.config.use_mtp_experimental,
                     "mtp_last_completion_success": state.client.last_mtp_completion.success,
                     "mtp_last_completion": mtp_last_completion,
+                    "mtp_config": mtp_config,
                     "mtp_fallback_reason": state.client.mtp_fallback_reason,
                     "mtp_enabled": session["mtp_enabled"],
                     "mtp_initialized": session["mtp_initialized"],
@@ -828,6 +830,20 @@ def _mtp_last_completion_payload(client: NativeLlamaClient) -> dict[str, object]
         "rollback_tokens_total": completion.rollback_tokens_total,
         "checkpoint_count": completion.checkpoint_count,
         "restore_count": completion.restore_count,
+    }
+
+
+def _mtp_config_payload(client: NativeLlamaClient) -> dict[str, object] | None:
+    if not client.config.use_mtp_experimental:
+        return None
+    return {
+        # Keep this in sync with the hardcoded Orbit native MTP shim config.
+        "n_max": 3,
+        "n_min": None,
+        "p_min": None,
+        "backend_sampling": None,
+        "ctx_tgt": client._session.ctx_tgt is not None,
+        "ctx_dft": client._session.ctx_dft is not None,
     }
 
 
