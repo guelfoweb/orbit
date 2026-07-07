@@ -8,7 +8,7 @@ import os
 import sys
 from dataclasses import dataclass
 from itertools import count
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 _REQUEST_IDS = count(1)
@@ -76,6 +76,7 @@ def emit_prompt_cache_event(
     output_tokens: int,
     cancelled: bool,
     slot_id: str,
+    component_tokens: dict[str, Any] | None = None,
 ) -> None:
     if not enabled():
         return
@@ -127,6 +128,115 @@ def emit_prompt_cache_event(
             common_tokens=common,
             reused_prompt_tokens=reused_prompt_tokens,
         ),
+    }
+    _emit(event)
+    if component_tokens is not None and _is_final_or_retry_phase(request.phase if request else None):
+        _emit_prompt_component_tokens_event(
+            request=request,
+            component_tokens=component_tokens,
+            prompt_tokens=prompt_count,
+            cached_tokens=reused_prompt_tokens,
+            evaluated_tokens=evaluated,
+        )
+
+
+def build_prompt_component_tokens(
+    *,
+    messages: list[dict[str, Any]],
+    prompt_tokens_total: int,
+    token_count: Callable[[str], int],
+) -> dict[str, Any]:
+    components = {
+        "system_prompt_tokens": 0,
+        "conversation_window_tokens": 0,
+        "assistant_history_tokens": 0,
+        "user_message_tokens": 0,
+        "evidence_total_tokens": 0,
+        "evidence_wrapper_tokens": 0,
+        "evidence_metadata_tokens": 0,
+        "evidence_raw_excerpt_tokens": 0,
+        "evidence_summary_tokens": 0,
+        "tool_result_tokens": 0,
+        "other_message_tokens": 0,
+        "template_overhead_tokens": 0,
+        "unknown_tokens": 0,
+    }
+    evidence_kinds: list[str] = []
+    evidence_card_count = 0
+    content_total = 0
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = _content_text(message.get("content"))
+        tokens = token_count(content) if content else 0
+        if role == "system" and index == 0:
+            components["system_prompt_tokens"] += tokens
+            content_total += tokens
+            continue
+        if role == "system" and _looks_like_evidence_context(content):
+            evidence = _evidence_component_tokens(content, token_count=token_count)
+            for key in (
+                "evidence_wrapper_tokens",
+                "evidence_metadata_tokens",
+                "evidence_raw_excerpt_tokens",
+                "evidence_summary_tokens",
+            ):
+                components[key] += evidence[key]
+            components["evidence_total_tokens"] += tokens
+            content_total += tokens
+            evidence_card_count += evidence["evidence_card_count"]
+            for kind in evidence["evidence_kinds"]:
+                if kind not in evidence_kinds:
+                    evidence_kinds.append(kind)
+            continue
+        if role == "assistant":
+            components["assistant_history_tokens"] += tokens
+            components["conversation_window_tokens"] += tokens
+        elif role == "user":
+            components["user_message_tokens"] += tokens
+            components["conversation_window_tokens"] += tokens
+        elif role == "tool":
+            components["tool_result_tokens"] += tokens
+            components["conversation_window_tokens"] += tokens
+        else:
+            components["other_message_tokens"] += tokens
+        content_total += tokens
+    remainder = prompt_tokens_total - content_total
+    if remainder >= 0:
+        components["template_overhead_tokens"] = remainder
+    else:
+        components["unknown_tokens"] = -remainder
+    return {
+        "components": components,
+        "evidence_card_count": evidence_card_count,
+        "evidence_kinds": evidence_kinds,
+        "content_tokens_total": content_total,
+    }
+
+
+def _emit_prompt_component_tokens_event(
+    *,
+    request: NativeDiagRequest | None,
+    component_tokens: dict[str, Any],
+    prompt_tokens: int,
+    cached_tokens: int,
+    evaluated_tokens: int,
+) -> None:
+    event = {
+        "event": "kv_diag_prompt_component_tokens",
+        "backend_request_id": request.backend_request_id if request else None,
+        "model_call_id": None,
+        "phase": request.phase if request else None,
+        "tools_mode": request.tools_mode if request else None,
+        "prompt_tokens_total": prompt_tokens,
+        "cached_tokens": cached_tokens,
+        "evaluated_tokens": evaluated_tokens,
+        "role_sequence": request.role_sequence if request else [],
+        "components": component_tokens.get("components", {}),
+        "evidence_card_count": _safe_int(component_tokens.get("evidence_card_count")) or 0,
+        "evidence_kinds": component_tokens.get("evidence_kinds") if isinstance(component_tokens.get("evidence_kinds"), list) else [],
+        "content_tokens_total": _safe_int(component_tokens.get("content_tokens_total")),
     }
     _emit(event)
 
@@ -193,6 +303,85 @@ def emit_route_prefix_prewarm_event(metadata: dict[str, Any]) -> None:
         "restore_ready": bool(metadata.get("restore_ready")),
     }
     _emit(event)
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return " ".join(parts)
+    return ""
+
+
+def _looks_like_evidence_context(content: str) -> bool:
+    return content.startswith("evidence_context:")
+
+
+def _is_final_or_retry_phase(phase: str | None) -> bool:
+    if phase is None:
+        return False
+    return phase == "chat_final" or phase == "chat_final_retry" or phase.startswith("final_from_tool")
+
+
+def _evidence_component_tokens(content: str, *, token_count: Callable[[str], int]) -> dict[str, Any]:
+    wrapper_lines: list[str] = []
+    metadata_lines: list[str] = []
+    raw_lines: list[str] = []
+    summary_lines: list[str] = []
+    evidence_kinds: list[str] = []
+    in_raw_excerpt = False
+    evidence_card_count = 0
+    summary_prefixes = (
+        "stdout_excerpt:",
+        "stderr_excerpt:",
+        "first_matches:",
+        "top_snippets:",
+        "compat_excerpt:",
+    )
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped == "bounded_raw_excerpt:":
+            wrapper_lines.append(line)
+            in_raw_excerpt = True
+            continue
+        if stripped.startswith("- evidence "):
+            wrapper_lines.append(line)
+            evidence_card_count += 1
+            in_raw_excerpt = False
+            continue
+        if stripped == "evidence_context:":
+            wrapper_lines.append(line)
+            in_raw_excerpt = False
+            continue
+        if in_raw_excerpt:
+            raw_lines.append(line)
+            continue
+        if stripped.startswith("kind:"):
+            kind = stripped.split(":", 1)[1].strip()
+            if kind and kind not in evidence_kinds:
+                evidence_kinds.append(kind)
+        if stripped.startswith(summary_prefixes):
+            summary_lines.append(line)
+            continue
+        metadata_lines.append(line)
+    return {
+        "evidence_wrapper_tokens": _joined_token_count(wrapper_lines, token_count=token_count),
+        "evidence_metadata_tokens": _joined_token_count(metadata_lines, token_count=token_count),
+        "evidence_raw_excerpt_tokens": _joined_token_count(raw_lines, token_count=token_count),
+        "evidence_summary_tokens": _joined_token_count(summary_lines, token_count=token_count),
+        "evidence_card_count": evidence_card_count,
+        "evidence_kinds": evidence_kinds,
+    }
+
+
+def _joined_token_count(lines: list[str], *, token_count: Callable[[str], int]) -> int:
+    if not lines:
+        return 0
+    return token_count("\n".join(lines))
 
 
 def _cache_miss_reason(
