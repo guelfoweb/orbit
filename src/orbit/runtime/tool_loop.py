@@ -94,6 +94,7 @@ def run_tool_loop(
     tool_names: tuple[str, ...] | None,
     initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
     local_capabilities: LocalCapabilities | None = None,
+    user_turn_id: str | None = None,
 ) -> ChatResult:
     allowed_tool_names = tool_names or default_tool_names()
     executor = HybridToolExecutor(
@@ -597,7 +598,12 @@ def run_tool_loop(
                         tool_call,
                         tool_result,
                         evidence_store=evidence_store,
-                        metadata=_tool_evidence_metadata(tool_call, source=execution.source),
+                        metadata=_tool_evidence_metadata(
+                            tool_call,
+                            source=execution.source,
+                            user_turn_id=user_turn_id,
+                            produced_by_phase="initial_tool_call",
+                        ),
                     )
                 )
                 if should_handoff_to_final_from_tool():
@@ -715,6 +721,7 @@ def run_tool_loop(
             on_final_delta=tool_delta_callback,
             on_progress=on_progress,
         )
+        produced_by_phase: str | None = "tool_call"
         last_result = result
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
@@ -737,6 +744,7 @@ def run_tool_loop(
                 on_final_delta=suppress_tool_delta,
                 on_progress=on_progress,
             )
+            produced_by_phase = "tool_call_retry"
             last_result = result
             repair.contract_retry_pending = False
             if on_model_step:
@@ -778,11 +786,13 @@ def run_tool_loop(
         if result.finish_reason == "length" and not result.tool_calls:
             with model_call_context(phase="tool_call_retry", tools_mode="on"):
                 result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+            produced_by_phase = "tool_call_retry"
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
         if not result.tool_calls and _is_empty_final_response(result):
             with model_call_context(phase="tool_call_retry", tools_mode="on"):
                 result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=tool_max_tokens, tools=tools)
+            produced_by_phase = "tool_call_retry"
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
             if not result.tool_calls and _is_empty_final_response(result):
@@ -932,7 +942,12 @@ def run_tool_loop(
                     tool_call,
                     tool_result,
                     evidence_store=evidence_store,
-                    metadata=_tool_evidence_metadata(tool_call, source=execution.source),
+                    metadata=_tool_evidence_metadata(
+                        tool_call,
+                        source=execution.source,
+                        user_turn_id=user_turn_id,
+                        produced_by_phase=produced_by_phase,
+                    ),
                 )
             )
             if should_handoff_to_final_from_tool():
@@ -1043,8 +1058,18 @@ def _shell_raw_arguments_from_tool_call(tool_call: dict[str, object]) -> str | N
     return arguments if isinstance(arguments, str) and arguments.strip() else None
 
 
-def _tool_evidence_metadata(tool_call: dict[str, object], *, source: str) -> dict[str, object]:
+def _tool_evidence_metadata(
+    tool_call: dict[str, object],
+    *,
+    source: str,
+    user_turn_id: str | None = None,
+    produced_by_phase: str | None = None,
+) -> dict[str, object]:
     metadata: dict[str, object] = {"source": source}
+    if user_turn_id is not None:
+        metadata["user_turn_id"] = user_turn_id
+    if produced_by_phase is not None:
+        metadata["produced_by_phase"] = produced_by_phase
     command = _shell_command_from_tool_call(tool_call)
     if command:
         metadata["command"] = command

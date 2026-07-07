@@ -6737,6 +6737,11 @@ EOF"""
         self.assertEqual(backend.calls, 3)
         tool_message = _last_tool_message(runtime)
         self.assertIn("file.txt", tool_message["content"])
+        self.assertIsNotNone(runtime.evidence_store)
+        record = runtime.evidence_store.recent_records(1)[0]
+        self.assertEqual(record.user_turn_id, "turn_1")
+        self.assertEqual(record.produced_by_phase, "tool_call")
+        self.assertIsNone(record.producer_model_call_id)
 
     def test_ask_with_tools_retries_empty_length_final_after_tool_result(self) -> None:
         class EmptyLengthFinalBackend:

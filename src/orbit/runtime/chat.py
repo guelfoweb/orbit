@@ -130,6 +130,8 @@ class ChatRuntime:
     local_capabilities: LocalCapabilities = field(default_factory=discover_local_capabilities)
     diagnostic_session_id: str = "default"
     evidence_store: EvidenceStore | None = None
+    user_turn_counter: int = 0
+    current_user_turn_id: str | None = None
 
     def __post_init__(self) -> None:
         self.backend = instrument_backend(self.backend)
@@ -141,6 +143,11 @@ class ChatRuntime:
     def refresh_local_capabilities(self) -> LocalCapabilities:
         self.local_capabilities = discover_local_capabilities()
         return self.local_capabilities
+
+    def _begin_user_turn(self) -> str:
+        self.user_turn_counter += 1
+        self.current_user_turn_id = f"turn_{self.user_turn_counter}"
+        return self.current_user_turn_id
 
     @user_request
     def ask(
@@ -156,6 +163,7 @@ class ChatRuntime:
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
+        self._begin_user_turn()
         user_content = message_content(prompt, images or [], audios or [])
         result = self._pure_chat_environment().ask_user_content(
             user_content,
@@ -182,6 +190,7 @@ class ChatRuntime:
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
+        self._begin_user_turn()
         self.last_memory_refresh = None
         self.refresh_memory_if_needed(temperature=temperature)
         call_messages = with_chat_system_prompt([*self.messages, {"role": "user", "content": prompt}])
@@ -236,6 +245,7 @@ class ChatRuntime:
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
+        self._begin_user_turn()
         self.last_memory_refresh = None
         self.refresh_memory_if_needed(temperature=temperature)
         self.messages.append({"role": "user", "content": prompt})
@@ -279,6 +289,7 @@ class ChatRuntime:
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         allowed_tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
+        self._begin_user_turn()
         self.last_memory_refresh = None
         self.refresh_memory_if_needed(temperature=temperature)
         resolution = self._file_input_environment(workdir).resolve(
@@ -713,6 +724,7 @@ class ChatRuntime:
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
             local_capabilities=self.local_capabilities,
+            user_turn_id=self.current_user_turn_id,
         )
     def _stream_tool_thinking_plan(
         self,
