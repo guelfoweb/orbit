@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from orbit.native_server.app import _mtp_last_completion_payload
+from orbit.native_server.app import _mtp_config_payload, _mtp_last_completion_payload
 from orbit.native_llama.mtp_completion import MtpCompletionResult
 
 
@@ -22,6 +22,30 @@ SPEC.loader.exec_module(bench_mtp)
 
 
 class NativeServerMtpPropsTests(unittest.TestCase):
+    def test_mtp_config_payload_is_none_when_mtp_experimental_is_disabled(self) -> None:
+        client = SimpleNamespace(
+            config=SimpleNamespace(use_mtp_experimental=False),
+            _session=SimpleNamespace(ctx_tgt=None, ctx_dft=None),
+        )
+
+        self.assertIsNone(_mtp_config_payload(client))
+
+    def test_mtp_config_payload_exposes_available_effective_values(self) -> None:
+        client = SimpleNamespace(
+            config=SimpleNamespace(use_mtp_experimental=True),
+            _session=SimpleNamespace(ctx_tgt=object(), ctx_dft=None),
+        )
+
+        payload = _mtp_config_payload(client)
+
+        assert payload is not None
+        self.assertEqual(payload["n_max"], 3)
+        self.assertIsNone(payload["n_min"])
+        self.assertIsNone(payload["p_min"])
+        self.assertIsNone(payload["backend_sampling"])
+        self.assertTrue(payload["ctx_tgt"])
+        self.assertFalse(payload["ctx_dft"])
+
     def test_mtp_last_completion_payload_is_none_when_completion_is_disabled(self) -> None:
         client = SimpleNamespace(
             last_mtp_completion=MtpCompletionResult(
