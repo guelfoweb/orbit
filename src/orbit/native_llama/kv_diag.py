@@ -163,6 +163,7 @@ def build_prompt_component_tokens(
     }
     evidence_kinds: list[str] = []
     evidence_card_count = 0
+    evidence_cards: list[dict[str, Any]] = []
     content_total = 0
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -186,6 +187,7 @@ def build_prompt_component_tokens(
             components["evidence_total_tokens"] += tokens
             content_total += tokens
             evidence_card_count += evidence["evidence_card_count"]
+            evidence_cards.extend(evidence.get("cards", []))
             for kind in evidence["evidence_kinds"]:
                 if kind not in evidence_kinds:
                     evidence_kinds.append(kind)
@@ -212,6 +214,7 @@ def build_prompt_component_tokens(
         "evidence_card_count": evidence_card_count,
         "evidence_kinds": evidence_kinds,
         "content_tokens_total": content_total,
+        "evidence_cards": evidence_cards,
     }
 
 
@@ -237,6 +240,43 @@ def _emit_prompt_component_tokens_event(
         "evidence_card_count": _safe_int(component_tokens.get("evidence_card_count")) or 0,
         "evidence_kinds": component_tokens.get("evidence_kinds") if isinstance(component_tokens.get("evidence_kinds"), list) else [],
         "content_tokens_total": _safe_int(component_tokens.get("content_tokens_total")),
+    }
+    _emit(event)
+    for card in component_tokens.get("evidence_cards", []):
+        if isinstance(card, dict):
+            _emit_evidence_card_tokens_event(
+                request=request,
+                card=card,
+            )
+
+
+def _emit_evidence_card_tokens_event(
+    *,
+    request: NativeDiagRequest | None,
+    card: dict[str, Any],
+) -> None:
+    event = {
+        "event": "kv_diag_evidence_card_tokens",
+        "backend_request_id": request.backend_request_id if request else None,
+        "model_call_id": None,
+        "phase": request.phase if request else None,
+        "tools_mode": request.tools_mode if request else None,
+        "role_sequence": request.role_sequence if request else [],
+        "card_index": _safe_int(card.get("card_index")),
+        "evidence_id_hash": _safe_str(card.get("evidence_id_hash")),
+        "kind": _safe_str(card.get("kind")),
+        "status": _safe_str(card.get("status")),
+        "command_hash": _safe_str(card.get("command_hash")),
+        "path_hash": _safe_str(card.get("path_hash")),
+        "metadata_tokens": _safe_int(card.get("metadata_tokens")) or 0,
+        "raw_excerpt_tokens": _safe_int(card.get("raw_excerpt_tokens")) or 0,
+        "summary_tokens": _safe_int(card.get("summary_tokens")) or 0,
+        "wrapper_tokens": _safe_int(card.get("wrapper_tokens")) or 0,
+        "unknown_tokens": _safe_int(card.get("unknown_tokens")) or 0,
+        "total_tokens": _safe_int(card.get("total_tokens")) or 0,
+        "has_raw_excerpt": bool(card.get("has_raw_excerpt")),
+        "has_summary": bool(card.get("has_summary")),
+        "is_error_status": bool(card.get("is_error_status")),
     }
     _emit(event)
 
@@ -335,6 +375,8 @@ def _evidence_component_tokens(content: str, *, token_count: Callable[[str], int
     evidence_kinds: list[str] = []
     in_raw_excerpt = False
     evidence_card_count = 0
+    cards: list[dict[str, Any]] = []
+    current_card: dict[str, Any] | None = None
     summary_prefixes = (
         "stdout_excerpt:",
         "stderr_excerpt:",
@@ -346,11 +388,26 @@ def _evidence_component_tokens(content: str, *, token_count: Callable[[str], int
         stripped = line.strip()
         if stripped == "bounded_raw_excerpt:":
             wrapper_lines.append(line)
+            if current_card is not None:
+                current_card["wrapper_lines"].append(line)
             in_raw_excerpt = True
             continue
         if stripped.startswith("- evidence "):
             wrapper_lines.append(line)
             evidence_card_count += 1
+            current_card = {
+                "card_index": evidence_card_count,
+                "wrapper_lines": [line],
+                "metadata_lines": [],
+                "raw_lines": [],
+                "summary_lines": [],
+                "kind": None,
+                "status": None,
+                "raw_ref": None,
+                "command": None,
+                "path": None,
+            }
+            cards.append(current_card)
             in_raw_excerpt = False
             continue
         if stripped == "evidence_context:":
@@ -359,15 +416,31 @@ def _evidence_component_tokens(content: str, *, token_count: Callable[[str], int
             continue
         if in_raw_excerpt:
             raw_lines.append(line)
+            if current_card is not None:
+                current_card["raw_lines"].append(line)
             continue
         if stripped.startswith("kind:"):
             kind = stripped.split(":", 1)[1].strip()
             if kind and kind not in evidence_kinds:
                 evidence_kinds.append(kind)
+            if current_card is not None:
+                current_card["kind"] = kind or None
+        if stripped.startswith("status:") and current_card is not None:
+            current_card["status"] = stripped.split(":", 1)[1].strip() or None
+        if stripped.startswith("raw_ref:") and current_card is not None:
+            current_card["raw_ref"] = stripped.split(":", 1)[1].strip() or None
+        if stripped.startswith("command:") and current_card is not None:
+            current_card["command"] = stripped.split(":", 1)[1].strip() or None
+        if stripped.startswith(("file_paths:", "path:")) and current_card is not None:
+            current_card["path"] = stripped.split(":", 1)[1].strip() or None
         if stripped.startswith(summary_prefixes):
             summary_lines.append(line)
+            if current_card is not None:
+                current_card["summary_lines"].append(line)
             continue
         metadata_lines.append(line)
+        if current_card is not None:
+            current_card["metadata_lines"].append(line)
     return {
         "evidence_wrapper_tokens": _joined_token_count(wrapper_lines, token_count=token_count),
         "evidence_metadata_tokens": _joined_token_count(metadata_lines, token_count=token_count),
@@ -375,6 +448,36 @@ def _evidence_component_tokens(content: str, *, token_count: Callable[[str], int
         "evidence_summary_tokens": _joined_token_count(summary_lines, token_count=token_count),
         "evidence_card_count": evidence_card_count,
         "evidence_kinds": evidence_kinds,
+        "cards": [_evidence_card_component_tokens(card, token_count=token_count) for card in cards],
+    }
+
+
+def _evidence_card_component_tokens(card: dict[str, Any], *, token_count: Callable[[str], int]) -> dict[str, Any]:
+    wrapper_tokens = _joined_token_count(card["wrapper_lines"], token_count=token_count)
+    metadata_tokens = _joined_token_count(card["metadata_lines"], token_count=token_count)
+    raw_tokens = _joined_token_count(card["raw_lines"], token_count=token_count)
+    summary_tokens = _joined_token_count(card["summary_lines"], token_count=token_count)
+    total = wrapper_tokens + metadata_tokens + raw_tokens + summary_tokens
+    raw_ref = card.get("raw_ref")
+    command = card.get("command")
+    path = card.get("path")
+    status = _safe_str(card.get("status"))
+    return {
+        "card_index": _safe_int(card.get("card_index")) or 0,
+        "evidence_id_hash": _hash(raw_ref) if isinstance(raw_ref, str) and raw_ref else None,
+        "kind": _safe_str(card.get("kind")),
+        "status": status,
+        "command_hash": _hash(command) if isinstance(command, str) and command else None,
+        "path_hash": _hash(path) if isinstance(path, str) and path else None,
+        "metadata_tokens": metadata_tokens,
+        "raw_excerpt_tokens": raw_tokens,
+        "summary_tokens": summary_tokens,
+        "wrapper_tokens": wrapper_tokens,
+        "unknown_tokens": 0,
+        "total_tokens": total,
+        "has_raw_excerpt": raw_tokens > 0,
+        "has_summary": summary_tokens > 0,
+        "is_error_status": status == "error",
     }
 
 

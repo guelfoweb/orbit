@@ -747,6 +747,86 @@ class KVDiagTests(unittest.TestCase):
         self.assertNotIn("raw detail line", raw_log)
         self.assertNotIn("system policy", raw_log)
 
+    def test_native_evidence_card_tokens_are_metadata_only(self) -> None:
+        def token_count(text: str) -> int:
+            return len([part for part in text.replace("\n", " ").split(" ") if part])
+
+        messages = [
+            {"role": "system", "content": "system policy"},
+            {"role": "user", "content": "placeholder question"},
+            {
+                "role": "system",
+                "content": "\n".join(
+                    [
+                        "evidence_context:",
+                        "- evidence 1:",
+                        "tool_evidence_card: true",
+                        "kind: shell",
+                        "status: error",
+                        "raw_ref: evidence:secret-raw-ref",
+                        "command: secret-command --with path.txt",
+                        "path: /secret/path.txt",
+                        "stdout_excerpt: concise summary",
+                        "bounded_raw_excerpt:",
+                        "raw detail line",
+                    ]
+                ),
+            },
+        ]
+        component_tokens = build_prompt_component_tokens(
+            messages=messages,
+            prompt_tokens_total=48,
+            token_count=token_count,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            payload = {
+                "cache_prompt": True,
+                "_orbit_kv_phase": "chat_final",
+                "_orbit_kv_tools_mode": "on",
+                "messages": messages,
+            }
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                with native_request_context(endpoint="/chat/stream", payload=payload):
+                    emit_native_prompt_cache_event(
+                        prompt_tokens=list(range(48)),
+                        previous_prompt_tokens=[0, 1],
+                        reused_prompt_tokens=1,
+                        output_tokens=1,
+                        cancelled=False,
+                        slot_id="default",
+                        component_tokens=component_tokens,
+                    )
+
+            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            event = next(item for item in events if item["event"] == "kv_diag_evidence_card_tokens")
+            raw_log = json.dumps(event)
+
+        self.assertEqual(event["phase"], "chat_final")
+        self.assertEqual(event["tools_mode"], "on")
+        self.assertEqual(event["card_index"], 1)
+        self.assertEqual(event["kind"], "shell")
+        self.assertEqual(event["status"], "error")
+        self.assertIsNotNone(event["evidence_id_hash"])
+        self.assertIsNotNone(event["command_hash"])
+        self.assertIsNotNone(event["path_hash"])
+        self.assertGreater(event["metadata_tokens"], 0)
+        self.assertGreater(event["raw_excerpt_tokens"], 0)
+        self.assertGreater(event["summary_tokens"], 0)
+        self.assertGreater(event["wrapper_tokens"], 0)
+        self.assertEqual(event["unknown_tokens"], 0)
+        self.assertEqual(
+            event["total_tokens"],
+            event["metadata_tokens"] + event["raw_excerpt_tokens"] + event["summary_tokens"] + event["wrapper_tokens"],
+        )
+        self.assertTrue(event["has_raw_excerpt"])
+        self.assertTrue(event["has_summary"])
+        self.assertTrue(event["is_error_status"])
+        self.assertNotIn("secret-command", raw_log)
+        self.assertNotIn("/secret/path.txt", raw_log)
+        self.assertNotIn("raw detail line", raw_log)
+        self.assertNotIn("evidence:secret-raw-ref", raw_log)
+
     def test_prompt_component_tokens_preserve_zero_values(self) -> None:
         component_tokens = build_prompt_component_tokens(
             messages=[],
@@ -756,6 +836,7 @@ class KVDiagTests(unittest.TestCase):
 
         self.assertEqual(component_tokens["evidence_card_count"], 0)
         self.assertEqual(component_tokens["evidence_kinds"], [])
+        self.assertEqual(component_tokens["evidence_cards"], [])
         for value in component_tokens["components"].values():
             self.assertEqual(value, 0)
 
