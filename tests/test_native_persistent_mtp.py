@@ -292,6 +292,36 @@ class NativePersistentMtpTests(unittest.TestCase):
             def orbit_mtp_session_last_restore_count(self, _handle):
                 return 0
 
+            def orbit_mtp_session_last_validate_steps(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_rows_requested_total(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_rows_consumed_estimated_total(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_rows_wasted_estimated_total(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_rows_wasted_estimated_ratio(self, _handle):
+                return 0.0
+
+            def orbit_mtp_session_last_accepted_draft_hist_0(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_accepted_draft_hist_1(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_accepted_draft_hist_2(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_accepted_draft_hist_3(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_accepted_draft_hist_ge4(self, _handle):
+                return 0
+
         class FakeLibrary:
             def __init__(self, _build_bin, _shim_path) -> None:
                 self.lib = FakeLib()
@@ -393,6 +423,36 @@ class NativePersistentMtpTests(unittest.TestCase):
             def orbit_mtp_session_last_restore_count(self, _handle):
                 return 0
 
+            def orbit_mtp_session_last_validate_steps(self, _handle):
+                return 2
+
+            def orbit_mtp_session_last_rows_requested_total(self, _handle):
+                return 8
+
+            def orbit_mtp_session_last_rows_consumed_estimated_total(self, _handle):
+                return 5
+
+            def orbit_mtp_session_last_rows_wasted_estimated_total(self, _handle):
+                return 3
+
+            def orbit_mtp_session_last_rows_wasted_estimated_ratio(self, _handle):
+                return 0.375
+
+            def orbit_mtp_session_last_accepted_draft_hist_0(self, _handle):
+                return 1
+
+            def orbit_mtp_session_last_accepted_draft_hist_1(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_accepted_draft_hist_2(self, _handle):
+                return 1
+
+            def orbit_mtp_session_last_accepted_draft_hist_3(self, _handle):
+                return 0
+
+            def orbit_mtp_session_last_accepted_draft_hist_ge4(self, _handle):
+                return 0
+
             def orbit_mtp_session_last_timing_json(self, _handle):
                 return b'{"target_validate":{"total_ms":10.0}}'
 
@@ -428,6 +488,16 @@ class NativePersistentMtpTests(unittest.TestCase):
         self.assertEqual(result.timing_json, '{"target_validate":{"total_ms":10.0}}')
         self.assertEqual(result.output_token_hashes_json, "[11,22]")
         self.assertEqual(result.first_sample_trace_json, '{"path_name":"mtp","prompt_count":23,"last_logits_hash":999,"first_sample_hash":11}')
+        self.assertEqual(result.validate_steps, 2)
+        self.assertEqual(result.rows_requested_total, 8)
+        self.assertEqual(result.rows_consumed_estimated_total, 5)
+        self.assertEqual(result.rows_wasted_estimated_total, 3)
+        self.assertEqual(result.rows_wasted_estimated_ratio, 0.375)
+        self.assertEqual(result.accepted_draft_hist_0, 1)
+        self.assertEqual(result.accepted_draft_hist_1, 0)
+        self.assertEqual(result.accepted_draft_hist_2, 1)
+        self.assertEqual(result.accepted_draft_hist_3, 0)
+        self.assertEqual(result.accepted_draft_hist_ge4, 0)
 
 
 if __name__ == "__main__":
