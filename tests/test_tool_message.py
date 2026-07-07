@@ -70,7 +70,12 @@ class ToolMessageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = EvidenceStore(Path(tmp) / "session.evidence")
-            message = tool_result_message(tool_call, result, evidence_store=store)
+            message = tool_result_message(
+                tool_call,
+                result,
+                evidence_store=store,
+                metadata={"user_turn_id": "turn_1", "produced_by_phase": "tool_call"},
+            )
 
             self.assertEqual(message["role"], "tool")
             self.assertEqual(message["tool_call_id"], "call-1")
@@ -84,6 +89,9 @@ class ToolMessageTests(unittest.TestCase):
             self.assertEqual(store.load_raw(message["evidence_id"]), raw)
             record = store.recent_records(1)[0]
             self.assertEqual(record.tool_call_id, "call-1")
+            self.assertEqual(record.user_turn_id, "turn_1")
+            self.assertEqual(record.produced_by_phase, "tool_call")
+            self.assertIsNone(record.producer_model_call_id)
             self.assertEqual(record.evidence_sequence, 1)
 
 

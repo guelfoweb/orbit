@@ -54,12 +54,22 @@ class EvidenceTests(unittest.TestCase):
             first = store.add(
                 "exec_shell_full_command",
                 "first",
-                metadata={"command": "printf first", "tool_call_id": "call_1"},
+                metadata={
+                    "command": "printf first",
+                    "tool_call_id": "call_1",
+                    "user_turn_id": "turn_1",
+                    "produced_by_phase": "tool_call",
+                },
             )
             second = store.add(
                 "exec_shell_full_command",
                 "second",
-                metadata={"command": "printf second", "tool_call_id": "call_2"},
+                metadata={
+                    "command": "printf second",
+                    "tool_call_id": "call_2",
+                    "user_turn_id": "turn_2",
+                    "produced_by_phase": "tool_call_retry",
+                },
             )
 
             reloaded = EvidenceStore(store.root)
@@ -68,6 +78,9 @@ class EvidenceTests(unittest.TestCase):
 
             self.assertEqual([record.evidence_sequence for record in loaded], [1, 2])
             self.assertEqual([record.tool_call_id for record in loaded], ["call_1", "call_2"])
+            self.assertEqual([record.user_turn_id for record in loaded], ["turn_1", "turn_2"])
+            self.assertEqual([record.produced_by_phase for record in loaded], ["tool_call", "tool_call_retry"])
+            self.assertEqual([record.producer_model_call_id for record in loaded], [None, None])
             self.assertEqual(first.evidence_sequence, 1)
             self.assertEqual(second.evidence_sequence, 2)
 

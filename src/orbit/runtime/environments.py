@@ -383,6 +383,7 @@ class ToolLoopEnvironment:
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
         local_capabilities=None,
+        user_turn_id: str | None = None,
     ) -> ToolResultBundle:
         result = run_tool_loop(
             self.runtime,
@@ -399,6 +400,7 @@ class ToolLoopEnvironment:
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
             local_capabilities=local_capabilities,
+            user_turn_id=user_turn_id,
         )
         return ToolResultBundle(
             result=result,
