@@ -22,7 +22,7 @@ from .bindings import (
 )
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativeProgress, NativeTimings
-from .kv_diag import emit_prompt_cache_event, emit_route_prefix_anchor_event
+from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
@@ -582,6 +582,7 @@ class NativeLlamaClient:
             allow_mtp_experimental=allow_mtp,
             thinking=thinking,
             route_anchor_segments=route_anchor_segments,
+            kv_diag_messages=messages,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
@@ -934,6 +935,7 @@ class NativeLlamaClient:
         allow_mtp_experimental: bool = True,
         thinking: bool | None = None,
         route_anchor_segments: RoutePromptSegments | None = None,
+        kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -971,6 +973,7 @@ class NativeLlamaClient:
                 prompt,
                 max_tokens=max_tokens,
                 route_anchor_segments=route_anchor_segments,
+                kv_diag_messages=kv_diag_messages,
                 on_progress=on_progress,
                 on_token=on_token,
                 should_cancel=should_cancel,
@@ -1111,6 +1114,7 @@ class NativeLlamaClient:
         *,
         max_tokens: int = 16,
         route_anchor_segments: RoutePromptSegments | None = None,
+        kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -1159,6 +1163,13 @@ class NativeLlamaClient:
             on_token=on_token,
             should_cancel=should_cancel,
         )
+        component_tokens = None
+        if kv_diag_enabled() and kv_diag_messages is not None:
+            component_tokens = build_prompt_component_tokens(
+                messages=[dict(message) for message in kv_diag_messages],
+                prompt_tokens_total=n_prompt,
+                token_count=self._content_token_count,
+            )
         emit_prompt_cache_event(
             prompt_tokens=prompt_tokens,
             previous_prompt_tokens=previous_prompt_tokens,
@@ -1166,6 +1177,7 @@ class NativeLlamaClient:
             output_tokens=generated,
             cancelled=cancelled,
             slot_id=self._session.session_id,
+            component_tokens=component_tokens,
         )
         if anchor_metadata is not None:
             anchor_metadata["cached_tokens"] = reused
@@ -1540,9 +1552,16 @@ class NativeLlamaClient:
     def tokenize(self, prompt: str) -> list[int]:
         if not self._vocab:
             raise RuntimeError("native client not loaded")
+        return self._tokenize_text(prompt, add_special=not prompt.startswith("<bos>"))
+
+    def _content_token_count(self, text: str) -> int:
+        if not text:
+            return 0
+        return len(self._tokenize_text(text, add_special=False))
+
+    def _tokenize_text(self, text: str, *, add_special: bool) -> list[int]:
         lib = self.lib.lib
-        prompt_bytes = prompt.encode()
-        add_special = not prompt.startswith("<bos>")
+        prompt_bytes = text.encode()
         n_prompt = -lib.llama_tokenize(self._vocab, prompt_bytes, len(prompt_bytes), None, 0, add_special, True)
         if n_prompt <= 0:
             return []

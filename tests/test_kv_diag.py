@@ -18,6 +18,7 @@ from orbit.runtime.kv_diag import (
     reset_diagnostics_for_tests,
 )
 from orbit.native_llama.kv_diag import (
+    build_prompt_component_tokens,
     emit_prompt_cache_event as emit_native_prompt_cache_event,
     emit_route_prefix_anchor_event as emit_native_route_prefix_anchor_event,
     request_context as native_request_context,
@@ -671,6 +672,92 @@ class KVDiagTests(unittest.TestCase):
         self.assertEqual(event["first_mismatch_token"], 0)
         self.assertEqual(event["previous_token_at_mismatch"], 1)
         self.assertEqual(event["current_token_at_mismatch"], 5)
+
+    def test_native_prompt_component_tokens_are_metadata_only(self) -> None:
+        def token_count(text: str) -> int:
+            return len([part for part in text.replace("\n", " ").split(" ") if part])
+
+        messages = [
+            {"role": "system", "content": "system policy"},
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": "placeholder component payload"},
+            {
+                "role": "system",
+                "content": "\n".join(
+                    [
+                        "evidence_context:",
+                        "- evidence 1:",
+                        "tool_evidence_card: true",
+                        "kind: shell",
+                        "stdout_excerpt: concise summary",
+                        "bounded_raw_excerpt:",
+                        "raw detail line",
+                    ]
+                ),
+            },
+        ]
+        component_tokens = build_prompt_component_tokens(
+            messages=messages,
+            prompt_tokens_total=64,
+            token_count=token_count,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            payload = {
+                "cache_prompt": True,
+                "stream": True,
+                "_orbit_kv_phase": "chat_final",
+                "_orbit_kv_tools_mode": "on",
+                "messages": messages,
+            }
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                with native_request_context(endpoint="/chat/stream", payload=payload):
+                    emit_native_prompt_cache_event(
+                        prompt_tokens=list(range(64)),
+                        previous_prompt_tokens=[0, 1, 99],
+                        reused_prompt_tokens=2,
+                        output_tokens=1,
+                        cancelled=False,
+                        slot_id="default",
+                        component_tokens=component_tokens,
+                    )
+
+            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            event = next(item for item in events if item["event"] == "kv_diag_prompt_component_tokens")
+            raw_log = json.dumps(event)
+
+        components = event["components"]
+        self.assertEqual(event["phase"], "chat_final")
+        self.assertEqual(event["prompt_tokens_total"], 64)
+        self.assertEqual(event["cached_tokens"], 2)
+        self.assertEqual(event["evaluated_tokens"], 62)
+        self.assertEqual(event["role_sequence"], ["system", "assistant", "user", "system"])
+        self.assertEqual(event["evidence_card_count"], 1)
+        self.assertEqual(event["evidence_kinds"], ["shell"])
+        self.assertEqual(components["system_prompt_tokens"], 2)
+        self.assertEqual(components["assistant_history_tokens"], 2)
+        self.assertEqual(components["user_message_tokens"], 3)
+        self.assertEqual(components["conversation_window_tokens"], 5)
+        self.assertGreater(components["evidence_total_tokens"], 0)
+        self.assertGreater(components["evidence_raw_excerpt_tokens"], 0)
+        self.assertGreater(components["evidence_summary_tokens"], 0)
+        self.assertGreaterEqual(components["template_overhead_tokens"], 0)
+        self.assertEqual(components["unknown_tokens"], 0)
+        self.assertNotIn("placeholder component payload", raw_log)
+        self.assertNotIn("raw detail line", raw_log)
+        self.assertNotIn("system policy", raw_log)
+
+    def test_prompt_component_tokens_preserve_zero_values(self) -> None:
+        component_tokens = build_prompt_component_tokens(
+            messages=[],
+            prompt_tokens_total=0,
+            token_count=lambda text: len(text.split()),
+        )
+
+        self.assertEqual(component_tokens["evidence_card_count"], 0)
+        self.assertEqual(component_tokens["evidence_kinds"], [])
+        for value in component_tokens["components"].values():
+            self.assertEqual(value, 0)
 
     def test_native_route_prefix_anchor_diagnostics_are_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
