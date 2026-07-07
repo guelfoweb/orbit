@@ -10,6 +10,7 @@ from unittest import mock
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
 from orbit.runtime.kv_diag import (
+    emit_evidence_lineage,
     emit_route_outcome,
     fingerprint_prompt,
     instrument_backend,
@@ -826,6 +827,46 @@ class KVDiagTests(unittest.TestCase):
         self.assertNotIn("/secret/path.txt", raw_log)
         self.assertNotIn("raw detail line", raw_log)
         self.assertNotIn("evidence:secret-raw-ref", raw_log)
+
+    def test_runtime_evidence_lineage_is_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                with request_context(session_id="session-a"):
+                    with model_call_context(phase="chat_final", tools_mode="on"):
+                        emit_evidence_lineage(
+                            {
+                                "context_kind": "final",
+                                "card_index": 1,
+                                "evidence_id": "ev_secret_raw",
+                                "evidence_sequence": 0,
+                                "tool_call_id": "call_secret",
+                                "user_turn_id": None,
+                                "producer_model_call_id": None,
+                                "produced_by_phase": None,
+                                "kind": "shell",
+                                "status": "error",
+                            }
+                        )
+
+            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            event = next(item for item in events if item["event"] == "kv_diag_evidence_lineage")
+            raw_log = json.dumps(event)
+
+        self.assertEqual(event["phase"], "chat_final")
+        self.assertEqual(event["tools_mode"], "on")
+        self.assertEqual(event["context_kind"], "final")
+        self.assertEqual(event["card_index"], 1)
+        self.assertEqual(event["evidence_sequence"], 0)
+        self.assertIsNotNone(event["evidence_id_hash"])
+        self.assertIsNotNone(event["tool_call_id_hash"])
+        self.assertIsNone(event["user_turn_id"])
+        self.assertIsNone(event["producer_model_call_id"])
+        self.assertIsNone(event["produced_by_phase"])
+        self.assertEqual(event["kind"], "shell")
+        self.assertEqual(event["status"], "error")
+        self.assertNotIn("ev_secret_raw", raw_log)
+        self.assertNotIn("call_secret", raw_log)
 
     def test_prompt_component_tokens_preserve_zero_values(self) -> None:
         component_tokens = build_prompt_component_tokens(

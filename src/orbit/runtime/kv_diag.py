@@ -464,6 +464,33 @@ def emit_route_outcome(
     )
 
 
+def emit_evidence_lineage(metadata: dict[str, Any]) -> None:
+    if not enabled():
+        return
+    evidence_id = metadata.get("evidence_id")
+    tool_call_id = metadata.get("tool_call_id")
+    active_phase = _PHASE.get()
+    event = {
+        "event": "kv_diag_evidence_lineage",
+        "session_id_hash": _current_session_id_hash(),
+        "request_id": _current_request_id(),
+        "model_call_id": _LAST_MODEL_CALL.get("model_call_id") if active_phase and _LAST_MODEL_CALL else None,
+        "phase": _safe_str(metadata.get("phase")) or active_phase,
+        "tools_mode": _TOOLS_MODE.get() if active_phase else None,
+        "context_kind": _safe_str(metadata.get("context_kind")),
+        "card_index": _safe_int(metadata.get("card_index")),
+        "evidence_id_hash": _hash(evidence_id) if isinstance(evidence_id, str) and evidence_id else None,
+        "evidence_sequence": _safe_int(metadata.get("evidence_sequence")),
+        "tool_call_id_hash": _hash(tool_call_id) if isinstance(tool_call_id, str) and tool_call_id else None,
+        "user_turn_id": _safe_str(metadata.get("user_turn_id")),
+        "producer_model_call_id": _safe_str(metadata.get("producer_model_call_id")),
+        "produced_by_phase": _safe_str(metadata.get("produced_by_phase")),
+        "kind": _safe_str(metadata.get("kind")),
+        "status": _safe_str(metadata.get("status")),
+    }
+    _emit(event)
+
+
 def _next_call_context(phase: str, tools_mode: str | None) -> dict[str, Any]:
     request = _REQUEST.get()
     call_id = next(_CALL_IDS)
@@ -488,6 +515,20 @@ def _next_call_context(phase: str, tools_mode: str | None) -> dict[str, Any]:
         "phase": phase,
         "tools_mode": tools_mode,
     }
+
+
+def _current_session_id_hash() -> str | None:
+    request = _REQUEST.get()
+    if request is not None:
+        return request.session_id_hash
+    return _LAST_MODEL_CALL.get("session_id_hash") if _LAST_MODEL_CALL else None
+
+
+def _current_request_id() -> str | None:
+    request = _REQUEST.get()
+    if request is not None:
+        return request.request_id
+    return _LAST_MODEL_CALL.get("request_id") if _LAST_MODEL_CALL else None
 
 
 def _record_model_call(event: dict[str, Any]) -> None:
@@ -550,6 +591,16 @@ def _sum_optional(values: Iterator[Any]) -> int | None:
             total += int(value)
             seen = True
     return total if seen else None
+
+
+def _safe_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _safe_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _component_changes(request_id: str | None, phase: str, tools_mode: str | None, fingerprint: PromptFingerprint) -> list[str]:

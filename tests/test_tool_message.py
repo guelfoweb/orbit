@@ -82,6 +82,9 @@ class ToolMessageTests(unittest.TestCase):
             self.assertLess(len(str(message["content"])), len(raw))
             self.assertNotIn(raw, message["content"])
             self.assertEqual(store.load_raw(message["evidence_id"]), raw)
+            record = store.recent_records(1)[0]
+            self.assertEqual(record.tool_call_id, "call-1")
+            self.assertEqual(record.evidence_sequence, 1)
 
 
 if __name__ == "__main__":

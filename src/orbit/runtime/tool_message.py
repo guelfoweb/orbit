@@ -26,7 +26,9 @@ def tool_result_message(
     content = tool_result.content
     evidence_id = None
     if evidence_store is not None and tool_result.content:
-        record = evidence_store.add(tool_result.name, tool_result.content, metadata=metadata or _tool_call_metadata(tool_call))
+        evidence_metadata = dict(metadata or _tool_call_metadata(tool_call))
+        evidence_metadata.setdefault("tool_call_id", tool_call_id(tool_call))
+        record = evidence_store.add(tool_result.name, tool_result.content, metadata=evidence_metadata)
         content = tool_evidence_ref(record)
         evidence_id = record.evidence_id
     return {
