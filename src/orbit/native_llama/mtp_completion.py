@@ -53,6 +53,7 @@ class MtpCompletionResult:
     timing_json: str | None = None
     validate_trace_json: str | None = None
     target_decode_trace_json: str | None = None
+    validate_equivalence_json: str | None = None
     output_token_hashes_json: str | None = None
     first_sample_trace_json: str | None = None
 

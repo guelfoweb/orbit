@@ -167,6 +167,9 @@ class PersistentMtpLibrary:
         if hasattr(lib, "orbit_mtp_session_last_first_sample_trace_json"):
             lib.orbit_mtp_session_last_first_sample_trace_json.argtypes = [c_void_p]
             lib.orbit_mtp_session_last_first_sample_trace_json.restype = c_char_p
+        if hasattr(lib, "orbit_mtp_session_last_validate_equivalence_json"):
+            lib.orbit_mtp_session_last_validate_equivalence_json.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_validate_equivalence_json.restype = c_char_p
 
 
 def build_persistent_mtp_shim(
@@ -416,6 +419,7 @@ def run_persistent_mtp_completion(
         timing_json=_optional_trace_text(library.lib, "orbit_mtp_session_last_timing_json", runtime.handle) if trace_enabled else None,
         validate_trace_json=None,
         target_decode_trace_json=None,
+        validate_equivalence_json=_optional_trace_text(library.lib, "orbit_mtp_session_last_validate_equivalence_json", runtime.handle) if trace_enabled else None,
         output_token_hashes_json=_optional_trace_text(library.lib, "orbit_mtp_session_last_output_token_hashes_json", runtime.handle) if trace_enabled else None,
         first_sample_trace_json=_optional_trace_text(library.lib, "orbit_mtp_session_last_first_sample_trace_json", runtime.handle) if trace_enabled else None,
     )
