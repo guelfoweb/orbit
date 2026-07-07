@@ -221,6 +221,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             state = self._state()
             session = state.session_info()
             runtime = state.runtime_info()
+            mtp_last_completion = _mtp_last_completion_payload(state.client)
             self._json(
                 {
                     "model_path": str(state.client.paths.model),
@@ -249,6 +250,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_decode_probe_error": state.client.mtp_decode_probe.error,
                     "mtp_experimental_enabled": state.client.config.use_mtp_experimental,
                     "mtp_last_completion_success": state.client.last_mtp_completion.success,
+                    "mtp_last_completion": mtp_last_completion,
                     "mtp_fallback_reason": state.client.mtp_fallback_reason,
                     "mtp_enabled": session["mtp_enabled"],
                     "mtp_initialized": session["mtp_initialized"],
@@ -766,6 +768,67 @@ def _session_id_from_payload(payload: dict[str, Any]) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return DEFAULT_SESSION_ID
+
+
+def _mtp_last_completion_payload(client: NativeLlamaClient) -> dict[str, object] | None:
+    completion = client.last_mtp_completion
+    if not completion.enabled:
+        return None
+    has_metrics = any(
+        value is not None and value != 0
+        for value in (
+            completion.output_tokens,
+            completion.draft_tokens_total,
+            completion.accepted_tokens_total,
+            completion.rejected_tokens_total,
+            completion.acceptance_ratio,
+            completion.fresh_acceptance_ratio,
+            completion.consumed_acceptance_ratio,
+            completion.reused_draft_tokens_total,
+            completion.reused_accepted_tokens_total,
+            completion.reused_rejected_tokens_total,
+            completion.target_decode_calls,
+            completion.draft_decode_calls,
+            completion.elapsed_ms,
+            completion.tokens_per_second,
+            completion.full_accept_steps,
+            completion.replay_steps,
+            completion.partial_accept_steps,
+            completion.partial_no_replay_steps,
+            completion.replay_fallback_steps,
+            completion.rollback_tokens_total,
+            completion.checkpoint_count,
+            completion.restore_count,
+        )
+    )
+    if not completion.success and completion.error is None and not has_metrics:
+        return None
+    return {
+        "success": completion.success,
+        "error": completion.error,
+        "output_tokens": completion.output_tokens,
+        "draft_tokens_total": completion.draft_tokens_total,
+        "accepted_tokens_total": completion.accepted_tokens_total,
+        "rejected_tokens_total": completion.rejected_tokens_total,
+        "acceptance_ratio": completion.acceptance_ratio,
+        "fresh_acceptance_ratio": completion.fresh_acceptance_ratio,
+        "consumed_acceptance_ratio": completion.consumed_acceptance_ratio,
+        "reused_draft_tokens_total": completion.reused_draft_tokens_total,
+        "reused_accepted_tokens_total": completion.reused_accepted_tokens_total,
+        "reused_rejected_tokens_total": completion.reused_rejected_tokens_total,
+        "target_decode_calls": completion.target_decode_calls,
+        "draft_decode_calls": completion.draft_decode_calls,
+        "elapsed_ms": completion.elapsed_ms,
+        "tokens_per_second": completion.tokens_per_second,
+        "full_accept_steps": completion.full_accept_steps,
+        "replay_steps": completion.replay_steps,
+        "partial_accept_steps": completion.partial_accept_steps,
+        "partial_no_replay_steps": completion.partial_no_replay_steps,
+        "replay_fallback_steps": completion.replay_fallback_steps,
+        "rollback_tokens_total": completion.rollback_tokens_total,
+        "checkpoint_count": completion.checkpoint_count,
+        "restore_count": completion.restore_count,
+    }
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError)
