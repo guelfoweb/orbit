@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from orbit.native_server.app import _mtp_config_payload, _mtp_last_completion_payload
+from orbit.native_server.app import _mtp_config_payload, _mtp_last_completion_payload, _mtp_last_timing_payload
 from orbit.native_llama.mtp_completion import MtpCompletionResult
 
 
@@ -101,6 +101,75 @@ class NativeServerMtpPropsTests(unittest.TestCase):
         self.assertEqual(payload["rollback_tokens_total"], 0)
         self.assertEqual(payload["checkpoint_count"], 0)
         self.assertEqual(payload["restore_count"], 0)
+
+    def test_mtp_last_timing_payload_is_none_when_completion_is_disabled(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=False,
+                success=False,
+                error=None,
+            )
+        )
+
+        self.assertIsNone(_mtp_last_timing_payload(client))
+
+    def test_mtp_last_timing_payload_is_none_when_timing_json_is_absent(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                timing_json=None,
+            )
+        )
+
+        self.assertIsNone(_mtp_last_timing_payload(client))
+
+    def test_mtp_last_timing_payload_is_none_when_timing_json_is_malformed(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                timing_json="{",
+            )
+        )
+
+        self.assertIsNone(_mtp_last_timing_payload(client))
+
+    def test_mtp_last_timing_payload_extracts_summary_and_preserves_zero(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                timing_json=json.dumps(
+                    {
+                        "summary": {
+                            "total_wall_ms": 10.0,
+                            "suffix_target_prefill_ms": 0.0,
+                            "speculative_loop_ms": 6.0,
+                            "speculative_loop_including_suffix_ms": 6.5,
+                            "target_validate_ms": 2.0,
+                            "draft_generation_ms": 1.5,
+                            "checkpoint_restore_ms": 0.0,
+                            "sampler_ms": 0.5,
+                            "seq_rm_ms": 0.0,
+                            "non_loop_overhead_ms": 1.0,
+                        }
+                    }
+                ),
+            )
+        )
+
+        payload = _mtp_last_timing_payload(client)
+
+        assert payload is not None
+        self.assertEqual(payload["total_ms"], 10.0)
+        self.assertEqual(payload["suffix_target_prefill_ms"], 0.0)
+        self.assertEqual(payload["checkpoint_restore_ms"], 0.0)
+        self.assertEqual(payload["seq_rm_ms"], 0.0)
+        self.assertEqual(payload["other_ms"], 0.0)
 
 
 class BenchMtpThroughputMarkdownTests(unittest.TestCase):

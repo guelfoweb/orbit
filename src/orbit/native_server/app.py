@@ -222,6 +222,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             session = state.session_info()
             runtime = state.runtime_info()
             mtp_last_completion = _mtp_last_completion_payload(state.client)
+            mtp_last_timing = _mtp_last_timing_payload(state.client)
             mtp_config = _mtp_config_payload(state.client)
             self._json(
                 {
@@ -252,6 +253,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_experimental_enabled": state.client.config.use_mtp_experimental,
                     "mtp_last_completion_success": state.client.last_mtp_completion.success,
                     "mtp_last_completion": mtp_last_completion,
+                    "mtp_last_timing": mtp_last_timing,
                     "mtp_config": mtp_config,
                     "mtp_fallback_reason": state.client.mtp_fallback_reason,
                     "mtp_enabled": session["mtp_enabled"],
@@ -830,6 +832,67 @@ def _mtp_last_completion_payload(client: NativeLlamaClient) -> dict[str, object]
         "rollback_tokens_total": completion.rollback_tokens_total,
         "checkpoint_count": completion.checkpoint_count,
         "restore_count": completion.restore_count,
+    }
+
+
+def _mtp_last_timing_payload(client: NativeLlamaClient) -> dict[str, object] | None:
+    completion = client.last_mtp_completion
+    if not completion.enabled or not completion.timing_json:
+        return None
+    try:
+        payload = json.loads(completion.timing_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    summary = payload.get("summary")
+    if not isinstance(summary, Mapping):
+        return None
+
+    def _number(name: str) -> float | int | None:
+        value = summary.get(name)
+        if isinstance(value, (int, float)):
+            return value
+        return None
+
+    total_ms = _number("total_wall_ms")
+    suffix_target_prefill_ms = _number("suffix_target_prefill_ms")
+    speculative_loop_ms = _number("speculative_loop_ms")
+    speculative_loop_including_suffix_ms = _number("speculative_loop_including_suffix_ms")
+    target_validate_ms = _number("target_validate_ms")
+    draft_generation_ms = _number("draft_generation_ms")
+    checkpoint_restore_ms = _number("checkpoint_restore_ms")
+    sampler_ms = _number("sampler_ms")
+    seq_rm_ms = _number("seq_rm_ms")
+    non_loop_overhead_ms = _number("non_loop_overhead_ms")
+
+    other_ms = None
+    if isinstance(total_ms, (int, float)):
+        known_components = [
+            suffix_target_prefill_ms,
+            speculative_loop_ms,
+            target_validate_ms,
+            draft_generation_ms,
+            checkpoint_restore_ms,
+            sampler_ms,
+            seq_rm_ms,
+            non_loop_overhead_ms,
+        ]
+        known_total = sum(float(value) for value in known_components if isinstance(value, (int, float)))
+        other_ms = max(0.0, float(total_ms) - known_total)
+
+    return {
+        "total_ms": total_ms,
+        "suffix_target_prefill_ms": suffix_target_prefill_ms,
+        "speculative_loop_ms": speculative_loop_ms,
+        "speculative_loop_including_suffix_ms": speculative_loop_including_suffix_ms,
+        "target_validate_ms": target_validate_ms,
+        "draft_generation_ms": draft_generation_ms,
+        "checkpoint_restore_ms": checkpoint_restore_ms,
+        "sampler_ms": sampler_ms,
+        "seq_rm_ms": seq_rm_ms,
+        "non_loop_overhead_ms": non_loop_overhead_ms,
+        "other_ms": other_ms,
     }
 
 
