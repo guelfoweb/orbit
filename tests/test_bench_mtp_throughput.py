@@ -12,6 +12,7 @@ from orbit.native_server.app import (
     _mtp_config_payload,
     _mtp_last_completion_payload,
     _mtp_last_timing_payload,
+    _mtp_last_validate_equivalence_payload,
     _mtp_last_validate_efficiency_payload,
 )
 from orbit.native_llama.mtp_completion import MtpCompletionResult
@@ -250,6 +251,66 @@ class NativeServerMtpPropsTests(unittest.TestCase):
         self.assertEqual(payload["accepted_draft_histogram"], {"0": 1, "1": 2, "2": 0, "3": 1, "ge4": 1})
         self.assertEqual(payload["full_accept_steps"], 2)
         self.assertEqual(payload["partial_accept_steps"], 3)
+
+    def test_mtp_last_validate_equivalence_payload_is_none_when_absent(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                validate_equivalence_json=None,
+            )
+        )
+
+        self.assertIsNone(_mtp_last_validate_equivalence_payload(client))
+
+    def test_mtp_last_validate_equivalence_payload_is_none_when_malformed(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                validate_equivalence_json="{",
+            )
+        )
+
+        self.assertIsNone(_mtp_last_validate_equivalence_payload(client))
+
+    def test_mtp_last_validate_equivalence_payload_preserves_zero_and_bounds_sample(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                validate_equivalence_json=json.dumps(
+                    {
+                        "steps": 0,
+                        "steps_recorded": 0,
+                        "rows_requested_total": 0,
+                        "rows_consumed_estimated_total": 0,
+                        "rows_wasted_estimated_total": 0,
+                        "rows_wasted_estimated_ratio": 0.0,
+                        "accepted_draft_histogram": {"0": 0, "1": 0, "2": 0, "3": 0, "ge4": 0},
+                        "all_steps_have_frontier": False,
+                        "all_steps_have_sampler_hash": True,
+                        "step_sample": [{"step": index} for index in range(70)],
+                    }
+                ),
+            )
+        )
+
+        payload = _mtp_last_validate_equivalence_payload(client)
+
+        assert payload is not None
+        self.assertEqual(payload["steps"], 0)
+        self.assertEqual(payload["rows_requested_total"], 0)
+        self.assertEqual(payload["rows_wasted_estimated_ratio"], 0.0)
+        self.assertEqual(payload["accepted_draft_histogram"], {"0": 0, "1": 0, "2": 0, "3": 0, "ge4": 0})
+        self.assertFalse(payload["all_steps_have_frontier"])
+        self.assertTrue(payload["all_steps_have_sampler_hash"])
+        step_sample = payload["step_sample"]
+        assert isinstance(step_sample, list)
+        self.assertEqual(len(step_sample), 64)
 
 
 class BenchMtpThroughputMarkdownTests(unittest.TestCase):

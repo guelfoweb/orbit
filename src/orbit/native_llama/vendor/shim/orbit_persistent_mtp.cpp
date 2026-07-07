@@ -54,6 +54,11 @@ static bool validate_debug_enabled() {
     return value && value[0] && std::strcmp(value, "0") != 0;
 }
 
+static bool mtp_trace_enabled() {
+    const char * value = std::getenv("ORBIT_MTP_TRACE");
+    return value && value[0] && std::strcmp(value, "0") != 0;
+}
+
 static bool boundary_split_enabled() {
     const char * value = std::getenv("ORBIT_MTP_BOUNDARY_SPLIT");
     if (!value || !value[0]) {
@@ -221,6 +226,7 @@ struct orbit_mtp_session {
     std::string last_timing_json;
     std::string last_validate_trace_json;
     std::string last_target_decode_trace_json;
+    std::string last_validate_equivalence_json;
     std::vector<uint64_t> last_output_token_hashes;
     std::string last_output_token_hashes_json;
     std::string last_first_sample_trace_json;
@@ -518,6 +524,110 @@ static std::string trace_step_json(const llama_vocab * vocab, const orbit_trace_
             << ",\"prefill_count\":" << step.prefill_count;
     }
     out << "}";
+    return out.str();
+}
+
+static std::string validate_equivalence_json(
+    const std::vector<orbit_trace_step> & steps,
+    int rows_requested_total,
+    int rows_consumed_estimated_total,
+    int rows_wasted_estimated_total
+) {
+    static constexpr size_t max_step_sample = 64;
+    int hist_0 = 0;
+    int hist_1 = 0;
+    int hist_2 = 0;
+    int hist_3 = 0;
+    int hist_ge4 = 0;
+    bool all_steps_have_frontier = !steps.empty();
+    bool all_steps_have_sampler_hash = !steps.empty();
+    for (const auto & step : steps) {
+        if (step.accepted_draft <= 0) {
+            hist_0++;
+        } else if (step.accepted_draft == 1) {
+            hist_1++;
+        } else if (step.accepted_draft == 2) {
+            hist_2++;
+        } else if (step.accepted_draft == 3) {
+            hist_3++;
+        } else {
+            hist_ge4++;
+        }
+        all_steps_have_frontier = all_steps_have_frontier &&
+            step.kv_tgt_before_min >= 0 &&
+            step.kv_tgt_before_max >= step.kv_tgt_before_min &&
+            step.kv_tgt_after_min >= 0 &&
+            step.kv_tgt_after_max >= step.kv_tgt_after_min;
+        all_steps_have_sampler_hash = all_steps_have_sampler_hash &&
+            step.sampler_state_hash_before != 0 &&
+            step.sampler_state_hash_after != 0;
+    }
+    const double rows_wasted_estimated_ratio = rows_requested_total > 0
+        ? (double) rows_wasted_estimated_total / (double) rows_requested_total
+        : 0.0;
+
+    std::ostringstream out;
+    out
+        << "{"
+        << "\"steps\":" << steps.size()
+        << ",\"steps_recorded\":" << std::min(steps.size(), max_step_sample)
+        << ",\"rows_requested_total\":" << rows_requested_total
+        << ",\"rows_consumed_estimated_total\":" << rows_consumed_estimated_total
+        << ",\"rows_wasted_estimated_total\":" << rows_wasted_estimated_total
+        << ",\"rows_wasted_estimated_ratio\":" << rows_wasted_estimated_ratio
+        << ",\"accepted_draft_histogram\":{"
+        << "\"0\":" << hist_0
+        << ",\"1\":" << hist_1
+        << ",\"2\":" << hist_2
+        << ",\"3\":" << hist_3
+        << ",\"ge4\":" << hist_ge4
+        << "}"
+        << ",\"all_steps_have_frontier\":" << (steps.empty() ? "null" : (all_steps_have_frontier ? "true" : "false"))
+        << ",\"all_steps_have_sampler_hash\":" << (steps.empty() ? "null" : (all_steps_have_sampler_hash ? "true" : "false"))
+        << ",\"step_sample\":[";
+    const size_t n_sample = std::min(steps.size(), max_step_sample);
+    for (size_t i = 0; i < n_sample; ++i) {
+        const auto & step = steps[i];
+        const int draft_size = (int) step.draft.size();
+        const int rows_requested = draft_size + 1;
+        const bool full_accept = step.resolution == "full_accept";
+        const int rows_consumed_estimated = full_accept ? rows_requested : std::min(rows_requested, step.accepted_draft + 1);
+        const int rows_wasted_estimated = std::max(0, rows_requested - rows_consumed_estimated);
+        if (i > 0) {
+            out << ",";
+        }
+        out
+            << "{"
+            << "\"step\":" << step.index
+            << ",\"draft_size\":" << draft_size
+            << ",\"accepted_draft\":" << step.accepted_draft
+            << ",\"resolution\":\"" << json_escape(step.resolution) << "\""
+            << ",\"rows_requested\":" << rows_requested
+            << ",\"rows_consumed_estimated\":" << rows_consumed_estimated
+            << ",\"rows_wasted_estimated\":" << rows_wasted_estimated
+            << ",\"sampler_before_hash\":" << (step.sampler_state_hash_before ? std::to_string(step.sampler_state_hash_before) : "null")
+            << ",\"sampler_after_hash\":" << (step.sampler_state_hash_after ? std::to_string(step.sampler_state_hash_after) : "null");
+        if (step.kv_tgt_before_min >= 0 && step.kv_tgt_before_max >= step.kv_tgt_before_min) {
+            out
+                << ",\"frontier_before\":{\"min\":" << step.kv_tgt_before_min
+                << ",\"max\":" << step.kv_tgt_before_max
+                << ",\"hash\":" << stable_hash_frontier(step.kv_tgt_before_min, step.kv_tgt_before_max)
+                << "}";
+        } else {
+            out << ",\"frontier_before\":null";
+        }
+        if (step.kv_tgt_after_min >= 0 && step.kv_tgt_after_max >= step.kv_tgt_after_min) {
+            out
+                << ",\"frontier_after\":{\"min\":" << step.kv_tgt_after_min
+                << ",\"max\":" << step.kv_tgt_after_max
+                << ",\"hash\":" << stable_hash_frontier(step.kv_tgt_after_min, step.kv_tgt_after_max)
+                << "}";
+        } else {
+            out << ",\"frontier_after\":null";
+        }
+        out << "}";
+    }
+    out << "]}";
     return out.str();
 }
 
@@ -1653,6 +1763,7 @@ extern "C" bool orbit_mtp_session_complete(
     session->last_timing_json = "{}";
     session->last_validate_trace_json = "[]";
     session->last_target_decode_trace_json = "[]";
+    session->last_validate_equivalence_json = "{}";
     session->last_output_token_hashes.clear();
     session->last_output_token_hashes_json = "[]";
     session->last_first_sample_trace_json = "{}";
@@ -2592,6 +2703,13 @@ done:
     }
     session->last_validate_trace_json = validate_trace_json(validate_traces);
     session->last_target_decode_trace_json = target_decode_trace_json(vocab_tgt, target_decode_traces);
+    if (mtp_trace_enabled()) {
+        session->last_validate_equivalence_json = validate_equivalence_json(
+            trace_steps,
+            session->last_rows_requested_total,
+            session->last_rows_consumed_estimated_total,
+            session->last_rows_wasted_estimated_total);
+    }
     session->last_output_token_hashes_json = uint64_vec_json(session->last_output_token_hashes);
     {
         const double suffix_target_prefill_ms = session->phase_suffix_decode_target.total_ms;
@@ -2850,6 +2968,11 @@ extern "C" const char * orbit_mtp_session_last_validate_trace_json(void * handle
 extern "C" const char * orbit_mtp_session_last_target_decode_trace_json(void * handle) {
     auto * session = static_cast<orbit_mtp_session *>(handle);
     return session ? session->last_target_decode_trace_json.c_str() : "[]";
+}
+
+extern "C" const char * orbit_mtp_session_last_validate_equivalence_json(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_validate_equivalence_json.c_str() : "{}";
 }
 
 extern "C" const char * orbit_mtp_session_last_output_token_hashes_json(void * handle) {

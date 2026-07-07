@@ -224,6 +224,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             mtp_last_completion = _mtp_last_completion_payload(state.client)
             mtp_last_timing = _mtp_last_timing_payload(state.client)
             mtp_last_validate_efficiency = _mtp_last_validate_efficiency_payload(state.client)
+            mtp_last_validate_equivalence = _mtp_last_validate_equivalence_payload(state.client)
             mtp_config = _mtp_config_payload(state.client)
             self._json(
                 {
@@ -256,6 +257,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_last_completion": mtp_last_completion,
                     "mtp_last_timing": mtp_last_timing,
                     "mtp_last_validate_efficiency": mtp_last_validate_efficiency,
+                    "mtp_last_validate_equivalence": mtp_last_validate_equivalence,
                     "mtp_config": mtp_config,
                     "mtp_fallback_reason": state.client.mtp_fallback_reason,
                     "mtp_enabled": session["mtp_enabled"],
@@ -934,6 +936,55 @@ def _mtp_last_validate_efficiency_payload(client: NativeLlamaClient) -> dict[str
         },
         "full_accept_steps": completion.full_accept_steps,
         "partial_accept_steps": completion.partial_accept_steps,
+    }
+
+
+def _mtp_last_validate_equivalence_payload(client: NativeLlamaClient) -> dict[str, object] | None:
+    completion = client.last_mtp_completion
+    if not completion.enabled or not completion.validate_equivalence_json:
+        return None
+    try:
+        payload = json.loads(completion.validate_equivalence_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping) or not payload:
+        return None
+
+    def _number(name: str) -> float | int | None:
+        value = payload.get(name)
+        if isinstance(value, (int, float)):
+            return value
+        return None
+
+    histogram = payload.get("accepted_draft_histogram")
+    if not isinstance(histogram, Mapping):
+        histogram_payload: dict[str, object] | None = None
+    else:
+        histogram_payload = {
+            "0": histogram.get("0") if isinstance(histogram.get("0"), int) else None,
+            "1": histogram.get("1") if isinstance(histogram.get("1"), int) else None,
+            "2": histogram.get("2") if isinstance(histogram.get("2"), int) else None,
+            "3": histogram.get("3") if isinstance(histogram.get("3"), int) else None,
+            "ge4": histogram.get("ge4") if isinstance(histogram.get("ge4"), int) else None,
+        }
+
+    step_sample = payload.get("step_sample")
+    if not isinstance(step_sample, list):
+        step_sample_payload: list[object] | None = None
+    else:
+        step_sample_payload = step_sample[:64]
+
+    return {
+        "steps": _number("steps"),
+        "steps_recorded": _number("steps_recorded"),
+        "rows_requested_total": _number("rows_requested_total"),
+        "rows_consumed_estimated_total": _number("rows_consumed_estimated_total"),
+        "rows_wasted_estimated_total": _number("rows_wasted_estimated_total"),
+        "rows_wasted_estimated_ratio": _number("rows_wasted_estimated_ratio"),
+        "accepted_draft_histogram": histogram_payload,
+        "all_steps_have_frontier": payload.get("all_steps_have_frontier") if isinstance(payload.get("all_steps_have_frontier"), bool) else None,
+        "all_steps_have_sampler_hash": payload.get("all_steps_have_sampler_hash") if isinstance(payload.get("all_steps_have_sampler_hash"), bool) else None,
+        "step_sample": step_sample_payload,
     }
 
 
