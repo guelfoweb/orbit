@@ -8,7 +8,12 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from orbit.native_server.app import _mtp_config_payload, _mtp_last_completion_payload, _mtp_last_timing_payload
+from orbit.native_server.app import (
+    _mtp_config_payload,
+    _mtp_last_completion_payload,
+    _mtp_last_timing_payload,
+    _mtp_last_validate_efficiency_payload,
+)
 from orbit.native_llama.mtp_completion import MtpCompletionResult
 
 
@@ -170,6 +175,81 @@ class NativeServerMtpPropsTests(unittest.TestCase):
         self.assertEqual(payload["checkpoint_restore_ms"], 0.0)
         self.assertEqual(payload["seq_rm_ms"], 0.0)
         self.assertEqual(payload["other_ms"], 0.0)
+
+    def test_mtp_last_validate_efficiency_payload_is_none_when_completion_is_disabled(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=False,
+                success=False,
+                error=None,
+            )
+        )
+
+        self.assertIsNone(_mtp_last_validate_efficiency_payload(client))
+
+    def test_mtp_last_validate_efficiency_payload_preserves_zero_values(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                validate_steps=0,
+                rows_requested_total=0,
+                rows_consumed_estimated_total=0,
+                rows_wasted_estimated_total=0,
+                rows_wasted_estimated_ratio=0.0,
+                accepted_draft_hist_0=0,
+                accepted_draft_hist_1=0,
+                accepted_draft_hist_2=0,
+                accepted_draft_hist_3=0,
+                accepted_draft_hist_ge4=0,
+                full_accept_steps=0,
+                partial_accept_steps=0,
+            )
+        )
+
+        payload = _mtp_last_validate_efficiency_payload(client)
+
+        assert payload is not None
+        self.assertEqual(payload["validate_steps"], 0)
+        self.assertEqual(payload["rows_requested_total"], 0)
+        self.assertEqual(payload["rows_consumed_estimated_total"], 0)
+        self.assertEqual(payload["rows_wasted_estimated_total"], 0)
+        self.assertEqual(payload["rows_wasted_estimated_ratio"], 0.0)
+        self.assertEqual(payload["accepted_draft_histogram"], {"0": 0, "1": 0, "2": 0, "3": 0, "ge4": 0})
+
+    def test_mtp_last_validate_efficiency_payload_exposes_histogram(self) -> None:
+        client = SimpleNamespace(
+            last_mtp_completion=MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                validate_steps=5,
+                rows_requested_total=20,
+                rows_consumed_estimated_total=14,
+                rows_wasted_estimated_total=6,
+                rows_wasted_estimated_ratio=0.3,
+                accepted_draft_hist_0=1,
+                accepted_draft_hist_1=2,
+                accepted_draft_hist_2=0,
+                accepted_draft_hist_3=1,
+                accepted_draft_hist_ge4=1,
+                full_accept_steps=2,
+                partial_accept_steps=3,
+            )
+        )
+
+        payload = _mtp_last_validate_efficiency_payload(client)
+
+        assert payload is not None
+        self.assertEqual(payload["validate_steps"], 5)
+        self.assertEqual(payload["rows_requested_total"], 20)
+        self.assertEqual(payload["rows_consumed_estimated_total"], 14)
+        self.assertEqual(payload["rows_wasted_estimated_total"], 6)
+        self.assertEqual(payload["rows_wasted_estimated_ratio"], 0.3)
+        self.assertEqual(payload["accepted_draft_histogram"], {"0": 1, "1": 2, "2": 0, "3": 1, "ge4": 1})
+        self.assertEqual(payload["full_accept_steps"], 2)
+        self.assertEqual(payload["partial_accept_steps"], 3)
 
 
 class BenchMtpThroughputMarkdownTests(unittest.TestCase):

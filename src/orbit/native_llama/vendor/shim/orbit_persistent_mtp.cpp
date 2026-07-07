@@ -208,6 +208,15 @@ struct orbit_mtp_session {
     int last_rollback_tokens_total = 0;
     int last_checkpoint_count = 0;
     int last_restore_count = 0;
+    int last_validate_steps = 0;
+    int last_rows_requested_total = 0;
+    int last_rows_consumed_estimated_total = 0;
+    int last_rows_wasted_estimated_total = 0;
+    int last_accepted_draft_hist_0 = 0;
+    int last_accepted_draft_hist_1 = 0;
+    int last_accepted_draft_hist_2 = 0;
+    int last_accepted_draft_hist_3 = 0;
+    int last_accepted_draft_hist_ge4 = 0;
     std::string last_trace_json;
     std::string last_timing_json;
     std::string last_validate_trace_json;
@@ -1631,6 +1640,15 @@ extern "C" bool orbit_mtp_session_complete(
     session->last_rollback_tokens_total = 0;
     session->last_checkpoint_count = 0;
     session->last_restore_count = 0;
+    session->last_validate_steps = 0;
+    session->last_rows_requested_total = 0;
+    session->last_rows_consumed_estimated_total = 0;
+    session->last_rows_wasted_estimated_total = 0;
+    session->last_accepted_draft_hist_0 = 0;
+    session->last_accepted_draft_hist_1 = 0;
+    session->last_accepted_draft_hist_2 = 0;
+    session->last_accepted_draft_hist_3 = 0;
+    session->last_accepted_draft_hist_ge4 = 0;
     session->last_trace_json = "[]";
     session->last_timing_json = "{}";
     session->last_validate_trace_json = "[]";
@@ -2385,6 +2403,25 @@ extern "C" bool orbit_mtp_session_complete(
         const int accepted = std::max(0, (int) ids.size() - 1);
         const bool full_accept = step.resolution == orbit_step_resolution::full_accept;
         const int rejected = std::max(0, (int) trace_step.draft.size() - accepted);
+        const int draft_size = (int) trace_step.draft.size();
+        const int rows_requested = draft_size + 1;
+        const int rows_consumed_estimated = full_accept ? rows_requested : std::min(rows_requested, accepted + 1);
+        const int rows_wasted_estimated = std::max(0, rows_requested - rows_consumed_estimated);
+        session->last_validate_steps++;
+        session->last_rows_requested_total += rows_requested;
+        session->last_rows_consumed_estimated_total += rows_consumed_estimated;
+        session->last_rows_wasted_estimated_total += rows_wasted_estimated;
+        if (accepted <= 0) {
+            session->last_accepted_draft_hist_0++;
+        } else if (accepted == 1) {
+            session->last_accepted_draft_hist_1++;
+        } else if (accepted == 2) {
+            session->last_accepted_draft_hist_2++;
+        } else if (accepted == 3) {
+            session->last_accepted_draft_hist_3++;
+        } else {
+            session->last_accepted_draft_hist_ge4++;
+        }
         trace_step.accepted_ids = ids;
         trace_step.accepted_draft = accepted;
         trace_step.rejected_draft = rejected;
@@ -2740,6 +2777,59 @@ extern "C" int32_t orbit_mtp_session_last_checkpoint_count(void * handle) {
 extern "C" int32_t orbit_mtp_session_last_restore_count(void * handle) {
     auto * session = static_cast<orbit_mtp_session *>(handle);
     return session ? session->last_restore_count : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_validate_steps(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_validate_steps : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_rows_requested_total(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_rows_requested_total : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_rows_consumed_estimated_total(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_rows_consumed_estimated_total : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_rows_wasted_estimated_total(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_rows_wasted_estimated_total : 0;
+}
+
+extern "C" double orbit_mtp_session_last_rows_wasted_estimated_ratio(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    if (!session || session->last_rows_requested_total <= 0) {
+        return 0.0;
+    }
+    return (double) session->last_rows_wasted_estimated_total / (double) session->last_rows_requested_total;
+}
+
+extern "C" int32_t orbit_mtp_session_last_accepted_draft_hist_0(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_accepted_draft_hist_0 : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_accepted_draft_hist_1(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_accepted_draft_hist_1 : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_accepted_draft_hist_2(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_accepted_draft_hist_2 : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_accepted_draft_hist_3(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_accepted_draft_hist_3 : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_accepted_draft_hist_ge4(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_accepted_draft_hist_ge4 : 0;
 }
 
 extern "C" const char * orbit_mtp_session_last_trace_json(void * handle) {
