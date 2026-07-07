@@ -251,7 +251,7 @@ def build_compact_final_evidence_context(store: EvidenceStore | None, *, limit: 
     parts = ["evidence_context:"]
     for index, record in enumerate(records, start=1):
         parts.append(f"- evidence {index}:")
-        parts.append(_compact_final_card(record))
+        parts.append(_compact_final_prompt_card(record))
         if _compact_final_context_needs_raw_excerpt(record):
             parts.append("bounded_raw_excerpt:")
             parts.append(
@@ -456,6 +456,39 @@ def _compact_final_card(record: EvidenceRecord) -> str:
     ]
     lines.extend(_card_metadata_lines(record, compact=True))
     return "\n".join(lines)
+
+
+def _compact_final_prompt_card(record: EvidenceRecord) -> str:
+    if not _should_use_small_final_prompt_card(record):
+        return _compact_final_card(record)
+    lines = [
+        "tool_evidence_card: true",
+        f"kind: {record.kind}",
+        f"status: {record.status}",
+        f"raw_ref: {record.raw_ref}",
+    ]
+    for key in _small_final_prompt_metadata_keys(record):
+        value = record.metadata.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, list):
+            joined = "; ".join(str(item) for item in value[:2])
+            lines.append(f"{key}: {joined}")
+        else:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _should_use_small_final_prompt_card(record: EvidenceRecord) -> bool:
+    if record.raw_chars > COMPACT_FINAL_RAW_EXCERPT_CHARS:
+        return False
+    return record.kind in {"shell", "grep_search", "unknown"}
+
+
+def _small_final_prompt_metadata_keys(record: EvidenceRecord) -> tuple[str, ...]:
+    if record.kind == "grep_search":
+        return ("query", "exit_code", "match_count", "files_count", "file_paths", "first_matches")
+    return ("exit_code", "stdout_excerpt", "stderr_excerpt", "sidecar_status")
 
 
 def _final_context_needs_raw_excerpt(record: EvidenceRecord) -> bool:

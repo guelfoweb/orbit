@@ -160,6 +160,22 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn("hash=", context)
         self.assertNotIn("sha256", context)
 
+    def test_compact_final_context_uses_small_card_for_small_shell_output(self) -> None:
+        content = "/home/example/project\n"
+        record = build_evidence_record("exec_shell_full_command", content, {"command": "pwd"})
+        context = build_compact_final_evidence_context(_store_with(record, content)) or ""
+
+        self.assertIn("evidence_context:", context)
+        self.assertIn("tool_evidence_card: true", context)
+        self.assertIn("kind: shell", context)
+        self.assertIn("status: ok", context)
+        self.assertIn(record.raw_ref, context)
+        self.assertIn("stdout_excerpt: /home/example/project", context)
+        self.assertNotIn("command: pwd", context)
+        self.assertNotIn("sha256:", context)
+        self.assertNotIn("size:", context)
+        self.assertNotIn("stdout_chars:", context)
+
     def test_post_tool_route_omits_command_for_medium_shell_output(self) -> None:
         content = "\n".join(f"line-{index}" for index in range(120))
         record = build_evidence_record("exec_shell_full_command", content, {"command": "python3 print-lines.py"})
