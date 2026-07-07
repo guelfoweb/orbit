@@ -223,6 +223,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             runtime = state.runtime_info()
             mtp_last_completion = _mtp_last_completion_payload(state.client)
             mtp_last_timing = _mtp_last_timing_payload(state.client)
+            mtp_last_validate_efficiency = _mtp_last_validate_efficiency_payload(state.client)
             mtp_config = _mtp_config_payload(state.client)
             self._json(
                 {
@@ -254,6 +255,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_last_completion_success": state.client.last_mtp_completion.success,
                     "mtp_last_completion": mtp_last_completion,
                     "mtp_last_timing": mtp_last_timing,
+                    "mtp_last_validate_efficiency": mtp_last_validate_efficiency,
                     "mtp_config": mtp_config,
                     "mtp_fallback_reason": state.client.mtp_fallback_reason,
                     "mtp_enabled": session["mtp_enabled"],
@@ -893,6 +895,45 @@ def _mtp_last_timing_payload(client: NativeLlamaClient) -> dict[str, object] | N
         "seq_rm_ms": seq_rm_ms,
         "non_loop_overhead_ms": non_loop_overhead_ms,
         "other_ms": other_ms,
+    }
+
+
+def _mtp_last_validate_efficiency_payload(client: NativeLlamaClient) -> dict[str, object] | None:
+    completion = client.last_mtp_completion
+    if not completion.enabled:
+        return None
+    has_metrics = completion.success or any(
+        value is not None and value != 0
+        for value in (
+            completion.validate_steps,
+            completion.rows_requested_total,
+            completion.rows_consumed_estimated_total,
+            completion.rows_wasted_estimated_total,
+            completion.rows_wasted_estimated_ratio,
+            completion.accepted_draft_hist_0,
+            completion.accepted_draft_hist_1,
+            completion.accepted_draft_hist_2,
+            completion.accepted_draft_hist_3,
+            completion.accepted_draft_hist_ge4,
+        )
+    )
+    if not has_metrics:
+        return None
+    return {
+        "validate_steps": completion.validate_steps,
+        "rows_requested_total": completion.rows_requested_total,
+        "rows_consumed_estimated_total": completion.rows_consumed_estimated_total,
+        "rows_wasted_estimated_total": completion.rows_wasted_estimated_total,
+        "rows_wasted_estimated_ratio": completion.rows_wasted_estimated_ratio,
+        "accepted_draft_histogram": {
+            "0": completion.accepted_draft_hist_0,
+            "1": completion.accepted_draft_hist_1,
+            "2": completion.accepted_draft_hist_2,
+            "3": completion.accepted_draft_hist_3,
+            "ge4": completion.accepted_draft_hist_ge4,
+        },
+        "full_accept_steps": completion.full_accept_steps,
+        "partial_accept_steps": completion.partial_accept_steps,
     }
 
 

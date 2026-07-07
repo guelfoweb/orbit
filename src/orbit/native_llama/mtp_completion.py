@@ -39,6 +39,16 @@ class MtpCompletionResult:
     rollback_tokens_total: int = 0
     checkpoint_count: int = 0
     restore_count: int = 0
+    validate_steps: int = 0
+    rows_requested_total: int = 0
+    rows_consumed_estimated_total: int = 0
+    rows_wasted_estimated_total: int = 0
+    rows_wasted_estimated_ratio: float | None = None
+    accepted_draft_hist_0: int = 0
+    accepted_draft_hist_1: int = 0
+    accepted_draft_hist_2: int = 0
+    accepted_draft_hist_3: int = 0
+    accepted_draft_hist_ge4: int = 0
     trace_json: str | None = None
     timing_json: str | None = None
     validate_trace_json: str | None = None
