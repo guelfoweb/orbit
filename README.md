@@ -59,16 +59,15 @@ orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
 
 ## Quick Start
 
-Start the native server with MTP enabled:
+Start the native server:
 
 ```bash
-PYTHONPATH=src .venv/bin/orbit server --mtp
+PYTHONPATH=src .venv/bin/orbit server
 ```
 
 The current release gate expects:
 
 - native backend loaded
-- MTP initialized when `--mtp` is used
 - multimodal capability detected when `mmproj` is available
 - route-prefix KV prewarm completed
 - no duplicate `llama.cpp` runtime loaded
@@ -94,6 +93,18 @@ ORBIT_KV_DIAG=1 .venv/bin/orbit --workdir workdir --tools on --think off "hi"
 
 `ORBIT_KV_DIAG=1` is diagnostic only. It is not required for normal use.
 
+### Optional MTP
+
+Native MTP is explicit:
+
+```bash
+PYTHONPATH=src .venv/bin/orbit server --mtp
+```
+
+Use it for targeted validation or experiments, not as a default speed
+assumption. Current diagnostics show MTP can be stable while still being slower
+on some CPU-only workloads.
+
 ## Tools
 
 Tools are off by default. Tools-on mode exposes unrestricted local shell access
@@ -103,7 +114,7 @@ workdir.
 Keep tools disabled at server startup:
 
 ```bash
-ORBIT_TOOLS=off .venv/bin/orbit server --mtp
+ORBIT_TOOLS=off .venv/bin/orbit server
 ```
 
 Disable tools for a client/session:
@@ -147,13 +158,13 @@ also enabled by default for the tools-on route prefix.
 Disable only startup prewarm:
 
 ```bash
-ORBIT_KV_PREFIX_PREWARM=off .venv/bin/orbit server --mtp
+ORBIT_KV_PREFIX_PREWARM=off .venv/bin/orbit server
 ```
 
 Disable route-prefix anchor and prewarm:
 
 ```bash
-ORBIT_KV_PREFIX_ANCHOR=off .venv/bin/orbit server --mtp
+ORBIT_KV_PREFIX_ANCHOR=off .venv/bin/orbit server
 ```
 
 The prewarm cost is paid at startup. It does not remove CPU work; it shifts part
@@ -227,16 +238,27 @@ For post-tool issues, first check whether raw evidence is leaking into the
 prompt, whether a redundant tool call happened, and whether the final footer
 shows a large prompt or simply slow CPU prefill.
 
-Future work includes a Dynamic Completion Budget Policy: route, tool, final,
-and repair calls should get per-completion-kind output budgets so Orbit can
-avoid both truncation and overly long internal generations without changing
-prompt policy.
+Output budgets are per completion kind. `/max-tokens` is still the user-facing
+budget, but Orbit may use smaller internal budgets for route, tool, final, and
+repair phases to avoid excessive CPU work. If an answer is truncated, the footer
+shows `stop: length` and `/continue` is available.
+
+For CPU benchmarking, record the exact Orbit commit or tag, model artifact,
+backend mode, context size, thread settings, MTP state, tools mode, and whether
+startup prewarm was enabled. Single-run numbers are useful for triage, but not
+release-quality performance evidence.
 
 ## Compatibility
 
 The preferred runtime is native `orbit server`. Orbit can still talk to a local
 OpenAI-compatible HTTP backend through `--base-url`, but that is a compatibility
 or comparison path, not the primary product path.
+
+Native Orbit is CPU-first and currently configures `gpu_layers=0`. GPU tests
+should use an external OpenAI-compatible backend such as `llama-server` with
+GPU offload enabled, then point Orbit at it with `--base-url`. Treat those
+results as compatibility/backend comparisons, not native `orbit server`
+performance.
 
 ## Troubleshooting
 

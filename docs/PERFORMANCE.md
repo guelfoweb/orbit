@@ -28,6 +28,31 @@ parallel_slots=1
 
 These defaults favor stability on CPU-only systems. Change them only with comparable benchmarks.
 
+On Apple Silicon, thread count is not automatically "all cores". Local
+measurements have shown that using only performance cores can beat using
+performance plus efficiency cores for token-by-token generation. On thermally
+constrained Intel laptops, extra threads can also be erased by throttling.
+Treat thread changes as workload- and machine-specific.
+
+## GPU and compatibility backends
+
+Native `orbit server` is CPU-first and currently configures `gpu_layers=0`.
+It does not expose native GPU offload as a normal server option.
+
+GPU measurements should use a separate OpenAI-compatible backend, for example
+`llama-server` built with Metal/CUDA and started with GPU offload enabled. Point
+Orbit at that backend with:
+
+```bash
+orbit bench-core --base-url http://127.0.0.1:8080
+```
+
+Do not include `/v1` in the base URL; Orbit appends the OpenAI-compatible paths.
+
+Interpret GPU results as backend comparisons. They are useful, but they are not
+native `orbit server` results. MLX/Ollama results are even less directly
+comparable when quantization, context length, and tool-call behavior differ.
+
 ## MTP
 
 Native MTP is supported through:
@@ -97,6 +122,44 @@ Rules:
 - keep prompt, config, model, and backend mode identical
 - use fixed CPU affinity for serious CPU-only measurements
 - treat single-run differences as noise unless repeated
+- record the exact Orbit commit or tag with `git rev-parse HEAD`
+- record the model artifact, quantization, context size, threads,
+  `threads-batch`, MTP state, tools mode, and startup prewarm state
+- keep raw benchmark output or logs outside the repository workdir unless they
+  are intentionally sanitized fixtures
+
+Minimum metadata to attach to any benchmark note:
+
+```text
+orbit_commit=<git rev-parse HEAD>
+orbit_tag=<tag or none>
+backend=native|llama-server|other
+model=<repo/file or local path>
+quant=<for example Q4_K_M>
+ctx=8192
+threads=<n>
+threads_batch=<n>
+mtp=on|off
+tools=on|off
+prewarm=on|off
+platform=<OS/CPU/GPU>
+```
+
+## Exploratory hardware observations
+
+Local exploratory tests on Gemma 4 12B Q4_K_M are consistent with common
+llama.cpp behavior:
+
+- generation is often memory-bandwidth-bound, not pure compute-bound
+- prefill benefits more from GPU/offload and larger batch compute
+- laptop Intel CPUs can be dominated by thermal throttling
+- Apple Silicon CPU results depend strongly on performance-core thread counts
+- external GPU backends can greatly improve prefill, but they are separate from
+  native Orbit CPU behavior
+
+These observations are useful for choosing hardware and benchmark matrices.
+They should not be treated as release gates unless the exact commit, backend,
+model, configuration, and repeated raw results are recorded.
 
 ## Main bottlenecks observed
 
