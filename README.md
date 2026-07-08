@@ -248,6 +248,11 @@ backend mode, context size, thread settings, MTP state, tools mode, and whether
 startup prewarm was enabled. Single-run numbers are useful for triage, but not
 release-quality performance evidence.
 
+For local performance checks, use `orbit bench-core`. For a conservative
+starting point on server thread and batch settings, see
+`scripts/suggest-server-profile.sh`. Benchmark and tuning notes are in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## Compatibility
 
 The preferred runtime is native `orbit server`. Orbit can still talk to a local
