@@ -313,7 +313,7 @@ def build_web_final_evidence_context(store: EvidenceStore | None) -> str | None:
     if record is None or record.kind != "web_search":
         return None
     snippets = record.metadata.get("top_snippets")
-    if (not isinstance(snippets, list) or not snippets) and record.status != "none":
+    if (not isinstance(snippets, list) or not snippets) and record.status not in {"none", "error"}:
         return None
     parts = [
         "evidence_context:",
@@ -327,7 +327,7 @@ def build_web_final_evidence_context(store: EvidenceStore | None) -> str | None:
         f"sha256: {record.raw_sha256[:16]}",
         f"size: {record.raw_chars} chars, {record.raw_lines} lines",
     ]
-    for key in ("query", "result_count", "top_domains", "top_titles"):
+    for key in ("query", "result_count", "error_message", "top_domains", "top_titles"):
         value = record.metadata.get(key)
         if value in (None, "", [], {}):
             continue
@@ -400,6 +400,8 @@ def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) ->
 
 def _status_for(kind: str, content: str, metadata: dict[str, object]) -> str:
     if kind == "web_search":
+        if content.lstrip().lower().startswith("error:"):
+            return "error"
         if "results: none" in content:
             return "none"
         if "web_search_results: true" in content:
@@ -428,9 +430,11 @@ def _web_metadata(content: str, metadata: dict[str, object]) -> dict[str, object
     urls = re.findall(r"^\s+url:\s*(.+)$", content, re.MULTILINE)
     snippets = re.findall(r"^\s+snippet:\s*(.+)$", content, re.MULTILINE)
     domains = [_domain(url) for url in urls]
+    error_message = content.strip() if content.lstrip().lower().startswith("error:") else ""
     return {
         "query": query or "",
         "result_count": len(titles),
+        "error_message": _bounded_text(error_message, 240) if error_message else "",
         "top_titles": titles[:3],
         "top_domains": [domain for domain in domains[:3] if domain],
         "top_snippets": snippets[:3],
