@@ -13,6 +13,7 @@ CHAT_MAX_TOKENS = 256
 
 FINAL_SMALL_MAX_TOKENS = 96
 FINAL_SHELL_ERROR_MAX_TOKENS = 128
+FINAL_SYSTEM_INFO_MAX_TOKENS = 160
 FINAL_MEDIUM_MAX_TOKENS = 192
 FINAL_WEB_SEARCH_MAX_TOKENS = 192
 FINAL_READ_MAX_TOKENS = 256
@@ -81,6 +82,8 @@ def _final_from_tool_tokens(requested: int | None, evidence_kind: str, evidence_
         return _floor_and_cap(requested, FINAL_READ_MAX_TOKENS, FINAL_READ_MAX_TOKENS)
     if evidence_kind == "shell_error":
         return _floor_and_cap(requested, FINAL_SHELL_ERROR_MAX_TOKENS, FINAL_SHELL_ERROR_MAX_TOKENS)
+    if evidence_kind == "system_info":
+        return _floor_and_cap(requested, FINAL_SYSTEM_INFO_MAX_TOKENS, FINAL_SYSTEM_INFO_MAX_TOKENS)
     if evidence_kind in {"shell", "unknown", "grep_search"} and evidence_chars is not None and evidence_chars <= 500:
         return _floor_and_cap(requested, FINAL_SMALL_MAX_TOKENS, FINAL_SMALL_MAX_TOKENS)
     if evidence_kind in {"shell", "unknown", "grep_search"}:

@@ -672,6 +672,8 @@ class FinalFromToolEnvironment:
         record = next(iter(store.recent_records(1)), None)
         if record is None:
             return None, None
+        if record.tool_name == "system_info":
+            return "system_info", record.raw_chars
         if record.kind in {"shell", "unknown"} and record.status == "error":
             return "shell_error", record.raw_chars
         return record.kind, record.raw_chars
