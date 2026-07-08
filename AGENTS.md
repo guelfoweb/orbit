@@ -1,130 +1,145 @@
 # AGENTS.md
 
-## Ruolo
+## Role
 
-Questo file guida agenti e sessioni Codex che lavorano su Orbit. Deve aiutare a
-continuare il progetto dopo `v0.0.1-rc16` distinguendo fatti consolidati,
-decisioni prese, ipotesi non ancora provate e prossimi passi ragionevoli.
+This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc17` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
 
-## Principi permanenti
+## Permanent Principles
 
-- Correctness, stabilita, reliability e semplicita vengono prima della performance.
-- Orbit resta Python-first: preferire standard library e codice piccolo, leggibile, debuggabile.
-- Target primario: CPU-only con Gemma 4 12B tramite native `orbit server`.
+- Correctness, stability, reliability, and simplicity come before performance.
+- Orbit remains Python-first: prefer the standard library and small, readable, debuggable code.
+- Primary target: CPU-only Gemma 4 12B through native `orbit server`.
 - Runtime owns behavior; backend owns inference.
-- Non introdurre fix semantici hardcoded nel routing o nel tool loop.
-- Guardrail deterministici sono ammessi solo per sicurezza, validazione, bounded retry e diagnostica.
-- Non sacrificare correttezza per speedup teorici.
-- Benchmark e test prevalgono sulle intuizioni.
-- `workdir/` e una fixture pubblica: non toccare o stagiare `workdir/.miktex/` e `workdir/doc/`.
-- Non creare tag o release salvo richiesta esplicita.
+- Do not add hardcoded semantic fixes in routing or the tool loop.
+- Deterministic guardrails are allowed only for safety, validation, bounded retry, and diagnostics.
+- Do not trade correctness for theoretical speedups.
+- Benchmarks and tests override intuition.
+- `workdir/` is a public fixture: do not touch or stage `workdir/.miktex/` or `workdir/doc/`.
+- Do not create tags or releases unless explicitly requested.
 
-## Stato release
+## Release State
 
 ### RC13
 
-- Focus: diagnostica MTP.
-- Aggiunte diagnostiche MTP per throughput, config, timing e validate efficiency.
-- MTP e stabile, ma non e risultato throughput-positive in modo robusto su CPU-only.
+- Focus: MTP diagnostics.
+- Added MTP diagnostics for throughput, config, timing, and validate efficiency.
+- MTP is stable, but it did not prove robustly throughput-positive on CPU-only systems.
 
 ### RC14
 
-- Focus: diagnostiche KV/final evidence e compact final evidence.
-- `cached=4` su final/retry e stato spiegato come divergenza prompt-view `route -> final`, non come bug backend/cache.
-- La slim compact final evidence metadata riduce gli evaluated tokens nei `final_from_tool` piccoli.
-- `chat_final` multi-card resta uno stop tecnico senza lineage/intent affidabile.
+- Focus: KV/final evidence diagnostics and compact final evidence.
+- `cached=4` on final/retry was explained as prompt-view divergence from `route -> final`, not as a backend/cache bug.
+- Slim compact final evidence metadata reduced evaluated tokens in small `final_from_tool` outputs.
+- Multi-card `chat_final` remains a technical stop without reliable lineage/intent.
 
 ### RC15
 
 - Focus: evidence lineage.
-- `EvidenceRecord` include `evidence_sequence`, `tool_call_id`, `user_turn_id`, `produced_by_phase`.
-- `producer_model_call_id` resta `null`.
-- Nessuna evidence selection o compaction attiva.
-- `dual_shell` conferma che una selection `current_turn`-only non e sicura.
-- Gli smoke lineage devono usare workdir temporanei puliti, non store persistenti contaminati.
+- `EvidenceRecord` includes `evidence_sequence`, `tool_call_id`, `user_turn_id`, and `produced_by_phase`.
+- `producer_model_call_id` remains `null`.
+- No active evidence selection or compaction.
+- `dual_shell` confirms that `current_turn`-only selection is unsafe.
+- Lineage smokes must use clean temporary workdirs, not contaminated persistent stores.
 
 ### RC16
 
-- Budget finale dedicato per `system_info`.
-- Documentazione CPU-first e MTP opzionale.
-- Metadata header per `orbit bench-core`.
-- Guidance di profiling e server profile conservativa.
-- Download modello draft MTP spostato fuori dal setup base: e opzionale.
+- Dedicated final budget for `system_info`.
+- CPU-first documentation and optional MTP guidance.
+- Metadata header for `orbit bench-core`.
+- Profiling guidance and conservative server-profile guidance.
+- Draft MTP model download moved out of the base install flow; it is optional.
+
+### RC17
+
+- Current published baseline: `v0.0.1-rc17`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc17
+- Release notes commit: `358ed995fbc0607ebbda15099a8c568223ddb752`.
+- Tag object: `8af6bd36d8bf0cd0e450e10af80bf8e5038fc408`.
+- Tag commit: `358ed995fbc0607ebbda15099a8c568223ddb752`.
+- Prerelease: yes. Latest: false.
+- Includes #122, #123, #124, #125, and #126.
+- Focus: post-RC16 agent guidance, MTP README clarification, conversation reuse route guidance, and smoke-result notes.
+- RC17 validation: MTP shim build PASS, full unit PASS with 985 tests, `simple_chat --mtp-required` PASS, `git diff --check` PASS.
+- RC17 MTP sanity: `mtp_enabled=true`, `mtp_initialized=true`, `mtp_failure_reason=null`, `in_flight=false`, `multimodal_available=true`, `mtp_last_completion.success=true`, `mtp_config.n_max=3`.
 
 ## MTP
 
-- MTP e opzionale/sperimentale.
-- Non e default nel quick start.
-- Non garantisce speedup, specialmente su CPU-only.
-- Il draft model MTP va scaricato solo se si vuole testare intenzionalmente MTP.
-- `n_max=3` resta il default migliore tra gli esperimenti osservati.
-- `target_validate` e compute-bound; il costo dominante e nel graph compute.
-- Two-pass validate e shadow runtime sono stati scartati per rischio correctness: mutazioni KV, stato speculative non clonabile in modo sicuro, sampler/KV/frontier cleanup sensibili.
-- MTP strict e timeout/cancel recovery restano gate obbligati quando si valida il path MTP.
-- Nei test locali MTP usare MTP attivo, mmproj e multimodal quando si valida quel path.
+- MTP is optional and experimental.
+- It is not the quick-start default.
+- It does not guarantee speedup, especially on CPU-only systems.
+- Download the draft MTP model only when intentionally testing MTP.
+- `n_max=3` remains the best default among observed experiments.
+- `target_validate` is compute-bound; graph compute is the dominant cost.
+- Two-pass validate and shadow runtime were rejected for correctness risk: KV mutation, speculative state that cannot be cloned safely, and sensitive sampler/KV/frontier cleanup.
+- MTP strict smoke and timeout/cancel recovery remain required gates when validating the MTP path.
+- Local MTP validation should use MTP enabled, mmproj, and multimodal availability when validating that path.
 
-## KV/cache/final budget
+## KV / Cache / Final Budget
 
-- `cached=4` su `route -> final` e atteso: i prompt divergono subito nel system prompt.
-- Non inseguire `cached=4` con redesign rischiosi senza nuova evidenza.
-- La strada sicura resta ridurre evaluated tokens nei final/retry.
-- `final_from_tool` piccolo e stato migliorato con compact evidence metadata.
-- `system_info` ha un cap dedicato a 160 token.
-- `shell`, `grep_search` e `unknown` piccoli restano a 96 token.
-- `/max-tokens` e un limite user-facing; il runtime applica comunque budget interni per fase.
+- `cached=4` on `route -> final` is expected: prompts diverge immediately in the system prompt.
+- Do not chase `cached=4` with risky redesigns without new evidence.
+- The safer path remains reducing evaluated tokens in final/retry prompts.
+- Small `final_from_tool` was improved with compact evidence metadata.
+- `system_info` has a dedicated 160-token cap.
+- Small `shell`, `grep_search`, and `unknown` finals remain at 96 tokens.
+- `/max-tokens` is user-facing; the runtime still applies internal per-phase budgets.
 
-## Evidence lineage
+## Evidence Lineage
 
-- `user_turn_id` e utile per provenance, non per relevance.
-- `tool_call_id` ed `evidence_sequence` sono utili ma non sufficienti per selection.
-- `produced_by_phase` e valorizzato solo nei path noti.
-- `producer_model_call_id` resta `null`.
-- L'esperimento model-guided shadow evidence selection e stato negativo: extra model call troppo costosa su CPU-only, JSON non affidabile, fragilita su `dual_shell`; patch revertita, non usarlo ora.
-- `chat_final` multi-card compaction resta stop tecnico.
-- `dual_shell` puo richiedere entrambe le card nel retry/final: non ridurre senza lineage/intent piu forte.
+- `user_turn_id` is useful for provenance, not relevance.
+- `tool_call_id` and `evidence_sequence` are useful but insufficient for selection.
+- `produced_by_phase` is populated only for known paths.
+- `producer_model_call_id` remains `null`.
+- The model-guided shadow evidence-selection experiment was negative: the extra model call was too expensive on CPU-only, JSON was unreliable, and `dual_shell` was fragile. The patch was reverted; do not use it now.
+- Multi-card `chat_final` compaction remains a technical stop.
+- `dual_shell` may require both cards in retry/final; do not reduce without stronger lineage/intent.
 
 ## Benchmarking
 
-- `orbit bench-core` e il benchmark pubblico di regressione.
-- Il metadata header di `bench-core` e ON di default.
-- Usare `--no-metadata` solo quando serve output minimale.
-- Il metadata include commit/tag, `base_url`, `workdir`, timeout, `max_tokens`, env selezionate e `/props` backend best-effort.
-- Se `/props` non risponde, `backend_props: unavailable` non deve fallire il benchmark.
-- Registrare sempre commit/tag, modello, ctx, threads, MTP, tools e prewarm.
-- `scripts/suggest-server-profile.sh` e un punto di partenza conservativo, non garanzia di tuning ottimale.
-- GPU va misurata tramite backend esterno compatibile, per esempio `llama-server --base-url`, non come performance nativa di `orbit server`.
-- Native `orbit server` e CPU-first con `gpu_layers=0`.
+- `orbit bench-core` is the public regression benchmark.
+- The `bench-core` metadata header is ON by default.
+- Use `--no-metadata` only when minimal output is needed.
+- Metadata includes commit/tag, `base_url`, `workdir`, timeout, `max_tokens`, selected env vars, and best-effort backend `/props`.
+- If `/props` does not respond, `backend_props: unavailable` must not fail the benchmark.
+- Always record commit/tag, model, ctx, threads, MTP, tools, and prewarm.
+- `scripts/suggest-server-profile.sh` is a conservative starting point, not a guarantee of optimal tuning.
+- GPU must be measured through an external compatible backend, for example `llama-server --base-url`, not as native `orbit server` performance.
+- Native `orbit server` is CPU-first with `gpu_layers=0`.
 
-## Gate consigliati
+## Recommended Gates
 
-- Pre-PR: unit mirati per l'area modificata.
-- Sempre: `compileall` mirato e `git diff --check`.
-- Full unit solo per pre-release o cambi ampi.
-- Se si toccano budget/final: smoke `system_info`.
-- Se si tocca `bench_core`: smoke metadata header e `--no-metadata`.
-- Evidence lineage smoke: usare workdir temporanei puliti.
+- Pre-PR: targeted unit tests for the modified area.
+- Always: targeted `compileall` and `git diff --check`.
+- Full unit only for pre-release or broad changes.
+- If touching budgets/final behavior: smoke `system_info`.
+- If touching `bench_core`: smoke the metadata header and `--no-metadata`.
+- Evidence lineage smoke: use clean temporary workdirs.
 - KV/final smoke: `pwd_followup`.
-- MTP gate: `simple_chat --mtp-required` con `/props` healthy.
-- Recovery gate: timeout/cancel con `shell20`, poi nuovo `simple_chat --mtp-required`.
-- Mai usare store persistente per RC smoke di evidence lineage.
+- MTP gate: `simple_chat --mtp-required` with healthy `/props`.
+- Recovery gate: timeout/cancel with `shell20`, then a new `simple_chat --mtp-required`.
+- Never use a persistent store for RC evidence-lineage smokes.
 
-## #124, conversation reuse route guidance
+## #124, Conversation Reuse Route Guidance
 
-- Problema: il router poteva richiamare tool anche per recap, sintesi, ripetizioni o continuazioni di informazioni gia presenti in conversazione.
-- Soluzione: aggiunta una regola generale e model-guided solo in `ROUTE_SYSTEM_PROMPT`.
-- La regola preferisce `CHAT` quando l'utente chiede recap/summarize/repeat/continue/explain/compare e il contesto esistente e sufficiente.
-- I tool restano consentiti per fresh/current, verify/check, nuove informazioni, changed file/state o contesto missing/stale/ambiguous/insufficient.
-- File toccati: `src/orbit/runtime/messages.py`, `tests/test_messages.py`.
-- Test eseguiti: `PYTHONPATH=src python3 -m unittest tests.test_messages -q`, `python3 -m compileall -q src/orbit/runtime tests`, `git diff --check`.
-- Smoke post-merge route-level: `system_info` recap e read-file recap confermano `CHAT`/no tool quando il contesto basta; refresh/current/check changed/new search continuano a consentire tool.
-- Limite smoke: grep recap solo parzialmente confermato per `finish_reason=length` con output vuoto.
-- Full E2E non e un gate leggero su questa CPU: A1 `system_info` ha richiesto circa 220s e A2 full E2E e stato interrotto.
-- Nessuna regressione osservata e nessuna patch ulteriore richiesta.
-- Limiti residui: e una guidance di routing, non una garanzia deterministica; non aggiunge cache, TTL, fast path o logica per-tool.
-- Stato: lavoro chiuso. Non aggiungere altre patch su conversation reuse senza regressione osservata.
+- Released in `v0.0.1-rc17`.
+- Problem: the router could call tools again for recaps, summaries, repetitions, or continuations of information already present in the conversation.
+- Solution: add one general, model-guided rule only in `ROUTE_SYSTEM_PROMPT`.
+- The rule prefers `CHAT` when the user asks to recap/summarize/repeat/continue/explain/compare and existing context is sufficient.
+- Tools remain allowed for fresh/current, verify/check, new information, changed file/state, or missing/stale/ambiguous/insufficient context.
+- Files touched: `src/orbit/runtime/messages.py`, `tests/test_messages.py`.
+- Tests run: `PYTHONPATH=src python3 -m unittest tests.test_messages -q`, `python3 -m compileall -q src/orbit/runtime tests`, `git diff --check`.
+- Post-merge route-level smoke: `system_info` recap and read-file recap confirmed `CHAT` / no tool when context is sufficient; refresh/current/check changed/new search still allow tools.
+- Smoke limitation: grep recap was only partially confirmed because it ended with `finish_reason=length` and empty output.
+- Full E2E is not a lightweight gate on this CPU: A1 `system_info` took about 220s and A2 full E2E was interrupted.
+- No regression was observed and no further patch is required.
+- Residual limit: this is routing guidance, not a deterministic guarantee; it adds no cache, TTL, fast path, or tool-specific logic.
+- Status: closed work. Do not add more conversation-reuse patches without an observed regression.
 
-## Ultimi commit principali
+## Main Commits
 
+- `358ed99` Add release notes for v0.0.1-rc17
+- `f75bb73` Record conversation reuse smoke results (#126)
+- `6b11419` Update agent guidance after conversation reuse merge (#125)
 - `1d54e9c` Improve route guidance for conversation reuse (#124)
 - `3390059` Clarify optional native MTP support (#123)
 - `a05a1e9` Add post-RC16 agent guidance (#122)
@@ -138,23 +153,23 @@ decisioni prese, ipotesi non ancora provate e prossimi passi ragionevoli.
 - `d4991d4` Add user turn lineage to evidence records (#116)
 - `d4ae03a` Add evidence lineage diagnostics (#115)
 
-## Prossimi obiettivi suggeriti
+## Suggested Next Objectives
 
-1. Fermarsi e usare RC16 come baseline stabile.
-2. Eseguire benchmark CPU controllati con `bench-core` metadata.
-3. Analizzare l'output `bench-core` per eventuali regressioni o profili migliori.
-4. Eseguire uno smoke end-to-end leggero su conversation reuse solo se emerge una regressione o un comportamento ambiguo.
-5. Solo se necessario, investigare `producer_model_call_id` runtime-side.
-6. Non riaprire evidence selection senza nuovo segnale affidabile di relevance.
-7. Non riaprire MTP algorithm tuning senza nuova evidenza upstream o benchmark forte.
-8. Valutare piccoli miglioramenti UX/documentazione solo se misurabili, isolati e supportati da test.
+1. Stop and use RC17 as the stable baseline.
+2. Run controlled CPU benchmarks with `bench-core` metadata.
+3. Analyze `bench-core` output for regressions or better profiles.
+4. Run a lightweight conversation-reuse end-to-end smoke only if a regression or ambiguous behavior appears.
+5. Investigate runtime-side `producer_model_call_id` only if needed.
+6. Do not reopen evidence selection without a new reliable relevance signal.
+7. Do not reopen MTP algorithm tuning without new upstream evidence or a strong benchmark.
+8. Consider small UX/documentation improvements only if measurable, isolated, and covered by tests.
 
-## Anti-obiettivi
+## Anti-Goals
 
-- Niente rewrite multi-linguaggio.
-- Niente hardcoded semantic routing.
-- Niente evidence selection `current_turn`-only.
-- Niente MTP default.
-- Niente promesse GPU sul native server.
-- Niente release senza preflight.
-- Niente benchmark senza metadata.
+- No multi-language rewrite.
+- No hardcoded semantic routing.
+- No `current_turn`-only evidence selection.
+- No MTP default.
+- No GPU promise for the native server.
+- No release without preflight.
+- No benchmark without metadata.
