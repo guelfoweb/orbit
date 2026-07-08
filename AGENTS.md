@@ -108,8 +108,22 @@ decisioni prese, ipotesi non ancora provate e prossimi passi ragionevoli.
 - Recovery gate: timeout/cancel con `shell20`, poi nuovo `simple_chat --mtp-required`.
 - Mai usare store persistente per RC smoke di evidence lineage.
 
+## #124, conversation reuse route guidance
+
+- Problema: il router poteva richiamare tool anche per recap, sintesi, ripetizioni o continuazioni di informazioni gia presenti in conversazione.
+- Soluzione: aggiunta una regola generale e model-guided solo in `ROUTE_SYSTEM_PROMPT`.
+- La regola preferisce `CHAT` quando l'utente chiede recap/summarize/repeat/continue/explain/compare e il contesto esistente e sufficiente.
+- I tool restano consentiti per fresh/current, verify/check, nuove informazioni, changed file/state o contesto missing/stale/ambiguous/insufficient.
+- File toccati: `src/orbit/runtime/messages.py`, `tests/test_messages.py`.
+- Test eseguiti: `PYTHONPATH=src python3 -m unittest tests.test_messages -q`, `python3 -m compileall -q src/orbit/runtime tests`, `git diff --check`.
+- Limiti residui: e una guidance di routing, non una garanzia deterministica; non aggiunge cache, TTL, fast path o logica per-tool.
+- Stato: lavoro chiuso. Non aggiungere altre patch su conversation reuse senza regressione osservata.
+
 ## Ultimi commit principali
 
+- `1d54e9c` Improve route guidance for conversation reuse (#124)
+- `3390059` Clarify optional native MTP support (#123)
+- `a05a1e9` Add post-RC16 agent guidance (#122)
 - `a6133c35` Add release notes for v0.0.1-rc16
 - `767ed6e` Document optional MTP model download (#121)
 - `400711e` Document bench core metadata and profile guidance (#120)
@@ -125,10 +139,11 @@ decisioni prese, ipotesi non ancora provate e prossimi passi ragionevoli.
 1. Fermarsi e usare RC16 come baseline stabile.
 2. Eseguire benchmark CPU controllati con `bench-core` metadata.
 3. Analizzare l'output `bench-core` per eventuali regressioni o profili migliori.
-4. Solo se necessario, investigare `producer_model_call_id` runtime-side.
-5. Non riaprire evidence selection senza nuovo segnale affidabile di relevance.
-6. Non riaprire MTP algorithm tuning senza nuova evidenza upstream o benchmark forte.
-7. Valutare piccoli miglioramenti UX/documentazione solo se misurabili e isolati.
+4. Eseguire uno smoke end-to-end leggero su conversation reuse solo se emerge una regressione o un comportamento ambiguo.
+5. Solo se necessario, investigare `producer_model_call_id` runtime-side.
+6. Non riaprire evidence selection senza nuovo segnale affidabile di relevance.
+7. Non riaprire MTP algorithm tuning senza nuova evidenza upstream o benchmark forte.
+8. Valutare piccoli miglioramenti UX/documentazione solo se misurabili, isolati e supportati da test.
 
 ## Anti-obiettivi
 
