@@ -1,135 +1,141 @@
 # AGENTS.md
 
-## Scope
+## Ruolo
 
-This repository contains the `orbit` CLI built around local `llama.cpp`-based backends, with native `orbit server` as the primary path.
+Questo file guida agenti e sessioni Codex che lavorano su Orbit. Deve aiutare a
+continuare il progetto dopo `v0.0.1-rc16` distinguendo fatti consolidati,
+decisioni prese, ipotesi non ancora provate e prossimi passi ragionevoli.
 
-The tool name remains `orbit`. The repository directory may be temporary.
+## Principi permanenti
 
-## Hard rules
+- Correctness, stabilita, reliability e semplicita vengono prima della performance.
+- Orbit resta Python-first: preferire standard library e codice piccolo, leggibile, debuggabile.
+- Target primario: CPU-only con Gemma 4 12B tramite native `orbit server`.
+- Runtime owns behavior; backend owns inference.
+- Non introdurre fix semantici hardcoded nel routing o nel tool loop.
+- Guardrail deterministici sono ammessi solo per sicurezza, validazione, bounded retry e diagnostica.
+- Non sacrificare correttezza per speedup teorici.
+- Benchmark e test prevalgono sulle intuizioni.
+- `workdir/` e una fixture pubblica: non toccare o stagiare `workdir/.miktex/` e `workdir/doc/`.
+- Non creare tag o release salvo richiesta esplicita.
 
-- Keep the runtime small, readable, and easy to debug.
-- Do not turn Orbit into a generic agent framework.
-- Do not add deterministic fast paths for user tasks.
-- The model must decide whether to use available tools.
-- The runtime may enforce safety, size, context, and tool-contract boundaries.
-- `workdir/` is a public regression fixture and must stay safe to publish.
-- Prefer standard-library Python unless a dependency has clear value.
-- Keep one-shot, REPL, backend, runtime, tools, and terminal UI separated.
-- Do not reintroduce Ollama-specific logic in this codebase.
-- Do not expose browser tools until explicitly designed.
-- Broad shell access is allowed only through explicit tools-on mode and must stay disabled by default.
-- After runtime/tool/session changes, run unit tests.
+## Stato release
 
-## Backend
+### RC13
 
-- Primary backend: native `orbit server`.
-- Compatibility backend: local OpenAI-compatible chat completions, including `llama-server`.
-- Default base URL: `http://127.0.0.1:12120`.
-- Primary target model: `gemma4:12b-it`.
-- Reasoning should remain disabled by default at backend startup unless explicitly testing visible thinking.
-- Context profiles are provided by helper scripts, not hidden runtime magic.
+- Focus: diagnostica MTP.
+- Aggiunte diagnostiche MTP per throughput, config, timing e validate efficiency.
+- MTP e stabile, ma non e risultato throughput-positive in modo robusto su CPU-only.
 
-## Tools
+### RC14
 
-Model-facing tools:
+- Focus: diagnostiche KV/final evidence e compact final evidence.
+- `cached=4` su final/retry e stato spiegato come divergenza prompt-view `route -> final`, non come bug backend/cache.
+- La slim compact final evidence metadata riduce gli evaluated tokens nei `final_from_tool` piccoli.
+- `chat_final` multi-card resta uno stop tecnico senza lineage/intent affidabile.
 
-- `exec_shell_full_command`
+### RC15
 
-Rules:
+- Focus: evidence lineage.
+- `EvidenceRecord` include `evidence_sequence`, `tool_call_id`, `user_turn_id`, `produced_by_phase`.
+- `producer_model_call_id` resta `null`.
+- Nessuna evidence selection o compaction attiva.
+- `dual_shell` conferma che una selection `current_turn`-only non e sicura.
+- Gli smoke lineage devono usare workdir temporanei puliti, non store persistenti contaminati.
 
-- Tools are exposed only when enabled by tool mode.
-- Command selection must be model-driven before tool exposure.
-- No deterministic task fast paths.
-- `exec_shell_full_command` is unrestricted local shell access.
-- The runtime enforces timeout/output-size limits around shell execution.
-- For analysis prompts, metadata-only commands such as `ls`, `file`, or `stat` must trigger a model retry asking for direct content/source/string evidence.
-- Failed shell commands may enter a model-driven repair loop using bounded exit code, stdout, and stderr evidence.
-- Shell repair must stay generic: no command/utility whitelist; skip only clearly environmental failures such as permission, filesystem, memory, DNS, or timeout errors.
-- Mutating shell commands that exit successfully with no output may trigger one model-driven verification command.
-- Mutation verification must not validate domain-specific formats in runtime; the model must produce evidence of the changed value or state.
-- Runtime guards must guide the model, not solve the task deterministically.
-- Internal guard prompts may ask for content evidence, completion, minimal local patches, or semantic repair, but the model must choose the command.
-- Tool-call output budgets may be dynamic by phase; do not raise global max tokens to hide internal control-flow bugs.
-- Coding guards must stay language-agnostic unless benchmark evidence justifies a narrower rule.
-- `cat` on large UTF-8 text/source files may be post-processed through the internal bounded reader.
-- Commands that read or analyze local PDFs may be post-processed through text extraction.
-- PDF text extraction must prefer `pdftotext`; if unavailable, fallback to filtered `strings`.
-- PDF support is text-only: no OCR and no raw PDF reinjection.
-- Generic web search should use `orbit-web-search "query"`; explicit URLs should use `curl`.
-- HTML emitted by shell commands such as `curl` may be converted to readable text before reinjection.
-- If the user asks for HTML/page source analysis, preserve source-like HTML instead of converting it to readable text.
-- Web content must not be silently saved into the workdir.
-- Do not present a first bounded shell result as a complete summary of a long document.
-- Unknown tools must fail clearly.
-- Tools remain off by default. `/tools on` exposes only `exec_shell_full_command`.
+### RC16
 
-## Session memory
+- Budget finale dedicato per `system_info`.
+- Documentazione CPU-first e MTP opzionale.
+- Metadata header per `orbit bench-core`.
+- Guidance di profiling e server profile conservativa.
+- Download modello draft MTP spostato fuori dal setup base: e opzionale.
 
-Orbit uses model-driven session memory refresh for long sessions.
+## MTP
 
-Rules:
+- MTP e opzionale/sperimentale.
+- Non e default nel quick start.
+- Non garantisce speedup, specialmente su CPU-only.
+- Il draft model MTP va scaricato solo se si vuole testare intenzionalmente MTP.
+- `n_max=3` resta il default migliore tra gli esperimenti osservati.
+- `target_validate` e compute-bound; il costo dominante e nel graph compute.
+- Two-pass validate e shadow runtime sono stati scartati per rischio correctness: mutazioni KV, stato speculative non clonabile in modo sicuro, sampler/KV/frontier cleanup sensibili.
+- MTP strict e timeout/cancel recovery restano gate obbligati quando si valida il path MTP.
+- Nei test locali MTP usare MTP attivo, mmproj e multimodal quando si valida quel path.
 
-- The model generates the memory.
-- The internal memory request must not be saved as a visible session turn.
-- Memory refresh must run without tools.
-- Rebuilt history keeps:
-  - system prompt
-  - model-generated session memory
-  - recent verbatim tail
-- If memory generation is empty, attempts tool calls, fails, or does not reduce context, keep the original history unchanged.
-- Avoid back-to-back memory refreshes; a successful refresh must enter a short message-count cooldown.
-- Memory refresh events must show before/after estimated tokens, saved ratio, elapsed seconds, and threshold/window.
-- Default memory refresh threshold is 85% of the configured context estimate; lower it only with benchmark evidence.
-- Do not summarize user prompts at ingestion time.
-- Do not replace the current turn with a rewritten prompt.
+## KV/cache/final budget
 
-## UX
+- `cached=4` su `route -> final` e atteso: i prompt divergono subito nel system prompt.
+- Non inseguire `cached=4` con redesign rischiosi senza nuova evidenza.
+- La strada sicura resta ridurre evaluated tokens nei final/retry.
+- `final_from_tool` piccolo e stato migliorato con compact evidence metadata.
+- `system_info` ha un cap dedicato a 160 token.
+- `shell`, `grep_search` e `unknown` piccoli restano a 96 token.
+- `/max-tokens` e un limite user-facing; il runtime applica comunque budget interni per fase.
 
-- Classic terminal UX only.
-- No full-screen TUI.
-- Errors must be short and concrete.
-- Prompt history should use `readline` when available, support arrow up/down, persist by workdir, and avoid duplicates.
-- Slash commands must not be stored in prompt history.
-- `/status` should expose useful runtime state without becoming noisy.
-- `/status` should include shell repair/mutation verification counters when present.
-- `/tools` must show only currently exposed model tools.
-- `/max-tokens` may adjust output token budget for following turns, runtime-only.
-- Interactive final assistant responses should stream when supported by the backend.
-- Streaming must not break tool-call parsing or duplicate the final response.
-- Ctrl+C during streaming must interrupt the current turn, rollback partial messages, and return to the prompt without exiting.
-- Tool phases should emit compact dim events, including display tool name and result size.
-- Tool event format is `exec <json_args>` followed by ` └ <result_chars> chars -> model`.
-- Show a dim elapsed-time indicator before the first streamed token.
-- Keep one blank line between prompt and assistant response.
-- Keep one blank line between assistant response and the dim metrics footer.
-- Prefer resolved model names in status/footer; do not show SHA ids when reliable local metadata can map them.
+## Evidence lineage
 
-## Tests
+- `user_turn_id` e utile per provenance, non per relevance.
+- `tool_call_id` ed `evidence_sequence` sono utili ma non sufficienti per selection.
+- `produced_by_phase` e valorizzato solo nei path noti.
+- `producer_model_call_id` resta `null`.
+- L'esperimento model-guided shadow evidence selection e stato negativo: extra model call troppo costosa su CPU-only, JSON non affidabile, fragilita su `dual_shell`; patch revertita, non usarlo ora.
+- `chat_final` multi-card compaction resta stop tecnico.
+- `dual_shell` puo richiedere entrambe le card nel retry/final: non ridurre senza lineage/intent piu forte.
 
-Minimum checks before considering a change safe:
+## Benchmarking
 
-```bash
-python3 -m unittest discover -s tests -q
-```
+- `orbit bench-core` e il benchmark pubblico di regressione.
+- Il metadata header di `bench-core` e ON di default.
+- Usare `--no-metadata` solo quando serve output minimale.
+- Il metadata include commit/tag, `base_url`, `workdir`, timeout, `max_tokens`, env selezionate e `/props` backend best-effort.
+- Se `/props` non risponde, `backend_props: unavailable` non deve fallire il benchmark.
+- Registrare sempre commit/tag, modello, ctx, threads, MTP, tools e prewarm.
+- `scripts/suggest-server-profile.sh` e un punto di partenza conservativo, non garanzia di tuning ottimale.
+- GPU va misurata tramite backend esterno compatibile, per esempio `llama-server --base-url`, non come performance nativa di `orbit server`.
+- Native `orbit server` e CPU-first con `gpu_layers=0`.
 
-When a local backend is running, also run at least one real smoke test for the changed area.
+## Gate consigliati
 
-Keep manual regression prompts in `docs/PROMPTS.md`. The file should stay short and focused on currently supported behavior.
+- Pre-PR: unit mirati per l'area modificata.
+- Sempre: `compileall` mirato e `git diff --check`.
+- Full unit solo per pre-release o cambi ampi.
+- Se si toccano budget/final: smoke `system_info`.
+- Se si tocca `bench_core`: smoke metadata header e `--no-metadata`.
+- Evidence lineage smoke: usare workdir temporanei puliti.
+- KV/final smoke: `pwd_followup`.
+- MTP gate: `simple_chat --mtp-required` con `/props` healthy.
+- Recovery gate: timeout/cancel con `shell20`, poi nuovo `simple_chat --mtp-required`.
+- Mai usare store persistente per RC smoke di evidence lineage.
 
-For release confidence, use `orbit release-confidence`. Its fixtures must stay isolated in `/tmp`, and its checkers must validate final behavior rather than specific shell commands.
+## Ultimi commit principali
 
-## Benchmark discipline
+- `a6133c35` Add release notes for v0.0.1-rc16
+- `767ed6e` Document optional MTP model download (#121)
+- `400711e` Document bench core metadata and profile guidance (#120)
+- `8e830ed` Add bench core metadata header (#119)
+- `b700d74` Clarify CPU-first server and MTP guidance (#118)
+- `c03533e` Increase system info final budget (#117)
+- `91e84e2` Add release notes for v0.0.1-rc15
+- `d4991d4` Add user turn lineage to evidence records (#116)
+- `d4ae03a` Add evidence lineage diagnostics (#115)
 
-- The software performance tuning line is closed.
-- Keep the current benchmark set as the regression suite.
-- Do not change routing, tool selection, final-answer policy, prompts, tool payloads, or cache behavior for performance unless a benchmark shows a strong, comparable benefit.
-- In the absence of strong measurement evidence, do not touch observable behavior.
-- Use `orbit bench-core` as the public regression benchmark.
-- `orbit bench-core` uses the repository `workdir/` fixture by default.
-- For deeper profiling, prefer temporary local scripts or manual measurements rather than adding permanent helper scripts.
-- Keep explicit backend slot/cache management out of the core runtime unless benchmarks justify it.
+## Prossimi obiettivi suggeriti
 
-## Todo
+1. Fermarsi e usare RC16 come baseline stabile.
+2. Eseguire benchmark CPU controllati con `bench-core` metadata.
+3. Analizzare l'output `bench-core` per eventuali regressioni o profili migliori.
+4. Solo se necessario, investigare `producer_model_call_id` runtime-side.
+5. Non riaprire evidence selection senza nuovo segnale affidabile di relevance.
+6. Non riaprire MTP algorithm tuning senza nuova evidenza upstream o benchmark forte.
+7. Valutare piccoli miglioramenti UX/documentazione solo se misurabili e isolati.
 
-- Keep the tool surface limited and explicit.
+## Anti-obiettivi
+
+- Niente rewrite multi-linguaggio.
+- Niente hardcoded semantic routing.
+- Niente evidence selection `current_turn`-only.
+- Niente MTP default.
+- Niente promesse GPU sul native server.
+- Niente release senza preflight.
+- Niente benchmark senza metadata.
