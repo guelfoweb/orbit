@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT, with_chat_system_prompt
+from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT, TOOL_CALL_SYSTEM_PROMPT, with_chat_system_prompt
 
 
 class MessagePromptTests(unittest.TestCase):
@@ -16,6 +16,28 @@ class MessagePromptTests(unittest.TestCase):
             [{"role": "system", "content": ROUTE_SYSTEM_PROMPT}, {"role": "user", "content": "x"}]
         )
         self.assertEqual(messages[0]["content"], CHAT_SYSTEM_PROMPT)
+
+    def test_route_policy_prefers_existing_context_for_recaps(self) -> None:
+        self.assertIn("recap, repeat, summary, explanation, comparison, or continuation", ROUTE_SYSTEM_PROMPT)
+        self.assertIn('prefer {"route":"CHAT"} when the prior context is sufficient', ROUTE_SYSTEM_PROMPT)
+
+    def test_route_policy_allows_refresh_and_verification_tools(self) -> None:
+        self.assertIn("fresh/current data", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("verification", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("changed files/state", ROUTE_SYSTEM_PROMPT)
+
+    def test_route_policy_allows_new_information_tools(self) -> None:
+        self.assertIn("new information", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("missing/stale/ambiguous/insufficient prior context", ROUTE_SYSTEM_PROMPT)
+
+    def test_route_policy_covers_prior_file_or_search_summaries_generally(self) -> None:
+        self.assertIn("information already in this conversation", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("summary", ROUTE_SYSTEM_PROMPT)
+        self.assertIn("prior context is sufficient", ROUTE_SYSTEM_PROMPT)
+
+    def test_tool_call_policy_still_requires_one_tool_after_route_decides_tool(self) -> None:
+        self.assertIn("Call exactly one available tool", TOOL_CALL_SYSTEM_PROMPT)
+        self.assertIn("Operate on the latest user request only", TOOL_CALL_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":
