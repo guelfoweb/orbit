@@ -967,7 +967,7 @@ class ChatRuntime:
         record = next(iter(self.evidence_store.recent_records(1)), None)
         if record is None or record.kind != "web_search":
             return False
-        if record.status == "none":
+        if record.status in {"none", "error"}:
             return True
         if use_tool_prompt:
             return False

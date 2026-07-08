@@ -624,6 +624,47 @@ class EvidenceTests(unittest.TestCase):
             self.assertNotIn("web_search_results: true", context)
             self.assertNotIn("results: none", context)
 
+    def test_web_final_context_handles_error_without_full_raw_output(self) -> None:
+        raw = "error: web search failed: " + ("dns resolution unavailable " * 40)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": 'orbit-web-search "location of Avola"'},
+            )
+
+            context = build_web_final_evidence_context(store)
+
+            self.assertEqual(record.kind, "web_search")
+            self.assertEqual(record.status, "error")
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn("web_search_evidence: true", context)
+            self.assertIn("status: error", context)
+            self.assertIn("query: location of Avola", context)
+            self.assertIn("result_count: 0", context)
+            self.assertIn("error_message: error: web search failed", context)
+            self.assertIn(record.raw_ref, context)
+            self.assertIn(record.raw_sha256[:16], context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
+            self.assertNotIn("dns resolution unavailable " * 20, context)
+
+    def test_web_final_context_ignores_non_web_error_records(self) -> None:
+        raw = "error: command failed"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={"command": "false"},
+            )
+
+            context = build_web_final_evidence_context(store)
+
+            self.assertEqual(record.kind, "shell")
+            self.assertIsNone(context)
+
 
 def _store_with(record, content: str) -> EvidenceStore:
     store = EvidenceStore(Path("/tmp/orbit-test-unused-session.evidence"))
