@@ -135,8 +135,23 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Residual limit: this is routing guidance, not a deterministic guarantee; it adds no cache, TTL, fast path, or tool-specific logic.
 - Status: closed work. Do not add more conversation-reuse patches without an observed regression.
 
+## #128, Compact Final View for Web Search Errors
+
+- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Problem: `web_search` tool errors correctly closed through `final_from_tool`, but could miss the compact web final view and prefill a larger final prompt.
+- Solution: `web_search` evidence with `status=error` now uses the compact web final view.
+- The final context carries bounded metadata, including query, status, `error_message`, raw ref/hash, and size.
+- Full raw web error/output is not reinjected into the compact final prompt.
+- `error:` detection is scoped to `web_search` evidence only; generic non-web tool errors are unchanged.
+- Files touched: `src/orbit/runtime/chat.py`, `src/orbit/runtime/evidence.py`, `tests/test_evidence.py`, `tests/test_runtime.py`.
+- Tests run: targeted evidence/runtime tests PASS with 37 tests, runtime/evidence/tool_message PASS with 198 tests, messages/final_policy/completion_budget PASS with 58 tests, `compileall` PASS, `git diff --check` PASS.
+- Full unit discovery previously passed with 988 tests.
+- Safety preserved: no route/tool-loop changes, no MTP changes, no cache/KV changes, no global budget changes.
+
 ## Main Commits
 
+- `2bb40b2` Use compact final view for web search errors (#128)
+- `ab4dd4f` Normalize agent guidance after v0.0.1-rc17 (#127)
 - `358ed99` Add release notes for v0.0.1-rc17
 - `f75bb73` Record conversation reuse smoke results (#126)
 - `6b11419` Update agent guidance after conversation reuse merge (#125)
