@@ -28,6 +28,17 @@ parallel_slots=1
 
 These defaults favor stability on CPU-only systems. Change them only with comparable benchmarks.
 
+For a conservative machine-local starting point, run:
+
+```bash
+scripts/suggest-server-profile.sh
+```
+
+The script prints suggested `THREADS`, `BATCH_SIZE`, `UBATCH_SIZE`, and
+`CACHE_RAM` exports for `orbit server`. Treat them as starting values, not
+guaranteed optimal settings; validate changes with comparable `bench-core`
+runs.
+
 On Apple Silicon, thread count is not automatically "all cores". Local
 measurements have shown that using only performance cores can beat using
 performance plus efficiency cores for token-by-token generation. On thermally
@@ -115,6 +126,11 @@ Public regression benchmark:
 ```bash
 orbit bench-core --base-url http://127.0.0.1:12120
 ```
+
+`bench-core` prints a metadata header by default so shared results include the
+Orbit commit/tag, local benchmark options, selected environment variables, and
+best-effort backend `/props` fields. Use `--no-metadata` only when the old
+minimal output is required.
 
 Rules:
 

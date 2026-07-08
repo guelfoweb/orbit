@@ -166,7 +166,8 @@ cat <<EOF
 # These values are suggestions for orbit server. Review them before exporting.
 # Typical use:
 #   export THREADS=$THREADS BATCH_SIZE=$BATCH_SIZE UBATCH_SIZE=$UBATCH_SIZE CACHE_RAM=$CACHE_RAM
-#   orbit server --port 12120 --mtp
+#   orbit server --port 12120
+# Add --mtp only when intentionally testing native MTP.
 
 export THREADS=$THREADS
 export BATCH_SIZE=$BATCH_SIZE
