@@ -31,6 +31,7 @@ class CompletionBudgetPolicyTests(unittest.TestCase):
         self.assertEqual(resolve_max_tokens("final_from_tool", 32, evidence_kind="shell", evidence_chars=80), 96)
         self.assertEqual(resolve_max_tokens("final_from_tool", 512, evidence_kind="unknown", evidence_chars=80), 96)
         self.assertEqual(resolve_max_tokens("final_from_tool", 32, evidence_kind="shell_error", evidence_chars=120), 128)
+        self.assertEqual(resolve_max_tokens("final_from_tool", 512, evidence_kind="system_info", evidence_chars=300), 160)
         self.assertEqual(resolve_max_tokens("final_from_tool", 32, evidence_kind="shell", evidence_chars=1200), 192)
         self.assertEqual(resolve_max_tokens("final_from_tool", 512, evidence_kind="web_search", evidence_chars=1200), 192)
         self.assertEqual(resolve_max_tokens("final_from_tool", 32, evidence_kind="read", evidence_chars=8000), 256)

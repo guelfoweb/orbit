@@ -18,6 +18,7 @@ PDF_FINAL_MAX_TOKENS = 128
 PDF_BRIEF_FINAL_MAX_TOKENS = 72
 LIST_FINAL_MAX_TOKENS = 96
 OPERATIONAL_STATUS_FINAL_MAX_TOKENS = 96
+SYSTEM_INFO_FINAL_MAX_TOKENS = 160
 LONG_SHELL_ANALYSIS_FINAL_MAX_TOKENS = 96
 BRIEF_SHELL_FINAL_MAX_TOKENS = 96
 COMPACT_FINAL_RETRY_MAX_TOKENS = 160
@@ -100,6 +101,7 @@ def build_final_tool_policy(
     pdf_text_result = has_pdf_text_tool_result(call_messages)
     list_like_result = has_list_like_tool_result(call_messages) and is_compact_list_request(prompt)
     shell_full_result = has_tool_result(call_messages, "exec_shell_full_command")
+    system_info_result = has_tool_result(call_messages, "system_info")
     operational_status_result = shell_full_result and is_operational_status_request(prompt)
     brief_request = is_brief_final_request(prompt)
     brief_shell_result = shell_full_result and brief_request and not (
@@ -240,6 +242,7 @@ def build_final_tool_policy(
             pdf_text_result=pdf_text_result,
             list_like_result=list_like_result,
             operational_status_result=operational_status_result,
+            system_info_result=system_info_result,
             compact_shell_analysis_result=compact_shell_analysis_result,
             brief_shell_result=brief_shell_result,
             brief_request=brief_request,
@@ -263,6 +266,7 @@ def final_tool_max_tokens(
     pdf_text_result: bool,
     list_like_result: bool,
     operational_status_result: bool = False,
+    system_info_result: bool = False,
     compact_shell_analysis_result: bool = False,
     brief_shell_result: bool = False,
     brief_request: bool = False,
@@ -289,6 +293,8 @@ def final_tool_max_tokens(
         )
     if list_like_result:
         return min(max_tokens, LIST_FINAL_MAX_TOKENS)
+    if system_info_result:
+        return min(max_tokens, SYSTEM_INFO_FINAL_MAX_TOKENS)
     if operational_status_result:
         return min(max_tokens, OPERATIONAL_STATUS_FINAL_MAX_TOKENS)
     if compact_shell_analysis_result:

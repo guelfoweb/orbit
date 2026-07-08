@@ -505,6 +505,27 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("Ignore older tool results", policy.messages[-1]["content"])
         self.assertIn("Do not summarize file or page content", policy.messages[-1]["content"])
 
+    def test_system_info_policy_uses_larger_small_final_budget(self) -> None:
+        messages = [
+            {"role": "user", "content": "tell me specs about this computer"},
+            {
+                "role": "tool",
+                "name": "system_info",
+                "content": (
+                    "system_info:\n"
+                    "OS: Linux 6.17.0-35-generic x86_64\n"
+                    "CPU: Intel(R) Core(TM) i7-10710U CPU @ 1.10GHz\n"
+                    "RAM: 62.5 GiB total (47.8 GiB available)\n"
+                    "Disk:\n- /: 915.3 GiB total, 164.1 GiB available\n"
+                    "Python: 3.12.3"
+                ),
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+
+        self.assertEqual(policy.max_tokens, 160)
+
     def test_operational_status_policy_preserves_remove_confirmation(self) -> None:
         messages = [
             {"role": "user", "content": "remove index.html"},
