@@ -54,7 +54,6 @@ Download model artifacts as needed:
 ```bash
 orbit download ggml-org/gemma-4-12B-it-GGUF
 orbit download ggml-org/gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
-orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
 ```
 
 ## Quick Start
@@ -96,6 +95,12 @@ ORBIT_KV_DIAG=1 .venv/bin/orbit --workdir workdir --tools on --think off "hi"
 ### Optional MTP
 
 Native MTP is explicit:
+
+Only download the MTP draft model if you intentionally want to test native MTP:
+
+```bash
+orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+```
 
 ```bash
 PYTHONPATH=src .venv/bin/orbit server --mtp
