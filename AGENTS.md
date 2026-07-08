@@ -116,6 +116,10 @@ decisioni prese, ipotesi non ancora provate e prossimi passi ragionevoli.
 - I tool restano consentiti per fresh/current, verify/check, nuove informazioni, changed file/state o contesto missing/stale/ambiguous/insufficient.
 - File toccati: `src/orbit/runtime/messages.py`, `tests/test_messages.py`.
 - Test eseguiti: `PYTHONPATH=src python3 -m unittest tests.test_messages -q`, `python3 -m compileall -q src/orbit/runtime tests`, `git diff --check`.
+- Smoke post-merge route-level: `system_info` recap e read-file recap confermano `CHAT`/no tool quando il contesto basta; refresh/current/check changed/new search continuano a consentire tool.
+- Limite smoke: grep recap solo parzialmente confermato per `finish_reason=length` con output vuoto.
+- Full E2E non e un gate leggero su questa CPU: A1 `system_info` ha richiesto circa 220s e A2 full E2E e stato interrotto.
+- Nessuna regressione osservata e nessuna patch ulteriore richiesta.
 - Limiti residui: e una guidance di routing, non una garanzia deterministica; non aggiunge cache, TTL, fast path o logica per-tool.
 - Stato: lavoro chiuso. Non aggiungere altre patch su conversation reuse senza regressione osservata.
 
