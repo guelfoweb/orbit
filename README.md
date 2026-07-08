@@ -19,11 +19,12 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 - streaming terminal output and compact progress phases
 - route-prefix KV anchor and startup prewarm enabled by default
 - optional multimodal image/audio support when the matching `mmproj` is loaded
-- native MTP with runtime guardrails through `orbit server --mtp`
+- optional native MTP support via `orbit server --mtp`, with diagnostics and recovery checks
 - EvidenceStore-backed post-tool evidence handling
 
-MTP is supported in the native server path with runtime guardrails. It is not
-always-on for every internal completion and is not a guaranteed performance win.
+MTP is supported in the native server path as an explicit, experimental option.
+It is not enabled by default, is not always-on for every internal completion,
+and is not a guaranteed performance win.
 
 ## Requirements
 
