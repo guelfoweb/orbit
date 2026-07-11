@@ -3066,8 +3066,13 @@ class ToolRuntimeTests(unittest.TestCase):
                         generation_tokens_per_second=None,
                     )
                 self.final_messages = messages
+                rendered = "\n".join(str(message.get("content", "")) for message in messages)
+                if "do not answer from general knowledge" not in rendered:
+                    content = "Avola is in Sicily."
+                else:
+                    content = "The web search failed because DNS resolution was unavailable."
                 return ChatResult(
-                    content="The web search failed because DNS resolution was unavailable.",
+                    content=content,
                     model="fake",
                     finish_reason="stop",
                     tool_calls=[],
@@ -3103,6 +3108,8 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn("web_search_evidence: true", rendered)
         self.assertIn("status: error", rendered)
         self.assertIn("query: location of Avola", rendered)
+        self.assertIn("web_search_failed: true", rendered)
+        self.assertIn("do not answer from general knowledge", rendered)
         self.assertIn("error_message: error: web search failed", rendered)
         self.assertNotIn("Decide compactly whether the user request needs local tools", rendered)
 

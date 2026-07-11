@@ -644,6 +644,8 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn("status: error", context)
             self.assertIn("query: location of Avola", context)
             self.assertIn("result_count: 0", context)
+            self.assertIn("web_search_failed: true", context)
+            self.assertIn("do not answer from general knowledge", context)
             self.assertIn("error_message: error: web search failed", context)
             self.assertIn(record.raw_ref, context)
             self.assertIn(record.raw_sha256[:16], context)
