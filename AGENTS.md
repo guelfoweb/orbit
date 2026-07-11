@@ -148,8 +148,22 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Full unit discovery previously passed with 988 tests.
 - Safety preserved: no route/tool-loop changes, no MTP changes, no cache/KV changes, no global budget changes.
 
+## #130, Web Search Error Final Correctness
+
+- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Completes the compact web error final behavior introduced by #128.
+- Problem: after #128, a known-query `web_search` error could still lead the final model call to answer from general knowledge as if the search had succeeded.
+- Solution: `web_search` evidence with `status=error` now adds `web_search_failed: true` and a narrow final instruction to report the web failure briefly and not answer from general knowledge as if the search succeeded.
+- Files touched: `src/orbit/runtime/evidence.py`, `tests/test_evidence.py`, `tests/test_runtime.py`.
+- Tests run: `tests.test_evidence tests.test_runtime` PASS with 193 tests, `tests.test_messages tests.test_final_policy tests.test_completion_budget` PASS with 58 tests, `compileall` PASS, `git diff --check` PASS.
+- Safety preserved: scoped only to `web_search` with `status=error`; `status=none`, successful web results, and non-web errors are unchanged.
+- Full raw web error/output is not reinjected.
+- No route/tool-loop changes, no MTP changes, no cache/KV changes, and no global budget changes.
+
 ## Main Commits
 
+- `0980c3d` Report web search errors without answering from memory (#130)
+- `de204cd` Update agent guidance after web search error final view (#129)
 - `2bb40b2` Use compact final view for web search errors (#128)
 - `ab4dd4f` Normalize agent guidance after v0.0.1-rc17 (#127)
 - `358ed99` Add release notes for v0.0.1-rc17
