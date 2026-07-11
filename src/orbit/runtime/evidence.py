@@ -327,6 +327,13 @@ def build_web_final_evidence_context(store: EvidenceStore | None) -> str | None:
         f"sha256: {record.raw_sha256[:16]}",
         f"size: {record.raw_chars} chars, {record.raw_lines} lines",
     ]
+    if record.status == "error":
+        parts.extend(
+            [
+                "web_search_failed: true",
+                "final_instruction: The web search failed. Report this failure briefly; do not answer from general knowledge as if the search succeeded.",
+            ]
+        )
     for key in ("query", "result_count", "error_message", "top_domains", "top_titles"):
         value = record.metadata.get(key)
         if value in (None, "", [], {}):
