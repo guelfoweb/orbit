@@ -2,7 +2,7 @@
 
 ## Role
 
-This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc17` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
+This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc18` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
 
 ## Permanent Principles
 
@@ -51,7 +51,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC17
 
-- Current published baseline: `v0.0.1-rc17`.
+- Published historical baseline: `v0.0.1-rc17`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc17
 - Release notes commit: `358ed995fbc0607ebbda15099a8c568223ddb752`.
 - Tag object: `8af6bd36d8bf0cd0e450e10af80bf8e5038fc408`.
@@ -61,6 +61,21 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Focus: post-RC16 agent guidance, MTP README clarification, conversation reuse route guidance, and smoke-result notes.
 - RC17 validation: MTP shim build PASS, full unit PASS with 985 tests, `simple_chat --mtp-required` PASS, `git diff --check` PASS.
 - RC17 MTP sanity: `mtp_enabled=true`, `mtp_initialized=true`, `mtp_failure_reason=null`, `in_flight=false`, `multimodal_available=true`, `mtp_last_completion.success=true`, `mtp_config.n_max=3`.
+
+### RC18
+
+- Current published baseline: `v0.0.1-rc18`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc18
+- Release notes commit: `230db4341737380afb240cd701861d2ee350df7e`.
+- Tag object: `3b327da630ed6d53f442a969c32e962e563589dc`.
+- Tag commit: `230db4341737380afb240cd701861d2ee350df7e`.
+- Prerelease: yes. Latest: false.
+- Includes #127, #128, #129, #130, #131, #132, #133, #134, and #135.
+- Focus: compact web-error final handling, correct failed-search reporting, reduced `final_from_tool` instructions, compact evidence prompt metadata, and related guidance updates.
+- RC18 validation: MTP shim build PASS, `compileall` PASS, full unit PASS with 989 tests, `git diff --check` PASS, and MTP strict smoke PASS.
+- RC18 MTP sanity: `mtp_enabled=true`, `mtp_initialized=true`, `mtp_failure_reason=null`, `multimodal_available=true`, `mtp_last_completion.success=true`, `mtp_config.n_max=3`.
+- `cached=4` remains expected and unresolved; RC18 reduces evaluated tokens but does not change route/final prompt divergence.
+- No deterministic wall-time improvement is claimed.
 
 ## MTP
 
@@ -138,7 +153,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## #128, Compact Final View for Web Search Errors
 
-- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Included in `v0.0.1-rc18`.
 - Problem: `web_search` tool errors correctly closed through `final_from_tool`, but could miss the compact web final view and prefill a larger final prompt.
 - Solution: `web_search` evidence with `status=error` now uses the compact web final view.
 - The final context carries bounded metadata, including query, status, `error_message`, raw ref/hash, and size.
@@ -151,7 +166,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## #130, Web Search Error Final Correctness
 
-- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Included in `v0.0.1-rc18`.
 - Completes the compact web error final behavior introduced by #128.
 - Problem: after #128, a known-query `web_search` error could still lead the final model call to answer from general knowledge as if the search had succeeded.
 - Solution: `web_search` evidence with `status=error` now adds `web_search_failed: true` and a narrow final instruction to report the web failure briefly and not answer from general knowledge as if the search succeeded.
@@ -163,7 +178,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## #132, Reduced final_from_tool Prompt Tokens
 
-- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Included in `v0.0.1-rc18`.
 - Problem: every `final_from_tool` call evaluated a correct but unnecessarily verbose dedicated system instruction.
 - Solution: compact equivalent wording preserves the full contract: answer concisely from tool evidence, do not call tools, do not expose raw tool-call syntax, do not falsely claim lack of access, and report errors briefly.
 - Production-tokenizer measurement: the `final_from_tool` system component decreased from 49 to 34 tokens, an exact deterministic reduction of 15 tokens per call.
@@ -174,7 +189,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## #134, Reduced Compact Evidence Prompt Metadata
 
-- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Included in `v0.0.1-rc18`.
 - Problem: compact model-facing evidence cards still included audit-only provenance fields that were retained elsewhere and were not needed to answer.
 - Solution: small compact cards no longer expose `raw_ref`; compact web cards no longer expose `tool`, `raw_ref`, hash, or size.
 - Full and medium cards are unchanged. EvidenceStore, raw retrieval, sidecars, route cards, tool messages, evidence identity, hashes, and lineage remain intact outside the model prompt.
@@ -187,6 +202,8 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Main Commits
 
+- `230db43` Add release notes for v0.0.1-rc18
+- `48b28b3` Update agent guidance after compact evidence reduction (#135)
 - `992ba3e` Reduce compact evidence prompt metadata (#134)
 - `f171089` Reduce final from tool prompt tokens (#132)
 - `0980c3d` Report web search errors without answering from memory (#130)
@@ -211,7 +228,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-1. Stop and use RC17 as the stable baseline.
+1. Stop and use RC18 as the stable baseline.
 2. Run controlled CPU benchmarks with `bench-core` metadata.
 3. Analyze `bench-core` output for regressions or better profiles.
 4. Run a lightweight conversation-reuse end-to-end smoke only if a regression or ambiguous behavior appears.
