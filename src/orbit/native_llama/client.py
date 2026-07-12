@@ -66,6 +66,18 @@ class NativeClientConfig:
     mtp_accept_probe_enabled: bool = False
     mtp_decode_probe_enabled: bool = False
     use_mtp_experimental: bool = False
+    final_prefix_experiment_enabled: bool = False
+
+
+@dataclass
+class FinalPrefixExperimentStatus:
+    initialized: bool = False
+    prefix_tokens: int = 0
+    capture_count: int = 0
+    restore_count: int = 0
+    fallback_count: int = 0
+    failure_reason: str | None = None
+    last_used: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,11 +158,27 @@ class NativeLlamaClient:
         self._last_prompt_decode_batch_n_tokens = 0
         self._route_prefix_anchor_state = PrefixAnchorState()
         self._route_prefix_prefill_lock = threading.Lock()
+        self._final_prefix_anchor_state = PrefixAnchorState()
+        self._final_prefix_status = FinalPrefixExperimentStatus()
 
     def session_snapshot(self, session_id: str = DEFAULT_NATIVE_SESSION_ID) -> NativeSessionSnapshot:
         if session_id != self._session.session_id:
             raise ValueError("only the default native session is supported in this experiment")
         return self._session.snapshot(backend_mode=self._current_backend_mode())
+
+    def final_prefix_experiment_status(self) -> dict[str, object]:
+        status = self._final_prefix_status
+        return {
+            "enabled": self.config.final_prefix_experiment_enabled,
+            "initialized": status.initialized,
+            "prefix_tokens": status.prefix_tokens,
+            "capture_count": status.capture_count,
+            "restore_count": status.restore_count,
+            "fallback_count": status.fallback_count,
+            "failure_reason": status.failure_reason,
+            "last_used": status.last_used,
+            "checkpoint_size_bytes": self._final_prefix_anchor_state.checkpoint_size,
+        }
 
     def _current_backend_mode(self) -> str:
         if not self.config.use_mtp_experimental:
@@ -189,6 +217,7 @@ class NativeLlamaClient:
         # corrupt teardown after mixed target-only/MTP client lifetimes.
 
     def cancel(self) -> None:
+        self._invalidate_final_prefix("cancelled")
         self._session.cancel_requested = True
         self._session.continuation_ready = False
         self.cancel_event.set()
@@ -319,6 +348,7 @@ class NativeLlamaClient:
         self._session.prompt_cache_mode = None
         self._session.continuation_ready = False
         self._session.last_metrics = None
+        self._invalidate_final_prefix("session_reset")
         if self._persistent_mtp_runtime is None:
             return
         try:
@@ -531,10 +561,12 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
+        final_prefix_experiment: bool = False,
         on_progress=None,
         on_token=None,
         should_cancel=None,
     ) -> NativeTimings:
+        self._final_prefix_status.last_used = False
         thinking = self._thinking_enabled(thinking)
         prepared_multimodal = prepare_multimodal_messages(messages, media_marker=self._media_marker)
         mode = (
@@ -573,7 +605,15 @@ class NativeLlamaClient:
             thinking=thinking,
             prompt=prompt,
         ) if route_prefix_anchor else None
+        final_prefix_segments = self._final_prefix_segments_for_prompt(
+            messages,
+            tools=tools,
+            thinking=thinking,
+            prompt=prompt,
+        ) if self._final_prefix_experiment_eligible(final_prefix_experiment) else None
         allow_mtp = not tools and route_anchor_segments is None
+        if final_prefix_segments is not None:
+            allow_mtp = False
         if allow_mtp_experimental is False:
             allow_mtp = False
         return self.complete_prompt(
@@ -582,6 +622,7 @@ class NativeLlamaClient:
             allow_mtp_experimental=allow_mtp,
             thinking=thinking,
             route_anchor_segments=route_anchor_segments,
+            final_prefix_segments=final_prefix_segments,
             kv_diag_messages=messages,
             on_progress=on_progress,
             on_token=on_token,
@@ -598,6 +639,7 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
+        final_prefix_experiment: bool = False,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -611,6 +653,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
+            final_prefix_experiment=final_prefix_experiment,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
@@ -656,6 +699,7 @@ class NativeLlamaClient:
         thinking: bool,
         route_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
+        final_prefix_experiment: bool = False,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -722,6 +766,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
+            final_prefix_experiment=final_prefix_experiment,
             on_progress=on_progress,
             on_token=collect,
             should_cancel=should_cancel,
@@ -935,6 +980,7 @@ class NativeLlamaClient:
         allow_mtp_experimental: bool = True,
         thinking: bool | None = None,
         route_anchor_segments: RoutePromptSegments | None = None,
+        final_prefix_segments: RoutePromptSegments | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -973,6 +1019,7 @@ class NativeLlamaClient:
                 prompt,
                 max_tokens=max_tokens,
                 route_anchor_segments=route_anchor_segments,
+                final_prefix_segments=final_prefix_segments,
                 kv_diag_messages=kv_diag_messages,
                 on_progress=on_progress,
                 on_token=on_token,
@@ -980,7 +1027,13 @@ class NativeLlamaClient:
             )
             self._session.last_metrics = timings
             self._session.continuation_ready = _can_continue_from_timings(timings)
+            if final_prefix_segments is not None and timings.cancelled:
+                self._invalidate_final_prefix("cancelled")
             return timings
+        except Exception:
+            if final_prefix_segments is not None:
+                self._invalidate_final_prefix("completion_error")
+            raise
         finally:
             self._session.in_flight = False
 
@@ -1114,6 +1167,7 @@ class NativeLlamaClient:
         *,
         max_tokens: int = 16,
         route_anchor_segments: RoutePromptSegments | None = None,
+        final_prefix_segments: RoutePromptSegments | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -1131,9 +1185,12 @@ class NativeLlamaClient:
         previous_prompt_tokens = list(self._session.cached_prompt_tokens)
         pf_start = lib.llama_time_us()
         anchor_plan = self._route_anchor_plan(prompt, prompt_tokens, route_anchor_segments)
+        final_plan = self._final_prefix_plan(prompt, prompt_tokens, final_prefix_segments)
         anchor_metadata: dict[str, object] | None = None
         processed_start = 0
-        if anchor_plan is None:
+        if final_plan is not None:
+            processed_start, reused = self._prepare_memory_with_final_prefix(final_plan, prompt_tokens)
+        elif anchor_plan is None:
             reused = self._prepare_memory_for_prompt(prompt_tokens)
         else:
             processed_start, reused, anchor_metadata = self._prepare_memory_with_route_anchor(anchor_plan)
@@ -1142,7 +1199,7 @@ class NativeLlamaClient:
                 processed_start = reused
         processed = 0
         step = max(1, min(self.config.progress_step, self.config.batch_size))
-        processed = processed_start if anchor_plan is not None and anchor_metadata is not None else reused
+        processed = processed_start if final_plan is not None or (anchor_plan is not None and anchor_metadata is not None) else reused
         if on_progress:
             on_progress(NativeProgress("prefill", processed, n_prompt))
         token_array = (llama_token * n_prompt)(*prompt_tokens)
@@ -1407,6 +1464,158 @@ class NativeLlamaClient:
             )
             return None
         return segments
+
+    def _final_prefix_segments_for_prompt(
+        self,
+        messages: list[NativeMessage],
+        *,
+        tools: list[dict] | None,
+        thinking: bool,
+        prompt: str,
+    ) -> RoutePromptSegments | None:
+        roles = [message.get("role") for message in messages]
+        if tools or thinking or roles != ["system", "user", "system"]:
+            self._record_final_prefix_fallback("ineligible_prompt_family")
+            return None
+        try:
+            segments = render_gemma4_route_prompt_segments(messages, thinking=False)
+        except Exception:
+            self._record_final_prefix_fallback("prompt_render_failed")
+            return None
+        if segments.full_prompt_text != prompt:
+            self._record_final_prefix_fallback("prompt_render_mismatch")
+            return None
+        return segments
+
+    def _final_prefix_experiment_eligible(self, requested: bool) -> bool:
+        return requested and self.config.final_prefix_experiment_enabled and not self.config.use_mtp_experimental
+
+    def _final_prefix_plan(
+        self,
+        prompt: str,
+        prompt_tokens: list[int],
+        segments: RoutePromptSegments | None,
+    ) -> _RouteAnchorRuntimePlan | None:
+        if segments is None:
+            return None
+        stable_tokens = self.tokenize(segments.stable_prefix_text)
+        if len(prompt_tokens) <= 43 or len(stable_tokens) > 43:
+            self._record_final_prefix_fallback("prefix_token_count_mismatch")
+            return None
+        prefix_tokens = prompt_tokens[:43]
+        if segments.full_prompt_text != prompt:
+            self._record_final_prefix_fallback("prefix_identity_mismatch")
+            return None
+        token_hash = _stable_tokens_hash_hex(prefix_tokens)
+        prefix_hash = compute_prefix_anchor_key(
+            **self._final_prefix_state_kwargs(segments, token_hash=token_hash)
+        )
+        return _RouteAnchorRuntimePlan(
+            segments=segments,
+            prefix_tokens=prefix_tokens,
+            prefix_hash=prefix_hash,
+            metadata={"prefix_token_count": len(prefix_tokens), "prefix_token_hash": token_hash},
+        )
+
+    def _prepare_memory_with_final_prefix(self, plan: _RouteAnchorRuntimePlan, prompt_tokens: list[int]) -> tuple[int, int]:
+        if not self._session.ctx_tgt:
+            raise RuntimeError("native client not loaded")
+        token_hash = _stable_tokens_hash_hex(plan.prefix_tokens)
+        state_kwargs = self._final_prefix_state_kwargs(plan.segments, token_hash=token_hash)
+        if self._final_prefix_anchor_state.valid:
+            self._clear_target_memory()
+            ok, restored, metadata = restore_prefix_anchor(
+                self._final_prefix_anchor_state,
+                lib=self.lib.lib,
+                ctx=self._session.ctx_tgt,
+                prefix_hash=plan.prefix_hash,
+                token_count=len(plan.prefix_tokens),
+                enabled=True,
+                **state_kwargs,
+            )
+            self._final_prefix_anchor_state = restored
+            if ok:
+                self._session.cached_prompt_tokens = list(plan.prefix_tokens)
+                self._final_prefix_status.initialized = True
+                self._final_prefix_status.prefix_tokens = len(plan.prefix_tokens)
+                self._final_prefix_status.restore_count += 1
+                self._final_prefix_status.failure_reason = None
+                self._final_prefix_status.last_used = True
+                return len(plan.prefix_tokens), len(plan.prefix_tokens)
+            self._final_prefix_status.initialized = False
+            self._final_prefix_status.prefix_tokens = 0
+            self._record_final_prefix_fallback(str(metadata.get("fallback_reason") or "restore_failed"))
+            self._clear_target_memory()
+            return 0, self._prepare_memory_for_prompt(prompt_tokens)
+
+        self._clear_target_memory()
+        token_array = (llama_token * len(plan.prefix_tokens))(*plan.prefix_tokens)
+        try:
+            self._decode_prompt_range(
+                token_array,
+                processed=0,
+                end=len(plan.prefix_tokens),
+                step=min(self.config.progress_step, self.config.batch_size),
+                total=len(plan.prefix_tokens),
+            )
+            state, metadata = capture_prefix_anchor(
+                lib=self.lib.lib,
+                ctx=self._session.ctx_tgt,
+                prefix_hash=plan.prefix_hash,
+                token_count=len(plan.prefix_tokens),
+                enabled=True,
+                **state_kwargs,
+            )
+        except Exception:
+            self._record_final_prefix_fallback("capture_exception")
+            self._clear_target_memory()
+            return 0, self._prepare_memory_for_prompt(prompt_tokens)
+        self._final_prefix_anchor_state = state
+        if not state.valid:
+            self._final_prefix_status.initialized = False
+            self._final_prefix_status.prefix_tokens = 0
+            self._record_final_prefix_fallback(str(metadata.get("fallback_reason") or "capture_failed"))
+            self._clear_target_memory()
+            return 0, self._prepare_memory_for_prompt(prompt_tokens)
+        self._session.cached_prompt_tokens = list(plan.prefix_tokens)
+        self._final_prefix_status.initialized = True
+        self._final_prefix_status.prefix_tokens = len(plan.prefix_tokens)
+        self._final_prefix_status.capture_count += 1
+        self._final_prefix_status.failure_reason = None
+        self._final_prefix_status.last_used = True
+        return len(plan.prefix_tokens), 0
+
+    def _final_prefix_state_kwargs(self, segments: RoutePromptSegments, *, token_hash: str) -> dict[str, str]:
+        config_id = (
+            f"ctx={self.config.context_tokens}:batch={self.config.batch_size}:"
+            f"ubatch={self.config.ubatch_size}:threads={self.config.threads}:"
+            f"threads_batch={self.config.threads_batch}"
+        )
+        return {
+            "model_id": str(self.paths.model),
+            "template_id": f"gemma4-final-prefix-v1:{config_id}",
+            "tool_schema_hash": "none",
+            "capability_summary_hash": "none",
+            "runtime_policy_hash": segments.stable_prefix_hash,
+            "route_contract_hash": token_hash,
+            "backend_version": "orbit-native",
+            "native_version": runtime_library_filename("llama"),
+            "tools_mode": "final_from_tool:thinking=off",
+        }
+
+    def _record_final_prefix_fallback(self, reason: str) -> None:
+        self._final_prefix_status.fallback_count += 1
+        self._final_prefix_status.failure_reason = reason
+        self._final_prefix_status.last_used = False
+
+    def _invalidate_final_prefix(self, reason: str) -> None:
+        if not hasattr(self, "_final_prefix_anchor_state"):
+            return
+        self._final_prefix_anchor_state = PrefixAnchorState()
+        self._final_prefix_status.initialized = False
+        self._final_prefix_status.prefix_tokens = 0
+        self._final_prefix_status.failure_reason = reason
+        self._final_prefix_status.last_used = False
 
     def _continue_generation_from_current_context(
         self,

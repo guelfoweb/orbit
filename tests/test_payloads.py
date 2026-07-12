@@ -97,5 +97,22 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn("allow_mtp_experimental", baseline)
         self.assertFalse(disabled["allow_mtp_experimental"])
 
+    def test_build_chat_payload_includes_final_prefix_experiment_only_when_requested(self) -> None:
+        baseline = build_chat_payload(
+            ChatPayloadOptions(model="m", messages=[{"role": "user", "content": "hello"}], temperature=0, max_tokens=32)
+        )
+        experimental = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0,
+                max_tokens=32,
+                final_prefix_experiment=True,
+            )
+        )
+
+        self.assertNotIn("final_prefix_experiment", baseline)
+        self.assertTrue(experimental["final_prefix_experiment"])
+
 if __name__ == "__main__":
     unittest.main()

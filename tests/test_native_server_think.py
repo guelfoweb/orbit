@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from orbit.native_server.app import OrbitNativeHandler, OrbitNativeServer, _DisconnectWatcher
 from orbit.native_server.protocol import openai_chat_response, parse_chat_request
+from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT
 
 
 @dataclass
@@ -38,6 +39,7 @@ class _FakeClient:
         self.last_mtp_completion = type("Probe", (), {"success": False})()
         self.mtp_fallback_reason = None
         self.allow_mtp_calls: list[bool | None] = []
+        self.final_prefix_calls: list[bool] = []
 
     def complete_chat_text(
         self,
@@ -49,12 +51,14 @@ class _FakeClient:
         thinking,
         route_prefix_anchor=False,
         allow_mtp_experimental=None,
+        final_prefix_experiment=False,
         on_progress=None,
         on_token=None,
         should_cancel=None,
     ):
         self.calls.append(thinking)
         self.allow_mtp_calls.append(allow_mtp_experimental)
+        self.final_prefix_calls.append(final_prefix_experiment)
         return _FakeCompletion()
 
     def session_snapshot(self, session_id: str):
@@ -75,6 +79,25 @@ class _FakeClient:
 
 
 class NativeServerThinkTests(unittest.TestCase):
+    def test_final_prefix_experiment_requires_exact_final_prompt_family(self) -> None:
+        client = _FakeClient(thinking=False)
+        server = OrbitNativeServer(client=client, model_alias="fake")
+        final_messages = [
+            {"role": "system", "content": FINAL_FROM_TOOL_SYSTEM_PROMPT},
+            {"role": "user", "content": "request"},
+            {"role": "system", "content": "evidence"},
+        ]
+        unknown_messages = [
+            {"role": "system", "content": "different prompt"},
+            {"role": "user", "content": "request"},
+            {"role": "system", "content": "evidence"},
+        ]
+
+        server.complete(parse_chat_request({"messages": final_messages, "final_prefix_experiment": True}))
+        server.complete(parse_chat_request({"messages": unknown_messages, "final_prefix_experiment": True}))
+
+        self.assertEqual(client.final_prefix_calls, [True, False])
+
     def test_disconnect_watcher_disarm_skips_cancel_callback(self) -> None:
         called: list[str] = []
         watcher = _DisconnectWatcher(None, lambda: called.append("cancel"))  # type: ignore[arg-type]
