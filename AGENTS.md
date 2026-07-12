@@ -160,8 +160,20 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Full raw web error/output is not reinjected.
 - No route/tool-loop changes, no MTP changes, no cache/KV changes, and no global budget changes.
 
+## #132, Reduced final_from_tool Prompt Tokens
+
+- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Problem: every `final_from_tool` call evaluated a correct but unnecessarily verbose dedicated system instruction.
+- Solution: compact equivalent wording preserves the full contract: answer concisely from tool evidence, do not call tools, do not expose raw tool-call syntax, do not falsely claim lack of access, and report errors briefly.
+- Production-tokenizer measurement: the `final_from_tool` system component decreased from 49 to 34 tokens, an exact deterministic reduction of 15 tokens per call.
+- No deterministic wall-time improvement is claimed because observed CPU timings were noisy.
+- Files touched: `src/orbit/runtime/messages.py`, `tests/test_messages.py`.
+- Tests run: messages/final policy/completion budget PASS with 59 tests, evidence/runtime PASS with 193 tests, `compileall` PASS, and `git diff --check` PASS. Full unit discovery previously passed with 989 tests.
+- Safety preserved: no route/tool-loop changes, no evidence-selection changes, no MTP changes, no cache/KV changes, and no completion-budget changes.
+
 ## Main Commits
 
+- `f171089` Reduce final from tool prompt tokens (#132)
 - `0980c3d` Report web search errors without answering from memory (#130)
 - `de204cd` Update agent guidance after web search error final view (#129)
 - `2bb40b2` Use compact final view for web search errors (#128)
