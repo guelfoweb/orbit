@@ -78,6 +78,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 - `cached=4` on `route -> final` is expected: prompts diverge immediately in the system prompt.
 - Do not chase `cached=4` with risky redesigns without new evidence.
+- Final-prefix checkpoint reuse remains a technical stop: the stable 43-token boundary does not align with production prefill batching, and changing segmentation changes logits.
 - The safer path remains reducing evaluated tokens in final/retry prompts.
 - Small `final_from_tool` was improved with compact evidence metadata.
 - `system_info` has a dedicated 160-token cap.
@@ -171,8 +172,22 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Tests run: messages/final policy/completion budget PASS with 59 tests, evidence/runtime PASS with 193 tests, `compileall` PASS, and `git diff --check` PASS. Full unit discovery previously passed with 989 tests.
 - Safety preserved: no route/tool-loop changes, no evidence-selection changes, no MTP changes, no cache/KV changes, and no completion-budget changes.
 
+## #134, Reduced Compact Evidence Prompt Metadata
+
+- Post-RC17 change; not included in `v0.0.1-rc17`.
+- Problem: compact model-facing evidence cards still included audit-only provenance fields that were retained elsewhere and were not needed to answer.
+- Solution: small compact cards no longer expose `raw_ref`; compact web cards no longer expose `tool`, `raw_ref`, hash, or size.
+- Full and medium cards are unchanged. EvidenceStore, raw retrieval, sidecars, route cards, tool messages, evidence identity, hashes, and lineage remain intact outside the model prompt.
+- The historical #128 compact web view included raw ref/hash/size; #134 removes those fields only from its model-facing projection without changing #128/#130 web-error correctness.
+- `kv_diag_evidence_card_tokens.evidence_id_hash` may be `null` for compact cards without `raw_ref`. This is intentional: `kv_diag_evidence_lineage` independently preserves the hashed `EvidenceRecord.evidence_id`.
+- Measured prompt reductions: `system_info` 36 tokens, `read_file` 37, `grep_search` 36, `list_files` 37, `shell_error` 35, `web_none` 72, `web_error` 74, and `web_success` 77.
+- Tests run: evidence/runtime/tool-message PASS with 198 tests, messages/final-policy/completion-budget PASS with 59 tests, `compileall` PASS, and `git diff --check` PASS.
+- Safety preserved: no route/tool-loop, evidence-selection, MTP, cache/KV, segmentation, completion-budget, system-prompt, or raw-retrieval changes.
+- This reduces evaluated dynamic-suffix tokens. It does not fix cache reuse: `cached=4` remains expected from route/final prompt-view divergence.
+
 ## Main Commits
 
+- `992ba3e` Reduce compact evidence prompt metadata (#134)
 - `f171089` Reduce final from tool prompt tokens (#132)
 - `0980c3d` Report web search errors without answering from memory (#130)
 - `de204cd` Update agent guidance after web search error final view (#129)
