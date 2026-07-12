@@ -70,7 +70,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Tag object: `3b327da630ed6d53f442a969c32e962e563589dc`.
 - Tag commit: `230db4341737380afb240cd701861d2ee350df7e`.
 - Prerelease: yes. Latest: false.
-- Includes #127, #128, #129, #130, #131, #132, #133, #134, and #135.
+- Includes #127, #128, #129, #130, #131, #132, #133, #134, #135, and #136.
 - Focus: compact web-error final handling, correct failed-search reporting, reduced `final_from_tool` instructions, compact evidence prompt metadata, and related guidance updates.
 - RC18 validation: MTP shim build PASS, `compileall` PASS, full unit PASS with 989 tests, `git diff --check` PASS, and MTP strict smoke PASS.
 - RC18 MTP sanity: `mtp_enabled=true`, `mtp_initialized=true`, `mtp_failure_reason=null`, `multimodal_available=true`, `mtp_last_completion.success=true`, `mtp_config.n_max=3`.
@@ -200,8 +200,47 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Safety preserved: no route/tool-loop, evidence-selection, MTP, cache/KV, segmentation, completion-budget, system-prompt, or raw-retrieval changes.
 - This reduces evaluated dynamic-suffix tokens. It does not fix cache reuse: `cached=4` remains expected from route/final prompt-view divergence.
 
+## #137, Experimental final_from_tool Prefix Reuse
+
+- Post-RC18 work; not included in `v0.0.1-rc18`.
+- Adds an off-by-default experimental path behind `ORBIT_FINAL_PREFIX_EXPERIMENT=1`.
+- Eligibility (when enabled):
+  - native backend,
+  - `tools` enabled,
+  - exact `final_from_tool` prompt family and role sequence,
+  - exact `FINAL_FROM_TOOL_SYSTEM_PROMPT` alignment,
+  - exact validated 43-token prefix,
+  - MTP experimental path is not active.
+- Default behavior remains unchanged:
+  - `cached=4` remains for route/final in production default.
+  - normal final path behavior is unchanged when the flag is off.
+- Experimental behavior when enabled:
+  - eligible final calls can restore validated 43-token prefix;
+  - cached tokens reach 43 for eligible finals when active;
+  - this is an exact 39 evaluated-token reduction relative to disabled default behavior.
+  - this is additive to prior final prompt reductions.
+- Safety and lifecycle:
+  - mismatch or restore failure falls back to normal prefill,
+  - failed restore cannot keep initialized state,
+  - cancel, reset, and completion errors invalidate checkpoint state,
+  - route, chat, retry/repair, and tool-call phases are not eligible.
+- Observability:
+  - `/props` reports bounded experiment diagnostics: `enabled`, `initialized`, `prefix_tokens`, `capture_count`, `restore_count`, `fallback_count`, `failure_reason`, `last_used`, and checkpoint size.
+- Validation recorded:
+  - OFF/ON matrix: 66 finals, `finish_reason=stop` in 66/66.
+  - 50 completion mixed stability run: 50/50 correct.
+  - 0 fallbacks.
+  - cancel invalidation and safe recapture: PASS.
+  - full suite PASS with 997 tests; compileall PASS; `git diff --check` PASS.
+- Limitations:
+  - not enabled by default,
+  - experimental logits differ from cold full-prefill due to segmentation differences,
+  - restore is bit-exact against an identically segmented baseline,
+  - no deterministic wall-time claim is made.
+
 ## Main Commits
 
+- `a1419d4` Add experimental final tool prefix reuse (#137)
 - `230db43` Add release notes for v0.0.1-rc18
 - `48b28b3` Update agent guidance after compact evidence reduction (#135)
 - `992ba3e` Reduce compact evidence prompt metadata (#134)
