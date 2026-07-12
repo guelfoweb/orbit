@@ -320,12 +320,8 @@ def build_web_final_evidence_context(store: EvidenceStore | None) -> str | None:
         "- evidence 1:",
         "tool_evidence_card: true",
         "web_search_evidence: true",
-        f"tool: {record.tool_name}",
         f"kind: {record.kind}",
         f"status: {record.status}",
-        f"raw_ref: {record.raw_ref}",
-        f"sha256: {record.raw_sha256[:16]}",
-        f"size: {record.raw_chars} chars, {record.raw_lines} lines",
     ]
     if record.status == "error":
         parts.extend(
@@ -542,7 +538,6 @@ def _compact_final_prompt_card(record: EvidenceRecord) -> str:
         "tool_evidence_card: true",
         f"kind: {record.kind}",
         f"status: {record.status}",
-        f"raw_ref: {record.raw_ref}",
     ]
     for key in _small_final_prompt_metadata_keys(record):
         value = record.metadata.get(key)
