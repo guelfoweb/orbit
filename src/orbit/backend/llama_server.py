@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -48,6 +49,7 @@ class LlamaServerBackend:
                 tools=tools,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
+                final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
             )
         )
         _attach_native_kv_diag_payload(payload, native_backend=native_backend)
@@ -85,6 +87,7 @@ class LlamaServerBackend:
                 stream=True,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
+                final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
             )
         )
         _attach_native_kv_diag_payload(payload, native_backend=native_backend)
@@ -718,6 +721,13 @@ def _allow_mtp_experimental_requested(*, native_backend: bool) -> bool | None:
     if phase == "chat_final_retry" or phase.startswith("final_from_tool"):
         return False
     return None
+
+
+def _final_prefix_experiment_requested(*, native_backend: bool) -> bool:
+    if not native_backend or os.environ.get("ORBIT_FINAL_PREFIX_EXPERIMENT") != "1":
+        return False
+    phase = current_phase()
+    return current_tools_mode() == "on" and phase is not None and phase.startswith("final_from_tool")
 
 
 def _attach_native_kv_diag_payload(payload: dict[str, Any], *, native_backend: bool) -> None:

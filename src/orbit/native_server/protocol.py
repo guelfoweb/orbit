@@ -20,6 +20,7 @@ class ChatRequest:
     tools: list[dict[str, Any]]
     route_prefix_anchor: bool
     allow_mtp_experimental: bool | None
+    final_prefix_experiment: bool
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
         tools=_tools_from_payload(payload.get("tools")),
         route_prefix_anchor=payload.get("route_prefix_anchor") is True,
         allow_mtp_experimental=_optional_bool(payload.get("allow_mtp_experimental")),
+        final_prefix_experiment=payload.get("final_prefix_experiment") is True,
     )
 
 

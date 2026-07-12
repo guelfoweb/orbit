@@ -35,7 +35,7 @@ from orbit.native_server.protocol import (
     trim_at_stop,
     validate_session_id,
 )
-from orbit.runtime.messages import ROUTE_SYSTEM_PROMPT
+from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -45,6 +45,7 @@ PREFIX_PREWARM_ENV = "ORBIT_KV_PREFIX_PREWARM"
 PREFIX_PREWARM_OFF = "off"
 PREFIX_PREWARM_STARTUP = "startup"
 TOOLS_ENV = "ORBIT_TOOLS"
+FINAL_PREFIX_EXPERIMENT_ENV = "ORBIT_FINAL_PREFIX_EXPERIMENT"
 
 
 class OrbitNativeServer:
@@ -68,6 +69,7 @@ class OrbitNativeServer:
 
         with self.lock:
             thinking = self.client.config.thinking if request.thinking is None else request.thinking
+            final_prefix_experiment = request.final_prefix_experiment and _is_final_from_tool_prompt(request.messages)
             completion = self.client.complete_chat_text(
                 request.messages,
                 max_tokens=request.max_tokens,
@@ -76,6 +78,7 @@ class OrbitNativeServer:
                 thinking=thinking,
                 route_prefix_anchor=request.route_prefix_anchor,
                 allow_mtp_experimental=request.allow_mtp_experimental,
+                final_prefix_experiment=final_prefix_experiment,
                 on_progress=on_progress,
                 on_token=collect,
                 should_cancel=should_cancel,
@@ -226,6 +229,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             mtp_last_validate_efficiency = _mtp_last_validate_efficiency_payload(state.client)
             mtp_last_validate_equivalence = _mtp_last_validate_equivalence_payload(state.client)
             mtp_config = _mtp_config_payload(state.client)
+            final_prefix = state.client.final_prefix_experiment_status()
             self._json(
                 {
                     "model_path": str(state.client.paths.model),
@@ -276,6 +280,15 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "batch_size": runtime["batch_size"],
                     "ubatch_size": runtime["ubatch_size"],
                     "parallel_slots": runtime["parallel_slots"],
+                    "final_prefix_experiment_enabled": final_prefix["enabled"],
+                    "final_prefix_experiment_initialized": final_prefix["initialized"],
+                    "final_prefix_experiment_prefix_tokens": final_prefix["prefix_tokens"],
+                    "final_prefix_experiment_capture_count": final_prefix["capture_count"],
+                    "final_prefix_experiment_restore_count": final_prefix["restore_count"],
+                    "final_prefix_experiment_fallback_count": final_prefix["fallback_count"],
+                    "final_prefix_experiment_failure_reason": final_prefix["failure_reason"],
+                    "final_prefix_experiment_last_used": final_prefix["last_used"],
+                    "final_prefix_experiment_checkpoint_size_bytes": final_prefix["checkpoint_size_bytes"],
                 }
             )
             return
@@ -577,6 +590,7 @@ def run_server(argv: list[str] | None = None) -> int:
                 mtp_accept_probe_enabled=args.enable_mtp_accept_probe,
                 mtp_decode_probe_enabled=args.enable_mtp_decode_probe,
                 use_mtp_experimental=args.enable_mtp_experimental,
+                final_prefix_experiment_enabled=os.environ.get(FINAL_PREFIX_EXPERIMENT_ENV) == "1",
             ),
         )
         if not args.verbose_llama_log:
@@ -618,6 +632,14 @@ def tools_startup_enabled(environ: Mapping[str, str] | None = None) -> bool:
     if value == "off":
         return False
     return False
+
+
+def _is_final_from_tool_prompt(messages: list[dict[str, Any]]) -> bool:
+    return (
+        len(messages) == 3
+        and [message.get("role") for message in messages] == ["system", "user", "system"]
+        and messages[0].get("content") == FINAL_FROM_TOOL_SYSTEM_PROMPT
+    )
 
 
 def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefixPrefillResult:
