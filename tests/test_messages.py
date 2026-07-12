@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT, TOOL_CALL_SYSTEM_PROMPT, with_chat_system_prompt
+from orbit.runtime.messages import (
+    CHAT_SYSTEM_PROMPT,
+    FINAL_FROM_TOOL_SYSTEM_PROMPT,
+    ROUTE_SYSTEM_PROMPT,
+    TOOL_CALL_SYSTEM_PROMPT,
+    with_chat_system_prompt,
+)
 
 
 class MessagePromptTests(unittest.TestCase):
@@ -38,6 +44,13 @@ class MessagePromptTests(unittest.TestCase):
     def test_tool_call_policy_still_requires_one_tool_after_route_decides_tool(self) -> None:
         self.assertIn("Call exactly one available tool", TOOL_CALL_SYSTEM_PROMPT)
         self.assertIn("Operate on the latest user request only", TOOL_CALL_SYSTEM_PROMPT)
+
+    def test_final_tool_policy_preserves_safety_and_error_guidance(self) -> None:
+        self.assertIn("from the tool result", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("Do not call tools", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("raw tool-call syntax", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("Never claim lack of access", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("Report errors briefly", FINAL_FROM_TOOL_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":
