@@ -98,11 +98,10 @@ TOOL_CALL_JSON_RETRY_PROMPT = (
     "For shell command, use one single-line command string only: no comments, no literal newlines."
 )
 FINAL_FROM_TOOL_SYSTEM_PROMPT = (
-    "Answer concisely from the available tool result. "
-    "Do not call tools. "
-    "Do not emit raw tool-call syntax. "
-    "If a tool result is present, do not claim lack of access. "
-    "If the tool result is an error, report the error briefly."
+    "Answer concisely from the tool result. "
+    "Do not call tools or emit raw tool-call syntax. "
+    "Never claim lack of access when a result is present. "
+    "Report errors briefly."
 )
 DEFAULT_SYSTEM_PROMPT = ROUTE_SYSTEM_PROMPT
 TOOL_SYSTEM_PROMPT = TOOL_CALL_SYSTEM_PROMPT
