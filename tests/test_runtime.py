@@ -471,6 +471,379 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn(record.raw_ref, final_rendered)
         self.assertNotIn("tool_evidence_ref: true", final_rendered)
 
+    def test_post_tool_chat_final_uses_visible_history_when_evidence_is_covered(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route":"CHAT"}', model="fake", finish_reason="stop", tool_calls=[],
+                    prompt_tokens=None, completion_tokens=1, cached_tokens=None,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="Alpha was first.", model="fake", finish_reason="stop", tool_calls=[],
+                    prompt_tokens=None, completion_tokens=4, cached_tokens=None,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            first = store.add(
+                "exec_shell_full_command", "alpha", metadata={"command": "printf alpha", "user_turn_id": "turn_1"}
+            )
+            second = store.add(
+                "exec_shell_full_command", "beta", metadata={"command": "printf beta", "user_turn_id": "turn_2"}
+            )
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "give the first result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(first), "evidence_id": first.evidence_id},
+                {"role": "assistant", "content": "The first result is alpha."},
+                {"role": "user", "content": "give the second result"},
+                {"role": "tool", "tool_call_id": "call-2", "name": "exec_shell_full_command", "content": tool_evidence_ref(second), "evidence_id": second.evidence_id},
+                {"role": "assistant", "content": "The second result is beta."},
+            ]
+            runtime.completed_evidence_ids.update({first.evidence_id, second.evidence_id})
+            runtime.last_visible_finish_reason = "stop"
+
+            runtime.ask_auto("summarize the first result", temperature=0, max_tokens=32, workdir=Path(tmp))
+
+        final_messages = backend.messages_by_call[1]
+        rendered = "\n".join(str(message.get("content", "")) for message in final_messages)
+        self.assertEqual(
+            [message.get("role") for message in final_messages],
+            ["system", "user", "assistant", "user", "assistant", "user"],
+        )
+        self.assertEqual(sum(message.get("content") == "summarize the first result" for message in final_messages), 1)
+        self.assertIn("The first result is alpha.", rendered)
+        self.assertIn("The second result is beta.", rendered)
+        self.assertIn("summarize the first result", rendered)
+        self.assertNotIn("evidence_context:", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in final_messages))
+        self.assertEqual(len(store.records), 2)
+        self.assertTrue(runtime.last_chat_projection_used)
+        self.assertIsNone(runtime.last_chat_projection_fallback_reason)
+        self.assertEqual(runtime.last_chat_projection_omitted_evidence_count, 2)
+        self.assertGreater(runtime.last_chat_projection_estimated_tokens_saved, 0)
+
+    def test_multiple_tool_results_from_one_completed_flow_are_covered_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            error = store.add(
+                "exec_shell_full_command", "first command failed", metadata={"user_turn_id": "turn_1"}
+            )
+            success = store.add(
+                "exec_shell_full_command", "second command returned alpha", metadata={"user_turn_id": "turn_1"}
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "find the result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(error), "evidence_id": error.evidence_id},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call-2", "function": {"name": "exec_shell_full_command", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call-2", "name": "exec_shell_full_command", "content": tool_evidence_ref(success), "evidence_id": success.evidence_id},
+                {"role": "assistant", "content": "The retry found alpha."},
+                {"role": "user", "content": "summarize the result"},
+            ]
+            runtime.completed_evidence_ids.update({error.evidence_id, success.evidence_id})
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("The retry found alpha.", rendered)
+        self.assertNotIn("evidence_context:", rendered)
+        self.assertFalse(any(message.get("role") == "tool" for message in messages))
+
+    def test_newer_unrelated_final_does_not_cover_older_unfinished_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            older = store.add("exec_shell_full_command", "older raw detail", metadata={"user_turn_id": "turn_1"})
+            newer = store.add("exec_shell_full_command", "newer result", metadata={"user_turn_id": "turn_2"})
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "run the first task"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(older), "evidence_id": older.evidence_id},
+                {"role": "user", "content": "run the second task"},
+                {"role": "tool", "tool_call_id": "call-2", "name": "exec_shell_full_command", "content": tool_evidence_ref(newer), "evidence_id": newer.evidence_id},
+                {"role": "assistant", "content": "The second task returned newer result."},
+                {"role": "user", "content": "summarize the first result"},
+            ]
+            runtime.completed_evidence_ids.update({older.evidence_id, newer.evidence_id})
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        self.assertIn("evidence_context:", "\n".join(str(message.get("content", "")) for message in messages))
+
+    def test_post_tool_chat_final_keeps_evidence_when_not_covered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command", "alpha", metadata={"command": "printf alpha", "user_turn_id": "turn_1"}
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "give a result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "user", "content": "summarize that"},
+            ]
+            runtime.completed_evidence_ids.add(record.evidence_id)
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn(record.raw_ref, rendered)
+        self.assertFalse(runtime.last_chat_projection_used)
+        self.assertEqual(runtime.last_chat_projection_fallback_reason, "evidence_final_association_inconsistent")
+
+    def test_tool_without_associated_user_does_not_cover_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command", "alpha", metadata={"command": "printf alpha", "user_turn_id": "turn_1"}
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "The result is alpha."},
+                {"role": "user", "content": "summarize that"},
+            ]
+            runtime.completed_evidence_ids.add(record.evidence_id)
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        self.assertIn("evidence_context:", "\n".join(str(message.get("content", "")) for message in messages))
+
+    def test_incomplete_visible_final_does_not_cover_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command", "alpha", metadata={"command": "printf alpha", "user_turn_id": "turn_1"}
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "give a result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "The result starts with alpha"},
+                {"role": "user", "content": "summarize that"},
+            ]
+            runtime.completed_evidence_ids.add(record.evidence_id)
+            runtime.last_visible_finish_reason = "length"
+
+            messages = runtime._chat_final_messages()
+
+        self.assertIn("evidence_context:", "\n".join(str(message.get("content", "")) for message in messages))
+
+    def test_loaded_history_without_completion_state_keeps_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command", "alpha", metadata={"command": "printf alpha", "user_turn_id": "turn_1"}
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "give a result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "The result is alpha."},
+                {"role": "user", "content": "summarize that"},
+            ]
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        self.assertIn("evidence_context:", "\n".join(str(message.get("content", "")) for message in messages))
+
+    def test_only_completed_evidence_turn_is_recorded_as_covered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", "alpha", metadata={"user_turn_id": "turn_1"})
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.current_user_turn_id = "turn_1"
+            stop = ChatResult(
+                content="The result is alpha.", model="fake", finish_reason="stop", tool_calls=[],
+                prompt_tokens=None, completion_tokens=4, cached_tokens=None,
+                prompt_tokens_per_second=None, generation_tokens_per_second=None,
+            )
+            length = ChatResult(
+                content="The result starts", model="fake", finish_reason="length", tool_calls=[],
+                prompt_tokens=None, completion_tokens=4, cached_tokens=None,
+                prompt_tokens_per_second=None, generation_tokens_per_second=None,
+            )
+
+            runtime._remember_visible_result(stop)
+            self.assertIn(record.evidence_id, runtime.completed_evidence_ids)
+            runtime._remember_visible_result(length)
+
+        self.assertNotIn(record.evidence_id, runtime.completed_evidence_ids)
+
+    def test_empty_and_length_results_do_not_cover_evidence_but_retry_stop_does(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("exec_shell_full_command", "alpha", metadata={"user_turn_id": "turn_1"})
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.current_user_turn_id = "turn_1"
+
+            for content, finish_reason in (("", "stop"), ("partial", "length")):
+                runtime._remember_visible_result(
+                    ChatResult(
+                        content=content, model="fake", finish_reason=finish_reason, tool_calls=[],
+                        prompt_tokens=None, completion_tokens=1, cached_tokens=None,
+                        prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                    )
+                )
+                self.assertNotIn(record.evidence_id, runtime.completed_evidence_ids)
+
+            runtime._remember_visible_result(
+                ChatResult(
+                    content="The complete result is alpha.", model="fake", finish_reason="stop", tool_calls=[],
+                    prompt_tokens=None, completion_tokens=5, cached_tokens=None,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                )
+            )
+
+        self.assertIn(record.evidence_id, runtime.completed_evidence_ids)
+
+    def test_cancelled_final_without_completed_result_keeps_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime._begin_user_turn()
+            record = store.add(
+                "exec_shell_full_command", "alpha", metadata={"user_turn_id": runtime.current_user_turn_id}
+            )
+            runtime.messages = [
+                {"role": "user", "content": "give a result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "user", "content": "summarize that"},
+            ]
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        self.assertIn("evidence_context:", "\n".join(str(message.get("content", "")) for message in messages))
+        self.assertEqual(runtime.last_chat_projection_fallback_reason, "evidence_completion_unproven")
+
+    def test_completed_continuation_can_cover_evidence_with_both_visible_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime._begin_user_turn()
+            record = store.add(
+                "exec_shell_full_command", "alpha beta", metadata={"user_turn_id": runtime.current_user_turn_id}
+            )
+            runtime.messages = [
+                {"role": "user", "content": "give both results"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "The first result is alpha"},
+            ]
+            runtime._remember_visible_result(
+                ChatResult(
+                    content="The first result is alpha", model="fake", finish_reason="length", tool_calls=[],
+                    prompt_tokens=None, completion_tokens=5, cached_tokens=None,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                )
+            )
+            runtime.messages.append({"role": "assistant", "content": "and the second result is beta."})
+            runtime._remember_visible_result(
+                ChatResult(
+                    content="and the second result is beta.", model="fake", finish_reason="stop", tool_calls=[],
+                    prompt_tokens=None, completion_tokens=7, cached_tokens=None,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                )
+            )
+            runtime.messages.append({"role": "user", "content": "summarize both"})
+
+            messages = runtime._chat_final_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("The first result is alpha", rendered)
+        self.assertIn("and the second result is beta.", rendered)
+        self.assertNotIn("evidence_context:", rendered)
+
+    def test_reset_and_history_rollback_clear_evidence_coverage(self) -> None:
+        runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None)
+        runtime.completed_evidence_ids.add("ev-reset")
+        runtime.last_chat_projection_used = True
+        runtime.last_chat_projection_omitted_evidence_count = 1
+
+        runtime.reset()
+        self.assertEqual(runtime.completed_evidence_ids, set())
+        self.assertFalse(runtime.last_chat_projection_used)
+        self.assertEqual(runtime.last_chat_projection_omitted_evidence_count, 0)
+        runtime.completed_evidence_ids.add("ev-rollback")
+        runtime.messages = [{"role": "user", "content": "hello"}]
+        runtime.restore_message_count(0)
+
+        self.assertEqual(runtime.completed_evidence_ids, set())
+
+    def test_reloaded_turn_id_does_not_cover_older_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            old = store.add("exec_shell_full_command", "old", metadata={"user_turn_id": "turn_1"})
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime._begin_user_turn()
+            new = store.add("exec_shell_full_command", "new", metadata={"user_turn_id": "turn_1"})
+            stop = ChatResult(
+                content="The new result.", model="fake", finish_reason="stop", tool_calls=[],
+                prompt_tokens=None, completion_tokens=4, cached_tokens=None,
+                prompt_tokens_per_second=None, generation_tokens_per_second=None,
+            )
+
+            runtime._remember_visible_result(stop)
+
+        self.assertNotIn(old.evidence_id, runtime.completed_evidence_ids)
+        self.assertIn(new.evidence_id, runtime.completed_evidence_ids)
+
+    def test_session_memory_disables_visible_history_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command", "alpha", metadata={"command": "printf alpha", "user_turn_id": "turn_1"}
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "system", "content": "Orbit session memory: visible context; use it for follow-ups.\nOlder result."},
+                {"role": "user", "content": "give a result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "The result is alpha."},
+                {"role": "user", "content": "summarize our discussion"},
+            ]
+            runtime.completed_evidence_ids.add(record.evidence_id)
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("evidence_context:", rendered)
+
+    def test_visible_history_projection_must_reduce_estimated_prompt_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command", "alpha", metadata={"command": "printf alpha", "user_turn_id": "turn_1"}
+            )
+            runtime = ChatRuntime(backend=FakeBackend(), system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "give a result"},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec_shell_full_command", "content": tool_evidence_ref(record), "evidence_id": record.evidence_id},
+                {"role": "assistant", "content": "The result is alpha."},
+                {"role": "user", "content": "unrelated context " * 500},
+                {"role": "assistant", "content": "acknowledged"},
+                {"role": "user", "content": "repeat the result"},
+            ]
+            runtime.completed_evidence_ids.add(record.evidence_id)
+            runtime.last_visible_finish_reason = "stop"
+
+            messages = runtime._chat_final_messages()
+
+        rendered = "\n".join(str(message.get("content", "")) for message in messages)
+        self.assertIn("evidence_context:", rendered)
+        self.assertNotIn("unrelated context " * 20, rendered)
+        self.assertEqual(runtime.last_chat_projection_fallback_reason, "visible_projection_not_smaller")
+
     def test_route_without_evidence_keeps_existing_history_window(self) -> None:
         backend = SequenceBackend(
             [
