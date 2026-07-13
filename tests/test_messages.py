@@ -29,8 +29,10 @@ class MessagePromptTests(unittest.TestCase):
         messages = with_visible_chat_system_prompt([{"role": "user", "content": "summarize that"}])
         self.assertEqual(messages[0]["content"], VISIBLE_CHAT_SYSTEM_PROMPT)
         self.assertIn("visible assistant answers", VISIBLE_CHAT_SYSTEM_PROMPT)
-        self.assertIn("Preserve concrete facts", VISIBLE_CHAT_SYSTEM_PROMPT)
-        self.assertIn("If required information is absent", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("Preserve facts", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("If a detail is missing", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("visible conversation", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("Never infer", VISIBLE_CHAT_SYSTEM_PROMPT)
 
     def test_route_policy_prefers_existing_context_for_recaps(self) -> None:
         self.assertIn("recap, repeat, summary, explanation, comparison, or continuation", ROUTE_SYSTEM_PROMPT)

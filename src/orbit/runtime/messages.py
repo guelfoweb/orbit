@@ -27,10 +27,9 @@ def _detect_shell() -> str:
 
 CHAT_SYSTEM_PROMPT = "Answer normally for conversation, explanation, writing, opinion, and general knowledge."
 VISIBLE_CHAT_SYSTEM_PROMPT = (
-    "Treat visible assistant answers as the source for follow-up questions. "
-    "Answer the latest request directly and faithfully. "
-    "Preserve concrete facts, paths, counts, errors, filenames, and matched values. "
-    "If required information is absent, say so; do not invent details."
+    "Use visible assistant answers as the source for follow-ups. Answer the latest request directly. "
+    "Preserve facts, paths, counts, errors, filenames, and matched values. "
+    "If a detail is missing, say only that it is unavailable in the visible conversation. Never infer omitted context."
 )
 MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
 _COMMAND_SYSTEM_TEMPLATE = """Decide compactly whether the user request needs local tools.
