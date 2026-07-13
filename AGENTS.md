@@ -238,8 +238,23 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   - restore is bit-exact against an identically segmented baseline,
   - no deterministic wall-time claim is made.
 
+## #139, Repeatable Final Prefix Benchmark Coverage
+
+- Post-RC18 work; not included in `v0.0.1-rc18`.
+- Extends `scripts/orbit_smoke_harness.py` with managed, repeatable OFF/ON validation for `ORBIT_FINAL_PREFIX_EXPERIMENT=1`; it does not change the reuse mechanism or enable it by default.
+- Harness coverage includes managed native-server startup, explicit flag propagation to both server and runtime client, deterministic web success/none/error fixtures, capture/restore/fallback counters, and additive JSONL summaries.
+- Recorded comparison metadata includes route/final/non-model/total timing, output tokens, run and block order, CPU affinity, managed process identity, and bounded `/props` snapshots.
+- Tools-off validation is truthful on both sides: the managed server is configured with tools disabled, the runtime receives no allowed tools, normal chat remains available, and final-prefix capture/restore remain zero.
+- First-class lifecycle coverage includes server restart, context change, thinking-mode eligibility, cancel and timeout cleanup, invalidation and recapture, and the MTP guard. The experiment remains ineligible while MTP is active.
+- Ordered RSS records cover startup, capture, restores 10/25/50, invalidation, and recapture with PID and block identity. The measured run showed no linear-growth pattern; this is diagnostic evidence, not a general no-leak guarantee.
+- Controlled OFF/ON results confirm default `cached=4`, eligible experimental `cached=43`, and an exact net reduction of 39 evaluated tokens. Matched-output cases showed lower final latency, but no deterministic wall-time improvement is claimed.
+- Validation recorded: OFF and ON correctness remained stable, web errors did not answer from model memory, no stale evidence or cross-turn contamination was observed, and full unit discovery passed with 1,022 tests; `compileall` and `git diff --check` passed.
+- The experiment remains optional and OFF by default. The next release candidate should include it only as an experimental opt-in with the benchmark harness, not promote it to default behavior.
+
 ## Main Commits
 
+- `f4e2226` Add repeatable final prefix benchmark coverage (#139)
+- `b02e59a` Update agent guidance after experimental final prefix reuse (#138)
 - `a1419d4` Add experimental final tool prefix reuse (#137)
 - `230db43` Add release notes for v0.0.1-rc18
 - `48b28b3` Update agent guidance after compact evidence reduction (#135)
