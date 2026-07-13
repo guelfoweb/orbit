@@ -45,6 +45,31 @@ class SmokeStep:
     checker_name: str = "not_evaluated"
 
 
+FINAL_PREFIX_LOCAL_STEPS = (
+    SmokeStep("run pwd", checker_name="path_like"),
+    SmokeStep("tell me specs about this computer", checker_name="nonempty"),
+    SmokeStep("read text/summary.txt", checker_name="nonempty"),
+    SmokeStep('search inside local text files for "Orbit"', checker_name="nonempty"),
+    SmokeStep("list files and directories in this workdir", checker_name="nonempty"),
+    SmokeStep("run printf 'orbit-final-prefix-ok\\n'", checker_name="nonempty"),
+    SmokeStep("run command_that_does_not_exist_123", checker_name="shell_error"),
+)
+
+FINAL_PREFIX_WEB_STEPS = (
+    SmokeStep("search online for orbit fixture success", checker_name="nonempty"),
+    SmokeStep("search online for orbit fixture none", checker_name="nonempty"),
+    SmokeStep("search online for where is Avola located?", checker_name="web_error"),
+    SmokeStep("search online for latest status of fictional endpoint xqz-orbit-404", checker_name="web_error"),
+)
+
+FINAL_PREFIX_PAIRED_STEPS = (
+    FINAL_PREFIX_LOCAL_STEPS[0],
+    FINAL_PREFIX_LOCAL_STEPS[1],
+    FINAL_PREFIX_LOCAL_STEPS[3],
+    FINAL_PREFIX_WEB_STEPS[0],
+)
+
+
 @dataclass(frozen=True)
 class SmokeScenario:
     name: str
@@ -119,6 +144,18 @@ class StepReport:
             "estimated_generation_ms": self.estimated_generation_ms,
             "estimated_prefill_residual_ms": self.estimated_prefill_residual_ms,
         }
+
+
+@dataclass(frozen=True)
+class LifecycleBlock:
+    block_id: str
+    server_pid: int
+    ctx: int
+    thinking: str
+    initial_props: dict[str, object]
+    final_props: dict[str, object]
+    reports: list[StepReport]
+    rss_samples: list[dict[str, object]]
 
 
 class ProbeBackend:
@@ -203,6 +240,9 @@ def main(argv: list[str] | None = None) -> int:
     jsonl_path = Path(args.jsonl) if args.jsonl else output_dir / f"orbit_smoke_{stamp}.jsonl"
     markdown_path = Path(args.markdown) if args.markdown else output_dir / f"orbit_smoke_{stamp}.md"
 
+    if args.lifecycle_check:
+        return run_lifecycle_checks(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
+
     with final_prefix_environment(args.final_prefix_mode), deterministic_web(args.deterministic_web), managed_server(args) as server_process:
         backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
         backend.thinking = args.server_thinking == "on"
@@ -226,16 +266,18 @@ def main(argv: list[str] | None = None) -> int:
                         max_tokens=args.max_tokens,
                         temperature=args.temperature,
                         timeout=args.timeout,
+                        tools_mode=args.tools,
                     )
                 )
         final_props = settled_backend_props(args.base_url, args.timeout)
         env = environment_summary(args=args, backend=backend, props=final_props)
+        env["server_pid"] = server_process.pid if server_process is not None else None
         env["server_rss_before_kib"] = rss_before_kib
         env["server_rss_after_kib"] = process_rss_kib(server_process)
     write_jsonl(jsonl_path, env, reports)
     write_markdown(markdown_path, env, reports)
     if args.verify_final_prefix:
-        failure = final_prefix_validation_failure(args.final_prefix_mode, reports, final_props)
+        failure = final_prefix_validation_failure(args.final_prefix_mode, reports, final_props, tools_mode=args.tools)
         if failure is not None:
             print(f"error: final-prefix validation failed ({failure})", file=sys.stderr)
             return 1
@@ -286,6 +328,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-order", default=None)
     parser.add_argument("--cooling-seconds", type=float, default=0.0)
     parser.add_argument("--deterministic-web", action="store_true", help="Use bounded local web fixtures for final-prefix smoke cases.")
+    parser.add_argument(
+        "--lifecycle-check",
+        action="append",
+        choices=("restart", "ctx-change", "thinking", "rss"),
+        help="Run a managed final-prefix lifecycle check; repeatable.",
+    )
+    parser.add_argument("--ctx-change-to", type=positive_int, default=4096)
     parser.add_argument(
         "--verify-final-prefix",
         action="store_true",
@@ -353,44 +402,26 @@ def scenarios() -> dict[str, SmokeScenario]:
         ),
         "final_prefix_local": SmokeScenario(
             "final_prefix_local",
-            (
-                SmokeStep("run pwd", checker_name="path_like"),
-                SmokeStep("tell me specs about this computer", checker_name="nonempty"),
-                SmokeStep("read text/summary.txt", checker_name="nonempty"),
-                SmokeStep('search inside local text files for "Orbit"', checker_name="nonempty"),
-                SmokeStep("list files and directories in this workdir", checker_name="nonempty"),
-                SmokeStep("run printf 'orbit-final-prefix-ok\\n'", checker_name="nonempty"),
-                SmokeStep("run command_that_does_not_exist_123", checker_name="shell_error"),
-            ),
+            FINAL_PREFIX_LOCAL_STEPS,
             optional=True,
             allowed_tool_names=TOOL_NAMES,
         ),
+        "final_prefix_pwd": SmokeScenario(
+            "final_prefix_pwd",
+            (FINAL_PREFIX_LOCAL_STEPS[0], FINAL_PREFIX_LOCAL_STEPS[0]),
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+        ),
         "final_prefix_web": SmokeScenario(
             "final_prefix_web",
-            (
-                SmokeStep("search online for orbit fixture success", checker_name="nonempty"),
-                SmokeStep("search online for orbit fixture none", checker_name="nonempty"),
-                SmokeStep("search online for where is Avola located?", checker_name="web_error"),
-                SmokeStep("search online for latest status of fictional endpoint xqz-orbit-404", checker_name="web_error"),
-            ),
+            FINAL_PREFIX_WEB_STEPS,
             requires_web=True,
             optional=True,
         ),
         "final_prefix_mixed": SmokeScenario(
             "final_prefix_mixed",
-            (
-                SmokeStep("run pwd", checker_name="path_like"),
-                SmokeStep("tell me specs about this computer", checker_name="nonempty"),
-                SmokeStep("read text/summary.txt", checker_name="nonempty"),
-                SmokeStep('search inside local text files for "Orbit"', checker_name="nonempty"),
-                SmokeStep("list files and directories in this workdir", checker_name="nonempty"),
-                SmokeStep("run printf 'orbit-final-prefix-ok\\n'", checker_name="nonempty"),
-                SmokeStep("run command_that_does_not_exist_123", checker_name="shell_error"),
-                SmokeStep("search online for orbit fixture success", checker_name="nonempty"),
-                SmokeStep("search online for orbit fixture none", checker_name="nonempty"),
-                SmokeStep("search online for where is Avola located?", checker_name="web_error"),
-                SmokeStep("search online for latest status of fictional endpoint xqz-orbit-404", checker_name="web_error"),
-            ),
+            FINAL_PREFIX_LOCAL_STEPS + FINAL_PREFIX_WEB_STEPS,
             requires_web=True,
             optional=True,
             allowed_tool_names=TOOL_NAMES,
@@ -398,12 +429,7 @@ def scenarios() -> dict[str, SmokeScenario]:
         ),
         "final_prefix_paired": SmokeScenario(
             "final_prefix_paired",
-            (
-                SmokeStep("run pwd", checker_name="path_like"),
-                SmokeStep("tell me specs about this computer", checker_name="nonempty"),
-                SmokeStep('search inside local text files for "Orbit"', checker_name="nonempty"),
-                SmokeStep("search online for orbit fixture success", checker_name="nonempty"),
-            ),
+            FINAL_PREFIX_PAIRED_STEPS,
             requires_web=True,
             optional=True,
             allowed_tool_names=TOOL_NAMES,
@@ -444,6 +470,7 @@ def run_scenario(
     max_tokens: int,
     temperature: float,
     timeout: float,
+    tools_mode: str = "on",
 ) -> list[StepReport]:
     runtime = new_runtime(backend, workdir)
     reports: list[StepReport] = []
@@ -460,12 +487,16 @@ def run_scenario(
             temperature=temperature,
             base_url=backend.base_url,
             timeout=timeout,
-            allowed_tool_names=scenario.allowed_tool_names,
+            allowed_tool_names=effective_allowed_tool_names(scenario, tools_mode),
         )
         reports.append(report)
         if report.finish_reason in {"timeout", "error"}:
             break
     return reports
+
+
+def effective_allowed_tool_names(scenario: SmokeScenario, tools_mode: str) -> tuple[str, ...]:
+    return scenario.allowed_tool_names if tools_mode == "on" else ()
 
 
 def new_runtime(backend: LlamaServerBackend, workdir: Path) -> ChatRuntime:
@@ -777,6 +808,8 @@ def final_prefix_validation_failure(
     mode: str,
     reports: list[StepReport],
     props: dict[str, object],
+    *,
+    tools_mode: str = "on",
 ) -> str | None:
     state = final_prefix_props(props)
     eligible = [report for report in reports if "final_from_tool" in report.completion_kind]
@@ -790,6 +823,10 @@ def final_prefix_validation_failure(
         return "explicit_mode_required"
     if state.get("enabled") is not True:
         return "on_mode_disabled"
+    if tools_mode == "off":
+        if (state.get("capture_count") or 0) != 0 or (state.get("restore_count") or 0) != 0:
+            return "tools_off_guard_failed"
+        return None
     if props.get("mtp_experimental_enabled") is True:
         if (state.get("capture_count") or 0) != 0 or (state.get("restore_count") or 0) != 0:
             return "mtp_guard_failed"
@@ -950,6 +987,290 @@ def process_rss_kib(process: subprocess.Popen[str] | None) -> int | None:
     return None
 
 
+def rss_sample(
+    process: subprocess.Popen[str],
+    *,
+    label: str,
+    block_id: str,
+    sequence: int,
+    props: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "type": "rss_sample",
+        "label": label,
+        "sequence": sequence,
+        "server_pid": process.pid,
+        "block_id": block_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "rss_kib": process_rss_kib(process),
+        "final_prefix": final_prefix_props(props or {}),
+    }
+
+
+def summarize_rss_samples(samples: list[dict[str, object]], *, block_id: str) -> dict[str, object]:
+    by_label = {str(sample.get("label")): sample.get("rss_kib") for sample in samples}
+
+    def delta(start: str, end: str) -> int | None:
+        before = by_label.get(start)
+        after = by_label.get(end)
+        return after - before if isinstance(before, int) and isinstance(after, int) else None
+
+    restore_values = [by_label.get(label) for label in ("after_restore_10", "after_restore_25", "after_restore_50")]
+    complete = all(isinstance(value, int) for value in restore_values)
+    linear_growth = None
+    if complete:
+        first, middle, last = (int(value) for value in restore_values)
+        linear_growth = first < middle < last and (last - first) >= 1024
+    required_labels = (
+        "startup",
+        "after_capture",
+        "after_restore_10",
+        "after_restore_25",
+        "after_restore_50",
+        "after_invalidation",
+        "after_recapture",
+    )
+    complete = all(label in by_label and isinstance(by_label[label], int) for label in required_labels)
+    invalidation = next((sample for sample in samples if sample.get("label") == "after_invalidation"), {})
+    recapture = next((sample for sample in samples if sample.get("label") == "after_recapture"), {})
+    invalidation_state = invalidation.get("final_prefix") if isinstance(invalidation.get("final_prefix"), dict) else {}
+    recapture_state = recapture.get("final_prefix") if isinstance(recapture.get("final_prefix"), dict) else {}
+    lifecycle_healthy = (
+        invalidation_state.get("initialized") is False
+        and invalidation_state.get("prefix_tokens") == 0
+        and recapture_state.get("initialized") is True
+        and (recapture_state.get("capture_count") or 0) >= 2
+    )
+    return {
+        "type": "lifecycle_summary",
+        "operation": "rss",
+        "block_id": block_id,
+        "server_pid": samples[0].get("server_pid") if samples else None,
+        "sample_labels": [sample.get("label") for sample in samples],
+        "startup_to_capture_delta_kib": delta("startup", "after_capture"),
+        "capture_to_restore50_delta_kib": delta("after_capture", "after_restore_50"),
+        "restore50_to_invalidation_delta_kib": delta("after_restore_50", "after_invalidation"),
+        "invalidation_to_recapture_delta_kib": delta("after_invalidation", "after_recapture"),
+        "linear_growth_suspected": linear_growth,
+        "invalidation_initialized": invalidation_state.get("initialized"),
+        "recapture_initialized": recapture_state.get("initialized"),
+        "complete": complete,
+        "passed": complete and lifecycle_healthy,
+    }
+
+
+def namespace_with(args: argparse.Namespace, **overrides: object) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def lifecycle_pwd_scenario(name: str = "final_prefix_lifecycle") -> SmokeScenario:
+    return SmokeScenario(
+        name,
+        (FINAL_PREFIX_LOCAL_STEPS[0],),
+        optional=True,
+        allowed_tool_names=TOOL_NAMES,
+        isolated_steps=True,
+    )
+
+
+def run_lifecycle_block(
+    args: argparse.Namespace,
+    *,
+    block_id: str,
+    calls: int,
+    rss_series: bool = False,
+) -> LifecycleBlock:
+    block_args = namespace_with(args, block_id=block_id, manage_server=True)
+    samples: list[dict[str, object]] = []
+    reports: list[StepReport] = []
+    with final_prefix_environment(block_args.final_prefix_mode), deterministic_web(False), managed_server(block_args) as process:
+        if process is None:
+            raise RuntimeError("lifecycle checks require a managed server")
+        backend = LlamaServerBackend(base_url=block_args.base_url, timeout=block_args.timeout)
+        backend.thinking = block_args.server_thinking == "on"
+        initial_props = fresh_backend_props(block_args.base_url, 5.0)
+        samples.append(rss_sample(process, label="startup", block_id=block_id, sequence=0, props=initial_props))
+        restore_milestones = {10, 25, 50}
+        sampled_restore_milestones: set[int] = set()
+        capture_sampled = False
+        for call_index in range(calls):
+            batch = run_scenario(
+                lifecycle_pwd_scenario(),
+                backend=backend,
+                workdir=Path(block_args.workdir),
+                max_tokens=block_args.max_tokens,
+                temperature=block_args.temperature,
+                timeout=block_args.timeout,
+                tools_mode=block_args.tools,
+            )
+            reports.extend(batch)
+            state = batch[-1].final_prefix if batch else {}
+            if not capture_sampled and (state.get("capture_count_delta") or 0) > 0:
+                samples.append(
+                    rss_sample(
+                        process,
+                        label="after_capture",
+                        block_id=block_id,
+                        sequence=len(samples),
+                        props=fresh_backend_props(block_args.base_url, 5.0),
+                    )
+                )
+                capture_sampled = True
+            props = fresh_backend_props(block_args.base_url, 5.0)
+            restore_count = props.get("final_prefix_experiment_restore_count")
+            if isinstance(restore_count, int):
+                for milestone in sorted(restore_milestones - sampled_restore_milestones):
+                    if restore_count >= milestone:
+                        samples.append(
+                            rss_sample(
+                                process,
+                                label=f"after_restore_{milestone}",
+                                block_id=block_id,
+                                sequence=len(samples),
+                                props=props,
+                            )
+                        )
+                        sampled_restore_milestones.add(milestone)
+            if batch and batch[-1].finish_reason in {"timeout", "error"}:
+                break
+        if rss_series:
+            request_backend_cancel(block_args.base_url, timeout=5.0)
+            invalidated_props = wait_for_backend_idle(block_args.base_url, 10.0)
+            samples.append(
+                rss_sample(
+                    process,
+                    label="after_invalidation",
+                    block_id=block_id,
+                    sequence=len(samples),
+                    props=invalidated_props,
+                )
+            )
+            recapture = run_scenario(
+                lifecycle_pwd_scenario(),
+                backend=backend,
+                workdir=Path(block_args.workdir),
+                max_tokens=block_args.max_tokens,
+                temperature=block_args.temperature,
+                timeout=block_args.timeout,
+                tools_mode=block_args.tools,
+            )
+            reports.extend(recapture)
+            samples.append(
+                rss_sample(
+                    process,
+                    label="after_recapture",
+                    block_id=block_id,
+                    sequence=len(samples),
+                    props=fresh_backend_props(block_args.base_url, 5.0),
+                )
+            )
+        final_props = settled_backend_props(block_args.base_url, block_args.timeout)
+        return LifecycleBlock(
+            block_id=block_id,
+            server_pid=process.pid,
+            ctx=block_args.ctx,
+            thinking=block_args.server_thinking,
+            initial_props=initial_props,
+            final_props=final_props,
+            reports=reports,
+            rss_samples=samples,
+        )
+
+
+def lifecycle_transition_row(operation: str, blocks: list[LifecycleBlock]) -> dict[str, object]:
+    transitions = []
+    passed = True
+    for block in blocks:
+        state = final_prefix_props(block.final_props)
+        initial_state = final_prefix_props(block.initial_props)
+        capture_count = state.get("capture_count") if isinstance(state.get("capture_count"), int) else 0
+        restore_count = state.get("restore_count") if isinstance(state.get("restore_count"), int) else 0
+        eligible = block.thinking == "off"
+        block_passed = (
+            initial_state.get("initialized") is False and capture_count >= 1 and restore_count >= 1
+            if eligible
+            else initial_state.get("initialized") is False and capture_count == 0 and restore_count == 0
+        )
+        passed = passed and block_passed
+        transitions.append(
+            {
+                "block_id": block.block_id,
+                "server_pid": block.server_pid,
+                "ctx": block.ctx,
+                "thinking": block.thinking,
+                "initial_initialized": initial_state.get("initialized"),
+                "capture_count": capture_count,
+                "restore_count": restore_count,
+                "fallback_count": state.get("fallback_count"),
+                "eligibility": "eligible" if eligible else "ineligible_thinking",
+                "passed": block_passed,
+            }
+        )
+    return {
+        "type": "lifecycle_summary",
+        "operation": operation,
+        "passed": passed,
+        "process_ids": [block.server_pid for block in blocks],
+        "transitions": transitions,
+    }
+
+
+def run_lifecycle_checks(
+    args: argparse.Namespace,
+    *,
+    jsonl_path: Path,
+    markdown_path: Path,
+) -> int:
+    if args.final_prefix_mode != "on" or not args.manage_server:
+        print("error: lifecycle checks require --manage-server --final-prefix-mode on", file=sys.stderr)
+        return 2
+    reports: list[StepReport] = []
+    extra_rows: list[dict[str, object]] = []
+    blocks: list[LifecycleBlock] = []
+    for operation in args.lifecycle_check:
+        if operation == "restart":
+            current = [
+                run_lifecycle_block(args, block_id="restart-before", calls=2),
+                run_lifecycle_block(args, block_id="restart-after", calls=2),
+            ]
+        elif operation == "ctx-change":
+            current = [
+                run_lifecycle_block(args, block_id=f"ctx-{args.ctx}", calls=2),
+                run_lifecycle_block(
+                    namespace_with(args, ctx=args.ctx_change_to),
+                    block_id=f"ctx-{args.ctx_change_to}",
+                    calls=2,
+                ),
+            ]
+        elif operation == "thinking":
+            current = [
+                run_lifecycle_block(namespace_with(args, server_thinking="off"), block_id="thinking-off", calls=2),
+                run_lifecycle_block(namespace_with(args, server_thinking="on"), block_id="thinking-on", calls=0),
+            ]
+        else:
+            current = [run_lifecycle_block(args, block_id="rss-50", calls=51, rss_series=True)]
+            extra_rows.extend(current[0].rss_samples)
+            extra_rows.append(summarize_rss_samples(current[0].rss_samples, block_id=current[0].block_id))
+        blocks.extend(current)
+        extra_rows.append(lifecycle_transition_row(operation, current))
+        reports.extend(report for block in current for report in block.reports)
+    last = blocks[-1]
+    backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
+    env = environment_summary(args=args, backend=backend, props=last.final_props)
+    env["server_pid"] = last.server_pid
+    env["lifecycle_checks"] = list(args.lifecycle_check)
+    write_jsonl(jsonl_path, env, reports, extra_rows=extra_rows)
+    write_markdown(markdown_path, env, reports)
+    failed = any(row.get("type") == "lifecycle_summary" and row.get("passed") is False for row in extra_rows)
+    if failed or scenario_failure_reason(reports) is not None:
+        return 1
+    print(f"jsonl={jsonl_path}")
+    print(f"markdown={markdown_path}")
+    return 0
+
+
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -1082,7 +1403,13 @@ def acceleration_mode(props: dict[str, object]) -> str:
     return "unknown"
 
 
-def write_jsonl(path: Path, env: dict[str, object], reports: list[StepReport]) -> None:
+def write_jsonl(
+    path: Path,
+    env: dict[str, object],
+    reports: list[StepReport],
+    *,
+    extra_rows: list[dict[str, object]] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "environment", **env}, ensure_ascii=False, sort_keys=True) + "\n")
@@ -1090,6 +1417,8 @@ def write_jsonl(path: Path, env: dict[str, object], reports: list[StepReport]) -
             handle.write(json.dumps({"type": "step", **report.to_json()}, ensure_ascii=False, sort_keys=True) + "\n")
         for summary in summarize_reports(reports):
             handle.write(json.dumps({"type": "summary", **summary}, ensure_ascii=False, sort_keys=True) + "\n")
+        for row in extra_rows or []:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def write_markdown(path: Path, env: dict[str, object], reports: list[StepReport]) -> None:
