@@ -64,7 +64,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC18
 
-- Current published baseline: `v0.0.1-rc18`.
+- Published predecessor: `v0.0.1-rc18`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc18
 - Release notes commit: `230db4341737380afb240cd701861d2ee350df7e`.
 - Tag object: `3b327da630ed6d53f442a969c32e962e563589dc`.
@@ -76,6 +76,22 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - RC18 MTP sanity: `mtp_enabled=true`, `mtp_initialized=true`, `mtp_failure_reason=null`, `multimodal_available=true`, `mtp_last_completion.success=true`, `mtp_config.n_max=3`.
 - `cached=4` remains expected and unresolved; RC18 reduces evaluated tokens but does not change route/final prompt divergence.
 - No deterministic wall-time improvement is claimed.
+
+### RC19
+
+- Current published baseline: `v0.0.1-rc19`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc19
+- Release notes commit: `eb68ad30f9539a731730f7c94397731db9fcbd28`.
+- Tag object: `9437d96a05811b5b7fac7dfde3bd37499a1334ae`.
+- Tag commit: `eb68ad30f9539a731730f7c94397731db9fcbd28`.
+- Prerelease: yes. Latest: false.
+- Includes #137, #138, #139, and #140.
+- Focus: off-by-default experimental `final_from_tool` prefix reuse and repeatable OFF/ON benchmark, lifecycle, recovery, MTP-guard, and RSS/PID coverage.
+- RC19 validation: MTP shim build PASS, `compileall` PASS, `tests.test_bench_core` PASS with 6 tests, `tests.test_smoke_harness` PASS with 44 tests, full unit discovery PASS with 1,022 tests, and `git diff --check` PASS.
+- RC19 runtime sanity: experiment OFF PASS with default `cached=4`; experiment ON PASS with first-call capture and subsequent `cached=43` restore; MTP guard PASS with zero final-prefix capture/restore while MTP remained healthy.
+- The experiment remains OFF by default. `ORBIT_FINAL_PREFIX_EXPERIMENT=1` enables eligible native `final_from_tool` reuse, with an exact net reduction of 39 evaluated tokens relative to default behavior.
+- Default `cached=4` remains unchanged and unresolved. Experimental logits differ from cold full-prefill because segmentation changes; restore is bit-exact against an identically segmented baseline.
+- No deterministic wall-time improvement is claimed. Non-stream timeout may require explicit `/cancel`, and bounded RSS allocator variation remains documented.
 
 ## MTP
 
@@ -202,7 +218,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## #137, Experimental final_from_tool Prefix Reuse
 
-- Post-RC18 work; not included in `v0.0.1-rc18`.
+- Included in `v0.0.1-rc19`; not included in `v0.0.1-rc18`.
 - Adds an off-by-default experimental path behind `ORBIT_FINAL_PREFIX_EXPERIMENT=1`.
 - Eligibility (when enabled):
   - native backend,
@@ -240,7 +256,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## #139, Repeatable Final Prefix Benchmark Coverage
 
-- Post-RC18 work; not included in `v0.0.1-rc18`.
+- Included in `v0.0.1-rc19`; not included in `v0.0.1-rc18`.
 - Extends `scripts/orbit_smoke_harness.py` with managed, repeatable OFF/ON validation for `ORBIT_FINAL_PREFIX_EXPERIMENT=1`; it does not change the reuse mechanism or enable it by default.
 - Harness coverage includes managed native-server startup, explicit flag propagation to both server and runtime client, deterministic web success/none/error fixtures, capture/restore/fallback counters, and additive JSONL summaries.
 - Recorded comparison metadata includes route/final/non-model/total timing, output tokens, run and block order, CPU affinity, managed process identity, and bounded `/props` snapshots.
@@ -249,10 +265,12 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Ordered RSS records cover startup, capture, restores 10/25/50, invalidation, and recapture with PID and block identity. The measured run showed no linear-growth pattern; this is diagnostic evidence, not a general no-leak guarantee.
 - Controlled OFF/ON results confirm default `cached=4`, eligible experimental `cached=43`, and an exact net reduction of 39 evaluated tokens. Matched-output cases showed lower final latency, but no deterministic wall-time improvement is claimed.
 - Validation recorded: OFF and ON correctness remained stable, web errors did not answer from model memory, no stale evidence or cross-turn contamination was observed, and full unit discovery passed with 1,022 tests; `compileall` and `git diff --check` passed.
-- The experiment remains optional and OFF by default. The next release candidate should include it only as an experimental opt-in with the benchmark harness, not promote it to default behavior.
+- RC19 includes the experiment only as an optional, OFF-by-default feature with its benchmark harness; it is not promoted to default behavior.
 
 ## Main Commits
 
+- `eb68ad3` Add release notes for v0.0.1-rc19
+- `2c541e9` Update agent guidance after final prefix benchmark coverage (#140)
 - `f4e2226` Add repeatable final prefix benchmark coverage (#139)
 - `b02e59a` Update agent guidance after experimental final prefix reuse (#138)
 - `a1419d4` Add experimental final tool prefix reuse (#137)
@@ -282,7 +300,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-1. Stop and use RC18 as the stable baseline.
+1. Stop and use RC19 as the stable baseline.
 2. Run controlled CPU benchmarks with `bench-core` metadata.
 3. Analyze `bench-core` output for regressions or better profiles.
 4. Run a lightweight conversation-reuse end-to-end smoke only if a regression or ambiguous behavior appears.
