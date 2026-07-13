@@ -47,6 +47,7 @@ from orbit.runtime.messages import (
     with_media_system_prompt,
     with_command_system_prompt,
     with_tool_call_system_prompt,
+    with_visible_chat_system_prompt,
 )
 
 from orbit.runtime.command_request import (
@@ -59,7 +60,7 @@ from orbit.runtime.command_request import (
     command_tool_call_from_tool_calls,
 )
 from orbit.runtime.results import error_result
-from orbit.runtime.session_memory import MemoryRefresh, maybe_refresh_memory
+from orbit.runtime.session_memory import MEMORY_PREFIX, MemoryRefresh, estimate_message_tokens, maybe_refresh_memory
 from orbit.runtime.shell_guardrails import is_metadata_only_shell_command
 from orbit.runtime.thinking_mode import (
     ThinkingMode,
@@ -132,6 +133,12 @@ class ChatRuntime:
     evidence_store: EvidenceStore | None = None
     user_turn_counter: int = 0
     current_user_turn_id: str | None = None
+    current_turn_evidence_sequence_start: int = 0
+    completed_evidence_ids: set[str] = field(default_factory=set, repr=False)
+    last_chat_projection_used: bool = False
+    last_chat_projection_fallback_reason: str | None = None
+    last_chat_projection_omitted_evidence_count: int = 0
+    last_chat_projection_estimated_tokens_saved: int = 0
 
     def __post_init__(self) -> None:
         self.backend = instrument_backend(self.backend)
@@ -147,6 +154,16 @@ class ChatRuntime:
     def _begin_user_turn(self) -> str:
         self.user_turn_counter += 1
         self.current_user_turn_id = f"turn_{self.user_turn_counter}"
+        sequences = (
+            [record.evidence_sequence for record in self.evidence_store.records.values()]
+            if self.evidence_store is not None
+            else []
+        )
+        self.current_turn_evidence_sequence_start = max(
+            (sequence for sequence in sequences if isinstance(sequence, int)),
+            default=0,
+        )
+        self._reset_chat_projection_diagnostics()
         return self.current_user_turn_id
 
     @user_request
@@ -620,6 +637,20 @@ class ChatRuntime:
 
     def _remember_visible_result(self, result: ChatResult) -> ChatResult:
         self.client_state.update_from_result(result, thinking=self._thinking())
+        turn_id = self.current_user_turn_id
+        if turn_id and self.evidence_store is not None:
+            produced_records = [
+                record
+                for record in self.evidence_store.records.values()
+                if record.user_turn_id == turn_id
+                and isinstance(record.evidence_sequence, int)
+                and record.evidence_sequence > self.current_turn_evidence_sequence_start
+            ]
+            produced_ids = {record.evidence_id for record in produced_records}
+            if produced_ids and result.finish_reason == "stop" and result.content.strip():
+                self.completed_evidence_ids.update(produced_ids)
+            elif produced_ids:
+                self.completed_evidence_ids.difference_update(produced_ids)
         return result
 
     def _ask_media_if_referenced(
@@ -861,6 +892,9 @@ class ChatRuntime:
         if self.evidence_store is not None:
             self.evidence_store.clear_memory()
         self.client_state.reset()
+        self.completed_evidence_ids.clear()
+        self.current_turn_evidence_sequence_start = 0
+        self._reset_chat_projection_diagnostics()
         self.last_memory_refresh = None
         self.last_memory_refresh_message_count = None
         self.last_memory_refresh_attempt = None
@@ -897,6 +931,9 @@ class ChatRuntime:
             count = 0
         del self.messages[count:]
         self.client_state.reset()
+        self.completed_evidence_ids.clear()
+        self.current_turn_evidence_sequence_start = 0
+        self._reset_chat_projection_diagnostics()
         self.last_memory_refresh = None
         if self.last_memory_refresh_message_count is not None and self.last_memory_refresh_message_count > len(self.messages):
             self.last_memory_refresh_message_count = None
@@ -1032,6 +1069,7 @@ class ChatRuntime:
 
     def _chat_final_messages(self) -> list[Message]:
         if self.evidence_store is None or not self.evidence_store.recent_records(1):
+            self.last_chat_projection_fallback_reason = "no_evidence"
             return self._with_final_evidence_context(with_chat_system_prompt(self.messages))
         messages: list[Message] = []
         assistant = _latest_operational_assistant_message(self.messages)
@@ -1040,18 +1078,91 @@ class ChatRuntime:
         latest_user = _latest_user_message(self.messages)
         if latest_user is not None:
             messages.append(latest_user)
+        visible_messages = self._covered_visible_chat_messages()
+        if visible_messages is not None:
+            candidate = with_visible_chat_system_prompt(visible_messages)
+            fallback = with_chat_system_prompt(messages)
+            context, _context_kind, _limit = self._chat_final_retry_evidence_context()
+            if context:
+                fallback.append({"role": "system", "content": context})
+            candidate_tokens = estimate_message_tokens(candidate)
+            fallback_tokens = estimate_message_tokens(fallback)
+            if candidate_tokens < fallback_tokens:
+                limit = 1 if self._should_compact_final_from_tool_window() else 2
+                self.last_chat_projection_used = True
+                self.last_chat_projection_fallback_reason = None
+                self.last_chat_projection_omitted_evidence_count = len(self.evidence_store.recent_records(limit))
+                self.last_chat_projection_estimated_tokens_saved = fallback_tokens - candidate_tokens
+                self._emit_evidence_lineage_context(
+                    context_kind="visible_covered",
+                    consumer_phase="chat_final",
+                    limit=limit,
+                )
+                return candidate
+            self.last_chat_projection_fallback_reason = "visible_projection_not_smaller"
         return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages), consumer_phase="chat_final")
 
+    def _covered_visible_chat_messages(self) -> list[Message] | None:
+        if self.last_visible_finish_reason != "stop":
+            self.last_chat_projection_fallback_reason = "previous_final_not_complete"
+            return None
+        if self.evidence_store is None:
+            self.last_chat_projection_fallback_reason = "evidence_store_unavailable"
+            return None
+        system_messages = [message for message in self.messages if message.get("role") == "system"]
+        if len(system_messages) > 1 or any(
+            isinstance(message.get("content"), str) and str(message["content"]).startswith(MEMORY_PREFIX)
+            for message in system_messages
+        ):
+            self.last_chat_projection_fallback_reason = "session_memory_or_system_context"
+            return None
+        records = self.evidence_store.recent_records(1 if self._should_compact_final_from_tool_window() else 2)
+        if not records:
+            self.last_chat_projection_fallback_reason = "no_recent_evidence"
+            return None
+        for record in records:
+            if record.evidence_id not in self.completed_evidence_ids:
+                self.last_chat_projection_fallback_reason = "evidence_completion_unproven"
+                return None
+            if not _evidence_has_visible_final(self.messages, record.evidence_id):
+                self.last_chat_projection_fallback_reason = "evidence_final_association_inconsistent"
+                return None
+        visible: list[Message] = []
+        for message in self.messages:
+            role = message.get("role")
+            if role == "user":
+                visible.append(dict(message))
+                continue
+            if role != "assistant" or message.get("tool_calls"):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                visible.append({"role": "assistant", "content": content})
+        if not visible:
+            self.last_chat_projection_fallback_reason = "visible_history_empty"
+            return None
+        return visible
+
+    def _reset_chat_projection_diagnostics(self) -> None:
+        self.last_chat_projection_used = False
+        self.last_chat_projection_fallback_reason = None
+        self.last_chat_projection_omitted_evidence_count = 0
+        self.last_chat_projection_estimated_tokens_saved = 0
+
     def _with_chat_final_retry_evidence_context(self, messages: list[Message], *, consumer_phase: str) -> list[Message]:
-        if self._should_compact_final_from_tool_window():
-            context = build_compact_final_evidence_context(self.evidence_store)
-            self._emit_evidence_lineage_context(context_kind="compact_final", consumer_phase=consumer_phase, limit=1)
-        else:
-            context = build_final_evidence_context(self.evidence_store)
-            self._emit_evidence_lineage_context(context_kind="final", consumer_phase=consumer_phase, limit=2)
+        context, context_kind, limit = self._chat_final_retry_evidence_context()
+        self._emit_evidence_lineage_context(context_kind=context_kind, consumer_phase=consumer_phase, limit=limit)
         if not context:
             return messages
         return [*messages, {"role": "system", "content": context}]
+
+    def _chat_final_retry_evidence_context(self) -> tuple[str | None, str, int]:
+        if self._should_compact_final_from_tool_window():
+            context = build_compact_final_evidence_context(self.evidence_store)
+            return context, "compact_final", 1
+        else:
+            context = build_final_evidence_context(self.evidence_store)
+            return context, "final", 2
 
     def _emit_evidence_lineage_context(self, *, context_kind: str, consumer_phase: str, limit: int) -> None:
         if self.evidence_store is None:
@@ -1365,6 +1476,44 @@ def _latest_short_assistant_message(messages: list[Message], *, max_chars: int =
 
 def _latest_operational_assistant_message(messages: list[Message], *, max_chars: int = 160) -> Message | None:
     return _latest_assistant_excerpt_message(messages, max_chars=max_chars)
+
+
+def _evidence_has_visible_final(messages: list[Message], evidence_id: str) -> bool:
+    tool_index = next(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "tool" and message.get("evidence_id") == evidence_id
+        ),
+        None,
+    )
+    if tool_index is None:
+        return False
+    if not _tool_has_associated_user(messages[:tool_index]):
+        return False
+    for message in messages[tool_index + 1 :]:
+        role = message.get("role")
+        if role == "user":
+            return False
+        if role != "assistant" or message.get("tool_calls"):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return True
+    return False
+
+
+def _tool_has_associated_user(messages: list[Message]) -> bool:
+    for message in reversed(messages):
+        role = message.get("role")
+        if role == "user":
+            return True
+        if role != "assistant" or message.get("tool_calls"):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return False
+    return False
 
 
 def _latest_assistant_excerpt_message(messages: list[Message], *, max_chars: int = 140) -> Message | None:

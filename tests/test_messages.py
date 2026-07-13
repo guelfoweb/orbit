@@ -7,7 +7,9 @@ from orbit.runtime.messages import (
     FINAL_FROM_TOOL_SYSTEM_PROMPT,
     ROUTE_SYSTEM_PROMPT,
     TOOL_CALL_SYSTEM_PROMPT,
+    VISIBLE_CHAT_SYSTEM_PROMPT,
     with_chat_system_prompt,
+    with_visible_chat_system_prompt,
 )
 
 
@@ -22,6 +24,15 @@ class MessagePromptTests(unittest.TestCase):
             [{"role": "system", "content": ROUTE_SYSTEM_PROMPT}, {"role": "user", "content": "x"}]
         )
         self.assertEqual(messages[0]["content"], CHAT_SYSTEM_PROMPT)
+
+    def test_visible_chat_prompt_preserves_facts_and_rejects_missing_details(self) -> None:
+        messages = with_visible_chat_system_prompt([{"role": "user", "content": "summarize that"}])
+        self.assertEqual(messages[0]["content"], VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("visible assistant answers", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("Preserve facts", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("If a detail is missing", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("visible conversation", VISIBLE_CHAT_SYSTEM_PROMPT)
+        self.assertIn("Never infer", VISIBLE_CHAT_SYSTEM_PROMPT)
 
     def test_route_policy_prefers_existing_context_for_recaps(self) -> None:
         self.assertIn("recap, repeat, summary, explanation, comparison, or continuation", ROUTE_SYSTEM_PROMPT)

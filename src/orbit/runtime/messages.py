@@ -26,6 +26,11 @@ def _detect_shell() -> str:
 
 
 CHAT_SYSTEM_PROMPT = "Answer normally for conversation, explanation, writing, opinion, and general knowledge."
+VISIBLE_CHAT_SYSTEM_PROMPT = (
+    "Use visible assistant answers as the source for follow-ups. Answer the latest request directly. "
+    "Preserve facts, paths, counts, errors, filenames, and matched values. "
+    "If a detail is missing, say only that it is unavailable in the visible conversation. Never infer omitted context."
+)
 MEDIA_SYSTEM_PROMPT = "Answer using the attached image/audio."
 _COMMAND_SYSTEM_TEMPLATE = """Decide compactly whether the user request needs local tools.
 Tool tasks: files/read/edit/create/append/delete, system, URLs/web/search/fetch, execution, and analysis that needs local or fetched evidence.
@@ -144,6 +149,10 @@ def with_chat_system_prompt(messages: list[Message]) -> list[Message]:
         copied[0]["content"] = CHAT_SYSTEM_PROMPT
         return copied
     return [{"role": "system", "content": CHAT_SYSTEM_PROMPT}, *copied]
+
+
+def with_visible_chat_system_prompt(messages: list[Message]) -> list[Message]:
+    return [{"role": "system", "content": VISIBLE_CHAT_SYSTEM_PROMPT}, *[dict(message) for message in messages]]
 
 
 def with_tool_call_system_prompt(messages: list[Message]) -> list[Message]:
