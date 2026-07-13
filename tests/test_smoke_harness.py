@@ -42,6 +42,33 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(args.jsonl, "/tmp/out.jsonl")
         self.assertEqual(args.markdown, "/tmp/out.md")
 
+    def test_parser_accepts_managed_final_prefix_options(self) -> None:
+        args = smoke_harness.build_parser().parse_args(
+            ["--manage-server", "--final-prefix-mode", "on", "--repetitions", "5"]
+        )
+
+        self.assertTrue(args.manage_server)
+        self.assertEqual(args.final_prefix_mode, "on")
+        self.assertEqual(args.repetitions, 5)
+
+    def test_parser_accepts_first_class_lifecycle_checks(self) -> None:
+        args = smoke_harness.build_parser().parse_args(
+            [
+                "--manage-server",
+                "--final-prefix-mode",
+                "on",
+                "--lifecycle-check",
+                "restart",
+                "--lifecycle-check",
+                "ctx-change",
+                "--ctx-change-to",
+                "4096",
+            ]
+        )
+
+        self.assertEqual(args.lifecycle_check, ["restart", "ctx-change"])
+        self.assertEqual(args.ctx_change_to, 4096)
+
     def test_select_scenarios_defaults_to_all_without_optional_or_web_when_disabled(self) -> None:
         selected = smoke_harness.select_scenarios(None, no_web=True, include_optional=False)
         names = [scenario.name for scenario in selected]
@@ -56,6 +83,46 @@ class SmokeHarnessTests(unittest.TestCase):
 
         self.assertEqual([scenario.name for scenario in selected], ["pwd_followup"])
 
+    def test_final_prefix_mixed_has_eleven_isolated_eligible_cases(self) -> None:
+        scenario = smoke_harness.scenarios()["final_prefix_mixed"]
+
+        self.assertEqual(len(scenario.steps), 11)
+        self.assertTrue(scenario.isolated_steps)
+        self.assertIn("system_info", scenario.allowed_tool_names)
+
+    def test_final_prefix_groups_share_canonical_case_definitions(self) -> None:
+        registry = smoke_harness.scenarios()
+
+        self.assertEqual(registry["final_prefix_local"].steps, smoke_harness.FINAL_PREFIX_LOCAL_STEPS)
+        self.assertEqual(registry["final_prefix_web"].steps, smoke_harness.FINAL_PREFIX_WEB_STEPS)
+        self.assertEqual(
+            registry["final_prefix_mixed"].steps,
+            smoke_harness.FINAL_PREFIX_LOCAL_STEPS + smoke_harness.FINAL_PREFIX_WEB_STEPS,
+        )
+        self.assertEqual(registry["final_prefix_paired"].steps, smoke_harness.FINAL_PREFIX_PAIRED_STEPS)
+
+    def test_tools_off_removes_runtime_tool_names(self) -> None:
+        scenario = smoke_harness.scenarios()["final_prefix_local"]
+
+        self.assertEqual(smoke_harness.effective_allowed_tool_names(scenario, "off"), ())
+        self.assertEqual(smoke_harness.effective_allowed_tool_names(scenario, "on"), scenario.allowed_tool_names)
+
+    def test_run_scenario_passes_no_tools_when_tools_mode_is_off(self) -> None:
+        report = mock.Mock(finish_reason="stop")
+        with mock.patch.object(smoke_harness, "run_step", return_value=report) as run_step, \
+            mock.patch.object(smoke_harness, "ChatRuntime"):
+            smoke_harness.run_scenario(
+                smoke_harness.SmokeScenario("chat", (smoke_harness.SmokeStep("hi"),)),
+                backend=mock.Mock(base_url="http://127.0.0.1:12120"),
+                workdir=Path("workdir"),
+                max_tokens=32,
+                temperature=0.0,
+                timeout=30.0,
+                tools_mode="off",
+            )
+
+        self.assertEqual(run_step.call_args.kwargs["allowed_tool_names"], ())
+
     def test_correctness_categorizer_detects_shell_error_and_mixed_output(self) -> None:
         self.assertEqual(smoke_harness.check_shell_error("exit_code=127 command not found", []), "correct")
         self.assertEqual(smoke_harness.check_shell_error_focus("failed with 127", []), "correct")
@@ -64,6 +131,23 @@ class SmokeHarnessTests(unittest.TestCase):
     def test_correctness_categorizer_detects_fake_shell20_without_tool_call(self) -> None:
         self.assertEqual(smoke_harness.check_shell20("line-19", []), "fake_tool_output")
         self.assertEqual(smoke_harness.check_shell20("line-19", ["exec_shell_full_command"]), "correct")
+
+    def test_web_error_checker_rejects_answer_from_memory(self) -> None:
+        self.assertEqual(smoke_harness.check_web_error("The web search failed.", []), "correct")
+        self.assertEqual(
+            smoke_harness.check_web_error("The search failed, but Avola is in Sicily.", []),
+            "wrong",
+        )
+
+    def test_deterministic_web_fixture_covers_success_none_and_error(self) -> None:
+        from orbit.runtime import shell_guardrails
+
+        original = shell_guardrails.search_web
+        with smoke_harness.deterministic_web(True):
+            self.assertIn("Orbit deterministic fixture", shell_guardrails.search_web("orbit fixture success"))
+            self.assertIn("results: none", shell_guardrails.search_web("orbit fixture none"))
+            self.assertIn("error:", shell_guardrails.search_web("where is Avola located?"))
+        self.assertIs(shell_guardrails.search_web, original)
 
     def test_mtp_state_marks_failed_props_as_not_usable(self) -> None:
         state = smoke_harness.mtp_state_from_props(
@@ -116,6 +200,407 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(env["mtp"], "failed")
         self.assertFalse(env["mtp_usable"])
         self.assertEqual(env["mtp_failure_reason"], "probe failed")
+
+    def test_environment_summary_records_final_prefix_and_runtime_metadata(self) -> None:
+        class Backend:
+            def model_info(self):
+                return type("Info", (), {"id": "m"})()
+
+        args = smoke_harness.build_parser().parse_args(
+            [
+                "--scenario", "final_prefix_local", "--final-prefix-mode", "on", "--timeout", "30",
+                "--block-id", "abba-1-on-a", "--run-order", "ON", "--cooling-seconds", "15",
+            ]
+        )
+        env = smoke_harness.environment_summary(
+            args=args,
+            backend=Backend(),
+            props={
+                "backend": "orbit-native",
+                "ctx_size": 8192,
+                "threads": 6,
+                "threads_batch": 6,
+                "batch_size": 256,
+                "ubatch_size": 128,
+                "final_prefix_experiment_enabled": True,
+                "final_prefix_experiment_restore_count": 2,
+            },
+        )
+
+        self.assertEqual(env["final_prefix_mode"], "on")
+        self.assertEqual(env["scenario"], ["final_prefix_local"])
+        self.assertEqual(env["ctx"], 8192)
+        self.assertEqual(env["final_prefix"]["restore_count"], 2)
+        self.assertEqual(env["timeout"], 30.0)
+        self.assertEqual(env["block_id"], "abba-1-on-a")
+        self.assertEqual(env["run_order"], "ON")
+        self.assertEqual(env["cooling_seconds"], 15.0)
+        self.assertIsInstance(env["cpu_affinity"], list)
+
+    def test_final_prefix_environment_controls_client_flag_and_restores_it(self) -> None:
+        with mock.patch.dict("os.environ", {"ORBIT_FINAL_PREFIX_EXPERIMENT": "old"}, clear=False):
+            with smoke_harness.final_prefix_environment("on"):
+                self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "1")
+            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "old")
+
+            with smoke_harness.final_prefix_environment("off"):
+                self.assertNotIn("ORBIT_FINAL_PREFIX_EXPERIMENT", smoke_harness.os.environ)
+            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "old")
+
+    def test_managed_server_passes_final_prefix_flag_only_when_on(self) -> None:
+        args = smoke_harness.build_parser().parse_args(["--manage-server", "--final-prefix-mode", "on"])
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with mock.patch.object(smoke_harness.subprocess, "Popen", return_value=process) as popen, \
+            mock.patch.object(smoke_harness, "wait_for_server"), \
+            mock.patch.object(
+                smoke_harness,
+                "fresh_backend_props",
+                side_effect=[{}, {"final_prefix_experiment_enabled": True}],
+            ):
+            with smoke_harness.managed_server(args):
+                pass
+        self.assertEqual(popen.call_args.kwargs["env"]["ORBIT_FINAL_PREFIX_EXPERIMENT"], "1")
+
+        args = smoke_harness.build_parser().parse_args(["--manage-server", "--final-prefix-mode", "off"])
+        with mock.patch.dict(smoke_harness.os.environ, {"ORBIT_FINAL_PREFIX_EXPERIMENT": "1"}), \
+            mock.patch.object(smoke_harness.subprocess, "Popen", return_value=process) as popen, \
+            mock.patch.object(smoke_harness, "wait_for_server"), \
+            mock.patch.object(
+                smoke_harness,
+                "fresh_backend_props",
+                side_effect=[{}, {"final_prefix_experiment_enabled": False}],
+            ):
+            with smoke_harness.managed_server(args):
+                pass
+        self.assertNotIn("ORBIT_FINAL_PREFIX_EXPERIMENT", popen.call_args.kwargs["env"])
+
+    def test_managed_server_rejects_an_already_used_base_url(self) -> None:
+        args = smoke_harness.build_parser().parse_args(["--manage-server", "--final-prefix-mode", "off"])
+        with mock.patch.object(smoke_harness, "fresh_backend_props", return_value={"backend": "orbit-native"}), \
+            self.assertRaisesRegex(RuntimeError, "unused base URL"):
+            with smoke_harness.managed_server(args):
+                pass
+
+    def test_server_command_can_enable_mtp_without_changing_final_prefix_mode(self) -> None:
+        args = smoke_harness.build_parser().parse_args(
+            ["--manage-server", "--final-prefix-mode", "on", "--server-mtp"]
+        )
+
+        command = smoke_harness.server_command(args)
+
+        self.assertIn("--mtp", command)
+        self.assertNotIn("ORBIT_FINAL_PREFIX_EXPERIMENT=1", command)
+
+    def test_server_command_records_thinking_and_managed_tools_mode(self) -> None:
+        args = smoke_harness.build_parser().parse_args(
+            ["--manage-server", "--server-thinking", "on", "--tools", "off"]
+        )
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with mock.patch.object(smoke_harness.subprocess, "Popen", return_value=process) as popen, \
+            mock.patch.object(smoke_harness, "wait_for_server"), \
+            mock.patch.object(
+                smoke_harness,
+                "fresh_backend_props",
+                side_effect=[{}, {"final_prefix_experiment_enabled": False}],
+            ):
+            with smoke_harness.managed_server(args):
+                pass
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--think") + 1], "on")
+        self.assertEqual(popen.call_args.kwargs["env"]["ORBIT_TOOLS"], "off")
+
+    def test_process_rss_reads_linux_status(self) -> None:
+        process = mock.Mock(pid=123)
+        with mock.patch.object(smoke_harness.Path, "read_text", return_value="Name:\torbit\nVmRSS:\t2048 kB\n"):
+            self.assertEqual(smoke_harness.process_rss_kib(process), 2048)
+
+    def test_final_prefix_step_state_reports_counter_deltas(self) -> None:
+        before = {
+            "final_prefix_experiment_capture_count": 1,
+            "final_prefix_experiment_restore_count": 3,
+            "final_prefix_experiment_fallback_count": 0,
+        }
+        after = {
+            "final_prefix_experiment_enabled": True,
+            "final_prefix_experiment_initialized": True,
+            "final_prefix_experiment_prefix_tokens": 43,
+            "final_prefix_experiment_capture_count": 1,
+            "final_prefix_experiment_restore_count": 4,
+            "final_prefix_experiment_fallback_count": 0,
+        }
+
+        state = smoke_harness.final_prefix_step_state(before, after)
+
+        self.assertEqual(state["capture_count_delta"], 0)
+        self.assertEqual(state["restore_count_delta"], 1)
+        self.assertEqual(state["fallback_count_delta"], 0)
+        self.assertEqual(state["prefix_tokens"], 43)
+
+    def test_final_prefix_validation_encodes_off_capture_and_on_restore_contract(self) -> None:
+        final = smoke_harness.StepReport(
+            case="pwd_followup",
+            step=1,
+            prompt="run pwd",
+            prompt_kind="auto",
+            completion_kind="route,final_from_tool",
+            route_tokens=800,
+            final_tokens=100,
+            prompt_tokens=100,
+            cached_tokens=43,
+            evaluated_tokens=57,
+            finish_reason="stop",
+            tool_calls=1,
+            tool_names=["exec_shell_full_command"],
+            wall_ms=100.0,
+            correctness_category="correct",
+            raw_leak=False,
+            fake_output=False,
+            loop=False,
+            notes="",
+            answer_excerpt="/tmp",
+            model_steps=[],
+        )
+        off_props = {
+            "final_prefix_experiment_enabled": False,
+            "final_prefix_experiment_capture_count": 0,
+        }
+        on_props = {
+            "final_prefix_experiment_enabled": True,
+            "final_prefix_experiment_prefix_tokens": 43,
+            "final_prefix_experiment_capture_count": 1,
+            "final_prefix_experiment_restore_count": 1,
+            "final_prefix_experiment_fallback_count": 0,
+        }
+
+        self.assertIsNone(smoke_harness.final_prefix_validation_failure("off", [final], off_props))
+        self.assertIsNone(smoke_harness.final_prefix_validation_failure("on", [final, final], on_props))
+        self.assertEqual(
+            smoke_harness.final_prefix_validation_failure(
+                "on",
+                [final, final],
+                {**on_props, "final_prefix_experiment_restore_count": 0},
+            ),
+            "restore_missing",
+        )
+        self.assertIsNone(
+            smoke_harness.final_prefix_validation_failure(
+                "on",
+                [final],
+                {
+                    "mtp_experimental_enabled": True,
+                    "final_prefix_experiment_enabled": True,
+                    "final_prefix_experiment_capture_count": 0,
+                    "final_prefix_experiment_restore_count": 0,
+                },
+            )
+        )
+        self.assertIsNone(
+            smoke_harness.final_prefix_validation_failure(
+                "on",
+                [],
+                {
+                    "final_prefix_experiment_enabled": True,
+                    "final_prefix_experiment_capture_count": 0,
+                    "final_prefix_experiment_restore_count": 0,
+                },
+                tools_mode="off",
+            )
+        )
+        self.assertEqual(
+            smoke_harness.final_prefix_validation_failure(
+                "on",
+                [],
+                {
+                    "final_prefix_experiment_enabled": True,
+                    "final_prefix_experiment_capture_count": 1,
+                    "final_prefix_experiment_restore_count": 0,
+                },
+                tools_mode="off",
+            ),
+            "tools_off_guard_failed",
+        )
+
+    def test_lifecycle_transition_reports_restart_and_thinking_state(self) -> None:
+        eligible_props = {
+            "final_prefix_experiment_initialized": True,
+            "final_prefix_experiment_capture_count": 1,
+            "final_prefix_experiment_restore_count": 1,
+            "final_prefix_experiment_fallback_count": 0,
+        }
+        blocks = [
+            smoke_harness.LifecycleBlock(
+                block_id="before",
+                server_pid=101,
+                ctx=8192,
+                thinking="off",
+                initial_props={"final_prefix_experiment_initialized": False},
+                final_props=eligible_props,
+                reports=[],
+                rss_samples=[],
+            ),
+            smoke_harness.LifecycleBlock(
+                block_id="after",
+                server_pid=202,
+                ctx=4096,
+                thinking="off",
+                initial_props={"final_prefix_experiment_initialized": False},
+                final_props=eligible_props,
+                reports=[],
+                rss_samples=[],
+            ),
+        ]
+
+        restart = smoke_harness.lifecycle_transition_row("restart", blocks)
+        thinking = smoke_harness.lifecycle_transition_row(
+            "thinking",
+            [
+                smoke_harness.LifecycleBlock(
+                    block_id="thinking-on",
+                    server_pid=303,
+                    ctx=8192,
+                    thinking="on",
+                    initial_props={"final_prefix_experiment_initialized": False},
+                    final_props={
+                        "final_prefix_experiment_capture_count": 0,
+                        "final_prefix_experiment_restore_count": 0,
+                    },
+                    reports=[],
+                    rss_samples=[],
+                )
+            ],
+        )
+
+        self.assertTrue(restart["passed"])
+        self.assertEqual(restart["process_ids"], [101, 202])
+        self.assertFalse(restart["transitions"][1]["initial_initialized"])
+        self.assertTrue(thinking["passed"])
+        self.assertEqual(thinking["transitions"][0]["eligibility"], "ineligible_thinking")
+
+    def test_rss_samples_preserve_pid_order_and_compute_neutral_deltas(self) -> None:
+        process = mock.Mock(pid=4242)
+        values = iter((1000, 1200, 1210, 1220, 1230, 1240, 1250))
+        labels = (
+            "startup",
+            "after_capture",
+            "after_restore_10",
+            "after_restore_25",
+            "after_restore_50",
+            "after_invalidation",
+            "after_recapture",
+        )
+        with mock.patch.object(smoke_harness, "process_rss_kib", side_effect=lambda _process: next(values)):
+            samples = []
+            for index, label in enumerate(labels):
+                props = {}
+                if label == "after_invalidation":
+                    props = {
+                        "final_prefix_experiment_initialized": False,
+                        "final_prefix_experiment_prefix_tokens": 0,
+                    }
+                elif label == "after_recapture":
+                    props = {
+                        "final_prefix_experiment_initialized": True,
+                        "final_prefix_experiment_capture_count": 2,
+                    }
+                samples.append(
+                    smoke_harness.rss_sample(
+                        process,
+                        label=label,
+                        block_id="rss",
+                        sequence=index,
+                        props=props,
+                    )
+                )
+
+        summary = smoke_harness.summarize_rss_samples(samples, block_id="rss")
+
+        self.assertEqual(summary["sample_labels"], list(labels))
+        self.assertEqual(summary["server_pid"], 4242)
+        self.assertEqual(summary["startup_to_capture_delta_kib"], 200)
+        self.assertEqual(summary["capture_to_restore50_delta_kib"], 30)
+        self.assertFalse(summary["linear_growth_suspected"])
+        self.assertTrue(summary["complete"])
+        self.assertTrue(summary["passed"])
+
+    def test_rss_summary_handles_missing_samples_without_inference(self) -> None:
+        summary = smoke_harness.summarize_rss_samples(
+            [{"label": "startup", "rss_kib": None, "server_pid": 7}],
+            block_id="rss",
+        )
+
+        self.assertIsNone(summary["startup_to_capture_delta_kib"])
+        self.assertIsNone(summary["linear_growth_suspected"])
+        self.assertFalse(summary["complete"])
+
+    def test_lifecycle_runner_exercises_restart_ctx_and_thinking_transitions(self) -> None:
+        recorded: list[tuple[str, int, str]] = []
+
+        def fake_block(args, *, block_id, calls: int, rss_series=False):
+            del calls, rss_series
+            test_args = args
+            eligible = test_args.server_thinking == "off"
+            calls_state = 1 if eligible else 0
+            recorded.append((block_id, test_args.ctx, test_args.server_thinking))
+            return smoke_harness.LifecycleBlock(
+                block_id=block_id,
+                server_pid=100 + len(recorded),
+                ctx=test_args.ctx,
+                thinking=test_args.server_thinking,
+                initial_props={"final_prefix_experiment_initialized": False},
+                final_props={
+                    "backend": "orbit-native",
+                    "final_prefix_experiment_capture_count": calls_state,
+                    "final_prefix_experiment_restore_count": calls_state,
+                    "final_prefix_experiment_fallback_count": 0,
+                },
+                reports=[],
+                rss_samples=[],
+            )
+
+        args = smoke_harness.build_parser().parse_args(
+            [
+                "--manage-server",
+                "--final-prefix-mode",
+                "on",
+                "--lifecycle-check",
+                "restart",
+                "--lifecycle-check",
+                "ctx-change",
+                "--lifecycle-check",
+                "thinking",
+                "--ctx",
+                "8192",
+                "--ctx-change-to",
+                "4096",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "run_lifecycle_block", side_effect=fake_block), \
+            mock.patch.object(smoke_harness, "write_jsonl"), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.run_lifecycle_checks(
+                args,
+                jsonl_path=Path(tmp) / "out.jsonl",
+                markdown_path=Path(tmp) / "out.md",
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            recorded,
+            [
+                ("restart-before", 8192, "off"),
+                ("restart-after", 8192, "off"),
+                ("ctx-8192", 8192, "off"),
+                ("ctx-4096", 4096, "off"),
+                ("thinking-off", 8192, "off"),
+                ("thinking-on", 8192, "on"),
+            ],
+        )
 
     def test_main_mtp_required_fails_when_post_run_props_not_usable(self) -> None:
         initial = {
@@ -189,12 +674,43 @@ class SmokeHarnessTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "report.jsonl"
-            smoke_harness.write_jsonl(path, {"version": "0.0.1", "git_head": "abc"}, [report])
+            smoke_harness.write_jsonl(
+                path,
+                {"version": "0.0.1", "git_head": "abc"},
+                [report],
+                extra_rows=[{"type": "lifecycle_summary", "operation": "restart", "passed": True}],
+            )
             rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
         self.assertEqual(rows[0]["type"], "environment")
         self.assertEqual(rows[1]["type"], "step")
         self.assertEqual(rows[1]["case"], "simple_chat")
+        self.assertIn("output_tokens", rows[1])
+        self.assertIn("phase_wall_ms", rows[1])
+        self.assertEqual(rows[2]["type"], "summary")
+        self.assertEqual(rows[3]["type"], "lifecycle_summary")
+
+    def test_main_tools_off_metadata_matches_runtime_mode(self) -> None:
+        captured_env: list[dict[str, object]] = []
+        captured_modes: list[str] = []
+
+        def fake_run_scenario(*_args, **kwargs):
+            captured_modes.append(kwargs["tools_mode"])
+            return []
+
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "safe_backend_props", return_value={}), \
+            mock.patch.object(smoke_harness, "settled_backend_props", return_value={}), \
+            mock.patch.object(smoke_harness, "run_scenario", side_effect=fake_run_scenario), \
+            mock.patch.object(smoke_harness, "write_jsonl", side_effect=lambda _p, env, _r: captured_env.append(env)), \
+            mock.patch.object(smoke_harness, "write_markdown"):
+            rc = smoke_harness.main(
+                ["--scenario", "simple_chat", "--no-web", "--tools", "off", "--output-dir", tmp]
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured_modes, ["off"])
+        self.assertEqual(captured_env[0]["tools"], "off")
 
     def test_markdown_summary_contains_expected_columns(self) -> None:
         report = smoke_harness.StepReport(
@@ -228,6 +744,96 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertIn("| Case | Step | Kind | Route | Final |", text)
         self.assertIn("pwd_followup", text)
         self.assertIn("partial_baseline", text)
+        self.assertIn("## Repetition Summary", text)
+
+    def test_summary_reports_median_and_final_prefix_counter_deltas(self) -> None:
+        rows = []
+        for cached, evaluated, wall, restore in (
+            (4, 96, 20.0, 0),
+            (43, 57, 14.0, 1),
+            (43, 57, 15.0, 1),
+            (43, 57, 13.0, 1),
+            (43, 57, 16.0, 1),
+        ):
+            rows.append(
+                smoke_harness.StepReport(
+                    case="pwd",
+                    step=1,
+                    prompt="run pwd",
+                    prompt_kind="auto",
+                    completion_kind="route,final_from_tool",
+                    route_tokens=800,
+                    final_tokens=100,
+                    prompt_tokens=100,
+                    cached_tokens=cached,
+                    evaluated_tokens=evaluated,
+                    finish_reason="stop",
+                    tool_calls=1,
+                    tool_names=["exec_shell_full_command"],
+                    wall_ms=wall,
+                    correctness_category="correct",
+                    raw_leak=False,
+                    fake_output=False,
+                    loop=False,
+                    notes="",
+                    answer_excerpt="/tmp",
+                    model_steps=[],
+                    final_prefix={"restore_count_delta": restore},
+                )
+            )
+
+        summary = smoke_harness.summarize_reports(rows)[0]
+
+        self.assertEqual(summary["cached_tokens"]["median"], 43.0)
+        self.assertEqual(summary["evaluated_tokens"]["median"], 57.0)
+        self.assertEqual(summary["runs"], 5)
+        self.assertEqual(summary["restore_delta"], 4)
+        self.assertEqual(summary["restored"]["runs"], 4)
+        self.assertEqual(summary["restored"]["cached_tokens"]["min"], 43.0)
+
+    def test_summary_aggregates_fifty_stability_calls(self) -> None:
+        row = smoke_harness.StepReport(
+            case="final_prefix_mixed",
+            step=1,
+            prompt="run pwd",
+            prompt_kind="auto",
+            completion_kind="route,final_from_tool",
+            route_tokens=780,
+            final_tokens=100,
+            prompt_tokens=100,
+            cached_tokens=43,
+            evaluated_tokens=57,
+            finish_reason="stop",
+            tool_calls=1,
+            tool_names=["exec_shell_full_command"],
+            wall_ms=12.0,
+            correctness_category="correct",
+            raw_leak=False,
+            fake_output=False,
+            loop=False,
+            notes="",
+            answer_excerpt="/tmp",
+            model_steps=[],
+            final_prefix={"restore_count_delta": 1, "fallback_count_delta": 0},
+        )
+
+        summary = smoke_harness.summarize_reports([row] * 50)[0]
+
+        self.assertEqual(summary["runs"], 50)
+        self.assertEqual(summary["correct"], 50)
+        self.assertEqual(summary["restore_delta"], 50)
+        self.assertEqual(summary["fallback_delta"], 0)
+
+    def test_phase_timing_summary_separates_model_and_non_model_wall(self) -> None:
+        timing = smoke_harness.phase_timing_summary(
+            [("route", 10.0), ("final_from_tool", 20.0), ("final_from_tool", 5.0)],
+            40.0,
+        )
+
+        self.assertEqual(timing["route"], 10.0)
+        self.assertEqual(timing["final_from_tool"], 25.0)
+        self.assertEqual(timing["non_model_wall_ms"], 5.0)
+        self.assertEqual(smoke_harness.estimated_generation_ms(10, 5.0), 2000.0)
 
     def test_model_step_to_json_includes_evaluated_tokens(self) -> None:
         row = smoke_harness.model_step_to_json(
@@ -273,6 +879,10 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(report.completion_kind, "timeout")
         self.assertIn("cancel_requested", report.notes)
         self.assertIn("cleanup_ok", report.notes)
+        self.assertTrue(report.lifecycle["timeout_observed"])
+        self.assertFalse(report.lifecycle["automatic_cancel"])
+        self.assertTrue(report.lifecycle["explicit_cancel_used"])
+        self.assertTrue(report.lifecycle["cleanup_healthy"])
 
     def test_main_returns_timeout_failure_when_report_times_out(self) -> None:
         timeout_report = smoke_harness.StepReport(

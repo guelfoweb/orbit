@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import queue
+import statistics
+import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -25,7 +28,9 @@ from orbit import __version__
 from orbit.backend.base import ChatResult
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime.chat import ChatRuntime
+from orbit.runtime.kv_diag import current_phase
 from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT
+from orbit.runtime.tools import TOOL_NAMES
 from orbit.runtime.turn_trace import ModelStepMetrics
 from orbit.terminal.runtime_status import collect_host_info
 
@@ -40,12 +45,39 @@ class SmokeStep:
     checker_name: str = "not_evaluated"
 
 
+FINAL_PREFIX_LOCAL_STEPS = (
+    SmokeStep("run pwd", checker_name="path_like"),
+    SmokeStep("tell me specs about this computer", checker_name="nonempty"),
+    SmokeStep("read text/summary.txt", checker_name="nonempty"),
+    SmokeStep('search inside local text files for "Orbit"', checker_name="nonempty"),
+    SmokeStep("list files and directories in this workdir", checker_name="nonempty"),
+    SmokeStep("run printf 'orbit-final-prefix-ok\\n'", checker_name="nonempty"),
+    SmokeStep("run command_that_does_not_exist_123", checker_name="shell_error"),
+)
+
+FINAL_PREFIX_WEB_STEPS = (
+    SmokeStep("search online for orbit fixture success", checker_name="nonempty"),
+    SmokeStep("search online for orbit fixture none", checker_name="nonempty"),
+    SmokeStep("search online for where is Avola located?", checker_name="web_error"),
+    SmokeStep("search online for latest status of fictional endpoint xqz-orbit-404", checker_name="web_error"),
+)
+
+FINAL_PREFIX_PAIRED_STEPS = (
+    FINAL_PREFIX_LOCAL_STEPS[0],
+    FINAL_PREFIX_LOCAL_STEPS[1],
+    FINAL_PREFIX_LOCAL_STEPS[3],
+    FINAL_PREFIX_WEB_STEPS[0],
+)
+
+
 @dataclass(frozen=True)
 class SmokeScenario:
     name: str
     steps: tuple[SmokeStep, ...]
     requires_web: bool = False
     optional: bool = False
+    allowed_tool_names: tuple[str, ...] = ("exec_shell_full_command",)
+    isolated_steps: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,6 +103,14 @@ class StepReport:
     notes: str
     answer_excerpt: str
     model_steps: list[dict[str, object]]
+    output_tokens: int | None = None
+    final_prefix: dict[str, object] = field(default_factory=dict)
+    lifecycle: dict[str, object] = field(default_factory=dict)
+    phase_wall_ms: dict[str, float] = field(default_factory=dict)
+    prompt_tokens_per_second: float | None = None
+    generation_tokens_per_second: float | None = None
+    estimated_generation_ms: float | None = None
+    estimated_prefill_residual_ms: float | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -84,6 +124,7 @@ class StepReport:
             "prompt_tokens": self.prompt_tokens,
             "cached_tokens": self.cached_tokens,
             "evaluated_tokens": self.evaluated_tokens,
+            "output_tokens": self.output_tokens,
             "finish_reason": self.finish_reason,
             "tool_calls": self.tool_calls,
             "tool_names": self.tool_names,
@@ -95,31 +136,71 @@ class StepReport:
             "notes": self.notes,
             "answer_excerpt": self.answer_excerpt,
             "model_steps": self.model_steps,
+            "final_prefix": self.final_prefix,
+            "lifecycle": self.lifecycle,
+            "phase_wall_ms": self.phase_wall_ms,
+            "prompt_tokens_per_second": self.prompt_tokens_per_second,
+            "generation_tokens_per_second": self.generation_tokens_per_second,
+            "estimated_generation_ms": self.estimated_generation_ms,
+            "estimated_prefill_residual_ms": self.estimated_prefill_residual_ms,
         }
+
+
+@dataclass(frozen=True)
+class LifecycleBlock:
+    block_id: str
+    server_pid: int
+    ctx: int
+    thinking: str
+    initial_props: dict[str, object]
+    final_props: dict[str, object]
+    reports: list[StepReport]
+    rss_samples: list[dict[str, object]]
 
 
 class ProbeBackend:
     def __init__(self, backend: LlamaServerBackend) -> None:
         self._backend = backend
+        self._phase_timings: list[tuple[str, float]] = []
 
     def __getattr__(self, name: str):
         return getattr(self._backend, name)
 
     def chat(self, messages, *, temperature, max_tokens, tools=None):
-        return self._backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+        return self._timed(
+            lambda: self._backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+        )
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None, on_delta=None, on_progress=None):
-        return self._backend.chat_stream(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            on_delta=on_delta or (lambda _text: None),
-            on_progress=on_progress,
+        return self._timed(
+            lambda: self._backend.chat_stream(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                on_delta=on_delta or (lambda _text: None),
+                on_progress=on_progress,
+            )
         )
 
     def continue_current(self, *, max_tokens, on_delta=None, on_progress=None):
-        return self._backend.continue_current(max_tokens=max_tokens, on_delta=on_delta, on_progress=on_progress)
+        return self._timed(
+            lambda: self._backend.continue_current(max_tokens=max_tokens, on_delta=on_delta, on_progress=on_progress)
+        )
+
+    def _timed(self, call):
+        phase = current_phase() or "unknown"
+        started = time.perf_counter()
+        try:
+            return call()
+        finally:
+            self._phase_timings.append((phase, round((time.perf_counter() - started) * 1000, 1)))
+
+    def reset_phase_timings(self) -> None:
+        self._phase_timings.clear()
+
+    def phase_timings(self) -> list[tuple[str, float]]:
+        return list(self._phase_timings)
 
 
 def mtp_state_from_props(props: dict[str, object]) -> dict[str, object]:
@@ -159,29 +240,47 @@ def main(argv: list[str] | None = None) -> int:
     jsonl_path = Path(args.jsonl) if args.jsonl else output_dir / f"orbit_smoke_{stamp}.jsonl"
     markdown_path = Path(args.markdown) if args.markdown else output_dir / f"orbit_smoke_{stamp}.md"
 
-    backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
-    initial_props = safe_backend_props(backend)
-    initial_mtp = mtp_state_from_props(initial_props)
-    if args.mtp_required and not (initial_mtp["requested"] or initial_mtp["usable"]):
-        print("error: --mtp-required set but backend does not report MTP requested/enabled", file=sys.stderr)
-        return 2
+    if args.lifecycle_check:
+        return run_lifecycle_checks(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
 
-    reports: list[StepReport] = []
-    for scenario in selected:
-        reports.extend(
-            run_scenario(
-                scenario,
-                backend=backend,
-                workdir=Path(args.workdir),
-                max_tokens=args.max_tokens,
-                temperature=args.temperature,
-                timeout=args.timeout,
-            )
-        )
-    final_props = settled_backend_props(args.base_url, args.timeout)
-    env = environment_summary(args=args, backend=backend, props=final_props)
+    with final_prefix_environment(args.final_prefix_mode), deterministic_web(args.deterministic_web), managed_server(args) as server_process:
+        backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
+        backend.thinking = args.server_thinking == "on"
+        rss_before_kib = process_rss_kib(server_process)
+        if args.cooling_seconds:
+            time.sleep(args.cooling_seconds)
+        initial_props = safe_backend_props(backend)
+        initial_mtp = mtp_state_from_props(initial_props)
+        if args.mtp_required and not (initial_mtp["requested"] or initial_mtp["usable"]):
+            print("error: --mtp-required set but backend does not report MTP requested/enabled", file=sys.stderr)
+            return 2
+
+        reports: list[StepReport] = []
+        for scenario in selected:
+            for _repeat in range(args.repetitions):
+                reports.extend(
+                    run_scenario(
+                        scenario,
+                        backend=backend,
+                        workdir=Path(args.workdir),
+                        max_tokens=args.max_tokens,
+                        temperature=args.temperature,
+                        timeout=args.timeout,
+                        tools_mode=args.tools,
+                    )
+                )
+        final_props = settled_backend_props(args.base_url, args.timeout)
+        env = environment_summary(args=args, backend=backend, props=final_props)
+        env["server_pid"] = server_process.pid if server_process is not None else None
+        env["server_rss_before_kib"] = rss_before_kib
+        env["server_rss_after_kib"] = process_rss_kib(server_process)
     write_jsonl(jsonl_path, env, reports)
     write_markdown(markdown_path, env, reports)
+    if args.verify_final_prefix:
+        failure = final_prefix_validation_failure(args.final_prefix_mode, reports, final_props, tools_mode=args.tools)
+        if failure is not None:
+            print(f"error: final-prefix validation failed ({failure})", file=sys.stderr)
+            return 1
     if args.mtp_required:
         final_mtp = mtp_state_from_props(final_props)
         if not final_mtp["usable"]:
@@ -211,6 +310,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--repetitions", type=positive_int, default=1)
+    parser.add_argument("--final-prefix-mode", choices=("inherit", "off", "on"), default="inherit")
+    parser.add_argument("--manage-server", action="store_true", help="Start and stop a native server for this run.")
+    parser.add_argument("--server-start-timeout", type=float, default=180.0)
+    parser.add_argument("--model")
+    parser.add_argument("--mmproj")
+    parser.add_argument("--ctx", type=int, default=8192)
+    parser.add_argument("--threads", type=int, default=6)
+    parser.add_argument("--threads-batch", type=int, default=6)
+    parser.add_argument("--batch", type=int, default=256)
+    parser.add_argument("--ubatch", type=int, default=128)
+    parser.add_argument("--server-mtp", action="store_true", help="Start the managed server with experimental MTP enabled.")
+    parser.add_argument("--server-thinking", choices=("off", "on"), default="off")
+    parser.add_argument("--tools", choices=("off", "on"), default="on")
+    parser.add_argument("--block-id", default=None)
+    parser.add_argument("--run-order", default=None)
+    parser.add_argument("--cooling-seconds", type=float, default=0.0)
+    parser.add_argument("--deterministic-web", action="store_true", help="Use bounded local web fixtures for final-prefix smoke cases.")
+    parser.add_argument(
+        "--lifecycle-check",
+        action="append",
+        choices=("restart", "ctx-change", "thinking", "rss"),
+        help="Run a managed final-prefix lifecycle check; repeatable.",
+    )
+    parser.add_argument("--ctx-change-to", type=positive_int, default=4096)
+    parser.add_argument(
+        "--verify-final-prefix",
+        action="store_true",
+        help="Fail unless OFF/ON final-prefix counters match the requested experimental mode.",
+    )
     return parser
 
 
@@ -271,6 +400,47 @@ def scenarios() -> dict[str, SmokeScenario]:
             ),
             optional=True,
         ),
+        "final_prefix_local": SmokeScenario(
+            "final_prefix_local",
+            FINAL_PREFIX_LOCAL_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+        ),
+        "final_prefix_pwd": SmokeScenario(
+            "final_prefix_pwd",
+            (FINAL_PREFIX_LOCAL_STEPS[0], FINAL_PREFIX_LOCAL_STEPS[0]),
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+        ),
+        "final_prefix_web": SmokeScenario(
+            "final_prefix_web",
+            FINAL_PREFIX_WEB_STEPS,
+            requires_web=True,
+            optional=True,
+        ),
+        "final_prefix_mixed": SmokeScenario(
+            "final_prefix_mixed",
+            FINAL_PREFIX_LOCAL_STEPS + FINAL_PREFIX_WEB_STEPS,
+            requires_web=True,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+        ),
+        "final_prefix_paired": SmokeScenario(
+            "final_prefix_paired",
+            FINAL_PREFIX_PAIRED_STEPS,
+            requires_web=True,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+        ),
+        "final_prefix_web_short": SmokeScenario(
+            "final_prefix_web_short",
+            (SmokeStep("search online for orbit fixture success and answer in one short sentence", checker_name="nonempty"),),
+            requires_web=True,
+            optional=True,
+        ),
     }
 
 
@@ -300,14 +470,13 @@ def run_scenario(
     max_tokens: int,
     temperature: float,
     timeout: float,
+    tools_mode: str = "on",
 ) -> list[StepReport]:
-    runtime = ChatRuntime(
-        backend=ProbeBackend(backend),
-        system_prompt=DEFAULT_SYSTEM_PROMPT,
-        diagnostic_session_id=str(workdir),
-    )
+    runtime = new_runtime(backend, workdir)
     reports: list[StepReport] = []
     for index, step in enumerate(scenario.steps, start=1):
+        if scenario.isolated_steps and index > 1:
+            runtime = new_runtime(backend, workdir)
         report = run_step(
             runtime,
             scenario=scenario.name,
@@ -318,11 +487,24 @@ def run_scenario(
             temperature=temperature,
             base_url=backend.base_url,
             timeout=timeout,
+            allowed_tool_names=effective_allowed_tool_names(scenario, tools_mode),
         )
         reports.append(report)
         if report.finish_reason in {"timeout", "error"}:
             break
     return reports
+
+
+def effective_allowed_tool_names(scenario: SmokeScenario, tools_mode: str) -> tuple[str, ...]:
+    return scenario.allowed_tool_names if tools_mode == "on" else ()
+
+
+def new_runtime(backend: LlamaServerBackend, workdir: Path) -> ChatRuntime:
+    return ChatRuntime(
+        backend=ProbeBackend(backend),
+        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        diagnostic_session_id=str(workdir),
+    )
 
 
 def run_step(
@@ -336,7 +518,9 @@ def run_step(
     temperature: float,
     base_url: str,
     timeout: float,
+    allowed_tool_names: tuple[str, ...] = ("exec_shell_full_command",),
 ) -> StepReport:
+    props_before = fresh_backend_props(base_url, min(timeout, 5.0))
     result_queue: queue.Queue[StepReport] = queue.Queue(maxsize=1)
 
     worker = threading.Thread(
@@ -349,6 +533,7 @@ def run_step(
                 workdir=workdir,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                allowed_tool_names=allowed_tool_names,
             )
         ),
         daemon=True,
@@ -378,6 +563,7 @@ def run_step(
             prompt_tokens=None,
             cached_tokens=None,
             evaluated_tokens=None,
+            output_tokens=None,
             finish_reason="timeout",
             tool_calls=0,
             tool_names=[],
@@ -389,8 +575,19 @@ def run_step(
             notes=notes,
             answer_excerpt="timeout",
             model_steps=[],
+            final_prefix=final_prefix_step_state(props_before, props_after),
+            lifecycle={
+                "event": "timeout",
+                "timeout_observed": True,
+                "automatic_cancel": False,
+                "explicit_cancel_used": cancel_requested,
+                "cleanup_healthy": props_after.get("in_flight") is False,
+            },
+            phase_wall_ms={},
         )
-    return result_queue.get()
+    report = result_queue.get()
+    props_after = fresh_backend_props(base_url, min(timeout, 5.0))
+    return replace_step_final_prefix(report, final_prefix_step_state(props_before, props_after))
 
 
 def _run_step_inner(
@@ -402,10 +599,14 @@ def _run_step_inner(
     workdir: Path,
     max_tokens: int,
     temperature: float,
+    allowed_tool_names: tuple[str, ...],
 ) -> StepReport:
     model_steps: list[ModelStepMetrics] = []
     tool_names: list[str] = []
     started = time.perf_counter()
+    probe = runtime.backend if isinstance(runtime.backend, ProbeBackend) else None
+    if probe is not None:
+        probe.reset_phase_timings()
     notes = ""
     try:
         if step.mode == "chat":
@@ -421,7 +622,7 @@ def _run_step_inner(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 workdir=workdir,
-                allowed_tool_names=("exec_shell_full_command",),
+                allowed_tool_names=allowed_tool_names,
                 on_model_step=model_steps.append,
                 on_tool_call=lambda name, _args: tool_names.append(name),
             )
@@ -439,6 +640,14 @@ def _run_step_inner(
         )
         notes = "exception"
     wall_ms = round((time.perf_counter() - started) * 1000, 1)
+    phase_timings = phase_timing_summary(probe.phase_timings() if probe is not None else [], wall_ms)
+    final_wall_ms = phase_duration(phase_timings, "final_from_tool")
+    generation_ms = estimated_generation_ms(result.completion_tokens, result.generation_tokens_per_second)
+    residual_ms = (
+        round(max(0.0, final_wall_ms - generation_ms), 1)
+        if final_wall_ms is not None and generation_ms is not None
+        else None
+    )
     completion_kind = ",".join(metric.phase for metric in model_steps) or "error"
     route_tokens = first_prompt_tokens(model_steps, route=True)
     final_tokens = first_prompt_tokens(model_steps, route=False, last=True)
@@ -461,6 +670,7 @@ def _run_step_inner(
         prompt_tokens=result.prompt_tokens,
         cached_tokens=result.cached_tokens,
         evaluated_tokens=evaluated,
+        output_tokens=result.completion_tokens,
         finish_reason=result.finish_reason,
         tool_calls=len(tool_names),
         tool_names=tool_names,
@@ -472,7 +682,29 @@ def _run_step_inner(
         notes=notes,
         answer_excerpt=excerpt(result.content),
         model_steps=[model_step_to_json(metric) for metric in model_steps],
+        final_prefix={},
+        lifecycle={},
+        phase_wall_ms=phase_timings,
+        prompt_tokens_per_second=result.prompt_tokens_per_second,
+        generation_tokens_per_second=result.generation_tokens_per_second,
+        estimated_generation_ms=generation_ms,
+        estimated_prefill_residual_ms=residual_ms,
     )
+
+
+def phase_timing_summary(timings: list[tuple[str, float]], total_wall_ms: float) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for phase, duration in timings:
+        result[phase] = round(result.get(phase, 0.0) + duration, 1)
+    model_wall = sum(result.values())
+    result["non_model_wall_ms"] = round(max(0.0, total_wall_ms - model_wall), 1)
+    return result
+
+
+def estimated_generation_ms(output_tokens: int | None, tokens_per_second: float | None) -> float | None:
+    if not isinstance(output_tokens, int) or not isinstance(tokens_per_second, int | float) or tokens_per_second <= 0:
+        return None
+    return round(output_tokens / float(tokens_per_second) * 1000, 1)
 
 
 def first_prompt_tokens(metrics: list[ModelStepMetrics], *, route: bool, last: bool = False) -> int | None:
@@ -495,6 +727,8 @@ def model_step_to_json(metric: ModelStepMetrics) -> dict[str, object]:
         "evaluated_tokens": evaluated,
         "tool_calls": metric.tool_calls,
         "retry_reason": metric.retry_reason,
+        "prompt_tokens_per_second": metric.prompt_tokens_per_second,
+        "generation_tokens_per_second": metric.generation_tokens_per_second,
     }
 
 
@@ -522,7 +756,526 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "accel": acceleration_mode(props),
         "base_url": args.base_url,
         "workdir": str(Path(args.workdir)),
+        "scenario": list(args.scenario or ["all"]),
+        "final_prefix_mode": args.final_prefix_mode,
+        "tools": args.tools,
+        "prewarm": os.environ.get("ORBIT_KV_PREFIX_PREWARM", "startup"),
+        "timeout": args.timeout,
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "ctx": props.get("ctx_size", args.ctx),
+        "threads": props.get("threads", args.threads),
+        "threads_batch": props.get("threads_batch", args.threads_batch),
+        "batch": props.get("batch_size", args.batch),
+        "ubatch": props.get("ubatch_size", args.ubatch),
+        "server_command": server_command(args) if args.manage_server else "external",
+        "client_command": " ".join(sys.argv),
+        "final_prefix": final_prefix_props(props),
+        "block_id": args.block_id,
+        "run_order": args.run_order,
+        "cooling_seconds": args.cooling_seconds,
+        "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
     }
+
+
+FINAL_PREFIX_PROP_KEYS = {
+    "enabled": "final_prefix_experiment_enabled",
+    "initialized": "final_prefix_experiment_initialized",
+    "prefix_tokens": "final_prefix_experiment_prefix_tokens",
+    "capture_count": "final_prefix_experiment_capture_count",
+    "restore_count": "final_prefix_experiment_restore_count",
+    "fallback_count": "final_prefix_experiment_fallback_count",
+    "failure_reason": "final_prefix_experiment_failure_reason",
+    "last_used": "final_prefix_experiment_last_used",
+    "checkpoint_size": "final_prefix_experiment_checkpoint_size_bytes",
+}
+
+
+def final_prefix_props(props: dict[str, object]) -> dict[str, object]:
+    return {name: props.get(source) for name, source in FINAL_PREFIX_PROP_KEYS.items()}
+
+
+def final_prefix_step_state(before: dict[str, object], after: dict[str, object]) -> dict[str, object]:
+    state = final_prefix_props(after)
+    for name in ("capture_count", "restore_count", "fallback_count"):
+        old = final_prefix_props(before).get(name)
+        new = state.get(name)
+        state[f"{name}_delta"] = new - old if isinstance(old, int) and isinstance(new, int) else None
+    return state
+
+
+def final_prefix_validation_failure(
+    mode: str,
+    reports: list[StepReport],
+    props: dict[str, object],
+    *,
+    tools_mode: str = "on",
+) -> str | None:
+    state = final_prefix_props(props)
+    eligible = [report for report in reports if "final_from_tool" in report.completion_kind]
+    if mode == "off":
+        if state.get("enabled") is not False:
+            return "off_mode_enabled"
+        if any((report.final_prefix.get("capture_count_delta") or 0) > 0 for report in eligible):
+            return "off_mode_capture"
+        return None
+    if mode != "on":
+        return "explicit_mode_required"
+    if state.get("enabled") is not True:
+        return "on_mode_disabled"
+    if tools_mode == "off":
+        if (state.get("capture_count") or 0) != 0 or (state.get("restore_count") or 0) != 0:
+            return "tools_off_guard_failed"
+        return None
+    if props.get("mtp_experimental_enabled") is True:
+        if (state.get("capture_count") or 0) != 0 or (state.get("restore_count") or 0) != 0:
+            return "mtp_guard_failed"
+        return None
+    if state.get("fallback_count") not in {0, None}:
+        return "fallback_observed"
+    if state.get("prefix_tokens") != 43:
+        return "unexpected_prefix_tokens"
+    if (state.get("capture_count") or 0) < 1:
+        return "capture_missing"
+    if len(eligible) >= 2 and (state.get("restore_count") or 0) < 1:
+        return "restore_missing"
+    return None
+
+
+def replace_step_final_prefix(report: StepReport, state: dict[str, object]) -> StepReport:
+    values = report.__dict__.copy()
+    values["final_prefix"] = state
+    return StepReport(**values)
+
+
+@contextmanager
+def final_prefix_environment(mode: str):
+    previous = os.environ.get("ORBIT_FINAL_PREFIX_EXPERIMENT")
+    if mode == "on":
+        os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"] = "1"
+    elif mode == "off":
+        os.environ.pop("ORBIT_FINAL_PREFIX_EXPERIMENT", None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("ORBIT_FINAL_PREFIX_EXPERIMENT", None)
+        else:
+            os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"] = previous
+
+
+@contextmanager
+def deterministic_web(enabled: bool):
+    if not enabled:
+        yield
+        return
+    from orbit.runtime import shell_guardrails
+
+    original = shell_guardrails.search_web
+
+    def fixture(query: str, *, max_results: int = 5) -> str:
+        del max_results
+        lower = query.lower()
+        if "fixture success" in lower:
+            return "\n".join(
+                [
+                    "web_search_results: true",
+                    f"query: {query}",
+                    "results:",
+                    "1. title: Orbit deterministic fixture",
+                    "   url: https://example.invalid/orbit-fixture",
+                    "   snippet: Orbit fixture result for bounded web final validation.",
+                ]
+            )
+        if "fixture none" in lower:
+            return "web_search_results: true\nresults: none"
+        return "error: web search failed: deterministic DNS fixture"
+
+    shell_guardrails.search_web = fixture
+    try:
+        yield
+    finally:
+        shell_guardrails.search_web = original
+
+
+def server_command(args: argparse.Namespace) -> list[str]:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(args.base_url)
+    command = [
+        sys.executable, "-m", "orbit.terminal.cli", "server",
+        "--host", parsed.hostname or "127.0.0.1",
+        "--port", str(parsed.port or 12120),
+        "--ctx", str(args.ctx),
+        "--threads", str(args.threads),
+        "--threads-batch", str(args.threads_batch),
+        "--batch", str(args.batch),
+        "--ubatch", str(args.ubatch),
+        "--think", args.server_thinking,
+    ]
+    if args.model:
+        command.extend(("--model", args.model))
+    if args.mmproj:
+        command.extend(("--mmproj", args.mmproj))
+    if args.server_mtp:
+        command.append("--mtp")
+    return command
+
+
+@contextmanager
+def managed_server(args: argparse.Namespace):
+    if not args.manage_server:
+        yield None
+        return
+    if fresh_backend_props(args.base_url, 1.0):
+        raise RuntimeError(f"managed server requires an unused base URL: {args.base_url}")
+    env = os.environ.copy()
+    env["ORBIT_TOOLS"] = args.tools
+    if args.final_prefix_mode == "on":
+        env["ORBIT_FINAL_PREFIX_EXPERIMENT"] = "1"
+    else:
+        env.pop("ORBIT_FINAL_PREFIX_EXPERIMENT", None)
+    process = subprocess.Popen(
+        server_command(args),
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        wait_for_server(args.base_url, process, args.server_start_timeout)
+        props = fresh_backend_props(args.base_url, 2.0)
+        expected_enabled = args.final_prefix_mode == "on"
+        if props.get("final_prefix_experiment_enabled") is not expected_enabled:
+            raise RuntimeError("managed server final-prefix mode does not match the requested mode")
+        yield process
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def wait_for_server(base_url: str, process: subprocess.Popen[str], timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            output = process.stdout.read() if process.stdout is not None else ""
+            raise RuntimeError(f"managed server exited during startup: {excerpt(output, 500)}")
+        if fresh_backend_props(base_url, 2.0):
+            time.sleep(0.1)
+            if process.poll() is None:
+                return
+        time.sleep(0.25)
+    raise TimeoutError(f"managed server did not become ready within {timeout:.0f}s")
+
+
+def process_rss_kib(process: subprocess.Popen[str] | None) -> int | None:
+    if process is None:
+        return None
+    try:
+        text = Path(f"/proc/{process.pid}/status").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("VmRSS:"):
+            fields = line.split()
+            return int(fields[1]) if len(fields) >= 2 and fields[1].isdigit() else None
+    return None
+
+
+def rss_sample(
+    process: subprocess.Popen[str],
+    *,
+    label: str,
+    block_id: str,
+    sequence: int,
+    props: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "type": "rss_sample",
+        "label": label,
+        "sequence": sequence,
+        "server_pid": process.pid,
+        "block_id": block_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "rss_kib": process_rss_kib(process),
+        "final_prefix": final_prefix_props(props or {}),
+    }
+
+
+def summarize_rss_samples(samples: list[dict[str, object]], *, block_id: str) -> dict[str, object]:
+    by_label = {str(sample.get("label")): sample.get("rss_kib") for sample in samples}
+
+    def delta(start: str, end: str) -> int | None:
+        before = by_label.get(start)
+        after = by_label.get(end)
+        return after - before if isinstance(before, int) and isinstance(after, int) else None
+
+    restore_values = [by_label.get(label) for label in ("after_restore_10", "after_restore_25", "after_restore_50")]
+    complete = all(isinstance(value, int) for value in restore_values)
+    linear_growth = None
+    if complete:
+        first, middle, last = (int(value) for value in restore_values)
+        linear_growth = first < middle < last and (last - first) >= 1024
+    required_labels = (
+        "startup",
+        "after_capture",
+        "after_restore_10",
+        "after_restore_25",
+        "after_restore_50",
+        "after_invalidation",
+        "after_recapture",
+    )
+    complete = all(label in by_label and isinstance(by_label[label], int) for label in required_labels)
+    invalidation = next((sample for sample in samples if sample.get("label") == "after_invalidation"), {})
+    recapture = next((sample for sample in samples if sample.get("label") == "after_recapture"), {})
+    invalidation_state = invalidation.get("final_prefix") if isinstance(invalidation.get("final_prefix"), dict) else {}
+    recapture_state = recapture.get("final_prefix") if isinstance(recapture.get("final_prefix"), dict) else {}
+    lifecycle_healthy = (
+        invalidation_state.get("initialized") is False
+        and invalidation_state.get("prefix_tokens") == 0
+        and recapture_state.get("initialized") is True
+        and (recapture_state.get("capture_count") or 0) >= 2
+    )
+    return {
+        "type": "lifecycle_summary",
+        "operation": "rss",
+        "block_id": block_id,
+        "server_pid": samples[0].get("server_pid") if samples else None,
+        "sample_labels": [sample.get("label") for sample in samples],
+        "startup_to_capture_delta_kib": delta("startup", "after_capture"),
+        "capture_to_restore50_delta_kib": delta("after_capture", "after_restore_50"),
+        "restore50_to_invalidation_delta_kib": delta("after_restore_50", "after_invalidation"),
+        "invalidation_to_recapture_delta_kib": delta("after_invalidation", "after_recapture"),
+        "linear_growth_suspected": linear_growth,
+        "invalidation_initialized": invalidation_state.get("initialized"),
+        "recapture_initialized": recapture_state.get("initialized"),
+        "complete": complete,
+        "passed": complete and lifecycle_healthy,
+    }
+
+
+def namespace_with(args: argparse.Namespace, **overrides: object) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def lifecycle_pwd_scenario(name: str = "final_prefix_lifecycle") -> SmokeScenario:
+    return SmokeScenario(
+        name,
+        (FINAL_PREFIX_LOCAL_STEPS[0],),
+        optional=True,
+        allowed_tool_names=TOOL_NAMES,
+        isolated_steps=True,
+    )
+
+
+def run_lifecycle_block(
+    args: argparse.Namespace,
+    *,
+    block_id: str,
+    calls: int,
+    rss_series: bool = False,
+) -> LifecycleBlock:
+    block_args = namespace_with(args, block_id=block_id, manage_server=True)
+    samples: list[dict[str, object]] = []
+    reports: list[StepReport] = []
+    with final_prefix_environment(block_args.final_prefix_mode), deterministic_web(False), managed_server(block_args) as process:
+        if process is None:
+            raise RuntimeError("lifecycle checks require a managed server")
+        backend = LlamaServerBackend(base_url=block_args.base_url, timeout=block_args.timeout)
+        backend.thinking = block_args.server_thinking == "on"
+        initial_props = fresh_backend_props(block_args.base_url, 5.0)
+        samples.append(rss_sample(process, label="startup", block_id=block_id, sequence=0, props=initial_props))
+        restore_milestones = {10, 25, 50}
+        sampled_restore_milestones: set[int] = set()
+        capture_sampled = False
+        for call_index in range(calls):
+            batch = run_scenario(
+                lifecycle_pwd_scenario(),
+                backend=backend,
+                workdir=Path(block_args.workdir),
+                max_tokens=block_args.max_tokens,
+                temperature=block_args.temperature,
+                timeout=block_args.timeout,
+                tools_mode=block_args.tools,
+            )
+            reports.extend(batch)
+            state = batch[-1].final_prefix if batch else {}
+            if not capture_sampled and (state.get("capture_count_delta") or 0) > 0:
+                samples.append(
+                    rss_sample(
+                        process,
+                        label="after_capture",
+                        block_id=block_id,
+                        sequence=len(samples),
+                        props=fresh_backend_props(block_args.base_url, 5.0),
+                    )
+                )
+                capture_sampled = True
+            props = fresh_backend_props(block_args.base_url, 5.0)
+            restore_count = props.get("final_prefix_experiment_restore_count")
+            if isinstance(restore_count, int):
+                for milestone in sorted(restore_milestones - sampled_restore_milestones):
+                    if restore_count >= milestone:
+                        samples.append(
+                            rss_sample(
+                                process,
+                                label=f"after_restore_{milestone}",
+                                block_id=block_id,
+                                sequence=len(samples),
+                                props=props,
+                            )
+                        )
+                        sampled_restore_milestones.add(milestone)
+            if batch and batch[-1].finish_reason in {"timeout", "error"}:
+                break
+        if rss_series:
+            request_backend_cancel(block_args.base_url, timeout=5.0)
+            invalidated_props = wait_for_backend_idle(block_args.base_url, 10.0)
+            samples.append(
+                rss_sample(
+                    process,
+                    label="after_invalidation",
+                    block_id=block_id,
+                    sequence=len(samples),
+                    props=invalidated_props,
+                )
+            )
+            recapture = run_scenario(
+                lifecycle_pwd_scenario(),
+                backend=backend,
+                workdir=Path(block_args.workdir),
+                max_tokens=block_args.max_tokens,
+                temperature=block_args.temperature,
+                timeout=block_args.timeout,
+                tools_mode=block_args.tools,
+            )
+            reports.extend(recapture)
+            samples.append(
+                rss_sample(
+                    process,
+                    label="after_recapture",
+                    block_id=block_id,
+                    sequence=len(samples),
+                    props=fresh_backend_props(block_args.base_url, 5.0),
+                )
+            )
+        final_props = settled_backend_props(block_args.base_url, block_args.timeout)
+        return LifecycleBlock(
+            block_id=block_id,
+            server_pid=process.pid,
+            ctx=block_args.ctx,
+            thinking=block_args.server_thinking,
+            initial_props=initial_props,
+            final_props=final_props,
+            reports=reports,
+            rss_samples=samples,
+        )
+
+
+def lifecycle_transition_row(operation: str, blocks: list[LifecycleBlock]) -> dict[str, object]:
+    transitions = []
+    passed = True
+    for block in blocks:
+        state = final_prefix_props(block.final_props)
+        initial_state = final_prefix_props(block.initial_props)
+        capture_count = state.get("capture_count") if isinstance(state.get("capture_count"), int) else 0
+        restore_count = state.get("restore_count") if isinstance(state.get("restore_count"), int) else 0
+        eligible = block.thinking == "off"
+        block_passed = (
+            initial_state.get("initialized") is False and capture_count >= 1 and restore_count >= 1
+            if eligible
+            else initial_state.get("initialized") is False and capture_count == 0 and restore_count == 0
+        )
+        passed = passed and block_passed
+        transitions.append(
+            {
+                "block_id": block.block_id,
+                "server_pid": block.server_pid,
+                "ctx": block.ctx,
+                "thinking": block.thinking,
+                "initial_initialized": initial_state.get("initialized"),
+                "capture_count": capture_count,
+                "restore_count": restore_count,
+                "fallback_count": state.get("fallback_count"),
+                "eligibility": "eligible" if eligible else "ineligible_thinking",
+                "passed": block_passed,
+            }
+        )
+    return {
+        "type": "lifecycle_summary",
+        "operation": operation,
+        "passed": passed,
+        "process_ids": [block.server_pid for block in blocks],
+        "transitions": transitions,
+    }
+
+
+def run_lifecycle_checks(
+    args: argparse.Namespace,
+    *,
+    jsonl_path: Path,
+    markdown_path: Path,
+) -> int:
+    if args.final_prefix_mode != "on" or not args.manage_server:
+        print("error: lifecycle checks require --manage-server --final-prefix-mode on", file=sys.stderr)
+        return 2
+    reports: list[StepReport] = []
+    extra_rows: list[dict[str, object]] = []
+    blocks: list[LifecycleBlock] = []
+    for operation in args.lifecycle_check:
+        if operation == "restart":
+            current = [
+                run_lifecycle_block(args, block_id="restart-before", calls=2),
+                run_lifecycle_block(args, block_id="restart-after", calls=2),
+            ]
+        elif operation == "ctx-change":
+            current = [
+                run_lifecycle_block(args, block_id=f"ctx-{args.ctx}", calls=2),
+                run_lifecycle_block(
+                    namespace_with(args, ctx=args.ctx_change_to),
+                    block_id=f"ctx-{args.ctx_change_to}",
+                    calls=2,
+                ),
+            ]
+        elif operation == "thinking":
+            current = [
+                run_lifecycle_block(namespace_with(args, server_thinking="off"), block_id="thinking-off", calls=2),
+                run_lifecycle_block(namespace_with(args, server_thinking="on"), block_id="thinking-on", calls=0),
+            ]
+        else:
+            current = [run_lifecycle_block(args, block_id="rss-50", calls=51, rss_series=True)]
+            extra_rows.extend(current[0].rss_samples)
+            extra_rows.append(summarize_rss_samples(current[0].rss_samples, block_id=current[0].block_id))
+        blocks.extend(current)
+        extra_rows.append(lifecycle_transition_row(operation, current))
+        reports.extend(report for block in current for report in block.reports)
+    last = blocks[-1]
+    backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
+    env = environment_summary(args=args, backend=backend, props=last.final_props)
+    env["server_pid"] = last.server_pid
+    env["lifecycle_checks"] = list(args.lifecycle_check)
+    write_jsonl(jsonl_path, env, reports, extra_rows=extra_rows)
+    write_markdown(markdown_path, env, reports)
+    failed = any(row.get("type") == "lifecycle_summary" and row.get("passed") is False for row in extra_rows)
+    if failed or scenario_failure_reason(reports) is not None:
+        return 1
+    print(f"jsonl={jsonl_path}")
+    print(f"markdown={markdown_path}")
+    return 0
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
 
 
 def safe_backend_props(backend: LlamaServerBackend) -> dict[str, object]:
@@ -650,12 +1403,22 @@ def acceleration_mode(props: dict[str, object]) -> str:
     return "unknown"
 
 
-def write_jsonl(path: Path, env: dict[str, object], reports: list[StepReport]) -> None:
+def write_jsonl(
+    path: Path,
+    env: dict[str, object],
+    reports: list[StepReport],
+    *,
+    extra_rows: list[dict[str, object]] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "environment", **env}, ensure_ascii=False, sort_keys=True) + "\n")
         for report in reports:
             handle.write(json.dumps({"type": "step", **report.to_json()}, ensure_ascii=False, sort_keys=True) + "\n")
+        for summary in summarize_reports(reports):
+            handle.write(json.dumps({"type": "summary", **summary}, ensure_ascii=False, sort_keys=True) + "\n")
+        for row in extra_rows or []:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def write_markdown(path: Path, env: dict[str, object], reports: list[StepReport]) -> None:
@@ -696,7 +1459,96 @@ def write_markdown(path: Path, env: dict[str, object], reports: list[StepReport]
                 notes=report.notes or "-",
             )
         )
+    summaries = summarize_reports(reports)
+    if summaries:
+        lines.extend(
+            [
+                "",
+                "## Repetition Summary",
+                "",
+                "| Case | Step | Runs | Correct | Cached min/median/max | Eval min/median/max | Wall ms min/median/max |",
+                "| --- | ---: | ---: | ---: | --- | --- | --- |",
+            ]
+        )
+        for summary in summaries:
+            lines.append(
+                f"| {summary['case']} | {summary['step']} | {summary['runs']} | {summary['correct']} | "
+                f"{format_range(summary['cached_tokens'])} | {format_range(summary['evaluated_tokens'])} | "
+                f"{format_range(summary['wall_ms'])} |"
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def summarize_reports(reports: list[StepReport]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, int], list[StepReport]] = {}
+    for report in reports:
+        grouped.setdefault((report.case, report.step), []).append(report)
+    result: list[dict[str, object]] = []
+    for (case, step), rows in grouped.items():
+        result.append(
+            {
+                "case": case,
+                "step": step,
+                "runs": len(rows),
+                "correct": sum(row.correctness_category == "correct" for row in rows),
+                "cached_tokens": numeric_range(row.cached_tokens for row in rows),
+                "evaluated_tokens": numeric_range(row.evaluated_tokens for row in rows),
+                "output_tokens": numeric_range(row.output_tokens for row in rows),
+                "wall_ms": numeric_range(row.wall_ms for row in rows),
+                "route_wall_ms": numeric_range(row.phase_wall_ms.get("route") for row in rows),
+                "final_wall_ms": numeric_range(
+                    phase_duration(row.phase_wall_ms, "final_from_tool")
+                    for row in rows
+                ),
+                "non_model_wall_ms": numeric_range(row.phase_wall_ms.get("non_model_wall_ms") for row in rows),
+                "prompt_tokens_per_second": numeric_range(row.prompt_tokens_per_second for row in rows),
+                "generation_tokens_per_second": numeric_range(row.generation_tokens_per_second for row in rows),
+                "estimated_generation_ms": numeric_range(row.estimated_generation_ms for row in rows),
+                "estimated_prefill_residual_ms": numeric_range(row.estimated_prefill_residual_ms for row in rows),
+                "capture_delta": sum(int(row.final_prefix.get("capture_count_delta") or 0) for row in rows),
+                "restore_delta": sum(int(row.final_prefix.get("restore_count_delta") or 0) for row in rows),
+                "fallback_delta": sum(int(row.final_prefix.get("fallback_count_delta") or 0) for row in rows),
+                "restored": summarize_restored_rows(rows),
+            }
+        )
+    return result
+
+
+def summarize_restored_rows(rows: list[StepReport]) -> dict[str, object]:
+    restored = [row for row in rows if (row.final_prefix.get("restore_count_delta") or 0) > 0]
+    return {
+        "runs": len(restored),
+        "cached_tokens": numeric_range(row.cached_tokens for row in restored),
+        "evaluated_tokens": numeric_range(row.evaluated_tokens for row in restored),
+        "output_tokens": numeric_range(row.output_tokens for row in restored),
+        "wall_ms": numeric_range(row.wall_ms for row in restored),
+        "final_wall_ms": numeric_range(
+            phase_duration(row.phase_wall_ms, "final_from_tool")
+            for row in restored
+        ),
+    }
+
+
+def phase_duration(timings: dict[str, float], prefix: str) -> float | None:
+    values = [value for phase, value in timings.items() if phase.startswith(prefix)]
+    return round(sum(values), 1) if values else None
+
+
+def numeric_range(values) -> dict[str, float] | None:
+    present = [float(item) for item in values if isinstance(item, int | float)]
+    if not present:
+        return None
+    return {
+        "min": round(min(present), 1),
+        "median": round(statistics.median(present), 1),
+        "max": round(max(present), 1),
+    }
+
+
+def format_range(value: object) -> str:
+    if not isinstance(value, dict):
+        return "-"
+    return f"{value.get('min')}/{value.get('median')}/{value.get('max')}"
 
 
 def value(item: object) -> object:
@@ -777,6 +1629,13 @@ def check_read_excerpt(text: str, _tools: list[str]) -> str:
     return "correct" if "EvidenceStore" in text or "from __future__" in text else "partial_baseline"
 
 
+def check_web_error(text: str, _tools: list[str]) -> str:
+    lower = text.lower()
+    reports_failure = "fail" in lower or "error" in lower or "could not" in lower or "unable" in lower
+    answers_from_memory = "avola is" in lower or "avola, sicily" in lower or "province of syracuse" in lower
+    return "correct" if reports_failure and not answers_from_memory else "wrong"
+
+
 CHECKERS: dict[str, CorrectnessChecker] = {
     "not_evaluated": check_not_evaluated,
     "nonempty": check_nonempty,
@@ -788,6 +1647,7 @@ CHECKERS: dict[str, CorrectnessChecker] = {
     "line5": check_line5,
     "grep_evidence": check_grep_evidence,
     "read_excerpt": check_read_excerpt,
+    "web_error": check_web_error,
 }
 
 
