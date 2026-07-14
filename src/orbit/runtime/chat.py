@@ -53,6 +53,7 @@ from orbit.runtime.messages import (
 from orbit.runtime.command_request import (
     ToolRoute,
     command_stream_state,
+    classify_route_output,
     decision_tool_names,
     parse_command_decision,
     parse_command_decision_from_tool_calls,
@@ -451,6 +452,13 @@ class ChatRuntime:
                 if retry_decision is not None:
                     _emit_route_outcome_for_result(route_retry, decision=retry_decision, outcome=_route_parsed_outcome(retry_decision))
                     route_outcome_emitted = True
+                else:
+                    _emit_route_outcome_for_result(
+                        route_retry,
+                        decision=None,
+                        outcome="route_retry_invalid_output",
+                        retry_reason=retry_reason,
+                    )
                 if retry_decision is not None:
                     first = route_retry
                     command_content = route_retry.content
@@ -1415,6 +1423,17 @@ def _emit_route_outcome_for_result(
     retry_reason: str | None = None,
 ) -> None:
     decision_type = decision.route.value if decision is not None else None
+    parser_source = None
+    if decision is not None:
+        parser_source = "tool_calls" if parse_command_decision_from_tool_calls(result.tool_calls) is not None else "content"
+    diagnostic = classify_route_output(
+        result.content,
+        parsed_decision=decision,
+        parser_source=parser_source,
+        direct_prose=outcome == "route_direct_final_stop",
+        finish_reason=result.finish_reason,
+        output_tokens=result.completion_tokens,
+    )
     emit_route_outcome(
         outcome=outcome,
         finish_reason=result.finish_reason,
@@ -1422,6 +1441,10 @@ def _emit_route_outcome_for_result(
         output_chars=len(result.content),
         output_tokens=result.completion_tokens,
         retry_reason=retry_reason,
+        route_output_class=diagnostic.classification.value,
+        route_output_reason=diagnostic.reason,
+        route_output_canonical=diagnostic.canonical,
+        route_parser_accepted=diagnostic.parser_accepted,
     )
 
 

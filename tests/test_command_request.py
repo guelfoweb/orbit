@@ -12,7 +12,9 @@ if str(SRC) not in sys.path:
 
 from orbit.runtime.command_request import (
     CommandStreamFilter,
+    RouteOutputClass,
     ToolRoute,
+    classify_route_output,
     decision_tool_names,
     parse_command_decision,
     parse_command_decision_from_tool_calls,
@@ -25,6 +27,119 @@ from orbit.runtime.command_request import (
 
 
 class RouteRequestTests(unittest.TestCase):
+    def _classify(
+        self,
+        content: str,
+        *,
+        direct_prose: bool = False,
+        finish_reason: str = "stop",
+        output_tokens: int = 5,
+        raw_token_ids: list[int] | None = None,
+    ):
+        decision = parse_command_decision(content)
+        return classify_route_output(
+            content,
+            parsed_decision=decision,
+            parser_source="content" if decision is not None else None,
+            direct_prose=direct_prose,
+            finish_reason=finish_reason,
+            output_tokens=output_tokens,
+            raw_token_ids=raw_token_ids,
+        )
+
+    def test_route_output_classifier_accepts_only_canonical_json_shapes(self) -> None:
+        for content in (
+            '{"route":"CHAT"}',
+            '{"command":"ls -F"}',
+            '{"url":"https://example.com?a=1&b=2"}',
+            '{"path":".","recursive":false,"max_depth":null}',
+            '{"include_cpu":true,"include_memory":true}',
+        ):
+            with self.subTest(content=content):
+                diagnostic = self._classify(content)
+                self.assertEqual(diagnostic.classification, RouteOutputClass.CANONICAL)
+                self.assertTrue(diagnostic.canonical)
+                self.assertTrue(diagnostic.parser_accepted)
+
+    def test_route_output_classifier_marks_parser_compatibility_forms_as_legacy(self) -> None:
+        for content in (
+            '```json\n{"route":"CHAT"}\n```',
+            '{"route":"chat"}',
+            'prefix\n{"route":"CHAT"}\nsuffix',
+            '<|tool_call>call:exec_shell_full_command{"command":"pwd"}<tool_call|>',
+            '{"command":"pwd","timeout":5}',
+        ):
+            with self.subTest(content=content):
+                diagnostic = self._classify(content)
+                self.assertEqual(diagnostic.classification, RouteOutputClass.LEGACY_TOLERATED)
+                self.assertFalse(diagnostic.canonical)
+                self.assertTrue(diagnostic.parser_accepted)
+
+    def test_route_output_classifier_marks_backend_tool_calls_as_legacy(self) -> None:
+        decision = parse_command_decision_from_tool_calls(
+            [{"type": "function", "function": {"name": "system_info", "arguments": '{"include_cpu":true}'}}]
+        )
+        diagnostic = classify_route_output(
+            "",
+            parsed_decision=decision,
+            parser_source="tool_calls",
+            direct_prose=False,
+            finish_reason="stop",
+            output_tokens=5,
+        )
+
+        self.assertEqual(diagnostic.classification, RouteOutputClass.LEGACY_TOLERATED)
+        self.assertTrue(diagnostic.parser_accepted)
+
+    def test_route_output_classifier_preserves_direct_prose(self) -> None:
+        content = "The answer is four."
+
+        diagnostic = self._classify(content, direct_prose=True)
+
+        self.assertEqual(diagnostic.classification, RouteOutputClass.DIRECT_PROSE)
+        self.assertFalse(diagnostic.parser_accepted)
+        self.assertEqual(content, "The answer is four.")
+
+    def test_route_output_classifier_separates_malformed_forms(self) -> None:
+        for content in ("", '{"route":', '[{"route":"CHAT"}]', '{"route":"FILESYSTEM"}', '{"command":""}', '{"route":"CHAT"} trailing'):
+            with self.subTest(content=content):
+                diagnostic = self._classify(content, direct_prose=True)
+                self.assertEqual(diagnostic.classification, RouteOutputClass.MALFORMED)
+                self.assertFalse(diagnostic.parser_accepted)
+
+    def test_route_output_classifier_detects_control_only_generation(self) -> None:
+        cycle = [100, 45518, 107, 101] * 2
+        from_tokens = self._classify("", finish_reason="length", output_tokens=len(cycle), raw_token_ids=cycle)
+        from_text = self._classify("<|channel>thought\n<channel|>" * 2, finish_reason="length", output_tokens=8)
+        from_hidden_output = self._classify("", finish_reason="length", output_tokens=64)
+
+        self.assertEqual(from_tokens.classification, RouteOutputClass.CONTROL_LOOP)
+        self.assertEqual(from_text.classification, RouteOutputClass.CONTROL_LOOP)
+        self.assertEqual(from_hidden_output.classification, RouteOutputClass.CONTROL_LOOP)
+
+    def test_route_output_classifier_does_not_treat_other_empty_finishes_as_control_loops(self) -> None:
+        for finish_reason in ("stop", "error", "cancelled"):
+            with self.subTest(finish_reason=finish_reason):
+                diagnostic = self._classify("", finish_reason=finish_reason, output_tokens=64)
+                self.assertEqual(diagnostic.classification, RouteOutputClass.MALFORMED)
+                self.assertEqual(diagnostic.reason, "empty_output")
+
+    def test_route_output_classifier_does_not_change_parser_results(self) -> None:
+        cases = (
+            '{"route":"CHAT"}',
+            '{"command":"pwd"}',
+            '```json\n{"url":"https://example.com"}\n```',
+            '{"route":"CHAT","command":"pwd"}',
+            '{"route":"UNKNOWN"}',
+            'direct prose',
+        )
+        for content in cases:
+            with self.subTest(content=content):
+                before = parse_command_decision(content)
+                self._classify(content, direct_prose=True)
+                after = parse_command_decision(content)
+                self.assertEqual(before, after)
+
     def test_parse_command_decision_accepts_shell_command_json(self) -> None:
         decision = parse_command_decision('{"command":"ls -F"}')
 
