@@ -293,8 +293,32 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Validation: `tests.test_command_request` PASS with 57 tests; `tests.test_kv_diag` PASS with 30 tests; messages/runtime/evidence/tool-message PASS with 222 tests; full discovery PASS with 1,049 tests; `compileall` PASS; `git diff --check` PASS.
 - This is observability, not a route fix. The next step is to measure class frequencies through the existing benchmark or smoke harness before considering any behavior change. Do not reopen grammar integration or route-contract redesign from these diagnostics alone.
 
+## Route Generation Technical Stop
+
+- The repeated route control-token loop is classified as prompt/model instability. Cold and warm KV, prompt-cache reuse, prefill segmentation, sampler reset, streaming and non-streaming collection, final stream flushing, and the 64-token route budget were excluded as root causes.
+- Local prompt edits, role reordering, evidence placement changes, format reminders, and independently designed compact route contracts moved the instability but caused regressions in other CHAT, refresh, verification, or tool-routing cases. No production route-prompt change was retained.
+- Global grammar-constrained decoding removed malformed syntax and control loops, but changed intentional direct-prose behavior, added repeated route-generation overhead, and produced parser-valid yet operationally inadequate arguments.
+- Evidence-selective grammar and one malformed/control-loop grammar retry were also rejected. Valid JSON did not guarantee a correct semantic decision: observed regressions included verification requests becoming `CHAT`, adjacent comparisons selecting `list_directory`, unsafe path or shell quoting, and omitted directory options.
+- Direct one-sentence route answers remain intentional behavior for suitable requests. Grammar guarantees output syntax only; it does not prove route semantics or argument adequacy.
+- The current conservative `chat_final_retry` and existing route fallback remain the safe production behavior. Do not continue route micro-patches, grammar integration, or route-contract redesign without new model or backend evidence.
+
+## Tool Argument Validation Technical Stop
+
+- Generic same-family model repair is rejected. Preserving the selected tool name did not prevent semantic rewriting; an empty web-search request was repaired into an invented non-empty query.
+- Deterministic validation is safe only for unequivocal structural invariants such as required fields and exact types, numeric bounds, contradictory flags, unsupported URL schemes, NUL/control characters, and invalid shell syntax. Existing safety guardrails remain authoritative after any such validation.
+- Deterministic validation must not infer missing user intent, command adequacy, a requested but absent depth, or corrected quoting for an opaque shell command when no structured path is available.
+- Current `read_file` and `grep_search` route behavior is flattened into `exec_shell_full_command`; reliable path and pattern integrity validation would require structured arguments before broader validation could be considered.
+- No production validator or argument-repair patch was applied. Do not reopen generic argument repair without a narrower structural contract and new validation evidence.
+
+## Current Route Priority
+
+- Keep #142: structurally covered evidence omission is effective whenever a valid `CHAT` decision reaches the normal `chat_final` path, and its conservative lifecycle fallbacks remain required.
+- Continue observational measurement through the #143 route-output classes and the additive #145 smoke-harness aggregation. Classification must remain diagnostic-only and must not change parser, route, fallback, direct-prose, or tool behavior.
+- Treat malformed error-plus-success routes and similar failures as known model-adherence limitations. Preserve their visibility in benchmark results rather than repairing, reclassifying, or hiding them.
+
 ## Main Commits
 
+- `3618000` Add route output classification benchmark coverage (#145)
 - `1dba552` Add diagnostic route output classification (#143)
 - `a303a3e` Reduce redundant evidence in conversation reuse prompts (#142)
 - `eb68ad3` Add release notes for v0.0.1-rc19
