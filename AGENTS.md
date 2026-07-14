@@ -267,8 +267,36 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Validation recorded: OFF and ON correctness remained stable, web errors did not answer from model memory, no stale evidence or cross-turn contamination was observed, and full unit discovery passed with 1,022 tests; `compileall` and `git diff --check` passed.
 - RC19 includes the experiment only as an optional, OFF-by-default feature with its benchmark harness; it is not promoted to default behavior.
 
+## #142, Structurally Covered CHAT Evidence Omission
+
+- Post-RC19 change; not included in `v0.0.1-rc19`. RC19 remains the current published release baseline.
+- Problem: conversation reuse could correctly choose `CHAT` and avoid another tool call, but the CHAT prompt still reinjected large hidden evidence contexts already represented by completed visible assistant answers.
+- Solution: the CHAT model projection may omit hidden evidence only when structural coverage is proven. This is structural redundancy handling, not semantic relevance selection; stored evidence and provenance remain unchanged.
+- Coverage requires a live-turn evidence sequence and associated user turn, exact evidence IDs, matching tool messages, and a later non-empty visible assistant final with `finish_reason=stop` before another user message. Every evidence record in the projected window must pass, live history and lineage must remain consistent, and the visible projection must be smaller than the existing evidence projection.
+- The visible projection preserves bounded visible user and assistant messages in order, includes the current user request exactly once, and excludes hidden tool syntax. It does not modify stored conversation history.
+- Conservative fallback retains the existing evidence view after reload, memory compaction, reset, rollback, history truncation, missing lineage, empty/failed/cancelled/length finals, inconsistent ordering, uncertain evidence association, or a non-smaller visible projection.
+- The visible CHAT policy preserves concrete facts such as paths, filenames, counts, errors, and matched values. If a requested detail is absent from visible answers, it reports that the detail is unavailable in the visible conversation and does not infer omitted context.
+- Measured system recap result: prompt tokens decreased from 841 to 279 and evaluated tokens from 837 to 275, an exact deterministic reduction of 562 evaluated tokens for that measured case. The recap remained `CHAT`, made no repeated tool call, returned a correct answer, and finished with `finish_reason=stop`.
+- No deterministic wall-time improvement is claimed. CPU timing remains dependent on output length, process state, and thermal conditions.
+- Validation: messages/final-policy/completion-budget PASS with 60 tests; runtime/evidence/tool-message PASS with 213 tests; full discovery PASS with 1,038 tests; `compileall` PASS; `git diff --check` PASS.
+- Safety preserved: no route or tool-loop behavior changes, no evidence-store changes, no semantic evidence selection, no MTP or KV/cache changes, no final-prefix changes, and no completion-budget changes.
+- General evidence selection remains closed; do not extend this structural projection into a relevance selector without a new reliable signal and separate evidence.
+
+## #143, Diagnostic Route Output Classification
+
+- Post-RC19 change; not included in `v0.0.1-rc19`. RC19 remains the current published release baseline.
+- Adds five mutually exclusive diagnostic classes for completed route output: `canonical`, `legacy_tolerated`, `direct_prose`, `malformed`, and `control_loop`.
+- `canonical` is restricted to one strict parser-accepted JSON object with the canonical field shape. `legacy_tolerated` covers only non-canonical forms already accepted by the existing parser through normalization. `direct_prose` is limited to the existing intentional direct-answer branch. Rejected output remains `malformed` unless it meets the bounded control-loop diagnostic conditions.
+- Classification occurs only after the existing parser and direct-answer handling. It does not change parser results, routing, fallback, tool selection, direct prose, or model-call count. Initial and retry route completions are classified independently.
+- Diagnostics are additive and bounded: class, static reason, parser-accepted flag, finish reason, and output-token count when available. They do not store raw route text, user requests, evidence content, or mutable aggregate counters.
+- Production `control_loop` classification may use the `empty_visible_control_output` surrogate only when visible route output is empty, `finish_reason=length`, and at least 8 completion tokens were generated. This is conservative diagnostic evidence, not proof that the exact raw control-token cycle occurred; empty stop, error, or cancelled output remains `malformed`.
+- Validation: `tests.test_command_request` PASS with 57 tests; `tests.test_kv_diag` PASS with 30 tests; messages/runtime/evidence/tool-message PASS with 222 tests; full discovery PASS with 1,049 tests; `compileall` PASS; `git diff --check` PASS.
+- This is observability, not a route fix. The next step is to measure class frequencies through the existing benchmark or smoke harness before considering any behavior change. Do not reopen grammar integration or route-contract redesign from these diagnostics alone.
+
 ## Main Commits
 
+- `1dba552` Add diagnostic route output classification (#143)
+- `a303a3e` Reduce redundant evidence in conversation reuse prompts (#142)
 - `eb68ad3` Add release notes for v0.0.1-rc19
 - `2c541e9` Update agent guidance after final prefix benchmark coverage (#140)
 - `f4e2226` Add repeatable final prefix benchmark coverage (#139)
