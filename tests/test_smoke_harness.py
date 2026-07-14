@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -19,6 +20,34 @@ assert SPEC is not None and SPEC.loader is not None
 smoke_harness = importlib.util.module_from_spec(SPEC)
 sys.modules["orbit_smoke_harness"] = smoke_harness
 SPEC.loader.exec_module(smoke_harness)
+
+
+def route_step_report(**overrides: object):
+    values = {
+        "case": "route",
+        "step": 1,
+        "prompt": "fixture",
+        "prompt_kind": "auto",
+        "completion_kind": "route",
+        "route_tokens": 10,
+        "final_tokens": 10,
+        "prompt_tokens": 10,
+        "cached_tokens": 0,
+        "evaluated_tokens": 10,
+        "finish_reason": "stop",
+        "tool_calls": 0,
+        "tool_names": [],
+        "wall_ms": 1.0,
+        "correctness_category": "correct",
+        "raw_leak": False,
+        "fake_output": False,
+        "loop": False,
+        "notes": "",
+        "answer_excerpt": "answer",
+        "model_steps": [],
+    }
+    values.update(overrides)
+    return smoke_harness.StepReport(**values)
 
 
 class SmokeHarnessTests(unittest.TestCase):
@@ -69,6 +98,18 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(args.lifecycle_check, ["restart", "ctx-change"])
         self.assertEqual(args.ctx_change_to, 4096)
 
+    def test_parser_accepts_opt_in_route_output_diagnostics(self) -> None:
+        args = smoke_harness.build_parser().parse_args(
+            ["--route-output-diagnostics", "--route-diagnostic-store", "existing-snapshot"]
+        )
+
+        self.assertTrue(args.route_output_diagnostics)
+        self.assertEqual(args.route_diagnostic_store, "existing-snapshot")
+
+        defaults = smoke_harness.build_parser().parse_args([])
+        self.assertFalse(defaults.route_output_diagnostics)
+        self.assertEqual(defaults.route_diagnostic_store, "clean")
+
     def test_select_scenarios_defaults_to_all_without_optional_or_web_when_disabled(self) -> None:
         selected = smoke_harness.select_scenarios(None, no_web=True, include_optional=False)
         names = [scenario.name for scenario in selected]
@@ -100,6 +141,114 @@ class SmokeHarnessTests(unittest.TestCase):
             smoke_harness.FINAL_PREFIX_LOCAL_STEPS + smoke_harness.FINAL_PREFIX_WEB_STEPS,
         )
         self.assertEqual(registry["final_prefix_paired"].steps, smoke_harness.FINAL_PREFIX_PAIRED_STEPS)
+
+    def test_route_classification_matrix_is_declarative_and_optional(self) -> None:
+        registry = smoke_harness.scenarios()
+        names = (
+            "route_classification_recap",
+            "route_classification_chat",
+            "route_classification_local",
+            "route_classification_web",
+            "route_classification_evidence",
+            "route_classification_ambiguous",
+            "route_classification_refresh",
+            "route_classification_verify",
+            "route_classification_error_success",
+            "route_classification_web_error",
+        )
+
+        self.assertTrue(all(registry[name].optional for name in names))
+        self.assertEqual(registry["route_classification_recap"].steps, smoke_harness.ROUTE_CLASS_RECAP_STEPS)
+        self.assertEqual(registry["route_classification_web"].family, "web")
+        self.assertEqual(registry["route_classification_ambiguous"].steps, smoke_harness.ROUTE_CLASS_AMBIGUOUS_STEPS)
+        self.assertEqual(registry["route_classification_refresh"].steps, smoke_harness.ROUTE_CLASS_REFRESH_STEPS)
+        self.assertEqual(registry["route_classification_verify"].steps, smoke_harness.ROUTE_CLASS_VERIFY_STEPS)
+        self.assertEqual(registry["route_classification_error_success"].steps, smoke_harness.ROUTE_CLASS_ERROR_SUCCESS_STEPS)
+        self.assertEqual(registry["route_classification_web_error"].steps, smoke_harness.ROUTE_CLASS_WEB_ERROR_STEPS)
+        self.assertTrue(
+            all(step.expected_route is not None for name in names for step in registry[name].steps)
+        )
+
+    def test_route_diagnostic_lines_are_sanitized_and_missing_fields_are_safe(self) -> None:
+        lines = [
+            *(
+                json.dumps(
+                    {
+                        "event": "kv_diag_route_outcome",
+                        "phase": "route",
+                        "route_output_class": route_class,
+                        "route_output_reason": f"fixture_{route_class}",
+                        "route_parser_accepted": route_class in {"canonical", "legacy_tolerated"},
+                    }
+                )
+                for route_class in smoke_harness.ROUTE_OUTPUT_CLASSES
+            ),
+            json.dumps(
+                {
+                    "event": "kv_diag_route_outcome",
+                    "phase": "route",
+                    "route_output_class": "malformed",
+                    "route_output_reason": "unaccepted_output",
+                    "route_parser_accepted": False,
+                    "route_finish_reason": "length",
+                    "route_output_tokens": 64,
+                    "decision_type": None,
+                    "outcome": "route_no_decision_length_retry",
+                    "retry_reason": "length_without_decision",
+                    "raw_route_text": "route-secret",
+                    "user_request": "request-secret",
+                    "evidence": "evidence-secret",
+                }
+            ),
+            json.dumps({"event": "kv_diag_route_outcome", "phase": "route_retry"}),
+            "not-json",
+        ]
+
+        events = smoke_harness.parse_route_diagnostic_lines(lines)
+        serialized = json.dumps(events)
+
+        self.assertEqual(len(events), 7)
+        self.assertEqual(
+            [event["route_output_class"] for event in events[:5]],
+            list(smoke_harness.ROUTE_OUTPUT_CLASSES),
+        )
+        self.assertEqual(events[0]["route_call"], "initial")
+        self.assertEqual(events[-1]["route_call"], "retry")
+        self.assertIsNone(events[-1]["route_output_class"])
+        self.assertNotIn("route-secret", serialized)
+        self.assertNotIn("request-secret", serialized)
+        self.assertNotIn("evidence-secret", serialized)
+
+    def test_route_diagnostic_snapshot_does_not_modify_source_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = smoke_harness.EvidenceStore(root / "source")
+            source.add("system_info", "source evidence")
+            source_hash_before = hashlib.sha256(
+                b"".join(
+                    path.relative_to(source.root).as_posix().encode() + b"\0" + path.read_bytes() + b"\0"
+                    for path in sorted(source.root.rglob("*"))
+                    if path.is_file()
+                )
+            ).hexdigest()
+            collector = smoke_harness.RouteDiagnosticCollector(root / "collector", store_mode="existing-snapshot")
+            with mock.patch.object(smoke_harness.EvidenceStore, "for_workdir", return_value=source):
+                snapshot = collector.new_evidence_store(Path("workdir"))
+            snapshot.add("exec_shell_full_command", "snapshot evidence")
+            source_hash_after = hashlib.sha256(
+                b"".join(
+                    path.relative_to(source.root).as_posix().encode() + b"\0" + path.read_bytes() + b"\0"
+                    for path in sorted(source.root.rglob("*"))
+                    if path.is_file()
+                )
+            ).hexdigest()
+
+            reloaded_source = smoke_harness.EvidenceStore(source.root)
+            reloaded_source.load_index()
+
+        self.assertEqual(len(reloaded_source.records), 1)
+        self.assertEqual(len(snapshot.records), 2)
+        self.assertEqual(source_hash_after, source_hash_before)
 
     def test_tools_off_removes_runtime_tool_names(self) -> None:
         scenario = smoke_harness.scenarios()["final_prefix_local"]
@@ -689,6 +838,249 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertIn("phase_wall_ms", rows[1])
         self.assertEqual(rows[2]["type"], "summary")
         self.assertEqual(rows[3]["type"], "lifecycle_summary")
+
+    def test_route_diagnostics_keep_initial_retry_and_tool_correlation_separate(self) -> None:
+        report = route_step_report(
+            prompt="fixture request",
+            completion_kind="route,route_retry,final_from_tool",
+            route_tokens=100,
+            final_tokens=50,
+            prompt_tokens=50,
+            cached_tokens=4,
+            evaluated_tokens=46,
+            tool_calls=1,
+            tool_names=["exec_shell_full_command"],
+            wall_ms=10.0,
+            answer_excerpt="fixture answer",
+            model_steps=[{"phase": "route_retry"}],
+        )
+        events = [
+            {
+                "route_call": "initial",
+                "route_output_class": "malformed",
+                "route_output_reason": "unaccepted_output",
+                "parser_accepted": False,
+                "finish_reason": "stop",
+                "output_tokens": 10,
+                "parsed_route": None,
+                "outcome": "route_other_retry",
+                "retry_reason": "explicit_web_search",
+                "control_loop_surrogate": False,
+            },
+            {
+                "route_call": "retry",
+                "route_output_class": "canonical",
+                "route_output_reason": "canonical_command",
+                "parser_accepted": True,
+                "finish_reason": "stop",
+                "output_tokens": 5,
+                "parsed_route": "FILESYSTEM",
+                "outcome": "route_parsed_tool",
+                "retry_reason": None,
+                "control_loop_surrogate": False,
+            },
+        ]
+
+        enriched = smoke_harness.enrich_step_route_diagnostics(
+            report,
+            events,
+            step=smoke_harness.SmokeStep(
+                "fixture request",
+                expected_route="FILESYSTEM",
+                expected_tool_names=("exec_shell_full_command",),
+            ),
+            enabled=True,
+            scenario_family="web",
+            process_id=4321,
+            block_id="block-a",
+            run_order="2",
+            repetition=1,
+        )
+
+        self.assertEqual([event["route_call"] for event in enriched.route_outputs], ["initial", "retry"])
+        self.assertEqual(enriched.final_parsed_route, "FILESYSTEM")
+        self.assertTrue(enriched.route_correct)
+        self.assertTrue(enriched.tool_correct)
+        self.assertTrue(enriched.retry_required)
+        self.assertFalse(enriched.route_fallback_used)
+        self.assertEqual(enriched.process_id, 4321)
+        self.assertEqual(enriched.block_id, "block-a")
+
+    def test_route_classification_summary_counts_transitions_and_correlations(self) -> None:
+        def report_with(events, *, family, final_route, fallback, retry, downstream=True):
+            return route_step_report(
+                case=family,
+                correctness_category="correct" if downstream else "length_failure",
+                scenario_family=family,
+                route_diagnostics_enabled=True,
+                route_outputs=events,
+                final_parsed_route=final_route,
+                route_correct=True,
+                tool_correct=True,
+                downstream_final_correct=downstream,
+                retry_required=retry,
+                route_fallback_used=fallback,
+            )
+
+        malformed = {
+            "route_call": "initial", "route_output_class": "malformed", "route_correct": True,
+            "tool_correct": True, "downstream_final_correct": True, "retry_required": True,
+            "control_loop_surrogate": False,
+        }
+        canonical_retry = {
+            "route_call": "retry", "route_output_class": "canonical", "route_correct": True,
+            "tool_correct": True, "downstream_final_correct": True, "retry_required": True,
+            "control_loop_surrogate": False,
+        }
+        control = {
+            "route_call": "initial", "route_output_class": "control_loop", "route_correct": False,
+            "tool_correct": False, "downstream_final_correct": True, "retry_required": True,
+            "control_loop_surrogate": True,
+        }
+        legacy = {
+            "route_call": "initial", "route_output_class": "legacy_tolerated", "route_correct": True,
+            "tool_correct": True, "downstream_final_correct": True, "retry_required": False,
+            "control_loop_surrogate": False,
+        }
+        direct = {
+            "route_call": "initial", "route_output_class": "direct_prose", "route_correct": True,
+            "tool_correct": True, "downstream_final_correct": True, "retry_required": False,
+            "control_loop_surrogate": False,
+        }
+        malformed_failure = {
+            "route_call": "initial", "route_output_class": "malformed", "route_correct": False,
+            "tool_correct": True, "downstream_final_correct": False, "retry_required": True,
+            "control_loop_surrogate": False,
+        }
+        malformed_retry = {**malformed_failure, "route_call": "retry"}
+        reports = [
+            report_with([malformed, canonical_retry], family="web", final_route="FILESYSTEM", fallback=False, retry=True),
+            report_with([control], family="chat", final_route=None, fallback=True, retry=True),
+            report_with([legacy], family="local", final_route="FILESYSTEM", fallback=False, retry=False),
+            report_with([direct], family="chat", final_route=None, fallback=False, retry=False),
+            report_with(
+                [malformed_failure, malformed_retry],
+                family="evidence",
+                final_route=None,
+                fallback=True,
+                retry=True,
+                downstream=False,
+            ),
+        ]
+
+        summary = smoke_harness.summarize_route_classifications(reports)
+
+        self.assertEqual(summary["class_counts"]["canonical"], 1)
+        self.assertEqual(summary["class_counts"]["legacy_tolerated"], 1)
+        self.assertEqual(summary["class_counts"]["direct_prose"], 1)
+        self.assertEqual(summary["initial_class_counts"]["malformed"], 2)
+        self.assertEqual(summary["retry_class_counts"]["canonical"], 1)
+        self.assertEqual(summary["retry_class_counts"]["malformed"], 1)
+        self.assertEqual(summary["malformed_to_retry_transitions"], 2)
+        self.assertEqual(summary["control_loop_to_retry_transitions"], 1)
+        self.assertEqual(summary["final_successful_decision_count"], 2)
+        self.assertEqual(summary["fallback_count"], 2)
+        self.assertEqual(summary["class_distribution_by_scenario_family"]["web"]["canonical"], 1)
+        self.assertEqual(summary["class_distribution_by_scenario_family"]["evidence"]["malformed"], 2)
+        self.assertEqual(summary["correctness_by_class"]["malformed"]["downstream_wrong"], 2)
+        self.assertEqual(summary["empty_visible_control_output_surrogate_count"], 1)
+        self.assertIn("not exact token-cycle proof", summary["control_loop_surrogate_note"])
+
+    def test_route_classification_summary_aggregates_five_repetitions(self) -> None:
+        reports = []
+        for repetition in range(1, 6):
+            reports.append(
+                route_step_report(
+                    case="fragile",
+                    completion_kind="route,chat_final",
+                    scenario_family="fragile_ambiguous",
+                    repetition=repetition,
+                    route_diagnostics_enabled=True,
+                    route_outputs=[
+                        {
+                            "route_call": "initial",
+                            "route_output_class": "canonical",
+                            "route_correct": True,
+                            "tool_correct": True,
+                            "downstream_final_correct": True,
+                            "retry_required": False,
+                            "control_loop_surrogate": False,
+                        }
+                    ],
+                    final_parsed_route="CHAT",
+                    route_correct=True,
+                    tool_correct=True,
+                    downstream_final_correct=True,
+                )
+            )
+
+        summary = smoke_harness.summarize_route_classifications(reports)
+
+        self.assertEqual(summary["diagnostic_steps"], 5)
+        self.assertEqual(summary["class_counts"]["canonical"], 5)
+        self.assertEqual(summary["final_successful_decision_count"], 5)
+        self.assertEqual(summary["class_distribution_by_scenario_family"]["fragile_ambiguous"]["canonical"], 5)
+        self.assertEqual(summary["correctness_by_class"]["canonical"]["downstream_correct"], 5)
+
+    def test_route_jsonl_rows_are_additive_and_do_not_copy_raw_diagnostic_content(self) -> None:
+        report = route_step_report(
+            prompt="existing step prompt",
+            answer_excerpt="existing answer excerpt",
+            route_diagnostics_enabled=True,
+            route_outputs=[
+                {
+                    "route_call": "initial",
+                    "route_output_class": "canonical",
+                    "route_output_reason": "canonical_chat",
+                    "parser_accepted": True,
+                    "finish_reason": "stop",
+                    "output_tokens": 5,
+                    "parsed_route": "CHAT",
+                }
+            ],
+            final_parsed_route="CHAT",
+            route_correct=True,
+            tool_correct=True,
+            downstream_final_correct=True,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.jsonl"
+            smoke_harness.write_jsonl(path, {"version": "test"}, [report])
+            text = path.read_text(encoding="utf-8")
+            rows = [json.loads(line) for line in text.splitlines()]
+
+        self.assertEqual([row["type"] for row in rows], ["environment", "step", "summary", "route_classification_summary"])
+        self.assertEqual(rows[1]["prompt"], "existing step prompt")
+        route_metadata = json.dumps(rows[1]["route_outputs"])
+        self.assertNotIn("existing step prompt", route_metadata)
+        self.assertNotIn("existing answer excerpt", route_metadata)
+        self.assertNotIn("raw_route_text", text)
+        self.assertNotIn("route-secret", text)
+
+    def test_missing_route_diagnostics_do_not_add_summary_or_change_old_rows(self) -> None:
+        report = route_step_report(
+            case="simple_chat",
+            prompt="hi",
+            prompt_kind="chat",
+            completion_kind="final",
+            route_tokens=None,
+            final_tokens=2,
+            prompt_tokens=2,
+            evaluated_tokens=2,
+            answer_excerpt="hello",
+        )
+
+        self.assertIsNone(smoke_harness.summarize_route_classifications([report]))
+
+        values = report.__dict__.copy()
+        values["route_diagnostics_enabled"] = True
+        partial = smoke_harness.StepReport(**values)
+        summary = smoke_harness.summarize_route_classifications([partial])
+
+        self.assertEqual(summary["diagnostic_steps"], 1)
+        self.assertEqual(summary["steps_with_route_events"], 0)
+        self.assertEqual(summary["missing_route_diagnostic_steps"], 1)
+        self.assertEqual(summary["class_counts"], smoke_harness.empty_route_class_counts())
 
     def test_main_tools_off_metadata_matches_runtime_mode(self) -> None:
         captured_env: list[dict[str, object]] = []

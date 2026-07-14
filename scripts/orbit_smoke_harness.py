@@ -6,9 +6,11 @@ from contextlib import contextmanager
 import json
 import os
 import queue
+import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -28,6 +30,7 @@ from orbit import __version__
 from orbit.backend.base import ChatResult
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime.chat import ChatRuntime
+from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import current_phase
 from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT
 from orbit.runtime.tools import TOOL_NAMES
@@ -43,6 +46,8 @@ class SmokeStep:
     prompt: str
     mode: str = "auto"
     checker_name: str = "not_evaluated"
+    expected_route: str | None = None
+    expected_tool_names: tuple[str, ...] | None = None
 
 
 FINAL_PREFIX_LOCAL_STEPS = (
@@ -69,6 +74,107 @@ FINAL_PREFIX_PAIRED_STEPS = (
     FINAL_PREFIX_WEB_STEPS[0],
 )
 
+ROUTE_PWD_STEP = SmokeStep(
+    "run pwd", checker_name="path_like", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)
+)
+ROUTE_SYSTEM_INFO_STEP = SmokeStep(
+    "tell me specs about this computer", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("system_info",)
+)
+ROUTE_READ_STEP = SmokeStep(
+    "read route_fixture.txt", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)
+)
+ROUTE_REFRESH_STEP = SmokeStep(
+    "refresh the current computer specs", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("system_info",)
+)
+ROUTE_VERIFY_STEP = SmokeStep(
+    "verify whether route_fixture.txt changed", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)
+)
+ROUTE_SHELL_ERROR_STEP = SmokeStep(
+    "run command_that_does_not_exist_123", checker_name="shell_error", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)
+)
+ROUTE_RECOVERY_SUCCESS_STEP = SmokeStep(
+    "run printf 'route-recovery-success\\n'", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)
+)
+ROUTE_ERROR_SUCCESS_COMPARE_STEP = SmokeStep(
+    "compare the failed command with the successful command", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()
+)
+ROUTE_WEB_ERROR_STEP = SmokeStep(
+    "search online for where is Avola located?", checker_name="web_error", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)
+)
+
+ROUTE_CLASS_RECAP_STEPS = (
+    ROUTE_PWD_STEP,
+    ROUTE_SYSTEM_INFO_STEP,
+    SmokeStep("summarize the specs you gave me", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+)
+
+ROUTE_CLASS_CHAT_STEPS = (
+    SmokeStep("explain CPU versus GPU in one short sentence", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+    *ROUTE_CLASS_RECAP_STEPS,
+    SmokeStep("summarize our whole discussion", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+    SmokeStep("explain why local context can matter", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+    SmokeStep("summarize that", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+    SmokeStep("compare the directory and computer specifications", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+    SmokeStep("run printf 'route-third-result\\n'", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+    SmokeStep("compare the first and third tool results", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+)
+
+ROUTE_CLASS_LOCAL_TOOL_STEPS = (
+    ROUTE_PWD_STEP,
+    ROUTE_SYSTEM_INFO_STEP,
+    ROUTE_READ_STEP,
+    SmokeStep('search route_fixture.txt for "route-fixture-match"', checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+    SmokeStep("list files and directories in this workdir", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("list_directory",)),
+    SmokeStep("run printf 'route-shell-success\\n'", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+    ROUTE_SHELL_ERROR_STEP,
+    ROUTE_REFRESH_STEP,
+    ROUTE_VERIFY_STEP,
+)
+
+ROUTE_CLASS_WEB_STEPS = (
+    SmokeStep("search online for orbit fixture success", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+    SmokeStep("search online for orbit fixture none", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+    ROUTE_WEB_ERROR_STEP,
+    SmokeStep("fetch https://example.com", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("fetch_url",)),
+    SmokeStep("search online for new information about orbit fixture success", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+)
+
+ROUTE_CLASS_EVIDENCE_STEPS = (
+    ROUTE_SHELL_ERROR_STEP,
+    ROUTE_RECOVERY_SUCCESS_STEP,
+    ROUTE_ERROR_SUCCESS_COMPARE_STEP,
+    SmokeStep("run python3 -c 'for i in range(40): print(f\"route-long-summary-{i}\")'", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+    SmokeStep("summarize that output", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+    SmokeStep("read route_long_excerpt.txt", checker_name="nonempty", expected_route="FILESYSTEM", expected_tool_names=("exec_shell_full_command",)),
+    SmokeStep("explain the excerpt", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+)
+
+ROUTE_CLASS_AMBIGUOUS_STEPS = (
+    ROUTE_PWD_STEP,
+    ROUTE_SYSTEM_INFO_STEP,
+    SmokeStep("summarize that", checker_name="nonempty", expected_route="CHAT", expected_tool_names=()),
+)
+
+ROUTE_CLASS_REFRESH_STEPS = (
+    ROUTE_SYSTEM_INFO_STEP,
+    ROUTE_REFRESH_STEP,
+)
+
+ROUTE_CLASS_VERIFY_STEPS = (
+    ROUTE_READ_STEP,
+    ROUTE_VERIFY_STEP,
+)
+
+ROUTE_CLASS_ERROR_SUCCESS_STEPS = (
+    ROUTE_SHELL_ERROR_STEP,
+    ROUTE_RECOVERY_SUCCESS_STEP,
+    ROUTE_ERROR_SUCCESS_COMPARE_STEP,
+)
+
+ROUTE_CLASS_WEB_ERROR_STEPS = (
+    ROUTE_WEB_ERROR_STEP,
+)
+
 
 @dataclass(frozen=True)
 class SmokeScenario:
@@ -78,6 +184,7 @@ class SmokeScenario:
     optional: bool = False
     allowed_tool_names: tuple[str, ...] = ("exec_shell_full_command",)
     isolated_steps: bool = False
+    family: str = "general"
 
 
 @dataclass(frozen=True)
@@ -111,6 +218,19 @@ class StepReport:
     generation_tokens_per_second: float | None = None
     estimated_generation_ms: float | None = None
     estimated_prefill_residual_ms: float | None = None
+    scenario_family: str = "general"
+    process_id: int | None = None
+    block_id: str | None = None
+    run_order: str | None = None
+    repetition: int | None = None
+    route_diagnostics_enabled: bool = False
+    route_outputs: list[dict[str, object]] = field(default_factory=list)
+    final_parsed_route: str | None = None
+    route_correct: bool | None = None
+    tool_correct: bool | None = None
+    downstream_final_correct: bool | None = None
+    retry_required: bool = False
+    route_fallback_used: bool = False
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -143,6 +263,19 @@ class StepReport:
             "generation_tokens_per_second": self.generation_tokens_per_second,
             "estimated_generation_ms": self.estimated_generation_ms,
             "estimated_prefill_residual_ms": self.estimated_prefill_residual_ms,
+            "scenario_family": self.scenario_family,
+            "process_id": self.process_id,
+            "block_id": self.block_id,
+            "run_order": self.run_order,
+            "repetition": self.repetition,
+            "route_diagnostics_enabled": self.route_diagnostics_enabled,
+            "route_outputs": self.route_outputs,
+            "final_parsed_route": self.final_parsed_route,
+            "route_correct": self.route_correct,
+            "tool_correct": self.tool_correct,
+            "downstream_final_correct": self.downstream_final_correct,
+            "retry_required": self.retry_required,
+            "route_fallback_used": self.route_fallback_used,
         }
 
 
@@ -203,6 +336,106 @@ class ProbeBackend:
         return list(self._phase_timings)
 
 
+ROUTE_OUTPUT_CLASSES = ("canonical", "legacy_tolerated", "direct_prose", "malformed", "control_loop")
+ROUTE_FALLBACK_OUTCOMES = {"route_invalid_output", "route_no_decision_length_retry", "route_retry_invalid_output"}
+
+
+class RouteDiagnosticCollector:
+    def __init__(self, root: Path, *, store_mode: str) -> None:
+        self.path = root / "route-kv-diag.jsonl"
+        self.store_root = root / "evidence"
+        self.store_mode = store_mode
+        self._store_index = 0
+
+    def mark(self) -> int:
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
+
+    def events_since(self, offset: int) -> list[dict[str, object]]:
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(offset)
+                lines = [line.decode("utf-8", errors="replace") for line in handle.readlines()]
+        except OSError:
+            return []
+        return parse_route_diagnostic_lines(lines)
+
+    def new_evidence_store(self, workdir: Path) -> EvidenceStore:
+        self._store_index += 1
+        destination = self.store_root / f"store-{self._store_index:04d}"
+        if self.store_mode == "existing-snapshot":
+            source = EvidenceStore.for_workdir(workdir).root
+            if source.is_dir():
+                shutil.copytree(source, destination)
+        store = EvidenceStore(destination)
+        store.load_index()
+        return store
+
+
+def parse_route_diagnostic_lines(lines: list[str]) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or value.get("event") != "kv_diag_route_outcome":
+            continue
+        route_class = value.get("route_output_class")
+        if route_class not in ROUTE_OUTPUT_CLASSES:
+            route_class = None
+        phase = value.get("phase")
+        events.append(
+            {
+                "route_call": "retry" if phase == "route_retry" else "initial",
+                "route_output_class": route_class,
+                "route_output_reason": bounded_identifier(value.get("route_output_reason")),
+                "parser_accepted": value.get("route_parser_accepted") if isinstance(value.get("route_parser_accepted"), bool) else None,
+                "finish_reason": bounded_identifier(value.get("route_finish_reason")),
+                "output_tokens": value.get("route_output_tokens") if isinstance(value.get("route_output_tokens"), int) else None,
+                "parsed_route": bounded_identifier(value.get("decision_type")),
+                "outcome": bounded_identifier(value.get("outcome")),
+                "retry_reason": bounded_identifier(value.get("retry_reason")),
+                "control_loop_surrogate": value.get("route_output_reason") == "empty_visible_control_output",
+            }
+        )
+    return events
+
+
+def bounded_identifier(value: object, *, limit: int = 80) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        return None
+    if not all(character.isalnum() or character in {"_", "-"} for character in value):
+        return None
+    return value
+
+
+@contextmanager
+def route_diagnostic_environment(enabled: bool, *, store_mode: str):
+    if not enabled:
+        yield None
+        return
+    previous_enabled = os.environ.get("ORBIT_KV_DIAG")
+    previous_path = os.environ.get("ORBIT_KV_DIAG_FILE")
+    with tempfile.TemporaryDirectory(prefix="orbit-route-diag-") as tmp:
+        collector = RouteDiagnosticCollector(Path(tmp), store_mode=store_mode)
+        os.environ["ORBIT_KV_DIAG"] = "1"
+        os.environ["ORBIT_KV_DIAG_FILE"] = str(collector.path)
+        try:
+            yield collector
+        finally:
+            if previous_enabled is None:
+                os.environ.pop("ORBIT_KV_DIAG", None)
+            else:
+                os.environ["ORBIT_KV_DIAG"] = previous_enabled
+            if previous_path is None:
+                os.environ.pop("ORBIT_KV_DIAG_FILE", None)
+            else:
+                os.environ["ORBIT_KV_DIAG_FILE"] = previous_path
+
+
 def mtp_state_from_props(props: dict[str, object]) -> dict[str, object]:
     requested = bool(props.get("mtp_experimental_enabled"))
     session_ready = bool(props.get("mtp_initialized"))
@@ -243,7 +476,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.lifecycle_check:
         return run_lifecycle_checks(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
 
-    with final_prefix_environment(args.final_prefix_mode), deterministic_web(args.deterministic_web), managed_server(args) as server_process:
+    with (
+        final_prefix_environment(args.final_prefix_mode),
+        deterministic_web(args.deterministic_web),
+        managed_server(args) as server_process,
+        route_diagnostic_environment(
+            args.route_output_diagnostics,
+            store_mode=args.route_diagnostic_store,
+        ) as route_collector,
+    ):
         backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
         backend.thinking = args.server_thinking == "on"
         rss_before_kib = process_rss_kib(server_process)
@@ -256,8 +497,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         reports: list[StepReport] = []
+        run_order_index = 0
         for scenario in selected:
-            for _repeat in range(args.repetitions):
+            for repeat in range(1, args.repetitions + 1):
+                run_order_index += 1
                 reports.extend(
                     run_scenario(
                         scenario,
@@ -267,6 +510,11 @@ def main(argv: list[str] | None = None) -> int:
                         temperature=args.temperature,
                         timeout=args.timeout,
                         tools_mode=args.tools,
+                        route_collector=route_collector,
+                        process_id=server_process.pid if server_process is not None else None,
+                        block_id=args.block_id or f"run-{run_order_index:04d}",
+                        run_order=args.run_order or str(run_order_index),
+                        repetition=repeat,
                     )
                 )
         final_props = settled_backend_props(args.base_url, args.timeout)
@@ -328,6 +576,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-order", default=None)
     parser.add_argument("--cooling-seconds", type=float, default=0.0)
     parser.add_argument("--deterministic-web", action="store_true", help="Use bounded local web fixtures for final-prefix smoke cases.")
+    parser.add_argument(
+        "--route-output-diagnostics",
+        action="store_true",
+        help="Collect bounded route-output classifications from existing KV diagnostic events.",
+    )
+    parser.add_argument(
+        "--route-diagnostic-store",
+        choices=("clean", "existing-snapshot"),
+        default="clean",
+        help="Use a clean temporary evidence store or a read-only snapshot of the selected workdir store.",
+    )
     parser.add_argument(
         "--lifecycle-check",
         action="append",
@@ -441,6 +700,78 @@ def scenarios() -> dict[str, SmokeScenario]:
             requires_web=True,
             optional=True,
         ),
+        "route_classification_recap": SmokeScenario(
+            "route_classification_recap",
+            ROUTE_CLASS_RECAP_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="chat_recap",
+        ),
+        "route_classification_chat": SmokeScenario(
+            "route_classification_chat",
+            ROUTE_CLASS_CHAT_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="chat",
+        ),
+        "route_classification_local": SmokeScenario(
+            "route_classification_local",
+            ROUTE_CLASS_LOCAL_TOOL_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="local_tool",
+        ),
+        "route_classification_web": SmokeScenario(
+            "route_classification_web",
+            ROUTE_CLASS_WEB_STEPS,
+            requires_web=True,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="web",
+        ),
+        "route_classification_evidence": SmokeScenario(
+            "route_classification_evidence",
+            ROUTE_CLASS_EVIDENCE_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="evidence_shape",
+        ),
+        "route_classification_ambiguous": SmokeScenario(
+            "route_classification_ambiguous",
+            ROUTE_CLASS_AMBIGUOUS_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="fragile_ambiguous",
+        ),
+        "route_classification_refresh": SmokeScenario(
+            "route_classification_refresh",
+            ROUTE_CLASS_REFRESH_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="fragile_refresh",
+        ),
+        "route_classification_verify": SmokeScenario(
+            "route_classification_verify",
+            ROUTE_CLASS_VERIFY_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="fragile_verify",
+        ),
+        "route_classification_error_success": SmokeScenario(
+            "route_classification_error_success",
+            ROUTE_CLASS_ERROR_SUCCESS_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="fragile_error_success",
+        ),
+        "route_classification_web_error": SmokeScenario(
+            "route_classification_web_error",
+            ROUTE_CLASS_WEB_ERROR_STEPS,
+            requires_web=True,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="fragile_web_error",
+        ),
     }
 
 
@@ -471,12 +802,17 @@ def run_scenario(
     temperature: float,
     timeout: float,
     tools_mode: str = "on",
+    route_collector: RouteDiagnosticCollector | None = None,
+    process_id: int | None = None,
+    block_id: str | None = None,
+    run_order: str | None = None,
+    repetition: int | None = None,
 ) -> list[StepReport]:
-    runtime = new_runtime(backend, workdir)
+    runtime = new_runtime(backend, workdir, route_collector=route_collector)
     reports: list[StepReport] = []
     for index, step in enumerate(scenario.steps, start=1):
         if scenario.isolated_steps and index > 1:
-            runtime = new_runtime(backend, workdir)
+            runtime = new_runtime(backend, workdir, route_collector=route_collector)
         report = run_step(
             runtime,
             scenario=scenario.name,
@@ -488,6 +824,12 @@ def run_scenario(
             base_url=backend.base_url,
             timeout=timeout,
             allowed_tool_names=effective_allowed_tool_names(scenario, tools_mode),
+            route_collector=route_collector,
+            scenario_family=scenario.family,
+            process_id=process_id,
+            block_id=block_id,
+            run_order=run_order,
+            repetition=repetition,
         )
         reports.append(report)
         if report.finish_reason in {"timeout", "error"}:
@@ -499,11 +841,17 @@ def effective_allowed_tool_names(scenario: SmokeScenario, tools_mode: str) -> tu
     return scenario.allowed_tool_names if tools_mode == "on" else ()
 
 
-def new_runtime(backend: LlamaServerBackend, workdir: Path) -> ChatRuntime:
+def new_runtime(
+    backend: LlamaServerBackend,
+    workdir: Path,
+    *,
+    route_collector: RouteDiagnosticCollector | None = None,
+) -> ChatRuntime:
     return ChatRuntime(
         backend=ProbeBackend(backend),
         system_prompt=DEFAULT_SYSTEM_PROMPT,
         diagnostic_session_id=str(workdir),
+        evidence_store=route_collector.new_evidence_store(workdir) if route_collector is not None else None,
     )
 
 
@@ -519,8 +867,15 @@ def run_step(
     base_url: str,
     timeout: float,
     allowed_tool_names: tuple[str, ...] = ("exec_shell_full_command",),
+    route_collector: RouteDiagnosticCollector | None = None,
+    scenario_family: str = "general",
+    process_id: int | None = None,
+    block_id: str | None = None,
+    run_order: str | None = None,
+    repetition: int | None = None,
 ) -> StepReport:
     props_before = fresh_backend_props(base_url, min(timeout, 5.0))
+    diagnostic_offset = route_collector.mark() if route_collector is not None else 0
     result_queue: queue.Queue[StepReport] = queue.Queue(maxsize=1)
 
     worker = threading.Thread(
@@ -552,7 +907,7 @@ def run_step(
             notes += ",cleanup_ok"
         elif props_after:
             notes += ",cleanup_pending"
-        return StepReport(
+        report = StepReport(
             case=scenario,
             step=step_index,
             prompt=step.prompt,
@@ -585,9 +940,31 @@ def run_step(
             },
             phase_wall_ms={},
         )
+        return enrich_step_route_diagnostics(
+            report,
+            route_collector.events_since(diagnostic_offset) if route_collector is not None else [],
+            step=step,
+            enabled=route_collector is not None,
+            scenario_family=scenario_family,
+            process_id=process_id,
+            block_id=block_id,
+            run_order=run_order,
+            repetition=repetition,
+        )
     report = result_queue.get()
     props_after = fresh_backend_props(base_url, min(timeout, 5.0))
-    return replace_step_final_prefix(report, final_prefix_step_state(props_before, props_after))
+    report = replace_step_final_prefix(report, final_prefix_step_state(props_before, props_after))
+    return enrich_step_route_diagnostics(
+        report,
+        route_collector.events_since(diagnostic_offset) if route_collector is not None else [],
+        step=step,
+        enabled=route_collector is not None,
+        scenario_family=scenario_family,
+        process_id=process_id,
+        block_id=block_id,
+        run_order=run_order,
+        repetition=repetition,
+    )
 
 
 def _run_step_inner(
@@ -604,7 +981,7 @@ def _run_step_inner(
     model_steps: list[ModelStepMetrics] = []
     tool_names: list[str] = []
     started = time.perf_counter()
-    probe = runtime.backend if isinstance(runtime.backend, ProbeBackend) else None
+    probe = probe_backend(runtime.backend)
     if probe is not None:
         probe.reset_phase_timings()
     notes = ""
@@ -701,6 +1078,13 @@ def phase_timing_summary(timings: list[tuple[str, float]], total_wall_ms: float)
     return result
 
 
+def probe_backend(backend: object) -> ProbeBackend | None:
+    if isinstance(backend, ProbeBackend):
+        return backend
+    wrapped = getattr(backend, "_backend", None)
+    return wrapped if isinstance(wrapped, ProbeBackend) else None
+
+
 def estimated_generation_ms(output_tokens: int | None, tokens_per_second: float | None) -> float | None:
     if not isinstance(output_tokens, int) or not isinstance(tokens_per_second, int | float) or tokens_per_second <= 0:
         return None
@@ -775,6 +1159,8 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "run_order": args.run_order,
         "cooling_seconds": args.cooling_seconds,
         "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
+        "route_output_diagnostics": args.route_output_diagnostics,
+        "route_diagnostic_store": args.route_diagnostic_store,
     }
 
 
@@ -846,6 +1232,86 @@ def replace_step_final_prefix(report: StepReport, state: dict[str, object]) -> S
     values = report.__dict__.copy()
     values["final_prefix"] = state
     return StepReport(**values)
+
+
+def enrich_step_route_diagnostics(
+    report: StepReport,
+    events: list[dict[str, object]],
+    *,
+    step: SmokeStep,
+    enabled: bool,
+    scenario_family: str,
+    process_id: int | None,
+    block_id: str | None,
+    run_order: str | None,
+    repetition: int | None,
+) -> StepReport:
+    final_route = next(
+        (event.get("parsed_route") for event in reversed(events) if isinstance(event.get("parsed_route"), str)),
+        None,
+    )
+    retry_required = any(event.get("route_call") == "retry" for event in events) or any(
+        "retry" in str(metric.get("phase") or "") for metric in report.model_steps
+    )
+    route_correct = route_expectation_result(step.expected_route, final_route, events, report.tool_names)
+    tool_correct = tool_expectation_result(step.expected_tool_names, report.tool_names) if events else None
+    downstream_correct = report.correctness_category == "correct"
+    fallback_used = any(event.get("outcome") in ROUTE_FALLBACK_OUTCOMES for event in events)
+    selected_tool = report.tool_names[0] if report.tool_names else None
+    correlated = [
+        {
+            **event,
+            "final_parsed_route": final_route,
+            "selected_tool": selected_tool,
+            "route_correct": route_correct,
+            "tool_correct": tool_correct,
+            "downstream_final_correct": downstream_correct,
+            "retry_required": retry_required,
+            "fallback_used": fallback_used,
+        }
+        for event in events
+    ]
+    values = report.__dict__.copy()
+    values.update(
+        {
+            "scenario_family": scenario_family,
+            "process_id": process_id,
+            "block_id": block_id,
+            "run_order": run_order,
+            "repetition": repetition,
+            "route_diagnostics_enabled": enabled,
+            "route_outputs": correlated,
+            "final_parsed_route": final_route,
+            "route_correct": route_correct,
+            "tool_correct": tool_correct,
+            "downstream_final_correct": downstream_correct,
+            "retry_required": retry_required,
+            "route_fallback_used": fallback_used,
+        }
+    )
+    return StepReport(**values)
+
+
+def route_expectation_result(
+    expected_route: str | None,
+    final_route: object,
+    events: list[dict[str, object]],
+    tool_names: list[str],
+) -> bool | None:
+    if expected_route is None or not events:
+        return None
+    if expected_route == "CHAT":
+        direct = any(event.get("route_output_class") == "direct_prose" for event in events)
+        return (final_route == "CHAT" or direct) and not tool_names
+    return final_route == expected_route
+
+
+def tool_expectation_result(expected: tuple[str, ...] | None, actual: list[str]) -> bool | None:
+    if expected is None:
+        return None
+    if not expected:
+        return not actual
+    return bool(actual) and set(actual).issubset(set(expected))
 
 
 @contextmanager
@@ -1417,6 +1883,9 @@ def write_jsonl(
             handle.write(json.dumps({"type": "step", **report.to_json()}, ensure_ascii=False, sort_keys=True) + "\n")
         for summary in summarize_reports(reports):
             handle.write(json.dumps({"type": "summary", **summary}, ensure_ascii=False, sort_keys=True) + "\n")
+        route_summary = summarize_route_classifications(reports)
+        if route_summary is not None:
+            handle.write(json.dumps(route_summary, ensure_ascii=False, sort_keys=True) + "\n")
         for row in extra_rows or []:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -1512,6 +1981,94 @@ def summarize_reports(reports: list[StepReport]) -> list[dict[str, object]]:
             }
         )
     return result
+
+
+def summarize_route_classifications(reports: list[StepReport]) -> dict[str, object] | None:
+    diagnostic_reports = [report for report in reports if report.route_diagnostics_enabled]
+    if not diagnostic_reports:
+        return None
+    class_counts = empty_route_class_counts()
+    initial_counts = empty_route_class_counts()
+    retry_counts = empty_route_class_counts()
+    by_family: dict[str, dict[str, int]] = {}
+    correctness = {
+        route_class: {
+            "calls": 0,
+            "route_correct": 0,
+            "route_wrong": 0,
+            "tool_correct": 0,
+            "tool_wrong": 0,
+            "downstream_correct": 0,
+            "downstream_wrong": 0,
+            "retry_required": 0,
+        }
+        for route_class in ROUTE_OUTPUT_CLASSES
+    }
+    malformed_to_retry = 0
+    control_loop_to_retry = 0
+    final_successful_decisions = 0
+    fallback_count = 0
+    surrogate_count = 0
+    for report in diagnostic_reports:
+        family_counts = by_family.setdefault(report.scenario_family, empty_route_class_counts())
+        if report.final_parsed_route is not None:
+            final_successful_decisions += 1
+        if report.route_fallback_used:
+            fallback_count += 1
+        initial_classes = {
+            event.get("route_output_class")
+            for event in report.route_outputs
+            if event.get("route_call") == "initial"
+        }
+        if report.retry_required and "malformed" in initial_classes:
+            malformed_to_retry += 1
+        if report.retry_required and "control_loop" in initial_classes:
+            control_loop_to_retry += 1
+        for event in report.route_outputs:
+            route_class = event.get("route_output_class")
+            if route_class not in ROUTE_OUTPUT_CLASSES:
+                continue
+            class_counts[route_class] += 1
+            family_counts[route_class] += 1
+            target = retry_counts if event.get("route_call") == "retry" else initial_counts
+            target[route_class] += 1
+            correlation = correctness[route_class]
+            correlation["calls"] += 1
+            _increment_boolean_counts(correlation, "route", event.get("route_correct"))
+            _increment_boolean_counts(correlation, "tool", event.get("tool_correct"))
+            _increment_boolean_counts(correlation, "downstream", event.get("downstream_final_correct"))
+            if event.get("retry_required") is True:
+                correlation["retry_required"] += 1
+            if event.get("control_loop_surrogate") is True:
+                surrogate_count += 1
+    return {
+        "type": "route_classification_summary",
+        "class_counts": class_counts,
+        "initial_class_counts": initial_counts,
+        "retry_class_counts": retry_counts,
+        "malformed_to_retry_transitions": malformed_to_retry,
+        "control_loop_to_retry_transitions": control_loop_to_retry,
+        "final_successful_decision_count": final_successful_decisions,
+        "fallback_count": fallback_count,
+        "class_distribution_by_scenario_family": by_family,
+        "correctness_by_class": correctness,
+        "diagnostic_steps": len(diagnostic_reports),
+        "steps_with_route_events": sum(bool(report.route_outputs) for report in diagnostic_reports),
+        "missing_route_diagnostic_steps": sum(not report.route_outputs for report in diagnostic_reports),
+        "empty_visible_control_output_surrogate_count": surrogate_count,
+        "control_loop_surrogate_note": "empty visible output at length with at least 8 output tokens is diagnostic evidence, not exact token-cycle proof",
+    }
+
+
+def empty_route_class_counts() -> dict[str, int]:
+    return {route_class: 0 for route_class in ROUTE_OUTPUT_CLASSES}
+
+
+def _increment_boolean_counts(target: dict[str, int], prefix: str, value: object) -> None:
+    if value is True:
+        target[f"{prefix}_correct"] += 1
+    elif value is False:
+        target[f"{prefix}_wrong"] += 1
 
 
 def summarize_restored_rows(rows: list[StepReport]) -> dict[str, object]:
