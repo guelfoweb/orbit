@@ -32,6 +32,124 @@ class RouteDecision:
     tool_names: tuple[str, ...] = ()
 
 
+class RouteOutputClass(StrEnum):
+    CANONICAL = "canonical"
+    LEGACY_TOLERATED = "legacy_tolerated"
+    DIRECT_PROSE = "direct_prose"
+    MALFORMED = "malformed"
+    CONTROL_LOOP = "control_loop"
+
+
+@dataclass(frozen=True)
+class RouteOutputDiagnostic:
+    classification: RouteOutputClass
+    reason: str
+    canonical: bool
+    parser_accepted: bool
+
+
+_CONTROL_TOKEN_CYCLE = (100, 45518, 107, 101)
+_CONTROL_ONLY_RE = re.compile(r"(?:\s*<\|channel>thought\s*<channel\|>\s*)+")
+
+
+def classify_route_output(
+    content: str,
+    *,
+    parsed_decision: RouteDecision | None,
+    parser_source: str | None,
+    direct_prose: bool,
+    finish_reason: str | None,
+    output_tokens: int | None,
+    raw_token_ids: list[int] | tuple[int, ...] | None = None,
+) -> RouteOutputDiagnostic:
+    """Classify a completed route output without changing its interpretation."""
+
+    parser_accepted = parsed_decision is not None
+    if _has_control_token_cycle(raw_token_ids):
+        return RouteOutputDiagnostic(RouteOutputClass.CONTROL_LOOP, "repeated_control_token_cycle", False, parser_accepted)
+    text = content.strip()
+    if text and _CONTROL_ONLY_RE.fullmatch(text):
+        return RouteOutputDiagnostic(RouteOutputClass.CONTROL_LOOP, "control_only_text", False, parser_accepted)
+    if not text and finish_reason == "length" and isinstance(output_tokens, int) and output_tokens >= len(_CONTROL_TOKEN_CYCLE) * 2:
+        return RouteOutputDiagnostic(RouteOutputClass.CONTROL_LOOP, "empty_visible_control_output", False, parser_accepted)
+
+    canonical_reason = _canonical_route_reason(text)
+    if canonical_reason is not None and parser_accepted and parser_source == "content":
+        return RouteOutputDiagnostic(RouteOutputClass.CANONICAL, canonical_reason, True, True)
+    if parser_accepted:
+        reason = "normalized_backend_tool_calls" if parser_source == "tool_calls" else "parser_tolerated_noncanonical"
+        return RouteOutputDiagnostic(RouteOutputClass.LEGACY_TOLERATED, reason, False, True)
+    if direct_prose and text and not _looks_like_route_syntax(text):
+        return RouteOutputDiagnostic(RouteOutputClass.DIRECT_PROSE, "accepted_direct_answer", False, False)
+    reason = "empty_output" if not text else "unaccepted_route_syntax" if _looks_like_route_syntax(text) else "unaccepted_output"
+    return RouteOutputDiagnostic(RouteOutputClass.MALFORMED, reason, False, False)
+
+
+def _has_control_token_cycle(raw_token_ids: list[int] | tuple[int, ...] | None) -> bool:
+    if raw_token_ids is None or len(raw_token_ids) < len(_CONTROL_TOKEN_CYCLE) * 2:
+        return False
+    return all(token == _CONTROL_TOKEN_CYCLE[index % len(_CONTROL_TOKEN_CYCLE)] for index, token in enumerate(raw_token_ids))
+
+
+def _canonical_route_reason(text: str) -> str | None:
+    if not text:
+        return None
+    try:
+        value = json.loads(text, object_pairs_hook=_unique_json_object)
+    except (json.JSONDecodeError, _DuplicateJsonKey):
+        return None
+    if not isinstance(value, dict):
+        return None
+    keys = set(value)
+    if keys == {"route"} and value.get("route") == ToolRoute.CHAT.value:
+        return "canonical_chat"
+    if keys == {"command"} and _nonempty_string(value.get("command")):
+        return "canonical_command"
+    if keys == {"url"} and _nonempty_string(value.get("url")):
+        return "canonical_url"
+    if keys and keys <= set(LIST_DIRECTORY_KEYS) and _canonical_list_directory(value):
+        return "canonical_list_directory"
+    if keys and keys <= set(SYSTEM_INFO_KEYS) and all(isinstance(arg, bool) for arg in value.values()):
+        return "canonical_system_info"
+    return None
+
+
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKey(key)
+        value[key] = item
+    return value
+
+
+def _canonical_list_directory(value: dict[str, Any]) -> bool:
+    for key, item in value.items():
+        if key == "path" and not isinstance(item, str):
+            return False
+        if key in {"recursive", "include_hidden", "dirs_first", "files_only", "dirs_only"} and not isinstance(item, bool):
+            return False
+        if key == "max_depth" and item is not None and (isinstance(item, bool) or not isinstance(item, int)):
+            return False
+        if key == "max_entries" and (isinstance(item, bool) or not isinstance(item, int)):
+            return False
+    return True
+
+
+def _nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _looks_like_route_syntax(text: str) -> bool:
+    if text.startswith(("{", "[", "```", "<|tool_call>")):
+        return True
+    return any(marker in text for marker in ('{"route"', '{"command"', '{"url"', '{"path"', '{"include_'))
+
+
 def parse_tool_command(content: str) -> ToolRoute | None:
     decision = parse_command_decision(content)
     return decision.route if decision is not None else None

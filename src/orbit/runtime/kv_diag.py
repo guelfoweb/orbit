@@ -441,6 +441,10 @@ def emit_route_outcome(
     output_chars: int | None,
     output_tokens: int | None,
     retry_reason: str | None,
+    route_output_class: str | None = None,
+    route_output_reason: str | None = None,
+    route_output_canonical: bool | None = None,
+    route_parser_accepted: bool | None = None,
 ) -> None:
     if not enabled() or _LAST_MODEL_CALL is None:
         return
@@ -458,6 +462,12 @@ def emit_route_outcome(
             "decision_type": decision_type,
             "output_chars": output_chars,
             "output_tokens": output_tokens,
+            "route_output_tokens": output_tokens,
+            "route_finish_reason": finish_reason,
+            "route_output_class": route_output_class,
+            "route_output_reason": route_output_reason,
+            "route_output_canonical": route_output_canonical,
+            "route_parser_accepted": route_parser_accepted,
             "retry_reason": retry_reason,
             "outcome": outcome,
         }

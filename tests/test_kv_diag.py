@@ -503,6 +503,9 @@ class KVDiagTests(unittest.TestCase):
         self.assertEqual(outcomes[0]["phase"], "route")
         self.assertEqual(outcomes[0]["finish_reason"], "stop")
         self.assertIsNone(outcomes[0]["decision_type"])
+        self.assertEqual(outcomes[0]["route_output_class"], "direct_prose")
+        self.assertFalse(outcomes[0]["route_output_canonical"])
+        self.assertFalse(outcomes[0]["route_parser_accepted"])
         self.assertNotIn("direct answer", json.dumps(outcomes))
 
     def test_route_no_decision_length_retry_is_observed_without_behavior_change(self) -> None:
@@ -535,8 +538,135 @@ class KVDiagTests(unittest.TestCase):
         self.assertEqual(outcomes[0]["outcome"], "route_no_decision_length_retry")
         self.assertEqual(outcomes[0]["retry_reason"], "length_without_decision")
         self.assertEqual(outcomes[0]["output_tokens"], 128)
+        self.assertEqual(outcomes[0]["route_output_class"], "malformed")
+        self.assertEqual(outcomes[0]["route_output_tokens"], 128)
+        self.assertEqual(outcomes[0]["route_finish_reason"], "length")
         self.assertNotIn("truncated route prose", json.dumps(outcomes))
         self.assertNotIn("final answer", json.dumps(outcomes))
+
+    def test_route_control_only_length_is_classified_without_behavior_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            backend = SequenceBackend(
+                [
+                    _result("", finish_reason="length", prompt_tokens=12, completion_tokens=64, cached_tokens=8),
+                    _result("final answer", finish_reason="stop", prompt_tokens=20, completion_tokens=3, cached_tokens=19),
+                ]
+            )
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                runtime = ChatRuntime(backend=backend, system_prompt=None)
+                result = runtime.ask_auto(
+                    "hi, tell me something about yourself",
+                    temperature=0,
+                    max_tokens=32,
+                    workdir=Path(tmp),
+                    allowed_tool_names=("exec_shell_full_command", "fetch_url", "list_directory", "system_info"),
+                )
+
+            lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            outcome = next(line for line in lines if line["event"] == "kv_diag_route_outcome")
+
+        self.assertEqual(result.content, "final answer")
+        self.assertEqual(backend.calls, 2)
+        self.assertEqual(outcome["route_output_class"], "control_loop")
+        self.assertEqual(outcome["route_output_reason"], "empty_visible_control_output")
+        self.assertNotIn("final answer", json.dumps(outcome))
+
+    def test_invalid_route_retry_is_classified_without_changing_tool_fallback(self) -> None:
+        class RouteRetryBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls == 1:
+                    return _result("route prose", finish_reason="stop")
+                if self.calls == 2:
+                    return _result("retry prose", finish_reason="length", completion_tokens=64)
+                if self.calls == 3:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": '{"command":"printf route-diagnostic-result"}',
+                                },
+                            }
+                        ],
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=10.0,
+                        generation_tokens_per_second=3.0,
+                    )
+                return _result("route diagnostic result", finish_reason="stop")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            backend = RouteRetryBackend()
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                runtime = ChatRuntime(backend=backend, system_prompt="route system")
+                result = runtime.ask_auto(
+                    "search online for route diagnostic information",
+                    temperature=0,
+                    max_tokens=32,
+                    workdir=Path(tmp),
+                    allowed_tool_names=("exec_shell_full_command",),
+                )
+
+            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            outcomes = [event for event in events if event["event"] == "kv_diag_route_outcome"]
+
+        self.assertEqual(result.content, "route diagnostic result")
+        self.assertEqual(backend.calls, 5)
+        self.assertEqual(
+            [event["outcome"] for event in outcomes],
+            ["route_other_retry", "route_retry_invalid_output"],
+        )
+        self.assertEqual(outcomes[1]["route_output_class"], "malformed")
+        self.assertFalse(outcomes[1]["route_parser_accepted"])
+        self.assertNotIn("route prose", json.dumps(outcomes))
+        self.assertNotIn("retry prose", json.dumps(outcomes))
+
+    def test_valid_route_retry_is_classified_independently_and_keeps_tool_selection(self) -> None:
+        backend = SequenceBackend(
+            [
+                _result("route prose", finish_reason="stop"),
+                _result('{"command":"printf route-valid-retry"}', finish_reason="stop"),
+                _result("route valid retry", finish_reason="stop"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "diag.jsonl"
+            with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1", "ORBIT_KV_DIAG_FILE": str(log_path)}, clear=False):
+                runtime = ChatRuntime(backend=backend, system_prompt="route system")
+                result = runtime.ask_auto(
+                    "search online for route validation information",
+                    temperature=0,
+                    max_tokens=32,
+                    workdir=Path(tmp),
+                    allowed_tool_names=("exec_shell_full_command",),
+                )
+
+            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            outcomes = [event for event in events if event["event"] == "kv_diag_route_outcome"]
+
+        self.assertEqual(result.content, "route valid retry")
+        self.assertEqual(backend.calls, 3)
+        self.assertEqual(
+            [(event["outcome"], event["route_output_class"]) for event in outcomes],
+            [("route_other_retry", "malformed"), ("route_parsed_tool", "canonical")],
+        )
+        tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
+        self.assertEqual(tool_messages[-1]["name"], "exec_shell_full_command")
+        self.assertIn("route-valid-retry", tool_messages[-1]["content"])
+        self.assertNotIn("route prose", json.dumps(outcomes))
+        self.assertNotIn("route-valid-retry", json.dumps(outcomes))
 
     def test_route_outcome_event_is_metadata_only_for_required_classes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
