@@ -57,11 +57,15 @@ class MessagePromptTests(unittest.TestCase):
         self.assertIn("Operate on the latest user request only", TOOL_CALL_SYSTEM_PROMPT)
 
     def test_final_tool_policy_preserves_safety_and_error_guidance(self) -> None:
-        self.assertIn("from the tool result", FINAL_FROM_TOOL_SYSTEM_PROMPT)
-        self.assertIn("Do not call tools", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("from tool evidence", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("shortest complete answer", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("retaining exact details when needed", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("Do not invent facts", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("call tools", FINAL_FROM_TOOL_SYSTEM_PROMPT)
         self.assertIn("raw tool-call syntax", FINAL_FROM_TOOL_SYSTEM_PROMPT)
-        self.assertIn("Never claim lack of access", FINAL_FROM_TOOL_SYSTEM_PROMPT)
-        self.assertIn("Report errors briefly", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("claim lack of access", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("report errors briefly", FINAL_FROM_TOOL_SYSTEM_PROMPT)
+        self.assertIn("End after the answer", FINAL_FROM_TOOL_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

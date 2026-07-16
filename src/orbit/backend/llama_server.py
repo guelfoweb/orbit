@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -11,6 +10,7 @@ from urllib.request import Request, urlopen
 from .base import ChatResult, Message, ModelInfo, StreamProgress
 from .model_names import resolve_model_display_name
 from .payloads import ChatPayloadOptions, build_chat_payload
+from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 
@@ -724,7 +724,7 @@ def _allow_mtp_experimental_requested(*, native_backend: bool) -> bool | None:
 
 
 def _final_prefix_experiment_requested(*, native_backend: bool) -> bool:
-    if not native_backend or os.environ.get("ORBIT_FINAL_PREFIX_EXPERIMENT") != "1":
+    if not native_backend or not resolve_final_prefix_reuse().enabled:
         return False
     phase = current_phase()
     return current_tools_mode() == "on" and phase is not None and phase.startswith("final_from_tool")

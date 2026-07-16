@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from orbit.native_server.protocol import (
     DEFAULT_SESSION_ID,
@@ -11,9 +12,30 @@ from orbit.native_server.protocol import (
     trim_at_stop,
     validate_session_id,
 )
+from orbit.native_server.app import _final_prefix_reuse_props
 
 
 class NativeServerProtocolTests(unittest.TestCase):
+    def test_final_prefix_reuse_props_are_bounded_configuration_metadata(self) -> None:
+        client = SimpleNamespace(
+            config=SimpleNamespace(
+                final_prefix_experiment_enabled=False,
+                final_prefix_reuse_source="stable",
+                final_prefix_reuse_config_error="invalid_stable_value",
+                final_prefix_reuse_legacy_detected=True,
+            )
+        )
+
+        self.assertEqual(
+            _final_prefix_reuse_props(client),
+            {
+                "final_prefix_reuse_enabled": False,
+                "final_prefix_reuse_source": "stable",
+                "final_prefix_reuse_config_error": "invalid_stable_value",
+                "final_prefix_reuse_legacy_detected": True,
+            },
+        )
+
     def test_parse_chat_request_defaults_to_default_session(self) -> None:
         request = parse_chat_request(
             {

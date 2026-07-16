@@ -373,6 +373,10 @@ class SmokeHarnessTests(unittest.TestCase):
                 "ubatch_size": 128,
                 "final_prefix_experiment_enabled": True,
                 "final_prefix_experiment_restore_count": 2,
+                "final_prefix_reuse_enabled": True,
+                "final_prefix_reuse_source": "stable",
+                "final_prefix_reuse_config_error": None,
+                "final_prefix_reuse_legacy_detected": False,
             },
         )
 
@@ -380,6 +384,9 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(env["scenario"], ["final_prefix_local"])
         self.assertEqual(env["ctx"], 8192)
         self.assertEqual(env["final_prefix"]["restore_count"], 2)
+        self.assertEqual(env["final_prefix_config"]["requested"], "on")
+        self.assertTrue(env["final_prefix_config"]["server_client_parity"])
+        self.assertNotIn("raw_value", env["final_prefix_config"]["client"])
         self.assertEqual(env["timeout"], 30.0)
         self.assertEqual(env["block_id"], "abba-1-on-a")
         self.assertEqual(env["run_order"], "ON")
@@ -387,14 +394,41 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertIsInstance(env["cpu_affinity"], list)
 
     def test_final_prefix_environment_controls_client_flag_and_restores_it(self) -> None:
-        with mock.patch.dict("os.environ", {"ORBIT_FINAL_PREFIX_EXPERIMENT": "old"}, clear=False):
+        with mock.patch.dict(
+            "os.environ",
+            {"ORBIT_FINAL_PREFIX_REUSE": "old-stable", "ORBIT_FINAL_PREFIX_EXPERIMENT": "old-legacy"},
+            clear=False,
+        ):
             with smoke_harness.final_prefix_environment("on"):
-                self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "1")
-            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "old")
+                self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_REUSE"], "1")
+                self.assertNotIn("ORBIT_FINAL_PREFIX_EXPERIMENT", smoke_harness.os.environ)
+            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_REUSE"], "old-stable")
+            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "old-legacy")
 
             with smoke_harness.final_prefix_environment("off"):
+                self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_REUSE"], "0")
                 self.assertNotIn("ORBIT_FINAL_PREFIX_EXPERIMENT", smoke_harness.os.environ)
-            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "old")
+            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_REUSE"], "old-stable")
+            self.assertEqual(smoke_harness.os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"], "old-legacy")
+
+    def test_final_prefix_harness_modes_cover_stable_legacy_conflict_and_invalid(self) -> None:
+        expected = {
+            "off": (False, "stable", None, False),
+            "on": (True, "stable", None, False),
+            "legacy-off": (False, "legacy", None, True),
+            "legacy-on": (True, "legacy", None, True),
+            "stable-off-legacy-on": (False, "stable", None, True),
+            "stable-on-legacy-off": (True, "stable", None, True),
+            "stable-invalid": (False, "stable", "invalid_stable_value", True),
+        }
+        for mode, values in expected.items():
+            with self.subTest(mode=mode), mock.patch.dict(smoke_harness.os.environ, {}, clear=True):
+                with smoke_harness.final_prefix_environment(mode):
+                    resolved = smoke_harness.resolve_final_prefix_reuse()
+                    self.assertEqual(
+                        (resolved.enabled, resolved.source, resolved.validation_error, resolved.legacy_detected),
+                        values,
+                    )
 
     def test_managed_server_passes_final_prefix_flag_only_when_on(self) -> None:
         args = smoke_harness.build_parser().parse_args(["--manage-server", "--final-prefix-mode", "on"])
@@ -406,11 +440,21 @@ class SmokeHarnessTests(unittest.TestCase):
             mock.patch.object(
                 smoke_harness,
                 "fresh_backend_props",
-                side_effect=[{}, {"final_prefix_experiment_enabled": True}],
+                side_effect=[
+                    {},
+                    {
+                        "final_prefix_experiment_enabled": True,
+                        "final_prefix_reuse_enabled": True,
+                        "final_prefix_reuse_source": "stable",
+                        "final_prefix_reuse_config_error": None,
+                        "final_prefix_reuse_legacy_detected": False,
+                    },
+                ],
             ):
             with smoke_harness.managed_server(args):
                 pass
-        self.assertEqual(popen.call_args.kwargs["env"]["ORBIT_FINAL_PREFIX_EXPERIMENT"], "1")
+        self.assertEqual(popen.call_args.kwargs["env"]["ORBIT_FINAL_PREFIX_REUSE"], "1")
+        self.assertNotIn("ORBIT_FINAL_PREFIX_EXPERIMENT", popen.call_args.kwargs["env"])
 
         args = smoke_harness.build_parser().parse_args(["--manage-server", "--final-prefix-mode", "off"])
         with mock.patch.dict(smoke_harness.os.environ, {"ORBIT_FINAL_PREFIX_EXPERIMENT": "1"}), \
@@ -419,10 +463,20 @@ class SmokeHarnessTests(unittest.TestCase):
             mock.patch.object(
                 smoke_harness,
                 "fresh_backend_props",
-                side_effect=[{}, {"final_prefix_experiment_enabled": False}],
+                side_effect=[
+                    {},
+                    {
+                        "final_prefix_experiment_enabled": False,
+                        "final_prefix_reuse_enabled": False,
+                        "final_prefix_reuse_source": "stable",
+                        "final_prefix_reuse_config_error": None,
+                        "final_prefix_reuse_legacy_detected": False,
+                    },
+                ],
             ):
             with smoke_harness.managed_server(args):
                 pass
+        self.assertEqual(popen.call_args.kwargs["env"]["ORBIT_FINAL_PREFIX_REUSE"], "0")
         self.assertNotIn("ORBIT_FINAL_PREFIX_EXPERIMENT", popen.call_args.kwargs["env"])
 
     def test_managed_server_rejects_an_already_used_base_url(self) -> None:
@@ -454,7 +508,16 @@ class SmokeHarnessTests(unittest.TestCase):
             mock.patch.object(
                 smoke_harness,
                 "fresh_backend_props",
-                side_effect=[{}, {"final_prefix_experiment_enabled": False}],
+                side_effect=[
+                    {},
+                    {
+                        "final_prefix_experiment_enabled": True,
+                        "final_prefix_reuse_enabled": True,
+                        "final_prefix_reuse_source": "default",
+                        "final_prefix_reuse_config_error": None,
+                        "final_prefix_reuse_legacy_detected": False,
+                    },
+                ],
             ):
             with smoke_harness.managed_server(args):
                 pass
@@ -477,7 +540,7 @@ class SmokeHarnessTests(unittest.TestCase):
         after = {
             "final_prefix_experiment_enabled": True,
             "final_prefix_experiment_initialized": True,
-            "final_prefix_experiment_prefix_tokens": 43,
+            "final_prefix_experiment_prefix_tokens": 64,
             "final_prefix_experiment_capture_count": 1,
             "final_prefix_experiment_restore_count": 4,
             "final_prefix_experiment_fallback_count": 0,
@@ -488,7 +551,7 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(state["capture_count_delta"], 0)
         self.assertEqual(state["restore_count_delta"], 1)
         self.assertEqual(state["fallback_count_delta"], 0)
-        self.assertEqual(state["prefix_tokens"], 43)
+        self.assertEqual(state["prefix_tokens"], 64)
 
     def test_final_prefix_validation_encodes_off_capture_and_on_restore_contract(self) -> None:
         final = smoke_harness.StepReport(
@@ -500,7 +563,7 @@ class SmokeHarnessTests(unittest.TestCase):
             route_tokens=800,
             final_tokens=100,
             prompt_tokens=100,
-            cached_tokens=43,
+            cached_tokens=64,
             evaluated_tokens=57,
             finish_reason="stop",
             tool_calls=1,
@@ -520,7 +583,7 @@ class SmokeHarnessTests(unittest.TestCase):
         }
         on_props = {
             "final_prefix_experiment_enabled": True,
-            "final_prefix_experiment_prefix_tokens": 43,
+            "final_prefix_experiment_prefix_tokens": 64,
             "final_prefix_experiment_capture_count": 1,
             "final_prefix_experiment_restore_count": 1,
             "final_prefix_experiment_fallback_count": 0,
@@ -1142,10 +1205,10 @@ class SmokeHarnessTests(unittest.TestCase):
         rows = []
         for cached, evaluated, wall, restore in (
             (4, 96, 20.0, 0),
-            (43, 57, 14.0, 1),
-            (43, 57, 15.0, 1),
-            (43, 57, 13.0, 1),
-            (43, 57, 16.0, 1),
+            (64, 36, 14.0, 1),
+            (64, 36, 15.0, 1),
+            (64, 36, 13.0, 1),
+            (64, 36, 16.0, 1),
         ):
             rows.append(
                 smoke_harness.StepReport(
@@ -1176,12 +1239,12 @@ class SmokeHarnessTests(unittest.TestCase):
 
         summary = smoke_harness.summarize_reports(rows)[0]
 
-        self.assertEqual(summary["cached_tokens"]["median"], 43.0)
-        self.assertEqual(summary["evaluated_tokens"]["median"], 57.0)
+        self.assertEqual(summary["cached_tokens"]["median"], 64.0)
+        self.assertEqual(summary["evaluated_tokens"]["median"], 36.0)
         self.assertEqual(summary["runs"], 5)
         self.assertEqual(summary["restore_delta"], 4)
         self.assertEqual(summary["restored"]["runs"], 4)
-        self.assertEqual(summary["restored"]["cached_tokens"]["min"], 43.0)
+        self.assertEqual(summary["restored"]["cached_tokens"]["min"], 64.0)
 
     def test_summary_aggregates_fifty_stability_calls(self) -> None:
         row = smoke_harness.StepReport(
@@ -1193,8 +1256,8 @@ class SmokeHarnessTests(unittest.TestCase):
             route_tokens=780,
             final_tokens=100,
             prompt_tokens=100,
-            cached_tokens=43,
-            evaluated_tokens=57,
+            cached_tokens=64,
+            evaluated_tokens=36,
             finish_reason="stop",
             tool_calls=1,
             tool_names=["exec_shell_full_command"],
