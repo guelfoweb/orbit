@@ -158,9 +158,8 @@ def _prefill_hook_client(segments, *, lib=None) -> NativeLlamaClient:
 
 def _final_prefix_client(segments, *, lib=None) -> NativeLlamaClient:
     client = _prefill_hook_client(segments, lib=lib)
-    stable_tokens = list(range(1, 43))
-    prefix_tokens = stable_tokens + [43]
-    full_tokens = prefix_tokens + [44, 45]
+    stable_tokens = list(range(1, 65))
+    full_tokens = stable_tokens + [65, 66]
     client.tokenize = lambda text: {
         segments.stable_prefix_text: stable_tokens,
         segments.full_prompt_text: full_tokens,
@@ -175,7 +174,7 @@ class PrefixAnchorProbeTests(unittest.TestCase):
 
         self.assertFalse(client._final_prefix_experiment_eligible(True))
 
-    def test_final_prefix_capture_then_restore_reuses_exact_43_tokens(self) -> None:
+    def test_final_prefix_capture_then_restore_reuses_exact_64_tokens(self) -> None:
         segments = render_gemma4_route_prompt_segments(
             [
                 {"role": "system", "content": "final policy"},
@@ -192,9 +191,9 @@ class PrefixAnchorProbeTests(unittest.TestCase):
         first_start, first_reused = client._prepare_memory_with_final_prefix(plan, prompt_tokens)  # type: ignore[arg-type]
         second_start, second_reused = client._prepare_memory_with_final_prefix(plan, prompt_tokens)  # type: ignore[arg-type]
 
-        self.assertEqual((first_start, first_reused), (43, 0))
-        self.assertEqual((second_start, second_reused), (43, 43))
-        self.assertEqual(client.lib.lib.current_tokens, list(range(1, 44)))
+        self.assertEqual((first_start, first_reused), (64, 0))
+        self.assertEqual((second_start, second_reused), (64, 64))
+        self.assertEqual(client.lib.lib.current_tokens, list(range(1, 65)))
         self.assertEqual(client.final_prefix_experiment_status()["capture_count"], 1)
         self.assertEqual(client.final_prefix_experiment_status()["restore_count"], 1)
         self.assertTrue(client.final_prefix_experiment_status()["last_used"])
@@ -212,7 +211,7 @@ class PrefixAnchorProbeTests(unittest.TestCase):
         prompt_tokens = client.tokenize(segments.full_prompt_text)
         client._final_prefix_anchor_state = PrefixAnchorState(
             prefix_hash="different",
-            token_count=43,
+            token_count=64,
             valid=True,
             checkpoint_size=1,
             checkpoint_data=b"x",
@@ -228,6 +227,38 @@ class PrefixAnchorProbeTests(unittest.TestCase):
         normal_prefill.assert_called_once_with(prompt_tokens)
         self.assertEqual(client.final_prefix_experiment_status()["failure_reason"], "prefix_hash_changed")
         self.assertEqual(client.final_prefix_experiment_status()["fallback_count"], 1)
+
+    def test_stale_43_token_checkpoint_is_rejected_before_64_token_recapture(self) -> None:
+        segments = render_gemma4_route_prompt_segments(
+            [
+                {"role": "system", "content": "final policy"},
+                {"role": "user", "content": "request"},
+                {"role": "system", "content": "evidence"},
+            ],
+            thinking=False,
+        )
+        client = _final_prefix_client(segments)
+        prompt_tokens = client.tokenize(segments.full_prompt_text)
+        client._final_prefix_anchor_state = PrefixAnchorState(
+            prefix_hash="stale-43-token-checkpoint",
+            token_count=43,
+            valid=True,
+            checkpoint_size=1,
+            checkpoint_data=b"x",
+        )
+        plan = client._final_prefix_plan(segments.full_prompt_text, prompt_tokens, segments)
+
+        with patch.object(client, "_prepare_memory_for_prompt", return_value=0) as normal_prefill:
+            start, reused = client._prepare_memory_with_final_prefix(plan, prompt_tokens)  # type: ignore[arg-type]
+
+        self.assertEqual((start, reused), (0, 0))
+        normal_prefill.assert_called_once_with(prompt_tokens)
+        self.assertFalse(client.final_prefix_experiment_status()["initialized"])
+        self.assertEqual(client.final_prefix_experiment_status()["failure_reason"], "prefix_hash_changed")
+
+        start, reused = client._prepare_memory_with_final_prefix(plan, prompt_tokens)  # type: ignore[arg-type]
+        self.assertEqual((start, reused), (64, 0))
+        self.assertEqual(client.final_prefix_experiment_status()["prefix_tokens"], 64)
 
     def test_final_prefix_restore_failure_uses_normal_prefill(self) -> None:
         segments = render_gemma4_route_prompt_segments(

@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
 from orbit.native_llama.client import (
     NativeClientConfig,
@@ -45,7 +46,6 @@ PREFIX_PREWARM_ENV = "ORBIT_KV_PREFIX_PREWARM"
 PREFIX_PREWARM_OFF = "off"
 PREFIX_PREWARM_STARTUP = "startup"
 TOOLS_ENV = "ORBIT_TOOLS"
-FINAL_PREFIX_EXPERIMENT_ENV = "ORBIT_FINAL_PREFIX_EXPERIMENT"
 
 
 class OrbitNativeServer:
@@ -230,6 +230,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             mtp_last_validate_equivalence = _mtp_last_validate_equivalence_payload(state.client)
             mtp_config = _mtp_config_payload(state.client)
             final_prefix = state.client.final_prefix_experiment_status()
+            final_prefix_config = _final_prefix_reuse_props(state.client)
             self._json(
                 {
                     "model_path": str(state.client.paths.model),
@@ -289,6 +290,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "final_prefix_experiment_failure_reason": final_prefix["failure_reason"],
                     "final_prefix_experiment_last_used": final_prefix["last_used"],
                     "final_prefix_experiment_checkpoint_size_bytes": final_prefix["checkpoint_size_bytes"],
+                    **final_prefix_config,
                 }
             )
             return
@@ -573,6 +575,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
 
 def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    final_prefix_config = resolve_final_prefix_reuse()
 
     try:
         paths = resolve_bootstrap_paths(args)
@@ -590,7 +593,10 @@ def run_server(argv: list[str] | None = None) -> int:
                 mtp_accept_probe_enabled=args.enable_mtp_accept_probe,
                 mtp_decode_probe_enabled=args.enable_mtp_decode_probe,
                 use_mtp_experimental=args.enable_mtp_experimental,
-                final_prefix_experiment_enabled=os.environ.get(FINAL_PREFIX_EXPERIMENT_ENV) == "1",
+                final_prefix_experiment_enabled=final_prefix_config.enabled,
+                final_prefix_reuse_source=final_prefix_config.source,
+                final_prefix_reuse_config_error=final_prefix_config.validation_error,
+                final_prefix_reuse_legacy_detected=final_prefix_config.legacy_detected,
             ),
         )
         if not args.verbose_llama_log:
@@ -632,6 +638,15 @@ def tools_startup_enabled(environ: Mapping[str, str] | None = None) -> bool:
     if value == "off":
         return False
     return False
+
+
+def _final_prefix_reuse_props(client: NativeLlamaClient) -> dict[str, object]:
+    return {
+        "final_prefix_reuse_enabled": client.config.final_prefix_experiment_enabled,
+        "final_prefix_reuse_source": client.config.final_prefix_reuse_source,
+        "final_prefix_reuse_config_error": client.config.final_prefix_reuse_config_error,
+        "final_prefix_reuse_legacy_detected": client.config.final_prefix_reuse_legacy_detected,
+    }
 
 
 def _is_final_from_tool_prompt(messages: list[dict[str, Any]]) -> bool:

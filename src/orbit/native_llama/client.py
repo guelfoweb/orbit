@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import threading
 
+from orbit.final_prefix_config import FINAL_PREFIX_TOKEN_COUNT
+
 from .bindings import (
     GgmlAbortCallback,
     GgmlLogCallback,
@@ -67,6 +69,9 @@ class NativeClientConfig:
     mtp_decode_probe_enabled: bool = False
     use_mtp_experimental: bool = False
     final_prefix_experiment_enabled: bool = False
+    final_prefix_reuse_source: str = "default"
+    final_prefix_reuse_config_error: str | None = None
+    final_prefix_reuse_legacy_detected: bool = False
 
 
 @dataclass
@@ -1499,10 +1504,14 @@ class NativeLlamaClient:
         if segments is None:
             return None
         stable_tokens = self.tokenize(segments.stable_prefix_text)
-        if len(prompt_tokens) <= 43 or len(stable_tokens) > 43:
+        if (
+            len(prompt_tokens) <= FINAL_PREFIX_TOKEN_COUNT
+            or len(stable_tokens) != FINAL_PREFIX_TOKEN_COUNT
+            or prompt_tokens[:FINAL_PREFIX_TOKEN_COUNT] != stable_tokens
+        ):
             self._record_final_prefix_fallback("prefix_token_count_mismatch")
             return None
-        prefix_tokens = prompt_tokens[:43]
+        prefix_tokens = stable_tokens
         if segments.full_prompt_text != prompt:
             self._record_final_prefix_fallback("prefix_identity_mismatch")
             return None
@@ -1593,7 +1602,7 @@ class NativeLlamaClient:
         )
         return {
             "model_id": str(self.paths.model),
-            "template_id": f"gemma4-final-prefix-v1:{config_id}",
+            "template_id": f"gemma4-final-prefix-v2:{config_id}",
             "tool_schema_hash": "none",
             "capability_summary_hash": "none",
             "runtime_policy_hash": segments.stable_prefix_hash,

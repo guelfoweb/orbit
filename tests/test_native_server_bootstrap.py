@@ -26,6 +26,7 @@ class _FakeNativeClient:
     instances: list["_FakeNativeClient"] = []
 
     def __init__(self, *_args, **_kwargs) -> None:
+        self.config = _args[1] if len(_args) > 1 else None
         self.loaded = False
         self.closed = False
         self.capture_calls = 0
@@ -389,6 +390,29 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(len(_FakeNativeClient.instances), 1)
         self.assertEqual(_FakeNativeClient.instances[0].capture_calls, 0)
         self.assertIsNotNone(_FakeHTTPServer.instances[0].orbit_state)
+
+    @mock.patch.dict(
+        "os.environ",
+        {"ORBIT_FINAL_PREFIX_REUSE": "0", "ORBIT_FINAL_PREFIX_EXPERIMENT": "1"},
+        clear=True,
+    )
+    def test_run_server_uses_stable_final_prefix_precedence(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        config = _FakeNativeClient.instances[0].config
+        self.assertFalse(config.final_prefix_experiment_enabled)
+        self.assertEqual(config.final_prefix_reuse_source, "stable")
+        self.assertTrue(config.final_prefix_reuse_legacy_detected)
+        self.assertIsNone(config.final_prefix_reuse_config_error)
 
 
 if __name__ == "__main__":

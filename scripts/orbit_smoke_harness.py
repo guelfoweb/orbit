@@ -29,6 +29,12 @@ if str(SRC) not in sys.path:
 from orbit import __version__
 from orbit.backend.base import ChatResult
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
+from orbit.final_prefix_config import (
+    FINAL_PREFIX_EXPERIMENT_ENV,
+    FINAL_PREFIX_REUSE_ENV,
+    FINAL_PREFIX_TOKEN_COUNT,
+    resolve_final_prefix_reuse,
+)
 from orbit.runtime.chat import ChatRuntime
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import current_phase
@@ -559,7 +565,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--repetitions", type=positive_int, default=1)
-    parser.add_argument("--final-prefix-mode", choices=("inherit", "off", "on"), default="inherit")
+    parser.add_argument(
+        "--final-prefix-mode",
+        choices=(
+            "inherit",
+            "off",
+            "on",
+            "legacy-off",
+            "legacy-on",
+            "stable-off-legacy-on",
+            "stable-on-legacy-off",
+            "stable-invalid",
+        ),
+        default="inherit",
+    )
     parser.add_argument("--manage-server", action="store_true", help="Start and stop a native server for this run.")
     parser.add_argument("--server-start-timeout", type=float, default=180.0)
     parser.add_argument("--model")
@@ -1155,6 +1174,7 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "server_command": server_command(args) if args.manage_server else "external",
         "client_command": " ".join(sys.argv),
         "final_prefix": final_prefix_props(props),
+        "final_prefix_config": final_prefix_config_metadata(args.final_prefix_mode, props),
         "block_id": args.block_id,
         "run_order": args.run_order,
         "cooling_seconds": args.cooling_seconds,
@@ -1181,6 +1201,29 @@ def final_prefix_props(props: dict[str, object]) -> dict[str, object]:
     return {name: props.get(source) for name, source in FINAL_PREFIX_PROP_KEYS.items()}
 
 
+def final_prefix_config_metadata(mode: str, props: dict[str, object]) -> dict[str, object]:
+    client = final_prefix_config_for_mode(mode)
+    server_known = "final_prefix_reuse_source" in props
+    server = {
+        "enabled": props.get("final_prefix_reuse_enabled"),
+        "source": props.get("final_prefix_reuse_source"),
+        "config_error": props.get("final_prefix_reuse_config_error"),
+        "legacy_detected": props.get("final_prefix_reuse_legacy_detected"),
+    }
+    client_metadata = {
+        "enabled": client.enabled,
+        "source": client.source,
+        "config_error": client.validation_error,
+        "legacy_detected": client.legacy_detected,
+    }
+    return {
+        "requested": mode,
+        "client": client_metadata,
+        "server": server,
+        "server_client_parity": server == client_metadata if server_known else None,
+    }
+
+
 def final_prefix_step_state(before: dict[str, object], after: dict[str, object]) -> dict[str, object]:
     state = final_prefix_props(after)
     for name in ("capture_count", "restore_count", "fallback_count"):
@@ -1199,13 +1242,14 @@ def final_prefix_validation_failure(
 ) -> str | None:
     state = final_prefix_props(props)
     eligible = [report for report in reports if "final_from_tool" in report.completion_kind]
-    if mode == "off":
+    expected_enabled = final_prefix_mode_enabled(mode)
+    if expected_enabled is False:
         if state.get("enabled") is not False:
             return "off_mode_enabled"
         if any((report.final_prefix.get("capture_count_delta") or 0) > 0 for report in eligible):
             return "off_mode_capture"
         return None
-    if mode != "on":
+    if expected_enabled is not True:
         return "explicit_mode_required"
     if state.get("enabled") is not True:
         return "on_mode_disabled"
@@ -1219,7 +1263,7 @@ def final_prefix_validation_failure(
         return None
     if state.get("fallback_count") not in {0, None}:
         return "fallback_observed"
-    if state.get("prefix_tokens") != 43:
+    if state.get("prefix_tokens") != FINAL_PREFIX_TOKEN_COUNT:
         return "unexpected_prefix_tokens"
     if (state.get("capture_count") or 0) < 1:
         return "capture_missing"
@@ -1316,18 +1360,49 @@ def tool_expectation_result(expected: tuple[str, ...] | None, actual: list[str])
 
 @contextmanager
 def final_prefix_environment(mode: str):
-    previous = os.environ.get("ORBIT_FINAL_PREFIX_EXPERIMENT")
-    if mode == "on":
-        os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"] = "1"
-    elif mode == "off":
-        os.environ.pop("ORBIT_FINAL_PREFIX_EXPERIMENT", None)
+    previous = {name: os.environ.get(name) for name in (FINAL_PREFIX_REUSE_ENV, FINAL_PREFIX_EXPERIMENT_ENV)}
+    apply_final_prefix_mode(os.environ, mode)
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop("ORBIT_FINAL_PREFIX_EXPERIMENT", None)
-        else:
-            os.environ["ORBIT_FINAL_PREFIX_EXPERIMENT"] = previous
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+FINAL_PREFIX_MODE_VALUES = {
+    "off": {FINAL_PREFIX_REUSE_ENV: "0"},
+    "on": {FINAL_PREFIX_REUSE_ENV: "1"},
+    "legacy-off": {FINAL_PREFIX_EXPERIMENT_ENV: "0"},
+    "legacy-on": {FINAL_PREFIX_EXPERIMENT_ENV: "1"},
+    "stable-off-legacy-on": {FINAL_PREFIX_REUSE_ENV: "0", FINAL_PREFIX_EXPERIMENT_ENV: "1"},
+    "stable-on-legacy-off": {FINAL_PREFIX_REUSE_ENV: "1", FINAL_PREFIX_EXPERIMENT_ENV: "0"},
+    "stable-invalid": {FINAL_PREFIX_REUSE_ENV: "invalid", FINAL_PREFIX_EXPERIMENT_ENV: "1"},
+}
+
+
+def apply_final_prefix_mode(environ: dict[str, str], mode: str) -> None:
+    if mode == "inherit":
+        return
+    environ.pop(FINAL_PREFIX_REUSE_ENV, None)
+    environ.pop(FINAL_PREFIX_EXPERIMENT_ENV, None)
+    environ.update(FINAL_PREFIX_MODE_VALUES[mode])
+
+
+def final_prefix_mode_enabled(mode: str) -> bool | None:
+    if mode == "inherit":
+        return None
+    return final_prefix_config_for_mode(mode).enabled
+
+
+def final_prefix_config_for_mode(mode: str):
+    if mode == "inherit":
+        return resolve_final_prefix_reuse()
+    env: dict[str, str] = {}
+    apply_final_prefix_mode(env, mode)
+    return resolve_final_prefix_reuse(env)
 
 
 @contextmanager
@@ -1397,10 +1472,7 @@ def managed_server(args: argparse.Namespace):
         raise RuntimeError(f"managed server requires an unused base URL: {args.base_url}")
     env = os.environ.copy()
     env["ORBIT_TOOLS"] = args.tools
-    if args.final_prefix_mode == "on":
-        env["ORBIT_FINAL_PREFIX_EXPERIMENT"] = "1"
-    else:
-        env.pop("ORBIT_FINAL_PREFIX_EXPERIMENT", None)
+    apply_final_prefix_mode(env, args.final_prefix_mode)
     process = subprocess.Popen(
         server_command(args),
         cwd=ROOT,
@@ -1412,8 +1484,20 @@ def managed_server(args: argparse.Namespace):
     try:
         wait_for_server(args.base_url, process, args.server_start_timeout)
         props = fresh_backend_props(args.base_url, 2.0)
-        expected_enabled = args.final_prefix_mode == "on"
-        if props.get("final_prefix_experiment_enabled") is not expected_enabled:
+        expected = resolve_final_prefix_reuse(env)
+        actual = (
+            props.get("final_prefix_reuse_enabled"),
+            props.get("final_prefix_reuse_source"),
+            props.get("final_prefix_reuse_config_error"),
+            props.get("final_prefix_reuse_legacy_detected"),
+        )
+        expected_values = (
+            expected.enabled,
+            expected.source,
+            expected.validation_error,
+            expected.legacy_detected,
+        )
+        if actual != expected_values or props.get("final_prefix_experiment_enabled") is not expected.enabled:
             raise RuntimeError("managed server final-prefix mode does not match the requested mode")
         yield process
     finally:
@@ -1689,8 +1773,8 @@ def run_lifecycle_checks(
     jsonl_path: Path,
     markdown_path: Path,
 ) -> int:
-    if args.final_prefix_mode != "on" or not args.manage_server:
-        print("error: lifecycle checks require --manage-server --final-prefix-mode on", file=sys.stderr)
+    if final_prefix_mode_enabled(args.final_prefix_mode) is not True or not args.manage_server:
+        print("error: lifecycle checks require managed server with final-prefix reuse enabled", file=sys.stderr)
         return 2
     reports: list[StepReport] = []
     extra_rows: list[dict[str, object]] = []

@@ -20,6 +20,7 @@ from orbit.backend.llama_server import (
     _parse_chat_stream,
     _parse_model_info,
     _parse_native_stream,
+    _final_prefix_experiment_requested,
 )
 from orbit.backend.base import ChatResult
 from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
@@ -339,10 +340,44 @@ class LlamaServerBackendTests(unittest.TestCase):
                 backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
             with model_call_context(phase="final_from_tool", tools_mode="on"):
                 backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+        with mock.patch.dict(
+            os.environ,
+            {"ORBIT_FINAL_PREFIX_REUSE": "0", "ORBIT_FINAL_PREFIX_EXPERIMENT": "1"},
+            clear=True,
+        ):
+            with model_call_context(phase="final_from_tool", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
+        with mock.patch.dict(os.environ, {"ORBIT_FINAL_PREFIX_REUSE": "1"}, clear=True):
+            with model_call_context(phase="final_from_tool", tools_mode="on"):
+                backend.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=16)
 
         self.assertNotIn("final_prefix_experiment", backend.payloads[0])
         self.assertNotIn("final_prefix_experiment", backend.payloads[1])
         self.assertTrue(backend.payloads[2]["final_prefix_experiment"])
+        self.assertNotIn("final_prefix_experiment", backend.payloads[3])
+        self.assertTrue(backend.payloads[4]["final_prefix_experiment"])
+
+    def test_final_prefix_stable_configuration_controls_native_payload_request(self) -> None:
+        cases = (
+            ({}, True),
+            ({"ORBIT_FINAL_PREFIX_EXPERIMENT": "1"}, True),
+            ({"ORBIT_FINAL_PREFIX_REUSE": "1"}, True),
+            ({"ORBIT_FINAL_PREFIX_REUSE": "0", "ORBIT_FINAL_PREFIX_EXPERIMENT": "1"}, False),
+            ({"ORBIT_FINAL_PREFIX_REUSE": "1", "ORBIT_FINAL_PREFIX_EXPERIMENT": "0"}, True),
+            ({"ORBIT_FINAL_PREFIX_REUSE": "invalid", "ORBIT_FINAL_PREFIX_EXPERIMENT": "1"}, False),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True), model_call_context(
+                phase="final_from_tool", tools_mode="on"
+            ):
+                self.assertIs(_final_prefix_experiment_requested(native_backend=True), expected)
+
+    def test_final_prefix_request_remains_ineligible_without_tools_or_native_backend(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_FINAL_PREFIX_REUSE": "1"}, clear=True):
+            with model_call_context(phase="final_from_tool", tools_mode="off"):
+                self.assertFalse(_final_prefix_experiment_requested(native_backend=True))
+            with model_call_context(phase="final_from_tool", tools_mode="on"):
+                self.assertFalse(_final_prefix_experiment_requested(native_backend=False))
 
     def test_native_kv_diag_payload_carries_phase_only_when_enabled(self) -> None:
         class Backend(LlamaServerBackend):
