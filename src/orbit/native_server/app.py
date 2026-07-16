@@ -37,6 +37,7 @@ from orbit.native_server.protocol import (
     validate_session_id,
 )
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
+from orbit.runtime.tool_healing import tool_call_healing_status
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -291,6 +292,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "final_prefix_experiment_last_used": final_prefix["last_used"],
                     "final_prefix_experiment_checkpoint_size_bytes": final_prefix["checkpoint_size_bytes"],
                     **final_prefix_config,
+                    **_tool_call_healing_props(),
                 }
             )
             return
@@ -647,6 +649,10 @@ def _final_prefix_reuse_props(client: NativeLlamaClient) -> dict[str, object]:
         "final_prefix_reuse_config_error": client.config.final_prefix_reuse_config_error,
         "final_prefix_reuse_legacy_detected": client.config.final_prefix_reuse_legacy_detected,
     }
+
+
+def _tool_call_healing_props() -> dict[str, object]:
+    return tool_call_healing_status()
 
 
 def _is_final_from_tool_prompt(messages: list[dict[str, Any]]) -> bool:

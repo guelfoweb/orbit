@@ -35,11 +35,15 @@ def list_directory_definition() -> dict[str, Any]:
                     },
                     "max_depth": {
                         "type": ["integer", "null"],
+                        "minimum": 1,
+                        "maximum": MAX_DEPTH_LIMIT,
                         "description": "Maximum recursive depth. Defaults to 2 when recursive is true.",
                         "default": None,
                     },
                     "max_entries": {
                         "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_ENTRIES_LIMIT,
                         "description": "Maximum entries to return before truncating.",
                         "default": DEFAULT_MAX_ENTRIES,
                     },
@@ -64,6 +68,7 @@ def list_directory_definition() -> dict[str, Any]:
                         "default": False,
                     },
                 },
+                "required": [],
                 "additionalProperties": False,
             },
         },

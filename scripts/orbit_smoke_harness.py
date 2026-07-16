@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import statistics
 import subprocess
@@ -36,12 +39,18 @@ from orbit.final_prefix_config import (
     resolve_final_prefix_reuse,
 )
 from orbit.runtime.chat import ChatRuntime
+from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import current_phase
-from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT
-from orbit.runtime.tools import TOOL_NAMES
+from orbit.runtime.kv_diag import model_call_context
+from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT, with_tool_call_system_prompt
+from orbit.runtime.tool_backends import HybridToolExecutor
+from orbit.runtime.tool_healing import analyze_tool_attempt, tool_call_healing_status
+from orbit.runtime.tools import TOOL_NAMES, tool_definitions
 from orbit.runtime.turn_trace import ModelStepMetrics
 from orbit.terminal.runtime_status import collect_host_info
+from orbit.tool_contract_config import TOOL_CALL_CANONICAL_GATE_ENV, resolve_tool_call_canonical_gate
+from orbit.tool_healing_config import TOOL_CALL_HEALING_ENV, resolve_tool_call_healing
 
 
 CorrectnessChecker = Callable[[str, list[str]], str]
@@ -54,6 +63,7 @@ class SmokeStep:
     checker_name: str = "not_evaluated"
     expected_route: str | None = None
     expected_tool_names: tuple[str, ...] | None = None
+    expected_active_outcome: str | None = None
 
 
 FINAL_PREFIX_LOCAL_STEPS = (
@@ -181,6 +191,96 @@ ROUTE_CLASS_WEB_ERROR_STEPS = (
     ROUTE_WEB_ERROR_STEP,
 )
 
+TOOL_HEALING_STEPS = (
+    SmokeStep("show the computer specifications", mode="tool", checker_name="nonempty", expected_tool_names=("system_info",), expected_active_outcome="executed"),
+    SmokeStep("list this directory", mode="tool", checker_name="nonempty", expected_tool_names=("list_directory",), expected_active_outcome="executed"),
+    SmokeStep("read route_fixture.txt", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
+    SmokeStep('search route_fixture.txt for "route-fixture-match"', mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
+    SmokeStep("run printf 'healing-ok\\n'", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
+    SmokeStep("without changing files, delete route_fixture.txt", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="rejected_policy"),
+    SmokeStep("fetch http://127.0.0.1:9/orbit-healing", mode="tool", checker_name="nonempty", expected_tool_names=("fetch_url",), expected_active_outcome="runtime_error"),
+    SmokeStep("fetch file:///etc/passwd", mode="tool", checker_name="nonempty", expected_tool_names=("fetch_url",), expected_active_outcome="runtime_error"),
+    SmokeStep("run pwd and answer briefly", mode="tool", checker_name="path_like", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
+    SmokeStep("run printf 'near-limit-%080d\\n' 1", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
+    SmokeStep("Explain in one sentence that system_info is a tool name; do not call tools.", mode="tool", checker_name="nonempty", expected_tool_names=(), expected_active_outcome="executed"),
+    SmokeStep('Show this JSON example literally: {"name":"system_info","arguments":{}}. Do not call it.', mode="tool", checker_name="nonempty", expected_tool_names=(), expected_active_outcome="executed"),
+    SmokeStep("Call system_info and list_directory in the same response.", mode="tool", checker_name="nonempty", expected_tool_names=("system_info", "list_directory"), expected_active_outcome="executed"),
+)
+TOOL_HEALING_QUICK_STEPS = (
+    TOOL_HEALING_STEPS[8],
+    TOOL_HEALING_STEPS[1],
+    TOOL_HEALING_STEPS[10],
+    TOOL_HEALING_STEPS[11],
+    TOOL_HEALING_STEPS[12],
+)
+CANONICAL_GATE_REAL_STEPS = (
+    TOOL_HEALING_STEPS[0],
+    TOOL_HEALING_STEPS[1],
+    TOOL_HEALING_STEPS[2],
+    TOOL_HEALING_STEPS[3],
+    TOOL_HEALING_STEPS[4],
+    SmokeStep("run command_that_does_not_exist_123", mode="tool", checker_name="shell_error", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="runtime_error"),
+    TOOL_HEALING_STEPS[6],
+    TOOL_HEALING_STEPS[11],
+)
+
+TOOL_CALL_GENERATION_CORPUS = (
+    *((f"system_info_{index}", "system_info", prompt) for index, prompt in enumerate((
+        "Show the synthetic computer specifications.",
+        "Report OS, CPU, memory, disks, and runtime for this test machine.",
+        "Use the system information tool for current machine details.",
+        "Inspect this computer's hardware and operating system.",
+        "Return the available system specification fields.",
+    ), 1)),
+    *((f"list_directory_{index}", "list_directory", prompt) for index, prompt in enumerate((
+        "List the current synthetic directory.",
+        "Show files in the fixture directory without reading them.",
+        "List this directory recursively to depth two.",
+        "Return only files from the current directory.",
+        "Show hidden and normal entries in this fixture directory.",
+    ), 1)),
+    *((f"read_file_{index}", "exec_shell_full_command", prompt) for index, prompt in enumerate((
+        "Read fixture-alpha.txt.",
+        "Show the exact content of fixture-beta.txt.",
+        "Open the synthetic file fixture-gamma.txt.",
+        "Read the file named fixture with spaces.txt.",
+        "Display the first line of fixture-delta.txt.",
+    ), 1)),
+    *((f"grep_search_{index}", "exec_shell_full_command", prompt) for index, prompt in enumerate((
+        "Search fixture-alpha.txt for alpha.",
+        "Find lines containing beta in the fixture files.",
+        "Run a recursive grep for synthetic-match.",
+        "Search the spaced fixture path for gamma.",
+        "Count exact delta matches in fixture-delta.txt.",
+    ), 1)),
+    *((f"fetch_url_{index}", "fetch_url", prompt) for index, prompt in enumerate((
+        "Fetch https://example.invalid/fixture-one.",
+        "Read https://example.invalid/fixture-two?x=1.",
+        "Fetch the synthetic URL https://example.invalid/a/b.",
+        "Retrieve https://example.invalid/empty.",
+        "Open https://example.invalid/error for inspection.",
+    ), 1)),
+    *((f"exec_shell_{index}", "exec_shell_full_command", prompt) for index, prompt in enumerate((
+        "Run printf 'synthetic-ok\\n'.",
+        "Run pwd in the current fixture directory.",
+        "Run printf '%s\\n' alpha beta.",
+        "Run wc -l fixture-alpha.txt.",
+        "Run test -f fixture-beta.txt and print present.",
+    ), 1)),
+    *((f"negative_{index}", None, prompt) for index, prompt in enumerate((
+        "Explain the phrase system_info without calling tools.",
+        "Write one sentence containing the words list_directory.",
+        "Describe what fetch_url might mean in documentation.",
+        "Show the literal text exec_shell_full_command.",
+        "Explain that arguments is a JSON field.",
+        'Quote this example without executing it: {"name":"system_info","arguments":{}}.',
+        'Show a JSON example with {"tool":"list_directory"}.',
+        "Say that tool calls are structured model outputs.",
+        "Compare the words name, function, and arguments.",
+        "Answer only: no tool is required.",
+    ), 1)),
+)
+
 
 @dataclass(frozen=True)
 class SmokeScenario:
@@ -237,12 +337,14 @@ class StepReport:
     downstream_final_correct: bool | None = None
     retry_required: bool = False
     route_fallback_used: bool = False
+    tool_healing_diagnostics_enabled: bool = False
+    tool_healing_attempts: list[dict[str, object]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, object]:
         return {
             "case": self.case,
             "step": self.step,
-            "prompt": self.prompt,
+            "prompt": "<redacted>" if self.tool_healing_diagnostics_enabled else self.prompt,
             "prompt_kind": self.prompt_kind,
             "completion_kind": self.completion_kind,
             "route_tokens": self.route_tokens,
@@ -260,7 +362,7 @@ class StepReport:
             "fake_output": self.fake_output,
             "loop": self.loop,
             "notes": self.notes,
-            "answer_excerpt": self.answer_excerpt,
+            "answer_excerpt": "<redacted>" if self.tool_healing_diagnostics_enabled else self.answer_excerpt,
             "model_steps": self.model_steps,
             "final_prefix": self.final_prefix,
             "lifecycle": self.lifecycle,
@@ -282,6 +384,8 @@ class StepReport:
             "downstream_final_correct": self.downstream_final_correct,
             "retry_required": self.retry_required,
             "route_fallback_used": self.route_fallback_used,
+            "tool_healing_diagnostics_enabled": self.tool_healing_diagnostics_enabled,
+            "tool_healing_attempts": self.tool_healing_attempts,
         }
 
 
@@ -344,13 +448,31 @@ class ProbeBackend:
 
 ROUTE_OUTPUT_CLASSES = ("canonical", "legacy_tolerated", "direct_prose", "malformed", "control_loop")
 ROUTE_FALLBACK_OUTCOMES = {"route_invalid_output", "route_no_decision_length_retry", "route_retry_invalid_output"}
+TOOL_HEALING_RECOVERABLE = {
+    "recoverable_envelope",
+    "recoverable_trailing_comma",
+    "recoverable_unambiguous_delimiter",
+    "recoverable_arguments_string",
+    "recoverable_structural_alias",
+}
+TOOL_HEALING_FORMAL_ERRORS = {
+    "missing_required",
+    "wrong_type",
+    "extra_argument",
+    "unknown_tool",
+    "multiple_candidates",
+    "ambiguous_attempt",
+    "truncated_attempt",
+}
 
 
 class RouteDiagnosticCollector:
-    def __init__(self, root: Path, *, store_mode: str) -> None:
+    def __init__(self, root: Path, *, store_mode: str, tool_healing: bool = False, route_output: bool = True) -> None:
         self.path = root / "route-kv-diag.jsonl"
         self.store_root = root / "evidence"
         self.store_mode = store_mode
+        self.tool_healing = tool_healing
+        self.route_output = route_output
         self._store_index = 0
 
     def mark(self) -> int:
@@ -360,13 +482,19 @@ class RouteDiagnosticCollector:
             return 0
 
     def events_since(self, offset: int) -> list[dict[str, object]]:
+        return parse_route_diagnostic_lines(self.lines_since(offset))
+
+    def tool_healing_events_since(self, offset: int) -> list[dict[str, object]]:
+        return parse_tool_healing_diagnostic_lines(self.lines_since(offset))
+
+    def lines_since(self, offset: int) -> list[str]:
         try:
             with self.path.open("rb") as handle:
                 handle.seek(offset)
                 lines = [line.decode("utf-8", errors="replace") for line in handle.readlines()]
         except OSError:
             return []
-        return parse_route_diagnostic_lines(lines)
+        return lines
 
     def new_evidence_store(self, workdir: Path) -> EvidenceStore:
         self._store_index += 1
@@ -410,6 +538,138 @@ def parse_route_diagnostic_lines(lines: list[str]) -> list[dict[str, object]]:
     return events
 
 
+def parse_tool_healing_diagnostic_lines(lines: list[str]) -> list[dict[str, object]]:
+    attempts: dict[str, dict[str, object]] = {}
+    order: list[str] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or value.get("event") not in {
+            "kv_diag_tool_healing_shadow",
+            "kv_diag_tool_healing_terminal",
+        }:
+            continue
+        attempt_id = bounded_hex(value.get("attempt_id"), length=32)
+        if attempt_id is None:
+            continue
+        if attempt_id not in attempts:
+            attempts[attempt_id] = {"attempt_id": attempt_id}
+            order.append(attempt_id)
+        attempt = attempts[attempt_id]
+        if value.get("event") == "kv_diag_tool_healing_shadow":
+            repairs = value.get("repairs") if isinstance(value.get("repairs"), list) else []
+            signals = value.get("signals") if isinstance(value.get("signals"), list) else []
+            attempt.update(
+                {
+                    "attempt_detected": value.get("attempt_detected") if isinstance(value.get("attempt_detected"), bool) else None,
+                    "signals": [item for item in (bounded_identifier(item) for item in signals) if item],
+                    "candidate_count": value.get("candidate_count") if isinstance(value.get("candidate_count"), int) else None,
+                    "candidate_source": bounded_identifier(value.get("candidate_source")),
+                    "repairs": [item for item in (bounded_identifier(item) for item in repairs) if item],
+                    "strict_outcome": bounded_identifier(value.get("shadow_outcome")),
+                    "parse_error": bounded_identifier(value.get("parse_error")),
+                    "validation_error": bounded_identifier(value.get("validation_error")),
+                    "formal_repairable": value.get("formal_repairable") if isinstance(value.get("formal_repairable"), bool) else None,
+                    "formal_repair_reason": bounded_identifier(value.get("formal_repair_reason")),
+                    "formal_argument_count": value.get("formal_argument_count") if isinstance(value.get("formal_argument_count"), int) else None,
+                    "finish_reason": bounded_identifier(value.get("finish_reason")),
+                    "output_tokens": value.get("output_tokens") if isinstance(value.get("output_tokens"), int) else None,
+                    "healing_us": value.get("healing_us") if isinstance(value.get("healing_us"), int | float) else None,
+                    "candidate_hash": bounded_hex(value.get("candidate_hash"), length=16),
+                    "original_tool_name_hash": bounded_hex(value.get("original_tool_name_hash"), length=16),
+                    "normalized_tool_name_hash": bounded_hex(value.get("normalized_tool_name_hash"), length=16),
+                    "normalized_arguments_hash": bounded_hex(value.get("normalized_arguments_hash"), length=16),
+                }
+            )
+        else:
+            attempt.update(
+                {
+                    "active_candidate_count": value.get("active_candidate_count") if isinstance(value.get("active_candidate_count"), int) else None,
+                    "active_tool_name_hash": bounded_hex(value.get("active_tool_name_hash"), length=16),
+                    "active_arguments_hash": bounded_hex(value.get("active_arguments_hash"), length=16),
+                    "active_outcome": bounded_identifier(value.get("active_outcome")),
+                    "terminal_reason": bounded_identifier(value.get("terminal_reason")),
+                    "agreement": bounded_identifier(value.get("agreement")),
+                    "active_canonical_outcome": bounded_identifier(value.get("active_canonical_outcome")),
+                    "active_canonical_error": bounded_identifier(value.get("active_canonical_error")),
+                }
+            )
+    for attempt in attempts.values():
+        attempt["categories"] = tool_healing_categories(attempt)
+    return [attempts[attempt_id] for attempt_id in order]
+
+
+def tool_healing_categories(attempt: dict[str, object]) -> list[str]:
+    categories: list[str] = []
+    repairs = set(attempt.get("repairs") or [])
+    source = attempt.get("candidate_source")
+    validation = attempt.get("validation_error")
+    parse_error = attempt.get("parse_error")
+    active = attempt.get("active_outcome")
+    finish_reason = attempt.get("finish_reason")
+    interrupted = active in {"cancelled", "timeout"} or finish_reason in {"cancelled", "timeout"}
+    if not interrupted and (
+        attempt.get("strict_outcome") == "no_attempt" or attempt.get("attempt_detected") is False
+    ):
+        categories.append("no_attempt")
+    if finish_reason == "length":
+        categories.append("budget_truncation")
+    if attempt.get("strict_outcome") == "valid_shadow_candidate" and (
+        not repairs or (source == "backend" and repairs <= {"unwrap_function_object", "decode_arguments_string"})
+    ):
+        categories.append("valid_first_pass")
+    if repairs & {"unwrap_function_object", "unwrap_named_wrapper", "wrap_top_level_arguments"} and source != "backend":
+        categories.append("recoverable_envelope")
+    if "remove_trailing_comma" in repairs:
+        categories.append("recoverable_trailing_comma")
+    if repairs & {"close_json_structure", "unclosed_tool_call_tag", "unclosed_tool_call_wrapper"}:
+        categories.append("recoverable_unambiguous_delimiter")
+    if "decode_arguments_string" in repairs and source != "backend":
+        categories.append("recoverable_arguments_string")
+    if "normalize_tool_field" in repairs:
+        categories.append("recoverable_structural_alias")
+    error_categories = {
+        "missing_required": "missing_required",
+        "empty_required_value": "missing_required",
+        "type_mismatch": "wrong_type",
+        "additional_property": "extra_argument",
+        "unknown_tool": "unknown_tool",
+        "multiple_candidates": "multiple_candidates",
+        "unterminated_json_string": "truncated_attempt",
+    }
+    mapped = error_categories.get(validation) or error_categories.get(parse_error)
+    if mapped:
+        categories.append(mapped)
+    if parse_error and mapped is None:
+        categories.append("ambiguous_attempt")
+    if active in {"rejected_policy", "rejected_guardrail", "rejected_permission"}:
+        categories.append("policy_denied")
+    active_accepted = active in {"executed", "runtime_error"}
+    if active_accepted and validation == "type_mismatch":
+        categories.append("active_default_used")
+    if active_accepted and validation == "limit_out_of_range":
+        categories.append("active_clamp_used")
+    if active_accepted and validation == "additional_property":
+        categories.append("active_ignored_extra")
+    if active == "runtime_error":
+        categories.append("executor_error")
+    if active == "superseded":
+        categories.append("superseded")
+    if attempt.get("agreement") == "uncorrelated" or (
+        attempt.get("attempt_detected") is False and active in {"cancelled", "timeout"}
+    ):
+        categories.append("uncorrelated")
+    return list(dict.fromkeys(categories or ["ambiguous_attempt"]))
+
+
+def bounded_hex(value: object, *, length: int) -> str | None:
+    if not isinstance(value, str) or len(value) != length:
+        return None
+    return value if all(character in "0123456789abcdef" for character in value) else None
+
+
 def bounded_identifier(value: object, *, limit: int = 80) -> str | None:
     if not isinstance(value, str) or not value or len(value) > limit:
         return None
@@ -419,16 +679,30 @@ def bounded_identifier(value: object, *, limit: int = 80) -> str | None:
 
 
 @contextmanager
-def route_diagnostic_environment(enabled: bool, *, store_mode: str):
+def route_diagnostic_environment(
+    enabled: bool,
+    *,
+    store_mode: str,
+    tool_healing: bool = False,
+    route_output: bool = True,
+):
     if not enabled:
         yield None
         return
     previous_enabled = os.environ.get("ORBIT_KV_DIAG")
     previous_path = os.environ.get("ORBIT_KV_DIAG_FILE")
+    previous_healing = os.environ.get("ORBIT_TOOL_CALL_HEALING_SHADOW")
     with tempfile.TemporaryDirectory(prefix="orbit-route-diag-") as tmp:
-        collector = RouteDiagnosticCollector(Path(tmp), store_mode=store_mode)
+        collector = RouteDiagnosticCollector(
+            Path(tmp),
+            store_mode=store_mode,
+            tool_healing=tool_healing,
+            route_output=route_output,
+        )
         os.environ["ORBIT_KV_DIAG"] = "1"
         os.environ["ORBIT_KV_DIAG_FILE"] = str(collector.path)
+        if tool_healing:
+            os.environ["ORBIT_TOOL_CALL_HEALING_SHADOW"] = "1"
         try:
             yield collector
         finally:
@@ -440,6 +714,10 @@ def route_diagnostic_environment(enabled: bool, *, store_mode: str):
                 os.environ.pop("ORBIT_KV_DIAG_FILE", None)
             else:
                 os.environ["ORBIT_KV_DIAG_FILE"] = previous_path
+            if previous_healing is None:
+                os.environ.pop("ORBIT_TOOL_CALL_HEALING_SHADOW", None)
+            else:
+                os.environ["ORBIT_TOOL_CALL_HEALING_SHADOW"] = previous_healing
 
 
 def mtp_state_from_props(props: dict[str, object]) -> dict[str, object]:
@@ -481,14 +759,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.lifecycle_check:
         return run_lifecycle_checks(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
+    if args.tool_call_generation_only:
+        return run_tool_call_generation_benchmark(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
 
     with (
         final_prefix_environment(args.final_prefix_mode),
+        canonical_gate_environment(args.canonical_gate),
+        tool_healing_environment(args.tool_healing_mode),
         deterministic_web(args.deterministic_web),
         managed_server(args) as server_process,
         route_diagnostic_environment(
-            args.route_output_diagnostics,
+            args.route_output_diagnostics or args.tool_healing_diagnostics,
             store_mode=args.route_diagnostic_store,
+            tool_healing=args.tool_healing_diagnostics,
+            route_output=args.route_output_diagnostics,
         ) as route_collector,
     ):
         backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
@@ -528,7 +812,11 @@ def main(argv: list[str] | None = None) -> int:
         env["server_pid"] = server_process.pid if server_process is not None else None
         env["server_rss_before_kib"] = rss_before_kib
         env["server_rss_after_kib"] = process_rss_kib(server_process)
-    write_jsonl(jsonl_path, env, reports)
+    replay_rows = run_tool_healing_replay(Path(args.workdir)) if args.tool_healing_replay else []
+    if replay_rows:
+        write_jsonl(jsonl_path, env, reports, extra_rows=replay_rows)
+    else:
+        write_jsonl(jsonl_path, env, reports)
     write_markdown(markdown_path, env, reports)
     if args.verify_final_prefix:
         failure = final_prefix_validation_failure(args.final_prefix_mode, reports, final_props, tools_mode=args.tools)
@@ -564,6 +852,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--canonical-gate",
+        choices=("inherit", "off", "on"),
+        default="inherit",
+        help="Control the runtime canonical tool-call gate for this benchmark only.",
+    )
+    parser.add_argument(
+        "--tool-healing-mode",
+        choices=("inherit", "off", "on"),
+        default="inherit",
+        help="Control deterministic tool-call healing for this benchmark only.",
+    )
     parser.add_argument("--repetitions", type=positive_int, default=1)
     parser.add_argument(
         "--final-prefix-mode",
@@ -601,6 +901,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Collect bounded route-output classifications from existing KV diagnostic events.",
     )
     parser.add_argument(
+        "--tool-healing-diagnostics",
+        action="store_true",
+        help="Collect bounded shadow/terminal tool-attempt diagnostics by attempt_id.",
+    )
+    parser.add_argument(
+        "--tool-healing-replay",
+        action="store_true",
+        help="Append a content-free summary of the labelled structural replay corpus.",
+    )
+    parser.add_argument(
+        "--tool-call-generation-only",
+        action="store_true",
+        help="Generate exactly one production-template tool-mode ChatResult per corpus item without executing tools.",
+    )
+    parser.add_argument(
+        "--tool-call-generation-smoke",
+        action="store_true",
+        help="Use one prompt per tool family plus two negatives instead of the full 40-prompt corpus.",
+    )
+    parser.add_argument(
         "--route-diagnostic-store",
         choices=("clean", "existing-snapshot"),
         default="clean",
@@ -619,6 +939,333 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail unless OFF/ON final-prefix counters match the requested experimental mode.",
     )
     return parser
+
+
+def run_tool_call_generation_benchmark(
+    args: argparse.Namespace,
+    *,
+    jsonl_path: Path,
+    markdown_path: Path,
+) -> int:
+    with final_prefix_environment(args.final_prefix_mode), managed_server(args) as server_process:
+        backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
+        backend.thinking = args.server_thinking == "on"
+        initial_props = safe_backend_props(backend)
+        initial_mtp = mtp_state_from_props(initial_props)
+        if args.mtp_required and not (initial_mtp["requested"] and initial_mtp["session_ready"]):
+            print("error: --mtp-required set but backend MTP is not initialized", file=sys.stderr)
+            return 2
+        corpus = tool_call_generation_corpus(smoke=args.tool_call_generation_smoke)
+        rows: list[dict[str, object]] = []
+        workdir = Path(args.workdir)
+        for repetition in range(1, args.repetitions + 1):
+            for scenario, expected_tool, prompt in corpus:
+                rows.append(
+                    run_tool_call_generation_sample(
+                        backend,
+                        base_url=args.base_url,
+                        timeout=args.timeout,
+                        workdir=workdir,
+                        scenario=scenario,
+                        prompt=prompt,
+                        expected_tool=expected_tool,
+                        repetition=repetition,
+                        temperature=args.temperature,
+                        max_tokens=args.max_tokens,
+                    )
+                )
+        final_props = settled_backend_props(args.base_url, args.timeout)
+        env = environment_summary(args=args, backend=backend, props=final_props)
+        env.update(
+            {
+                "type": "environment",
+                "benchmark_mode": "tool_call_generation_only",
+                "server_pid": server_process.pid if server_process is not None else None,
+                "corpus_size": len(corpus),
+                "repetitions": args.repetitions,
+                "mtp_tool_mode_eligible": False,
+            }
+        )
+    summary = summarize_tool_call_generation(rows, mtp=env.get("mtp"))
+    write_tool_call_generation_jsonl(jsonl_path, env, rows, summary)
+    write_tool_call_generation_markdown(markdown_path, env, summary)
+    print(f"jsonl={jsonl_path}")
+    print(f"markdown={markdown_path}")
+    return 1 if any(row.get("cleanup_healthy") is False for row in rows) else 0
+
+
+def tool_call_generation_corpus(*, smoke: bool) -> tuple[tuple[str, str | None, str], ...]:
+    if not smoke:
+        return TOOL_CALL_GENERATION_CORPUS
+    selected = {
+        "system_info_1", "list_directory_1", "read_file_1", "grep_search_1",
+        "fetch_url_1", "exec_shell_1", "negative_1", "negative_6",
+    }
+    return tuple(item for item in TOOL_CALL_GENERATION_CORPUS if item[0] in selected)
+
+
+def run_tool_call_generation_sample(
+    backend: LlamaServerBackend,
+    *,
+    base_url: str,
+    timeout: float,
+    workdir: Path,
+    scenario: str,
+    prompt: str,
+    expected_tool: str | None,
+    repetition: int,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, object]:
+    runtime = ChatRuntime(backend=ProbeBackend(backend), system_prompt=DEFAULT_SYSTEM_PROMPT)
+    runtime.messages.append({"role": "user", "content": prompt})
+    messages = with_tool_call_system_prompt(runtime.messages)
+    executor = HybridToolExecutor(
+        backend=backend if hasattr(backend, "server_tools") else None,
+        workdir=workdir,
+        allowed_tool_names=TOOL_NAMES,
+        user_prompt=prompt,
+    )
+    tools = executor.tool_definitions()
+    result_queue: queue.Queue[ChatResult | BaseException] = queue.Queue(maxsize=1)
+
+    def generate() -> None:
+        try:
+            with model_call_context(phase="tool_call", tools_mode="on"):
+                result_queue.put(
+                    runtime._chat_tool_call_once(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=resolve_max_tokens("tool_call", max_tokens),
+                        tools=tools,
+                        on_final_delta=None,
+                        on_progress=None,
+                    )
+                )
+        except BaseException as exc:
+            result_queue.put(exc)
+
+    worker = threading.Thread(target=generate, daemon=True)
+    started = time.perf_counter()
+    worker.start()
+    worker.join(timeout)
+    timed_out = worker.is_alive()
+    cancel_requested = False
+    cleanup_started = time.perf_counter()
+    if timed_out:
+        cancel_requested = request_backend_cancel(base_url, timeout=min(5.0, max(1.0, timeout)))
+    props = wait_for_backend_idle(base_url, timeout=min(10.0, max(2.0, timeout / 5.0)))
+    worker.join(min(2.0, max(0.5, timeout / 10.0)))
+    cleanup_ms = round((time.perf_counter() - cleanup_started) * 1000, 1)
+    wall_ms = round((time.perf_counter() - started) * 1000, 1)
+    value = result_queue.get_nowait() if not result_queue.empty() else None
+    result = value if isinstance(value, ChatResult) else None
+    error = value if isinstance(value, BaseException) else None
+    cancelled = bool(result and result.finish_reason == "cancelled")
+    evaluable = result is not None and not timed_out and not cancelled and error is None
+    if result is not None:
+        analysis_started = time.perf_counter_ns()
+        report = analyze_tool_attempt(
+            text=result.content,
+            tool_calls=result.tool_calls,
+            tool_definitions=tools,
+            allowed_tool_names=TOOL_NAMES,
+            workdir=workdir,
+            user_prompt=prompt,
+            finish_reason=result.finish_reason,
+        )
+        healing_us = round((time.perf_counter_ns() - analysis_started) / 1000, 1)
+        categories = tool_healing_categories(
+            {
+                "candidate_source": report.candidate_source,
+                "repairs": list(report.repairs),
+                "strict_outcome": report.outcome,
+                "parse_error": report.parse_error,
+                "validation_error": report.validation_error,
+                "attempt_detected": report.attempt_detected,
+                "finish_reason": result.finish_reason,
+            }
+        )
+        markup_leakage = bool(re.search(r"<\|?tool_call|\[TOOL_CALLS\]|\[ARGS\]", result.content, re.IGNORECASE))
+    else:
+        report = None
+        healing_us = None
+        categories = ["uncorrelated"]
+        markup_leakage = False
+    prompt_tokens = result.prompt_tokens if result else None
+    cached_tokens = result.cached_tokens if result else None
+    output_tokens = result.completion_tokens if result else None
+    evaluated_tokens = prompt_tokens - cached_tokens if isinstance(prompt_tokens, int) and isinstance(cached_tokens, int) else None
+    if not evaluable:
+        semantic_outcome = "not_evaluable"
+    elif expected_tool is None:
+        semantic_outcome = "unwanted_tool_call" if report and report.attempt_detected else "no_attempt"
+    elif report and not report.attempt_detected:
+        semantic_outcome = "missing_tool_call"
+    elif report and report.tool_name == expected_tool:
+        semantic_outcome = "expected_tool"
+    else:
+        semantic_outcome = "wrong_tool"
+    budget_truncation = bool(result and result.finish_reason == "length")
+    structural_truncation = "truncated_attempt" in categories
+    return {
+        "type": "tool_call_generation",
+        "scenario": scenario,
+        "repetition": repetition,
+        "expected_tool": expected_tool,
+        "template": "production_tool_call_system_prompt",
+        "model_calls": 1,
+        "prompt_tokens": prompt_tokens,
+        "cached_tokens": cached_tokens,
+        "evaluated_tokens": evaluated_tokens,
+        "output_tokens": output_tokens,
+        "finish_reason": result.finish_reason if result else "timeout" if timed_out else "error",
+        "generation_wall_ms": wall_ms,
+        "estimated_prefill_ms": estimated_phase_ms(evaluated_tokens, result.prompt_tokens_per_second if result else None),
+        "estimated_decode_ms": estimated_phase_ms(output_tokens, result.generation_tokens_per_second if result else None),
+        "prompt_tokens_per_second": result.prompt_tokens_per_second if result else None,
+        "generation_tokens_per_second": result.generation_tokens_per_second if result else None,
+        "healing_us": healing_us,
+        "cleanup_ms": cleanup_ms,
+        "timeout": timed_out,
+        "cancel_requested": cancel_requested,
+        "cancelled": cancelled,
+        "cleanup_healthy": props.get("in_flight") is False and not worker.is_alive(),
+        "evaluable": evaluable,
+        "attempt_detected": report.attempt_detected if report else None,
+        "candidate_count": report.candidate_count if report else None,
+        "strict_valid": report.outcome == "valid_shadow_candidate" if report else None,
+        "strict_outcome": report.outcome if report else None,
+        "candidate_source": bounded_identifier(report.candidate_source) if report else None,
+        "parse_error": report.parse_error if report else None,
+        "validation_error": report.validation_error if report else None,
+        "repairs": list(report.repairs) if report else [],
+        "formal_repairable": report.formal_repairable if report else None,
+        "formal_repair_reason": report.formal_repair_reason if report else None,
+        "formal_argument_count": report.formal_argument_count if report else None,
+        "categories": categories,
+        "semantic_outcome": semantic_outcome,
+        "tool_name_exact_match": report.tool_name == expected_tool if report and expected_tool is not None else report.attempt_detected is False if report else None,
+        "markup_leakage": markup_leakage,
+        "multiple_candidates": bool(report and report.candidate_count > 1),
+        "budget_truncation": budget_truncation,
+        "structural_truncation": structural_truncation,
+        "truncation": budget_truncation or structural_truncation,
+        "tool_executed": False,
+        "finalization_started": False,
+        "error_type": type(error).__name__ if error is not None else None,
+    }
+
+
+def estimated_phase_ms(tokens: int | None, rate: float | None) -> float | None:
+    if not isinstance(tokens, int) or not isinstance(rate, int | float) or rate <= 0:
+        return None
+    return round(tokens / float(rate) * 1000, 1)
+
+
+def summarize_tool_call_generation(rows: list[dict[str, object]], *, mtp: object) -> dict[str, object]:
+    evaluable = [row for row in rows if row.get("evaluable") is True]
+    detected = [row for row in evaluable if row.get("attempt_detected") is True]
+    positive = [row for row in evaluable if row.get("expected_tool") is not None]
+    negative = [row for row in evaluable if row.get("expected_tool") is None]
+    latencies = [float(row["generation_wall_ms"]) for row in evaluable if isinstance(row.get("generation_wall_ms"), int | float)]
+    healing = [float(row["healing_us"]) for row in evaluable if isinstance(row.get("healing_us"), int | float)]
+    category_counts: dict[str, int] = {}
+    for row in evaluable:
+        for category in row.get("categories") or []:
+            category_counts[category] = category_counts.get(category, 0) + 1
+    return {
+        "type": "tool_call_generation_summary",
+        "mtp": bounded_identifier(mtp),
+        "samples": len(rows),
+        "evaluable": len(evaluable),
+        "completion_rate": ratio(len(evaluable), len(rows)),
+        "timeout_rate": ratio(sum(row.get("timeout") is True for row in rows), len(rows)),
+        "cancel_rate": ratio(sum(row.get("cancelled") is True for row in rows), len(rows)),
+        "cleanup_success_rate": ratio(sum(row.get("cleanup_healthy") is True for row in rows), len(rows)),
+        "valid_first_pass_rate": ratio(
+            sum("valid_first_pass" in (row.get("categories") or []) for row in detected),
+            len(detected),
+        ),
+        "valid_first_pass_output_rate": ratio(
+            sum("valid_first_pass" in (row.get("categories") or []) for row in evaluable),
+            len(evaluable),
+        ),
+        "no_attempt_rate": ratio(
+            sum("no_attempt" in (row.get("categories") or []) for row in evaluable),
+            len(evaluable),
+        ),
+        "deterministic_repair_candidate_rate": ratio(
+            sum(
+                row.get("formal_repairable") is True
+                and "budget_truncation" not in (row.get("categories") or [])
+                for row in detected
+            ),
+            len(detected),
+        ),
+        "formal_error_rate": ratio(
+            sum(any(category in TOOL_HEALING_FORMAL_ERRORS for category in row.get("categories") or []) for row in detected),
+            len(detected),
+        ),
+        "detected_rate": ratio(sum(row.get("attempt_detected") is True for row in evaluable), len(evaluable)),
+        "exact_tool_match_rate": ratio(sum(row.get("tool_name_exact_match") is True for row in positive), len(positive)),
+        "model_missing_attempt_rate": ratio(sum(row.get("attempt_detected") is False for row in positive), len(positive)),
+        "model_unwanted_attempt_rate": ratio(sum(row.get("attempt_detected") is True for row in negative), len(negative)),
+        "detector_false_positive_rate": ratio(
+            sum(row.get("attempt_detected") is True and row.get("strict_outcome") == "no_attempt" for row in evaluable),
+            len(evaluable),
+        ),
+        "detector_false_negative_rate": ratio(
+            sum(row.get("attempt_detected") is False and row.get("markup_leakage") is True for row in evaluable),
+            len(evaluable),
+        ),
+        "multiple_candidate_rate": ratio(sum(row.get("multiple_candidates") is True for row in evaluable), len(evaluable)),
+        "truncation_rate": ratio(sum(row.get("truncation") is True for row in evaluable), len(evaluable)),
+        "budget_truncation_rate": ratio(sum(row.get("budget_truncation") is True for row in evaluable), len(evaluable)),
+        "structural_truncation_rate": ratio(sum(row.get("structural_truncation") is True for row in evaluable), len(evaluable)),
+        "semantic_wrong_tool_rate": ratio(sum(row.get("semantic_outcome") == "wrong_tool" for row in positive), len(positive)),
+        "semantic_unwanted_tool_rate": ratio(sum(row.get("semantic_outcome") == "unwanted_tool_call" for row in negative), len(negative)),
+        "markup_leakage_rate": ratio(sum(row.get("markup_leakage") is True for row in evaluable), len(evaluable)),
+        "category_counts": category_counts,
+        "generation_wall_ms_median": round(statistics.median(latencies), 1) if latencies else None,
+        "generation_wall_ms_p95": percentile(latencies, 0.95),
+        "healing_us_median": round(statistics.median(healing), 1) if healing else None,
+        "healing_us_p95": percentile(healing, 0.95),
+        "model_calls": sum(int(row.get("model_calls") or 0) for row in rows),
+        "tools_executed": sum(row.get("tool_executed") is True for row in rows),
+        "finalizations_started": sum(row.get("finalization_started") is True for row in rows),
+    }
+
+
+def write_tool_call_generation_jsonl(
+    path: Path,
+    env: dict[str, object],
+    rows: list[dict[str, object]],
+    summary: dict[str, object],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(env, ensure_ascii=False, sort_keys=True) + "\n")
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.write(json.dumps(summary, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def write_tool_call_generation_markdown(
+    path: Path,
+    env: dict[str, object],
+    summary: dict[str, object],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Orbit Tool-Call Generation Benchmark\n\n"
+        f"- Model: `{env.get('model')}`\n"
+        f"- MTP: `{env.get('mtp')}`\n"
+        f"- Samples: `{summary.get('samples')}`\n"
+        f"- Evaluable: `{summary.get('evaluable')}`\n"
+        f"- Completion rate: `{summary.get('completion_rate')}`\n",
+        encoding="utf-8",
+    )
 
 
 def scenarios() -> dict[str, SmokeScenario]:
@@ -791,6 +1438,38 @@ def scenarios() -> dict[str, SmokeScenario]:
             allowed_tool_names=TOOL_NAMES,
             family="fragile_web_error",
         ),
+        "tool_healing_baseline": SmokeScenario(
+            "tool_healing_baseline",
+            TOOL_HEALING_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+            family="tool_healing",
+        ),
+        "tool_healing_quick": SmokeScenario(
+            "tool_healing_quick",
+            TOOL_HEALING_QUICK_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+            family="tool_healing",
+        ),
+        "canonical_gate_real": SmokeScenario(
+            "canonical_gate_real",
+            CANONICAL_GATE_REAL_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+            family="canonical_gate",
+        ),
+        "canonical_gate_system": SmokeScenario("canonical_gate_system", (CANONICAL_GATE_REAL_STEPS[0],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "canonical_gate_list": SmokeScenario("canonical_gate_list", (CANONICAL_GATE_REAL_STEPS[1],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "canonical_gate_read": SmokeScenario("canonical_gate_read", (CANONICAL_GATE_REAL_STEPS[2],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "canonical_gate_grep": SmokeScenario("canonical_gate_grep", (CANONICAL_GATE_REAL_STEPS[3],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "canonical_gate_shell": SmokeScenario("canonical_gate_shell", (CANONICAL_GATE_REAL_STEPS[4],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "canonical_gate_shell_error": SmokeScenario("canonical_gate_shell_error", (CANONICAL_GATE_REAL_STEPS[5],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "canonical_gate_fetch_error": SmokeScenario("canonical_gate_fetch_error", (CANONICAL_GATE_REAL_STEPS[6],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "canonical_gate_negative": SmokeScenario("canonical_gate_negative", (CANONICAL_GATE_REAL_STEPS[7],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
     }
 
 
@@ -959,30 +1638,42 @@ def run_step(
             },
             phase_wall_ms={},
         )
-        return enrich_step_route_diagnostics(
+        report = enrich_step_route_diagnostics(
             report,
             route_collector.events_since(diagnostic_offset) if route_collector is not None else [],
             step=step,
-            enabled=route_collector is not None,
+            enabled=bool(route_collector and route_collector.route_output),
             scenario_family=scenario_family,
             process_id=process_id,
             block_id=block_id,
             run_order=run_order,
             repetition=repetition,
         )
+        return enrich_step_tool_healing(
+            report,
+            route_collector.tool_healing_events_since(diagnostic_offset) if route_collector is not None else [],
+            step=step,
+            enabled=bool(route_collector and route_collector.tool_healing),
+        )
     report = result_queue.get()
     props_after = fresh_backend_props(base_url, min(timeout, 5.0))
     report = replace_step_final_prefix(report, final_prefix_step_state(props_before, props_after))
-    return enrich_step_route_diagnostics(
+    report = enrich_step_route_diagnostics(
         report,
         route_collector.events_since(diagnostic_offset) if route_collector is not None else [],
         step=step,
-        enabled=route_collector is not None,
+        enabled=bool(route_collector and route_collector.route_output),
         scenario_family=scenario_family,
         process_id=process_id,
         block_id=block_id,
         run_order=run_order,
         repetition=repetition,
+    )
+    return enrich_step_tool_healing(
+        report,
+        route_collector.tool_healing_events_since(diagnostic_offset) if route_collector is not None else [],
+        step=step,
+        enabled=bool(route_collector and route_collector.tool_healing),
     )
 
 
@@ -1011,6 +1702,16 @@ def _run_step_inner(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_model_step=model_steps.append,
+            )
+        elif step.mode == "tool":
+            result = runtime.ask_with_tools(
+                step.prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                workdir=workdir,
+                tool_names=allowed_tool_names,
+                on_model_step=model_steps.append,
+                on_tool_call=lambda name, _args: tool_names.append(name),
             )
         else:
             result = runtime.ask_auto(
@@ -1140,9 +1841,10 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
     info = safe_model_info(backend)
     host = collect_host_info()
     mtp = mtp_state_from_props(props)
+    redact = args.tool_healing_diagnostics or args.tool_call_generation_only
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "command": " ".join(sys.argv),
+        "command": "<redacted>" if redact else " ".join(sys.argv),
         "git_head": git_head(),
         "version": __version__,
         "model": getattr(info, "id", None) or props.get("model_id") or "unknown",
@@ -1157,8 +1859,8 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "cores": {"physical": host.physical_cores, "logical": host.logical_cores},
         "ram": {"total": host.ram_total, "available": host.ram_available},
         "accel": acceleration_mode(props),
-        "base_url": args.base_url,
-        "workdir": str(Path(args.workdir)),
+        "base_url": "<redacted>" if redact else args.base_url,
+        "workdir": "<redacted>" if redact else str(Path(args.workdir)),
         "scenario": list(args.scenario or ["all"]),
         "final_prefix_mode": args.final_prefix_mode,
         "tools": args.tools,
@@ -1171,8 +1873,8 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "threads_batch": props.get("threads_batch", args.threads_batch),
         "batch": props.get("batch_size", args.batch),
         "ubatch": props.get("ubatch_size", args.ubatch),
-        "server_command": server_command(args) if args.manage_server else "external",
-        "client_command": " ".join(sys.argv),
+        "server_command": "<redacted>" if redact else server_command(args) if args.manage_server else "external",
+        "client_command": "<redacted>" if redact else " ".join(sys.argv),
         "final_prefix": final_prefix_props(props),
         "final_prefix_config": final_prefix_config_metadata(args.final_prefix_mode, props),
         "block_id": args.block_id,
@@ -1180,6 +1882,9 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "cooling_seconds": args.cooling_seconds,
         "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
         "route_output_diagnostics": args.route_output_diagnostics,
+        "tool_healing_diagnostics": args.tool_healing_diagnostics,
+        "tool_healing": tool_healing_metadata(args.tool_healing_mode),
+        "canonical_gate": canonical_gate_metadata(args.canonical_gate),
         "route_diagnostic_store": args.route_diagnostic_store,
     }
 
@@ -1336,6 +2041,74 @@ def enrich_step_route_diagnostics(
     return StepReport(**values)
 
 
+def enrich_step_tool_healing(
+    report: StepReport,
+    attempts: list[dict[str, object]],
+    *,
+    step: SmokeStep,
+    enabled: bool,
+) -> StepReport:
+    expected_attempt = bool(step.expected_tool_names) if step.expected_tool_names is not None else None
+    actual_tool = report.tool_names[0] if len(report.tool_names) == 1 else None
+    retry_active = any(attempt.get("active_outcome") == "superseded" for attempt in attempts) or any(
+        metric.get("phase") == "tool_call_retry" for metric in report.model_steps
+    )
+    tool_metrics = [
+        metric for metric in report.model_steps if metric.get("phase") in {"tool_call", "tool_call_retry"}
+    ]
+    correlated: list[dict[str, object]] = []
+    for index, attempt in enumerate(attempts):
+        active_outcome = attempt.get("active_outcome")
+        expected_outcome = step.expected_active_outcome
+        expected_tools = step.expected_tool_names
+        tool_match = (
+            actual_tool in expected_tools
+            if actual_tool is not None and expected_tools
+            else not report.tool_names
+            if expected_tools == ()
+            else None
+        )
+        if active_outcome == "executed" and expected_outcome == "executed" and tool_match is not False:
+            execution_assessment = "correct_execution" if report.correctness_category == "correct" else "wrong_execution"
+        elif active_outcome == expected_outcome and active_outcome in {
+            "rejected_parse", "rejected_schema", "rejected_guardrail", "rejected_policy", "rejected_permission",
+        }:
+            execution_assessment = "safe_rejection"
+        elif active_outcome == "executed" and expected_outcome not in {None, "executed"}:
+            execution_assessment = "unsafe_acceptance"
+        elif active_outcome in {"superseded", "cancelled", "timeout", None}:
+            execution_assessment = "not_terminally_assessed"
+        else:
+            execution_assessment = "wrong_execution"
+        metric = tool_metrics[index] if index < len(tool_metrics) else {}
+        correlated.append(
+            {
+                **attempt,
+                "scenario": report.case,
+                "scenario_step": report.step,
+                "expected_attempt": expected_attempt,
+                "expected_tool": expected_tools[0] if expected_tools and len(expected_tools) == 1 else None,
+                "executed_tool": actual_tool,
+                "template": "native_tool_call",
+                "prompt_tokens": metric.get("prompt_tokens"),
+                "total_wall_ms": report.wall_ms,
+                "active_retry_present": retry_active,
+                "strict_active_agreement": attempt.get("agreement") == "exact_match",
+                "detector_false_positive": expected_attempt is False and attempt.get("attempt_detected") is True,
+                "detector_false_negative": expected_attempt is True and attempt.get("attempt_detected") is False,
+                "execution_assessment": execution_assessment,
+            }
+        )
+    values = report.__dict__.copy()
+    values.update(
+        {
+            "tool_healing_diagnostics_enabled": enabled,
+            "tool_healing_attempts": correlated,
+        }
+    )
+    return StepReport(**values)
+
+
 def route_expectation_result(
     expected_route: str | None,
     final_route: object,
@@ -1370,6 +2143,70 @@ def final_prefix_environment(mode: str):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+@contextmanager
+def canonical_gate_environment(mode: str):
+    previous = os.environ.get(TOOL_CALL_CANONICAL_GATE_ENV)
+    if mode != "inherit":
+        os.environ[TOOL_CALL_CANONICAL_GATE_ENV] = "1" if mode == "on" else "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(TOOL_CALL_CANONICAL_GATE_ENV, None)
+        else:
+            os.environ[TOOL_CALL_CANONICAL_GATE_ENV] = previous
+
+
+def canonical_gate_metadata(mode: str) -> dict[str, object]:
+    config = (
+        resolve_tool_call_canonical_gate()
+        if mode == "inherit"
+        else resolve_tool_call_canonical_gate(
+            {TOOL_CALL_CANONICAL_GATE_ENV: "1" if mode == "on" else "0"}
+        )
+    )
+    return {
+        "requested_mode": mode,
+        "enabled": config.enabled,
+        "source": config.source,
+        "validation_error": config.validation_error,
+    }
+
+
+@contextmanager
+def tool_healing_environment(mode: str):
+    previous = os.environ.get(TOOL_CALL_HEALING_ENV)
+    if mode != "inherit":
+        os.environ[TOOL_CALL_HEALING_ENV] = "1" if mode == "on" else "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(TOOL_CALL_HEALING_ENV, None)
+        else:
+            os.environ[TOOL_CALL_HEALING_ENV] = previous
+
+
+def tool_healing_metadata(mode: str) -> dict[str, object]:
+    config = (
+        resolve_tool_call_healing()
+        if mode == "inherit"
+        else resolve_tool_call_healing({TOOL_CALL_HEALING_ENV: "1" if mode == "on" else "0"})
+    )
+    status = tool_call_healing_status()
+    effective_enabled = config.enabled and resolve_tool_call_canonical_gate().enabled
+    return {
+        "requested_mode": mode,
+        "enabled": effective_enabled,
+        "source": config.source,
+        "validation_error": config.validation_error,
+        "blocked_reason": None if effective_enabled or not config.enabled else "canonical_gate_disabled",
+        "repair_count": status["tool_call_healing_repair_count"],
+        "rejection_count": status["tool_call_healing_rejection_count"],
+        "last_rules": status["tool_call_healing_last_rules"],
+    }
 
 
 FINAL_PREFIX_MODE_VALUES = {
@@ -1970,6 +2807,11 @@ def write_jsonl(
         route_summary = summarize_route_classifications(reports)
         if route_summary is not None:
             handle.write(json.dumps(route_summary, ensure_ascii=False, sort_keys=True) + "\n")
+        for row in tool_healing_attempt_rows(reports, env):
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        healing_summary = summarize_tool_healing(reports)
+        if healing_summary is not None:
+            handle.write(json.dumps(healing_summary, ensure_ascii=False, sort_keys=True) + "\n")
         for row in extra_rows or []:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -2146,6 +2988,341 @@ def summarize_route_classifications(reports: list[StepReport]) -> dict[str, obje
 
 def empty_route_class_counts() -> dict[str, int]:
     return {route_class: 0 for route_class in ROUTE_OUTPUT_CLASSES}
+
+
+def tool_healing_attempt_rows(
+    reports: list[StepReport],
+    env: dict[str, object],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for report in reports:
+        for attempt in report.tool_healing_attempts:
+            rows.append(
+                {
+                    "type": "tool_healing_attempt",
+                    **attempt,
+                    "model": bounded_model_label(env.get("model")),
+                    "ctx": env.get("ctx") if isinstance(env.get("ctx"), int) else None,
+                    "threads": env.get("threads") if isinstance(env.get("threads"), int) else None,
+                    "mtp": bounded_identifier(env.get("mtp")),
+                    "mmproj": bounded_identifier(env.get("mmproj")),
+                    "process_id": report.process_id,
+                    "block_id": bounded_identifier(report.block_id),
+                    "run_order": bounded_identifier(report.run_order),
+                    "repetition": report.repetition,
+                }
+            )
+    return rows
+
+
+def bounded_model_label(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 80:
+        return None
+    return value if all(character.isalnum() or character in {"_", "-", ".", ":"} for character in value) else None
+
+
+def summarize_tool_healing(reports: list[StepReport]) -> dict[str, object] | None:
+    diagnostic_reports = [report for report in reports if report.tool_healing_diagnostics_enabled]
+    if not diagnostic_reports:
+        return None
+    attempts = [attempt for report in diagnostic_reports for attempt in report.tool_healing_attempts]
+    evaluable_attempts = [
+        attempt for attempt in attempts
+        if attempt.get("active_outcome") not in {"cancelled", "timeout"}
+    ]
+    detected_attempts = [attempt for attempt in evaluable_attempts if attempt.get("attempt_detected") is True]
+    categories = {
+        category: 0
+        for category in (
+            "valid_first_pass", "recoverable_envelope", "recoverable_trailing_comma",
+            "recoverable_unambiguous_delimiter", "recoverable_arguments_string",
+            "recoverable_structural_alias", "missing_required", "wrong_type", "extra_argument",
+            "unknown_tool", "multiple_candidates", "no_attempt", "ambiguous_attempt",
+            "budget_truncation", "truncated_attempt",
+            "policy_denied", "active_default_used", "active_clamp_used", "active_ignored_extra",
+            "executor_error", "superseded", "uncorrelated",
+        )
+    }
+    for attempt in attempts:
+        for category in attempt.get("categories") or []:
+            if category in categories:
+                categories[category] += 1
+    expected_positive = [attempt for attempt in attempts if attempt.get("expected_attempt") is True]
+    expected_negative = [attempt for attempt in attempts if attempt.get("expected_attempt") is False]
+    healing_values = [float(attempt["healing_us"]) for attempt in attempts if isinstance(attempt.get("healing_us"), int | float)]
+    assessments = {name: 0 for name in ("correct_execution", "wrong_execution", "safe_rejection", "unsafe_acceptance", "not_terminally_assessed")}
+    for attempt in attempts:
+        assessment = attempt.get("execution_assessment")
+        if assessment in assessments:
+            assessments[assessment] += 1
+    return {
+        "type": "tool_healing_summary",
+        "diagnostic_steps": len(diagnostic_reports),
+        "attempts": len(attempts),
+        "category_counts": categories,
+        "first_pass_valid_rate": ratio(
+            sum("valid_first_pass" in (attempt.get("categories") or []) for attempt in detected_attempts),
+            len(detected_attempts),
+        ),
+        "first_pass_valid_output_rate": ratio(categories["valid_first_pass"], len(evaluable_attempts)),
+        "no_attempt_rate": ratio(categories["no_attempt"], len(evaluable_attempts)),
+        "deterministic_repair_candidate_rate": ratio(
+            sum(
+                attempt.get("formal_repairable") is True
+                and "budget_truncation" not in (attempt.get("categories") or [])
+                for attempt in detected_attempts
+            ),
+            len(detected_attempts),
+        ),
+        "formal_error_rate": ratio(
+            sum(
+                any(category in TOOL_HEALING_FORMAL_ERRORS for category in attempt.get("categories") or [])
+                for attempt in detected_attempts
+            ),
+            len(detected_attempts),
+        ),
+        "strict_active_agreement_rate": ratio(sum(attempt.get("strict_active_agreement") is True for attempt in attempts), len(attempts)),
+        "detector_false_positive_rate": ratio(sum(attempt.get("detector_false_positive") is True for attempt in expected_negative), len(expected_negative)),
+        "detector_false_negative_rate": ratio(sum(attempt.get("detector_false_negative") is True for attempt in expected_positive), len(expected_positive)),
+        "active_default_rate": ratio(categories["active_default_used"], len(attempts)),
+        "active_clamp_rate": ratio(categories["active_clamp_used"], len(attempts)),
+        "active_ignored_extra_rate": ratio(categories["active_ignored_extra"], len(attempts)),
+        "multiple_candidate_rate": ratio(categories["multiple_candidates"], len(attempts)),
+        "truncation_rate": ratio(categories["truncated_attempt"], len(attempts)),
+        "healing_us_median": round(statistics.median(healing_values), 1) if healing_values else None,
+        "healing_us_p95": percentile(healing_values, 0.95),
+        "execution_assessments": assessments,
+        "missing_diagnostic_steps": sum(not report.tool_healing_attempts for report in diagnostic_reports),
+    }
+
+
+def ratio(numerator: int, denominator: int) -> float | None:
+    return round(numerator / denominator, 6) if denominator else None
+
+
+def percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * fraction + 0.999999)))
+    return round(ordered[index], 1)
+
+
+def run_tool_healing_replay(workdir: Path) -> list[dict[str, object]]:
+    corpus = (
+        ("valid", '<tool_call>{"name":"system_info","arguments":{}}</tool_call>', True),
+        ("trailing_comma", '<tool_call>{"name":"system_info","arguments":{},}</tool_call>', True),
+        ("missing_delimiter", '<tool_call>{"name":"system_info","arguments":{}', True),
+        ("unclosed_tag", '<tool_call>{"name":"system_info","arguments":{}}', True),
+        ("external_text", 'prefix <tool_call>{"name":"system_info","arguments":{}}</tool_call> suffix', True),
+        ("tool_alias", '{"tool":"system_info","arguments":{}}', True),
+        ("top_level_arguments", '{"name":"list_directory","path":"."}', True),
+        ("arguments_string", '{"name":"system_info","arguments":"{}"}', True),
+        ("unknown_tool", '{"name":"not_registered","arguments":{}}', True),
+        ("missing_required", '{"name":"fetch_url","arguments":{}}', True),
+        ("wrong_type", '{"name":"fetch_url","arguments":{"url":3}}', True),
+        ("extra_argument", '{"name":"system_info","arguments":{"extra":true}}', True),
+        ("normal_tool_name", 'system_info is the registered name of a tool.', False),
+        ("json_example", 'Example only: {"name":"system_info","arguments":{}}.', False),
+        ("multiple", '<tool_call>{"name":"system_info","arguments":{}}</tool_call><tool_call>{"name":"list_directory","arguments":{}}</tool_call>', True),
+        ("policy", '{"name":"exec_shell_full_command","arguments":{"command":"rm -f note.txt"}}', True),
+        ("interrupted", '<tool_call>{"name":"fetch_url","arguments":{"url":"https://example.invalid', True),
+    )
+    rows: list[dict[str, object]] = []
+    false_positive = 0
+    false_negative = 0
+    category_counts: dict[str, int] = {}
+    for case, text, expected in corpus:
+        report = analyze_tool_attempt(
+            text=text,
+            tool_calls=[],
+            tool_definitions=tool_definitions(),
+            allowed_tool_names=TOOL_NAMES,
+            workdir=workdir,
+            user_prompt="show note.txt" if case == "policy" else "perform the labelled replay operation",
+        )
+        attempt = {
+            "candidate_source": report.candidate_source,
+            "repairs": list(report.repairs),
+            "strict_outcome": report.outcome,
+            "parse_error": report.parse_error,
+            "validation_error": report.validation_error,
+            "attempt_detected": report.attempt_detected,
+            "formal_repairable": report.formal_repairable,
+        }
+        categories = tool_healing_categories(attempt)
+        fp = not expected and report.attempt_detected
+        fn = expected and not report.attempt_detected
+        false_positive += fp
+        false_negative += fn
+        for category in categories:
+            category_counts[category] = category_counts.get(category, 0) + 1
+        rows.append(
+            {
+                "type": "tool_healing_replay_case",
+                "case": case,
+                "expected_attempt": expected,
+                "detected": report.attempt_detected,
+                "false_positive": fp,
+                "false_negative": fn,
+                "strict_outcome": report.outcome,
+                "categories": categories,
+                "repairs": list(report.repairs),
+                "parse_error": report.parse_error,
+                "validation_error": report.validation_error,
+                "formal_repairable": report.formal_repairable,
+                "formal_repair_reason": report.formal_repair_reason,
+                "formal_argument_count": report.formal_argument_count,
+            }
+        )
+    rows.append(
+        {
+            "type": "tool_healing_replay_summary",
+            "cases": len(corpus),
+            "false_positives": false_positive,
+            "false_negatives": false_negative,
+            "false_positive_rate": ratio(false_positive, sum(not expected for _, _, expected in corpus)),
+            "false_negative_rate": ratio(false_negative, sum(expected for _, _, expected in corpus)),
+            "category_counts": category_counts,
+        }
+    )
+    replay_summary = rows.pop()
+    rows.extend(run_tool_validation_divergence_replay(workdir))
+    rows.append(replay_summary)
+    return rows
+
+
+def run_tool_validation_divergence_replay(workdir: Path) -> list[dict[str, object]]:
+    cases = (
+        ("system_valid", "system_info", {}, None),
+        ("system_extra", "system_info", {"ignored_extra": True}, "active_ignored_extra"),
+        ("system_wrong_type", "system_info", {"include_cpu": "yes"}, "active_default_used"),
+        ("list_valid", "list_directory", {"path": ".", "max_entries": 10}, None),
+        ("list_extra", "list_directory", {"path": ".", "ignored_extra": True}, "active_ignored_extra"),
+        ("list_wrong_type", "list_directory", {"path": ".", "recursive": "yes"}, "active_default_used"),
+        ("list_clamp", "list_directory", {"path": ".", "max_entries": 2000}, "active_clamp_used"),
+        ("shell_valid", "exec_shell_full_command", {"command": "printf validation-ok"}, None),
+        ("shell_extra", "exec_shell_full_command", {"command": "printf validation-ok", "ignored_extra": True}, "active_ignored_extra"),
+        ("shell_wrong_type", "exec_shell_full_command", {"command": "printf validation-ok", "timeout": "slow"}, "active_default_used"),
+        ("shell_clamp", "exec_shell_full_command", {"command": "printf validation-ok", "timeout": 999}, "active_clamp_used"),
+        ("shell_policy", "exec_shell_full_command", {"command": "rm -f note.txt"}, "policy_denied"),
+        ("fetch_missing", "fetch_url", {}, "missing_required"),
+        ("fetch_extra", "fetch_url", {"url": "http://127.0.0.1:9/fixture", "ignored_extra": True}, "active_ignored_extra"),
+        ("fetch_wrong_type", "fetch_url", {"url": "http://127.0.0.1:9/fixture", "timeout": "slow"}, "active_default_used"),
+        ("fetch_clamp", "fetch_url", {"url": "http://127.0.0.1:9/fixture", "timeout": 999}, "active_clamp_used"),
+    )
+    definitions = tool_definitions()
+    allowed = tuple(TOOL_NAMES)
+    executor = HybridToolExecutor(
+        backend=None,
+        workdir=workdir,
+        allowed_tool_names=allowed,
+        user_prompt="show note.txt",
+    )
+    rows: list[dict[str, object]] = []
+    counts: Counter[str] = Counter()
+    for case, name, arguments, expected_divergence in cases:
+        report = analyze_tool_attempt(
+            text="",
+            tool_calls=[
+                {
+                    "id": "validation-replay",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments, sort_keys=True)},
+                }
+            ],
+            tool_definitions=definitions,
+            allowed_tool_names=allowed,
+            workdir=workdir,
+            user_prompt="show note.txt",
+            finish_reason="tool_calls",
+        )
+        execution = _execute_with_canonical_gate(executor, name, arguments, enabled=False)
+        gated = _execute_with_canonical_gate(executor, name, arguments, enabled=True)
+        attempt = {
+            "attempt_detected": report.attempt_detected,
+            "strict_outcome": report.outcome,
+            "validation_error": report.validation_error,
+            "active_outcome": execution.terminal_outcome,
+        }
+        categories = tool_healing_categories(attempt)
+        observed = next(
+            (
+                category
+                for category in (
+                    "active_default_used", "active_clamp_used", "active_ignored_extra",
+                    "policy_denied", "missing_required",
+                )
+                if category in categories
+            ),
+            None,
+        )
+        if observed:
+            counts[observed] += 1
+        rows.append(
+            {
+                "type": "tool_validation_divergence_case",
+                "case": case,
+                "tool_name_hash": hashlib.sha256(name.encode("utf-8")).hexdigest()[:16],
+                "arguments_hash": hashlib.sha256(
+                    json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()[:16],
+                "argument_count": len(arguments),
+                "strict_outcome": report.outcome,
+                "strict_error": report.validation_error,
+                "active_outcome": execution.terminal_outcome,
+                "active_reason": execution.terminal_reason,
+                "gate_on_outcome": gated.terminal_outcome,
+                "gate_on_reason": gated.terminal_reason,
+                "off_result_hash": hashlib.sha256(execution.result.content.encode("utf-8")).hexdigest()[:16],
+                "on_result_hash": hashlib.sha256(gated.result.content.encode("utf-8")).hexdigest()[:16],
+                "output_equal": execution.result.content == gated.result.content,
+                "new_execution_enabled": gated.terminal_outcome == "executed" and execution.terminal_outcome != "executed",
+                "divergence_category": observed,
+                "expected_divergence": expected_divergence,
+                "matched_expectation": observed == expected_divergence,
+                "formal_repairable": report.formal_repairable,
+            }
+        )
+    rows.append(
+        {
+            "type": "tool_validation_divergence_summary",
+            "cases": len(cases),
+            "matched_expectations": sum(row.get("matched_expectation") is True for row in rows),
+            "active_default_used": counts["active_default_used"],
+            "active_clamp_used": counts["active_clamp_used"],
+            "active_ignored_extra": counts["active_ignored_extra"],
+            "policy_denied": counts["policy_denied"],
+            "missing_required": counts["missing_required"],
+            "repair_executed": False,
+            "new_executions_enabled": sum(row.get("new_execution_enabled") is True for row in rows),
+            "valid_off_on_terminal_matches": sum(
+                row.get("strict_outcome") == "valid_shadow_candidate"
+                and row.get("active_outcome") == row.get("gate_on_outcome")
+                for row in rows
+            ),
+        }
+    )
+    return rows
+
+
+def _execute_with_canonical_gate(
+    executor: HybridToolExecutor,
+    name: str,
+    arguments: dict[str, object],
+    *,
+    enabled: bool,
+):
+    key = "ORBIT_TOOL_CALL_CANONICAL_GATE"
+    previous = os.environ.get(key)
+    os.environ[key] = "1" if enabled else "0"
+    try:
+        return executor.execute(name, arguments, chunk_budget={})
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
 
 
 def _increment_boolean_counts(target: dict[str, int], prefix: str, value: object) -> None:

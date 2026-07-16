@@ -47,6 +47,16 @@ from orbit.runtime.shell_guardrails import (
 from orbit.runtime.tool_arguments import parse_tool_arguments_or_empty
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_calls import execute_tool_call
+from orbit.runtime.tool_contract import (
+    CanonicalToolDecision,
+    validate_canonical_tool_call_payload,
+)
+from orbit.runtime.tool_healing import (
+    begin_tool_healing_attempt,
+    build_tool_call_repair,
+    observe_tool_attempt_shadow,
+    record_tool_healing_terminal,
+)
 from orbit.runtime.tool_loop_state import (
     EVIDENCE_CANDIDATE_PATHS_FOUND,
     EVIDENCE_DIRECT_READ_FAILED,
@@ -63,6 +73,8 @@ from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_
 from orbit.runtime.tools import default_tool_names
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 from orbit.runtime.web import fetch_url_result_error, fetch_url_result_has_text, fetch_url_result_status
+from orbit.tool_contract_config import resolve_tool_call_canonical_gate
+from orbit.tool_healing_config import resolve_tool_call_healing
 
 
 def _env_int(name: str, default: int) -> int:
@@ -108,6 +120,8 @@ def run_tool_loop(
         evidence_store = EvidenceStore.for_workdir(Path(workdir))
         runtime.evidence_store = evidence_store
     tools = executor.tool_definitions()
+    canonical_gate_enabled = resolve_tool_call_canonical_gate().enabled
+    healing_enabled = canonical_gate_enabled and resolve_tool_call_healing().enabled
     last_result: ChatResult | None = None
     state = ToolLoopState(allowed_tool_names)
     user_prompt = _last_user_text(runtime.messages)
@@ -120,9 +134,99 @@ def run_tool_loop(
     url_content_required = requires_url_content_evidence(user_prompt)
     capability_context = local_capabilities.format_prompt_summary() if local_capabilities is not None else None
     suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
+    terminal_attempt_ids: set[str] = set()
+    canonical_decisions: dict[str, CanonicalToolDecision] = {}
 
     # These local helpers still couple policy and runtime counters in one place.
     # The state objects only store turn-local facts; they do not decide tasks.
+
+    def observe_shadow(result: ChatResult, *, attempt_id: str | None, phase: str = "tool_call"):
+        return observe_tool_attempt_shadow(
+            text=result.content,
+            tool_calls=result.tool_calls,
+            tool_definitions=tools,
+            allowed_tool_names=allowed_tool_names,
+            workdir=Path(workdir),
+            user_prompt=user_prompt,
+            finish_reason=result.finish_reason,
+            output_tokens=result.completion_tokens,
+            phase=phase,
+            attempt_id=attempt_id,
+        )
+
+    def record_terminal(
+        *,
+        attempt_id: str | None,
+        report,
+        result: ChatResult | None,
+        outcome: str,
+        reason: str | None,
+        phase: str,
+    ) -> None:
+        if attempt_id is None or attempt_id in terminal_attempt_ids:
+            return
+        record_tool_healing_terminal(
+            attempt_id=attempt_id,
+            report=report,
+            active_tool_calls=result.tool_calls if result is not None else [],
+            active_outcome=outcome,
+            terminal_reason=reason,
+            phase=phase,
+            tool_definitions=tools,
+            allowed_tool_names=allowed_tool_names,
+            workdir=Path(workdir),
+            user_prompt=user_prompt,
+            canonical_decision=canonical_decisions.get(attempt_id),
+            canonical_evaluated=attempt_id in canonical_decisions,
+        )
+        terminal_attempt_ids.add(attempt_id)
+
+    def canonical_preflight(
+        tool_call: dict[str, object],
+        *,
+        attempt_id: str | None = None,
+        decision: CanonicalToolDecision | None = None,
+    ) -> CanonicalToolDecision | None:
+        if not canonical_gate_enabled:
+            return None
+        resolved = decision or validate_canonical_tool_call_payload(
+            tool_call,
+            tool_definitions=tools,
+            allowed_tool_names=allowed_tool_names,
+            workdir=Path(workdir),
+            user_prompt=user_prompt,
+        )
+        if attempt_id is not None:
+            canonical_decisions[attempt_id] = resolved
+        return resolved
+
+    def loop_guardrails_allowed(decision: CanonicalToolDecision | None) -> bool:
+        return (
+            decision is None
+            or (
+                decision.schema_outcome.accepted
+                and decision.permission_outcome.accepted
+                and decision.operational_limit_outcome.accepted
+            )
+        )
+
+    def observed_model_call(invoke, *, phase: str):
+        attempt_id = begin_tool_healing_attempt()
+        try:
+            result = invoke()
+        except Exception as exc:
+            timeout = isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
+            record_terminal(
+                attempt_id=attempt_id,
+                report=None,
+                result=None,
+                outcome="timeout" if timeout else "runtime_error",
+                reason="model_timeout" if timeout else "model_error",
+                phase=phase,
+            )
+            raise
+        report = observe_shadow(result, attempt_id=attempt_id, phase=phase)
+        return result, report, attempt_id
 
     def has_required_direct_evidence() -> bool:
         return (
@@ -563,7 +667,23 @@ def run_tool_loop(
             runtime.mutation_verifications += 1
     if initial_tool_calls:
         calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
-        if any(
+        initial_decision: CanonicalToolDecision | None = None
+        if canonical_gate_enabled:
+            if len(calls) != 1:
+                return ChatResult(
+                    content="error: canonical tool call rejected: multiple_candidates",
+                    model=None,
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+            initial_decision = canonical_preflight(calls[0])
+            assert initial_decision is not None
+        if loop_guardrails_allowed(initial_decision) and any(
             _should_guard_existing_file_rewrite(
                 tool_call,
                 workdir=workdir,
@@ -579,7 +699,12 @@ def run_tool_loop(
                 signature = state.mark_tool_call(tool_call)
                 if on_tool_call:
                     on_tool_call(*signature)
-                execution = execute_tool_call(tool_call, chunk_budget=state.chunk_budget, executor=executor)
+                execution = execute_tool_call(
+                    tool_call,
+                    chunk_budget=state.chunk_budget,
+                    executor=executor,
+                    canonical_decision=initial_decision,
+                )
                 tool_result = execution.result
                 update_state_after_tool_result(
                     tool_call,
@@ -713,19 +838,30 @@ def run_tool_loop(
                     reason="model_tool_call",
                 )
             )
-        result = runtime._chat_tool_call_once(
-            call_messages,
-            temperature=temperature,
-            max_tokens=tool_max_tokens,
-            tools=tools,
-            on_final_delta=tool_delta_callback,
-            on_progress=on_progress,
+        result, shadow_report, attempt_id = observed_model_call(
+            lambda: runtime._chat_tool_call_once(
+                call_messages,
+                temperature=temperature,
+                max_tokens=tool_max_tokens,
+                tools=tools,
+                on_final_delta=tool_delta_callback,
+                on_progress=on_progress,
+            ),
+            phase="tool_call",
         )
         produced_by_phase: str | None = "tool_call"
         last_result = result
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
         if repair.contract_retry_pending and not result.tool_calls:
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="superseded",
+                reason="contract_retry",
+                phase=produced_by_phase,
+            )
             retry_prompt = SHELL_FULL_CONTRACT_RETRY_PROMPT
             if executing_file_recovery_guard and turn.requested_user_path:
                 retry_prompt = file_recovery_retry_prompt(
@@ -736,13 +872,16 @@ def run_tool_loop(
             retry_messages = [*call_messages, {"role": "user", "content": retry_prompt}]
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("tool_call_retry", streamed=False, attempt=state.tool_rounds + 1, reason="tool_contract_retry"))
-            result = runtime._chat_tool_call_once(
-                retry_messages,
-                temperature=temperature,
-                max_tokens=tool_max_tokens,
-                tools=tools,
-                on_final_delta=suppress_tool_delta,
-                on_progress=on_progress,
+            result, shadow_report, attempt_id = observed_model_call(
+                lambda: runtime._chat_tool_call_once(
+                    retry_messages,
+                    temperature=temperature,
+                    max_tokens=tool_max_tokens,
+                    tools=tools,
+                    on_final_delta=suppress_tool_delta,
+                    on_progress=on_progress,
+                ),
+                phase="tool_call_retry",
             )
             produced_by_phase = "tool_call_retry"
             last_result = result
@@ -769,9 +908,25 @@ def run_tool_loop(
                 length_truncated=True,
             )
         ):
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="minimal_patch_guard",
+                phase=produced_by_phase or "tool_call",
+            )
             request_minimal_patch_guard()
             continue
         if result.finish_reason == "length" and not result.tool_calls and state.tool_rounds > 0:
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_parse",
+                reason="length_after_tool_result",
+                phase=produced_by_phase or "tool_call",
+            )
             return runtime._answer_from_tool_results(
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -784,18 +939,46 @@ def run_tool_loop(
                 compact_window=True,
             )
         if result.finish_reason == "length" and not result.tool_calls:
-            with model_call_context(phase="tool_call_retry", tools_mode="on"):
-                result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="superseded",
+                reason="length_retry",
+                phase=produced_by_phase or "tool_call",
+            )
+            result, shadow_report, attempt_id = observed_model_call(
+                lambda: _backend_tool_retry(runtime, call_messages, temperature, max_tokens, tools),
+                phase="tool_call_retry",
+            )
             produced_by_phase = "tool_call_retry"
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
         if not result.tool_calls and _is_empty_final_response(result):
-            with model_call_context(phase="tool_call_retry", tools_mode="on"):
-                result = runtime.backend.chat(call_messages, temperature=temperature, max_tokens=tool_max_tokens, tools=tools)
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="superseded",
+                reason="empty_retry",
+                phase=produced_by_phase or "tool_call",
+            )
+            result, shadow_report, attempt_id = observed_model_call(
+                lambda: _backend_tool_retry(runtime, call_messages, temperature, tool_max_tokens, tools),
+                phase="tool_call_retry",
+            )
             produced_by_phase = "tool_call_retry"
             if on_model_step:
                 on_model_step(ModelStepMetrics.from_result(loop=loop_index + 1, result=result, phase="tool_call_retry" if result.tool_calls else None))
             if not result.tool_calls and _is_empty_final_response(result):
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="rejected_parse",
+                    reason="empty_after_retry",
+                    phase=produced_by_phase,
+                )
                 return runtime._chat_final(
                     with_chat_system_prompt(runtime.messages),
                     temperature=temperature,
@@ -806,15 +989,61 @@ def run_tool_loop(
                     on_phase_start=on_phase_start,
                     loop=loop_index + 2,
                 )
+        if canonical_gate_enabled and len(result.tool_calls) > 1:
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_schema",
+                reason="multiple_candidates",
+                phase=produced_by_phase or "tool_call",
+            )
+            result = replace(
+                result,
+                content="error: canonical tool call rejected: multiple_candidates",
+                finish_reason="stop",
+                tool_calls=[],
+            )
         if result.tool_calls:
             route_tool_call = command_tool_call_from_tool_calls(result.tool_calls, allowed_tool_names)
             if route_tool_call is not None:
+                if canonical_gate_enabled and _is_exact_canonical_tool_call(result.tool_calls[0]):
+                    route_tool_call = result.tool_calls[0]
                 result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
         if not result.tool_calls:
             route_tool_call = command_like_tool_call(result.content, allowed_tool_names)
             if route_tool_call is not None:
                 result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
-        if result.tool_calls and any(
+        repaired_decision: CanonicalToolDecision | None = None
+        if not result.tool_calls and healing_enabled:
+            repaired = build_tool_call_repair(
+                text=result.content,
+                tool_calls=result.tool_calls,
+                tool_definitions=tools,
+                allowed_tool_names=allowed_tool_names,
+                workdir=Path(workdir),
+                user_prompt=user_prompt,
+                finish_reason=result.finish_reason,
+                attempt_id=attempt_id,
+            )
+            if repaired.tool_call is not None:
+                repaired_decision = repaired.canonical_decision
+                assert repaired_decision is not None and repaired_decision.accepted
+                result = replace(
+                    result,
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[repaired.tool_call],
+                )
+        canonical_decision: CanonicalToolDecision | None = None
+        if result.tool_calls and canonical_gate_enabled:
+            canonical_decision = canonical_preflight(
+                result.tool_calls[0],
+                attempt_id=attempt_id,
+                decision=repaired_decision,
+            )
+            assert canonical_decision is not None
+        if result.tool_calls and loop_guardrails_allowed(canonical_decision) and any(
             _should_guard_existing_file_rewrite(
                 tool_call,
                 workdir=workdir,
@@ -822,12 +1051,36 @@ def run_tool_loop(
             )
             for tool_call in result.tool_calls
         ):
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="existing_file_rewrite_guard",
+                phase=produced_by_phase or "tool_call",
+            )
             request_minimal_patch_guard()
             continue
-        if result.tool_calls and should_nudge_analysis_completion(result.tool_calls):
+        if result.tool_calls and loop_guardrails_allowed(canonical_decision) and should_nudge_analysis_completion(result.tool_calls):
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="analysis_completion_guard",
+                phase=produced_by_phase or "tool_call",
+            )
             request_analysis_completion_guard()
             continue
-        if result.tool_calls and should_nudge_file_recovery(result.tool_calls):
+        if result.tool_calls and loop_guardrails_allowed(canonical_decision) and should_nudge_file_recovery(result.tool_calls):
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="file_recovery_guard",
+                phase=produced_by_phase or "tool_call",
+            )
             request_file_recovery_guard()
             continue
         if not result.tool_calls:
@@ -857,6 +1110,14 @@ def run_tool_loop(
                     and not has_required_direct_evidence()
                     and not repair.url_content_retry_used
                 ):
+                    record_terminal(
+                        attempt_id=attempt_id,
+                        report=shadow_report,
+                        result=result,
+                        outcome="superseded",
+                        reason="url_content_retry",
+                        phase=produced_by_phase or "tool_call",
+                    )
                     repair.url_content_retry_used = True
                     turn.pending_url_recovery_guard = True
                     turn.pending_url_recovery_guard_prompt = url_recovery_retry_prompt(fetch_attempted=turn.url_fetch_attempted)
@@ -868,13 +1129,37 @@ def run_tool_loop(
                     and _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
                     and not repair.file_content_retry_used
                 ):
+                    record_terminal(
+                        attempt_id=attempt_id,
+                        report=shadow_report,
+                        result=result,
+                        outcome="superseded",
+                        reason="file_content_retry",
+                        phase=produced_by_phase or "tool_call",
+                    )
                     repair.file_content_retry_used = True
                     turn.pending_file_recovery_guard = True
                     turn.pending_file_recovery_guard_prompt = file_recovery_retry_prompt(requested_path_exists=True)
                     continue
                 if should_nudge_completion():
+                    record_terminal(
+                        attempt_id=attempt_id,
+                        report=shadow_report,
+                        result=result,
+                        outcome="superseded",
+                        reason="completion_guard",
+                        phase=produced_by_phase or "tool_call",
+                    )
                     request_completion_guard()
                     continue
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="cancelled" if result.finish_reason == "cancelled" else "executed",
+                    reason="model_cancelled" if result.finish_reason == "cancelled" else "no_tool_call",
+                    phase=produced_by_phase or "tool_call",
+                )
                 turn.mark_finalizable()
                 return runtime._answer_from_tool_results(
                     temperature=temperature,
@@ -893,8 +1178,29 @@ def run_tool_loop(
                 and not has_required_direct_evidence()
                 and not executed_internal_tool_prompt
             ):
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="superseded",
+                    reason="url_recovery_guard",
+                    phase=produced_by_phase or "tool_call",
+                )
                 request_url_recovery_guard(fetch_attempted=turn.url_fetch_attempted)
                 continue
+            terminal_outcome = "cancelled" if result.finish_reason == "cancelled" else "executed"
+            terminal_reason = "model_cancelled" if result.finish_reason == "cancelled" else "no_tool_call"
+            if result.finish_reason != "cancelled" and shadow_report is not None and shadow_report.attempt_detected:
+                terminal_outcome = "rejected_parse"
+                terminal_reason = "active_normalizer_rejected"
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome=terminal_outcome,
+                reason=terminal_reason,
+                phase=produced_by_phase or "tool_call",
+            )
             if state.tool_rounds == 0 and not executed_internal_tool_prompt:
                 runtime.messages.append({"role": "assistant", "content": result.content})
             return result
@@ -903,6 +1209,14 @@ def run_tool_loop(
         turn.increment_round()
         for tool_call in result.tool_calls:
             if state.has_seen_tool_call(tool_call):
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="rejected_guardrail",
+                    reason="repeated_tool_call",
+                    phase=produced_by_phase or "tool_call",
+                )
                 turn.mark_finalizable()
                 return runtime._answer_from_tool_results(
                     temperature=temperature,
@@ -917,10 +1231,31 @@ def run_tool_loop(
             signature = state.mark_tool_call(tool_call)
             if on_tool_call:
                 on_tool_call(*signature)
-            execution = execute_tool_call(
-                tool_call,
-                chunk_budget=state.chunk_budget,
-                executor=executor,
+            try:
+                execution = execute_tool_call(
+                    tool_call,
+                    chunk_budget=state.chunk_budget,
+                    executor=executor,
+                    canonical_decision=canonical_decision,
+                )
+            except Exception as exc:
+                timeout = isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="timeout" if timeout else "runtime_error",
+                    reason="executor_timeout" if timeout else "executor_exception",
+                    phase=produced_by_phase or "tool_call",
+                )
+                raise
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome=execution.terminal_outcome,
+                reason=execution.terminal_reason,
+                phase=produced_by_phase or "tool_call",
             )
             tool_result = execution.result
             update_state_after_tool_result(
@@ -1003,6 +1338,23 @@ def run_tool_loop(
 
 def _bounded_internal_max_tokens(max_tokens: int, internal_max: int) -> int:
     return max(1, min(max_tokens, internal_max))
+
+
+def _backend_tool_retry(runtime, messages, temperature: float, max_tokens: int, tools) -> ChatResult:
+    with model_call_context(phase="tool_call_retry", tools_mode="on"):
+        return runtime.backend.chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+
+
+def _is_exact_canonical_tool_call(tool_call: dict[str, object]) -> bool:
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        return False
+    return function.get("name") in {
+        "exec_shell_full_command",
+        "fetch_url",
+        "list_directory",
+        "system_info",
+    }
 
 
 def _tool_call_max_tokens(max_tokens: int, *, mutative: bool, file_recovery: bool = False) -> int:

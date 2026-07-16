@@ -13,6 +13,7 @@ from .payloads import ChatPayloadOptions, build_chat_payload
 from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
+from orbit.runtime.tool_healing import tool_call_healing_status
 
 
 class LlamaServerError(RuntimeError):
@@ -181,7 +182,11 @@ class LlamaServerBackend:
         return self._server_tools_cache
 
     def backend_props(self) -> dict[str, Any]:
-        return dict(self._props_or_empty())
+        props = dict(self._props_or_empty())
+        if not props:
+            return props
+        props.update(tool_call_healing_status())
+        return props
 
     def execute_server_tool(self, name: str, arguments: dict[str, Any]) -> str:
         data = self._post_json("/tools", {"tool": name, "params": arguments})

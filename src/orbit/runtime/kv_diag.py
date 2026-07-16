@@ -474,6 +474,91 @@ def emit_route_outcome(
     )
 
 
+def emit_tool_healing_shadow(
+    *,
+    report: Any,
+    finish_reason: str | None,
+    output_tokens: int | None,
+    output_hash: str,
+    output_chars: int,
+    phase: str,
+    config_source: str,
+    config_error: str | None,
+    healing_us: float,
+) -> None:
+    last_call = _LAST_MODEL_CALL if enabled() and _LAST_MODEL_CALL is not None else {}
+    _emit(
+        {
+            "event": "kv_diag_tool_healing_shadow",
+            "session_id_hash": last_call.get("session_id_hash"),
+            "request_id": last_call.get("request_id"),
+            "model_call_id": last_call.get("model_call_id"),
+            "phase": current_phase() or last_call.get("phase") or phase,
+            "tools_mode": current_tools_mode() or last_call.get("tools_mode"),
+            "enabled": True,
+            "config_source": config_source,
+            "config_error": config_error,
+            "attempt_id": report.attempt_id,
+            "attempt_detected": report.attempt_detected,
+            "signals": list(report.signals),
+            "candidate_count": report.candidate_count,
+            "candidate_extracted": report.candidate_extracted,
+            "candidate_source": report.candidate_source,
+            "candidate_hash": report.candidate_hash,
+            "candidate_excerpt": report.candidate_excerpt,
+            "repairs": list(report.repairs),
+            "original_tool_name_hash": report.original_tool_name_hash,
+            "normalized_tool_name_hash": report.normalized_tool_name_hash,
+            "normalized_arguments_hash": report.normalized_arguments_hash,
+            "parse_error": report.parse_error,
+            "validation_error": report.validation_error,
+            "validation_path": report.validation_path,
+            "shadow_outcome": report.outcome,
+            "formal_repairable": report.formal_repairable,
+            "formal_repair_reason": report.formal_repair_reason,
+            "formal_argument_count": report.formal_argument_count,
+            "finish_reason": finish_reason,
+            "output_tokens": output_tokens,
+            "output_hash": output_hash,
+            "output_chars": output_chars,
+            "healing_us": healing_us,
+        }
+    )
+
+
+def emit_tool_healing_terminal(
+    *,
+    report: Any | None,
+    correlation: Any,
+    phase: str,
+    attempt_id: str | None = None,
+) -> None:
+    last_call = _LAST_MODEL_CALL if enabled() and _LAST_MODEL_CALL is not None else {}
+    _emit(
+        {
+            "event": "kv_diag_tool_healing_terminal",
+            "session_id_hash": last_call.get("session_id_hash"),
+            "request_id": last_call.get("request_id"),
+            "model_call_id": last_call.get("model_call_id"),
+            "phase": current_phase() or last_call.get("phase") or phase,
+            "attempt_id": attempt_id or (report.attempt_id if report is not None else None),
+            "candidate_hash": report.candidate_hash if report is not None else None,
+            "shadow_outcome": report.outcome if report is not None else None,
+            "shadow_candidate_count": report.candidate_count if report is not None else None,
+            "shadow_tool_name_hash": report.normalized_tool_name_hash if report is not None else None,
+            "shadow_arguments_hash": report.normalized_arguments_hash if report is not None else None,
+            "active_candidate_count": correlation.active_candidate_count,
+            "active_tool_name_hash": correlation.active_tool_name_hash,
+            "active_arguments_hash": correlation.active_arguments_hash,
+            "active_outcome": correlation.active_outcome,
+            "terminal_reason": correlation.terminal_reason,
+            "agreement": correlation.agreement,
+            "active_canonical_outcome": correlation.canonical_outcome,
+            "active_canonical_error": correlation.canonical_error,
+        }
+    )
+
+
 def emit_evidence_lineage(metadata: dict[str, Any]) -> None:
     if not enabled():
         return

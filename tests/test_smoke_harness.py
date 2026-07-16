@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -51,6 +53,229 @@ def route_step_report(**overrides: object):
 
 
 class SmokeHarnessTests(unittest.TestCase):
+    def test_tool_call_generation_only_uses_one_model_call_without_execution_or_finalization(self) -> None:
+        class Backend:
+            base_url = "http://127.0.0.1:9"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages, *, temperature, max_tokens, tools=None):
+                self.calls += 1
+                return smoke_harness.ChatResult(
+                    content="",
+                    model="fake",
+                    finish_reason="tool_calls",
+                    tool_calls=[{"id": "c", "type": "function", "function": {"name": "system_info", "arguments": "{}"}}],
+                    prompt_tokens=20,
+                    completion_tokens=3,
+                    cached_tokens=4,
+                    prompt_tokens_per_second=100.0,
+                    generation_tokens_per_second=10.0,
+                )
+
+        backend = Backend()
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "wait_for_backend_idle", return_value={"in_flight": False}), \
+            mock.patch("orbit.runtime.tool_calls.execute_tool_call") as execute, \
+            mock.patch.object(smoke_harness.ChatRuntime, "_answer_from_tool_results") as finalize:
+            row = smoke_harness.run_tool_call_generation_sample(
+                backend,
+                base_url=backend.base_url,
+                timeout=1.0,
+                workdir=Path(tmp),
+                scenario="system_info_1",
+                prompt="synthetic prompt",
+                expected_tool="system_info",
+                repetition=1,
+                temperature=0,
+                max_tokens=96,
+            )
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(row["model_calls"], 1)
+        self.assertTrue(row["strict_valid"])
+        self.assertEqual(row["candidate_source"], "backend")
+        self.assertTrue(row["tool_name_exact_match"])
+        self.assertFalse(row["tool_executed"])
+        self.assertFalse(row["finalization_started"])
+        execute.assert_not_called()
+        finalize.assert_not_called()
+
+    def test_tool_call_generation_timeout_cancels_and_reports_cleanup(self) -> None:
+        release = threading.Event()
+
+        class Backend:
+            base_url = "http://127.0.0.1:9"
+
+            def chat(self, messages, *, temperature, max_tokens, tools=None):
+                release.wait(1.0)
+                return smoke_harness.ChatResult(
+                    content="", model="fake", finish_reason="cancelled", tool_calls=[],
+                    prompt_tokens=1, completion_tokens=0, cached_tokens=0,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                )
+
+        def cancel(*_args, **_kwargs):
+            release.set()
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(smoke_harness, "request_backend_cancel", side_effect=cancel), \
+            mock.patch.object(smoke_harness, "wait_for_backend_idle", return_value={"in_flight": False}):
+            row = smoke_harness.run_tool_call_generation_sample(
+                Backend(), base_url="http://127.0.0.1:9", timeout=0.01,
+                workdir=Path(tmp), scenario="timeout", prompt="fixture",
+                expected_tool="system_info", repetition=1, temperature=0, max_tokens=96,
+            )
+
+        self.assertTrue(row["timeout"])
+        self.assertTrue(row["cancel_requested"])
+        self.assertTrue(row["cleanup_healthy"])
+        self.assertFalse(row["evaluable"])
+        self.assertEqual(row["model_calls"], 1)
+
+    def test_tool_call_generation_summary_and_jsonl_are_content_free(self) -> None:
+        rows = [
+            {
+                "type": "tool_call_generation", "scenario": "safe-id", "repetition": 1,
+                "evaluable": True, "timeout": False, "cancelled": False, "cleanup_healthy": True,
+                "strict_valid": True, "repairs": [], "attempt_detected": True,
+                "tool_name_exact_match": True, "multiple_candidates": False, "truncation": False,
+                "budget_truncation": False, "structural_truncation": False,
+                "semantic_outcome": "expected_tool",
+                "formal_repairable": False,
+                "markup_leakage": False, "categories": ["valid_first_pass"],
+                "generation_wall_ms": 10.0, "healing_us": 80.0, "model_calls": 1,
+                "tool_executed": False, "finalization_started": False,
+            }
+        ]
+        summary = smoke_harness.summarize_tool_call_generation(rows, mtp="off")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "generation.jsonl"
+            smoke_harness.write_tool_call_generation_jsonl(path, {"type": "environment", "model": "fake"}, rows, summary)
+            text = path.read_text(encoding="utf-8")
+
+        self.assertEqual(summary["completion_rate"], 1.0)
+        self.assertEqual(summary["valid_first_pass_rate"], 1.0)
+        self.assertEqual(summary["valid_first_pass_output_rate"], 1.0)
+        self.assertEqual(summary["formal_error_rate"], 0.0)
+        self.assertEqual(summary["deterministic_repair_candidate_rate"], 0.0)
+        self.assertEqual(summary["model_calls"], 1)
+        self.assertEqual(summary["tools_executed"], 0)
+        self.assertEqual(summary["finalizations_started"], 0)
+        self.assertNotIn("synthetic prompt", text)
+        self.assertNotIn("arguments", text)
+
+    def test_validation_divergence_replay_measures_legacy_without_healing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = smoke_harness.run_tool_validation_divergence_replay(Path(tmp))
+
+        cases = [row for row in rows if row["type"] == "tool_validation_divergence_case"]
+        summary = rows[-1]
+        self.assertEqual(summary["cases"], 16)
+        self.assertEqual(summary["matched_expectations"], 16)
+        self.assertEqual(summary["active_default_used"], 4)
+        self.assertEqual(summary["active_clamp_used"], 3)
+        self.assertEqual(summary["active_ignored_extra"], 4)
+        self.assertEqual(summary["policy_denied"], 1)
+        self.assertEqual(summary["missing_required"], 1)
+        self.assertFalse(summary["repair_executed"])
+        self.assertEqual(summary["new_executions_enabled"], 0)
+        self.assertEqual(summary["valid_off_on_terminal_matches"], 3)
+        self.assertTrue(all(row["formal_repairable"] is False for row in cases))
+        self.assertTrue(all("arguments" not in row for row in cases))
+
+    def test_tool_call_generation_distinguishes_no_attempt_and_truncation_kinds(self) -> None:
+        no_attempt = smoke_harness.tool_healing_categories(
+            {"attempt_detected": False, "strict_outcome": "no_attempt", "finish_reason": "stop"}
+        )
+        budget = smoke_harness.tool_healing_categories(
+            {
+                "attempt_detected": True,
+                "strict_outcome": "rejected_parse",
+                "parse_error": "unterminated_json_string",
+                "finish_reason": "length",
+                "repairs": ["close_json_structure"],
+            }
+        )
+        structural = smoke_harness.tool_healing_categories(
+            {
+                "attempt_detected": True,
+                "strict_outcome": "rejected_parse",
+                "parse_error": "unterminated_json_string",
+                "finish_reason": "stop",
+            }
+        )
+
+        self.assertEqual(no_attempt, ["no_attempt"])
+        self.assertNotIn("ambiguous_attempt", no_attempt)
+        self.assertIn("budget_truncation", budget)
+        self.assertIn("truncated_attempt", budget)
+        self.assertNotIn("budget_truncation", structural)
+        self.assertIn("truncated_attempt", structural)
+
+        summary = smoke_harness.summarize_tool_call_generation(
+            [
+                {
+                    "evaluable": True, "expected_tool": "fetch_url", "attempt_detected": True,
+                    "categories": budget, "semantic_outcome": "missing_tool_call",
+                    "formal_repairable": False,
+                    "generation_wall_ms": 10.0, "healing_us": 50.0,
+                    "cleanup_healthy": True, "timeout": False, "cancelled": False,
+                    "multiple_candidates": False, "truncation": True,
+                    "budget_truncation": True, "structural_truncation": True,
+                    "markup_leakage": True, "model_calls": 1,
+                }
+            ],
+            mtp="off",
+        )
+        self.assertEqual(summary["deterministic_repair_candidate_rate"], 0.0)
+        self.assertEqual(summary["budget_truncation_rate"], 1.0)
+        self.assertEqual(summary["structural_truncation_rate"], 1.0)
+
+    def test_tool_call_generation_summary_excludes_non_evaluable_and_semantic_errors_from_repair(self) -> None:
+        rows = [
+            {
+                "evaluable": True, "expected_tool": None, "attempt_detected": False,
+                "categories": ["no_attempt"], "semantic_outcome": "no_attempt",
+                "formal_repairable": False,
+                "generation_wall_ms": 10.0, "healing_us": 50.0,
+                "cleanup_healthy": True, "timeout": False, "cancelled": False,
+                "multiple_candidates": False, "truncation": False,
+                "budget_truncation": False, "structural_truncation": False,
+                "markup_leakage": False, "model_calls": 1,
+            },
+            {
+                "evaluable": True, "expected_tool": "read_file", "attempt_detected": True,
+                "categories": ["valid_first_pass"], "semantic_outcome": "wrong_tool",
+                "formal_repairable": False,
+                "tool_name_exact_match": False, "generation_wall_ms": 20.0, "healing_us": 60.0,
+                "cleanup_healthy": True, "timeout": False, "cancelled": False,
+                "multiple_candidates": False, "truncation": False,
+                "budget_truncation": False, "structural_truncation": False,
+                "markup_leakage": False, "model_calls": 1,
+            },
+            {
+                "evaluable": False, "expected_tool": "system_info", "attempt_detected": False,
+                "categories": ["uncorrelated"], "semantic_outcome": "not_evaluable",
+                "formal_repairable": False,
+                "generation_wall_ms": 80.0, "cleanup_healthy": True,
+                "timeout": True, "cancelled": True, "model_calls": 1,
+            },
+        ]
+
+        summary = smoke_harness.summarize_tool_call_generation(rows, mtp="off")
+
+        self.assertEqual(summary["evaluable"], 2)
+        self.assertEqual(summary["no_attempt_rate"], 0.5)
+        self.assertEqual(summary["valid_first_pass_rate"], 1.0)
+        self.assertEqual(summary["valid_first_pass_output_rate"], 0.5)
+        self.assertEqual(summary["semantic_wrong_tool_rate"], 1.0)
+        self.assertEqual(summary["deterministic_repair_candidate_rate"], 0.0)
+        self.assertEqual(summary["formal_error_rate"], 0.0)
+        self.assertEqual(summary["generation_wall_ms_median"], 15.0)
+
     def test_parser_accepts_output_and_selection_options(self) -> None:
         args = smoke_harness.build_parser().parse_args(
             [
@@ -63,6 +288,10 @@ class SmokeHarnessTests(unittest.TestCase):
                 "/tmp/out.jsonl",
                 "--markdown",
                 "/tmp/out.md",
+                "--canonical-gate",
+                "on",
+                "--tool-healing-mode",
+                "off",
             ]
         )
 
@@ -70,6 +299,35 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertTrue(args.no_web)
         self.assertEqual(args.jsonl, "/tmp/out.jsonl")
         self.assertEqual(args.markdown, "/tmp/out.md")
+        self.assertEqual(args.canonical_gate, "on")
+        self.assertEqual(args.tool_healing_mode, "off")
+
+    def test_canonical_gate_environment_and_metadata_are_bounded(self) -> None:
+        key = "ORBIT_TOOL_CALL_CANONICAL_GATE"
+        with mock.patch.dict(os.environ, {key: "0"}, clear=False):
+            with smoke_harness.canonical_gate_environment("on"):
+                self.assertEqual(os.environ[key], "1")
+                self.assertEqual(
+                    smoke_harness.canonical_gate_metadata("inherit"),
+                    {"requested_mode": "inherit", "enabled": True, "source": "stable", "validation_error": None},
+                )
+            self.assertEqual(os.environ[key], "0")
+
+    def test_tool_healing_environment_and_metadata_are_bounded(self) -> None:
+        key = "ORBIT_TOOL_CALL_HEALING"
+        with mock.patch.dict(os.environ, {key: "0"}, clear=False):
+            with smoke_harness.tool_healing_environment("on"):
+                self.assertEqual(os.environ[key], "1")
+                metadata = smoke_harness.tool_healing_metadata("inherit")
+                self.assertEqual(metadata["requested_mode"], "inherit")
+                self.assertTrue(metadata["enabled"])
+                self.assertEqual(metadata["source"], "stable")
+                self.assertIsNone(metadata["validation_error"])
+                self.assertIsNone(metadata["blocked_reason"])
+                self.assertIsInstance(metadata["repair_count"], int)
+                self.assertIsInstance(metadata["rejection_count"], int)
+                self.assertIsInstance(metadata["last_rules"], list)
+            self.assertEqual(os.environ[key], "0")
 
     def test_parser_accepts_managed_final_prefix_options(self) -> None:
         args = smoke_harness.build_parser().parse_args(
@@ -349,6 +607,29 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(env["mtp"], "failed")
         self.assertFalse(env["mtp_usable"])
         self.assertEqual(env["mtp_failure_reason"], "probe failed")
+
+    def test_environment_summary_redacts_locations_for_healing_diagnostics(self) -> None:
+        class Backend:
+            def model_info(self):
+                return type("Info", (), {"id": "m"})()
+
+        args = smoke_harness.build_parser().parse_args(
+            [
+                "--base-url", "http://127.0.0.1:9999",
+                "--workdir", "/tmp/private-fixture",
+                "--tool-healing-diagnostics",
+            ]
+        )
+        env = smoke_harness.environment_summary(
+            args=args,
+            backend=Backend(),
+            props={"backend": "orbit-native", "model_id": "m"},
+        )
+
+        self.assertEqual(env["base_url"], "<redacted>")
+        self.assertEqual(env["workdir"], "<redacted>")
+        self.assertNotIn("http://", json.dumps(env))
+        self.assertNotIn("private-fixture", json.dumps(env))
 
     def test_environment_summary_records_final_prefix_and_runtime_metadata(self) -> None:
         class Backend:
@@ -1144,6 +1425,151 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(summary["steps_with_route_events"], 0)
         self.assertEqual(summary["missing_route_diagnostic_steps"], 1)
         self.assertEqual(summary["class_counts"], smoke_harness.empty_route_class_counts())
+
+    def test_tool_healing_events_join_by_attempt_id_and_classify_active_divergence(self) -> None:
+        attempt_id = "a" * 32
+        lines = [
+            json.dumps(
+                {
+                    "event": "kv_diag_tool_healing_shadow",
+                    "attempt_id": attempt_id,
+                    "attempt_detected": True,
+                    "signals": ["backend_tool_calls"],
+                    "candidate_count": 1,
+                    "candidate_source": "backend",
+                    "repairs": ["unwrap_function_object", "decode_arguments_string"],
+                    "shadow_outcome": "rejected_validation",
+                    "validation_error": "additional_property",
+                    "finish_reason": "tool_calls",
+                    "output_tokens": 3,
+                    "healing_us": 82.5,
+                    "candidate_hash": "1" * 16,
+                    "normalized_tool_name_hash": "2" * 16,
+                    "normalized_arguments_hash": "3" * 16,
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "kv_diag_tool_healing_terminal",
+                    "attempt_id": attempt_id,
+                    "active_candidate_count": 1,
+                    "active_tool_name_hash": "2" * 16,
+                    "active_arguments_hash": "3" * 16,
+                    "active_outcome": "executed",
+                    "agreement": "active_only",
+                }
+            ),
+        ]
+
+        attempts = smoke_harness.parse_tool_healing_diagnostic_lines(lines)
+
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["attempt_id"], attempt_id)
+        self.assertEqual(attempts[0]["active_outcome"], "executed")
+        self.assertIn("extra_argument", attempts[0]["categories"])
+        self.assertIn("active_ignored_extra", attempts[0]["categories"])
+        self.assertNotIn("candidate_excerpt", attempts[0])
+
+    def test_tool_healing_summary_reports_rates_latency_and_execution_assessment(self) -> None:
+        step = smoke_harness.SmokeStep(
+            "fixture",
+            mode="tool",
+            expected_tool_names=("system_info",),
+            expected_active_outcome="executed",
+        )
+        report = route_step_report(
+            case="healing",
+            prompt="secret request",
+            answer_excerpt="secret answer",
+            tool_names=["system_info"],
+            tool_calls=1,
+            model_steps=[{"phase": "tool_call", "prompt_tokens": 12}],
+        )
+        attempts = [
+            {
+                "attempt_id": "b" * 32,
+                "attempt_detected": True,
+                "categories": ["valid_first_pass"],
+                "formal_repairable": False,
+                "strict_outcome": "valid_shadow_candidate",
+                "active_outcome": "executed",
+                "agreement": "exact_match",
+                "healing_us": 80.0,
+            },
+            {
+                "attempt_id": "c" * 32,
+                "attempt_detected": True,
+                "categories": ["recoverable_trailing_comma", "superseded"],
+                "formal_repairable": True,
+                "strict_outcome": "valid_shadow_candidate",
+                "active_outcome": "superseded",
+                "agreement": "shadow_only",
+                "healing_us": 120.0,
+            },
+        ]
+        enriched = smoke_harness.enrich_step_tool_healing(report, attempts, step=step, enabled=True)
+
+        summary = smoke_harness.summarize_tool_healing([enriched])
+
+        self.assertEqual(summary["attempts"], 2)
+        self.assertEqual(summary["category_counts"]["valid_first_pass"], 1)
+        self.assertEqual(summary["category_counts"]["recoverable_trailing_comma"], 1)
+        self.assertEqual(summary["first_pass_valid_rate"], 0.5)
+        self.assertEqual(summary["deterministic_repair_candidate_rate"], 0.5)
+        self.assertEqual(summary["strict_active_agreement_rate"], 0.5)
+        self.assertEqual(summary["healing_us_median"], 100.0)
+        self.assertEqual(summary["healing_us_p95"], 120.0)
+        self.assertEqual(enriched.tool_healing_attempts[0]["execution_assessment"], "correct_execution")
+
+    def test_tool_healing_jsonl_is_content_free_and_additive(self) -> None:
+        secret = "SECRET-REQUEST-TOKEN"
+        report = route_step_report(
+            prompt=secret,
+            answer_excerpt="SECRET-ANSWER",
+            tool_healing_diagnostics_enabled=True,
+            tool_healing_attempts=[
+                {
+                    "attempt_id": "d" * 32,
+                    "scenario": "healing",
+                    "categories": ["valid_first_pass"],
+                    "active_outcome": "executed",
+                    "healing_us": 75.0,
+                }
+            ],
+        )
+        env = {
+            "version": "test",
+            "model": "gemma4:12b-it-native",
+            "ctx": 8192,
+            "threads": 6,
+            "mtp": "on",
+            "mmproj": "loaded",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "healing.jsonl"
+            smoke_harness.write_jsonl(path, env, [report])
+            text = path.read_text(encoding="utf-8")
+            rows = [json.loads(line) for line in text.splitlines()]
+
+        self.assertNotIn(secret, text)
+        self.assertNotIn("SECRET-ANSWER", text)
+        self.assertEqual(rows[1]["prompt"], "<redacted>")
+        self.assertEqual(rows[1]["answer_excerpt"], "<redacted>")
+        self.assertIn("tool_healing_attempt", [row["type"] for row in rows])
+        self.assertEqual(rows[-1]["type"], "tool_healing_summary")
+
+    def test_tool_healing_replay_is_labelled_and_contains_no_raw_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = smoke_harness.run_tool_healing_replay(Path(tmp))
+        summary = rows[-1]
+        serialized = json.dumps(rows)
+
+        self.assertEqual(summary["type"], "tool_healing_replay_summary")
+        self.assertEqual(summary["cases"], 17)
+        self.assertEqual(summary["false_positives"], 0)
+        self.assertEqual(summary["false_negatives"], 0)
+        self.assertNotIn("file:///etc/passwd", serialized)
+        self.assertNotIn("rm -f", serialized)
 
     def test_main_tools_off_metadata_matches_runtime_mode(self) -> None:
         captured_env: list[dict[str, object]] = []

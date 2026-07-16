@@ -200,11 +200,16 @@ def exec_shell_full_definition() -> dict[str, Any]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string"},
-                    "timeout": {"type": "integer"},
-                    "max_output_size": {"type": "integer"},
+                    "command": {"type": "string", "minLength": 1},
+                    "timeout": {"type": "integer", "minimum": 1, "maximum": MAX_SHELL_TIMEOUT},
+                    "max_output_size": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_SHELL_OUTPUT_BYTES,
+                    },
                 },
                 "required": ["command"],
+                "additionalProperties": False,
             },
         },
     }
