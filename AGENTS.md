@@ -79,7 +79,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC19
 
-- Current published baseline: `v0.0.1-rc19`.
+- Published predecessor: `v0.0.1-rc19`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc19
 - Release notes commit: `eb68ad30f9539a731730f7c94397731db9fcbd28`.
 - Tag object: `9437d96a05811b5b7fac7dfde3bd37499a1334ae`.
@@ -92,6 +92,23 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - The experiment remains OFF by default. `ORBIT_FINAL_PREFIX_EXPERIMENT=1` enables eligible native `final_from_tool` reuse, with an exact net reduction of 39 evaluated tokens relative to default behavior.
 - Default `cached=4` remains unchanged and unresolved. Experimental logits differ from cold full-prefill because segmentation changes; restore is bit-exact against an identically segmented baseline.
 - No deterministic wall-time improvement is claimed. Non-stream timeout may require explicit `/cancel`, and bounded RSS allocator variation remains documented.
+
+### RC20
+
+- Current published baseline: `v0.0.1-rc20`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc20
+- Release notes commit: `73ec0215258ce9aa8c4c5f69ea650edc2aa103c3`.
+- Tag object: `6dc3740a8e87a9d56adf211c235fc13236609e32`.
+- Tag commit: `73ec0215258ce9aa8c4c5f69ea650edc2aa103c3`.
+- Prerelease: yes. Latest: false. The GitHub `releases/latest` endpoint does not resolve to RC20.
+- Includes #142, #143, #144, #145, #146, and #147.
+- Focus: structurally covered CHAT evidence omission, diagnostic route-output classification and benchmark aggregation, route/argument technical-stop guidance, and aligned 64-token `final_from_tool` prefix reuse enabled by default.
+- RC20 final-prefix behavior: the first eligible native final captures the exact 64-token checkpoint; subsequent eligible finals restore `cached=64`. `ORBIT_FINAL_PREFIX_REUSE=0` is the immediate stable kill switch and restores non-reuse behavior with `cached=4` on the measured smoke.
+- The stable variable overrides `ORBIT_FINAL_PREFIX_EXPERIMENT`; legacy-only configurations remain compatible, invalid stable values disable safely, and MTP, tools-off, thinking-enabled, route, chat, tool-call, retry, and repair paths remain ineligible.
+- Exact-prefix validation: 58 content tokens plus six Gemma template/control tokens, next dynamic token 105, no padding, 55/55 bit-exact cold/segmented/restore probes, and maximum logits difference `0.0`.
+- RC20 post-merge runtime sanity: default reuse PASS with six correct stop completions, one capture, five `cached=64` restores, and zero fallback; kill switch PASS with two `cached=4` completions and zero capture/restore; strict MTP PASS with healthy MTP and zero final-prefix activity.
+- RC20 validation: MTP shim build PASS; prompt/final-policy/completion-budget PASS with 60 tests; evidence/runtime/tool-message PASS with 213 tests; resolver PASS with 3 tests; backend/native/protocol PASS with 118 tests; smoke harness PASS with 54 tests; full unit discovery PASS with 1,067 tests; `compileall` PASS; `git diff --check` PASS.
+- Restored calls evaluate 36 fewer tokens than previous production, with cumulative evaluated-token break-even on the second eligible final. CPU timing remains workload- and output-dependent; no deterministic wall-time improvement is claimed.
 
 ## MTP
 
@@ -107,10 +124,10 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## KV / Cache / Final Budget
 
-- `cached=4` on `route -> final` is expected: prompts diverge immediately in the system prompt.
-- Do not chase `cached=4` with risky redesigns without new evidence.
-- Final-prefix checkpoint reuse remains a technical stop: the stable 43-token boundary does not align with production prefill batching, and changing segmentation changes logits.
-- The safer path remains reducing evaluated tokens in final/retry prompts.
+- Eligible native `final_from_tool` calls now use an exact batch-aligned 64-token checkpoint by default. The first eligible final captures; later eligible finals restore `cached=64`.
+- `ORBIT_FINAL_PREFIX_REUSE=0` disables reuse immediately. The measured kill-switch path retains expected non-reuse behavior with `cached=4`.
+- The former 43-token segmentation remains historical and must not be restored. Its checkpoint implementation was correct, but the non-aligned boundary changed Gemma logits and caused the reproduced read regression.
+- Do not generalize the checkpoint beyond the exact validated final prompt family or into route, chat, retry, tool-call, thinking, tools-off, or MTP-owned paths.
 - Small `final_from_tool` was improved with compact evidence metadata.
 - `system_info` has a dedicated 160-token cap.
 - Small `shell`, `grep_search`, and `unknown` finals remain at 96 tokens.
@@ -267,9 +284,27 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Validation recorded: OFF and ON correctness remained stable, web errors did not answer from model memory, no stale evidence or cross-turn contamination was observed, and full unit discovery passed with 1,022 tests; `compileall` and `git diff --check` passed.
 - RC19 includes the experiment only as an optional, OFF-by-default feature with its benchmark harness; it is not promoted to default behavior.
 
+## #147, Aligned 64-Token final_from_tool Prefix Reuse
+
+- Included in `v0.0.1-rc20`; not included in `v0.0.1-rc19`.
+- The experimental 43-token checkpoint boundary was not safe for default use because it split production prefill before the normal 64-token batch boundary. Gemma output could therefore diverge even though checkpoint capture and restore were correct; the reproduced read fixture expanded from a concise 13-token stop response to a 96-token length termination.
+- The final system instruction is now a meaningful 58-content-token policy. With six Gemma template/control tokens, the stable prefix is exactly 64 tokens, ends at the system turn, and contains no padding or filler. The next dynamic token is the user-turn control token 105.
+- Stable-prefix text hash: `c3b8e45ac695a87e60146bb8017a98f1b41fc13a708565b58160cce6d419c6f3`. Serialized token-prefix hash: `398338fd38a9c80d54b269e09ae70077ab7323ec1a47920879a24896928cdfc5`.
+- Cold production prefill, explicit segmentation at token 64, and checkpoint restore were bit-exact in 55/55 probes across 11 final families: logits hashes, next token, ordered top-10, bounded output, and finish reason matched, with maximum logits difference `0.0`.
+- The read regression is resolved: aligned capture and restore both return the same 13-token `finish_reason=stop` answer as cold production. Checkpoints created for the old 43-token identity are rejected and rebuilt.
+- Eligible native `final_from_tool` reuse is enabled by default. The first eligible final captures the checkpoint; later eligible finals restore `cached=64`.
+- `ORBIT_FINAL_PREFIX_REUSE=0` is the immediate stable kill switch. The stable variable overrides `ORBIT_FINAL_PREFIX_EXPERIMENT`; legacy-only configurations remain compatible, and invalid stable values disable reuse safely with bounded diagnostics.
+- Eligibility remains restricted to native `final_from_tool` calls with tools enabled and the exact prompt family. Tools-off, thinking-enabled, MTP-owned, route, chat, tool-call, retry, and repair paths do not use the checkpoint.
+- A restored final evaluates 60 fewer tokens than the same new prompt without reuse and 36 fewer tokens than previous production. The first capture costs 28 additional evaluated tokens, so cumulative evaluated-token break-even occurs on the second eligible final.
+- Semantic validation passed 40/40 high-information cases with `finish_reason=stop`; output tokens decreased from 845 to 825 without losing requested facts, paths, counts, matches, errors, or values.
+- Lifecycle validation recorded 900 restores and 906/906 correct stop completions, zero normal fallbacks, bounded non-linear RSS, safe cancel/timeout/reset/restart invalidation, and no stale or cross-process checkpoint state.
+- Post-merge validation on `6330d85` passed six default-reuse tool finals with one capture, five `cached=64` restores, and zero fallback; stable OFF passed two `cached=4` finals with zero capture/restore; strict MTP remained healthy with zero final-prefix activity.
+- Validation: prompt/final-policy/completion-budget PASS with 60 tests; evidence/runtime/tool-message PASS with 213 tests; resolver PASS with 3 tests; backend/native/protocol PASS with 118 tests; smoke harness PASS with 54 tests; MTP shim build PASS; full discovery PASS with 1,067 tests; `compileall` PASS; `git diff --check` PASS.
+- The evaluated-token reduction is deterministic for eligible restored calls. CPU wall time remains workload-, output-, process-, and thermal-dependent; no deterministic wall-time improvement is claimed.
+
 ## #142, Structurally Covered CHAT Evidence Omission
 
-- Post-RC19 change; not included in `v0.0.1-rc19`. RC19 remains the current published release baseline.
+- Included in `v0.0.1-rc20`; not included in `v0.0.1-rc19`.
 - Problem: conversation reuse could correctly choose `CHAT` and avoid another tool call, but the CHAT prompt still reinjected large hidden evidence contexts already represented by completed visible assistant answers.
 - Solution: the CHAT model projection may omit hidden evidence only when structural coverage is proven. This is structural redundancy handling, not semantic relevance selection; stored evidence and provenance remain unchanged.
 - Coverage requires a live-turn evidence sequence and associated user turn, exact evidence IDs, matching tool messages, and a later non-empty visible assistant final with `finish_reason=stop` before another user message. Every evidence record in the projected window must pass, live history and lineage must remain consistent, and the visible projection must be smaller than the existing evidence projection.
@@ -284,7 +319,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## #143, Diagnostic Route Output Classification
 
-- Post-RC19 change; not included in `v0.0.1-rc19`. RC19 remains the current published release baseline.
+- Included in `v0.0.1-rc20`; not included in `v0.0.1-rc19`.
 - Adds five mutually exclusive diagnostic classes for completed route output: `canonical`, `legacy_tolerated`, `direct_prose`, `malformed`, and `control_loop`.
 - `canonical` is restricted to one strict parser-accepted JSON object with the canonical field shape. `legacy_tolerated` covers only non-canonical forms already accepted by the existing parser through normalization. `direct_prose` is limited to the existing intentional direct-answer branch. Rejected output remains `malformed` unless it meets the bounded control-loop diagnostic conditions.
 - Classification occurs only after the existing parser and direct-answer handling. It does not change parser results, routing, fallback, tool selection, direct prose, or model-call count. Initial and retry route completions are classified independently.
@@ -318,7 +353,11 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Main Commits
 
+- `73ec021` Add release notes for v0.0.1-rc20
+- `6330d85` Enable aligned final tool prefix reuse by default (#147)
+- `000fbfe` Record route and argument validation technical stops (#146)
 - `3618000` Add route output classification benchmark coverage (#145)
+- `6384396` Update agent guidance after route output diagnostics (#144)
 - `1dba552` Add diagnostic route output classification (#143)
 - `a303a3e` Reduce redundant evidence in conversation reuse prompts (#142)
 - `eb68ad3` Add release notes for v0.0.1-rc19
@@ -352,7 +391,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-1. Stop and use RC19 as the stable baseline.
+1. Stop and use RC20 as the stable baseline.
 2. Run controlled CPU benchmarks with `bench-core` metadata.
 3. Analyze `bench-core` output for regressions or better profiles.
 4. Run a lightweight conversation-reuse end-to-end smoke only if a regression or ambiguous behavior appears.
