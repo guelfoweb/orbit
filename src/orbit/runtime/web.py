@@ -70,11 +70,20 @@ def fetch_url_definition() -> dict[str, object]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string"},
-                    "timeout": {"type": "integer"},
-                    "max_bytes": {"type": "integer"},
+                    "url": {"type": "string", "minLength": 1},
+                    "timeout": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_FETCH_TIMEOUT_SECONDS,
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_FETCH_MAX_BYTES,
+                    },
                 },
                 "required": ["url"],
+                "additionalProperties": False,
             },
         },
     }

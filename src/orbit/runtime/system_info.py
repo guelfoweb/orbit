@@ -28,6 +28,7 @@ def system_info_definition() -> dict[str, Any]:
                     "include_gpu": {"type": "boolean", "default": False},
                     "human_readable": {"type": "boolean", "default": True},
                 },
+                "required": [],
                 "additionalProperties": False,
             },
         },

@@ -53,6 +53,36 @@ class FakeNativeStreamWithTrailingNoise:
 
 
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_backend_props_overlay_runtime_tool_healing_diagnostics(self) -> None:
+        class Backend(LlamaServerBackend):
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native", "tool_call_healing_repair_count": 0}
+
+        runtime_status = {
+            "tool_call_healing_enabled": True,
+            "tool_call_healing_source": "default",
+            "tool_call_healing_config_error": None,
+            "tool_call_healing_repair_count": 3,
+            "tool_call_healing_rejection_count": 2,
+            "tool_call_healing_last_rules": ["remove_trailing_comma"],
+        }
+        with mock.patch(
+            "orbit.backend.llama_server.tool_call_healing_status",
+            return_value=runtime_status,
+        ):
+            props = Backend(base_url="http://localhost", timeout=1).backend_props()
+
+        self.assertEqual(props["backend"], "orbit-native")
+        self.assertEqual(props["tool_call_healing_repair_count"], 3)
+        self.assertEqual(props["tool_call_healing_last_rules"], ["remove_trailing_comma"])
+
+    def test_backend_props_stays_empty_when_server_props_are_unavailable(self) -> None:
+        class Backend(LlamaServerBackend):
+            def _props_or_empty(self) -> dict[str, object]:
+                return {}
+
+        self.assertEqual(Backend(base_url="http://localhost", timeout=1).backend_props(), {})
+
     def test_backend_connection_error_mentions_backend_server(self) -> None:
         backend = LlamaServerBackend(base_url="http://127.0.0.1:12120", model="fake", timeout=1)
 

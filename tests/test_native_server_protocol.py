@@ -12,10 +12,22 @@ from orbit.native_server.protocol import (
     trim_at_stop,
     validate_session_id,
 )
-from orbit.native_server.app import _final_prefix_reuse_props
+from orbit.native_server.app import _final_prefix_reuse_props, _tool_call_healing_props
 
 
 class NativeServerProtocolTests(unittest.TestCase):
+    def test_tool_call_healing_props_are_bounded_and_default_enabled(self) -> None:
+        props = _tool_call_healing_props()
+
+        self.assertTrue(props["tool_call_healing_enabled"])
+        self.assertEqual(props["tool_call_healing_source"], "default")
+        self.assertIsNone(props["tool_call_healing_config_error"])
+        self.assertIsNone(props["tool_call_healing_blocked_reason"])
+        self.assertIsInstance(props["tool_call_healing_repair_count"], int)
+        self.assertIsInstance(props["tool_call_healing_rejection_count"], int)
+        self.assertIsInstance(props["tool_call_healing_last_rules"], list)
+        self.assertNotIn("arguments", props)
+
     def test_final_prefix_reuse_props_are_bounded_configuration_metadata(self) -> None:
         client = SimpleNamespace(
             config=SimpleNamespace(
