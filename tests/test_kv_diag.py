@@ -102,6 +102,12 @@ class KVDiagTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_diagnostics_for_tests()
         reset_native_diagnostics_for_tests()
+        self._post_tool_final_reuse_env = mock.patch.dict(
+            os.environ,
+            {"ORBIT_POST_TOOL_FINAL_REUSE": "0"},
+        )
+        self._post_tool_final_reuse_env.start()
+        self.addCleanup(self._post_tool_final_reuse_env.stop)
 
     def test_diag_default_off_does_not_write_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

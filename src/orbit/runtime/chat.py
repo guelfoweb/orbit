@@ -140,6 +140,11 @@ class ChatRuntime:
     last_chat_projection_fallback_reason: str | None = None
     last_chat_projection_omitted_evidence_count: int = 0
     last_chat_projection_estimated_tokens_saved: int = 0
+    post_tool_final_reuse_eligible_count: int = 0
+    post_tool_final_reuse_reused_count: int = 0
+    post_tool_final_reuse_fallback_count: int = 0
+    post_tool_final_reuse_avoided_model_calls: int = 0
+    post_tool_final_reuse_last_reason: str | None = None
 
     def __post_init__(self) -> None:
         self.backend = instrument_backend(self.backend)
@@ -903,6 +908,11 @@ class ChatRuntime:
         self.completed_evidence_ids.clear()
         self.current_turn_evidence_sequence_start = 0
         self._reset_chat_projection_diagnostics()
+        self.post_tool_final_reuse_eligible_count = 0
+        self.post_tool_final_reuse_reused_count = 0
+        self.post_tool_final_reuse_fallback_count = 0
+        self.post_tool_final_reuse_avoided_model_calls = 0
+        self.post_tool_final_reuse_last_reason = None
         self.last_memory_refresh = None
         self.last_memory_refresh_message_count = None
         self.last_memory_refresh_attempt = None

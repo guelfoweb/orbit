@@ -38,19 +38,27 @@ from orbit.final_prefix_config import (
     FINAL_PREFIX_TOKEN_COUNT,
     resolve_final_prefix_reuse,
 )
+from orbit.inference_audit_config import resolve_inference_audit_shadow
+from orbit.post_tool_final_reuse_config import (
+    POST_TOOL_FINAL_REUSE_ENV,
+    resolve_post_tool_final_reuse,
+)
 from orbit.runtime.chat import ChatRuntime
 from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import current_phase
 from orbit.runtime.kv_diag import model_call_context
+from orbit.runtime.inference_audit import audit_model_calls, summarize_inference_audits
 from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT, TOOL_CALL_SYSTEM_PROMPT, with_tool_call_system_prompt
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_healing import analyze_tool_attempt, tool_call_healing_status
+from orbit.runtime.tool_plan_shadow import analyze_tool_plan_shadow
 from orbit.runtime.tools import TOOL_NAMES, tool_definitions
-from orbit.runtime.turn_trace import ModelStepMetrics
+from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 from orbit.terminal.runtime_status import collect_host_info
 from orbit.tool_contract_config import TOOL_CALL_CANONICAL_GATE_ENV, resolve_tool_call_canonical_gate
 from orbit.tool_healing_config import TOOL_CALL_HEALING_ENV, resolve_tool_call_healing
+from orbit.tool_plan_config import resolve_tool_plan_shadow
 
 
 CorrectnessChecker = Callable[[str, list[str]], str]
@@ -64,16 +72,17 @@ class SmokeStep:
     expected_route: str | None = None
     expected_tool_names: tuple[str, ...] | None = None
     expected_active_outcome: str | None = None
+    inference_audit_expectation: str = "unknown"
 
 
 FINAL_PREFIX_LOCAL_STEPS = (
-    SmokeStep("run pwd", checker_name="path_like"),
-    SmokeStep("tell me specs about this computer", checker_name="nonempty"),
-    SmokeStep("read text/summary.txt", checker_name="nonempty"),
-    SmokeStep('search inside local text files for "Orbit"', checker_name="nonempty"),
-    SmokeStep("list files and directories in this workdir", checker_name="nonempty"),
-    SmokeStep("run printf 'orbit-final-prefix-ok\\n'", checker_name="nonempty"),
-    SmokeStep("run command_that_does_not_exist_123", checker_name="shell_error"),
+    SmokeStep("run pwd", checker_name="path_like", inference_audit_expectation="bounded_confirmation"),
+    SmokeStep("tell me specs about this computer", checker_name="nonempty", inference_audit_expectation="synthesis_required"),
+    SmokeStep("read text/summary.txt", checker_name="nonempty", inference_audit_expectation="synthesis_required"),
+    SmokeStep('search inside local text files for "Orbit"', checker_name="nonempty", inference_audit_expectation="synthesis_required"),
+    SmokeStep("list files and directories in this workdir", checker_name="nonempty", inference_audit_expectation="synthesis_required"),
+    SmokeStep("run printf 'orbit-final-prefix-ok\\n'", checker_name="nonempty", inference_audit_expectation="bounded_confirmation"),
+    SmokeStep("run command_that_does_not_exist_123", checker_name="shell_error", inference_audit_expectation="structured_error"),
 )
 
 FINAL_PREFIX_WEB_STEPS = (
@@ -192,15 +201,15 @@ ROUTE_CLASS_WEB_ERROR_STEPS = (
 )
 
 TOOL_HEALING_STEPS = (
-    SmokeStep("show the computer specifications", mode="tool", checker_name="nonempty", expected_tool_names=("system_info",), expected_active_outcome="executed"),
-    SmokeStep("list this directory", mode="tool", checker_name="nonempty", expected_tool_names=("list_directory",), expected_active_outcome="executed"),
-    SmokeStep("read route_fixture.txt", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
-    SmokeStep('search route_fixture.txt for "route-fixture-match"', mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
-    SmokeStep("run printf 'healing-ok\\n'", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
+    SmokeStep("show the computer specifications", mode="tool", checker_name="nonempty", expected_tool_names=("system_info",), expected_active_outcome="executed", inference_audit_expectation="synthesis_required"),
+    SmokeStep("list this directory", mode="tool", checker_name="nonempty", expected_tool_names=("list_directory",), expected_active_outcome="executed", inference_audit_expectation="synthesis_required"),
+    SmokeStep("read route_fixture.txt", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed", inference_audit_expectation="synthesis_required"),
+    SmokeStep('search route_fixture.txt for "route-fixture-match"', mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed", inference_audit_expectation="synthesis_required"),
+    SmokeStep("run printf 'healing-ok\\n'", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed", inference_audit_expectation="bounded_confirmation"),
     SmokeStep("without changing files, delete route_fixture.txt", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="rejected_policy"),
-    SmokeStep("fetch http://127.0.0.1:9/orbit-healing", mode="tool", checker_name="nonempty", expected_tool_names=("fetch_url",), expected_active_outcome="runtime_error"),
-    SmokeStep("fetch file:///etc/passwd", mode="tool", checker_name="nonempty", expected_tool_names=("fetch_url",), expected_active_outcome="runtime_error"),
-    SmokeStep("run pwd and answer briefly", mode="tool", checker_name="path_like", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
+    SmokeStep("fetch http://127.0.0.1:9/orbit-healing", mode="tool", checker_name="nonempty", expected_tool_names=("fetch_url",), expected_active_outcome="runtime_error", inference_audit_expectation="structured_error"),
+    SmokeStep("fetch file:///etc/passwd", mode="tool", checker_name="nonempty", expected_tool_names=("fetch_url",), expected_active_outcome="runtime_error", inference_audit_expectation="structured_error"),
+    SmokeStep("run pwd and answer briefly", mode="tool", checker_name="path_like", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed", inference_audit_expectation="bounded_confirmation"),
     SmokeStep("run printf 'near-limit-%080d\\n' 1", mode="tool", checker_name="nonempty", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="executed"),
     SmokeStep("Explain in one sentence that system_info is a tool name; do not call tools.", mode="tool", checker_name="nonempty", expected_tool_names=(), expected_active_outcome="executed"),
     SmokeStep('Show this JSON example literally: {"name":"system_info","arguments":{}}. Do not call it.', mode="tool", checker_name="nonempty", expected_tool_names=(), expected_active_outcome="executed"),
@@ -213,13 +222,62 @@ TOOL_HEALING_QUICK_STEPS = (
     TOOL_HEALING_STEPS[11],
     TOOL_HEALING_STEPS[12],
 )
+
+INFERENCE_AUDIT_SINGLE_STEPS = (
+    SmokeStep(
+        "run printf 'audit-confirmation-ok\\n'",
+        checker_name="nonempty",
+        inference_audit_expectation="bounded_confirmation",
+    ),
+    SmokeStep(
+        "run command_that_does_not_exist_123",
+        checker_name="shell_error",
+        inference_audit_expectation="structured_error",
+    ),
+    SmokeStep(
+        "tell me specs about this computer",
+        checker_name="nonempty",
+        inference_audit_expectation="synthesis_required",
+    ),
+    SmokeStep(
+        "read text/summary.txt and explain its contents briefly",
+        checker_name="nonempty",
+        inference_audit_expectation="synthesis_required",
+    ),
+    SmokeStep(
+        "search online for orbit fixture success and summarize the result",
+        checker_name="nonempty",
+        inference_audit_expectation="synthesis_required",
+    ),
+)
+
+INFERENCE_AUDIT_TWO_TOOL_STEPS = (
+    SmokeStep(
+        "Run printf 'audit-first\\n', then run printf 'audit-second\\n', and report both results.",
+        checker_name="nonempty",
+        inference_audit_expectation="next_tool_required",
+    ),
+)
+
+INFERENCE_AUDIT_SYNTHESIS_STEPS = (
+    SmokeStep(
+        "run python3 -c 'for i in range(20): print(f\"audit-line-{i}\")'",
+        checker_name="nonempty",
+        inference_audit_expectation="synthesis_required",
+    ),
+    SmokeStep(
+        "compare the first five and last five lines and explain the pattern",
+        checker_name="nonempty",
+        inference_audit_expectation="synthesis_required",
+    ),
+)
 CANONICAL_GATE_REAL_STEPS = (
     TOOL_HEALING_STEPS[0],
     TOOL_HEALING_STEPS[1],
     TOOL_HEALING_STEPS[2],
     TOOL_HEALING_STEPS[3],
     TOOL_HEALING_STEPS[4],
-    SmokeStep("run command_that_does_not_exist_123", mode="tool", checker_name="shell_error", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="runtime_error"),
+    SmokeStep("run command_that_does_not_exist_123", mode="tool", checker_name="shell_error", expected_tool_names=("exec_shell_full_command",), expected_active_outcome="runtime_error", inference_audit_expectation="structured_error"),
     TOOL_HEALING_STEPS[6],
     TOOL_HEALING_STEPS[11],
 )
@@ -284,6 +342,55 @@ TOOL_CALL_GENERATION_CORPUS_VERSION = 1
 TOOL_CALL_GENERATION_PROTOCOL_VERSION = 1
 TOOL_CALL_GENERATION_CONFIGURATION_VERSION = 1
 
+_TOOL_PLAN_BASE_PROMPT = """Choose exactly one response schema. Supported task: exactly two independent calls using only system_info or list_directory, with all arguments known now. Plan schema: {\"type\":\"tool_plan\",\"steps\":[{\"name\":\"<exact tool>\",\"arguments\":{}},{\"name\":\"<exact tool>\",\"arguments\":{}}]}. Unsupported schema: {\"type\":\"unsupported_plan\"}. Use unsupported_plan if any requested action needs another tool, mutation, network access, an intermediate result, or cannot be completed by exactly two supported calls."""
+TOOL_PLAN_SHADOW_PROMPT_VIEWS = {
+    "contract": _TOOL_PLAN_BASE_PROMPT,
+    "json_only": _TOOL_PLAN_BASE_PROMPT + " Output only the JSON object, with no prose or Markdown fences.",
+    "exactness": _TOOL_PLAN_BASE_PROMPT + " Output only the JSON object, with no prose or Markdown fences. Do not replace an unsupported requested action with a supported tool.",
+}
+
+TOOL_PLAN_SHADOW_CORPUS = (
+    (
+        "mixed_specs_list",
+        "positive_mixed",
+        "First collect computer specifications, then list '.' with at most 20 entries.",
+        "plan",
+        (("system_info", {}), ("list_directory", {"path": ".", "max_entries": 20})),
+    ),
+    (
+        "mixed_list_specs",
+        "positive_mixed",
+        "First list 'docs' with at most 10 entries, then collect computer specifications.",
+        "plan",
+        (("list_directory", {"path": "docs", "max_entries": 10}), ("system_info", {})),
+    ),
+    (
+        "two_lists_alpha_beta",
+        "positive_two_lists",
+        "List 'alpha' with at most 5 entries and independently list 'beta' with at most 7 entries, in that order.",
+        "plan",
+        (("list_directory", {"path": "alpha", "max_entries": 5}), ("list_directory", {"path": "beta", "max_entries": 7})),
+    ),
+    (
+        "two_lists_src_tests",
+        "positive_two_lists",
+        "List 'src' with at most 12 entries and independently list 'tests' with at most 15 entries, in that order.",
+        "plan",
+        (("list_directory", {"path": "src", "max_entries": 12}), ("list_directory", {"path": "tests", "max_entries": 15})),
+    ),
+    ("unsupported_shell", "negative", "Run pwd and uname -s as two shell commands.", "unsupported", None),
+    ("unsupported_mutation", "negative", "Create synthetic.txt and then list the current directory.", "unsupported", None),
+    (
+        "unsupported_dependency",
+        "negative",
+        "List the current directory and then read the first filename returned by that listing.",
+        "unsupported",
+        None,
+    ),
+    ("unsupported_network", "negative", "Fetch https://synthetic.invalid and then show system specifications.", "unsupported", None),
+    ("unsupported_missing_tool", "negative", "Read known.txt and list the docs directory.", "unsupported", None),
+)
+
 
 @dataclass(frozen=True)
 class SmokeScenario:
@@ -342,12 +449,17 @@ class StepReport:
     route_fallback_used: bool = False
     tool_healing_diagnostics_enabled: bool = False
     tool_healing_attempts: list[dict[str, object]] = field(default_factory=list)
+    model_phase_starts: list[dict[str, object]] = field(default_factory=list)
+    phase_timing_sequence: list[dict[str, object]] = field(default_factory=list)
+    inference_audit_enabled: bool = False
+    inference_audit: dict[str, object] = field(default_factory=dict)
+    post_tool_final_reuse: dict[str, object] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         return {
             "case": self.case,
             "step": self.step,
-            "prompt": "<redacted>" if self.tool_healing_diagnostics_enabled else self.prompt,
+            "prompt": "<redacted>" if self.tool_healing_diagnostics_enabled or self.inference_audit_enabled else self.prompt,
             "prompt_kind": self.prompt_kind,
             "completion_kind": self.completion_kind,
             "route_tokens": self.route_tokens,
@@ -365,7 +477,7 @@ class StepReport:
             "fake_output": self.fake_output,
             "loop": self.loop,
             "notes": self.notes,
-            "answer_excerpt": "<redacted>" if self.tool_healing_diagnostics_enabled else self.answer_excerpt,
+            "answer_excerpt": "<redacted>" if self.tool_healing_diagnostics_enabled or self.inference_audit_enabled else self.answer_excerpt,
             "model_steps": self.model_steps,
             "final_prefix": self.final_prefix,
             "lifecycle": self.lifecycle,
@@ -389,6 +501,11 @@ class StepReport:
             "route_fallback_used": self.route_fallback_used,
             "tool_healing_diagnostics_enabled": self.tool_healing_diagnostics_enabled,
             "tool_healing_attempts": self.tool_healing_attempts,
+            "model_phase_starts": self.model_phase_starts,
+            "phase_timing_sequence": self.phase_timing_sequence,
+            "inference_audit_enabled": self.inference_audit_enabled,
+            "inference_audit": self.inference_audit,
+            "post_tool_final_reuse": self.post_tool_final_reuse,
         }
 
 
@@ -762,20 +879,35 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.lifecycle_check:
         return run_lifecycle_checks(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
+    if args.tool_plan_shadow:
+        plan_config = resolve_tool_plan_shadow()
+        if not plan_config.enabled:
+            reason = plan_config.validation_error or "disabled"
+            print(f"error: bounded tool-plan shadow is not enabled ({reason})", file=sys.stderr)
+            return 2
+        return run_tool_plan_shadow_benchmark(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
     if args.tool_call_generation_only:
         return run_tool_call_generation_benchmark(args, jsonl_path=jsonl_path, markdown_path=markdown_path)
 
+    inference_audit_config = resolve_inference_audit_shadow()
+    if args.inference_audit_shadow and not inference_audit_config.enabled:
+        reason = inference_audit_config.validation_error or "disabled"
+        print(f"error: inference audit shadow is not enabled ({reason})", file=sys.stderr)
+        return 2
+    inference_audit_enabled = args.inference_audit_shadow and inference_audit_config.enabled
+
     with (
         final_prefix_environment(args.final_prefix_mode),
+        post_tool_final_reuse_environment(args.post_tool_final_reuse_mode),
         canonical_gate_environment(args.canonical_gate),
         tool_healing_environment(args.tool_healing_mode),
         deterministic_web(args.deterministic_web),
         managed_server(args) as server_process,
         route_diagnostic_environment(
-            args.route_output_diagnostics or args.tool_healing_diagnostics,
+            args.route_output_diagnostics or args.tool_healing_diagnostics or inference_audit_enabled,
             store_mode=args.route_diagnostic_store,
             tool_healing=args.tool_healing_diagnostics,
-            route_output=args.route_output_diagnostics,
+            route_output=args.route_output_diagnostics or inference_audit_enabled,
         ) as route_collector,
     ):
         backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
@@ -808,6 +940,7 @@ def main(argv: list[str] | None = None) -> int:
                         block_id=args.block_id or f"run-{run_order_index:04d}",
                         run_order=args.run_order or str(run_order_index),
                         repetition=repeat,
+                        inference_audit_enabled=inference_audit_enabled,
                     )
                 )
         final_props = settled_backend_props(args.base_url, args.timeout)
@@ -815,6 +948,9 @@ def main(argv: list[str] | None = None) -> int:
         env["server_pid"] = server_process.pid if server_process is not None else None
         env["server_rss_before_kib"] = rss_before_kib
         env["server_rss_after_kib"] = process_rss_kib(server_process)
+        env["post_tool_final_reuse_comparison_fingerprint"] = (
+            post_tool_final_reuse_comparison_fingerprint(env)
+        )
     replay_rows = run_tool_healing_replay(Path(args.workdir)) if args.tool_healing_replay else []
     if replay_rows:
         write_jsonl(jsonl_path, env, reports, extra_rows=replay_rows)
@@ -855,6 +991,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--post-tool-final-reuse-mode",
+        choices=("inherit", "off", "on"),
+        default="inherit",
+        help="Control post-tool prose final reuse for this benchmark only.",
+    )
     parser.add_argument(
         "--canonical-gate",
         choices=("inherit", "off", "on"),
@@ -922,6 +1064,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--tool-call-generation-smoke",
         action="store_true",
         help="Use one prompt per tool family plus two negatives instead of the full 40-prompt corpus.",
+    )
+    parser.add_argument(
+        "--tool-plan-shadow",
+        action="store_true",
+        help="Generate and validate one bounded tool plan per benchmark case without executing tools.",
+    )
+    parser.add_argument(
+        "--tool-plan-shadow-smoke",
+        action="store_true",
+        help="Use a four-case subset of the bounded tool-plan shadow corpus.",
+    )
+    parser.add_argument(
+        "--inference-audit-shadow",
+        action="store_true",
+        help="Classify model calls and theoretical savings without changing runtime behavior.",
+    )
+    parser.add_argument(
+        "--tool-plan-prompt-view",
+        choices=("all", *TOOL_PLAN_SHADOW_PROMPT_VIEWS),
+        default="all",
+        help="Select one bounded tool-plan prompt view or compare all views.",
     )
     parser.add_argument(
         "--route-diagnostic-store",
@@ -1012,6 +1175,347 @@ def run_tool_call_generation_benchmark(
     print(f"jsonl={jsonl_path}")
     print(f"markdown={markdown_path}")
     return 1 if any(row.get("cleanup_healthy") is False for row in rows) else 0
+
+
+def run_tool_plan_shadow_benchmark(
+    args: argparse.Namespace,
+    *,
+    jsonl_path: Path,
+    markdown_path: Path,
+) -> int:
+    with managed_server(args) as server_process:
+        backend = LlamaServerBackend(base_url=args.base_url, timeout=args.timeout)
+        backend.thinking = args.server_thinking == "on"
+        corpus = tool_plan_shadow_corpus(smoke=args.tool_plan_shadow_smoke)
+        prompt_views = (
+            TOOL_PLAN_SHADOW_PROMPT_VIEWS
+            if args.tool_plan_prompt_view == "all"
+            else {args.tool_plan_prompt_view: TOOL_PLAN_SHADOW_PROMPT_VIEWS[args.tool_plan_prompt_view]}
+        )
+        rows: list[dict[str, object]] = []
+        workdir = Path(args.workdir)
+        for prompt_view, system_prompt in prompt_views.items():
+            for repetition in range(1, args.repetitions + 1):
+                for scenario, group, prompt, expected_kind, expected_steps in corpus:
+                    rows.append(
+                        run_tool_plan_shadow_sample(
+                            backend,
+                            base_url=args.base_url,
+                            timeout=args.timeout,
+                            workdir=workdir,
+                            scenario=scenario,
+                            group=group,
+                            prompt=prompt,
+                            prompt_view=prompt_view,
+                            system_prompt=system_prompt,
+                            expected_kind=expected_kind,
+                            expected_steps=expected_steps,
+                            repetition=repetition,
+                            temperature=args.temperature,
+                            max_tokens=args.max_tokens,
+                        )
+                    )
+        final_props = settled_backend_props(args.base_url, args.timeout)
+        env = environment_summary(args=args, backend=backend, props=final_props)
+        env.update(
+            {
+                "type": "environment",
+                "benchmark_mode": "tool_plan_shadow",
+                "server_pid": server_process.pid if server_process is not None else None,
+                "corpus_size": len(corpus),
+                "corpus_version": 1,
+                "corpus_hash": _hash_bounded_tool_plan_corpus(corpus),
+                "tool_plan_shadow": {
+                    "enabled": resolve_tool_plan_shadow().enabled,
+                    "source": resolve_tool_plan_shadow().source,
+                    "validation_error": resolve_tool_plan_shadow().validation_error,
+                    "active_execution": False,
+                    "model_tools_mode": "off",
+                    "schemas_in_prompt": True,
+                    "step_count": 2,
+                    "prompt_views": list(prompt_views),
+                },
+            }
+        )
+    summary = summarize_tool_plan_shadow(rows)
+    write_tool_plan_shadow_jsonl(jsonl_path, env, rows, summary)
+    write_tool_plan_shadow_markdown(markdown_path, env, summary)
+    print(f"jsonl={jsonl_path}")
+    print(f"markdown={markdown_path}")
+    return 1 if any(row.get("cleanup_healthy") is False for row in rows) else 0
+
+
+def tool_plan_shadow_corpus(
+    *,
+    smoke: bool,
+) -> tuple[tuple[str, str, str, str, tuple[tuple[str, dict[str, object]], ...] | None], ...]:
+    if not smoke:
+        return TOOL_PLAN_SHADOW_CORPUS
+    selected = {"mixed_specs_list", "two_lists_alpha_beta", "unsupported_shell", "unsupported_dependency"}
+    return tuple(item for item in TOOL_PLAN_SHADOW_CORPUS if item[0] in selected)
+
+
+def run_tool_plan_shadow_sample(
+    backend: LlamaServerBackend,
+    *,
+    base_url: str,
+    timeout: float,
+    workdir: Path,
+    scenario: str,
+    group: str,
+    prompt: str,
+    prompt_view: str,
+    system_prompt: str,
+    expected_kind: str,
+    expected_steps: tuple[tuple[str, dict[str, object]], ...] | None,
+    repetition: int,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, object]:
+    runtime = ChatRuntime(backend=ProbeBackend(backend), system_prompt=None)
+    plan_tools = tool_definitions(tuple(sorted({"list_directory", "system_info"})))
+    schema_text = json.dumps(plan_tools, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    messages = [
+        {"role": "system", "content": f"{system_prompt}\nCanonical tool schemas: {schema_text}"},
+        {"role": "user", "content": prompt},
+    ]
+    result_queue: queue.Queue[ChatResult | BaseException] = queue.Queue(maxsize=1)
+
+    def generate() -> None:
+        try:
+            with model_call_context(phase="tool_plan_shadow", tools_mode="off"):
+                result_queue.put(
+                    runtime._chat_once(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        on_final_delta=None,
+                        on_progress=None,
+                    )
+                )
+        except BaseException as exc:
+            result_queue.put(exc)
+
+    worker = threading.Thread(target=generate, daemon=True)
+    started = time.perf_counter()
+    worker.start()
+    worker.join(timeout)
+    timed_out = worker.is_alive()
+    cancel_requested = False
+    cleanup_started = time.perf_counter()
+    if timed_out:
+        cancel_requested = request_backend_cancel(base_url, timeout=min(5.0, max(1.0, timeout)))
+    props = wait_for_backend_idle(base_url, timeout=min(10.0, max(2.0, timeout / 5.0)))
+    worker.join(min(2.0, max(0.5, timeout / 10.0)))
+    cleanup_ms = round((time.perf_counter() - cleanup_started) * 1000, 1)
+    wall_ms = round((time.perf_counter() - started) * 1000, 1)
+    value = result_queue.get_nowait() if not result_queue.empty() else None
+    result = value if isinstance(value, ChatResult) else None
+    error = value if isinstance(value, BaseException) else None
+    cancelled = bool(result and result.finish_reason == "cancelled")
+    evaluable = result is not None and not timed_out and not cancelled and error is None
+    validation_us: float | None = None
+    report = None
+    if result is not None:
+        validation_started = time.perf_counter_ns()
+        report = analyze_tool_plan_shadow(
+            result.content,
+            finish_reason=result.finish_reason,
+            tool_definitions=tool_definitions(TOOL_NAMES),
+            allowed_tool_names=TOOL_NAMES,
+            workdir=workdir,
+            user_prompt=prompt,
+        )
+        validation_us = round((time.perf_counter_ns() - validation_started) / 1000, 1)
+    diagnostic = report.diagnostic() if report is not None else {}
+    if result is not None and result.tool_calls:
+        diagnostic.update(
+            {
+                "valid": False,
+                "rejection_code": "unexpected_backend_tool_call",
+                "response_kind": None,
+            }
+        )
+    if validation_us is not None:
+        diagnostic["validation_us"] = validation_us
+    prompt_tokens = result.prompt_tokens if result else None
+    cached_tokens = result.cached_tokens if result else None
+    actual_steps = _normalized_plan_steps(report.plan) if report is not None and report.plan is not None else None
+    exact_tool_sequence = _tool_sequence(actual_steps) == _tool_sequence(expected_steps) if expected_steps else None
+    exact_arguments = actual_steps == expected_steps if expected_steps else None
+    scenario_outcome = _tool_plan_scenario_outcome(
+        evaluable=evaluable,
+        report_valid=diagnostic.get("valid") is True,
+        response_kind=diagnostic.get("response_kind"),
+        expected_kind=expected_kind,
+        exact_arguments=exact_arguments,
+    )
+    exact_plan = scenario_outcome == "exact_plan"
+    correct_unsupported = scenario_outcome == "correct_unsupported"
+    return {
+        "type": "tool_plan_shadow",
+        "scenario": scenario,
+        "group": group,
+        "prompt_view": prompt_view,
+        "repetition": repetition,
+        "expected_kind": expected_kind,
+        "scenario_outcome": scenario_outcome,
+        "exact_tool_sequence": exact_tool_sequence,
+        "exact_arguments": exact_arguments,
+        "exact_plan": exact_plan,
+        "correct_unsupported": correct_unsupported,
+        "wrong_plan": scenario_outcome == "wrong_plan",
+        "evaluable": evaluable,
+        "model_calls": 1,
+        "prompt_tokens": prompt_tokens,
+        "cached_tokens": cached_tokens,
+        "evaluated_tokens": (
+            prompt_tokens - cached_tokens
+            if isinstance(prompt_tokens, int) and isinstance(cached_tokens, int)
+            else None
+        ),
+        "output_tokens": result.completion_tokens if result else None,
+        "finish_reason": result.finish_reason if result else "timeout" if timed_out else "error",
+        "generation_wall_ms": wall_ms,
+        "timeout": timed_out,
+        "cancel_requested": cancel_requested,
+        "cancelled": cancelled,
+        "cleanup_ms": cleanup_ms,
+        "cleanup_healthy": props.get("in_flight") is False and not worker.is_alive(),
+        "unexpected_backend_tool_calls": bool(result and result.tool_calls),
+        "error_type": type(error).__name__ if error is not None else None,
+        "potential_model_call_reduction": 2 if exact_plan else 0,
+        "realized_model_call_reduction": 0,
+        **diagnostic,
+    }
+
+
+def summarize_tool_plan_shadow(rows: list[dict[str, object]]) -> dict[str, object]:
+    evaluable = [row for row in rows if row.get("evaluable") is True]
+    latencies = [float(row["validation_us"]) for row in evaluable if isinstance(row.get("validation_us"), int | float)]
+    generation = [float(row["generation_wall_ms"]) for row in evaluable if isinstance(row.get("generation_wall_ms"), int | float)]
+    views = {
+        view: _summarize_tool_plan_view([row for row in rows if row.get("prompt_view") == view])
+        for view in TOOL_PLAN_SHADOW_PROMPT_VIEWS
+        if any(row.get("prompt_view") == view for row in rows)
+    }
+    return {
+        "type": "tool_plan_shadow_summary",
+        "samples": len(rows),
+        "evaluable": len(evaluable),
+        "json_compliant": sum(row.get("json_compliant") is True for row in evaluable),
+        "exact_plans": sum(row.get("exact_plan") is True for row in evaluable),
+        "correct_unsupported": sum(row.get("correct_unsupported") is True for row in evaluable),
+        "wrong_plans": sum(row.get("wrong_plan") is True for row in evaluable),
+        "prose_leakage": sum(row.get("prose_leakage") is True for row in evaluable),
+        "invalid_json": sum(row.get("invalid_json") is True for row in evaluable),
+        "model_calls": sum(int(row.get("model_calls") or 0) for row in rows),
+        "potential_model_call_reduction": sum(int(row.get("potential_model_call_reduction") or 0) for row in rows),
+        "realized_model_call_reduction": 0,
+        "tool_executions": 0,
+        "finalizations_started": 0,
+        "validation_us_median": round(statistics.median(latencies), 1) if latencies else None,
+        "validation_us_p95": percentile(latencies, 0.95),
+        "generation_wall_ms_median": round(statistics.median(generation), 1) if generation else None,
+        "prompt_tokens_total": sum(int(row.get("prompt_tokens") or 0) for row in evaluable),
+        "evaluated_tokens_total": sum(int(row.get("evaluated_tokens") or 0) for row in evaluable),
+        "output_tokens_total": sum(int(row.get("output_tokens") or 0) for row in evaluable),
+        "views": views,
+        "raw_content_included": False,
+    }
+
+
+def write_tool_plan_shadow_jsonl(
+    path: Path,
+    env: dict[str, object],
+    rows: list[dict[str, object]],
+    summary: dict[str, object],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        for row in (env, *rows, summary):
+            stream.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+
+
+def write_tool_plan_shadow_markdown(path: Path, env: dict[str, object], summary: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Orbit Bounded Tool-Plan Shadow Benchmark\n\n"
+        f"- Model: `{env.get('model')}`\n"
+        f"- Samples: `{summary.get('samples')}`\n"
+        f"- Evaluable: `{summary.get('evaluable')}`\n"
+        f"- JSON compliant: `{summary.get('json_compliant')}`\n"
+        f"- Exact plans: `{summary.get('exact_plans')}`\n"
+        f"- Correct unsupported: `{summary.get('correct_unsupported')}`\n"
+        f"- Wrong plans: `{summary.get('wrong_plans')}`\n"
+        f"- Tool executions: `{summary.get('tool_executions')}`\n"
+        f"- Finalizations: `{summary.get('finalizations_started')}`\n"
+        f"- Realized model-call reduction: `{summary.get('realized_model_call_reduction')}`\n",
+        encoding="utf-8",
+    )
+
+
+def _normalized_plan_steps(plan) -> tuple[tuple[str, dict[str, object]], ...]:
+    return tuple((step.name, step.arguments) for step in plan.steps)
+
+
+def _tool_sequence(steps: tuple[tuple[str, dict[str, object]], ...] | None) -> tuple[str, ...] | None:
+    return tuple(name for name, _arguments in steps) if steps is not None else None
+
+
+def _tool_plan_scenario_outcome(
+    *,
+    evaluable: bool,
+    report_valid: bool,
+    response_kind: object,
+    expected_kind: str,
+    exact_arguments: bool | None,
+) -> str:
+    if not evaluable:
+        return "non_evaluable"
+    if not report_valid:
+        return "invalid_response"
+    if expected_kind == "unsupported":
+        return "correct_unsupported" if response_kind == "unsupported" else "wrong_plan"
+    if response_kind != "plan":
+        return "missed_plan"
+    return "exact_plan" if exact_arguments is True else "wrong_plan"
+
+
+def _summarize_tool_plan_view(rows: list[dict[str, object]]) -> dict[str, object]:
+    evaluable = [row for row in rows if row.get("evaluable") is True]
+    positives = [row for row in evaluable if row.get("expected_kind") == "plan"]
+    negatives = [row for row in evaluable if row.get("expected_kind") == "unsupported"]
+    json_count = sum(row.get("json_compliant") is True for row in evaluable)
+    exact_count = sum(row.get("exact_plan") is True for row in positives)
+    unsupported_count = sum(row.get("correct_unsupported") is True for row in negatives)
+    wrong_count = sum(row.get("wrong_plan") is True for row in evaluable)
+    return {
+        "samples": len(rows),
+        "evaluable": len(evaluable),
+        "json_compliance_rate": round(json_count / len(evaluable), 6) if evaluable else None,
+        "exact_plan_rate": round(exact_count / len(positives), 6) if positives else None,
+        "unsupported_accuracy": round(unsupported_count / len(negatives), 6) if negatives else None,
+        "wrong_plan_rate": round(wrong_count / len(evaluable), 6) if evaluable else None,
+        "prose_leakage": sum(row.get("prose_leakage") is True for row in evaluable),
+        "invalid_json": sum(row.get("invalid_json") is True for row in evaluable),
+        "prompt_tokens_total": sum(int(row.get("prompt_tokens") or 0) for row in evaluable),
+        "evaluated_tokens_total": sum(int(row.get("evaluated_tokens") or 0) for row in evaluable),
+        "output_tokens_total": sum(int(row.get("output_tokens") or 0) for row in evaluable),
+        "generation_wall_ms_total": round(sum(float(row.get("generation_wall_ms") or 0) for row in evaluable), 1),
+        "smoke_gate_pass": bool(
+            evaluable
+            and json_count / len(evaluable) >= 0.9
+            and wrong_count == 0
+            and exact_count == len(positives)
+            and unsupported_count == len(negatives)
+        ),
+    }
+
+
+def _hash_bounded_tool_plan_corpus(corpus: tuple[object, ...]) -> str:
+    payload = json.dumps(corpus, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def tool_call_generation_corpus(*, smoke: bool) -> tuple[tuple[str, str | None, str], ...]:
@@ -1539,6 +2043,29 @@ def scenarios() -> dict[str, SmokeScenario]:
         "canonical_gate_shell_error": SmokeScenario("canonical_gate_shell_error", (CANONICAL_GATE_REAL_STEPS[5],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
         "canonical_gate_fetch_error": SmokeScenario("canonical_gate_fetch_error", (CANONICAL_GATE_REAL_STEPS[6],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
         "canonical_gate_negative": SmokeScenario("canonical_gate_negative", (CANONICAL_GATE_REAL_STEPS[7],), optional=True, allowed_tool_names=TOOL_NAMES, family="canonical_gate"),
+        "inference_audit_single": SmokeScenario(
+            "inference_audit_single",
+            INFERENCE_AUDIT_SINGLE_STEPS,
+            optional=True,
+            requires_web=True,
+            allowed_tool_names=TOOL_NAMES,
+            isolated_steps=True,
+            family="inference_audit",
+        ),
+        "inference_audit_two_tool": SmokeScenario(
+            "inference_audit_two_tool",
+            INFERENCE_AUDIT_TWO_TOOL_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="inference_audit",
+        ),
+        "inference_audit_synthesis": SmokeScenario(
+            "inference_audit_synthesis",
+            INFERENCE_AUDIT_SYNTHESIS_STEPS,
+            optional=True,
+            allowed_tool_names=TOOL_NAMES,
+            family="inference_audit",
+        ),
     }
 
 
@@ -1574,6 +2101,7 @@ def run_scenario(
     block_id: str | None = None,
     run_order: str | None = None,
     repetition: int | None = None,
+    inference_audit_enabled: bool = False,
 ) -> list[StepReport]:
     runtime = new_runtime(backend, workdir, route_collector=route_collector)
     reports: list[StepReport] = []
@@ -1597,6 +2125,7 @@ def run_scenario(
             block_id=block_id,
             run_order=run_order,
             repetition=repetition,
+            inference_audit_enabled=inference_audit_enabled,
         )
         reports.append(report)
         if report.finish_reason in {"timeout", "error"}:
@@ -1640,6 +2169,7 @@ def run_step(
     block_id: str | None = None,
     run_order: str | None = None,
     repetition: int | None = None,
+    inference_audit_enabled: bool = False,
 ) -> StepReport:
     props_before = fresh_backend_props(base_url, min(timeout, 5.0))
     diagnostic_offset = route_collector.mark() if route_collector is not None else 0
@@ -1656,6 +2186,7 @@ def run_step(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 allowed_tool_names=allowed_tool_names,
+                inference_audit_enabled=inference_audit_enabled,
             )
         ),
         daemon=True,
@@ -1706,6 +2237,7 @@ def run_step(
                 "cleanup_healthy": props_after.get("in_flight") is False,
             },
             phase_wall_ms={},
+            inference_audit_enabled=inference_audit_enabled,
         )
         report = enrich_step_route_diagnostics(
             report,
@@ -1718,12 +2250,13 @@ def run_step(
             run_order=run_order,
             repetition=repetition,
         )
-        return enrich_step_tool_healing(
+        report = enrich_step_tool_healing(
             report,
             route_collector.tool_healing_events_since(diagnostic_offset) if route_collector is not None else [],
             step=step,
             enabled=bool(route_collector and route_collector.tool_healing),
         )
+        return enrich_step_inference_audit(report, step=step, enabled=inference_audit_enabled)
     report = result_queue.get()
     props_after = fresh_backend_props(base_url, min(timeout, 5.0))
     report = replace_step_final_prefix(report, final_prefix_step_state(props_before, props_after))
@@ -1738,12 +2271,13 @@ def run_step(
         run_order=run_order,
         repetition=repetition,
     )
-    return enrich_step_tool_healing(
+    report = enrich_step_tool_healing(
         report,
         route_collector.tool_healing_events_since(diagnostic_offset) if route_collector is not None else [],
         step=step,
         enabled=bool(route_collector and route_collector.tool_healing),
     )
+    return enrich_step_inference_audit(report, step=step, enabled=inference_audit_enabled)
 
 
 def _run_step_inner(
@@ -1756,9 +2290,12 @@ def _run_step_inner(
     max_tokens: int,
     temperature: float,
     allowed_tool_names: tuple[str, ...],
+    inference_audit_enabled: bool = False,
 ) -> StepReport:
     model_steps: list[ModelStepMetrics] = []
+    phase_starts: list[ModelPhaseStart] = []
     tool_names: list[str] = []
+    reuse_before = post_tool_final_reuse_runtime_state(runtime)
     started = time.perf_counter()
     probe = probe_backend(runtime.backend)
     if probe is not None:
@@ -1771,6 +2308,7 @@ def _run_step_inner(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_model_step=model_steps.append,
+                on_phase_start=phase_starts.append if inference_audit_enabled else None,
             )
         elif step.mode == "tool":
             result = runtime.ask_with_tools(
@@ -1780,6 +2318,7 @@ def _run_step_inner(
                 workdir=workdir,
                 tool_names=allowed_tool_names,
                 on_model_step=model_steps.append,
+                on_phase_start=phase_starts.append if inference_audit_enabled else None,
                 on_tool_call=lambda name, _args: tool_names.append(name),
             )
         else:
@@ -1790,6 +2329,7 @@ def _run_step_inner(
                 workdir=workdir,
                 allowed_tool_names=allowed_tool_names,
                 on_model_step=model_steps.append,
+                on_phase_start=phase_starts.append if inference_audit_enabled else None,
                 on_tool_call=lambda name, _args: tool_names.append(name),
             )
     except Exception as exc:
@@ -1806,7 +2346,8 @@ def _run_step_inner(
         )
         notes = "exception"
     wall_ms = round((time.perf_counter() - started) * 1000, 1)
-    phase_timings = phase_timing_summary(probe.phase_timings() if probe is not None else [], wall_ms)
+    raw_phase_timings = probe.phase_timings() if probe is not None else []
+    phase_timings = phase_timing_summary(raw_phase_timings, wall_ms)
     final_wall_ms = phase_duration(phase_timings, "final_from_tool")
     generation_ms = estimated_generation_ms(result.completion_tokens, result.generation_tokens_per_second)
     residual_ms = (
@@ -1851,6 +2392,13 @@ def _run_step_inner(
         final_prefix={},
         lifecycle={},
         phase_wall_ms=phase_timings,
+        model_phase_starts=[model_phase_start_to_json(item) for item in phase_starts],
+        phase_timing_sequence=[{"phase": phase, "wall_ms": duration} for phase, duration in raw_phase_timings],
+        inference_audit_enabled=inference_audit_enabled,
+        post_tool_final_reuse=post_tool_final_reuse_step_state(
+            reuse_before,
+            post_tool_final_reuse_runtime_state(runtime),
+        ),
         prompt_tokens_per_second=result.prompt_tokens_per_second,
         generation_tokens_per_second=result.generation_tokens_per_second,
         estimated_generation_ms=generation_ms,
@@ -1905,12 +2453,27 @@ def model_step_to_json(metric: ModelStepMetrics) -> dict[str, object]:
     }
 
 
+def model_phase_start_to_json(start: ModelPhaseStart) -> dict[str, object]:
+    return {
+        "phase": start.phase,
+        "streamed": start.streamed,
+        "attempt": start.attempt,
+        "reason": bounded_identifier(start.reason),
+    }
+
+
 def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend, props: dict[str, object] | None = None) -> dict[str, object]:
     props = props if props is not None else safe_backend_props(backend)
     info = safe_model_info(backend)
     host = collect_host_info()
     mtp = mtp_state_from_props(props)
-    redact = args.tool_healing_diagnostics or args.tool_call_generation_only
+    inference_audit = resolve_inference_audit_shadow()
+    redact = (
+        args.tool_healing_diagnostics
+        or args.tool_call_generation_only
+        or args.tool_plan_shadow
+        or args.inference_audit_shadow
+    )
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "command": "<redacted>" if redact else " ".join(sys.argv),
@@ -1947,6 +2510,7 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "client_command": "<redacted>" if redact else " ".join(sys.argv),
         "final_prefix": final_prefix_props(props),
         "final_prefix_config": final_prefix_config_metadata(args.final_prefix_mode, props),
+        "post_tool_final_reuse": post_tool_final_reuse_metadata(args.post_tool_final_reuse_mode),
         "native_backend_capabilities": native_backend_capability_metadata(props),
         "block_id": args.block_id,
         "run_order": args.run_order,
@@ -1957,6 +2521,12 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "tool_healing": tool_healing_metadata(args.tool_healing_mode),
         "canonical_gate": canonical_gate_metadata(args.canonical_gate),
         "route_diagnostic_store": args.route_diagnostic_store,
+        "inference_audit_shadow": {
+            "requested": args.inference_audit_shadow,
+            "enabled": inference_audit.enabled and args.inference_audit_shadow,
+            "source": inference_audit.source,
+            "config_error": inference_audit.validation_error,
+        },
     }
 
 
@@ -2215,6 +2785,29 @@ def enrich_step_tool_healing(
     return StepReport(**values)
 
 
+def enrich_step_inference_audit(
+    report: StepReport,
+    *,
+    step: SmokeStep,
+    enabled: bool,
+) -> StepReport:
+    values = report.__dict__.copy()
+    values["inference_audit_enabled"] = enabled
+    if enabled:
+        values["inference_audit"] = audit_model_calls(
+            model_steps=report.model_steps,
+            phase_starts=report.model_phase_starts,
+            phase_timings=report.phase_timing_sequence,
+            route_outputs=report.route_outputs,
+            tool_names=report.tool_names,
+            expectation=step.inference_audit_expectation,
+            correctness=report.correctness_category,
+        )
+    else:
+        values["inference_audit"] = {}
+    return StepReport(**values)
+
+
 def route_expectation_result(
     expected_route: str | None,
     final_route: object,
@@ -2249,6 +2842,108 @@ def final_prefix_environment(mode: str):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+@contextmanager
+def post_tool_final_reuse_environment(mode: str):
+    previous = os.environ.get(POST_TOOL_FINAL_REUSE_ENV)
+    if mode != "inherit":
+        os.environ[POST_TOOL_FINAL_REUSE_ENV] = "1" if mode == "on" else "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(POST_TOOL_FINAL_REUSE_ENV, None)
+        else:
+            os.environ[POST_TOOL_FINAL_REUSE_ENV] = previous
+
+
+def post_tool_final_reuse_metadata(mode: str) -> dict[str, object]:
+    config = (
+        resolve_post_tool_final_reuse()
+        if mode == "inherit"
+        else resolve_post_tool_final_reuse(
+            {POST_TOOL_FINAL_REUSE_ENV: "1" if mode == "on" else "0"}
+        )
+    )
+    return {
+        "requested_mode": mode,
+        "enabled": config.enabled,
+        "source": config.source,
+        "validation_error": config.validation_error,
+    }
+
+
+def post_tool_final_reuse_runtime_state(runtime: ChatRuntime) -> dict[str, object]:
+    return {
+        "eligible_count": getattr(runtime, "post_tool_final_reuse_eligible_count", 0),
+        "reused_count": getattr(runtime, "post_tool_final_reuse_reused_count", 0),
+        "fallback_count": getattr(runtime, "post_tool_final_reuse_fallback_count", 0),
+        "avoided_model_calls": getattr(runtime, "post_tool_final_reuse_avoided_model_calls", 0),
+        "last_reason": bounded_identifier(getattr(runtime, "post_tool_final_reuse_last_reason", None)),
+    }
+
+
+def post_tool_final_reuse_step_state(
+    before: dict[str, object],
+    after: dict[str, object],
+) -> dict[str, object]:
+    config = resolve_post_tool_final_reuse()
+    state: dict[str, object] = {
+        "enabled": config.enabled,
+        "source": config.source,
+        "validation_error": config.validation_error,
+        "last_reason": after.get("last_reason"),
+        "saved_evaluated_tokens": None,
+        "saved_wall_ms": None,
+        "savings_measurement": "process_isolated_off_on_required",
+    }
+    for name in ("eligible_count", "reused_count", "fallback_count", "avoided_model_calls"):
+        old = before.get(name)
+        new = after.get(name)
+        state[name] = new
+        state[f"{name}_delta"] = new - old if isinstance(old, int) and isinstance(new, int) else None
+    state["eligible"] = bool(state.get("eligible_count_delta"))
+    state["reused"] = bool(state.get("reused_count_delta"))
+    state["fallback_reason"] = (
+        after.get("last_reason") if state.get("fallback_count_delta") else None
+    )
+    return state
+
+
+def post_tool_final_reuse_comparison_fingerprint(environment: dict[str, object]) -> str:
+    comparable = {
+        name: environment.get(name)
+        for name in (
+            "git_head",
+            "version",
+            "model",
+            "backend",
+            "thinking",
+            "mtp",
+            "mmproj",
+            "cpu",
+            "cores",
+            "accel",
+            "ctx",
+            "threads",
+            "threads_batch",
+            "batch",
+            "ubatch",
+            "tools",
+            "max_tokens",
+            "temperature",
+            "cpu_affinity",
+            "scenario",
+            "final_prefix_mode",
+            "final_prefix_config",
+            "native_backend_capabilities",
+            "canonical_gate",
+            "tool_healing",
+        )
+    }
+    payload = json.dumps(comparable, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @contextmanager
@@ -2918,6 +3613,11 @@ def write_jsonl(
         healing_summary = summarize_tool_healing(reports)
         if healing_summary is not None:
             handle.write(json.dumps(healing_summary, ensure_ascii=False, sort_keys=True) + "\n")
+        audit_rows = [report.inference_audit for report in reports if report.inference_audit_enabled]
+        if audit_rows:
+            handle.write(
+                json.dumps(summarize_inference_audits(audit_rows), ensure_ascii=False, sort_keys=True) + "\n"
+            )
         for row in extra_rows or []:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -2977,6 +3677,21 @@ def write_markdown(path: Path, env: dict[str, object], reports: list[StepReport]
                 f"{format_range(summary['cached_tokens'])} | {format_range(summary['evaluated_tokens'])} | "
                 f"{format_range(summary['wall_ms'])} |"
             )
+    audit_rows = [report.inference_audit for report in reports if report.inference_audit_enabled]
+    if audit_rows:
+        audit = summarize_inference_audits(audit_rows)
+        lines.extend(
+            [
+                "",
+                "## Inference Audit Shadow",
+                "",
+                f"- Model calls observed: `{audit['model_calls']}`",
+                f"- Theoretical candidates: `{audit['theoretical_model_calls']}`",
+                f"- Theoretical evaluated tokens: `{audit['theoretical_evaluated_tokens']}`",
+                f"- Theoretical model wall ms: `{audit['theoretical_wall_ms']}`",
+                "- Active behavior changed: `false`",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

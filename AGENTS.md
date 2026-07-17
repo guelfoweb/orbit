@@ -128,6 +128,15 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - RC21 validation: focused canonical/healing/comparator/capability/harness PASS with 151 tests; full unit discovery PASS with 1,165 tests; MTP shim build PASS; `compileall` PASS; `git diff --check` PASS. Default final-prefix PASS with capture then `cached=64`; combined kill switches PASS with `cached=4` and zero prefix activity; strict MTP/mmproj PASS with usable MTP and zero final-prefix activity.
 - No semantic-healing, success-rate, or deterministic performance claim is made. Do not expand the repair whitelist or add a nudge retry without natural, repeatable malformed production-budget samples and separate safety evidence.
 
+## Post-Tool Final Prose Reuse
+
+- `ORBIT_POST_TOOL_FINAL_REUSE` is enabled by default. Setting it to `0` is the immediate kill switch; setting it to `1` explicitly enables it; invalid values disable the feature safely. Diagnostics report only the bounded effective state and source (`default` or `stable`).
+- The optimization applies only after a terminal `post_tool_route` result: the model stopped normally, no new tool call or retry is present, the terminal tool result is complete, no error or guardrail is pending, and the original prose is non-empty, complete, and free of tool markup, control markup, or technical JSON. Any uncertainty falls back to the normal `final_from_tool` call.
+- When eligible, runtime returns the exact original `ChatResult.content`; it does not construct, summarize, correct, or semantically reinterpret an answer. Tool selection, arguments, execution, evidence, finish reason, and correctness remain unchanged in the validated cases.
+- Process-isolated Gemma 4 12B validation recorded 50/50 comparable OFF cases and 50/50 correct, stop ON reuses, with 50 model calls avoided and zero false positives or skipped tools. The measured aggregate saving was 65,189 evaluated tokens; the median per reuse was 1,084 evaluated tokens and approximately 107.5 seconds of wall time in that workload.
+- Eligibility analysis overhead measured approximately 8.55 microseconds at p95. The wall-time result is workload-, output-, process-, and thermal-dependent; no deterministic speedup claim is made.
+- Read, system, web, error, synthesis, multi-tool, cancellation, timeout, and reset cases retain normal fallback when the structural eligibility conditions are not met. This feature does not change routing, tool selection, executor behavior, MTP, final-prefix reuse, or retry policy.
+
 ## MTP
 
 - MTP is optional and experimental.
@@ -185,6 +194,32 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - MTP gate: `simple_chat --mtp-required` with healthy `/props`.
 - Recovery gate: timeout/cancel with `shell20`, then a new `simple_chat --mtp-required`.
 - Never use a persistent store for RC evidence-lineage smokes.
+
+## Bounded Multi-Action Planning Shadow
+
+- Bounded multi-action planning is observational only. Production routing,
+  tool execution, and finalization remain unchanged.
+- `ORBIT_TOOL_PLAN_SHADOW` is OFF by default. The dedicated smoke-harness mode
+  performs one real planning inference, validates exactly two literal linear
+  steps, and never executes a tool or starts post-tool finalization.
+- The initial shadow allowlist is `system_info` and `list_directory`. Network,
+  mutation, and unrestricted shell actions are excluded, including shell calls
+  that appear read-only but can access external resources or paths.
+- The only alternate response is exact `{"type":"unsupported_plan"}`. Model
+  IDs, expectations, dependencies, branches, parallelism, and completion choice
+  are not part of the minimal schema.
+- Every proposed step reuses the canonical tool contract. The analyzer rejects
+  multiple plans, duplicate keys, dynamic step references, external text,
+  truncation, disabled tools, schema/policy/permission failures, and operational
+  limit failures.
+- Structural literal arguments do not prove semantic independence from prior
+  step output. This is the main technical stop before any opt-in execution.
+- Three compact prompt views were tested on nine scenarios each. The best view
+  reached 88.9% JSON compliance, 50% exact positive plans, 100% unsupported
+  accuracy, and an 11.1% wrong-plan rate. It failed the smoke gate, so five
+  repetitions were not run and no model-call reduction is credited.
+- See `docs/BOUNDED_TOOL_PLANNING.md` for the minimal schema, prompt comparison,
+  token/wall measurements, and closure decision.
 
 ## #124, Conversation Reuse Route Guidance
 
