@@ -2,7 +2,7 @@
 
 ## Role
 
-This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc21` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
+This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc22` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
 
 ## Permanent Principles
 
@@ -112,7 +112,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC21
 
-- Current published baseline: `v0.0.1-rc21`.
+- Published predecessor: `v0.0.1-rc21`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc21
 - Release notes commit: `b19c9ef1cf82dd07d6aeb70ea1e21c3e16bfc5eb`.
 - Tag object: `11419be25bb87920be24fbede42d1dd6a3a19a82`.
@@ -127,6 +127,22 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - RC21 benchmark sanity used two distinct native-server processes. Both completed 8/8 evaluable scenarios with eight model calls, zero tool executions, and zero finalizations. Exact-tool match `0.833333`, unwanted-attempt `0.5`, and budget-truncation `0.125` remained visible; wrong-tool, unwanted-tool, and truncation are not formal-healing categories.
 - RC21 validation: focused canonical/healing/comparator/capability/harness PASS with 151 tests; full unit discovery PASS with 1,165 tests; MTP shim build PASS; `compileall` PASS; `git diff --check` PASS. Default final-prefix PASS with capture then `cached=64`; combined kill switches PASS with `cached=4` and zero prefix activity; strict MTP/mmproj PASS with usable MTP and zero final-prefix activity.
 - No semantic-healing, success-rate, or deterministic performance claim is made. Do not expand the repair whitelist or add a nudge retry without natural, repeatable malformed production-budget samples and separate safety evidence.
+
+### RC22
+
+- Current published baseline: `v0.0.1-rc22`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc22
+- Release-notes commit: `2c40a0bf1a33aecac5fc259f60133f8bf1da02e8`.
+- Tag object: `e44f8021b369ca522d05d3c49e29456e3047be47`.
+- Tag commit: `2c40a0bf1a33aecac5fc259f60133f8bf1da02e8`.
+- Prerelease: yes. Draft: false. Latest: false. The GitHub `releases/latest` endpoint remains on the stable release channel and does not resolve to RC22.
+- Includes merge commit `c2be0ef` from #151.
+- Focus: default-on post-tool final prose reuse while preserving canonical tool validation, deterministic formal healing, MTP, and aligned final-prefix reuse.
+- `ORBIT_POST_TOOL_FINAL_REUSE` is enabled by default. `ORBIT_POST_TOOL_FINAL_REUSE=0` is the immediate kill switch; `1` explicitly enables it; invalid values disable it safely.
+- Eligible results reuse the exact original `ChatResult.content` only after a stopped terminal `post_tool_route` with no new tool call, retry, pending error or guardrail, technical markup, or additional step. Uncertain cases use normal `final_from_tool`.
+- Process-isolated validation recorded 50/50 correct stop reuses, 50 model calls eliminated, 65,189 evaluated tokens saved, median savings of 1,084 evaluated tokens and approximately 107.5 seconds per reuse in the measured workload, with zero false positives or skipped tools.
+- Eligibility overhead was approximately 8.55 microseconds at p95. CPU timing remains workload-, output-, process-, and thermal-dependent; no deterministic speedup claim is made.
+- Validation: focused tests PASS with 387 tests; full unit discovery PASS with 1,213 tests; process-isolated comparator PASS on 10/10 scenario pairs; MTP shim build PASS; `compileall` PASS; `git diff --check` PASS. Existing final-prefix `cached=64`/kill-switch `cached=4`, canonical/healing, MTP/mmproj, cancel, timeout, and reset gates remain unchanged and passing.
 
 ## Post-Tool Final Prose Reuse
 
@@ -444,6 +460,8 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Main Commits
 
+- `2c40a0b` Add release notes for v0.0.1-rc22
+- `c2be0ef` Enable post-tool final prose reuse by default (#151)
 - `b19c9ef` Add release notes for v0.0.1-rc21
 - `7f46c0c` Add native backend compatibility observability (#150)
 - `b7207aa` Add canonical tool-call validation and deterministic healing (#149)
@@ -485,7 +503,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-1. Stop and use RC21 as the published baseline.
+1. Stop and use RC22 as the published baseline.
 2. Keep the formal-healing whitelist fixed; collect natural malformed production-budget events before considering any expansion.
 3. Investigate wrong-tool and unwanted-tool reliability only as a separate observational mission, without semantic hardcoding or tool substitution.
 4. Use the process-isolated comparator and verified capability manifest before accepting a native backend, renderer, tokenizer, or tool-protocol revision.
