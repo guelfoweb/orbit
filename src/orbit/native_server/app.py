@@ -13,6 +13,7 @@ import time
 from typing import Any, Mapping
 
 from orbit.final_prefix_config import resolve_final_prefix_reuse
+from orbit.native_llama.capabilities import safe_gemma4_capability_manifest
 from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
 from orbit.native_llama.client import (
     NativeClientConfig,
@@ -54,6 +55,10 @@ class OrbitNativeServer:
         self.client = client
         self.model_alias = model_alias
         self.lock = threading.Lock()
+        self.native_backend_capabilities = safe_gemma4_capability_manifest(
+            client,
+            final_system_prompt=FINAL_FROM_TOOL_SYSTEM_PROMPT,
+        )
 
     def chat(self, payload: dict[str, Any], *, on_token=None, on_progress=None, should_cancel=None) -> dict[str, Any]:
         request = parse_chat_request(payload)
@@ -271,6 +276,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_failure_reason": session["mtp_failure_reason"],
                     "model_id": state.client.paths.model_id,
                     "backend": "orbit-native",
+                    "native_backend_capabilities": state.native_backend_capabilities,
                     "backend_mode": session["backend_mode"],
                     "thinking_mode": runtime["thinking_mode"],
                     "session_id": session["id"],

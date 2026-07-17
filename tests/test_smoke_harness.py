@@ -53,6 +53,97 @@ def route_step_report(**overrides: object):
 
 
 class SmokeHarnessTests(unittest.TestCase):
+    def test_tool_call_generation_corpus_identity_is_stable(self) -> None:
+        self.assertEqual(smoke_harness.TOOL_CALL_GENERATION_CORPUS_VERSION, 1)
+        self.assertEqual(len(smoke_harness.TOOL_CALL_GENERATION_CORPUS), 40)
+        self.assertEqual(
+            smoke_harness.tool_call_generation_corpus_hash(smoke_harness.TOOL_CALL_GENERATION_CORPUS),
+            "f5db2bc1802ec6535ca25b1bb42d5ff288dbbf1dd71868b1bbc33a2092394585",
+        )
+        self.assertEqual(smoke_harness.TOOL_CALL_GENERATION_PROTOCOL_VERSION, 1)
+        self.assertEqual(
+            smoke_harness.tool_call_generation_protocol_hash(),
+            "1407e2a5f7444446ebd2bd0d6cbdb3c81c155f814c587e203515de9babe55301",
+        )
+
+    def test_tool_call_generation_configuration_hash_uses_comparable_fields_only(self) -> None:
+        environment = {
+            "model": "gemma4-test",
+            "backend": "orbit-native",
+            "thinking": "off",
+            "mtp": "disabled",
+            "timeout": 60.0,
+            "max_tokens": 128,
+            "temperature": 0.0,
+            "ctx": 8192,
+            "threads": 6,
+            "threads_batch": 6,
+            "batch": 256,
+            "ubatch": 128,
+            "repetitions": 5,
+            "canonical_gate": {"enabled": True, "repair_count": 999},
+            "tool_healing": {"enabled": True, "repair_count": 123},
+            "timestamp": "ignored",
+            "git_head": "ignored",
+        }
+        baseline = smoke_harness.tool_call_generation_configuration_hash(environment)
+
+        environment["timestamp"] = "still-ignored"
+        environment["git_head"] = "still-ignored"
+        environment["canonical_gate"]["repair_count"] = 1000
+        environment["canonical_gate"]["enabled"] = False
+        environment["tool_healing"]["enabled"] = False
+        self.assertEqual(smoke_harness.tool_call_generation_configuration_hash(environment), baseline)
+
+        environment["threads"] = 4
+        self.assertNotEqual(smoke_harness.tool_call_generation_configuration_hash(environment), baseline)
+
+        environment["threads"] = 6
+        environment["thinking"] = "on"
+        self.assertNotEqual(smoke_harness.tool_call_generation_configuration_hash(environment), baseline)
+
+    def test_native_capability_metadata_is_bounded_and_content_free(self) -> None:
+        metadata = smoke_harness.native_backend_capability_metadata(
+            {
+                "native_backend_capabilities": {
+                    "schema_version": 1,
+                    "profile_id": "orbit-gemma4-native-v1",
+                    "status": "verified",
+                    "verification_scope": "backend_identity_and_prompt_conformance",
+                    "behavior_enforced": False,
+                    "backend": {
+                        "build_number": 278,
+                        "commit": "6f79e02",
+                        "library_hash": "a" * 64,
+                        "verified_commit": True,
+                        "compiler": "must-not-be-copied",
+                    },
+                    "renderer": {
+                        "tool_protocol_text_hash": "b" * 64,
+                        "final_prefix_text_hash": "c" * 64,
+                        "fixture_suite_version": 1,
+                        "fixture_suite_hash": "e" * 64,
+                    },
+                    "tokenizer": {
+                        "prefix_tokens": 64,
+                        "prefix_token_hash": "d" * 64,
+                        "next_dynamic_token": 105,
+                    },
+                    "prompt": "must-not-be-copied",
+                    "arguments": {"secret": "must-not-be-copied"},
+                }
+            }
+        )
+
+        self.assertEqual(metadata["profile_id"], "orbit-gemma4-native-v1")
+        self.assertEqual(metadata["backend_commit"], "6f79e02")
+        self.assertEqual(metadata["tokenizer_prefix_tokens"], 64)
+        self.assertEqual(metadata["renderer_fixture_suite_hash"], "e" * 64)
+        self.assertNotIn("prompt", metadata)
+        self.assertNotIn("arguments", metadata)
+        self.assertNotIn("compiler", metadata)
+        self.assertNotIn("must-not-be-copied", json.dumps(metadata))
+
     def test_tool_call_generation_only_uses_one_model_call_without_execution_or_finalization(self) -> None:
         class Backend:
             base_url = "http://127.0.0.1:9"

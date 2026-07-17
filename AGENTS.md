@@ -373,6 +373,16 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Do not expand the healing whitelist or add a nudge retry without natural, repeatable malformed tool-call events observed at the production budget. Any expansion still requires zero false positives and unsafe acceptance in a sufficiently large real sample; replay-only evidence is insufficient.
 - A future tool-selection reliability investigation must be separate from formal healing. It may measure wrong-tool and unwanted-tool decisions, but must not add fuzzy matching, deterministic semantic routing, invented arguments, or tool substitution to this mechanism.
 
+## Native Backend Compatibility Observability
+
+- Native `/props` exposes a bounded `native_backend_capabilities` manifest for the `orbit-gemma4-native-v1` profile. It is observational and must not alter startup eligibility, inference, routing, tools, healing, MTP, or final-prefix behavior.
+- The manifest fingerprints the loaded `llama.cpp` build and library, the exact aligned final-prefix tokenizer boundary, and a versioned Gemma 4 renderer fixture suite. It contains hashes and bounded identifiers only; prompts, outputs, evidence, tool arguments, model paths, and environment values are excluded.
+- Renderer conformance covers tool declaration/generation, a complete tool round trip, nested and escaped argument shapes, and tool error responses. Golden fixture hashes are checked in explicitly; expectations must never be derived from the implementation under test.
+- `verified` means the reviewed backend commit, renderer fixtures, and tokenizer boundary all match. A new backend commit reports `backend_unverified` and remains usable so that its behavior can be measured. Renderer or tokenizer mismatch remains diagnostic and must not be silently treated as verified.
+- The generation-only benchmark records a versioned corpus hash, an actual tool-mode protocol hash covering the production system prompt and registered schemas, and a hash of the generation-affecting configuration. Raw corpus prompts and schemas are not copied into comparison output.
+- `scripts/compare_tool_call_generation.py` is an offline gate. It accepts an unverified backend revision only when corpus, sample set, protocol, configuration, renderer suite, and tokenizer identity remain comparable. It rejects semantic regressions, markup leakage, multiple candidates, tool execution, finalization, and extra model calls. Timing deltas are informational only.
+- Do not make the capability manifest a runtime startup gate without separate evidence and an explicit rollback path. Use it to identify drift, then run the versioned conformance corpus before accepting a new backend or template revision.
+
 ## Current Route Priority
 
 - Keep #142: structurally covered evidence omission is effective whenever a valid `CHAT` decision reaches the normal `chat_final` path, and its conservative lifecycle fallbacks remain required.
@@ -381,6 +391,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Main Commits
 
+- `b7207aa` Add canonical tool-call validation and deterministic healing (#149)
 - `73ec021` Add release notes for v0.0.1-rc20
 - `6330d85` Enable aligned final tool prefix reuse by default (#147)
 - `000fbfe` Record route and argument validation technical stops (#146)
