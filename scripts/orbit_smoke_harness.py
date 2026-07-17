@@ -43,7 +43,7 @@ from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import current_phase
 from orbit.runtime.kv_diag import model_call_context
-from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT, with_tool_call_system_prompt
+from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT, TOOL_CALL_SYSTEM_PROMPT, with_tool_call_system_prompt
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_healing import analyze_tool_attempt, tool_call_healing_status
 from orbit.runtime.tools import TOOL_NAMES, tool_definitions
@@ -280,6 +280,9 @@ TOOL_CALL_GENERATION_CORPUS = (
         "Answer only: no tool is required.",
     ), 1)),
 )
+TOOL_CALL_GENERATION_CORPUS_VERSION = 1
+TOOL_CALL_GENERATION_PROTOCOL_VERSION = 1
+TOOL_CALL_GENERATION_CONFIGURATION_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -982,11 +985,28 @@ def run_tool_call_generation_benchmark(
                 "benchmark_mode": "tool_call_generation_only",
                 "server_pid": server_process.pid if server_process is not None else None,
                 "corpus_size": len(corpus),
+                "corpus_version": TOOL_CALL_GENERATION_CORPUS_VERSION,
+                "corpus_hash": tool_call_generation_corpus_hash(corpus),
+                "protocol_version": TOOL_CALL_GENERATION_PROTOCOL_VERSION,
+                "protocol_hash": tool_call_generation_protocol_hash(),
                 "repetitions": args.repetitions,
                 "mtp_tool_mode_eligible": False,
             }
         )
+        env["configuration_version"] = TOOL_CALL_GENERATION_CONFIGURATION_VERSION
+        env["configuration_hash"] = tool_call_generation_configuration_hash(env)
     summary = summarize_tool_call_generation(rows, mtp=env.get("mtp"))
+    summary.update(
+        {
+            "corpus_version": env.get("corpus_version"),
+            "corpus_hash": env.get("corpus_hash"),
+            "protocol_version": env.get("protocol_version"),
+            "protocol_hash": env.get("protocol_hash"),
+            "configuration_version": env.get("configuration_version"),
+            "configuration_hash": env.get("configuration_hash"),
+            "native_backend_capabilities": env.get("native_backend_capabilities"),
+        }
+    )
     write_tool_call_generation_jsonl(jsonl_path, env, rows, summary)
     write_tool_call_generation_markdown(markdown_path, env, summary)
     print(f"jsonl={jsonl_path}")
@@ -1002,6 +1022,50 @@ def tool_call_generation_corpus(*, smoke: bool) -> tuple[tuple[str, str | None, 
         "fetch_url_1", "exec_shell_1", "negative_1", "negative_6",
     }
     return tuple(item for item in TOOL_CALL_GENERATION_CORPUS if item[0] in selected)
+
+
+def tool_call_generation_corpus_hash(corpus: tuple[tuple[str, str | None, str], ...]) -> str:
+    payload = json.dumps(corpus, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def tool_call_generation_protocol_hash() -> str:
+    payload = {
+        "version": TOOL_CALL_GENERATION_PROTOCOL_VERSION,
+        "template": "production_tool_call_system_prompt",
+        "system_prompt": TOOL_CALL_SYSTEM_PROMPT,
+        "tools": tool_definitions(TOOL_NAMES),
+    }
+    serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def tool_call_generation_configuration_hash(environment: dict[str, object]) -> str:
+    payload = {
+        "version": TOOL_CALL_GENERATION_CONFIGURATION_VERSION,
+        "model": environment.get("model"),
+        "backend": environment.get("backend"),
+        "thinking": environment.get("thinking"),
+        "mtp": environment.get("mtp"),
+        "mtp_requested": environment.get("mtp_requested"),
+        "mtp_session_ready": environment.get("mtp_session_ready"),
+        "mtp_usable": environment.get("mtp_usable"),
+        "mmproj": environment.get("mmproj"),
+        "tools": environment.get("tools"),
+        "timeout": environment.get("timeout"),
+        "max_tokens": environment.get("max_tokens"),
+        "temperature": environment.get("temperature"),
+        "ctx": environment.get("ctx"),
+        "threads": environment.get("threads"),
+        "threads_batch": environment.get("threads_batch"),
+        "batch": environment.get("batch"),
+        "ubatch": environment.get("ubatch"),
+        "cpu_affinity": environment.get("cpu_affinity"),
+        "cooling_seconds": environment.get("cooling_seconds"),
+        "repetitions": environment.get("repetitions"),
+    }
+    serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def run_tool_call_generation_sample(
@@ -1261,6 +1325,11 @@ def write_tool_call_generation_markdown(
         "# Orbit Tool-Call Generation Benchmark\n\n"
         f"- Model: `{env.get('model')}`\n"
         f"- MTP: `{env.get('mtp')}`\n"
+        f"- Capability profile: `{(env.get('native_backend_capabilities') or {}).get('profile_id')}`\n"
+        f"- Capability status: `{(env.get('native_backend_capabilities') or {}).get('status')}`\n"
+        f"- Corpus: `v{env.get('corpus_version')} {env.get('corpus_hash')}`\n"
+        f"- Tool protocol: `v{env.get('protocol_version')} {env.get('protocol_hash')}`\n"
+        f"- Comparable configuration: `v{env.get('configuration_version')} {env.get('configuration_hash')}`\n"
         f"- Samples: `{summary.get('samples')}`\n"
         f"- Evaluable: `{summary.get('evaluable')}`\n"
         f"- Completion rate: `{summary.get('completion_rate')}`\n",
@@ -1849,6 +1918,7 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "version": __version__,
         "model": getattr(info, "id", None) or props.get("model_id") or "unknown",
         "backend": props.get("backend") or "unknown",
+        "thinking": bounded_identifier(props.get("thinking_mode")) or args.server_thinking,
         "mtp": mtp["status"],
         "mtp_requested": mtp["requested"],
         "mtp_session_ready": mtp["session_ready"],
@@ -1877,6 +1947,7 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "client_command": "<redacted>" if redact else " ".join(sys.argv),
         "final_prefix": final_prefix_props(props),
         "final_prefix_config": final_prefix_config_metadata(args.final_prefix_mode, props),
+        "native_backend_capabilities": native_backend_capability_metadata(props),
         "block_id": args.block_id,
         "run_order": args.run_order,
         "cooling_seconds": args.cooling_seconds,
@@ -1886,6 +1957,41 @@ def environment_summary(*, args: argparse.Namespace, backend: LlamaServerBackend
         "tool_healing": tool_healing_metadata(args.tool_healing_mode),
         "canonical_gate": canonical_gate_metadata(args.canonical_gate),
         "route_diagnostic_store": args.route_diagnostic_store,
+    }
+
+
+def native_backend_capability_metadata(props: dict[str, object]) -> dict[str, object]:
+    manifest = props.get("native_backend_capabilities")
+    if not isinstance(manifest, dict):
+        return {
+            "profile_id": None,
+            "status": "unavailable",
+            "schema_version": None,
+        }
+    backend = manifest.get("backend") if isinstance(manifest.get("backend"), dict) else {}
+    renderer = manifest.get("renderer") if isinstance(manifest.get("renderer"), dict) else {}
+    tokenizer = manifest.get("tokenizer") if isinstance(manifest.get("tokenizer"), dict) else {}
+    return {
+        "schema_version": manifest.get("schema_version") if isinstance(manifest.get("schema_version"), int) else None,
+        "profile_id": bounded_identifier(manifest.get("profile_id")),
+        "status": bounded_identifier(manifest.get("status")),
+        "verification_scope": bounded_identifier(manifest.get("verification_scope")),
+        "behavior_enforced": manifest.get("behavior_enforced") is True,
+        "backend_build_number": backend.get("build_number") if isinstance(backend.get("build_number"), int) else None,
+        "backend_commit": bounded_identifier(backend.get("commit"), limit=64),
+        "backend_library_hash": bounded_hex(backend.get("library_hash"), length=64),
+        "backend_verified_commit": backend.get("verified_commit") is True,
+        "tool_protocol_text_hash": bounded_hex(renderer.get("tool_protocol_text_hash"), length=64),
+        "final_prefix_text_hash": bounded_hex(renderer.get("final_prefix_text_hash"), length=64),
+        "renderer_fixture_suite_version": (
+            renderer.get("fixture_suite_version") if isinstance(renderer.get("fixture_suite_version"), int) else None
+        ),
+        "renderer_fixture_suite_hash": bounded_hex(renderer.get("fixture_suite_hash"), length=64),
+        "tokenizer_prefix_tokens": tokenizer.get("prefix_tokens") if isinstance(tokenizer.get("prefix_tokens"), int) else None,
+        "tokenizer_prefix_hash": bounded_hex(tokenizer.get("prefix_token_hash"), length=64),
+        "tokenizer_next_dynamic_token": (
+            tokenizer.get("next_dynamic_token") if isinstance(tokenizer.get("next_dynamic_token"), int) else None
+        ),
     }
 
 

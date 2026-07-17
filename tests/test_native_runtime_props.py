@@ -61,6 +61,22 @@ class NativeRuntimePropsTests(unittest.TestCase):
         self.assertTrue(server.client.supports_vision)
         self.assertTrue(server.client.supports_audio)
 
+    @mock.patch("orbit.native_server.app.safe_gemma4_capability_manifest")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_server_caches_bounded_native_capability_manifest(self, _mocked_lib, build_manifest) -> None:
+        build_manifest.return_value = {
+            "schema_version": 1,
+            "profile_id": "orbit-gemma4-native-v1",
+            "status": "verified",
+            "behavior_enforced": False,
+        }
+        client = NativeLlamaClient(self._paths(), NativeClientConfig())
+
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        self.assertEqual(server.native_backend_capabilities["status"], "verified")
+        build_manifest.assert_called_once_with(client, final_system_prompt=mock.ANY)
+
 
 if __name__ == "__main__":
     unittest.main()
