@@ -2,7 +2,7 @@
 
 ## Role
 
-This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc18` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
+This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc21` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
 
 ## Permanent Principles
 
@@ -95,7 +95,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC20
 
-- Current published baseline: `v0.0.1-rc20`.
+- Published predecessor: `v0.0.1-rc20`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc20
 - Release notes commit: `73ec0215258ce9aa8c4c5f69ea650edc2aa103c3`.
 - Tag object: `6dc3740a8e87a9d56adf211c235fc13236609e32`.
@@ -109,6 +109,24 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - RC20 post-merge runtime sanity: default reuse PASS with six correct stop completions, one capture, five `cached=64` restores, and zero fallback; kill switch PASS with two `cached=4` completions and zero capture/restore; strict MTP PASS with healthy MTP and zero final-prefix activity.
 - RC20 validation: MTP shim build PASS; prompt/final-policy/completion-budget PASS with 60 tests; evidence/runtime/tool-message PASS with 213 tests; resolver PASS with 3 tests; backend/native/protocol PASS with 118 tests; smoke harness PASS with 54 tests; full unit discovery PASS with 1,067 tests; `compileall` PASS; `git diff --check` PASS.
 - Restored calls evaluate 36 fewer tokens than previous production, with cumulative evaluated-token break-even on the second eligible final. CPU timing remains workload- and output-dependent; no deterministic wall-time improvement is claimed.
+
+### RC21
+
+- Current published baseline: `v0.0.1-rc21`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc21
+- Release notes commit: `b19c9ef1cf82dd07d6aeb70ea1e21c3e16bfc5eb`.
+- Tag object: `11419be25bb87920be24fbede42d1dd6a3a19a82`.
+- Tag commit: `b19c9ef1cf82dd07d6aeb70ea1e21c3e16bfc5eb`.
+- Prerelease: yes. Draft: false. Latest: false. The GitHub `releases/latest` endpoint does not resolve to RC21.
+- Includes #148, #149, and #150.
+- Focus: canonical runtime tool-call validation enabled by default, deterministic value-preserving formal healing enabled by default, and process-isolated native-backend compatibility observability.
+- `ORBIT_TOOL_CALL_CANONICAL_GATE=0` restores the legacy validation path. Invalid values disable the gate safely. The canonical contract rejects duplicate keys, extra arguments, missing required fields, wrong types, invalid ranges, unavailable tools, and policy, permission, or operational-limit denials before execution.
+- `ORBIT_TOOL_CALL_HEALING=0` disables formal healing immediately. The fixed whitelist contains only known-envelope removal, trailing-comma removal, complete JSON-string `arguments` decoding, and registered-wrapper unwrapping. Repaired calls must preserve the exact tool name, keys, types, values, and argument count before passing the same canonical contract, guardrails, and executor path.
+- Ambiguity, multiple candidates, incomplete delimiters or strings, `finish_reason=length`, timeout, cancel, schema failure, policy denial, permission denial, and operational-limit denial remain fail-closed. No semantic correction, aliasing, fuzzy matching, tool substitution, defaults, clamps, argument invention/removal/renaming, or nudge retry exists.
+- The process-isolated generation comparator records versioned corpus, protocol, runtime configuration, model, renderer, tokenizer, exact 64-token prefix, MTP, tools, thinking, affinity, and thread identities. The verified manifest is observational and does not gate startup or inference.
+- RC21 benchmark sanity used two distinct native-server processes. Both completed 8/8 evaluable scenarios with eight model calls, zero tool executions, and zero finalizations. Exact-tool match `0.833333`, unwanted-attempt `0.5`, and budget-truncation `0.125` remained visible; wrong-tool, unwanted-tool, and truncation are not formal-healing categories.
+- RC21 validation: focused canonical/healing/comparator/capability/harness PASS with 151 tests; full unit discovery PASS with 1,165 tests; MTP shim build PASS; `compileall` PASS; `git diff --check` PASS. Default final-prefix PASS with capture then `cached=64`; combined kill switches PASS with `cached=4` and zero prefix activity; strict MTP/mmproj PASS with usable MTP and zero final-prefix activity.
+- No semantic-healing, success-rate, or deterministic performance claim is made. Do not expand the repair whitelist or add a nudge retry without natural, repeatable malformed production-budget samples and separate safety evidence.
 
 ## MTP
 
@@ -340,12 +358,12 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 ## Tool Argument Validation Technical Stop
 
 - Generic same-family model repair is rejected. Preserving the selected tool name did not prevent semantic rewriting; an empty web-search request was repaired into an invented non-empty query.
-- Deterministic validation is safe only for unequivocal structural invariants such as required fields and exact types, numeric bounds, contradictory flags, unsupported URL schemes, NUL/control characters, and invalid shell syntax. Existing safety guardrails remain authoritative after any such validation.
+- The canonical runtime contract now enforces unequivocal structural invariants such as required fields and exact types, numeric bounds, contradictory flags, unsupported URL schemes, NUL/control characters, duplicate keys, and invalid shell syntax. Existing policy, permission, operational-limit, and executor guardrails remain authoritative after validation.
 - Deterministic validation must not infer missing user intent, command adequacy, a requested but absent depth, or corrected quoting for an opaque shell command when no structured path is available.
 - Current `read_file` and `grep_search` route behavior is flattened into `exec_shell_full_command`; reliable path and pattern integrity validation would require structured arguments before broader validation could be considered.
-- No production validator or argument-repair patch was applied. Do not reopen generic argument repair without a narrower structural contract and new validation evidence.
+- Deterministic formal healing is restricted to syntax-envelope transformations that preserve the exact tool and typed argument values. Do not reopen generic argument repair, semantic argument correction, or command rewriting without a narrower structured representation and new validation evidence.
 
-## Tool-Call Healing Observational Technical Stop
+## Canonical Tool-Call Validation and Healing Technical Stop
 
 - Tool-call healing diagnostics remain shadow-only and OFF by default through `ORBIT_TOOL_CALL_HEALING_SHADOW=0|1`. Shadow candidates are diagnostic objects only and cannot reach normalization, guardrails, policy, an executor, or the normal tool loop.
 - The benchmark-only generation mode stops after one production-template tool-mode model result. It does not execute a tool or start `final_from_tool`, and records only bounded, redacted metadata.
@@ -391,6 +409,8 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Main Commits
 
+- `b19c9ef` Add release notes for v0.0.1-rc21
+- `7f46c0c` Add native backend compatibility observability (#150)
 - `b7207aa` Add canonical tool-call validation and deterministic healing (#149)
 - `73ec021` Add release notes for v0.0.1-rc20
 - `6330d85` Enable aligned final tool prefix reuse by default (#147)
@@ -430,12 +450,12 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-1. Stop and use RC20 as the stable baseline.
-2. Run controlled CPU benchmarks with `bench-core` metadata.
-3. Analyze `bench-core` output for regressions or better profiles.
-4. Run a lightweight conversation-reuse end-to-end smoke only if a regression or ambiguous behavior appears.
-5. Investigate runtime-side `producer_model_call_id` only if needed.
-6. Do not reopen evidence selection without a new reliable relevance signal.
+1. Stop and use RC21 as the published baseline.
+2. Keep the formal-healing whitelist fixed; collect natural malformed production-budget events before considering any expansion.
+3. Investigate wrong-tool and unwanted-tool reliability only as a separate observational mission, without semantic hardcoding or tool substitution.
+4. Use the process-isolated comparator and verified capability manifest before accepting a native backend, renderer, tokenizer, or tool-protocol revision.
+5. Run controlled CPU benchmarks with `bench-core` metadata; do not infer speedup from the compatibility comparator.
+6. Do not reopen route grammar, evidence selection, or generic argument repair without a new reliable signal and separate evidence.
 7. Do not reopen MTP algorithm tuning without new upstream evidence or a strong benchmark.
 8. Consider small UX/documentation improvements only if measurable, isolated, and covered by tests.
 
