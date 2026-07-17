@@ -53,6 +53,166 @@ def route_step_report(**overrides: object):
 
 
 class SmokeHarnessTests(unittest.TestCase):
+    def test_post_tool_final_reuse_mode_and_bounded_step_diagnostics(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(smoke_harness.post_tool_final_reuse_metadata("inherit")["enabled"])
+            with smoke_harness.post_tool_final_reuse_environment("on"):
+                self.assertTrue(smoke_harness.post_tool_final_reuse_metadata("inherit")["enabled"])
+            self.assertNotIn("ORBIT_POST_TOOL_FINAL_REUSE", os.environ)
+
+        before = {
+            "eligible_count": 2,
+            "reused_count": 1,
+            "fallback_count": 1,
+            "avoided_model_calls": 1,
+            "last_reason": "old",
+        }
+        after = {
+            "eligible_count": 3,
+            "reused_count": 2,
+            "fallback_count": 1,
+            "avoided_model_calls": 2,
+            "last_reason": "complete_post_tool_prose",
+        }
+        with mock.patch.dict(os.environ, {"ORBIT_POST_TOOL_FINAL_REUSE": "1"}, clear=True):
+            state = smoke_harness.post_tool_final_reuse_step_state(before, after)
+        self.assertEqual(state["reused_count_delta"], 1)
+        self.assertEqual(state["avoided_model_calls_delta"], 1)
+        self.assertIsNone(state["saved_evaluated_tokens"])
+        self.assertEqual(state["savings_measurement"], "process_isolated_off_on_required")
+
+    def test_post_tool_final_reuse_fingerprint_ignores_only_run_identity_and_mode(self) -> None:
+        base = {
+            "git_head": "abc123",
+            "model": "gemma4-test",
+            "ctx": 8192,
+            "threads": 6,
+            "scenario": ["fixture"],
+            "post_tool_final_reuse": {"enabled": False},
+            "server_pid": 10,
+            "timestamp": "first",
+        }
+        candidate = {
+            **base,
+            "post_tool_final_reuse": {"enabled": True},
+            "server_pid": 11,
+            "timestamp": "second",
+        }
+        self.assertEqual(
+            smoke_harness.post_tool_final_reuse_comparison_fingerprint(base),
+            smoke_harness.post_tool_final_reuse_comparison_fingerprint(candidate),
+        )
+        self.assertNotEqual(
+            smoke_harness.post_tool_final_reuse_comparison_fingerprint(base),
+            smoke_harness.post_tool_final_reuse_comparison_fingerprint({**candidate, "threads": 4}),
+        )
+
+    def test_inference_audit_shadow_requires_explicit_enabled_resolver(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=True):
+            result = smoke_harness.main(
+                [
+                    "--inference-audit-shadow",
+                    "--output-dir",
+                    tmp,
+                    "--scenario",
+                    "simple_chat",
+                ]
+            )
+        self.assertEqual(result, 2)
+
+    def test_inference_audit_enrichment_is_off_by_default_and_redacted_when_enabled(self) -> None:
+        report = route_step_report(
+            prompt="sensitive request",
+            answer_excerpt="sensitive answer",
+            model_steps=[
+                {
+                    "phase": "final_from_tool",
+                    "loop": 2,
+                    "prompt_tokens": 120,
+                    "cached_tokens": 64,
+                    "evaluated_tokens": 56,
+                    "completion_tokens": 3,
+                    "tool_calls": 0,
+                    "finish_reason": "stop",
+                }
+            ],
+            tool_names=["system_info"],
+            correctness_category="correct",
+        )
+        step = smoke_harness.SmokeStep(
+            "fixture",
+            inference_audit_expectation="bounded_confirmation",
+        )
+        disabled = smoke_harness.enrich_step_inference_audit(report, step=step, enabled=False)
+        self.assertEqual(disabled.inference_audit, {})
+        self.assertEqual(disabled.to_json()["prompt"], "sensitive request")
+
+        enabled = smoke_harness.enrich_step_inference_audit(report, step=step, enabled=True)
+        self.assertEqual(enabled.inference_audit["summary"]["theoretical_model_calls"], 1)
+        self.assertEqual(enabled.to_json()["prompt"], "<redacted>")
+        self.assertEqual(enabled.to_json()["answer_excerpt"], "<redacted>")
+
+    def test_inference_audit_off_on_preserves_result_and_model_call_count(self) -> None:
+        class Runtime:
+            backend = object()
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def ask_chat(self, _prompt, **kwargs):
+                self.calls += 1
+                result = smoke_harness.ChatResult(
+                    content="bounded answer",
+                    model="fixture",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=20,
+                    completion_tokens=3,
+                    cached_tokens=4,
+                    prompt_tokens_per_second=10.0,
+                    generation_tokens_per_second=5.0,
+                )
+                phase_start = kwargs.get("on_phase_start")
+                if phase_start is not None:
+                    phase_start(smoke_harness.ModelPhaseStart("chat_final", attempt=1, reason="chat_response"))
+                kwargs["on_model_step"](
+                    smoke_harness.ModelStepMetrics.from_result(loop=1, result=result, phase="chat_final")
+                )
+                return result
+
+        step = smoke_harness.SmokeStep("fixture", mode="chat", checker_name="nonempty")
+        disabled_runtime = Runtime()
+        enabled_runtime = Runtime()
+        disabled = smoke_harness._run_step_inner(
+            disabled_runtime,
+            scenario="fixture",
+            step_index=1,
+            step=step,
+            workdir=Path("."),
+            max_tokens=16,
+            temperature=0.0,
+            allowed_tool_names=(),
+            inference_audit_enabled=False,
+        )
+        enabled = smoke_harness._run_step_inner(
+            enabled_runtime,
+            scenario="fixture",
+            step_index=1,
+            step=step,
+            workdir=Path("."),
+            max_tokens=16,
+            temperature=0.0,
+            allowed_tool_names=(),
+            inference_audit_enabled=True,
+        )
+        self.assertEqual(disabled_runtime.calls, enabled_runtime.calls)
+        self.assertEqual(disabled.answer_excerpt, enabled.answer_excerpt)
+        self.assertEqual(disabled.finish_reason, enabled.finish_reason)
+        self.assertEqual(disabled.model_steps, enabled.model_steps)
+        self.assertEqual(disabled.tool_names, enabled.tool_names)
+        self.assertEqual(disabled.model_phase_starts, [])
+        self.assertEqual(len(enabled.model_phase_starts), 1)
+
     def test_tool_call_generation_corpus_identity_is_stable(self) -> None:
         self.assertEqual(smoke_harness.TOOL_CALL_GENERATION_CORPUS_VERSION, 1)
         self.assertEqual(len(smoke_harness.TOOL_CALL_GENERATION_CORPUS), 40)

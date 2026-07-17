@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 import tempfile
+import os
 from pathlib import Path
 from shutil import copyfile
 import sys
@@ -2448,6 +2449,16 @@ def _last_tool_message(runtime: ChatRuntime) -> Message:
 
 
 class ToolRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep legacy-path fixtures explicit; default-on behavior is covered by
+        # the dedicated post-tool final reuse tests and live matrix.
+        self._post_tool_final_reuse_env = patch.dict(
+            os.environ,
+            {"ORBIT_POST_TOOL_FINAL_REUSE": "0"},
+        )
+        self._post_tool_final_reuse_env.start()
+        self.addCleanup(self._post_tool_final_reuse_env.stop)
+
     def test_ask_with_tools_disables_backend_thinking_for_tool_plan_and_final_answer(self) -> None:
         class ThinkingAwareBackend:
             def __init__(self) -> None:

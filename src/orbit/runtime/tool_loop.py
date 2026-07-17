@@ -8,12 +8,14 @@ from typing import Callable
 
 from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
+from orbit.post_tool_final_reuse_config import resolve_post_tool_final_reuse
 from orbit.runtime.capabilities import LocalCapabilities
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
 from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
+from orbit.runtime.post_tool_final_reuse import evaluate_post_tool_final_reuse
 from orbit.runtime.session_memory import should_refresh_for_append
 from orbit.runtime.shell_guardrails import (
     SHELL_FULL_COMPLETION_GUARD_PROMPT,
@@ -122,6 +124,7 @@ def run_tool_loop(
     tools = executor.tool_definitions()
     canonical_gate_enabled = resolve_tool_call_canonical_gate().enabled
     healing_enabled = canonical_gate_enabled and resolve_tool_call_healing().enabled
+    post_tool_final_reuse_enabled = resolve_post_tool_final_reuse().enabled
     last_result: ChatResult | None = None
     state = ToolLoopState(allowed_tool_names)
     user_prompt = _last_user_text(runtime.messages)
@@ -153,6 +156,12 @@ def run_tool_loop(
             phase=phase,
             attempt_id=attempt_id,
         )
+
+    def record_post_tool_final_reuse_fallback(reason: str) -> None:
+        if not post_tool_final_reuse_enabled:
+            return
+        runtime.post_tool_final_reuse_fallback_count += 1
+        runtime.post_tool_final_reuse_last_reason = reason
 
     def record_terminal(
         *,
@@ -784,7 +793,10 @@ def run_tool_loop(
         executing_mutation_verification_repair = repair.mutation_verification_repair_pending
         executing_mutation_semantic_repair = repair.mutation_semantic_repair_pending
         executing_read_only_mutation_retry = repair.read_only_mutation_retry_pending
+        executing_shell_repair = repair.shell_repair_prompt_pending is not None
+        executing_shell_empty_result_check = repair.shell_empty_result_check_pending
         executing_content_evidence_guard = turn.pending_content_evidence_guard
+        executing_analysis_completion_guard = turn.pending_analysis_completion_guard
         executing_file_recovery_guard = turn.pending_file_recovery_guard
         executing_url_recovery_guard = turn.pending_url_recovery_guard
         executing_completion_guard = turn.pending_completion_guard
@@ -852,7 +864,17 @@ def run_tool_loop(
         produced_by_phase: str | None = "tool_call"
         last_result = result
         if on_model_step:
-            on_model_step(ModelStepMetrics.from_result(loop=loop_index, result=result, phase="tool_call" if result.tool_calls else None))
+            on_model_step(
+                ModelStepMetrics.from_result(
+                    loop=loop_index,
+                    result=result,
+                    phase=(
+                        "tool_call"
+                        if result.tool_calls
+                        else "post_tool_route" if state.tool_rounds > 0 else None
+                    ),
+                )
+            )
         if repair.contract_retry_pending and not result.tool_calls:
             record_terminal(
                 attempt_id=attempt_id,
@@ -919,6 +941,7 @@ def run_tool_loop(
             request_minimal_patch_guard()
             continue
         if result.finish_reason == "length" and not result.tool_calls and state.tool_rounds > 0:
+            record_post_tool_final_reuse_fallback("finish_reason")
             record_terminal(
                 attempt_id=attempt_id,
                 report=shadow_report,
@@ -1089,7 +1112,10 @@ def run_tool_loop(
                 or executing_mutation_verification_repair
                 or executing_mutation_semantic_repair
                 or executing_read_only_mutation_retry
+                or executing_shell_repair
+                or executing_shell_empty_result_check
                 or executing_content_evidence_guard
+                or executing_analysis_completion_guard
                 or executing_file_recovery_guard
                 or executing_url_recovery_guard
                 or executing_completion_guard
@@ -1161,6 +1187,36 @@ def run_tool_loop(
                     phase=produced_by_phase or "tool_call",
                 )
                 turn.mark_finalizable()
+                if post_tool_final_reuse_enabled:
+                    reuse_decision = evaluate_post_tool_final_reuse(
+                        content=result.content,
+                        finish_reason=result.finish_reason,
+                        tool_calls=result.tool_calls,
+                        phase=(
+                            "post_tool_route"
+                            if produced_by_phase == "tool_call" and state.tool_rounds > 0
+                            else produced_by_phase
+                        ),
+                        messages=runtime.messages,
+                        tool_rounds=state.tool_rounds,
+                        output_was_suppressed=tool_delta_callback is suppress_tool_delta,
+                        pending_internal_request=has_pending_internal_request(),
+                        executed_internal_tool_prompt=executed_internal_tool_prompt,
+                        shell_error_pending=repair.shell_error_final_pending,
+                        shadow_attempt_detected=bool(
+                            shadow_report is not None and shadow_report.attempt_detected
+                        ),
+                    )
+                    runtime.post_tool_final_reuse_last_reason = reuse_decision.reason
+                    if reuse_decision.eligible:
+                        runtime.post_tool_final_reuse_eligible_count += 1
+                        runtime.post_tool_final_reuse_reused_count += 1
+                        runtime.post_tool_final_reuse_avoided_model_calls += 1
+                        runtime.messages.append({"role": "assistant", "content": result.content})
+                        if on_final_delta is not None and result.content:
+                            on_final_delta(result.content)
+                        return result
+                    runtime.post_tool_final_reuse_fallback_count += 1
                 return runtime._answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,

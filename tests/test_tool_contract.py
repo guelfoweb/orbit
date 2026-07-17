@@ -18,6 +18,14 @@ from orbit.tool_contract_config import resolve_tool_call_canonical_gate
 
 
 class CanonicalToolContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._post_tool_final_reuse_env = mock.patch.dict(
+            os.environ,
+            {"ORBIT_POST_TOOL_FINAL_REUSE": "0"},
+        )
+        self._post_tool_final_reuse_env.start()
+        self.addCleanup(self._post_tool_final_reuse_env.stop)
+
     def _decision(
         self,
         name: object,

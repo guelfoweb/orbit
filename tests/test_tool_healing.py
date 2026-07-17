@@ -26,6 +26,14 @@ from orbit.tool_healing_config import resolve_tool_call_healing, resolve_tool_ca
 
 
 class ToolHealingShadowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._post_tool_final_reuse_env = mock.patch.dict(
+            os.environ,
+            {"ORBIT_POST_TOOL_FINAL_REUSE": "0"},
+        )
+        self._post_tool_final_reuse_env.start()
+        self.addCleanup(self._post_tool_final_reuse_env.stop)
+
     def _analyze(
         self,
         text: str,
