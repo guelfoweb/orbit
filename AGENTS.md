@@ -2,7 +2,7 @@
 
 ## Role
 
-This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc22` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
+This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc23` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
 
 ## Permanent Principles
 
@@ -130,7 +130,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC22
 
-- Current published baseline: `v0.0.1-rc22`.
+- Published predecessor: `v0.0.1-rc22`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc22
 - Release-notes commit: `2c40a0bf1a33aecac5fc259f60133f8bf1da02e8`.
 - Tag object: `e44f8021b369ca522d05d3c49e29456e3047be47`.
@@ -143,6 +143,23 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Process-isolated validation recorded 50/50 correct stop reuses, 50 model calls eliminated, 65,189 evaluated tokens saved, median savings of 1,084 evaluated tokens and approximately 107.5 seconds per reuse in the measured workload, with zero false positives or skipped tools.
 - Eligibility overhead was approximately 8.55 microseconds at p95. CPU timing remains workload-, output-, process-, and thermal-dependent; no deterministic speedup claim is made.
 - Validation: focused tests PASS with 387 tests; full unit discovery PASS with 1,213 tests; process-isolated comparator PASS on 10/10 scenario pairs; MTP shim build PASS; `compileall` PASS; `git diff --check` PASS. Existing final-prefix `cached=64`/kill-switch `cached=4`, canonical/healing, MTP/mmproj, cancel, timeout, and reset gates remain unchanged and passing.
+
+### RC23
+
+- Current published baseline: `v0.0.1-rc23`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc23
+- Release-notes commit: `2aada5ca15b6dc3c3ad945a0fd9591c580eecbed`.
+- Tag object: `af89a85b66d86d362d1a6abe480cea1a4bf2c7f4`.
+- Tag commit: `2aada5ca15b6dc3c3ad945a0fd9591c580eecbed`.
+- Prerelease: yes. Draft: false. Latest: false. The GitHub `releases/latest` endpoint remains on the stable release channel and does not resolve to RC23.
+- Includes merge commit `0a446a2` from #152.
+- Focus: fail-closed mtmd ABI hardening and reproducible llama.cpp vendor provenance, with no vendor revision upgrade or inference-behavior change.
+- Python now passes only primitives and opaque handles through the mandatory co-located Orbit mtmd bridge. The bridge constructs upstream mtmd structures from the active build headers, while unknown or mismatched ABI layouts fail before mmproj initialization.
+- Bridge, sidecar, runtime libraries, compiler identity, build flags, headers, bridge source, and provenance are revision-bound. Core ctypes structures that remain passed by value are checked through `sizeof`, `alignof`, and relevant `offsetof` gates before use.
+- The production vendor remains llama.cpp `b9551`, upstream commit `379ac6673b5cd75c7b4e07d1521c50f1e093878c`. The recorded source-tree hash is `4adb967e643363e7dc4d01d632b3a8471e0df2ec84ff304d364dc182f63e7ee1`; the 60-path Orbit patchset hash is `dea2f205ed2a73d09ad203e08ba85545474742dbb0191f4f1a9b3a86beb4b435`.
+- `LLAMA_BUILD_COMMIT` and `LLAMA_BUILD_NUMBER` are explicit vendor metadata and are not derived from the parent Orbit repository. The staged b10068 candidate is not included in RC23.
+- RC23 validation: focused ABI/native tests PASS with 105 tests; full unit discovery PASS with 1,223 tests; all six MTP helpers rebuilt from staging; real vision and audio mmproj inputs PASS; MTP initialization/completion PASS; final-prefix capture and `cached=64` restore PASS; cancel, timeout, reset, and restart coverage PASS; artificial ABI mismatch fails safely without a crash; `compileall` PASS; `git diff --check` PASS.
+- RC23 makes no performance claim. Future vendor revisions require a separate process-isolated compatibility and performance comparison through the hardened bridge.
 
 ## Post-Tool Final Prose Reuse
 
@@ -469,6 +486,8 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Main Commits
 
+- `2aada5c` Add release notes for v0.0.1-rc23
+- `0a446a2` Harden mtmd ABI and record vendor provenance (#152)
 - `2c40a0b` Add release notes for v0.0.1-rc22
 - `c2be0ef` Enable post-tool final prose reuse by default (#151)
 - `b19c9ef` Add release notes for v0.0.1-rc21
@@ -512,7 +531,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-1. Stop and use RC22 as the published baseline.
+1. Stop and use RC23 as the published baseline.
 2. Keep the formal-healing whitelist fixed; collect natural malformed production-budget events before considering any expansion.
 3. Investigate wrong-tool and unwanted-tool reliability only as a separate observational mission, without semantic hardcoding or tool substitution.
 4. Use the process-isolated comparator and verified capability manifest before accepting a native backend, renderer, tokenizer, or tool-protocol revision.
