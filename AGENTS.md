@@ -202,6 +202,30 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Small `shell`, `grep_search`, and `unknown` finals remain at 96 tokens.
 - `/max-tokens` is user-facing; the runtime still applies internal per-phase budgets.
 
+## Discarded Optimization Experiments
+
+- The post-reuse model-call audit found no additional frequent model call that
+  could be removed without taking over a semantic decision. Exact final-input
+  replay remains unimplemented and stopped pending repeated real opportunities.
+- Additive structured `read_file`/`grep_search` schemas increased cold prefill
+  and regressed exact argument fidelity. Their schemas, harness branches, and
+  tests are not present in production.
+- Production tool-schema compaction changed tool selection or exact arguments;
+  generic output bounding lacked supporting oversized evidence. Both remain
+  technical stops.
+- Bounded planning failed its semantic smoke gate with Gemma 4 12B and remains
+  inactive. It requires a new model/template to pass exact-plan,
+  unsupported-plan, and zero-wrong-plan gates before reconsideration.
+- A 768-token tool-mode checkpoint was numerically exact but the
+  production-like opportunity sample observed no useful real restore. It also
+  retained about 252 MiB. Its runtime integration and
+  `ORBIT_TOOL_PREFIX_REUSE` flag were discarded after RC23.
+- Preserve only the measured audits in
+  `docs/POST_TOOL_MODEL_CALL_AUDIT.md`,
+  `docs/STRUCTURED_FILE_TOOLS_SHADOW.md`, and
+  `docs/TOOL_CALL_POST_ROUTE_KV_REUSE.md`. Do not restore their experimental
+  code without new production evidence and a separate review.
+
 ## Evidence Lineage
 
 - `user_turn_id` is useful for provenance, not relevance.
