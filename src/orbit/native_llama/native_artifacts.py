@@ -15,6 +15,7 @@ LINUX_RUNTIME_LIBS = (
 
 OPTIONAL_RUNTIME_LIBS = (
     "libmtmd.so",
+    "liborbit-mtmd-bridge.so",
 )
 
 SHIM_ARTIFACTS = (

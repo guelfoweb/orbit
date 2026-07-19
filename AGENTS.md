@@ -153,6 +153,15 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Eligibility analysis overhead measured approximately 8.55 microseconds at p95. The wall-time result is workload-, output-, process-, and thermal-dependent; no deterministic speedup claim is made.
 - Read, system, web, error, synthesis, multi-tool, cancellation, timeout, and reset cases retain normal fallback when the structural eligibility conditions are not met. This feature does not change routing, tool selection, executor behavior, MTP, final-prefix reuse, or retry policy.
 
+## Native mtmd ABI and Vendor Provenance
+
+- Python no longer exposes upstream mtmd structures. The mandatory co-located `liborbit-mtmd-bridge` accepts primitive values and opaque handles, constructs `mtmd_context_params` and `mtmd_input_text` from the compiled headers, and adapts reviewed bitmap return profiles.
+- The bridge rejects unknown context, input-text, bitmap, or capability ABI layouts before mmproj initialization. Core ctypes structures passed by value are checked against bridge-reported `sizeof`, `alignof`, and relevant `offsetof` values.
+- Bridge reuse is revision-bound. Its identity covers compiler/version, bridge flags, native CMake configuration, relevant source/header hashes, every co-located runtime-library hash, the bridge artifact hash, upstream provenance, and the Orbit patchset hash. Missing or mismatched identity fails explicitly.
+- Current vendor provenance is upstream `b9551` at `379ac6673b5cd75c7b4e07d1521c50f1e093878c`, source-tree hash `4adb967e643363e7dc4d01d632b3a8471e0df2ec84ff304d364dc182f63e7ee1`, and Orbit patchset hash `dea2f205ed2a73d09ad203e08ba85545474742dbb0191f4f1a9b3a86beb4b435`.
+- Native CMake builds receive vendor commit/build metadata explicitly. `LLAMA_COMMIT` must never be inferred from the enclosing Orbit repository.
+- This hardening does not update the production llama.cpp revision. See `docs/NATIVE_MTMD_ABI.md`.
+
 ## MTP
 
 - MTP is optional and experimental.

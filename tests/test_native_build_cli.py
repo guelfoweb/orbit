@@ -48,6 +48,20 @@ class NativeBuildCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("cmake not found in PATH", stream.getvalue())
 
+    def test_main_fails_cleanly_when_provenance_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.10)\n", encoding="utf-8")
+            stream = io.StringIO()
+            with (
+                mock.patch("orbit.native_llama.build_cli.shutil.which", return_value="/usr/bin/cmake"),
+                contextlib.redirect_stderr(stream),
+            ):
+                code = build_cli.main(["--source-dir", str(root)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("unable to read llama.cpp Git provenance", stream.getvalue())
+
     def test_parser_accepts_source_dir_and_with_mtp_shim(self) -> None:
         args = build_cli.build_parser().parse_args(["--source-dir", "/tmp/src", "--with-mtp-shim", "--jobs", "4"])
 
@@ -203,6 +217,7 @@ class NativeBuildCliTests(unittest.TestCase):
                 mock.patch("orbit.native_llama.build_cli._run"),
                 mock.patch("orbit.native_llama.build_cli._copy_runtime_libraries"),
                 mock.patch("orbit.native_llama.build_cli._build_packaged_shims"),
+                mock.patch("orbit.native_llama.build_cli._cmake_provenance_args", return_value=[]),
                 mock.patch("orbit.native_llama.build_cli.platform_runtime_libs", return_value=[]),
             ):
                 code = build_cli.main(["--quiet"])
@@ -225,6 +240,7 @@ class NativeBuildCliTests(unittest.TestCase):
                 mock.patch("orbit.native_llama.build_cli._run"),
                 mock.patch("orbit.native_llama.build_cli._copy_runtime_libraries"),
                 mock.patch("orbit.native_llama.build_cli._build_packaged_shims"),
+                mock.patch("orbit.native_llama.build_cli._cmake_provenance_args", return_value=[]),
                 mock.patch("orbit.native_llama.build_cli.platform_runtime_libs", return_value=["libllama.so"]),
                 mock.patch("orbit.native_llama.build_cli.DEFAULT_VENDOR_LIB_DIR", root / "vendor-lib"),
             ):

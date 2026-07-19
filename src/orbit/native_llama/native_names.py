@@ -21,3 +21,7 @@ def platform_optional_runtime_libs() -> tuple[str, ...]:
 
 def persistent_mtp_shim_filename() -> str:
     return f"liborbit-persistent-mtp{shared_library_suffix()}"
+
+
+def mtmd_bridge_filename() -> str:
+    return runtime_library_filename("orbit-mtmd-bridge")

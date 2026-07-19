@@ -17,7 +17,6 @@ from .bindings import (
     LlamaLibrary,
     LlamaChatMessage,
     LlamaProgressCallback,
-    MtmdInputText,
     MtmdLibrary,
     llama_token,
     llama_pos,
@@ -31,7 +30,7 @@ from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
 from .mtp_accept_probe import MtpAcceptProbeResult, run_mtp_accept_probe
 from .mtp_dry_run import MtpDryRunResult, run_mtp_dry_run
 from .mtp_probe import MtpProbeResult, run_mtp_probe
-from .native_names import runtime_library_filename
+from .native_names import mtmd_bridge_filename, runtime_library_filename
 from .paths import NativeLlamaPaths
 from .prefix_anchor import (
     PrefixAnchorState,
@@ -131,19 +130,29 @@ class NativeRoutePrefixPrefillResult:
         }
 
 
+def _resolve_mtmd_bridge_path(paths: NativeLlamaPaths) -> Path | None:
+    bridge = paths.build_bin / mtmd_bridge_filename()
+    return bridge if bridge.exists() else None
+
+
 class NativeLlamaClient:
     def __init__(self, paths: NativeLlamaPaths, config: NativeClientConfig | None = None) -> None:
         self.paths = paths
         self.config = config or NativeClientConfig()
         self.lib = LlamaLibrary(paths.build_bin)
-        self.mtmd = MtmdLibrary(paths.build_bin) if (paths.build_bin / runtime_library_filename("mtmd")).exists() else None
+        mtmd_bridge = _resolve_mtmd_bridge_path(paths)
+        self.mtmd = (
+            MtmdLibrary(paths.build_bin, mtmd_bridge)
+            if mtmd_bridge is not None
+            else None
+        )
         self.cancel_event = threading.Event()
         self._callbacks: list[object] = []
         self._model: c_void_p | None = None
         self._vocab: c_void_p | None = None
         self._mtmd_ctx: c_void_p | None = None
         self._media_marker = (
-            self.mtmd.lib.mtmd_default_marker().decode("utf-8", errors="replace")
+            self.mtmd.lib.orbit_mtmd_default_marker().decode("utf-8", errors="replace")
             if self.mtmd is not None else DEFAULT_MEDIA_MARKER
         )
         self.supports_vision = False
@@ -207,7 +216,7 @@ class NativeLlamaClient:
         self._free_persistent_mtp_session()
         if self._mtmd_ctx:
             assert self.mtmd is not None
-            self.mtmd.lib.mtmd_free(self._mtmd_ctx)
+            self.mtmd.lib.orbit_mtmd_context_free(self._mtmd_ctx)
             self._mtmd_ctx = None
         if self._session.sampler:
             lib.llama_sampler_free(self._session.sampler)
@@ -393,21 +402,28 @@ class NativeLlamaClient:
         self.supports_audio = False
         if self._mtmd_ctx:
             assert self.mtmd is not None
-            self.mtmd.lib.mtmd_free(self._mtmd_ctx)
+            self.mtmd.lib.orbit_mtmd_context_free(self._mtmd_ctx)
             self._mtmd_ctx = None
+        if self.paths.mmproj_model is not None and self._model and self.mtmd is None:
+            raise RuntimeError(
+                "matching Orbit mtmd ABI bridge is required for multimodal inference"
+            )
         if self.mtmd is None or self.paths.mmproj_model is None or not self._model:
             return
-        params = self.mtmd.lib.mtmd_context_params_default()
-        params.use_gpu = False
-        params.print_timings = False
-        params.n_threads = self.config.threads
-        params.media_marker = self._media_marker.encode()
-        ctx = self.mtmd.lib.mtmd_init_from_file(str(self.paths.mmproj_model).encode(), self._model, params)
+        ctx = self.mtmd.lib.orbit_mtmd_context_create(
+            str(self.paths.mmproj_model).encode(),
+            self._model,
+            False,
+            False,
+            self.config.threads,
+            self._media_marker.encode(),
+        )
         if not ctx:
-            raise RuntimeError(f"failed to load multimodal projector: {self.paths.mmproj_model}")
+            detail = self.mtmd.last_error() or "native bridge initialization failed"
+            raise RuntimeError(f"failed to load multimodal projector: {detail}")
         self._mtmd_ctx = ctx
-        self.supports_vision = bool(self.mtmd.lib.mtmd_support_vision(ctx))
-        self.supports_audio = bool(self.mtmd.lib.mtmd_support_audio(ctx))
+        self.supports_vision = bool(self.mtmd.lib.orbit_mtmd_support_vision(ctx))
+        self.supports_audio = bool(self.mtmd.lib.orbit_mtmd_support_audio(ctx))
 
     def _free_persistent_mtp_session(self) -> None:
         if self._persistent_mtp_runtime is None:
@@ -872,27 +888,36 @@ class NativeLlamaClient:
         for payload in media_payloads:
             buf = (c_ubyte * len(payload)).from_buffer_copy(payload)
             bitmap_buffers.append(buf)
-            bitmap = mtmd.mtmd_helper_bitmap_init_from_buf(self._mtmd_ctx, buf, len(payload), False)
+            bitmap = mtmd.orbit_mtmd_bitmap_init_from_buf(self._mtmd_ctx, buf, len(payload), False)
             if not bitmap:
                 raise RuntimeError("failed to decode multimodal input")
             bitmaps.append(bitmap)
 
-        chunks = mtmd.mtmd_input_chunks_init()
+        chunks = mtmd.orbit_mtmd_chunks_create()
         if not chunks:
             for bitmap in bitmaps:
-                mtmd.mtmd_bitmap_free(bitmap)
+                mtmd.orbit_mtmd_bitmap_free(bitmap)
             raise RuntimeError("failed to allocate multimodal chunks")
 
         try:
-            text = MtmdInputText(prompt.encode(), True, True)
+            prompt_bytes = prompt.encode()
             bitmap_array = (c_void_p * len(bitmaps))(*bitmaps) if bitmaps else None
-            rc = mtmd.mtmd_tokenize(self._mtmd_ctx, chunks, byref(text), bitmap_array, len(bitmaps))
+            rc = mtmd.orbit_mtmd_tokenize(
+                self._mtmd_ctx,
+                chunks,
+                prompt_bytes,
+                len(prompt_bytes),
+                True,
+                True,
+                bitmap_array,
+                len(bitmaps),
+            )
             if rc != 0:
                 raise RuntimeError("failed to tokenize multimodal prompt")
 
-            total_tokens = int(mtmd.mtmd_helper_get_n_tokens(chunks))
+            total_tokens = int(mtmd.orbit_mtmd_chunks_token_count(chunks))
             processed_tokens = 0
-            n_chunks = int(mtmd.mtmd_input_chunks_size(chunks))
+            n_chunks = int(mtmd.orbit_mtmd_chunks_size(chunks))
             n_past = llama_pos(0)
             if on_progress:
                 on_progress(NativeProgress("prefill", 0, max(1, total_tokens)))
@@ -901,9 +926,9 @@ class NativeLlamaClient:
                 if should_cancel and should_cancel():
                     self.cancel()
                     break
-                chunk = mtmd.mtmd_input_chunks_get(chunks, idx)
+                chunk = mtmd.orbit_mtmd_chunks_get(chunks, idx)
                 new_n_past = llama_pos(0)
-                rc = mtmd.mtmd_helper_eval_chunk_single(
+                rc = mtmd.orbit_mtmd_eval_chunk(
                     self._mtmd_ctx,
                     self._session.ctx_tgt,
                     chunk,
@@ -916,7 +941,7 @@ class NativeLlamaClient:
                 if rc != 0:
                     raise RuntimeError(f"multimodal prefill failed: {rc}")
                 n_past = new_n_past
-                processed_tokens += int(mtmd.mtmd_input_chunk_get_n_tokens(chunk))
+                processed_tokens += int(mtmd.orbit_mtmd_chunk_token_count(chunk))
                 if on_progress:
                     on_progress(NativeProgress("prefill", min(processed_tokens, total_tokens), max(1, total_tokens)))
             pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
@@ -947,9 +972,9 @@ class NativeLlamaClient:
                 cancelled=cancelled,
             )
         finally:
-            mtmd.mtmd_input_chunks_free(chunks)
+            mtmd.orbit_mtmd_chunks_free(chunks)
             for bitmap in bitmaps:
-                mtmd.mtmd_bitmap_free(bitmap)
+                mtmd.orbit_mtmd_bitmap_free(bitmap)
 
     def _multimodal_chunk_batch_size(self) -> int:
         return max(1, min(self.config.batch_size, self.config.ubatch_size))
