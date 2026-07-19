@@ -202,6 +202,45 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Small `shell`, `grep_search`, and `unknown` finals remain at 96 tokens.
 - `/max-tokens` is user-facing; the runtime still applies internal per-phase budgets.
 
+## Tool-Call Early-Stop Shadow Technical Stop
+
+- Measured fact: a one-time benchmark-only streaming scanner observed the
+  production Gemma tool envelope, reused active raw normalization, and applied
+  the shared canonical contract. It never cancelled generation, executed a
+  tool, or started a final. The scanner, harness branch, and tests were removed
+  after the technical stop; no early-stop module or flag remains.
+- Measured fact: in 11/11 evaluable production-like scenarios, eight canonical
+  completion points were observed. Every point was the final generated token:
+  median and p95 trailing tokens were both zero, and theoretical avoidable
+  decode time was zero. No false completion was observed.
+- Conclusion: the production decode loop samples EOG immediately after the
+  closed `<tool_call|>` envelope and exits before decoding or counting EOG.
+  Active early stopping therefore has no measured token or wall-time
+  opportunity.
+- Reopen only for a new model, template, or backend that naturally emits at
+  least two trailing tokens in at least 20% of
+  representative canonical-valid calls, with measurable decode cost and zero
+  adversarial false completion. See `docs/TOOL_CALL_EARLY_STOP_SHADOW.md`.
+
+## ngram-mod Technical Stop
+
+- Measured fact: the current vendor's server/common implementation is not
+  directly usable by Orbit's production one-token Python decode loop. Safe
+  integration would need batch target validation, sampler cloning, KV rollback,
+  and checkpoint state that the production path does not expose.
+- Measured fact: a staging probe benefited a highly repetitive copy workload,
+  but non-repetitive medium/long controls proposed no drafts and showed no gain
+  outside variability; the draft path also retained additional memory.
+- Conclusion: observed usefulness was limited to a highly repetitive sequence
+  and did not generalize. No ngram-mod runtime module, flag, or decode path is
+  active.
+- Reopen the investigation only if upstream provides a stable C API for the
+  required speculative operations, or production-like evidence shows frequent,
+  repeatable, and materially beneficial repetitive workloads. Promotion would
+  still require revision-matched integration, exact greedy output equivalence,
+  process-isolated ABBA validation, bounded memory, and complete
+  lifecycle/MTP/prefix-reuse validation.
+
 ## Discarded Optimization Experiments
 
 - The post-reuse model-call audit found no additional frequent model call that
