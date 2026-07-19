@@ -20,9 +20,11 @@ from ctypes import (
 )
 from pathlib import Path
 import ctypes
+import json
 import os
 
 from .native_names import platform_runtime_libs, runtime_library_filename
+from .mtmd_bridge import validate_mtmd_bridge_artifact
 
 
 llama_token = c_int32
@@ -137,37 +139,6 @@ class LlamaChatMessage(Structure):
     _fields_ = [
         ("role", c_char_p),
         ("content", c_char_p),
-    ]
-
-
-class MtmdContextParams(Structure):
-    _fields_ = [
-        ("use_gpu", c_bool),
-        ("print_timings", c_bool),
-        ("n_threads", c_int),
-        ("image_marker", c_char_p),
-        ("media_marker", c_char_p),
-        ("flash_attn_type", c_int),
-        ("warmup", c_bool),
-        ("image_min_tokens", c_int),
-        ("image_max_tokens", c_int),
-        ("cb_eval", c_void_p),
-        ("cb_eval_user_data", c_void_p),
-    ]
-
-
-class MtmdInputText(Structure):
-    _fields_ = [
-        ("text", c_char_p),
-        ("add_special", c_bool),
-        ("parse_special", c_bool),
-    ]
-
-
-class MtmdCaps(Structure):
-    _fields_ = [
-        ("inp_vision", c_bool),
-        ("inp_audio", c_bool),
     ]
 
 
@@ -302,48 +273,164 @@ class LlamaLibrary:
 
 
 class MtmdLibrary:
-    def __init__(self, build_bin: Path) -> None:
+    def __init__(self, build_bin: Path, bridge_path: Path | None = None) -> None:
+        resolved_bridge = bridge_path or build_bin / runtime_library_filename("orbit-mtmd-bridge")
+        self.build_identity = validate_mtmd_bridge_artifact(build_bin, resolved_bridge)
         flags = native_cdll_flags()
-        self.lib = load_native_cdll(build_bin / runtime_library_filename("mtmd"), mode=flags)
+        self.lib = load_native_cdll(
+            resolved_bridge,
+            mode=flags,
+        )
         self._configure_api()
+        if self.lib.orbit_mtmd_bridge_api_version() != 1:
+            raise RuntimeError("unsupported Orbit mtmd bridge API")
+        if not self.lib.orbit_mtmd_bridge_abi_supported():
+            error = self.last_error() or "unsupported mtmd ABI profile"
+            raise RuntimeError(error)
+        raw_manifest = self.lib.orbit_mtmd_bridge_manifest_json()
+        if not raw_manifest:
+            raise RuntimeError("missing Orbit mtmd bridge ABI manifest")
+        try:
+            self.manifest = json.loads(raw_manifest)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("invalid Orbit mtmd bridge ABI manifest") from exc
+        for manifest_key, identity_key in (
+            ("upstream_commit", "upstream_commit"),
+            ("upstream_tag", "upstream_tag"),
+            ("source_tree_hash", "source_tree_sha256"),
+            ("patchset_hash", "patchset_sha256"),
+        ):
+            if self.manifest.get(manifest_key) != self.build_identity.get(identity_key):
+                raise RuntimeError("Orbit mtmd bridge provenance mismatch")
+        verify_core_abi_layouts(self.manifest)
 
     def _configure_api(self) -> None:
         lib = self.lib
-        lib.mtmd_default_marker.argtypes = []
-        lib.mtmd_default_marker.restype = c_char_p
-        lib.mtmd_context_params_default.argtypes = []
-        lib.mtmd_context_params_default.restype = MtmdContextParams
-        lib.mtmd_init_from_file.argtypes = [c_char_p, c_void_p, MtmdContextParams]
-        lib.mtmd_init_from_file.restype = c_void_p
-        lib.mtmd_free.argtypes = [c_void_p]
-        lib.mtmd_free.restype = None
-        lib.mtmd_get_cap_from_file.argtypes = [c_char_p]
-        lib.mtmd_get_cap_from_file.restype = MtmdCaps
-        lib.mtmd_support_vision.argtypes = [c_void_p]
-        lib.mtmd_support_vision.restype = c_bool
-        lib.mtmd_support_audio.argtypes = [c_void_p]
-        lib.mtmd_support_audio.restype = c_bool
+        lib.orbit_mtmd_bridge_api_version.argtypes = []
+        lib.orbit_mtmd_bridge_api_version.restype = c_uint32
+        lib.orbit_mtmd_bridge_abi_supported.argtypes = []
+        lib.orbit_mtmd_bridge_abi_supported.restype = c_bool
+        lib.orbit_mtmd_bridge_last_error.argtypes = []
+        lib.orbit_mtmd_bridge_last_error.restype = c_char_p
+        lib.orbit_mtmd_bridge_manifest_json.argtypes = []
+        lib.orbit_mtmd_bridge_manifest_json.restype = c_char_p
+        lib.orbit_mtmd_default_marker.argtypes = []
+        lib.orbit_mtmd_default_marker.restype = c_char_p
+        lib.orbit_mtmd_context_create.argtypes = [
+            c_char_p,
+            c_void_p,
+            c_bool,
+            c_bool,
+            c_int32,
+            c_char_p,
+        ]
+        lib.orbit_mtmd_context_create.restype = c_void_p
+        lib.orbit_mtmd_context_free.argtypes = [c_void_p]
+        lib.orbit_mtmd_context_free.restype = None
+        lib.orbit_mtmd_support_vision.argtypes = [c_void_p]
+        lib.orbit_mtmd_support_vision.restype = c_bool
+        lib.orbit_mtmd_support_audio.argtypes = [c_void_p]
+        lib.orbit_mtmd_support_audio.restype = c_bool
+        lib.orbit_mtmd_get_cap_from_file.argtypes = [
+            c_char_p,
+            POINTER(c_bool),
+            POINTER(c_bool),
+        ]
+        lib.orbit_mtmd_get_cap_from_file.restype = c_bool
+        lib.orbit_mtmd_bitmap_init_from_buf.argtypes = [
+            c_void_p,
+            POINTER(c_ubyte),
+            c_size_t,
+            c_bool,
+        ]
+        lib.orbit_mtmd_bitmap_init_from_buf.restype = c_void_p
+        lib.orbit_mtmd_bitmap_free.argtypes = [c_void_p]
+        lib.orbit_mtmd_bitmap_free.restype = None
+        lib.orbit_mtmd_chunks_create.argtypes = []
+        lib.orbit_mtmd_chunks_create.restype = c_void_p
+        lib.orbit_mtmd_chunks_free.argtypes = [c_void_p]
+        lib.orbit_mtmd_chunks_free.restype = None
+        lib.orbit_mtmd_chunks_size.argtypes = [c_void_p]
+        lib.orbit_mtmd_chunks_size.restype = c_size_t
+        lib.orbit_mtmd_chunks_get.argtypes = [c_void_p, c_size_t]
+        lib.orbit_mtmd_chunks_get.restype = c_void_p
+        lib.orbit_mtmd_chunk_token_count.argtypes = [c_void_p]
+        lib.orbit_mtmd_chunk_token_count.restype = c_size_t
+        lib.orbit_mtmd_chunks_token_count.argtypes = [c_void_p]
+        lib.orbit_mtmd_chunks_token_count.restype = c_size_t
+        lib.orbit_mtmd_tokenize.argtypes = [
+            c_void_p,
+            c_void_p,
+            c_char_p,
+            c_size_t,
+            c_bool,
+            c_bool,
+            POINTER(c_void_p),
+            c_size_t,
+        ]
+        lib.orbit_mtmd_tokenize.restype = c_int32
+        lib.orbit_mtmd_eval_chunk.argtypes = [
+            c_void_p,
+            c_void_p,
+            c_void_p,
+            llama_pos,
+            llama_seq_id,
+            c_int32,
+            c_bool,
+            POINTER(llama_pos),
+        ]
+        lib.orbit_mtmd_eval_chunk.restype = c_int32
 
-        lib.mtmd_helper_bitmap_init_from_buf.argtypes = [c_void_p, POINTER(c_ubyte), c_size_t, c_bool]
-        lib.mtmd_helper_bitmap_init_from_buf.restype = c_void_p
-        lib.mtmd_bitmap_free.argtypes = [c_void_p]
-        lib.mtmd_bitmap_free.restype = None
+    def last_error(self) -> str | None:
+        value = self.lib.orbit_mtmd_bridge_last_error()
+        if not value:
+            return None
+        return value.decode("utf-8", errors="replace") or None
 
-        lib.mtmd_input_chunks_init.argtypes = []
-        lib.mtmd_input_chunks_init.restype = c_void_p
-        lib.mtmd_input_chunks_size.argtypes = [c_void_p]
-        lib.mtmd_input_chunks_size.restype = c_size_t
-        lib.mtmd_input_chunks_get.argtypes = [c_void_p, c_size_t]
-        lib.mtmd_input_chunks_get.restype = c_void_p
-        lib.mtmd_input_chunks_free.argtypes = [c_void_p]
-        lib.mtmd_input_chunks_free.restype = None
 
-        lib.mtmd_input_chunk_get_n_tokens.argtypes = [c_void_p]
-        lib.mtmd_input_chunk_get_n_tokens.restype = c_size_t
-        lib.mtmd_helper_get_n_tokens.argtypes = [c_void_p]
-        lib.mtmd_helper_get_n_tokens.restype = c_size_t
-
-        lib.mtmd_tokenize.argtypes = [c_void_p, c_void_p, POINTER(MtmdInputText), POINTER(c_void_p), c_size_t]
-        lib.mtmd_tokenize.restype = c_int32
-        lib.mtmd_helper_eval_chunk_single.argtypes = [c_void_p, c_void_p, c_void_p, llama_pos, llama_seq_id, c_int32, c_bool, POINTER(llama_pos)]
-        lib.mtmd_helper_eval_chunk_single.restype = c_int32
+def verify_core_abi_layouts(manifest: object) -> None:
+    if not isinstance(manifest, dict):
+        raise RuntimeError("invalid Orbit mtmd bridge ABI manifest")
+    structures = {
+        "llama_batch": (LlamaBatch, tuple(name for name, _ctype in LlamaBatch._fields_)),
+        "llama_model_params": (
+            LlamaModelParams,
+            (
+                "n_gpu_layers",
+                "progress_callback",
+                "progress_callback_user_data",
+                "kv_overrides",
+                "vocab_only",
+                "no_alloc",
+            ),
+        ),
+        "llama_context_params": (
+            LlamaContextParams,
+            (
+                "n_ctx",
+                "n_outputs_max",
+                "n_threads",
+                "flash_attn_type",
+                "defrag_thold",
+                "cb_eval",
+                "type_k",
+                "abort_callback",
+                "embeddings",
+                "samplers",
+                "ctx_other",
+            ),
+        ),
+        "llama_sampler_chain_params": (LlamaSamplerChainParams, ("no_perf",)),
+        "llama_chat_message": (LlamaChatMessage, ("role", "content")),
+    }
+    for name, (structure, fields) in structures.items():
+        actual = manifest.get(name)
+        if not isinstance(actual, dict):
+            raise RuntimeError(f"missing native ABI layout: {name}")
+        expected = {
+            "size": ctypes.sizeof(structure),
+            "align": ctypes.alignment(structure),
+            **{field: getattr(structure, field).offset for field in fields},
+        }
+        if any(actual.get(key) != value for key, value in expected.items()):
+            raise RuntimeError(f"native ABI layout mismatch: {name}")

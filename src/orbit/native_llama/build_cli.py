@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import collections
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -11,11 +12,13 @@ import time
 from pathlib import Path
 
 from .build_support import BUNDLED_SOURCE_ROOT, DEFAULT_VENDOR_BUILD_BIN, DEFAULT_VENDOR_BUILD_ROOT, validate_llama_source_root
+from .llama_provenance import load_llama_provenance
 from .mtp_accept_probe import build_mtp_accept_probe_helper
 from .mtp_completion import build_mtp_completion_helper
 from .mtp_decode_probe import build_mtp_decode_probe_helper
 from .mtp_dry_run import build_mtp_dry_run_helper
 from .mtp_probe import build_mtp_probe_helper
+from .mtmd_bridge import build_mtmd_bridge
 from .native_names import platform_optional_runtime_libs, platform_runtime_libs
 from .paths import DEFAULT_VENDOR_LIB_DIR, DEFAULT_VENDOR_SHIM_DIR
 from .persistent_mtp import build_persistent_mtp_shim
@@ -78,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     if not cmake:
         print("error: cmake not found in PATH", file=sys.stderr)
         return 1
+    try:
+        provenance_args = _cmake_provenance_args(source_root)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     build_dir = DEFAULT_VENDOR_BUILD_ROOT
     reporter.phase("preparing source/build dirs")
@@ -103,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         "-DLLAMA_BUILD_UI=OFF",
         "-DLLAMA_BUILD_TOOLS=ON",
         "-DLLAMA_OPENSSL=OFF",
+        *provenance_args,
     ]
     build_cmd = [cmake, "--build", str(build_dir)]
     if args.jobs and args.jobs > 0:
@@ -153,6 +162,16 @@ def _resolve_source_root(source_dir: Path | None, llama_root: Path | None) -> Pa
 
 def _validate_llama_root(root: Path) -> Path | str:
     return validate_llama_source_root(root)
+
+
+def _cmake_provenance_args(source_root: Path) -> list[str]:
+    provenance = load_llama_provenance(source_root)
+    tag_match = re.fullmatch(r"b([0-9]+)", provenance.upstream_tag)
+    build_number = tag_match.group(1) if tag_match else "0"
+    return [
+        f"-DLLAMA_BUILD_COMMIT={provenance.upstream_commit}",
+        f"-DLLAMA_BUILD_NUMBER={build_number}",
+    ]
 
 
 class BuildReporter:
@@ -261,6 +280,15 @@ def _copy_runtime_libraries(build_bin: Path) -> None:
 
 
 def _build_packaged_shims(source_root: Path, build_bin: Path) -> None:
+    mtmd_bridge, _provenance = build_mtmd_bridge(
+        llama_root=source_root,
+        build_dir=build_bin,
+        build_bin=build_bin,
+    )
+    shutil.copy2(mtmd_bridge, DEFAULT_VENDOR_LIB_DIR / mtmd_bridge.name)
+    identity = mtmd_bridge.with_name(f"{mtmd_bridge.name}.identity.json")
+    if identity.exists():
+        shutil.copy2(identity, DEFAULT_VENDOR_LIB_DIR / identity.name)
     build_mtp_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
     build_mtp_dry_run_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
     build_mtp_accept_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)

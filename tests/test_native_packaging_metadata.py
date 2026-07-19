@@ -64,6 +64,7 @@ class NativePackagingMetadataTests(unittest.TestCase):
         self.assertIn("libllama.so", LINUX_RUNTIME_LIBS)
         self.assertIn("libggml-cpu.so", LINUX_RUNTIME_LIBS)
         self.assertIn("libmtmd.so", OPTIONAL_RUNTIME_LIBS)
+        self.assertIn("liborbit-mtmd-bridge.so", OPTIONAL_RUNTIME_LIBS)
         self.assertIn("liborbit-persistent-mtp.so", SHIM_ARTIFACTS)
         self.assertIn("orbit-mtp-probe", SHIM_ARTIFACTS)
 

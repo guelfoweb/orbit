@@ -38,16 +38,35 @@ def compile_cpp_helper(
     build_bin: Path | None = None,
     runner=subprocess.run,
     shared: bool = False,
+    extra_compile_args: tuple[str, ...] = (),
+    extra_include_dirs: tuple[Path, ...] = (),
+    extra_link_args: tuple[str, ...] = (),
+    force: bool = False,
 ) -> Path:
     resolved_root = llama_root.expanduser().resolve()
     resolved_bin = resolve_build_bin(llama_root=resolved_root, build_bin=build_bin)
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists() and output.stat().st_mtime >= source.stat().st_mtime:
+    dependency_paths = [
+        source,
+        resolved_root / "include" / "llama.h",
+        resolved_root / "common" / "common.h",
+        resolved_root / "common" / "speculative.h",
+        resolved_root / "tools" / "mtmd" / "mtmd.h",
+        resolved_root / "tools" / "mtmd" / "mtmd-helper.h",
+        *(resolved_bin / name for name in platform_runtime_libs()),
+        *(Path(arg) for arg in extra_link_args if Path(arg).is_absolute()),
+    ]
+    newest_input = max(
+        (path.stat().st_mtime for path in dependency_paths if path.exists()),
+        default=source.stat().st_mtime,
+    )
+    if not force and output.exists() and output.stat().st_mtime >= newest_input:
         return output
 
     command = [os.environ.get("CXX", "c++"), "-std=c++17"]
     if shared:
         command.extend(["-shared", "-fPIC"])
+    command.extend(extra_compile_args)
     command.extend(
         [
             str(source),
@@ -59,7 +78,9 @@ def compile_cpp_helper(
             f"-Wl,-rpath,{resolved_bin}",
         ]
     )
+    command.extend(f"-I{path}" for path in extra_include_dirs)
     command.extend(str(resolved_bin / name) for name in platform_runtime_libs())
+    command.extend(extra_link_args)
     command.extend(["-o", str(output)])
 
     completed = runner(command, capture_output=True, text=True, check=False)
