@@ -217,7 +217,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   closed `<tool_call|>` envelope and exits before decoding or counting EOG.
   Active early stopping therefore has no measured token or wall-time
   opportunity.
-- Reopen only for a new model, template, or backend that naturally emits at
+- Reopen only for a new model or template that naturally emits at
   least two trailing tokens in at least 20% of
   representative canonical-valid calls, with measurable decode cost and zero
   adversarial false completion. See `docs/TOOL_CALL_EARLY_STOP_SHADOW.md`.

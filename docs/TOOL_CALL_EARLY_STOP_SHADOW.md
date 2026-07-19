@@ -52,7 +52,7 @@ to a path that already terminates at the earliest useful boundary.
 
 ### Reopening criteria
 
-Reopen only if a production model, template, or backend revision produces a
+Reopen only if a production model or template produces a
 repeatable population of canonical-valid calls with meaningful trailing
 tokens. A new investigation must show all of the following:
 
