@@ -42,13 +42,13 @@ SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT = (
     '{"command":"..."}'
 )
 SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT = (
-    "Your previous command inspected only metadata or listings.\n\n"
-    "For this task, inspect real file, document, source, string, or test content before continuing.\n\n"
-    "Use commands such as cat, sed -n, grep/rg on file contents, or test output.\n"
-    "For PDFs, prefer pdftotext <file> - piped to sed, head, tail, or grep.\n\n"
-    "If file names are unknown, use grep/rg recursively over file contents.\n\n"
-    "Do not use ls, find, tree, file, or stat.\n\n"
-    "Return only JSON:\n\n"
+    "The latest request is not complete: only metadata or listing evidence is available.\n\n"
+    "Re-evaluate the original request and choose the next concrete action. "
+    "If required artifacts do not exist, create them first. "
+    "Otherwise inspect direct file, source, string, document, or test-output evidence.\n\n"
+    "Do not repeat metadata-only discovery. Each shell call starts in the workdir, "
+    "so use explicit paths instead of relying on a previous cd.\n\n"
+    "Return only one tool call:\n\n"
     '{"command":"..."}'
 )
 SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT = (
@@ -57,6 +57,16 @@ SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT = (
     "The verification command must print direct evidence of the requested value or state, "
     "not only metadata, paths, tags, field names, or key names.\n\n"
     "Return only JSON:\n\n"
+    '{"command":"..."}'
+)
+SHELL_FULL_AGENT_MUTATION_VERIFICATION_PROMPT = (
+    "The latest mutation completed. Re-read every explicit verification requirement in the latest user request.\n\n"
+    "Return exactly one short non-mutating command that exposes direct post-change evidence. "
+    "When no specific test command was requested, read or print the resulting artifact directly; "
+    "do not reimplement the transformation or comparison in a new script. "
+    "If the user explicitly requested tests or named another validation command, run that check now after the mutation "
+    "and print a short success marker only after it exits successfully.\n\n"
+    "Do not modify files or state. Return only JSON:\n\n"
     '{"command":"..."}'
 )
 SHELL_FULL_COMPLETION_GUARD_PROMPT = (
@@ -86,10 +96,11 @@ SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX = (
     '{"command":"..."}'
 )
 SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT = (
-    "Your previous command tried to rewrite too much and was too long or incomplete.\n\n"
-    "Use a minimal local patch to modify only the necessary lines.\n\n"
-    "Do not use heredocs, cat > file, tee, or full-file rewrites for existing files.\n\n"
-    "Use a short command that changes only the needed lines.\n\n"
+    "The previous tool call was too long, incomplete, or attempted too much at once.\n\n"
+    "Continue with one short self-contained command for only the next concrete action. "
+    "Do not encode the whole workflow in one command. For an existing text file, prefer one exact apply_patch call; "
+    "otherwise modify only the necessary lines.\n\n"
+    "Each shell call starts in the workdir, so use explicit paths instead of relying on a previous cd.\n\n"
     "Return only JSON:\n\n"
     '{"command":"..."}'
 )
@@ -100,6 +111,19 @@ SHELL_FULL_SEMANTIC_REPAIR_PROMPT = (
     "If all requested changes are satisfied, return only: OK\n\n"
     "Return command JSON only when a follow-up command is needed:\n\n"
     '{"command":"..."}'
+)
+SHELL_FULL_AGENT_SEMANTIC_COMPLETION_PROMPT = (
+    "The requested modification was applied, and direct verification output is in context.\n\n"
+    "Check whether every outcome in the latest user request is satisfied.\n\n"
+    "Compare requested filenames, paths, headers, fields, rows, keys, values, and formats literally against the evidence. "
+    "If any differ, return the next minimal corrective tool call rather than reporting success.\n\n"
+    "A requested test, validation, or check counts only if it ran after the latest modification "
+    "and its tool result is present in context. An earlier failure or a content read is not proof "
+    "that a different requested check passed.\n\n"
+    "If anything is missing, return exactly one minimal tool call for the next required action.\n\n"
+    "If the task is complete, answer the user directly in concise plain prose. "
+    "Report the material change and verification result requested by the user; do not return only OK.\n\n"
+    "Return either one tool call or the final answer, never both."
 )
 
 
@@ -192,6 +216,7 @@ def exec_shell_full_definition() -> dict[str, Any]:
             "name": "exec_shell_full_command",
             "description": (
                 "Unrestricted local shell launched from the current workdir. May read, write, delete, execute, access network, and access paths outside workdir. "
+                "Each invocation starts in a fresh shell at workdir; directory changes do not persist across tool calls. "
                 "Use whatever commands are needed to complete the task. "
                 "For analysis, prefer direct evidence from content, source, binaries, strings, logs, archives, and fetched data, not only metadata. "
                 'For generic web search, use orbit-web-search "query"; for explicit URL content requests, prefer fetch_url and use shell fetch commands only when needed. '
@@ -312,15 +337,6 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
             return (
                 f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, explicit URL requests require direct URL content/failure evidence from the requested URL."
             )
-    if not _requires_direct_content_evidence(user_prompt):
-        return None
-    if _CONTENT_EVIDENCE_RE.search(raw_command):
-        return None
-    if _METADATA_ONLY_RE.search(raw_command):
-        return (
-            f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, not only metadata/listing. "
-            "Use a bounded command such as sed/head/grep/strings on the target file."
-    )
     return None
 
 
@@ -338,7 +354,9 @@ def validate_read_only_shell_mutation(arguments: dict[str, Any], *, user_prompt:
     )
 
 
-def _requires_direct_content_evidence(user_prompt: str) -> bool:
+def requires_direct_content_evidence(user_prompt: str | None) -> bool:
+    if not user_prompt:
+        return False
     if _ANALYSIS_PROMPT_RE.search(user_prompt):
         return True
     if _METADATA_REQUEST_RE.search(user_prompt):

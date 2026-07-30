@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             max_tokens=config.max_tokens,
             workdir=config.workdir,
             tools=config.tools,
+            agent=config.agent,
             thinking=config.think,
             render_markdown_mode=config.render_markdown,
         )
@@ -165,6 +166,7 @@ def _run_one_shot(
     workdir,
     tools: str,
     thinking: bool,
+    agent: bool = False,
     render_markdown_mode: str = "plain",
 ) -> int:
     prefill_estimator = PrefillEstimator()
@@ -209,7 +211,8 @@ def _run_one_shot(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 workdir=workdir,
-                allowed_tool_names=allowed_tool_names_for_spec(tools),
+                allowed_tool_names=allowed_tool_names_for_spec(tools, agent=agent),
+                agent_mode=agent,
                 on_final_delta=renderer.write,
                 on_progress=renderer.progress,
                 on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),

@@ -1,6 +1,6 @@
 # orbit
 
-Orbit is a small Python-first local runtime for Gemma 4 12B on CPU-only
+Orbit is a small Python-first local runtime for Gemma 4 26B-A4B on CPU-only
 machines. The primary path is the native `orbit server` backend, using
 vendored `llama.cpp`/`ggml` libraries built and loaded by Orbit. It does not
 require an external `llama-server` process for normal use.
@@ -13,7 +13,7 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 
 ## Current Scope
 
-- local CLI and native HTTP server for Gemma 4 12B
+- local CLI and native HTTP server for Gemma 4 26B-A4B
 - CPU-first native backend
 - explicit shell tools when tools mode is enabled
 - streaming terminal output and compact progress phases
@@ -30,7 +30,8 @@ and is not a guaranteed performance win.
 
 - Python 3.11 or newer
 - Linux recommended
-- Gemma 4 12B target GGUF
+- CMake for building the vendored native libraries
+- Gemma 4 26B-A4B target GGUF
 - optional Gemma 4 `mmproj` GGUF for multimodal input
 - optional MTP draft GGUF for `orbit server --mtp`
 
@@ -39,6 +40,7 @@ and is not a guaranteed performance win.
 ```bash
 git clone https://github.com/guelfoweb/orbit.git
 cd orbit
+sudo apt install cmake
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
@@ -53,8 +55,14 @@ python3 scripts/build_native.py
 Download model artifacts as needed:
 
 ```bash
-orbit download ggml-org/gemma-4-12B-it-GGUF
-orbit download ggml-org/gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
+orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_0.gguf
+orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/mtp-gemma-4-26B-A4B-it-Q4_0.gguf
+```
+
+Inspect the host and review the recommended server configuration:
+
+```bash
+scripts/suggest-server-profile.sh
 ```
 
 ## Quick Start
@@ -85,6 +93,29 @@ Enable tools only when you want to expose model-driven shell access:
 .venv/bin/orbit --workdir workdir --tools on --think off
 ```
 
+Enable the bounded agentic profile explicitly for multi-step local work:
+
+```bash
+.venv/bin/orbit --agent --workdir workdir --tools on --think off
+```
+
+It lets the model continue from partial tool results, recover from a bounded
+number of ordinary command failures, and verify local mutations before
+concluding. Existing text files can be changed through the exact `apply_patch`
+tool; the model still chooses every action, while the runtime only validates,
+authorizes, executes, and verifies it.
+
+Agent mode does not add a planner, parallel execution, semantic runtime
+decisions, hidden model retries, or a separate executor. Every action passes
+through the normal canonical validation, healing, guardrails, and tool
+implementation. Each shell call starts from `--workdir` in a fresh shell, so
+commands must use explicit paths instead of relying on a previous `cd`.
+
+Agent mode remains disabled by default. `--no-agent` (or `"agent": false` in
+the config file) explicitly selects the normal bounded tool loop. Agent mode
+still exposes the same unrestricted shell capability as normal tools-on mode;
+use a dedicated workdir or an isolated environment for untrusted prompts.
+
 For route/KV diagnostics:
 
 ```bash
@@ -100,7 +131,7 @@ Native MTP is explicit:
 Only download the MTP draft model if you intentionally want to test native MTP:
 
 ```bash
-orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/mtp-gemma-4-26B-A4B-it-Q4_0.gguf
 ```
 
 ```bash
@@ -113,9 +144,10 @@ on some CPU-only workloads.
 
 ## Tools
 
-Tools are off by default. Tools-on mode exposes unrestricted local shell access
-through the model-facing shell tool. Use it only in an isolated lab or safe
-workdir.
+Tools are enabled by default in the client configuration. Tools-on mode exposes
+unrestricted local shell access through the model-facing shell tool. Use it
+only in an isolated lab or safe workdir, or pass `--tools off` when tool access
+is not needed.
 
 Keep tools disabled at server startup:
 

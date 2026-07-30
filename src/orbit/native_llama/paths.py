@@ -16,7 +16,7 @@ BUNDLED_SOURCE_ROOT = PACKAGE_NATIVE_ROOT / "source" / "llama.cpp"
 DEFAULT_LLAMA_LIB_DIR = Path(os.environ["ORBIT_LLAMA_LIB_DIR"]).expanduser().resolve() if os.environ.get("ORBIT_LLAMA_LIB_DIR") else None
 BUNDLED_SOURCE_ROOT = PACKAGE_NATIVE_ROOT / "source" / "llama.cpp"
 DEFAULT_LLAMA_ROOT = Path(os.environ["ORBIT_LLAMA_ROOT"]).expanduser().resolve() if os.environ.get("ORBIT_LLAMA_ROOT") else None
-DEFAULT_MODEL_ID = "gemma4-12b-it-q4km"
+DEFAULT_MODEL_ID = "gemma4-26b-a4b-it-q40"
 LEGACY_MODEL_ID = "legacy-path"
 
 

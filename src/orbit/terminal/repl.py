@@ -124,7 +124,11 @@ class Repl:
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                     workdir=self.config.workdir,
-                    allowed_tool_names=allowed_tool_names_for_spec(self.tools_mode or "off"),
+                    allowed_tool_names=allowed_tool_names_for_spec(
+                        self.tools_mode or "off",
+                        agent=self.config.agent,
+                    ),
+                    agent_mode=self.config.agent,
                     on_final_delta=renderer.write,
                     on_progress=renderer.progress,
                     on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),

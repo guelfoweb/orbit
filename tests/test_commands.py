@@ -61,6 +61,7 @@ class CommandTests(unittest.TestCase):
 
         self.assertIn("┌─ Orbit Runtime", status)
         self.assertIn("Tools        on", status)
+        self.assertIn("Agent        off", status)
         self.assertIn("Think        off", status)
         self.assertIn("Model tools  exec_shell_full_command", status)
         self.assertIn("fetch_url", status)

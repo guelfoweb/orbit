@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-
 ToolSpec = str
 
 DEFAULT_ON_TOOL_NAMES = ("exec_shell_full_command", "fetch_url", "list_directory", "system_info")
+AGENT_ON_TOOL_NAMES = (*DEFAULT_ON_TOOL_NAMES, "apply_patch")
 
 SPECIAL_TOOL_SPECS = ("off", "on")
 USAGE = "off|on|status|refresh"
@@ -25,9 +25,10 @@ def tools_are_enabled(spec: ToolSpec) -> bool:
     return spec != "off"
 
 
-def allowed_tool_names_for_spec(spec: ToolSpec) -> tuple[str, ...] | None:
+def allowed_tool_names_for_spec(spec: ToolSpec, *, agent: bool = False) -> tuple[str, ...] | None:
     if spec == "off":
         return ()
     if spec == "on":
-        return tuple(dict.fromkeys(DEFAULT_ON_TOOL_NAMES))
+        names = AGENT_ON_TOOL_NAMES if agent else DEFAULT_ON_TOOL_NAMES
+        return tuple(dict.fromkeys(names))
     return ()

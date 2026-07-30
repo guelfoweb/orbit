@@ -26,7 +26,7 @@ from orbit.runtime.final_policy import (
 )
 from orbit.runtime.kv_diag import current_tools_mode, model_call_context
 from orbit.runtime.media import AudioInput, ImageInput
-from orbit.runtime.messages import TOOL_CALL_JSON_RETRY_PROMPT
+from orbit.runtime.messages import TOOL_CALL_JSON_RETRY_PROMPT, with_agent_final_completion_instruction
 from orbit.runtime.thinking_mode import ThinkingMode, last_assistant_has_open_reasoning
 from orbit.runtime.tool_loop import run_tool_loop
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
@@ -381,7 +381,9 @@ class ToolLoopEnvironment:
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         on_phase_start: Callable[[ModelPhaseStart], None] | None,
         tool_names: tuple[str, ...] | None,
+        agent_mode: bool = False,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+        initial_after_tool: str | None = None,
         local_capabilities=None,
         user_turn_id: str | None = None,
     ) -> ToolResultBundle:
@@ -398,7 +400,9 @@ class ToolLoopEnvironment:
             on_model_step=on_model_step,
             on_phase_start=on_phase_start,
             tool_names=tool_names,
+            agent_mode=agent_mode,
             initial_tool_calls=initial_tool_calls,
+            initial_after_tool=initial_after_tool,
             local_capabilities=local_capabilities,
             user_turn_id=user_turn_id,
         )
@@ -425,6 +429,7 @@ class FinalFromToolEnvironment:
         loop: int,
         use_tool_prompt: bool,
         compact_window: bool = False,
+        agent_mode: bool = False,
     ) -> FinalAnswerResult:
         if self.runtime._should_use_web_final_view(use_tool_prompt=use_tool_prompt):
             call_messages = self.runtime._web_final_from_tool_messages()
@@ -437,6 +442,8 @@ class FinalFromToolEnvironment:
         else:
             call_messages = self.runtime._with_final_tool_prompt() if use_tool_prompt else self.runtime.messages
             call_messages = self.runtime._with_final_evidence_context(call_messages)
+        if agent_mode:
+            call_messages = with_agent_final_completion_instruction(call_messages)
         evidence_kind, evidence_chars = self._latest_evidence_budget_metadata()
         policy = build_final_tool_policy(
             call_messages,

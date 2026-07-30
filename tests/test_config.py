@@ -111,7 +111,42 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.max_tokens, 512)
         self.assertIsNone(config.context_tokens)
         self.assertEqual(config.tools, "on")
+        self.assertFalse(config.agent)
         self.assertEqual(config.render_markdown, "live")
+
+    def test_cli_agent_profile_is_default_off_and_can_be_enabled(self) -> None:
+        defaulted = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json"))
+        enabled = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json", "--agent"))
+        disabled = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json", "--no-agent"))
+
+        self.assertFalse(defaulted.agent)
+        self.assertTrue(enabled.agent)
+        self.assertFalse(disabled.agent)
+
+    def test_agent_tool_profile_adds_exact_patch_only_when_agent_is_enabled(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn("apply_patch", allowed_tool_names_for_spec("on"))
+            self.assertIn("apply_patch", allowed_tool_names_for_spec("on", agent=True))
+            self.assertEqual(allowed_tool_names_for_spec("off", agent=True), ())
+
+    def test_cli_agent_flag_overrides_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"agent": False}), encoding="utf-8")
+
+            configured = load_app_config(_parse("--config", str(path)))
+            enabled = load_app_config(_parse("--config", str(path), "--agent"))
+
+        self.assertFalse(configured.agent)
+        self.assertTrue(enabled.agent)
+
+    def test_config_rejects_non_boolean_agent_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"agent": "yes"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "agent"):
+                load_app_config(_parse("--config", str(path)))
 
     def test_orbit_tools_env_can_disable_default_tools(self) -> None:
         with mock.patch.dict(os.environ, {"ORBIT_TOOLS": "off"}):
@@ -150,6 +185,7 @@ class ConfigTests(unittest.TestCase):
                         "no_system": True,
                         "think": True,
                         "tools": "on",
+                        "agent": True,
                         "render_markdown": "live",
                     }
                 ),
@@ -166,6 +202,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.no_system)
         self.assertTrue(config.think)
         self.assertEqual(config.tools, "on")
+        self.assertTrue(config.agent)
         self.assertEqual(config.render_markdown, "live")
 
     def test_cli_flags_override_config_file(self) -> None:
@@ -187,6 +224,7 @@ class ConfigTests(unittest.TestCase):
                     "on",
                     "--tools",
                     "on",
+                    "--agent",
                     "--render-markdown-live",
                 )
             )
@@ -196,6 +234,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.context_tokens, 2048)
         self.assertTrue(config.think)
         self.assertEqual(config.tools, "on")
+        self.assertTrue(config.agent)
         self.assertEqual(config.render_markdown, "live")
 
     def test_env_can_enable_live_markdown_rendering(self) -> None:

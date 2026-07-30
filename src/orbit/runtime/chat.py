@@ -42,6 +42,7 @@ from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import (
     TOOL_CALL_JSON_RETRY_PROMPT,
     message_content,
+    with_agent_command_system_prompt,
     with_chat_system_prompt,
     with_final_tool_system_prompt,
     with_media_system_prompt,
@@ -145,7 +146,15 @@ class ChatRuntime:
     post_tool_final_reuse_fallback_count: int = 0
     post_tool_final_reuse_avoided_model_calls: int = 0
     post_tool_final_reuse_last_reason: str | None = None
-
+    agent_route_repairs: int = 0
+    agent_error_continuations: int = 0
+    agent_verification_retries: int = 0
+    agent_semantic_completion_retries: int = 0
+    agent_action_reviews: int = 0
+    agent_action_review_approvals: int = 0
+    agent_action_review_revisions: int = 0
+    agent_action_review_declines: int = 0
+    agent_action_review_invalid: int = 0
     def __post_init__(self) -> None:
         self.backend = instrument_backend(self.backend)
         if hasattr(self.backend, "thinking"):
@@ -311,6 +320,7 @@ class ChatRuntime:
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         allowed_tool_names: tuple[str, ...] | None = None,
+        agent_mode: bool = False,
     ) -> ChatResult:
         self._begin_user_turn()
         self.last_memory_refresh = None
@@ -352,14 +362,19 @@ class ChatRuntime:
                 on_tool_result=on_tool_result,
                 on_model_step=on_model_step,
                 on_phase_start=on_phase_start,
-                tool_names=("exec_shell_full_command",),
+                tool_names=_agent_shell_tool_names(allowed_tool_names, agent_mode=agent_mode),
+                agent_mode=agent_mode,
             )
             return self._remember_visible_result(_tool_loop_result_value(bundle))
         command_max_tokens = resolve_max_tokens("route", max_tokens)
         streamed_final_retry = False
         retried_empty_final = False
         route_abort_reason: str | None = None
-        command_messages = self._route_messages()
+        command_messages = (
+            self._with_route_evidence_context(with_agent_command_system_prompt(self.messages))
+            if agent_mode
+            else self._route_messages()
+        )
         with self._temporary_backend_thinking(False):
             if on_phase_start:
                 on_phase_start(ModelPhaseStart("route", streamed=False, attempt=1, reason="tool_decision"))
@@ -400,16 +415,28 @@ class ChatRuntime:
         if decision is None:
             explicit_web_search = _requires_explicit_web_search_tool(prompt, allowed_tool_names)
             file_content_evidence = _requires_file_content_evidence_retry(prompt, allowed_tool_names, first.finish_reason)
-            if _should_force_tool_route_retry(
-                prompt,
-                allowed_tool_names,
-                first.finish_reason,
+            agent_structural_route_retry = (
+                agent_mode
+                and _should_attempt_route_repair(first)
+                and first.finish_reason != "cancelled"
+            )
+            if (
+                _should_force_tool_route_retry(
+                    prompt,
+                    allowed_tool_names,
+                    first.finish_reason,
+                )
+                or agent_structural_route_retry
             ) and not _should_skip_route_repair(first):
+                if agent_structural_route_retry:
+                    self.agent_route_repairs += 1
                 retry_reason = (
                     "explicit_web_search"
                     if explicit_web_search
                     else "file_content_evidence"
                     if file_content_evidence
+                    else "agent_invalid_structural_attempt"
+                    if agent_structural_route_retry
                     else "length_without_decision_tool_related"
                 )
                 _emit_route_outcome_for_result(
@@ -424,6 +451,8 @@ class ChatRuntime:
                         self.messages,
                         explicit_web_search=explicit_web_search,
                         file_content_evidence=file_content_evidence,
+                        structural_attempt=agent_structural_route_retry,
+                        agent_mode=agent_mode,
                     )
                     route_retry_messages = self._with_route_evidence_context(route_retry_messages)
                     if on_phase_start:
@@ -468,6 +497,11 @@ class ChatRuntime:
                     first = route_retry
                     command_content = route_retry.content
                     decision = retry_decision
+                elif agent_structural_route_retry:
+                    # Never surface or reconsider the original malformed
+                    # payload after its one bounded repair attempt.
+                    first = route_retry
+                    command_content = route_retry.content
             if decision is None:
                 if explicit_web_search or file_content_evidence:
                     bundle = self._run_tool_loop(
@@ -481,7 +515,8 @@ class ChatRuntime:
                         on_tool_result=on_tool_result,
                         on_model_step=on_model_step,
                         on_phase_start=on_phase_start,
-                        tool_names=("exec_shell_full_command",),
+                        tool_names=_agent_shell_tool_names(allowed_tool_names, agent_mode=agent_mode),
+                        agent_mode=agent_mode,
                     )
                     return self._remember_visible_result(_tool_loop_result_value(bundle))
                 initial_shell_tool_call = command_tool_call_from_tool_calls(first.tool_calls, ("exec_shell_full_command",)) or command_tool_call_from_content(command_content, ("exec_shell_full_command",))
@@ -623,6 +658,11 @@ class ChatRuntime:
                 and "exec_shell_full_command" in allowed
             ):
                 tools = ("exec_shell_full_command",)
+            if agent_mode and tools:
+                # The route selects the first action. Agent mode keeps the
+                # caller-authorized tool set available for later observe/act
+                # rounds instead of treating that first choice as exclusive.
+                tools = tuple(dict.fromkeys((*tools, *allowed_tool_names)))
         if not tools:
             result = _unsupported_tool_mode_result(first)
             self.messages.append({"role": "assistant", "content": result.content})
@@ -641,10 +681,12 @@ class ChatRuntime:
             on_model_step=on_model_step,
             on_phase_start=on_phase_start,
             tool_names=tools,
+            agent_mode=agent_mode,
             initial_tool_calls=(
                 command_tool_call_from_tool_calls(first.tool_calls, tools)
                 or command_tool_call_from_content(command_content, tools)
             ),
+            initial_after_tool=decision.after_tool if agent_mode else None,
         )
         return self._remember_visible_result(_tool_loop_result_value(bundle))
 
@@ -752,7 +794,9 @@ class ChatRuntime:
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         tool_names: tuple[str, ...] | None,
+        agent_mode: bool = False,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+        initial_after_tool: str | None = None,
         ):
         return self._tool_loop_environment().run(
             temperature=temperature,
@@ -766,7 +810,9 @@ class ChatRuntime:
             on_model_step=on_model_step,
             on_phase_start=on_phase_start,
             tool_names=tool_names,
+            agent_mode=agent_mode,
             initial_tool_calls=initial_tool_calls,
+            initial_after_tool=initial_after_tool,
             local_capabilities=self.local_capabilities,
             user_turn_id=self.current_user_turn_id,
         )
@@ -824,6 +870,7 @@ class ChatRuntime:
         loop: int,
         use_tool_prompt: bool,
         compact_window: bool = False,
+        agent_mode: bool = False,
     ) -> ChatResult:
         return self._final_from_tool_environment().answer(
             temperature=temperature,
@@ -835,6 +882,7 @@ class ChatRuntime:
             loop=loop,
             use_tool_prompt=use_tool_prompt,
             compact_window=compact_window,
+            agent_mode=agent_mode,
         ).result
 
     def _chat_final(
@@ -1371,6 +1419,17 @@ def _should_retry_route_as_tool_call(prompt: str, allowed_tool_names: tuple[str,
     return bool(_ROUTE_TOOL_RETRY_PROMPT_RE.search(prompt))
 
 
+def _agent_shell_tool_names(
+    allowed_tool_names: tuple[str, ...] | None,
+    *,
+    agent_mode: bool,
+) -> tuple[str, ...]:
+    names = ["exec_shell_full_command"]
+    if agent_mode and allowed_tool_names and "apply_patch" in allowed_tool_names:
+        names.append("apply_patch")
+    return tuple(names)
+
+
 def _requires_explicit_web_search_tool(prompt: str, allowed_tool_names: tuple[str, ...] | None) -> bool:
     if "exec_shell_full_command" not in set(allowed_tool_names or ()):
         return False
@@ -1463,6 +1522,8 @@ def _route_retry_messages(
     *,
     explicit_web_search: bool,
     file_content_evidence: bool = False,
+    structural_attempt: bool = False,
+    agent_mode: bool = False,
 ) -> list[Message]:
     if explicit_web_search:
         reminder = (
@@ -1478,12 +1539,22 @@ def _route_retry_messages(
             'Return a compact JSON command decision such as {"command":"cat requested-file"} that reads the requested file content. '
             "Output no prose."
         )
+    elif structural_attempt:
+        reminder = (
+            "The previous output was a malformed structural tool attempt and was not executed. "
+            "Choose the next action again. Return exactly one complete available tool call if a tool is needed, "
+            "or a valid route decision if no tool is needed. Do not reuse or complete the malformed payload. "
+            "Output no prose."
+        )
     else:
         reminder = (
             "The previous routing pass did not return a valid decision. "
             "Return exactly one shell tool call now if shell/web/file access is needed. Output no prose."
         )
-    retry_messages = with_command_system_prompt(messages) if file_content_evidence else with_tool_call_system_prompt(messages)
+    if agent_mode:
+        retry_messages = with_agent_command_system_prompt(messages)
+    else:
+        retry_messages = with_command_system_prompt(messages) if file_content_evidence else with_tool_call_system_prompt(messages)
     return [
         *retry_messages,
         {"role": "user", "content": reminder},

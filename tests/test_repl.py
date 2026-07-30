@@ -75,12 +75,14 @@ class CountingRuntime(ChatRuntime):
         self.ask_auto_calls = 0
         self.ask_chat_calls = 0
         self.last_allowed_tool_names = None
+        self.last_agent_mode = None
         self.last_continue_on_progress = None
 
     def ask_auto(self, *args, **kwargs) -> ChatResult:
         self.ask_calls += 1
         self.ask_auto_calls += 1
         self.last_allowed_tool_names = kwargs.get("allowed_tool_names")
+        self.last_agent_mode = kwargs.get("agent_mode")
         return ChatResult(
             content="ok",
             model="fake",
@@ -157,12 +159,41 @@ class ReplTests(unittest.TestCase):
         self.assertIn("\033[2m┌─ Orbit Runtime", output)
         self.assertIn("Version", output)
         self.assertIn("Tools        on", output)
+        self.assertIn("Agent        off", output)
         self.assertIn("Workdir", output)
         self.assertIn("Type /help for commands, /status for runtime details.", output)
         self.assertIn("warning: tools on", output)
         self.assertIn("recent session context:", output)
         self.assertIn("user: first question", output)
         self.assertIn("assistant: first answer", output)
+
+    def test_default_agent_profile_is_off(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(
+            runtime=runtime,
+            backend=runtime.backend,
+            config=AppConfig(workdir=Path(".")),
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            repl._ask("inspect the workspace")
+
+        self.assertFalse(runtime.last_agent_mode)
+        self.assertNotIn("apply_patch", runtime.last_allowed_tool_names)
+
+    def test_agent_opt_in_is_forwarded_to_runtime(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(
+            runtime=runtime,
+            backend=runtime.backend,
+            config=AppConfig(workdir=Path("."), agent=True),
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            repl._ask("inspect the workspace")
+
+        self.assertTrue(runtime.last_agent_mode)
+        self.assertIn("apply_patch", runtime.last_allowed_tool_names)
 
     def test_recent_session_preview_uses_last_four_non_system_messages(self) -> None:
         messages = [
@@ -255,6 +286,20 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(
             format_tool_call_event("fetch_url", json.dumps({"url": "https://example.com"})),
             "Fetch: https://example.com",
+        )
+
+    def test_patch_event_is_bounded_and_does_not_echo_patch_content(self) -> None:
+        patch = "--- a/src/item.py\n+++ b/src/item.py\n@@ -1 +1 @@\n-before\n+secret replacement\n"
+
+        event = format_tool_call_event("apply_patch", json.dumps({"patch": patch}))
+
+        self.assertEqual(event, "Patch: src/item.py")
+        self.assertNotIn("secret replacement", event)
+
+        literal_directory_patch = "--- a/item.py\n+++ a/item.py\n@@ -1 +1 @@\n-before\n+after\n"
+        self.assertEqual(
+            format_tool_call_event("apply_patch", json.dumps({"patch": literal_directory_patch})),
+            "Patch: a/item.py",
         )
 
     def test_tool_result_event_previews_pdf_and_list_output(self) -> None:
@@ -625,7 +670,15 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(runtime.ask_auto_calls, 1)
         self.assertEqual(runtime.ask_chat_calls, 0)
         self.assertIsNotNone(runtime.last_allowed_tool_names)
-        self.assertEqual(runtime.last_allowed_tool_names, ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        self.assertEqual(
+            runtime.last_allowed_tool_names,
+            (
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+            ),
+        )
 
     def test_repl_reads_queued_prompt_before_new_input(self) -> None:
         runtime = CountingRuntime()

@@ -8,7 +8,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 - Correctness, stability, reliability, and simplicity come before performance.
 - Orbit remains Python-first: prefer the standard library and small, readable, debuggable code.
-- Primary target: CPU-only Gemma 4 12B through native `orbit server`.
+- Primary target: CPU-only Gemma 4 26B-A4B Q4_0 through native `orbit server`.
 - Runtime owns behavior; backend owns inference.
 - Do not add hardcoded semantic fixes in routing or the tool loop.
 - Deterministic guardrails are allowed only for safety, validation, bounded retry, and diagnostics.
@@ -160,6 +160,191 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - `LLAMA_BUILD_COMMIT` and `LLAMA_BUILD_NUMBER` are explicit vendor metadata and are not derived from the parent Orbit repository. The staged b10068 candidate is not included in RC23.
 - RC23 validation: focused ABI/native tests PASS with 105 tests; full unit discovery PASS with 1,223 tests; all six MTP helpers rebuilt from staging; real vision and audio mmproj inputs PASS; MTP initialization/completion PASS; final-prefix capture and `cached=64` restore PASS; cancel, timeout, reset, and restart coverage PASS; artificial ABI mismatch fails safely without a crash; `compileall` PASS; `git diff --check` PASS.
 - RC23 makes no performance claim. Future vendor revisions require a separate process-isolated compatibility and performance comparison through the hardened bridge.
+
+## Post-RC23 Agentic CLI Candidate
+
+- The local post-RC23 patch keeps the bounded agent profile opt-in through
+  `--agent`. `--no-agent` and `"agent": false` select the normal bounded tool
+  loop. This change is not part of RC23.
+- The model still chooses every tool, argument, continuation, verification, and
+  final answer. Runtime adds bounded control, canonical validation, safety
+  guardrails, model-driven action authorization, and lifecycle handling; it
+  does not construct a plan or a semantic task solution.
+- The agent-only `apply_patch` tool applies one exact unified diff to one
+  existing UTF-8 file after canonical validation and model-driven review. It
+  does not create, delete, rename, follow symlinks, fuzzy-match context, or
+  bypass the normal executor path.
+- Exact repeated calls are rejected before another action-review inference.
+  Successful mutations advance a state epoch so read-only observations may be
+  repeated after state changes while the exact mutation remains blocked.
+- Gemma 4 26B-A4B Q4_0 validation completed 20/20 strategic scenarios
+  correctly with `finish_reason=stop`, including code repair, exact CSV
+  transformation, file creation, read/grep/list, permission and command
+  failures, and inert JSON/Markdown controls. The automatic checker reported
+  19/20 because one correct dictionary definition used "name/value pairs"
+  instead of its literal expected word.
+- With the targeted post-guard run-once row substituted, the final matrix used
+  60 model calls, 27 executed tool calls, and 42,647 evaluated tokens over
+  1,720.2 seconds on the measured CPU workload. The combined wall total is
+  descriptive rather than an ABBA comparison. Critical code-repair and CSV
+  blockers passed targeted repetitions.
+- The post-fix CSV workflow completed in six calls and approximately 281-303
+  seconds, versus a twelve-call, 929-second truncated pre-fix attempt. This is
+  bounded failure avoidance in one workload, not a deterministic speedup.
+- Default promotion is blocked by two real read-only source audits. The first
+  broad four-deliverable audit ended with incomplete and incorrect default
+  claims after eight executed tools in 375.7 seconds. A narrower two-resolver
+  audit still used five tools, ended at the 96-token final limit after 400.6
+  seconds, and failed to confirm one directly available default. A rejected
+  broad-discovery reviewer experiment took 943.3 seconds before cancellation
+  and added six review calls without preventing redundant scans.
+- An exact registered tool interface name used as a shell executable is now
+  rejected structurally before execution and returned to the model for one
+  bounded revision. Runtime does not substitute or select the replacement
+  tool. Broader repository-search behavior remains model-driven.
+- Additional direct-schema, native-thinking, duplicate-revision, and compact
+  unified-prompt probes did not resolve the broad-audit failure. The direct
+  schema fixed the malformed interface form but not strategy; thinking reached
+  length before later actions; bounded model revisions increased context; and
+  the longest compact-prompt probe used twelve model calls and nine executed
+  tools over 664.7 seconds without a clean final. These variants were removed.
+- A recovery run repeated the four-subject configuration audit against a clean
+  temporary copy of the complete source, test, script, and documentation
+  trees. It used five model calls and three tools over 168.2 seconds, then ended
+  at the final length limit with unresolved subjects and an incorrect default
+  attributed to planning-shadow code. The dominant failure was broad bounded
+  search evidence followed by incorrect attribution, not missing fixture
+  files or malformed tool calls.
+- A bounded agent-only structured source-query prototype also failed its first
+  correctness gate. Gemma selected the tool after prompting but repeatedly
+  merged the four independent configuration subjects into one expression,
+  exhausted the first bounded hits in an unrelated alphabetic source file,
+  and returned to recursive listings instead of continuation. The final
+  calibration used six model calls, three tools, 5,635 evaluated tokens, 288
+  output tokens, and 252.570 seconds; its post-tool route reached `length` and
+  its final stop response left every deliverable unresolved. The prototype,
+  flag, schema, evidence integration, and tests were removed. Reopen only for
+  a model/template that naturally preserves separate model-chosen query groups
+  and passes the configuration-audit smoke before a larger matrix.
+- The model-owned workflow-state hypothesis failed before integration. A
+  separate initializer enumerated the requested subjects but added cost
+  without stable evidence association. The production tool envelope cannot
+  carry sideband state after a normal call, and registered wrapper probes
+  omitted required state or invented `search_repository`/`list_files`.
+  Immutable-checklist, broader-final-evidence, focused-prompt, wrapper-tool, and
+  sideband variants were removed; no workflow-state runtime path remains.
+- A later model-authored decomposition prototype offered two to four isolated
+  deliverables in the existing 64-token route call. Its first clean
+  configuration-audit smoke reached the route limit without a valid
+  decomposition, fell back to the unchanged loop, repeated broad
+  `ls`/`find`/`grep` discovery, and returned all four subjects unresolved.
+  The run used nine model calls, five tools, 5,103 evaluated tokens, 424 output
+  tokens, and 281.257 seconds. The feature flag, parser, child contexts,
+  harness, and tests were removed. Do not retry this mechanism without a
+  model/template that emits a complete bounded decomposition within the
+  existing route budget and passes the first audit smoke.
+- A materially different two-stage decomposition probe removed that route
+  budget constraint. The normal 64-token route emitted exact
+  `{"route":"DECOMPOSE"}` with `finish_reason=stop`, and one dedicated
+  256-token call emitted four structurally valid deliverables. The model
+  decomposed by repository layer (`CLI`, JSON configuration, runtime, and
+  tests), however, merging all four requested settings into every child
+  instead of isolating `agent`, `tools`, `think`, and `max_tokens`.
+- Each isolated child then repeated broad recursive listing and grep/find
+  discovery, exhausted its four-round bound without a usable conclusion, and
+  supplied no completed result to the final synthesis. The run ended with all
+  subjects unresolved despite a clean final stop. It used 23 model calls,
+  14 executed tools, 21,081 evaluated tokens, 905 output tokens, and
+  881.824 seconds, versus the already-failing 5-call, 3-tool, 3,416-evaluated-
+  token, 330-output-token, 168.2-second baseline.
+- This proves that the route token limit was not the remaining blocker.
+  Gemma's model-authored decomposition axis and source-acquisition strategy
+  were not reliable, and isolated contexts multiplied the same broad
+  discovery cost. Increasing child rounds would not correct that decomposition
+  and was not tested. The two-stage flag, parser, runtime path, harness, and
+  tests were removed after the first failed smoke; no decomposition execution
+  path remains.
+- A final agent-only structural Python-inspection probe exposed exact AST
+  queries for identifiers, string literals, definitions, assignment targets,
+  and call names. A direct capability check returned deterministic grouped
+  source ranges, snippets, totals, and continuation cursors for the requested
+  configuration symbols without using shell or semantic ranking.
+- Gemma did not select that registered tool in the first clean configuration
+  audit. It instead executed one directory listing and eight shell calls,
+  including two broad `find` scans and repeated recursive `grep` variants.
+  The run used 13 model calls, nine executed tools, 19,165 evaluated tokens,
+  571 output tokens, and 908.218 seconds. Its final response stopped normally
+  but left all four configuration subjects unresolved, so correctness
+  remained 0/4.
+- The AST probe therefore failed the first explicit selection, correctness,
+  repeated-scan, and cost gates. It showed that deterministic structural
+  lookup can return precise evidence when invoked, but adding another exact
+  schema without prompt guidance does not change this model's broad-discovery
+  strategy. The tool, flag, schema integration, harness, and tests were
+  removed; no Python-inspection runtime path remains.
+- A follow-up tested whether unrestricted-shell competition explained that
+  result. An off-by-default agent profile exposed exactly `inspect_python`,
+  `read_file`, and bounded non-recursive `list_directory`; no shell tool or
+  equivalent command executor was registered. Direct checks again confirmed
+  that the AST tool could return the authoritative configuration definitions.
+- In the first clean audit, the model selected only
+  `list_directory({"path":"."})`, then finalized without selecting either
+  source-reading tool. It made no unavailable-shell proposal, performed no
+  recursive scan, and stopped normally, but reported all four subjects
+  unresolved. The run used three model calls, one tool, 2,064 evaluated
+  tokens, 92 output tokens, and 91.798 seconds.
+- A later exact prompt-capture rerun demonstrated why that first result
+  finalized prematurely. The terminal `final_from_tool` input retained the
+  complete user request and the bounded directory-listing evidence, but it
+  contained no tool definitions or continuation instruction. The restricted
+  profile had inherited a one-round limit because round count was coupled to
+  unrestricted-shell availability. The captured route, tool, and final calls
+  used 2,112 evaluated tokens, 99 output tokens, and 91.181 seconds.
+- A minimal probe associated the existing eight-round agent bound with agent
+  mode rather than shell presence. The next model-facing calls then retained
+  the complete request, accumulated observations, all three structured tool
+  definitions, and an explicit next-action instruction. Gemma still selected
+  only progressively deeper non-recursive listings for `.`, `src`,
+  `src/orbit`, and `src/orbit/runtime`; it never selected `inspect_python` or
+  `read_file`, then proposed the last listing again. The existing exact-repeat
+  guard blocked that fifth execution.
+- The corrected-prompt smoke used seven model calls, four executed tools,
+  4,385 evaluated tokens, 227 output tokens, and 203.952 seconds. It stopped
+  normally but left all four subjects unresolved. Because this first smoke
+  failed the mandatory correctness and natural source-reading gates, the
+  repetitions, remaining source audits, and strategic matrix were not run.
+- A final off-by-default completion-verifier probe tested one bounded recovery
+  epoch. After the normal agent proposed a terminal answer, a separate model
+  call received only the original request, proposed answer, and bounded
+  observed evidence. Exact `continue` would have exposed only
+  `inspect_python` and `read_file` for one recovery epoch.
+- The clean smoke never entered recovery. The proposed answer explicitly said
+  that the available file listings were insufficient to inspect defaults,
+  precedence, or authoritative source lines, yet the verifier returned exact
+  `{"decision":"accept"}`. The run used eight model calls, four executed
+  tools, 7,739 evaluated tokens, 244 output tokens, and 326.954 seconds. It
+  stopped normally with all four subjects unresolved.
+- This same-model verifier was not a reliable completeness gate for the
+  observed strategic failure. It added 2,449 evaluated tokens and accepted a
+  plainly incomplete model-authored conclusion, so the restricted recovery
+  tools were never exposed. The resolver, verifier, recovery state,
+  `inspect_python`/`read_file` schemas, harness, and tests were removed after
+  the failed first smoke. No completion verifier, recovery flag, or restricted
+  recovery path remains.
+- Removing shell competition therefore reduced wasted discovery but did not
+  make the model acquire source evidence. The profile failed its first
+  correctness and natural-tool-selection gates. Its resolver, restricted
+  schemas, AST and file-read integrations, route bridge, temporary round-limit
+  correction, prompt-capture harness, and tests were removed; the normal agent
+  and non-agent tool surfaces remain unchanged.
+- Default promotion remains a technical stop. Reopen it only for a
+  model/template that passes repeated multi-deliverable source audits within
+  the existing budgets, with complete facts, no repeated-action loop, clean
+  stop responses, no prefill regression, and no material matched-workload
+  wall-time regression.
+- Agent mode retains unrestricted shell capability when tools are on. Untrusted
+  prompts require `--tools off`; use a dedicated workdir for agentic tasks.
+  See `docs/AGENT_MODE_DEFAULT_VALIDATION.md`.
 
 ## Post-Tool Final Prose Reuse
 

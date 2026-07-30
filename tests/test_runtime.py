@@ -37,6 +37,7 @@ from orbit.runtime.tool_loop import _should_guard_existing_file_rewrite
 from orbit.runtime.turn_trace import ModelPhaseStart
 from orbit.runtime.shell_guardrails import (
     SHELL_FULL_COMPLETION_GUARD_PROMPT,
+    SHELL_FULL_CONTRACT_ERROR_PREFIX,
     SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT,
     SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT,
     SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT,
@@ -3731,7 +3732,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn("latest user request only", backend.retry_messages[-1]["content"])
         self.assertIn("ignore older tool results", backend.retry_messages[-1]["content"])
 
-    def test_shell_full_analysis_metadata_only_command_gets_one_model_retry(self) -> None:
+    def test_shell_full_analysis_metadata_observation_gets_one_model_continuation(self) -> None:
         class ShellFullAnalysisBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -3757,19 +3758,6 @@ class ToolRuntimeTests(unittest.TestCase):
                 if self.calls == 2:
                     self.second_call_last_message = messages[-1]
                     return ChatResult(
-                        content="I do not have access to the file content.",
-                        model="fake",
-                        finish_reason="stop",
-                        tool_calls=[],
-                        prompt_tokens=6,
-                        completion_tokens=8,
-                        cached_tokens=0,
-                        prompt_tokens_per_second=None,
-                        generation_tokens_per_second=None,
-                    )
-                if self.calls == 3:
-                    self.third_call_last_message = messages[-1]
-                    return ChatResult(
                         content="",
                         model="fake",
                         finish_reason="tool_calls",
@@ -3784,6 +3772,19 @@ class ToolRuntimeTests(unittest.TestCase):
                             }
                         ],
                         prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if self.calls == 3:
+                    self.third_call_last_message = messages[-1]
+                    return ChatResult(
+                        content="vulnerability found from source evidence",
+                        model="fake",
+                        finish_reason="stop",
+                        tool_calls=[],
+                        prompt_tokens=7,
                         completion_tokens=1,
                         cached_tokens=0,
                         prompt_tokens_per_second=None,
@@ -3818,16 +3819,14 @@ class ToolRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result.content, "vulnerability found from source evidence")
-        self.assertEqual(backend.calls, 4)
+        self.assertEqual(backend.calls, 3)
         self.assertEqual(backend.tools_seen[0], None)
         self.assertIsNotNone(backend.tools_seen[1])
-        self.assertIsNotNone(backend.tools_seen[2])
-        self.assertEqual(backend.tools_seen[3], None)
+        self.assertEqual(backend.tools_seen[2], None)
         self.assertIsNotNone(backend.second_call_last_message)
-        self.assertIn("Requested file: samples/vulnerable_service.py", backend.second_call_last_message["content"])
-        self.assertIn("No usable content has been extracted from the requested file yet.", backend.second_call_last_message["content"])
+        self.assertTrue(backend.second_call_last_message["content"].startswith("Requested file not read yet."))
         self.assertIsNotNone(backend.third_call_last_message)
-        self.assertIn("Return only the tool call", backend.third_call_last_message["content"])
+        self.assertNotEqual(backend.third_call_last_message["content"], SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT)
 
     def test_analysis_completion_guard_reconsiders_non_content_followup_after_evidence(self) -> None:
         class AnalysisCompletionBackend:
@@ -5036,6 +5035,68 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.mutation_semantic_repair_failures, 0)
         self.assertEqual(runtime.backend.messages_seen[2][-1]["content"], SHELL_FULL_SEMANTIC_REPAIR_PROMPT)
 
+    def test_mutation_verification_covers_empty_semantic_followup(self) -> None:
+        class MultiMutationBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps({"command": "printf alpha > first.txt"})
+                elif self.calls == 2:
+                    self.assert_prompt(messages, SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
+                    content = json.dumps({"command": "cat first.txt"})
+                elif self.calls == 3:
+                    self.assert_prompt(messages, SHELL_FULL_SEMANTIC_REPAIR_PROMPT)
+                    content = json.dumps({"command": "printf beta > second.txt"})
+                elif self.calls == 4:
+                    self.assert_prompt(messages, SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
+                    content = json.dumps({"command": "cat second.txt"})
+                else:
+                    content = "done"
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+            @staticmethod
+            def assert_prompt(messages: list[Message], expected: str) -> None:
+                if messages[-1]["content"] != expected:
+                    raise AssertionError(messages[-1]["content"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = MultiMutationBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            result = runtime.ask_auto(
+                "Create first.txt containing alpha and second.txt containing beta.",
+                temperature=0,
+                max_tokens=256,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            first = (workdir / "first.txt").read_text(encoding="utf-8")
+            second = (workdir / "second.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(first, "alpha")
+        self.assertEqual(second, "beta")
+        self.assertEqual(backend.calls, 6)
+        self.assertEqual(runtime.mutation_verifications, 2)
+        self.assertEqual(runtime.mutation_semantic_repairs, 1)
+        self.assertEqual(runtime.mutation_semantic_repair_commands, 1)
+        self.assertEqual(runtime.mutation_semantic_repair_failures, 0)
+
     def test_mutation_verification_rename_noop_requests_verification(self) -> None:
         class RenameNoopBackend:
             def __init__(self) -> None:
@@ -5447,6 +5508,107 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.backend.messages_seen[1][-1]["content"], SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT)
         self.assertEqual(runtime.completion_guard_nudges, 0)
 
+    def test_greenfield_analysis_task_continues_after_intermediate_listing(self) -> None:
+        class GreenfieldBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps({"command": "mkdir -p agent-demo && cd agent-demo"})
+                    tool_calls = []
+                    finish_reason = "stop"
+                elif self.calls == 2:
+                    self.assert_prompt(messages, SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
+                    content = ""
+                    tool_calls = [
+                        {
+                            "id": "call-list",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_shell_full_command",
+                                "arguments": "{\"command\":\"ls -la agent-demo\"}",
+                            },
+                        }
+                    ]
+                    finish_reason = "tool_calls"
+                elif self.calls == 3:
+                    self.assert_prompt(messages, SHELL_FULL_SEMANTIC_REPAIR_PROMPT)
+                    content = ""
+                    tool_calls = [
+                        {
+                            "id": "call-create",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_shell_full_command",
+                                "arguments": "{\"command\":\"printf 'value=1\\\\n' > agent-demo/report.txt && cat agent-demo/report.txt\"}",
+                            },
+                        }
+                    ]
+                    finish_reason = "tool_calls"
+                elif self.calls == 4:
+                    content = "The task is complete."
+                    tool_calls = []
+                    finish_reason = "stop"
+                elif self.calls == 5:
+                    self.assert_prompt(messages, SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT)
+                    content = ""
+                    tool_calls = [
+                        {
+                            "id": "call-read",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_shell_full_command",
+                                "arguments": "{\"command\":\"cat agent-demo/report.txt\"}",
+                            },
+                        }
+                    ]
+                    finish_reason = "tool_calls"
+                else:
+                    content = "done"
+                    tool_calls = []
+                    finish_reason = "stop"
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason=finish_reason,
+                    tool_calls=tool_calls,
+                    prompt_tokens=8,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+            @staticmethod
+            def assert_prompt(messages: list[Message], expected: str) -> None:
+                if messages[-1]["content"] != expected:
+                    raise AssertionError(messages[-1]["content"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = GreenfieldBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            result = runtime.ask_auto(
+                "Create analyze.py for generated data and verify report.txt from its contents.",
+                temperature=0,
+                max_tokens=128,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            report = (workdir / "agent-demo" / "report.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(report, "value=1\n")
+        self.assertEqual(backend.calls, 7)
+        self.assertNotIn(SHELL_FULL_CONTRACT_ERROR_PREFIX, str(backend.messages_seen))
+        self.assertEqual(runtime.content_evidence_guard_nudges, 1)
+        self.assertEqual(runtime.content_evidence_guard_commands, 1)
+        self.assertEqual(runtime.content_evidence_guard_successes, 1)
+
     def test_completion_guard_does_not_fire_for_read_only_analysis(self) -> None:
         class ReadOnlyBackend:
             def __init__(self) -> None:
@@ -5791,6 +5953,75 @@ cp "$1\""""
         self.assertEqual(runtime.minimal_patch_guard_failures, 0)
         self.assertEqual(backend.messages_seen[2][-1]["content"], SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT)
 
+    def test_minimal_patch_guard_retries_structural_truncation_after_tool_result(self) -> None:
+        class TruncatedToolBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_seen: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_seen.append(messages)
+                if self.calls == 1:
+                    content = json.dumps({"command": "ls -F"})
+                    finish_reason = "stop"
+                    tool_calls = []
+                elif self.calls == 2:
+                    content = (
+                        '<tool_call>{"name":"exec_shell_full_command","arguments":'
+                        '{"command":"cat <<EOF > report.txt\\n'
+                    )
+                    finish_reason = "length"
+                    tool_calls = []
+                elif self.calls == 3:
+                    self.assert_prompt(messages, SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT)
+                    content = json.dumps({"command": "printf 'ok\\n' > report.txt && cat report.txt"})
+                    finish_reason = "stop"
+                    tool_calls = []
+                else:
+                    content = "done"
+                    finish_reason = "stop"
+                    tool_calls = []
+                return ChatResult(
+                    content=content,
+                    model="fake",
+                    finish_reason=finish_reason,
+                    tool_calls=tool_calls,
+                    prompt_tokens=8,
+                    completion_tokens=160 if finish_reason == "length" else 2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+            @staticmethod
+            def assert_prompt(messages: list[Message], expected: str) -> None:
+                if messages[-1]["content"] != expected:
+                    raise AssertionError(messages[-1]["content"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            backend = TruncatedToolBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            result = runtime.ask_auto(
+                "Create report.txt containing ok and verify it.",
+                temperature=0,
+                max_tokens=256,
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            content = (workdir / "report.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(result.content, "done")
+        self.assertEqual(content, "ok\n")
+        self.assertEqual(runtime.minimal_patch_guard_nudges, 1)
+        self.assertEqual(runtime.minimal_patch_guard_commands, 1)
+        self.assertEqual(runtime.minimal_patch_guard_successes, 1)
+        self.assertEqual(
+            sum(message["content"] == SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT for messages in backend.messages_seen for message in messages),
+            1,
+        )
+
     def test_minimal_patch_guard_intercepts_broad_rewrite_of_existing_file(self) -> None:
         class BroadRewriteBackend:
             def __init__(self) -> None:
@@ -5903,6 +6134,48 @@ EOF"""
             )
 
         self.assertTrue(should_guard)
+
+    def test_minimal_patch_guard_intercepts_echo_overwrite_of_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "module.py").write_text("value = 1\n", encoding="utf-8")
+            tool_call = {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "exec_shell_full_command",
+                    "arguments": json.dumps({"command": "echo 'value = 2' > module.py"}),
+                },
+            }
+
+            should_guard = _should_guard_existing_file_rewrite(
+                tool_call,
+                workdir=workdir,
+                should_nudge_minimal_patch=lambda **kwargs: kwargs["existing_file_rewrite"],
+                include_simple_redirects=True,
+            )
+
+        self.assertTrue(should_guard)
+
+    def test_minimal_patch_guard_allows_echo_creation_of_new_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tool_call = {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "exec_shell_full_command",
+                    "arguments": json.dumps({"command": "echo 'value = 1' > module.py"}),
+                },
+            }
+
+            should_guard = _should_guard_existing_file_rewrite(
+                tool_call,
+                workdir=Path(tmp),
+                should_nudge_minimal_patch=lambda **kwargs: kwargs["existing_file_rewrite"],
+                include_simple_redirects=True,
+            )
+
+        self.assertFalse(should_guard)
 
     def test_minimal_patch_guard_does_not_fire_for_short_mutation(self) -> None:
         class ShortMutationBackend:
@@ -6460,7 +6733,7 @@ EOF"""
         self.assertEqual(backend.tool_names_seen[0], ())
         self.assertEqual(backend.tool_names_seen[1], ())
 
-    def test_ask_auto_rejects_metadata_only_file_read_after_prior_chat_turn(self) -> None:
+    def test_ask_auto_uses_metadata_listing_as_intermediate_file_observation_after_prior_chat_turn(self) -> None:
         class MultiTurnBackend:
             def __init__(self) -> None:
                 self.calls = 0
@@ -6497,10 +6770,19 @@ EOF"""
                     if not messages[-1]["content"].startswith("Requested file not read yet."):
                         raise AssertionError(messages[-1]["content"])
                     return ChatResult(
-                        content="I cannot confirm the content of the file yet.",
+                        content="",
                         model="fake",
-                        finish_reason="stop",
-                        tool_calls=[],
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-read",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": "{\"command\":\"cat README.md\"}",
+                                },
+                            }
+                        ],
                         prompt_tokens=7,
                         completion_tokens=2,
                         cached_tokens=0,
@@ -6508,29 +6790,13 @@ EOF"""
                         generation_tokens_per_second=None,
                     )
                 if self.calls == 4:
-                    if "still did not read the requested file contents" not in messages[-1]["content"]:
-                        raise AssertionError(messages[-1]["content"])
                     return ChatResult(
-                        content="I still cannot confirm the content of the file.",
+                        content="done",
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
                         prompt_tokens=8,
-                        completion_tokens=2,
-                        cached_tokens=0,
-                        prompt_tokens_per_second=None,
-                        generation_tokens_per_second=None,
-                    )
-                if self.calls == 5:
-                    if "still did not read the requested file contents" not in messages[-1]["content"]:
-                        raise AssertionError(messages[-1]["content"])
-                    return ChatResult(
-                        content='{"command":"cat README.md"}',
-                        model="fake",
-                        finish_reason="stop",
-                        tool_calls=[],
-                        prompt_tokens=7,
-                        completion_tokens=2,
+                        completion_tokens=1,
                         cached_tokens=0,
                         prompt_tokens_per_second=None,
                         generation_tokens_per_second=None,
@@ -6564,10 +6830,9 @@ EOF"""
 
         self.assertEqual(first.content, "hello there")
         self.assertEqual(second.content, "done")
-        self.assertEqual(backend.calls, 6)
+        self.assertEqual(backend.calls, 4)
         self.assertIn("hi", str(backend.messages_seen[1]))
-        self.assertNotIn("I cannot confirm the content of the file yet.", str(backend.messages_seen[3]))
-        self.assertNotIn("I still cannot confirm the content of the file.", str(backend.messages_seen[4]))
+        self.assertIn("Orbit README", str(backend.messages_seen[3]))
 
     def test_ask_auto_retries_direct_final_when_latest_turn_requires_file_content_after_listing(self) -> None:
         class FileEvidenceRouteBackend:

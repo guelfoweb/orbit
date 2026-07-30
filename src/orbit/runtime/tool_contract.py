@@ -8,10 +8,12 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from orbit.runtime.directory_listing import MAX_DEPTH_LIMIT, MAX_ENTRIES_LIMIT
+from orbit.runtime.file_patch import validate_file_patch
 from orbit.runtime.path_guardrails import resolve_inside_workdir
 from orbit.runtime.shell_guardrails import (
     MAX_SHELL_OUTPUT_BYTES,
     MAX_SHELL_TIMEOUT,
+    is_read_only_user_request,
     validate_read_only_shell_mutation,
     validate_shell_full_contract,
 )
@@ -241,6 +243,18 @@ def _policy_and_operational(
         if limit is None:
             limit = _integer_limit(arguments, "max_entries", 1, MAX_ENTRIES_LIMIT)
         return neutral, limit or neutral
+    if name == "apply_patch":
+        if is_read_only_user_request(user_prompt):
+            return ContractStageOutcome(
+                False,
+                "policy_read_only_mutation",
+                "arguments.patch",
+                "error: read-only request rejected file patch",
+            ), neutral
+        patch_error = validate_file_patch(arguments.get("patch"), workdir=workdir)
+        if patch_error is not None:
+            return neutral, ContractStageOutcome(False, patch_error, "arguments.patch")
+        return neutral, neutral
     return neutral, neutral
 
 

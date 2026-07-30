@@ -21,8 +21,8 @@ class NativePathsTests(unittest.TestCase):
             root = Path(tmp)
             vendor_lib = root / "vendor/lib"
             models_dir = root / "models"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             vendor_lib.mkdir(parents=True)
             library_name = runtime_library_filename("llama")
             (vendor_lib / library_name).write_text("", encoding="utf-8")
@@ -48,8 +48,8 @@ class NativePathsTests(unittest.TestCase):
             vendor_lib = root / "vendor/lib"
             vendor_build_bin = root / "vendor/build/llama.cpp/bin"
             models_dir = root / "models"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             vendor_lib.mkdir(parents=True)
             vendor_build_bin.mkdir(parents=True)
             library_name = runtime_library_filename("llama")
@@ -76,8 +76,8 @@ class NativePathsTests(unittest.TestCase):
             root = Path(tmp)
             env_lib = root / "custom-lib"
             models_dir = root / "models"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             env_lib.mkdir(parents=True)
             (env_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
@@ -101,8 +101,8 @@ class NativePathsTests(unittest.TestCase):
             vendor_lib = root / "vendor/lib"
             bundled = root / "vendor/source/llama.cpp"
             models_dir = root / "models"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             vendor_lib.mkdir(parents=True)
             (vendor_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             (bundled / "CMakeLists.txt").parent.mkdir(parents=True, exist_ok=True)
@@ -127,8 +127,8 @@ class NativePathsTests(unittest.TestCase):
             llama_root = root / "llama"
             models_dir = root / "models"
             build_bin = llama_root / "build/bin"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             build_bin.mkdir(parents=True)
             (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
@@ -150,7 +150,7 @@ class NativePathsTests(unittest.TestCase):
             llama_root = root / "llama"
             hf_cache = root / "hf"
             build_bin = llama_root / "build/bin"
-            target = hf_cache / "models--ggml-org--gemma-4-12B-it-GGUF/snapshots/abc/gemma-4-12B-it-Q4_K_M.gguf"
+            target = hf_cache / "models--ggml-org--gemma-4-26B-A4B-it-GGUF/snapshots/abc/gemma-4-26B-A4B-it-Q4_0.gguf"
             build_bin.mkdir(parents=True)
             (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
@@ -191,13 +191,13 @@ class NativePathsTests(unittest.TestCase):
             llama_root = root / "llama"
             models_dir = root / "models"
             build_bin = llama_root / "build/bin"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
-            draft = models_dir / "unsloth--gemma-4-12b-it-GGUF" / "MTP/gemma-4-12b-it-Q8_0-MTP.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
+            draft = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mtp-gemma-4-26B-A4B-it-Q4_0.gguf"
             build_bin.mkdir(parents=True)
             (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
-            draft.parent.mkdir(parents=True)
+            draft.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
             draft.write_text("draft", encoding="utf-8")

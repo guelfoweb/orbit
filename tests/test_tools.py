@@ -11,15 +11,38 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.runtime.tools import default_tool_names, execute_tool, tool_definitions, tool_names
+from orbit.runtime.tools import agent_tool_names, default_tool_names, execute_tool, tool_definitions, tool_names
 
 
 class ToolTests(unittest.TestCase):
     def test_shell_and_fetch_url_are_exposed(self) -> None:
-        self.assertEqual(tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        self.assertEqual(
+            tool_names(),
+            (
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+                "apply_patch",
+            ),
+        )
         self.assertEqual(default_tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        self.assertEqual(
+            agent_tool_names(),
+            (
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+                "apply_patch",
+            ),
+        )
         definitions = tool_definitions()
-        self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command", "fetch_url", "list_directory", "system_info"])
+        self.assertEqual(
+            [item["function"]["name"] for item in definitions],
+            ["exec_shell_full_command", "fetch_url", "list_directory", "system_info"],
+        )
+        self.assertEqual(len(tool_definitions(agent_tool_names())), 5)
 
     def test_tool_definitions_respect_allowed_names(self) -> None:
         self.assertEqual(tool_definitions(("read_file",)), [])
@@ -27,6 +50,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(len(tool_definitions(("fetch_url",))), 1)
         self.assertEqual(len(tool_definitions(("list_directory",))), 1)
         self.assertEqual(len(tool_definitions(("system_info",))), 1)
+        self.assertEqual(len(tool_definitions(("apply_patch",))), 1)
 
     def test_unknown_tool_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

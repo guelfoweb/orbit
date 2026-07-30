@@ -13,7 +13,7 @@ from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_contract import validate_canonical_tool_call
-from orbit.runtime.tools import ToolResult, default_tool_names, tool_definitions
+from orbit.runtime.tools import ToolResult, agent_tool_names, default_tool_names, tool_definitions
 from orbit.tool_contract_config import resolve_tool_call_canonical_gate
 
 
@@ -53,8 +53,11 @@ class CanonicalToolContractTests(unittest.TestCase):
         self.assertEqual(invalid.validation_error, "invalid_canonical_gate_value")
 
     def test_all_published_tool_schemas_match_the_strict_contract(self) -> None:
-        definitions = {item["function"]["name"]: item["function"]["parameters"] for item in tool_definitions()}
-        self.assertEqual(set(definitions), set(default_tool_names()))
+        definitions = {
+            item["function"]["name"]: item["function"]["parameters"]
+            for item in tool_definitions(agent_tool_names())
+        }
+        self.assertEqual(set(definitions), set(agent_tool_names()))
         for name, schema in definitions.items():
             with self.subTest(name=name):
                 self.assertEqual(schema["type"], "object")
@@ -65,10 +68,56 @@ class CanonicalToolContractTests(unittest.TestCase):
         self.assertEqual(definitions["fetch_url"]["required"], ["url"])
         self.assertEqual(definitions["list_directory"]["required"], [])
         self.assertEqual(definitions["system_info"]["required"], [])
+        self.assertEqual(definitions["apply_patch"]["required"], ["patch"])
         self.assertEqual(definitions["exec_shell_full_command"]["properties"]["timeout"]["maximum"], 15)
         self.assertEqual(definitions["fetch_url"]["properties"]["timeout"]["maximum"], 15)
         self.assertEqual(definitions["list_directory"]["properties"]["max_entries"]["maximum"], 1000)
         self.assertEqual(definitions["list_directory"]["properties"]["max_depth"]["maximum"], 20)
+        self.assertIs(definitions["apply_patch"]["additionalProperties"], False)
+
+    def test_apply_patch_uses_the_same_schema_permission_policy_and_operational_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "item.txt").write_text("before\n", encoding="utf-8")
+            patch = "--- item.txt\n+++ item.txt\n@@ -1 +1 @@\n-before\n+after\n"
+
+            accepted = validate_canonical_tool_call(
+                "apply_patch",
+                {"patch": patch},
+                tool_definitions=tool_definitions(agent_tool_names()),
+                allowed_tool_names=agent_tool_names(),
+                workdir=root,
+                user_prompt="Change item.txt from before to after.",
+            )
+            denied = validate_canonical_tool_call(
+                "apply_patch",
+                {"patch": patch},
+                tool_definitions=tool_definitions(agent_tool_names()),
+                allowed_tool_names=default_tool_names(),
+                workdir=root,
+                user_prompt="Change item.txt from before to after.",
+            )
+            read_only = validate_canonical_tool_call(
+                "apply_patch",
+                {"patch": patch},
+                tool_definitions=tool_definitions(agent_tool_names()),
+                allowed_tool_names=agent_tool_names(),
+                workdir=root,
+                user_prompt="Read item.txt.",
+            )
+            invalid = validate_canonical_tool_call(
+                "apply_patch",
+                {"patch": patch.replace("-before", "-missing")},
+                tool_definitions=tool_definitions(agent_tool_names()),
+                allowed_tool_names=agent_tool_names(),
+                workdir=root,
+                user_prompt="Change item.txt from before to after.",
+            )
+
+        self.assertTrue(accepted.accepted)
+        self.assertEqual((denied.terminal_decision, denied.rejection_code), ("rejected_permission", "tool_not_enabled"))
+        self.assertEqual((read_only.terminal_decision, read_only.rejection_code), ("rejected_policy", "policy_read_only_mutation"))
+        self.assertEqual((invalid.terminal_decision, invalid.rejection_code), ("rejected_guardrail", "context_mismatch"))
 
     def test_api_reports_stage_outcomes_and_stable_rejections(self) -> None:
         cases = (

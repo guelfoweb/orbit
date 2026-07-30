@@ -36,6 +36,7 @@ class AppConfig:
     no_system: bool = False
     think: bool = DEFAULT_THINKING
     tools: ToolSpec = DEFAULT_TOOLS
+    agent: bool = False
     render_markdown: str = "live"
 
 
@@ -51,6 +52,12 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-system", action="store_true", help="Do not send the default system prompt.")
     parser.add_argument("--think", help="Initial thinking mode: off or on.")
     parser.add_argument("--tools", help="Initial tool mode: off or on.")
+    parser.add_argument(
+        "--agent",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use the bounded agentic tool loop (default: disabled).",
+    )
     parser.add_argument(
         "--render-markdown-live",
         action="store_true",
@@ -93,6 +100,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         no_system=_bool_value(values, "no_system", AppConfig.no_system),
         think=_bool_value_or_spec(values, "think", AppConfig.think),
         tools=_tool_spec_value(values),
+        agent=_bool_value(values, "agent", AppConfig.agent),
         render_markdown=_markdown_mode_value(values),
     )
     cli_markdown = _cli_markdown_mode(args)
@@ -128,6 +136,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         no_system=args.no_system or config.no_system,
         think=normalize_think_spec(args.think) if args.think is not None else config.think,
         tools=normalize_tool_spec(args.tools) if args.tools is not None else config.tools,
+        agent=args.agent if args.agent is not None else config.agent,
         render_markdown=cli_markdown if cli_markdown is not None else config.render_markdown,
     )
 

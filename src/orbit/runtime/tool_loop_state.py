@@ -44,8 +44,13 @@ class ToolRepairState:
     mutation_verification_repair_used: bool = False
     mutation_semantic_repair_pending: bool = False
     mutation_semantic_repair_used: bool = False
+    agent_semantic_completion_retry_used: bool = False
+    agent_action_review_prompt_pending: str | None = None
+    agent_action_reviews: int = 0
+    agent_action_revision_retries: int = 0
     file_content_retry_used: bool = False
     url_content_retry_used: bool = False
+    agent_shell_error_continuations: int = 0
 
     def has_pending(self) -> bool:
         return (
@@ -56,6 +61,7 @@ class ToolRepairState:
             or self.mutation_verification_pending
             or self.mutation_verification_repair_pending
             or self.mutation_semantic_repair_pending
+            or self.agent_action_review_prompt_pending is not None
         )
 
 
@@ -91,6 +97,7 @@ class ToolTurnState:
     pending_completion_guard: bool = False
     pending_minimal_patch_guard: bool = False
     metadata_only_rejections: int = 0
+    metadata_only_observations: int = 0
     shell_commands_seen: int = 0
     shell_mutation_attempted: bool = False
     shell_mutation_succeeded: bool = False
@@ -167,6 +174,7 @@ class ToolTurnState:
         self.repair_state.mutation_verification_pending = False
         self.repair_state.mutation_verification_repair_pending = False
         self.repair_state.mutation_semantic_repair_pending = False
+        self.repair_state.agent_action_review_prompt_pending = None
         self.pending_content_evidence_guard = False
         self.pending_analysis_completion_guard = False
         self.pending_file_recovery_guard = False
@@ -187,7 +195,8 @@ class ToolLoopState:
 
     allowed_tool_names: tuple[str, ...]
     chunk_budget: dict[str, int] = field(default_factory=dict)
-    seen_tool_calls: set[tuple[str, str]] = field(default_factory=set)
+    seen_tool_calls: set[tuple[int, str, str]] = field(default_factory=set)
+    mutation_epoch: int = 0
     tool_rounds: int = 0
     used_tool_call_prompt: bool = False
 
@@ -205,11 +214,18 @@ class ToolLoopState:
 
     def mark_tool_call(self, tool_call: dict[str, object]) -> tuple[str, str]:
         signature = tool_call_signature(tool_call)
-        self.seen_tool_calls.add(signature)
+        self.seen_tool_calls.add((self.mutation_epoch, *signature))
         return signature
 
     def has_seen_tool_call(self, tool_call: dict[str, object]) -> bool:
-        return tool_call_signature(tool_call) in self.seen_tool_calls
+        return (self.mutation_epoch, *tool_call_signature(tool_call)) in self.seen_tool_calls
 
     def tool_call_signature(self, tool_call: dict[str, object]) -> tuple[str, str]:
         return tool_call_signature(tool_call)
+
+    def advance_after_mutation(self, tool_call: dict[str, object]) -> None:
+        self.mutation_epoch += 1
+        signature = tool_call_signature(tool_call)
+        # The state changed, so prior observations may be repeated. The exact
+        # mutation itself remains blocked in the new state.
+        self.seen_tool_calls.add((self.mutation_epoch, *signature))

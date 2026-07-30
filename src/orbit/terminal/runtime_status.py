@@ -65,6 +65,7 @@ class RuntimeStatus:
     mtp: str
     mmproj: str
     tools: str
+    agent: str
     think: str
     max_tokens: str
     temperature: str
@@ -116,6 +117,7 @@ def collect_runtime_status(
         mtp=_on_off(props.get("mtp_enabled")),
         mmproj=_loaded_missing(props.get("multimodal_available")),
         tools=_tools_mode(tools_mode if tools_mode is not None else config.tools),
+        agent="on" if config.agent else "off",
         think="on" if config.think else "off",
         max_tokens=str(config.max_tokens),
         temperature=str(config.temperature),
@@ -142,6 +144,7 @@ def format_startup_banner(status: RuntimeStatus) -> str:
         ("Backend", status.backend),
         ("MTP", f"{status.mtp}, mmproj {status.mmproj}"),
         ("Tools", status.tools),
+        ("Agent", status.agent),
         ("Think", status.think),
         ("Max tokens", status.max_tokens),
         ("Workdir", status.workdir),
@@ -181,6 +184,7 @@ def format_status_panel(status: RuntimeStatus) -> str:
         ("Backend", f"{status.backend}, server {status.server}"),
         ("MTP", f"{status.mtp}, mmproj {status.mmproj}"),
         ("Tools", status.tools),
+        ("Agent", status.agent),
         ("Think", status.think),
         ("Max tokens", status.max_tokens),
         ("Workdir", status.workdir),

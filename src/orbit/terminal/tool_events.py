@@ -36,6 +36,9 @@ def format_tool_call_event(name: str, args: str) -> str:
         if path:
             suffix = " recursive" if recursive else ""
             return f"ListDir{suffix}: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}"
+    if name == "apply_patch":
+        path = _patch_path_from_args(args)
+        return f"Patch: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}" if path else "Patch"
     if name == "system_info":
         return "SystemInfo"
     return f"{display_tool_name(name)} {args}"
@@ -90,6 +93,32 @@ def _list_directory_from_args(args: str) -> tuple[str | None, bool]:
         recursive = parsed.get("recursive")
         return (path if isinstance(path, str) and path.strip() else ".", bool(recursive) if isinstance(recursive, bool) else False)
     return None, False
+
+
+def _patch_path_from_args(args: str) -> str | None:
+    try:
+        parsed = json.loads(args)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    patch = parsed.get("patch")
+    if not isinstance(patch, str):
+        return None
+    lines = patch.splitlines()
+    if len(lines) < 2 or not lines[0].startswith("--- ") or not lines[1].startswith("+++ "):
+        return None
+    old_path = lines[0][4:]
+    new_path = lines[1][4:]
+    if old_path == new_path:
+        path = old_path
+    elif old_path.startswith("a/") and new_path.startswith("b/") and old_path[2:] == new_path[2:]:
+        path = old_path[2:]
+    else:
+        return None
+    if not path or path == "/dev/null" or "\t" in path:
+        return None
+    return path
 
 
 def _format_shell_command_call(command: str) -> str:

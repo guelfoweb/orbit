@@ -16,6 +16,9 @@ LIST_DIRECTORY_TOOL_ALIASES = {"list_directory"}
 LIST_DIRECTORY_KEYS = ("path", "recursive", "max_depth", "max_entries", "include_hidden", "dirs_first", "files_only", "dirs_only")
 SYSTEM_INFO_TOOL_ALIASES = {"system_info"}
 SYSTEM_INFO_KEYS = ("include_disks", "include_cpu", "include_memory", "include_os", "include_runtime", "include_gpu", "human_readable")
+AFTER_TOOL_FINAL = "final"
+AFTER_TOOL_CONTINUE = "continue"
+AFTER_TOOL_VALUES = {AFTER_TOOL_FINAL, AFTER_TOOL_CONTINUE}
 
 
 class ToolRoute(StrEnum):
@@ -30,6 +33,7 @@ class ToolRoute(StrEnum):
 class RouteDecision:
     route: ToolRoute
     tool_names: tuple[str, ...] = ()
+    after_tool: str | None = None
 
 
 class RouteOutputClass(StrEnum):
@@ -100,16 +104,20 @@ def _canonical_route_reason(text: str) -> str | None:
         return None
     if not isinstance(value, dict):
         return None
-    keys = set(value)
-    if keys == {"route"} and value.get("route") == ToolRoute.CHAT.value:
+    after_tool = _after_tool(value)
+    if "after" in value and after_tool is None:
+        return None
+    payload = _without_after_tool(value)
+    keys = set(payload)
+    if keys == {"route"} and payload.get("route") == ToolRoute.CHAT.value and after_tool is None:
         return "canonical_chat"
-    if keys == {"command"} and _nonempty_string(value.get("command")):
+    if keys == {"command"} and _nonempty_string(payload.get("command")):
         return "canonical_command"
-    if keys == {"url"} and _nonempty_string(value.get("url")):
+    if keys == {"url"} and _nonempty_string(payload.get("url")):
         return "canonical_url"
-    if keys and keys <= set(LIST_DIRECTORY_KEYS) and _canonical_list_directory(value):
+    if keys and keys <= set(LIST_DIRECTORY_KEYS) and _canonical_list_directory(payload):
         return "canonical_list_directory"
-    if keys and keys <= set(SYSTEM_INFO_KEYS) and all(isinstance(arg, bool) for arg in value.values()):
+    if keys and keys <= set(SYSTEM_INFO_KEYS) and all(isinstance(arg, bool) for arg in payload.values()):
         return "canonical_system_info"
     return None
 
@@ -253,6 +261,7 @@ def command_tool_call_from_content(
             return None
         return _tool_call("system_info", raw_system_info)
     value = _parse_command_json_object(content) or _extract_last_json_object(content) or _extract_loose_command_object(content)
+    value = _without_after_tool(value)
     if not _has_command(value):
         if _has_url(value) and "fetch_url" in allowed:
             return _tool_call("fetch_url", {"url": value["url"]})
@@ -279,29 +288,33 @@ def parse_command_decision(content: str) -> RouteDecision | None:
     if _parse_raw_tool_call_decision(text) is not None:
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
     value = _parse_command_json_object(text)
-    if _has_command(value):
-        return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
-    if _has_url(value):
-        return RouteDecision(ToolRoute.FILESYSTEM, ("fetch_url",))
-    if _has_list_directory_args(value):
-        return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",))
-    if _has_system_info_args(value):
-        return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",))
-    if _has_chat_route(value):
+    after_tool = _after_tool(value)
+    payload = _without_after_tool(value)
+    if _has_command(payload):
+        return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",), after_tool)
+    if _has_url(payload):
+        return RouteDecision(ToolRoute.FILESYSTEM, ("fetch_url",), after_tool)
+    if _has_list_directory_args(payload):
+        return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",), after_tool)
+    if _has_system_info_args(payload):
+        return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",), after_tool)
+    if _has_chat_route(payload):
         return RouteDecision(ToolRoute.CHAT)
     if _has_command(_extract_loose_command_object(text)):
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
     for line in text.splitlines():
         value = _parse_command_json_object(_strip_json_fence(line.strip()))
-        if _has_command(value):
-            return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
-        if _has_url(value):
-            return RouteDecision(ToolRoute.FILESYSTEM, ("fetch_url",))
-        if _has_list_directory_args(value):
-            return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",))
-        if _has_system_info_args(value):
-            return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",))
-        if _has_chat_route(value):
+        after_tool = _after_tool(value)
+        payload = _without_after_tool(value)
+        if _has_command(payload):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",), after_tool)
+        if _has_url(payload):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("fetch_url",), after_tool)
+        if _has_list_directory_args(payload):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",), after_tool)
+        if _has_system_info_args(payload):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",), after_tool)
+        if _has_chat_route(payload):
             return RouteDecision(ToolRoute.CHAT)
     return None
 
@@ -649,6 +662,19 @@ def _has_url(value: dict[str, Any] | None) -> bool:
         return False
     url = value.get("url")
     return isinstance(url, str) and bool(url.strip())
+
+
+def _after_tool(value: dict[str, Any] | None) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    after = value.get("after")
+    return after if isinstance(after, str) and after in AFTER_TOOL_VALUES else None
+
+
+def _without_after_tool(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or "after" not in value:
+        return value
+    return {key: item for key, item in value.items() if key != "after"}
 
 
 def _looks_like_complete_json_object(text: str) -> bool:

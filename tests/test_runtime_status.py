@@ -36,6 +36,7 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
         self.assertIn("Gemma 4 12B", banner)
         self.assertIn("│ MTP          on, mmproj loaded", banner)
         self.assertIn("│ Tools        on", banner)
+        self.assertIn("│ Agent        off", banner)
         self.assertIn("│ Think        off", banner)
         self.assertIn("│ Workdir      /tmp/orbit", banner)
         self.assertIn("│ Machine      Test Machine", banner)
@@ -206,6 +207,7 @@ def _status(
         mtp="on",
         mmproj="loaded",
         tools="on",
+        agent="off",
         think="off",
         max_tokens="192",
         temperature="0.0",

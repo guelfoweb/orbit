@@ -67,7 +67,7 @@ class HybridToolExecutor:
             decision = validate_canonical_tool_call(
                 name,
                 arguments,
-                tool_definitions=tool_definitions(),
+                tool_definitions=tool_definitions(self.allowed_tool_names),
                 allowed_tool_names=self.allowed_tool_names,
                 workdir=self.workdir,
                 user_prompt=self.user_prompt,
@@ -95,7 +95,13 @@ class HybridToolExecutor:
                 "rejected_permission",
                 "tool_not_enabled",
             )
-        if name not in {"exec_shell_full_command", "fetch_url", "list_directory", "system_info"}:
+        if name not in {
+            "exec_shell_full_command",
+            "fetch_url",
+            "list_directory",
+            "system_info",
+            "apply_patch",
+        }:
             return ToolExecution(
                 ToolResult(name=name, content=f"error: unknown tool: {name}"),
                 "orbit",

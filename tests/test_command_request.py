@@ -147,6 +147,28 @@ class RouteRequestTests(unittest.TestCase):
         assert decision is not None
         self.assertEqual(decision.route, ToolRoute.FILESYSTEM)
         self.assertEqual(decision_tool_names(decision), ("exec_shell_full_command",))
+        self.assertIsNone(decision.after_tool)
+
+    def test_parse_command_decision_preserves_agent_after_tool_control(self) -> None:
+        final = parse_command_decision('{"include_cpu":true,"include_os":true,"after":"final"}')
+        continued = parse_command_decision('{"command":"find . -type f","after":"continue"}')
+
+        self.assertIsNotNone(final)
+        assert final is not None
+        self.assertEqual(decision_tool_names(final), ("system_info",))
+        self.assertEqual(final.after_tool, "final")
+        self.assertIsNotNone(continued)
+        assert continued is not None
+        self.assertEqual(decision_tool_names(continued), ("exec_shell_full_command",))
+        self.assertEqual(continued.after_tool, "continue")
+
+    def test_parse_command_decision_ignores_invalid_agent_after_tool_control(self) -> None:
+        decision = parse_command_decision('{"command":"pwd","after":"guess"}')
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision_tool_names(decision), ("exec_shell_full_command",))
+        self.assertIsNone(decision.after_tool)
 
     def test_parse_command_decision_rejects_chat_text(self) -> None:
         self.assertIsNone(parse_command_decision("Here is the answer."))

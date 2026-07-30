@@ -1194,8 +1194,12 @@ class ToolHealingShadowTests(unittest.TestCase):
                 backend=None,
                 workdir=workdir,
                 allowed_tool_names=("exec_shell_full_command",),
-                user_prompt="analyze source.py for vulnerabilities",
-            ).execute("exec_shell_full_command", {"command": "ls"}, chunk_budget={})
+                user_prompt="Fetch https://example.invalid/doc and summarize it.",
+            ).execute(
+                "exec_shell_full_command",
+                {"command": 'orbit-web-search "example document"'},
+                chunk_budget={},
+            )
             runtime_error = executor.execute(
                 "exec_shell_full_command",
                 {"command": "sh -c 'exit 7'"},

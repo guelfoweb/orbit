@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -9,12 +10,28 @@ from typing import Callable
 from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.post_tool_final_reuse_config import resolve_post_tool_final_reuse
+from orbit.runtime.agent_action_review import (
+    AgentActionReview,
+    build_agent_action_review_messages,
+    build_agent_action_revision_prompt,
+    parse_agent_action_review,
+)
 from orbit.runtime.capabilities import LocalCapabilities
-from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
+from orbit.runtime.command_request import (
+    AFTER_TOOL_FINAL,
+    command_like_tool_call,
+    command_tool_call_from_tool_calls,
+)
 from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import model_call_context
-from orbit.runtime.messages import with_chat_system_prompt, with_tool_call_system_prompt
+from orbit.runtime.messages import (
+    with_agent_action_anchor,
+    with_agent_strict_tool_call_system_prompt,
+    with_agent_tool_continuation_system_prompt,
+    with_chat_system_prompt,
+    with_tool_call_system_prompt,
+)
 from orbit.runtime.post_tool_final_reuse import evaluate_post_tool_final_reuse
 from orbit.runtime.session_memory import should_refresh_for_append
 from orbit.runtime.shell_guardrails import (
@@ -41,7 +58,10 @@ from orbit.runtime.shell_guardrails import (
     is_shell_full_read_only_mutation_error,
     is_shell_full_execution_error,
     looks_like_broad_file_rewrite,
+    requires_direct_content_evidence,
     requires_url_content_evidence,
+    SHELL_FULL_AGENT_MUTATION_VERIFICATION_PROMPT,
+    SHELL_FULL_AGENT_SEMANTIC_COMPLETION_PROMPT,
     SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT,
     shell_repair_prompt,
     should_verify_shell_mutation,
@@ -54,6 +74,7 @@ from orbit.runtime.tool_contract import (
     validate_canonical_tool_call_payload,
 )
 from orbit.runtime.tool_healing import (
+    ToolAttemptDetector,
     begin_tool_healing_attempt,
     build_tool_call_repair,
     observe_tool_attempt_shadow,
@@ -87,9 +108,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 TOOL_CALL_MAX_TOKENS = 96
-MUTATIVE_TOOL_CALL_MAX_TOKENS = _env_int("ORBIT_MUTATIVE_TOOL_CALL_MAX_TOKENS", 160)
+MUTATIVE_TOOL_CALL_MAX_TOKENS = _env_int("ORBIT_MUTATIVE_TOOL_CALL_MAX_TOKENS", 256)
 FILE_RECOVERY_TOOL_CALL_MAX_TOKENS = 64
 MAX_SHELL_REPAIR_RETRIES = 2
+MAX_AGENT_SHELL_ERROR_CONTINUATIONS = 2
+MAX_AGENT_ACTION_REVISION_RETRIES = 2
 
 
 def run_tool_loop(
@@ -106,11 +129,19 @@ def run_tool_loop(
     on_model_step: Callable[[ModelStepMetrics], None] | None,
     on_phase_start: Callable[[ModelPhaseStart], None] | None,
     tool_names: tuple[str, ...] | None,
+    agent_mode: bool = False,
     initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+    initial_after_tool: str | None = None,
     local_capabilities: LocalCapabilities | None = None,
     user_turn_id: str | None = None,
 ) -> ChatResult:
     allowed_tool_names = tool_names or default_tool_names()
+    if not agent_mode:
+        allowed_tool_names = tuple(
+            name
+            for name in allowed_tool_names
+            if name != "apply_patch"
+        )
     executor = HybridToolExecutor(
         backend=runtime.backend if hasattr(runtime.backend, "server_tools") else None,
         workdir=workdir,
@@ -134,6 +165,7 @@ def run_tool_loop(
     )
     repair = turn.repair_state
     shell_full_enabled = "exec_shell_full_command" in allowed_tool_names
+    direct_content_required = requires_direct_content_evidence(user_prompt)
     url_content_required = requires_url_content_evidence(user_prompt)
     capability_context = local_capabilities.format_prompt_summary() if local_capabilities is not None else None
     suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
@@ -142,6 +174,9 @@ def run_tool_loop(
 
     # These local helpers still couple policy and runtime counters in one place.
     # The state objects only store turn-local facts; they do not decide tasks.
+
+    def answer_from_tool_results(**kwargs) -> ChatResult:
+        return runtime._answer_from_tool_results(agent_mode=agent_mode, **kwargs)
 
     def observe_shadow(result: ChatResult, *, attempt_id: str | None, phase: str = "tool_call"):
         return observe_tool_attempt_shadow(
@@ -283,14 +318,170 @@ def run_tool_loop(
         repair.mutation_semantic_repair_used = True
         runtime.mutation_semantic_repairs += 1
 
-    def should_nudge_content_evidence() -> bool:
+    def request_agent_semantic_completion_retry() -> bool:
+        if repair.agent_semantic_completion_retry_used:
+            return False
+        repair.agent_semantic_completion_retry_used = True
+        repair.mutation_semantic_repair_pending = True
+        runtime.agent_semantic_completion_retries += 1
+        return True
+
+    def request_mutation_verification() -> None:
+        repair.shell_empty_result_check_pending = True
+        repair.shell_empty_result_check_used = True
+        repair.mutation_verification_pending = True
+        runtime.mutation_verifications += 1
+
+    def request_agent_verification_retry() -> bool:
+        if repair.mutation_verification_repair_used:
+            return False
+        repair.mutation_verification_repair_used = True
+        repair.shell_empty_result_check_pending = True
+        repair.mutation_verification_repair_pending = True
+        runtime.mutation_verification_repairs += 1
+        runtime.agent_verification_retries += 1
+        return True
+
+    def request_agent_action_revision(
+        tool_call: dict[str, object],
+        reason: str | None,
+    ) -> bool:
+        if repair.agent_action_revision_retries >= MAX_AGENT_ACTION_REVISION_RETRIES:
+            return False
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            return False
+        name = function.get("name")
+        arguments = parse_tool_arguments_or_empty(function.get("arguments"))
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            return False
+        repair.agent_action_revision_retries += 1
+        repair.agent_action_review_prompt_pending = build_agent_action_revision_prompt(
+            reason,
+            user_prompt=user_prompt or "",
+            tool_name=name,
+            arguments=arguments,
+        )
+        runtime.agent_action_review_revisions += 1
+        return True
+
+    def review_agent_action(
+        tool_call: dict[str, object],
+        *,
+        loop: int,
+    ) -> tuple[AgentActionReview | None, ChatResult | None]:
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            return None, None
+        name = function.get("name")
+        if not isinstance(name, str):
+            return None, None
+        command = _shell_command_from_tool_call(tool_call)
+        action_is_mutating = name == "apply_patch" or bool(command and is_mutating_shell_command(command))
+        mutative_request = is_mutative_user_request(user_prompt)
+        command_is_clear_observation = bool(
+            command
+            and not action_is_mutating
+            and not _uses_general_purpose_interpreter(command)
+        )
+        if (
+            not agent_mode
+            or (not action_is_mutating and not command)
+            or (not action_is_mutating and not mutative_request)
+            or command_is_clear_observation
+        ):
+            return AgentActionReview("approve"), None
+        arguments = parse_tool_arguments_or_empty(function.get("arguments"))
+        if not isinstance(arguments, dict):
+            return None, None
+        repair.agent_action_reviews += 1
+        runtime.agent_action_reviews += 1
+        review_messages = build_agent_action_review_messages(
+            user_prompt=user_prompt or "",
+            tool_name=name,
+            arguments=arguments,
+            shell_name="POSIX sh" if name == "exec_shell_full_command" else "Orbit exact patch",
+            recent_tool_observations=_recent_tool_observations(runtime.messages),
+        )
+        if on_phase_start:
+            on_phase_start(
+                ModelPhaseStart(
+                    "agent_action_review",
+                    streamed=False,
+                    attempt=repair.agent_action_reviews,
+                    reason="pre_execution_review",
+                )
+            )
+        with runtime._temporary_backend_thinking(False):
+            with model_call_context(phase="agent_action_review", tools_mode="on"):
+                review_result = runtime.backend.chat(
+                    review_messages,
+                    temperature=temperature,
+                    max_tokens=_bounded_internal_max_tokens(max_tokens, 64),
+                )
+        if on_model_step:
+            on_model_step(
+                ModelStepMetrics.from_result(
+                    loop=loop,
+                    result=review_result,
+                    phase="agent_action_review",
+                )
+            )
+        if review_result.finish_reason == "cancelled":
+            return None, review_result
+        review = (
+            parse_agent_action_review(review_result.content)
+            if review_result.finish_reason == "stop"
+            else None
+        )
+        if review is None:
+            runtime.agent_action_review_invalid += 1
+        elif review.decision == "approve":
+            repair.agent_action_revision_retries = 0
+            runtime.agent_action_review_approvals += 1
+        elif review.decision == "decline":
+            runtime.agent_action_review_declines += 1
+        return review, review_result
+
+    def answer_after_declined_action(*, loop: int) -> ChatResult:
+        call_messages = [
+            *with_chat_system_prompt(runtime.messages),
+            {
+                "role": "system",
+                "content": (
+                    "A proposed local action was reviewed and was not executed. "
+                    "Answer the latest user request directly without tools. "
+                    "Do not claim that the proposed action ran or changed state."
+                ),
+            },
+        ]
+        result = runtime._chat_final(
+            call_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
+            loop=loop,
+        )
+        runtime.messages.append({"role": "assistant", "content": result.content})
+        return result
+
+    def should_nudge_content_evidence(*, model_concluded: bool = False) -> bool:
+        requested_path_exists = _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
         return (
             shell_full_enabled
             and turn.can_reconsider(RECONSIDER_CONTENT_EVIDENCE)
-            and is_mutative_user_request(user_prompt)
-            and turn.metadata_only_rejections > 0
-            and not turn.content_evidence_satisfied
-            and not turn.shell_mutation_attempted
+            and direct_content_required
+            and not has_required_direct_evidence()
+            and not repair.shell_error_final_pending
+            and turn.metadata_only_observations > 0
+            and not (turn.requested_user_path and requested_path_exists)
+            and (
+                turn.metadata_only_observations >= 2
+                or (model_concluded and state.tool_rounds > 0)
+            )
         )
 
     def request_content_evidence_guard() -> None:
@@ -426,7 +617,14 @@ def run_tool_loop(
 
     def should_handoff_to_final_from_tool() -> bool:
         return (
-            has_required_direct_evidence()
+            (
+                not agent_mode
+                or (
+                    initial_after_tool == AFTER_TOOL_FINAL
+                    and state.tool_rounds == 1
+                )
+            )
+            and has_required_direct_evidence()
             and turn.finalizable
             and not has_pending_internal_request()
             and not repair.shell_error_final_pending
@@ -443,10 +641,29 @@ def run_tool_loop(
         is_content_evidence_guard: bool,
         is_completion_guard: bool,
         is_minimal_patch_guard: bool,
+        execution_outcome: str,
+        execution_reason: str | None,
     ) -> None:
         # This remains the main transition reducer for tool evidence and bounded
         # repair state. It updates turn-local state, while runtime counters stay
         # here to avoid leaking telemetry into the state objects themselves.
+        if tool_result.name == "apply_patch":
+            turn.shell_mutation_attempted = True
+            if execution_outcome.startswith("rejected_") or tool_result.content.startswith("error:"):
+                if (
+                    agent_mode
+                    and repair.agent_shell_error_continuations < MAX_AGENT_SHELL_ERROR_CONTINUATIONS
+                ):
+                    repair.agent_shell_error_continuations += 1
+                    runtime.agent_error_continuations += 1
+                    return
+                repair.shell_error_final_pending = True
+                turn.last_error = execution_reason
+                turn.mark_exhausted()
+                return
+            turn.shell_mutation_succeeded = True
+            request_mutation_verification()
+            return
         if tool_result.name not in {"exec_shell_full_command", "fetch_url"}:
             return
         command = _shell_command_from_tool_call(tool_call)
@@ -533,6 +750,20 @@ def run_tool_loop(
             if is_content_evidence_guard:
                 runtime.content_evidence_guard_failures += 1
             return
+        if execution_outcome.startswith("rejected_"):
+            if (
+                agent_mode
+                and tool_result.name == "exec_shell_full_command"
+                and execution_outcome in {"rejected_parse", "rejected_schema", "rejected_guardrail"}
+                and repair.shell_repair_retries < MAX_SHELL_REPAIR_RETRIES
+            ):
+                repair.shell_repair_retries += 1
+                repair.shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
+                return
+            repair.shell_error_final_pending = True
+            turn.last_error = execution_reason
+            turn.mark_exhausted()
+            return
         if is_shell_full_execution_error(tool_result.content):
             if command_is_url_fetch:
                 turn.mark_url_failure_evidence(_summarize_shell_error(tool_result.content))
@@ -597,12 +828,24 @@ def run_tool_loop(
                 repair.shell_repair_retries += 1
                 repair.shell_repair_prompt_pending = shell_repair_prompt(tool_result.content)
                 return
+            if (
+                agent_mode
+                and is_repairable_shell_error(tool_result.content)
+                and repair.agent_shell_error_continuations < MAX_AGENT_SHELL_ERROR_CONTINUATIONS
+            ):
+                repair.agent_shell_error_continuations += 1
+                runtime.agent_error_continuations += 1
+                return
             # A shell command that actually executed and returned a non-zero
             # result is still valid evidence. Do not open a generic repair loop
             # here; bounded finalization can explain the failure from evidence.
             repair.shell_error_final_pending = True
             turn.mark_exhausted()
             return
+        if command and is_metadata_only_shell_command(command):
+            turn.metadata_only_observations += 1
+            if should_nudge_content_evidence():
+                request_content_evidence_guard()
         fetch_url_status = fetch_url_result_status(tool_result.content) if tool_result.name == "fetch_url" else None
         fetch_url_success = bool(tool_result.name == "fetch_url" and fetch_url_status == "ok" and fetch_url_result_has_text(tool_result.content))
         fetch_url_failure = bool(
@@ -642,8 +885,18 @@ def run_tool_loop(
                 discovered = _extract_candidate_paths_from_output(tool_result.content)
                 if discovered:
                     turn.mark_candidate_paths_found(_merge_candidate_paths(turn.candidate_paths, discovered))
-            if is_mutation_verification and not repair.mutation_semantic_repair_used:
+            if (
+                (is_mutation_verification or is_mutation_verification_repair)
+                and not repair.mutation_semantic_repair_used
+            ):
                 request_mutation_semantic_repair()
+            elif (
+                agent_mode
+                and command_is_mutating
+                and not is_mutation_verification_repair
+                and not is_mutation_semantic_repair
+            ):
+                request_mutation_verification()
             if has_required_direct_evidence() or repair.shell_error_final_pending:
                 turn.mark_finalizable()
             return
@@ -656,27 +909,32 @@ def run_tool_loop(
             request_mutation_semantic_repair()
             return
         if is_mutation_verification or is_mutation_verification_repair:
+            if agent_mode and request_agent_verification_retry():
+                return
             runtime.mutation_verification_failures += 1
             repair.shell_error_final_pending = True
             turn.mark_exhausted()
             return
         if is_mutation_semantic_repair:
+            if command_is_mutating:
+                request_mutation_verification()
+                return
+            if agent_mode:
+                request_mutation_verification()
+                return
             runtime.mutation_semantic_repair_failures += 1
             repair.shell_error_final_pending = True
             turn.mark_exhausted()
             return
         if (
             command
-            and not repair.shell_empty_result_check_used
             and should_verify_shell_mutation(command, user_prompt=_last_user_text(runtime.messages))
         ):
-            repair.shell_empty_result_check_pending = True
-            repair.shell_empty_result_check_used = True
-            repair.mutation_verification_pending = True
-            runtime.mutation_verifications += 1
+            request_mutation_verification()
     if initial_tool_calls:
         calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
         initial_decision: CanonicalToolDecision | None = None
+        skip_initial_execution = False
         if canonical_gate_enabled:
             if len(calls) != 1:
                 return ChatResult(
@@ -692,65 +950,114 @@ def run_tool_loop(
                 )
             initial_decision = canonical_preflight(calls[0])
             assert initial_decision is not None
-        if loop_guardrails_allowed(initial_decision) and any(
+        if (
+            agent_mode
+            and len(calls) == 1
+            and _tool_call_invokes_registered_tool_name(calls[0], allowed_tool_names)
+        ):
+            if not request_agent_action_revision(
+                calls[0],
+                "A registered tool interface name was used as a shell executable. "
+                "Use the appropriate structured tool interface instead.",
+            ):
+                return answer_after_declined_action(loop=2)
+            skip_initial_execution = True
+        elif loop_guardrails_allowed(initial_decision) and any(
             _should_guard_existing_file_rewrite(
                 tool_call,
                 workdir=workdir,
                 should_nudge_minimal_patch=should_nudge_minimal_patch,
+                include_simple_redirects=agent_mode,
             )
             for tool_call in calls
         ):
             request_minimal_patch_guard()
         else:
-            state.increment_round()
-            runtime.messages.append(assistant_tool_call_message("", calls))
-            for tool_call in calls:
-                signature = state.mark_tool_call(tool_call)
-                if on_tool_call:
-                    on_tool_call(*signature)
-                execution = execute_tool_call(
-                    tool_call,
-                    chunk_budget=state.chunk_budget,
-                    executor=executor,
-                    canonical_decision=initial_decision,
-                )
-                tool_result = execution.result
-                update_state_after_tool_result(
-                    tool_call,
-                    tool_result,
-                    is_mutation_verification=False,
-                    is_mutation_verification_repair=False,
-                    is_mutation_semantic_repair=False,
-                    is_content_evidence_guard=False,
-                    is_completion_guard=False,
-                    is_minimal_patch_guard=False,
-                )
-                if on_tool_result:
-                    on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
-                runtime.messages.append(
-                    tool_result_message(
+            if len(calls) == 1 and (initial_decision is None or initial_decision.accepted):
+                action_review, review_result = review_agent_action(calls[0], loop=2)
+                if review_result is not None and review_result.finish_reason == "cancelled":
+                    return review_result
+                if action_review is not None and action_review.decision == "decline":
+                    return answer_after_declined_action(loop=3)
+                if action_review is None or action_review.decision == "revise":
+                    reason = action_review.reason if action_review is not None else None
+                    if request_agent_action_revision(calls[0], reason):
+                        skip_initial_execution = True
+                    else:
+                        return answer_after_declined_action(loop=3)
+            if skip_initial_execution:
+                pass
+            else:
+                state.increment_round()
+                runtime.messages.append(assistant_tool_call_message("", calls))
+                for tool_call in calls:
+                    signature = state.mark_tool_call(tool_call)
+                    if on_tool_call:
+                        on_tool_call(*signature)
+                    execution = execute_tool_call(
+                        tool_call,
+                        chunk_budget=state.chunk_budget,
+                        executor=executor,
+                        canonical_decision=initial_decision,
+                    )
+                    tool_result = execution.result
+                    update_state_after_tool_result(
                         tool_call,
                         tool_result,
-                        evidence_store=evidence_store,
-                        metadata=_tool_evidence_metadata(
+                        is_mutation_verification=False,
+                        is_mutation_verification_repair=False,
+                        is_mutation_semantic_repair=False,
+                        is_content_evidence_guard=False,
+                        is_completion_guard=False,
+                        is_minimal_patch_guard=False,
+                        execution_outcome=execution.terminal_outcome,
+                        execution_reason=execution.terminal_reason,
+                    )
+                    if execution.terminal_outcome == "executed" and _tool_call_is_mutating(tool_call):
+                        state.advance_after_mutation(tool_call)
+                    if on_tool_result:
+                        on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
+                    runtime.messages.append(
+                        tool_result_message(
                             tool_call,
-                            source=execution.source,
-                            user_turn_id=user_turn_id,
-                            produced_by_phase="initial_tool_call",
-                        ),
+                            tool_result,
+                            evidence_store=evidence_store,
+                            metadata=_tool_evidence_metadata(
+                                tool_call,
+                                source=execution.source,
+                                user_turn_id=user_turn_id,
+                                produced_by_phase="initial_tool_call",
+                            ),
+                        )
                     )
-                )
-                if should_handoff_to_final_from_tool():
-                    return runtime._answer_from_tool_results(
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        on_final_delta=on_final_delta,
-                        on_progress=on_progress,
-                        on_model_step=on_model_step,
-                        on_phase_start=on_phase_start,
-                        loop=state.tool_rounds + 1,
-                        use_tool_prompt=state.used_tool_call_prompt or _is_empty_web_search_result(tool_result),
-                    )
+                    if should_handoff_to_final_from_tool():
+                        return answer_from_tool_results(
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            on_final_delta=on_final_delta,
+                            on_progress=on_progress,
+                            on_model_step=on_model_step,
+                            on_phase_start=on_phase_start,
+                            loop=state.tool_rounds + 1,
+                            use_tool_prompt=state.used_tool_call_prompt or _is_empty_web_search_result(tool_result),
+                        )
+        if (
+            not repair.shell_error_final_pending
+            and not repair.contract_retry_pending
+            and repair.shell_repair_prompt_pending is None
+            and not has_pending_internal_request()
+        ):
+            requested_path_exists = _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
+            if (
+                turn.requested_user_path
+                and turn.metadata_only_observations > 0
+                and not turn.content_evidence_satisfied
+                and requested_path_exists
+                and turn.can_reconsider(RECONSIDER_FILE_RECOVERY)
+            ):
+                request_file_recovery_guard(requested_path_exists=True)
+            elif should_nudge_content_evidence(model_concluded=True):
+                request_content_evidence_guard()
         if (
             not repair.shell_error_final_pending
             and not repair.contract_retry_pending
@@ -760,10 +1067,14 @@ def run_tool_loop(
         ):
             request_completion_guard()
         if repair.shell_error_final_pending or (
-            not has_pending_internal_request()
+            (
+                not agent_mode
+                or initial_after_tool == AFTER_TOOL_FINAL
+            )
+            and not has_pending_internal_request()
         ):
             if not turn.pending_completion_guard:
-                return runtime._answer_from_tool_results(
+                return answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
@@ -775,7 +1086,7 @@ def run_tool_loop(
                     compact_window=repair.shell_error_final_pending,
                 )
         if state.round_limit_reached() and not has_pending_internal_request():
-            return runtime._answer_from_tool_results(
+            return answer_from_tool_results(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
@@ -786,9 +1097,6 @@ def run_tool_loop(
                 use_tool_prompt=state.used_tool_call_prompt,
             )
     for loop_index in range(1, max_loops + 1):
-        call_messages = with_tool_call_system_prompt(runtime.messages)
-        if capability_context:
-            call_messages = [*call_messages, {"role": "system", "content": capability_context}]
         executing_mutation_verification = repair.mutation_verification_pending
         executing_mutation_verification_repair = repair.mutation_verification_repair_pending
         executing_mutation_semantic_repair = repair.mutation_semantic_repair_pending
@@ -801,12 +1109,55 @@ def run_tool_loop(
         executing_url_recovery_guard = turn.pending_url_recovery_guard
         executing_completion_guard = turn.pending_completion_guard
         executing_minimal_patch_guard = turn.pending_minimal_patch_guard
-        if repair.shell_repair_prompt_pending is not None:
+        executing_agent_action_revision = repair.agent_action_review_prompt_pending is not None
+        strict_internal_tool_request = (
+            repair.contract_retry_pending
+            or executing_agent_action_revision
+            or executing_mutation_verification
+            or executing_mutation_verification_repair
+            or executing_read_only_mutation_retry
+            or executing_shell_repair
+            or executing_shell_empty_result_check
+            or executing_content_evidence_guard
+            or executing_completion_guard
+            or executing_minimal_patch_guard
+        )
+        call_messages = (
+            with_agent_tool_continuation_system_prompt(runtime.messages)
+            if agent_mode and state.tool_rounds > 0 and not strict_internal_tool_request
+            else with_agent_strict_tool_call_system_prompt(runtime.messages)
+            if agent_mode
+            else with_tool_call_system_prompt(runtime.messages)
+        )
+        if capability_context:
+            call_messages = [*call_messages, {"role": "system", "content": capability_context}]
+        if repair.agent_action_review_prompt_pending is not None:
+            call_messages = [
+                *call_messages,
+                {"role": "user", "content": repair.agent_action_review_prompt_pending},
+            ]
+        elif repair.shell_repair_prompt_pending is not None:
             call_messages = [*call_messages, {"role": "user", "content": repair.shell_repair_prompt_pending}]
         elif repair.shell_empty_result_check_pending:
-            call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT}]
+            verification_prompt = (
+                _with_authoritative_user_request(
+                    SHELL_FULL_AGENT_MUTATION_VERIFICATION_PROMPT,
+                    user_prompt,
+                )
+                if agent_mode
+                else SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT
+            )
+            call_messages = [*call_messages, {"role": "user", "content": verification_prompt}]
         elif repair.mutation_semantic_repair_pending:
-            call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_SEMANTIC_REPAIR_PROMPT}]
+            semantic_prompt = (
+                _with_authoritative_user_request(
+                    SHELL_FULL_AGENT_SEMANTIC_COMPLETION_PROMPT,
+                    user_prompt,
+                )
+                if agent_mode
+                else SHELL_FULL_SEMANTIC_REPAIR_PROMPT
+            )
+            call_messages = [*call_messages, {"role": "user", "content": semantic_prompt}]
         elif repair.read_only_mutation_retry_pending:
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT}]
         elif turn.pending_content_evidence_guard:
@@ -821,11 +1172,25 @@ def run_tool_loop(
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT}]
         elif turn.pending_completion_guard:
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_COMPLETION_GUARD_PROMPT}]
+        anchor_agent_action = (
+            agent_mode
+            and (
+                (state.tool_rounds > 0 and not strict_internal_tool_request)
+                or executing_agent_action_revision
+                or executing_shell_repair
+                or executing_minimal_patch_guard
+                or executing_completion_guard
+                or repair.contract_retry_pending
+            )
+        )
+        if anchor_agent_action:
+            call_messages = with_agent_action_anchor(call_messages, user_prompt or "")
         state.used_tool_call_prompt = True
         tool_max_tokens = _tool_call_max_tokens(
             max_tokens,
             mutative=(
                 repair.shell_repair_prompt_pending is not None
+                or repair.agent_action_review_prompt_pending is not None
                 or repair.shell_empty_result_check_pending
                 or repair.mutation_semantic_repair_pending
                 or repair.read_only_mutation_retry_pending
@@ -840,7 +1205,12 @@ def run_tool_loop(
             ),
             file_recovery=turn.pending_file_recovery_guard,
         )
-        tool_delta_callback = suppress_tool_delta if shell_full_enabled and (state.tool_rounds > 0 or repair.contract_retry_pending) else on_final_delta
+        tool_delta_callback = (
+            suppress_tool_delta
+            if shell_full_enabled
+            and (state.tool_rounds > 0 or repair.contract_retry_pending)
+            else on_final_delta
+        )
         if on_phase_start:
             on_phase_start(
                 ModelPhaseStart(
@@ -919,14 +1289,26 @@ def run_tool_loop(
             elif result.tool_calls:
                 repair.contract_retry_pending = False
         turn.clear_pending_after_model_call()
+        truncated_tool_attempt = (
+            result.finish_reason == "length"
+            and not result.tool_calls
+            and ToolAttemptDetector()
+            .detect(
+                text=result.content,
+                tool_calls=[],
+                registered_tool_names=allowed_tool_names,
+            )
+            .detected
+        )
         if (
             result.finish_reason == "length"
-            and result.tool_calls
+            and (result.tool_calls or truncated_tool_attempt)
             and should_nudge_minimal_patch(
                 broad_rewrite_seen=any(
                     looks_like_broad_file_rewrite(_shell_raw_arguments_from_tool_call(tool_call))
                     for tool_call in result.tool_calls
-                ),
+                )
+                or looks_like_broad_file_rewrite(result.content),
                 length_truncated=True,
             )
         ):
@@ -950,7 +1332,7 @@ def run_tool_loop(
                 reason="length_after_tool_result",
                 phase=produced_by_phase or "tool_call",
             )
-            return runtime._answer_from_tool_results(
+            return answer_from_tool_results(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
@@ -1066,11 +1448,41 @@ def run_tool_loop(
                 decision=repaired_decision,
             )
             assert canonical_decision is not None
+        if (
+            agent_mode
+            and result.tool_calls
+            and (executing_mutation_verification or executing_mutation_verification_repair)
+            and any(_tool_call_is_mutating(tool_call) for tool_call in result.tool_calls)
+        ):
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="agent_verification_must_be_read_only",
+                phase=produced_by_phase or "tool_call",
+            )
+            if request_agent_verification_retry():
+                continue
+            runtime.mutation_verification_failures += 1
+            repair.shell_error_final_pending = True
+            turn.mark_exhausted()
+            return answer_from_tool_results(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+                loop=loop_index + 1,
+                use_tool_prompt=state.used_tool_call_prompt,
+            )
         if result.tool_calls and loop_guardrails_allowed(canonical_decision) and any(
             _should_guard_existing_file_rewrite(
                 tool_call,
                 workdir=workdir,
                 should_nudge_minimal_patch=should_nudge_minimal_patch,
+                include_simple_redirects=agent_mode,
             )
             for tool_call in result.tool_calls
         ):
@@ -1106,11 +1518,96 @@ def run_tool_loop(
             )
             request_file_recovery_guard()
             continue
+        if result.tool_calls and state.has_seen_tool_call(result.tool_calls[0]):
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="repeated_tool_call",
+                phase=produced_by_phase or "tool_call",
+            )
+            turn.mark_finalizable()
+            return answer_from_tool_results(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+                loop=loop_index + 1,
+                use_tool_prompt=state.used_tool_call_prompt,
+            )
+        if (
+            agent_mode
+            and result.tool_calls
+            and _tool_call_invokes_registered_tool_name(result.tool_calls[0], allowed_tool_names)
+        ):
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="registered_tool_name_used_as_shell_command",
+                phase=produced_by_phase or "tool_call",
+            )
+            if request_agent_action_revision(
+                result.tool_calls[0],
+                "A registered tool interface name was used as a shell executable. "
+                "Use the appropriate structured tool interface instead.",
+            ):
+                continue
+            return answer_after_declined_action(loop=loop_index + 1)
+        if result.tool_calls and (canonical_decision is None or canonical_decision.accepted):
+            action_review, review_result = review_agent_action(
+                result.tool_calls[0],
+                loop=loop_index + 1,
+            )
+            if review_result is not None and review_result.finish_reason == "cancelled":
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="cancelled",
+                    reason="agent_action_review_cancelled",
+                    phase=produced_by_phase or "tool_call",
+                )
+                return review_result
+            if action_review is not None and action_review.decision == "decline":
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="rejected_guardrail",
+                    reason="agent_action_review_declined",
+                    phase=produced_by_phase or "tool_call",
+                )
+                return answer_after_declined_action(loop=loop_index + 2)
+            if action_review is None or action_review.decision == "revise":
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="superseded",
+                    reason="agent_action_review_revision",
+                    phase=produced_by_phase or "tool_call",
+                )
+                reason = action_review.reason if action_review is not None else None
+                if request_agent_action_revision(result.tool_calls[0], reason):
+                    continue
+                return answer_after_declined_action(loop=loop_index + 2)
         if not result.tool_calls:
             executed_internal_tool_prompt = (
                 executing_mutation_verification
                 or executing_mutation_verification_repair
-                or executing_mutation_semantic_repair
+                or executing_agent_action_revision
+                or (
+                    executing_mutation_semantic_repair
+                    and (
+                        not agent_mode
+                        or result.content.strip().upper() == "OK"
+                    )
+                )
                 or executing_read_only_mutation_retry
                 or executing_shell_repair
                 or executing_shell_empty_result_check
@@ -1121,7 +1618,71 @@ def run_tool_loop(
                 or executing_completion_guard
                 or executing_minimal_patch_guard
             )
-            if executing_mutation_semantic_repair and result.content.strip().upper() != "OK":
+            if executing_agent_action_revision:
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="rejected_parse",
+                    reason="agent_action_revision_missing_tool",
+                    phase=produced_by_phase or "tool_call",
+                )
+                return answer_after_declined_action(loop=loop_index + 1)
+            if agent_mode and (executing_mutation_verification or executing_mutation_verification_repair):
+                if request_agent_verification_retry():
+                    record_terminal(
+                        attempt_id=attempt_id,
+                        report=shadow_report,
+                        result=result,
+                        outcome="superseded",
+                        reason="agent_verification_requires_tool",
+                        phase=produced_by_phase or "tool_call",
+                    )
+                    continue
+                runtime.mutation_verification_failures += 1
+                repair.shell_error_final_pending = True
+                turn.mark_exhausted()
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="rejected_guardrail",
+                    reason="agent_verification_missing",
+                    phase=produced_by_phase or "tool_call",
+                )
+                return answer_from_tool_results(
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
+                    loop=loop_index + 1,
+                    use_tool_prompt=state.used_tool_call_prompt,
+                )
+            if (
+                agent_mode
+                and executing_mutation_semantic_repair
+                and result.content.strip().upper() == "OK"
+            ):
+                if request_agent_semantic_completion_retry():
+                    record_terminal(
+                        attempt_id=attempt_id,
+                        report=shadow_report,
+                        result=result,
+                        outcome="superseded",
+                        reason="agent_semantic_completion_requires_evidence",
+                        phase=produced_by_phase or "tool_call",
+                    )
+                    continue
+                runtime.mutation_semantic_repair_failures += 1
+                repair.shell_error_final_pending = True
+                turn.mark_exhausted()
+            if (
+                executing_mutation_semantic_repair
+                and not agent_mode
+                and result.content.strip().upper() != "OK"
+            ):
                 runtime.mutation_semantic_repair_failures += 1
             if executing_content_evidence_guard:
                 runtime.content_evidence_guard_failures += 1
@@ -1150,7 +1711,7 @@ def run_tool_loop(
                     continue
                 if (
                     turn.requested_user_path
-                    and turn.metadata_only_rejections > 0
+                    and (turn.metadata_only_rejections > 0 or turn.metadata_only_observations > 0)
                     and not turn.content_evidence_satisfied
                     and _requested_user_path_exists(turn.requested_user_path, workdir=workdir)
                     and not repair.file_content_retry_used
@@ -1166,6 +1727,17 @@ def run_tool_loop(
                     repair.file_content_retry_used = True
                     turn.pending_file_recovery_guard = True
                     turn.pending_file_recovery_guard_prompt = file_recovery_retry_prompt(requested_path_exists=True)
+                    continue
+                if should_nudge_content_evidence(model_concluded=True):
+                    record_terminal(
+                        attempt_id=attempt_id,
+                        report=shadow_report,
+                        result=result,
+                        outcome="superseded",
+                        reason="content_evidence_guard",
+                        phase=produced_by_phase or "tool_call",
+                    )
+                    request_content_evidence_guard()
                     continue
                 if should_nudge_completion():
                     record_terminal(
@@ -1217,7 +1789,7 @@ def run_tool_loop(
                             on_final_delta(result.content)
                         return result
                     runtime.post_tool_final_reuse_fallback_count += 1
-                return runtime._answer_from_tool_results(
+                return answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
@@ -1264,26 +1836,6 @@ def run_tool_loop(
         state.increment_round()
         turn.increment_round()
         for tool_call in result.tool_calls:
-            if state.has_seen_tool_call(tool_call):
-                record_terminal(
-                    attempt_id=attempt_id,
-                    report=shadow_report,
-                    result=result,
-                    outcome="rejected_guardrail",
-                    reason="repeated_tool_call",
-                    phase=produced_by_phase or "tool_call",
-                )
-                turn.mark_finalizable()
-                return runtime._answer_from_tool_results(
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    on_final_delta=on_final_delta,
-                    on_progress=on_progress,
-                    on_model_step=on_model_step,
-                    on_phase_start=on_phase_start,
-                    loop=loop_index + 1,
-                    use_tool_prompt=state.used_tool_call_prompt,
-                )
             signature = state.mark_tool_call(tool_call)
             if on_tool_call:
                 on_tool_call(*signature)
@@ -1323,7 +1875,11 @@ def run_tool_loop(
                 is_content_evidence_guard=executing_content_evidence_guard,
                 is_completion_guard=executing_completion_guard,
                 is_minimal_patch_guard=executing_minimal_patch_guard,
+                execution_outcome=execution.terminal_outcome,
+                execution_reason=execution.terminal_reason,
             )
+            if execution.terminal_outcome == "executed" and _tool_call_is_mutating(tool_call):
+                state.advance_after_mutation(tool_call)
             if on_tool_result:
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
             if should_refresh_for_append(runtime.messages, tool_result.content, context_tokens=runtime.context_tokens):
@@ -1342,7 +1898,7 @@ def run_tool_loop(
                 )
             )
             if should_handoff_to_final_from_tool():
-                return runtime._answer_from_tool_results(
+                return answer_from_tool_results(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     on_final_delta=on_final_delta,
@@ -1354,7 +1910,7 @@ def run_tool_loop(
                 )
         if repair.shell_error_final_pending:
             turn.mark_finalizable()
-            return runtime._answer_from_tool_results(
+            return answer_from_tool_results(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
@@ -1369,7 +1925,7 @@ def run_tool_loop(
                 request_completion_guard()
                 continue
             turn.mark_exhausted()
-            return runtime._answer_from_tool_results(
+            return answer_from_tool_results(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_final_delta=on_final_delta,
@@ -1410,10 +1966,16 @@ def _is_exact_canonical_tool_call(tool_call: dict[str, object]) -> bool:
         "fetch_url",
         "list_directory",
         "system_info",
+        "apply_patch",
     }
 
 
-def _tool_call_max_tokens(max_tokens: int, *, mutative: bool, file_recovery: bool = False) -> int:
+def _tool_call_max_tokens(
+    max_tokens: int,
+    *,
+    mutative: bool,
+    file_recovery: bool = False,
+) -> int:
     if file_recovery:
         return resolve_max_tokens("tool_call_file_recovery", max_tokens)
     internal_max = MUTATIVE_TOOL_CALL_MAX_TOKENS if mutative else TOOL_CALL_MAX_TOKENS
@@ -1436,6 +1998,50 @@ def _is_empty_web_search_result(tool_result) -> bool:
     return "web_search_results: true" in lowered and re.search(r"(?m)^results:\s*none\s*$", lowered) is not None
 
 
+def _recent_tool_observations(messages: list[Message]) -> list[str]:
+    observations: list[str] = []
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            observations.append(content)
+        if len(observations) == 2:
+            break
+    observations.reverse()
+    return observations
+
+
+def _with_authoritative_user_request(instruction: str, user_prompt: str | None) -> str:
+    return (
+        f"{instruction}\n\n"
+        "Latest user request (authoritative; compare every explicit requirement):\n"
+        f"{user_prompt or ''}"
+    )
+
+
+def _uses_general_purpose_interpreter(command: str) -> bool:
+    return re.search(r"(?:^|[;&|]\s*)(?:python\d*|node|perl|ruby|sh|bash)\b", command.strip()) is not None
+
+
+def _shell_invokes_registered_tool_name(command: str, registered_tool_names: tuple[str, ...]) -> bool:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    return tokens[0] in set(registered_tool_names)
+
+
+def _tool_call_invokes_registered_tool_name(
+    tool_call: dict[str, object],
+    registered_tool_names: tuple[str, ...],
+) -> bool:
+    command = _shell_command_from_tool_call(tool_call)
+    return bool(command and _shell_invokes_registered_tool_name(command, registered_tool_names))
+
+
 def _last_user_text(messages: list[Message]) -> str | None:
     for message in reversed(messages):
         if message.get("role") != "user":
@@ -1454,6 +2060,16 @@ def _shell_command_from_tool_call(tool_call: dict[str, object]) -> str | None:
     args = parse_tool_arguments_or_empty(function.get("arguments"))
     command = args.get("command") if isinstance(args, dict) else None
     return command if isinstance(command, str) and command.strip() else None
+
+
+def _tool_call_is_mutating(tool_call: dict[str, object]) -> bool:
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        return False
+    if function.get("name") == "apply_patch":
+        return True
+    command = _shell_command_from_tool_call(tool_call)
+    return bool(command and is_mutating_shell_command(command))
 
 
 def _shell_raw_arguments_from_tool_call(tool_call: dict[str, object]) -> str | None:
@@ -1502,25 +2118,43 @@ def _should_guard_existing_file_rewrite(
     *,
     workdir,
     should_nudge_minimal_patch,
+    include_simple_redirects: bool = False,
 ) -> bool:
     command = _shell_command_from_tool_call(tool_call)
     raw_arguments = _shell_raw_arguments_from_tool_call(tool_call)
-    broad_rewrite_seen = _looks_like_preexecution_broad_rewrite(command) or _looks_like_preexecution_broad_rewrite(raw_arguments)
+    broad_rewrite_seen = _looks_like_preexecution_broad_rewrite(
+        command,
+        include_simple_redirects=include_simple_redirects,
+    ) or _looks_like_preexecution_broad_rewrite(
+        raw_arguments,
+        include_simple_redirects=include_simple_redirects,
+    )
     target_source = command or raw_arguments
     if not broad_rewrite_seen or not target_source:
         return False
+    existing_file_rewrite = _targets_existing_file(target_source, workdir=workdir)
+    if not existing_file_rewrite:
+        return False
     return should_nudge_minimal_patch(
         broad_rewrite_seen=True,
-        existing_file_rewrite=_targets_existing_file(target_source, workdir=workdir),
+        existing_file_rewrite=True,
     )
 
 
-def _looks_like_preexecution_broad_rewrite(text: str | None) -> bool:
+def _looks_like_preexecution_broad_rewrite(
+    text: str | None,
+    *,
+    include_simple_redirects: bool = False,
+) -> bool:
     if not text:
         return False
     return bool(
         re.search(r"\bcat\s+<<\s*['\"]?\w+['\"]?\s*>\s*[^\s]+", text)
         or re.search(r"\bcat\s*>\s*[^\s]+\s*<<\s*['\"]?\w+['\"]?", text)
+        or (
+            include_simple_redirects
+            and re.search(r"\b(?:echo|printf)\b[^\n;&|]*?(?<!>)>(?!>)\s*[^\s]+", text)
+        )
         or re.search(r"\btee\b.*\s>\s*", text)
         or re.search(r"\btee\s+(?:-a\s+)?['\"]?[^'\"\s;|&]+", text)
         or re.search(r"\bdd\b.*\bof=", text)
