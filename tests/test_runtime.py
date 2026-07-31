@@ -5,7 +5,6 @@ import unittest
 import tempfile
 import os
 from pathlib import Path
-from shutil import copyfile
 import sys
 from unittest.mock import patch
 
@@ -4139,17 +4138,24 @@ class ToolRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "pdf").mkdir()
-            copyfile(ROOT / "workdir" / "pdf" / "grande.pdf", workdir / "pdf" / "grande.pdf")
+            (workdir / "pdf" / "grande.pdf").write_bytes(b"%PDF-1.4\n")
             backend = PdfRecoveryBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="route system")
 
-            result = runtime.ask_auto(
-                "Read pdf/grande.pdf and summarize the document topic in one concise sentence.",
-                temperature=0,
-                max_tokens=64,
-                workdir=workdir,
-                allowed_tool_names=("exec_shell_full_command",),
-            )
+            with patch(
+                "orbit.runtime.tools.execute_exec_shell_full_command",
+                side_effect=(
+                    "shell_command_failed: true\nexit_code: 127\nSTDOUT:\n\nSTDERR:\npdffind: not found",
+                    "eIDAS regulation and identity proofing\n",
+                ),
+            ):
+                result = runtime.ask_auto(
+                    "Read pdf/grande.pdf and summarize the document topic in one concise sentence.",
+                    temperature=0,
+                    max_tokens=64,
+                    workdir=workdir,
+                    allowed_tool_names=("exec_shell_full_command",),
+                )
 
         self.assertIn("identity proofing", result.content.lower())
         self.assertIsNotNone(backend.guard_messages)
