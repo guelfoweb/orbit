@@ -224,6 +224,72 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("OpenAI is an AI company.", final_rendered)
         self.assertIn("...", final_rendered)
 
+    def test_route_chat_final_respects_explicit_user_max_tokens(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content='{"route":"CHAT"}',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+                ChatResult(
+                    content="A complete long-form answer.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                ),
+            ]
+        )
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_auto(
+            "Tell me about the research lab.",
+            temperature=0,
+            max_tokens=2048,
+            workdir=Path("."),
+        )
+
+        self.assertEqual(result.content, "A complete long-form answer.")
+        self.assertEqual(backend.max_tokens_by_call, [64, 2048])
+
+    def test_tools_off_chat_respects_explicit_user_max_tokens(self) -> None:
+        backend = SequenceBackend(
+            [
+                ChatResult(
+                    content="A complete long-form answer.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    cached_tokens=None,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+            ]
+        )
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+        result = runtime.ask_chat(
+            "Tell me about the research lab.",
+            temperature=0,
+            max_tokens=2048,
+        )
+
+        self.assertEqual(result.content, "A complete long-form answer.")
+        self.assertEqual(backend.max_tokens_by_call, [2048])
+
     def test_post_tool_route_window_excludes_full_history_and_audit_marker(self) -> None:
         raw = "\n".join(f"line-{index}" for index in range(120))
         backend = SequenceBackend(

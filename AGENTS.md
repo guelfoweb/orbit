@@ -253,6 +253,22 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - See `docs/TOOL_LOOP_CONVERGENCE_VALIDATION.md` for the inventory, comparison,
   removal decision, compatibility rationale, and release gates.
 
+## Post-RC24 Chat Output Budget
+
+- A local post-RC24 fix removes the hidden 256-token cap from user-visible chat
+  output. An explicit CLI, JSON, or REPL `max_tokens` value is now authoritative
+  for chat responses, within the existing validated configuration range.
+- Internal route, tool-call, retry, repair, and final-from-tool budgets keep
+  their existing bounded caps. The change does not affect routing, tool
+  selection, backend decoding, or continuation behavior.
+- A real Gemma 4 26B-A4B Q4_0 smoke for `tell me about Google Deepmind` with
+  tools enabled and `max_tokens=2048` used a five-token route decision, then a
+  zero-tool 879-token chat final with `finish_reason=stop`. Before the fix, the
+  final was truncated at 256 tokens and required `/continue`.
+- Focused tests passed 266/266; full discovery passed 1,253/1,253;
+  `compileall` and `git diff --check` passed. The longer response demonstrates
+  correct budget control, not a performance improvement.
+
 ## Post-Tool Final Prose Reuse
 
 - `ORBIT_POST_TOOL_FINAL_REUSE` is enabled by default. Setting it to `0` is the immediate kill switch; setting it to `1` explicitly enables it; invalid values disable the feature safely. Diagnostics report only the bounded effective state and source (`default` or `stable`).

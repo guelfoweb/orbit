@@ -9,7 +9,6 @@ ROUTE_MAX_TOKENS = 64
 TOOL_CALL_MAX_TOKENS = 96
 FILE_RECOVERY_TOOL_CALL_MAX_TOKENS = 64
 CHAT_DEFAULT_MAX_TOKENS = 192
-CHAT_MAX_TOKENS = 256
 
 FINAL_SMALL_MAX_TOKENS = 96
 FINAL_SHELL_ERROR_MAX_TOKENS = 128
@@ -59,7 +58,10 @@ def resolve_max_tokens(
     if kind == "chat":
         if requested is None:
             return CHAT_DEFAULT_MAX_TOKENS
-        return _floor_and_cap(requested, 64, CHAT_MAX_TOKENS)
+        # Chat is user-visible output: an explicit CLI/REPL limit must remain
+        # authoritative. Internal route, tool, retry, and repair phases keep
+        # their separate bounded caps.
+        return max(requested, 64)
     if kind == "final_from_tool":
         return _final_from_tool_tokens(requested, evidence, evidence_chars)
     if kind == "chat_final_retry":

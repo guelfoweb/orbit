@@ -22,10 +22,11 @@ class CompletionBudgetPolicyTests(unittest.TestCase):
         self.assertEqual(resolve_max_tokens("tool_call", 512), 96)
         self.assertEqual(resolve_max_tokens("tool_call_file_recovery", 512), 64)
 
-    def test_chat_budget_respects_requested_with_cap(self) -> None:
+    def test_chat_budget_respects_explicit_user_limit(self) -> None:
         self.assertEqual(resolve_max_tokens("chat"), 192)
         self.assertEqual(resolve_max_tokens("chat", 32), 64)
-        self.assertEqual(resolve_max_tokens("chat", 512), 256)
+        self.assertEqual(resolve_max_tokens("chat", 512), 512)
+        self.assertEqual(resolve_max_tokens("chat", 2048), 2048)
 
     def test_final_from_tool_structural_evidence_budgets(self) -> None:
         self.assertEqual(resolve_max_tokens("final_from_tool", 32, evidence_kind="shell", evidence_chars=80), 96)
