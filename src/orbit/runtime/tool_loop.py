@@ -55,7 +55,6 @@ from orbit.runtime.shell_guardrails import (
     is_mutative_user_request,
     is_repairable_shell_error,
     is_shell_full_contract_error,
-    is_shell_full_read_only_mutation_error,
     is_shell_full_execution_error,
     looks_like_broad_file_rewrite,
     requires_direct_content_evidence,
@@ -669,7 +668,10 @@ def run_tool_loop(
         command = _shell_command_from_tool_call(tool_call)
         raw_arguments = _shell_raw_arguments_from_tool_call(tool_call)
         command_is_mutating = bool(command and is_mutating_shell_command(command))
-        read_only_mutation_rejected = is_shell_full_read_only_mutation_error(tool_result.content)
+        read_only_mutation_rejected = (
+            execution_outcome == "rejected_policy"
+            and execution_reason == "policy_read_only_mutation"
+        )
         command_is_content_evidence = bool(command and is_content_evidence_shell_command(command))
         command_is_url_fetch = bool(
             command

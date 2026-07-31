@@ -11,9 +11,16 @@ from unittest import mock
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
+from orbit.runtime.shell_guardrails import validate_tool_no_mutation_policy
 from orbit.runtime.tool_backends import HybridToolExecutor
 from orbit.runtime.tool_contract import validate_canonical_tool_call
-from orbit.runtime.tools import ToolResult, agent_tool_names, default_tool_names, tool_definitions
+from orbit.runtime.tools import (
+    ToolResult,
+    agent_tool_names,
+    default_tool_names,
+    execute_tool,
+    tool_definitions,
+)
 from orbit.tool_contract_config import resolve_tool_call_canonical_gate
 
 
@@ -118,6 +125,370 @@ class CanonicalToolContractTests(unittest.TestCase):
         self.assertEqual((denied.terminal_decision, denied.rejection_code), ("rejected_permission", "tool_not_enabled"))
         self.assertEqual((read_only.terminal_decision, read_only.rejection_code), ("rejected_policy", "policy_read_only_mutation"))
         self.assertEqual((invalid.terminal_decision, invalid.rejection_code), ("rejected_guardrail", "context_mismatch"))
+
+    def test_apply_patch_obeys_global_and_mixed_constraints_but_ignores_inert_quotes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "item.txt").write_text("before\n", encoding="utf-8")
+            patch = "--- item.txt\n+++ item.txt\n@@ -1 +1 @@\n-before\n+after\n"
+            cases = (
+                ("Analyze without changing any files.", False, "read-only request rejected"),
+                ("Inspect without changing files, then fix item.txt.", False, "mixed or scoped"),
+                ('Change item.txt to contain "without changing any files".', True, None),
+            )
+            for prompt, accepted, message in cases:
+                with self.subTest(prompt=prompt):
+                    decision = validate_canonical_tool_call(
+                        "apply_patch",
+                        {"patch": patch},
+                        tool_definitions=tool_definitions(agent_tool_names()),
+                        allowed_tool_names=agent_tool_names(),
+                        workdir=root,
+                        user_prompt=prompt,
+                    )
+                    self.assertIs(decision.accepted, accepted)
+                    if message is not None:
+                        self.assertIn(message, decision.policy_outcome.message or "")
+
+    def test_explicit_no_mutation_policy_rejects_before_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "orbit.runtime.tool_backends.execute_tool"
+        ) as execute:
+            result = HybridToolExecutor(
+                backend=None,
+                workdir=Path(tmp),
+                allowed_tool_names=default_tool_names(),
+                user_prompt="Analyze the project without changing any files.",
+            ).execute(
+                "exec_shell_full_command",
+                {"command": "cd . && touch marker.txt"},
+                chunk_budget={},
+            )
+
+        self.assertEqual((result.terminal_outcome, result.terminal_reason), ("rejected_policy", "policy_read_only_mutation"))
+        execute.assert_not_called()
+
+    def test_no_mutation_policy_survives_canonical_and_healing_kill_switches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "item.txt"
+            patch = "--- item.txt\n+++ item.txt\n@@ -1 +1 @@\n-before\n+after\n"
+            for gate in ("0", "1"):
+                for healing in ("0", "1"):
+                    with self.subTest(gate=gate, healing=healing), mock.patch.dict(
+                        os.environ,
+                        {
+                            "ORBIT_TOOL_CALL_CANONICAL_GATE": gate,
+                            "ORBIT_TOOL_CALL_HEALING": healing,
+                        },
+                        clear=False,
+                    ):
+                        target.write_text("before\n", encoding="utf-8")
+                        executor = HybridToolExecutor(
+                            backend=None,
+                            workdir=root,
+                            allowed_tool_names=agent_tool_names(),
+                            user_prompt="Analyze without changing any files.",
+                        )
+                        shell = executor.execute(
+                            "exec_shell_full_command",
+                            {"command": "cat README.md"},
+                            chunk_budget={},
+                        )
+                        applied = executor.execute(
+                            "apply_patch",
+                            {"patch": patch},
+                            chunk_budget={},
+                        )
+
+                        self.assertEqual(
+                            (shell.terminal_outcome, shell.terminal_reason),
+                            ("rejected_policy", "policy_read_only_mutation"),
+                        )
+                        self.assertEqual(
+                            (applied.terminal_outcome, applied.terminal_reason),
+                            ("rejected_policy", "policy_read_only_mutation"),
+                        )
+                        self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+
+    def test_common_global_forms_are_enforced_with_canonical_gate_on_and_off(self) -> None:
+        prompts = (
+            "Keep all files unchanged.",
+            "Files must not be modified.",
+            "Please refrain from changing files.",
+            "Never modify files.",
+            "You must not modify files.",
+            "Avoid modifying files.",
+            "Don\u2019t modify files.",
+            "Without altering files, report what you find.",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for gate in ("0", "1"):
+                for prompt in prompts:
+                    with self.subTest(gate=gate, prompt=prompt), mock.patch.dict(
+                        os.environ,
+                        {"ORBIT_TOOL_CALL_CANONICAL_GATE": gate},
+                        clear=False,
+                    ):
+                        result = HybridToolExecutor(
+                            backend=None,
+                            workdir=root,
+                            allowed_tool_names=default_tool_names(),
+                            user_prompt=prompt,
+                        ).execute(
+                            "exec_shell_full_command",
+                            {"command": "touch marker.txt"},
+                            chunk_budget={},
+                        )
+
+                        self.assertEqual(result.terminal_outcome, "rejected_policy")
+                        self.assertFalse((root / "marker.txt").exists())
+
+    def test_descriptive_no_changes_text_allows_mutation_with_gate_on_or_off(self) -> None:
+        prompt = "There are no file changes in the current status. Create report.txt."
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for gate in ("0", "1"):
+                with self.subTest(gate=gate), mock.patch.dict(
+                    os.environ,
+                    {"ORBIT_TOOL_CALL_CANONICAL_GATE": gate},
+                    clear=False,
+                ):
+                    marker = root / "marker.txt"
+                    marker.unlink(missing_ok=True)
+                    result = HybridToolExecutor(
+                        backend=None,
+                        workdir=root,
+                        allowed_tool_names=default_tool_names(),
+                        user_prompt=prompt,
+                    ).execute(
+                        "exec_shell_full_command",
+                        {"command": "printf report > marker.txt"},
+                        chunk_budget={},
+                    )
+
+                    self.assertEqual(result.terminal_outcome, "executed")
+                    self.assertEqual(marker.read_text(encoding="utf-8"), "report")
+
+    def test_ambiguous_markdown_lists_fail_closed_with_gate_on_or_off(self) -> None:
+        prompts = (
+            "Use the following bullets:\n- Do not modify files.\n- Delete old.txt.",
+            "Create report.md with the following bullets:\n- do not modify files",
+            "Generate report.md with the following bullets:\n- do not modify files",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for gate in ("0", "1"):
+                for prompt in prompts:
+                    with self.subTest(gate=gate, prompt=prompt), mock.patch.dict(
+                        os.environ,
+                        {"ORBIT_TOOL_CALL_CANONICAL_GATE": gate},
+                        clear=False,
+                    ):
+                        marker = root / "marker.txt"
+                        marker.unlink(missing_ok=True)
+                        result = HybridToolExecutor(
+                            backend=None,
+                            workdir=root,
+                            allowed_tool_names=default_tool_names(),
+                            user_prompt=prompt,
+                        ).execute(
+                            "exec_shell_full_command",
+                            {"command": "printf unsafe > marker.txt"},
+                            chunk_budget={},
+                        )
+
+                        self.assertEqual(
+                            (result.terminal_outcome, result.terminal_reason),
+                            ("rejected_policy", "policy_read_only_mutation"),
+                        )
+                        self.assertIn("mixed or scoped mutation constraint", result.result.content)
+                        self.assertFalse(marker.exists())
+
+    def test_markdown_payload_headers_do_not_block_mutation_with_gate_on_or_off(self) -> None:
+        prompts = (
+            "Here is a Markdown example:\n- do not modify files",
+            "The following Markdown payload:\n- do not modify files",
+            "Copy the following Markdown into report.md:\n- do not modify files",
+            "Output this Markdown:\n- do not modify files",
+            "Return this Markdown:\n- do not modify files",
+            "Provide this Markdown:\n- do not modify files",
+            "Put this Markdown in report.md:\n- do not modify files",
+            "Use the following Markdown payload:\n- do not modify files",
+            "Replace report.md with this content:\n- do not modify files",
+            "Append the following content to report.md:\n- do not modify files",
+            "Paste this Markdown into report.md:\n- do not modify files",
+            "Create report.txt with this payload:\ndo not modify files",
+            "Create quote.txt containing \u201cdo not modify files\u201d.",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for gate in ("0", "1"):
+                for prompt in prompts:
+                    with self.subTest(gate=gate, prompt=prompt), mock.patch.dict(
+                        os.environ,
+                        {"ORBIT_TOOL_CALL_CANONICAL_GATE": gate},
+                        clear=False,
+                    ):
+                        marker = root / "marker.txt"
+                        marker.unlink(missing_ok=True)
+                        result = HybridToolExecutor(
+                            backend=None,
+                            workdir=root,
+                            allowed_tool_names=default_tool_names(),
+                            user_prompt=prompt,
+                        ).execute(
+                            "exec_shell_full_command",
+                            {"command": "printf created > marker.txt"},
+                            chunk_budget={},
+                        )
+
+                        self.assertEqual(result.terminal_outcome, "executed")
+                        self.assertEqual(marker.read_text(encoding="utf-8"), "created")
+
+    def test_no_mutation_policy_covers_agent_non_agent_and_direct_executor_paths(self) -> None:
+        prompt = "Inspect the project without changing any files."
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "item.txt"
+            target.write_text("before\n", encoding="utf-8")
+            patch = "--- item.txt\n+++ item.txt\n@@ -1 +1 @@\n-before\n+after\n"
+
+            for allowed in (default_tool_names(), agent_tool_names()):
+                with self.subTest(allowed=allowed):
+                    result = HybridToolExecutor(
+                        backend=None,
+                        workdir=root,
+                        allowed_tool_names=allowed,
+                        user_prompt=prompt,
+                    ).execute(
+                        "exec_shell_full_command",
+                        {"command": "printf bypass > marker.txt"},
+                        chunk_budget={},
+                    )
+                    self.assertEqual(result.terminal_outcome, "rejected_policy")
+                    self.assertFalse((root / "marker.txt").exists())
+
+            direct_shell = execute_tool(
+                "exec_shell_full_command",
+                {"command": "printf bypass > marker.txt"},
+                workdir=root,
+                user_prompt=prompt,
+            )
+            direct_patch = execute_tool(
+                "apply_patch",
+                {"patch": patch},
+                workdir=root,
+                user_prompt=prompt,
+            )
+
+            self.assertIn("unrestricted shell command", direct_shell.content)
+            self.assertIn("read-only request rejected file patch", direct_patch.content)
+            self.assertFalse((root / "marker.txt").exists())
+            self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+
+    def test_shell_bypass_matrix_never_reaches_direct_dispatch(self) -> None:
+        commands = (
+            "./cat README.md",
+            "/bin/cat README.md",
+            "env cat README.md",
+            "command cat README.md",
+            "sed -n 'w marker.txt' README.md",
+            "sed -i 's/a/b/' README.md",
+            "git diff --output=marker",
+            "find . -exec touch marker.txt ';'",
+            "printf marker | xargs touch",
+            "python3 -c 'open(\"marker.txt\", \"w\").write(\"x\")'",
+            "cat $(touch marker.txt)",
+            "cat README.md > copy.txt",
+            "grep Orbit README.md | tee copy.txt",
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "orbit.runtime.tools.execute_exec_shell_full_command"
+        ) as shell:
+            root = Path(tmp)
+            for command in commands:
+                with self.subTest(command=command):
+                    result = execute_tool(
+                        "exec_shell_full_command",
+                        {"command": command},
+                        workdir=root,
+                        user_prompt="Analyze without changing any files.",
+                    )
+                    self.assertIn("unrestricted shell command", result.content)
+
+            shell.assert_not_called()
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_structured_read_only_tools_remain_available_under_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "item.txt").write_text("content\n", encoding="utf-8")
+            executor = HybridToolExecutor(
+                backend=None,
+                workdir=root,
+                allowed_tool_names=default_tool_names(),
+                user_prompt="Inspect without changing any files.",
+            )
+
+            listing = executor.execute("list_directory", {"path": "."}, chunk_budget={})
+            system = executor.execute("system_info", {}, chunk_budget={})
+
+            self.assertEqual((listing.terminal_outcome, system.terminal_outcome), ("executed", "executed"))
+            self.assertIn("item.txt", listing.result.content)
+            self.assertIn("OS:", system.result.content)
+
+    def test_tool_output_text_cannot_activate_no_mutation_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "orbit.runtime.tool_backends.execute_tool",
+            side_effect=(
+                ToolResult(name="exec_shell_full_command", content="without changing any files"),
+                ToolResult(name="exec_shell_full_command", content="created"),
+            ),
+        ) as execute:
+            executor = HybridToolExecutor(
+                backend=None,
+                workdir=Path(tmp),
+                allowed_tool_names=default_tool_names(),
+                user_prompt="Create marker.txt after reading the prior output.",
+            )
+            first = executor.execute(
+                "exec_shell_full_command",
+                {"command": "printf observation"},
+                chunk_budget={},
+            )
+            second = executor.execute(
+                "exec_shell_full_command",
+                {"command": "touch marker.txt"},
+                chunk_budget={},
+            )
+
+        self.assertEqual((first.terminal_outcome, second.terminal_outcome), ("executed", "executed"))
+        self.assertEqual(execute.call_count, 2)
+
+    def test_tool_output_prefix_is_never_reclassified_as_policy(self) -> None:
+        content = "error: read-only request rejected unrestricted shell command"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "orbit.runtime.tool_backends.execute_tool",
+            return_value=ToolResult(name="exec_shell_full_command", content=content),
+        ):
+            result = HybridToolExecutor(
+                backend=None,
+                workdir=Path(tmp),
+                allowed_tool_names=default_tool_names(),
+                user_prompt="Create marker.txt.",
+            ).execute(
+                "exec_shell_full_command",
+                {"command": "printf changed > marker.txt"},
+                chunk_budget={},
+            )
+
+        self.assertEqual(
+            (result.terminal_outcome, result.terminal_reason),
+            ("runtime_error", "tool_error"),
+        )
+        self.assertEqual(result.result.content, content)
 
     def test_api_reports_stage_outcomes_and_stable_rejections(self) -> None:
         cases = (
@@ -415,19 +786,19 @@ class CanonicalToolContractTests(unittest.TestCase):
         self.assertEqual(error.terminal_outcome, "runtime_error")
         self.assertEqual((policy.terminal_outcome, policy.terminal_reason), ("rejected_policy", "policy_read_only_mutation"))
 
-    def test_gate_reuses_shell_policy_once_before_execution(self) -> None:
+    def test_gate_and_dispatch_use_the_same_shell_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {"ORBIT_TOOL_CALL_CANONICAL_GATE": "1"}, clear=False
         ), mock.patch(
-            "orbit.runtime.tool_contract.validate_read_only_shell_mutation",
-            return_value=None,
-        ) as read_only, mock.patch(
+            "orbit.runtime.tool_contract.validate_tool_no_mutation_policy",
+            wraps=validate_tool_no_mutation_policy,
+        ) as no_mutation, mock.patch(
             "orbit.runtime.tool_contract.validate_shell_full_contract",
             return_value=None,
         ) as contract, mock.patch(
-            "orbit.runtime.tool_backends.execute_tool",
-            return_value=ToolResult("exec_shell_full_command", "ok"),
-        ):
+            "orbit.runtime.tools.validate_tool_no_mutation_policy",
+            wraps=validate_tool_no_mutation_policy,
+        ) as executor_policy:
             result = HybridToolExecutor(
                 backend=None,
                 workdir=Path(tmp),
@@ -436,8 +807,30 @@ class CanonicalToolContractTests(unittest.TestCase):
             ).execute("exec_shell_full_command", {"command": "printf ok"}, chunk_budget={})
 
         self.assertEqual(result.terminal_outcome, "executed")
-        read_only.assert_called_once()
+        no_mutation.assert_called_once()
         contract.assert_called_once()
+        executor_policy.assert_called_once()
+
+    def test_legacy_path_and_dispatch_use_the_same_shell_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"ORBIT_TOOL_CALL_CANONICAL_GATE": "0"}, clear=False
+        ), mock.patch(
+            "orbit.runtime.tool_backends.validate_tool_no_mutation_policy",
+            wraps=validate_tool_no_mutation_policy,
+        ) as no_mutation, mock.patch(
+            "orbit.runtime.tools.validate_tool_no_mutation_policy",
+            wraps=validate_tool_no_mutation_policy,
+        ) as executor_policy:
+            result = HybridToolExecutor(
+                backend=None,
+                workdir=Path(tmp),
+                allowed_tool_names=("exec_shell_full_command",),
+                user_prompt="run printf ok",
+            ).execute("exec_shell_full_command", {"command": "printf ok"}, chunk_budget={})
+
+        self.assertEqual(result.terminal_outcome, "executed")
+        no_mutation.assert_called_once()
+        executor_policy.assert_called_once()
 
     def test_runtime_preflight_is_the_only_canonical_validation(self) -> None:
         class Backend:

@@ -6,7 +6,11 @@ from typing import Any
 
 from orbit.runtime.directory_listing import execute_list_directory, list_directory_definition
 from orbit.runtime.file_patch import apply_patch_definition, execute_apply_patch
-from orbit.runtime.shell_guardrails import exec_shell_full_definition, execute_exec_shell_full_command
+from orbit.runtime.shell_guardrails import (
+    exec_shell_full_definition,
+    execute_exec_shell_full_command,
+    validate_tool_no_mutation_policy,
+)
 from orbit.runtime.system_info import execute_system_info, system_info_definition
 from orbit.runtime.tool_arguments import parse_tool_arguments
 from orbit.runtime.web import execute_fetch_url, fetch_url_definition
@@ -67,6 +71,9 @@ def execute_tool(
     parsed = parse_tool_arguments(arguments)
     if isinstance(parsed, str):
         return ToolResult(name=name, content=parsed)
+    policy_error = validate_tool_no_mutation_policy(name, parsed, user_prompt=user_prompt)
+    if policy_error:
+        return ToolResult(name=name, content=policy_error)
     if name == "fetch_url":
         return ToolResult(name=name, content=execute_fetch_url(parsed))
     if name == "list_directory":
