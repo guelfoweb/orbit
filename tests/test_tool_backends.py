@@ -23,6 +23,7 @@ from orbit.runtime.shell_guardrails import (
     looks_like_transfer_progress_only,
     looks_like_url_content_evidence,
     looks_like_url_fetch_failure,
+    requires_direct_content_evidence,
     validate_shell_full_contract,
 )
 
@@ -52,14 +53,18 @@ class FakeServerTools:
 
 
 class HybridToolExecutorTests(unittest.TestCase):
-    def test_shell_full_contract_rejects_metadata_only_analysis_in_italian(self) -> None:
+    def test_shell_full_contract_allows_intermediate_metadata_analysis_in_italian(self) -> None:
         error = validate_shell_full_contract(
             {"command": "ls -F pdf/"},
             user_prompt='analizza intero documento PDF nella cartella "pdf/RELAZIONE TECNICA 1.pdf" e fammi una sintesi dettagliata',
         )
 
-        self.assertIsNotNone(error)
-        self.assertTrue(error.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX))
+        self.assertIsNone(error)
+        self.assertTrue(
+            requires_direct_content_evidence(
+                'analizza intero documento PDF nella cartella "pdf/RELAZIONE TECNICA 1.pdf" e fammi una sintesi dettagliata'
+            )
+        )
 
     def test_shell_full_contract_allows_content_evidence_analysis_in_italian(self) -> None:
         error = validate_shell_full_contract(
@@ -87,6 +92,8 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("explicit URL content requests", description)
         self.assertIn("fetch_url", description)
         self.assertIn("Quote paths containing spaces", description)
+        self.assertIn("Each invocation starts in a fresh shell at workdir", description)
+        self.assertIn("directory changes do not persist", description)
 
     def test_ignores_server_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,8 +355,11 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertEqual(execution.source, "orbit")
         self.assertIn("tool not available", execution.result.content)
 
-    def test_exec_shell_full_blocks_metadata_only_analysis_command(self) -> None:
+    def test_exec_shell_full_allows_metadata_only_analysis_as_intermediate_observation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples"
+            samples.mkdir()
+            (samples / "vulnerable_service.py").write_text("print('sample')\n", encoding="utf-8")
             executor = HybridToolExecutor(
                 backend=FakeServerTools(),
                 workdir=Path(tmp),
@@ -364,7 +374,8 @@ class HybridToolExecutorTests(unittest.TestCase):
             )
 
         self.assertEqual(execution.source, "orbit")
-        self.assertIn("require content/source/string evidence", execution.result.content)
+        self.assertIn("vulnerable_service.py", execution.result.content)
+        self.assertNotIn(SHELL_FULL_CONTRACT_ERROR_PREFIX, execution.result.content)
 
     def test_validate_shell_full_contract_rejects_explicit_url_without_fetch(self) -> None:
         error = validate_shell_full_contract(

@@ -43,7 +43,6 @@ from orbit.runtime.tool_healing import tool_call_healing_status
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 12120
-DEFAULT_ALIAS = "gemma4:12b-it-native"
 PREFIX_PREWARM_ENV = "ORBIT_KV_PREFIX_PREWARM"
 PREFIX_PREWARM_OFF = "off"
 PREFIX_PREWARM_STARTUP = "startup"
@@ -615,8 +614,10 @@ def run_server(argv: list[str] | None = None) -> int:
         print(_format_native_bootstrap_error(exc), file=sys.stderr)
         return 1
 
+    model_alias = resolve_model_alias(args.alias, paths)
     httpd = ThreadingHTTPServer((args.host, args.port), OrbitNativeHandler)
-    httpd.orbit_state = OrbitNativeServer(client=client, model_alias=args.alias)  # type: ignore[attr-defined]
+    httpd.orbit_state = OrbitNativeServer(client=client, model_alias=model_alias)  # type: ignore[attr-defined]
+    print(f"orbit-server model: {model_alias}", flush=True)
     print(f"orbit-server listening on http://{args.host}:{args.port}", flush=True)
     try:
         httpd.serve_forever()
@@ -758,7 +759,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mmproj", type=Path, help="Optional multimodal projector override for native image/audio support.")
     parser.add_argument("--models-dir", type=Path, help="Orbit local models directory.")
     parser.add_argument("--hf-cache", type=Path, help="Hugging Face cache root fallback.")
-    parser.add_argument("--alias", default=DEFAULT_ALIAS)
+    parser.add_argument("--alias", help="Model name exposed by the server. Defaults to the exact GGUF filename.")
     parser.add_argument("--ctx", type=int, default=8192)
     parser.add_argument("--threads", type=int, default=6)
     parser.add_argument("--threads-batch", type=int, default=6)
@@ -799,6 +800,10 @@ def resolve_bootstrap_paths(args: argparse.Namespace) -> NativeLlamaPaths:
         models_dir=args.models_dir,
         hf_cache=args.hf_cache,
     )
+
+
+def resolve_model_alias(alias: str | None, paths: NativeLlamaPaths) -> str:
+    return alias or paths.model.name
 
 
 def _format_native_bootstrap_error(exc: Exception) -> str:

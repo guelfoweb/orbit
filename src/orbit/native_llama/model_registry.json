@@ -2,26 +2,26 @@
   "version": 1,
   "models": [
     {
-      "id": "gemma4-12b-it-q4km",
+      "id": "gemma4-26b-a4b-it-q40",
       "backend": "native-llama",
       "architecture": "gemma4",
       "target": {
-        "repo": "ggml-org/gemma-4-12B-it-GGUF",
-        "file": "gemma-4-12B-it-Q4_K_M.gguf",
-        "cache_glob": "models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/gemma-4-12B-it-Q4_K_M.gguf"
+        "repo": "ggml-org/gemma-4-26B-A4B-it-GGUF",
+        "file": "gemma-4-26B-A4B-it-Q4_0.gguf",
+        "cache_glob": "models--ggml-org--gemma-4-26B-A4B-it-GGUF/snapshots/*/gemma-4-26B-A4B-it-Q4_0.gguf"
       },
       "mmproj": {
-        "repo": "ggml-org/gemma-4-12B-it-GGUF",
-        "file": "mmproj-gemma-4-12B-it-Q8_0.gguf",
-        "cache_glob": "models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*/mmproj-gemma-4-12B-it-Q8_0.gguf"
+        "repo": "ggml-org/gemma-4-26B-A4B-it-GGUF",
+        "file": "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf",
+        "cache_glob": "models--ggml-org--gemma-4-26B-A4B-it-GGUF/snapshots/*/mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
       },
       "mtp": {
         "enabled_by_default": true,
         "required": false,
         "spec_type": "draft-mtp",
-        "repo": "unsloth/gemma-4-12b-it-GGUF",
-        "file": "MTP/gemma-4-12b-it-Q8_0-MTP.gguf",
-        "cache_glob": "models--unsloth--gemma-4-12b-it-GGUF/snapshots/*/MTP/gemma-4-12b-it-Q8_0-MTP.gguf"
+        "repo": "ggml-org/gemma-4-26B-A4B-it-GGUF",
+        "file": "mtp-gemma-4-26B-A4B-it-Q4_0.gguf",
+        "cache_glob": "models--ggml-org--gemma-4-26B-A4B-it-GGUF/snapshots/*/mtp-gemma-4-26B-A4B-it-Q4_0.gguf"
       }
     }
   ]

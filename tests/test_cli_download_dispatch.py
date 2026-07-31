@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 
 from orbit.terminal import cli
 from orbit.native_llama import download_cli
+from orbit.native_llama.download_cli import _DownloadProgress
 
 
 class CliDownloadDispatchTests(unittest.TestCase):
@@ -30,10 +31,10 @@ class CliDownloadDispatchTests(unittest.TestCase):
 
     def test_main_dispatches_download_subcommand(self) -> None:
         with mock.patch("orbit.terminal.cli.native_download_main", return_value=7) as mocked:
-            code = cli.main(["download", "--mmproj", "ggml-org/gemma-4-12B-it-GGUF"])
+            code = cli.main(["download", "--mmproj", "ggml-org/gemma-4-26B-A4B-it-GGUF"])
 
         self.assertEqual(code, 7)
-        mocked.assert_called_once_with(["download", "--mmproj", "ggml-org/gemma-4-12B-it-GGUF"])
+        mocked.assert_called_once_with(["download", "--mmproj", "ggml-org/gemma-4-26B-A4B-it-GGUF"])
 
     def test_main_dispatches_server_subcommand(self) -> None:
         with mock.patch("orbit.terminal.cli.run_server", return_value=11) as mocked:
@@ -65,7 +66,11 @@ class CliDownloadDispatchTests(unittest.TestCase):
             code = download_cli._download(args)
 
         self.assertEqual(code, 0)
-        mocked.assert_called_once_with("ggml-org/gemma-4-12B-it-GGUF", models_dir=mock.ANY)
+        mocked.assert_called_once_with(
+            "ggml-org/gemma-4-26B-A4B-it-GGUF",
+            models_dir=mock.ANY,
+            progress=mock.ANY,
+        )
 
     def test_download_without_spec_fails_when_not_all(self) -> None:
         args = download_cli.build_parser().parse_args([])
@@ -76,6 +81,21 @@ class CliDownloadDispatchTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("expected Hugging Face repo or repo/file", stream.getvalue())
+
+    def test_download_progress_prints_percentages(self) -> None:
+        stream = io.StringIO()
+        progress = _DownloadProgress()
+
+        with contextlib.redirect_stdout(stream):
+            progress(0, 100)
+            progress(50, 100)
+            progress(100, 100)
+            progress.finish()
+
+        output = stream.getvalue()
+        self.assertIn("download:   0%", output)
+        self.assertIn("download:  50%", output)
+        self.assertIn("download: 100%", output)
 
 
 if __name__ == "__main__":

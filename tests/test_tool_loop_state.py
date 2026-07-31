@@ -56,6 +56,30 @@ class ToolLoopStateTests(unittest.TestCase):
         self.assertEqual(signature[0], "read_file")
         self.assertTrue(state.has_seen_tool_call(tool_call))
 
+    def test_mutation_epoch_reopens_observations_but_keeps_mutation_blocked(self) -> None:
+        state = ToolLoopState(("exec_shell_full_command",))
+        read_call = {
+            "id": "read-1",
+            "function": {
+                "name": "exec_shell_full_command",
+                "arguments": {"command": "cat note.txt"},
+            },
+        }
+        mutation_call = {
+            "id": "write-1",
+            "function": {
+                "name": "exec_shell_full_command",
+                "arguments": {"command": "printf changed > note.txt"},
+            },
+        }
+        state.mark_tool_call(read_call)
+        state.mark_tool_call(mutation_call)
+
+        state.advance_after_mutation(mutation_call)
+
+        self.assertFalse(state.has_seen_tool_call(read_call))
+        self.assertTrue(state.has_seen_tool_call(mutation_call))
+
     def test_mutative_tool_call_budget_is_separate_and_bounded(self) -> None:
         original_mutative = tool_loop.MUTATIVE_TOOL_CALL_MAX_TOKENS
         original_file_recovery = tool_loop.FILE_RECOVERY_TOOL_CALL_MAX_TOKENS

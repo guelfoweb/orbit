@@ -12,6 +12,7 @@ from unittest import mock
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
 from orbit.runtime.tool_backends import HybridToolExecutor
+from orbit.runtime.shell_guardrails import validate_tool_no_mutation_policy
 from orbit.runtime.tool_contract import validate_canonical_tool_call
 from orbit.runtime.tools import ToolResult, default_tool_names, tool_definitions
 from orbit.tool_contract_config import resolve_tool_call_canonical_gate
@@ -366,13 +367,13 @@ class CanonicalToolContractTests(unittest.TestCase):
         self.assertEqual(error.terminal_outcome, "runtime_error")
         self.assertEqual((policy.terminal_outcome, policy.terminal_reason), ("rejected_policy", "policy_read_only_mutation"))
 
-    def test_gate_reuses_shell_policy_once_before_execution(self) -> None:
+    def test_gate_and_dispatch_use_the_same_shell_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {"ORBIT_TOOL_CALL_CANONICAL_GATE": "1"}, clear=False
         ), mock.patch(
-            "orbit.runtime.tool_contract.validate_read_only_shell_mutation",
-            return_value=None,
-        ) as read_only, mock.patch(
+            "orbit.runtime.tool_contract.validate_tool_no_mutation_policy",
+            wraps=validate_tool_no_mutation_policy,
+        ) as no_mutation, mock.patch(
             "orbit.runtime.tool_contract.validate_shell_full_contract",
             return_value=None,
         ) as contract, mock.patch(
@@ -387,8 +388,50 @@ class CanonicalToolContractTests(unittest.TestCase):
             ).execute("exec_shell_full_command", {"command": "printf ok"}, chunk_budget={})
 
         self.assertEqual(result.terminal_outcome, "executed")
-        read_only.assert_called_once()
+        no_mutation.assert_called_once()
         contract.assert_called_once()
+
+    def test_explicit_no_mutation_policy_survives_canonical_kill_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for gate in ("0", "1"):
+                with self.subTest(gate=gate), mock.patch.dict(
+                    os.environ,
+                    {"ORBIT_TOOL_CALL_CANONICAL_GATE": gate},
+                    clear=False,
+                ):
+                    marker = root / "marker.txt"
+                    marker.unlink(missing_ok=True)
+                    result = HybridToolExecutor(
+                        backend=None,
+                        workdir=root,
+                        allowed_tool_names=default_tool_names(),
+                        user_prompt="Analyze without changing any files.",
+                    ).execute(
+                        "exec_shell_full_command",
+                        {"command": "printf unsafe > marker.txt"},
+                        chunk_budget={},
+                    )
+
+                    self.assertEqual(
+                        (result.terminal_outcome, result.terminal_reason),
+                        ("rejected_policy", "policy_read_only_mutation"),
+                    )
+                    self.assertFalse(marker.exists())
+
+    def test_structured_read_only_tool_remains_available_under_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "item.txt").write_text("content\n", encoding="utf-8")
+            result = HybridToolExecutor(
+                backend=None,
+                workdir=root,
+                allowed_tool_names=default_tool_names(),
+                user_prompt="Inspect without changing any files.",
+            ).execute("list_directory", {"path": "."}, chunk_budget={})
+
+        self.assertEqual(result.terminal_outcome, "executed")
+        self.assertIn("item.txt", result.result.content)
 
     def test_runtime_preflight_is_the_only_canonical_validation(self) -> None:
         class Backend:

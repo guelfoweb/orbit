@@ -10,7 +10,7 @@ HOME_DIR="$(mktemp -d)" HOME="$HOME_DIR" .venv/bin/orbit \
   --workdir workdir
 ```
 
-Tools are opt-in:
+Tools are enabled by default. Disable them for chat-only or untrusted prompts:
 
 ```text
 /tools off = chat only

@@ -12,8 +12,8 @@ from orbit.runtime.path_guardrails import resolve_inside_workdir
 from orbit.runtime.shell_guardrails import (
     MAX_SHELL_OUTPUT_BYTES,
     MAX_SHELL_TIMEOUT,
-    validate_read_only_shell_mutation,
     validate_shell_full_contract,
+    validate_tool_no_mutation_policy,
 )
 from orbit.runtime.web import MAX_FETCH_MAX_BYTES, MAX_FETCH_TIMEOUT_SECONDS
 
@@ -198,7 +198,7 @@ def _policy_and_operational(
             shlex.split(command)
         except ValueError:
             return neutral, ContractStageOutcome(False, "invalid_shell_syntax", "arguments.command")
-        policy_error = validate_read_only_shell_mutation(arguments, user_prompt=user_prompt)
+        policy_error = validate_tool_no_mutation_policy(name, arguments, user_prompt=user_prompt)
         if policy_error:
             return ContractStageOutcome(
                 False,

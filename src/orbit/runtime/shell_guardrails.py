@@ -29,6 +29,7 @@ SHELL_FAILURE_STREAM_CHARS = 1200
 SHELL_READ_FILE_THRESHOLD_BYTES = 8 * 1024
 SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
 SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX = "error: read-only request rejected mutating shell command"
+SHELL_FULL_MIXED_MUTATION_ERROR_PREFIX = "error: mixed or scoped mutation constraint rejected mutating shell command"
 SHELL_FULL_CONTRACT_RETRY_PROMPT = (
     "The previous shell-full command was rejected because it only listed metadata. "
     "Use the available exec_shell_full_command tool now to inspect source/content/string evidence. "
@@ -42,13 +43,13 @@ SHELL_FULL_READ_ONLY_MUTATION_RETRY_PROMPT = (
     '{"command":"..."}'
 )
 SHELL_FULL_CONTENT_EVIDENCE_GUARD_PROMPT = (
-    "Your previous command inspected only metadata or listings.\n\n"
-    "For this task, inspect real file, document, source, string, or test content before continuing.\n\n"
-    "Use commands such as cat, sed -n, grep/rg on file contents, or test output.\n"
-    "For PDFs, prefer pdftotext <file> - piped to sed, head, tail, or grep.\n\n"
-    "If file names are unknown, use grep/rg recursively over file contents.\n\n"
-    "Do not use ls, find, tree, file, or stat.\n\n"
-    "Return only JSON:\n\n"
+    "The latest request is not complete: only metadata or listing evidence is available.\n\n"
+    "Re-evaluate the original request and choose the next concrete action. "
+    "If required artifacts do not exist, create them first. "
+    "Otherwise inspect direct file, source, string, document, or test-output evidence.\n\n"
+    "Do not repeat metadata-only discovery. Each shell call starts in the workdir, "
+    "so use explicit paths instead of relying on a previous cd.\n\n"
+    "Return only one tool call:\n\n"
     '{"command":"..."}'
 )
 SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT = (
@@ -86,10 +87,10 @@ SHELL_FULL_FILE_RECOVERY_GUARD_PROMPT_PREFIX = (
     '{"command":"..."}'
 )
 SHELL_FULL_MINIMAL_PATCH_GUARD_PROMPT = (
-    "Your previous command tried to rewrite too much and was too long or incomplete.\n\n"
-    "Use a minimal local patch to modify only the necessary lines.\n\n"
-    "Do not use heredocs, cat > file, tee, or full-file rewrites for existing files.\n\n"
-    "Use a short command that changes only the needed lines.\n\n"
+    "The previous tool call was too long, incomplete, or attempted too much at once.\n\n"
+    "Continue with one short self-contained command for only the next concrete action. "
+    "Do not encode the whole workflow in one command. Modify only the necessary lines.\n\n"
+    "Each shell call starts in the workdir, so use explicit paths instead of relying on a previous cd.\n\n"
     "Return only JSON:\n\n"
     '{"command":"..."}'
 )
@@ -183,6 +184,99 @@ _NEGATED_MUTATION_PROMPT_RE = re.compile(
     r"\b(?:do\s+not|don't|without)\s+(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
 )
+_NO_MUTATION_OBJECT = (
+    r"(?:(?:all|any|the)\s+)?"
+    r"(?:(?:local|project|repository|source)\s+)?"
+    r"(?:files?|filesystem|worktree|repository|project|data|state|anything)"
+)
+_NO_MUTATION_VERB = r"(?:alter|change|create|delete|edit|modify|remove|rename|touch|write)"
+_NO_MUTATION_GERUND = (
+    r"(?:altering|changing|creating|deleting|editing|modifying|removing|renaming|touching|writing)"
+)
+_NO_MUTATION_VERB_SEQUENCE = (
+    rf"{_NO_MUTATION_VERB}(?:\s*,\s*{_NO_MUTATION_VERB})*"
+    rf"(?:\s*,?\s*(?:and|or)\s+{_NO_MUTATION_VERB})?"
+)
+_NO_MUTATION_GERUND_SEQUENCE = (
+    rf"{_NO_MUTATION_GERUND}(?:\s*,\s*{_NO_MUTATION_GERUND})*"
+    rf"(?:\s*,?\s*(?:and|or)\s+{_NO_MUTATION_GERUND})?"
+)
+_NO_MUTATION_PAST = (
+    r"(?:altered|changed|created|deleted|edited|modified|removed|renamed|touched|written)"
+)
+_GLOBAL_NO_MUTATION_CONSTRAINT_RE = re.compile(
+    rf"\b(?:"
+    rf"(?:do\s+not|don't|(?:you\s+)?must\s+not|never)\s+(?:"
+    rf"(?:make|perform)\s+(?:any\s+)?(?:file\s+)?(?:changes?|modifications?)"
+    rf"(?:\s+to\s+{_NO_MUTATION_OBJECT})?"
+    rf"|{_NO_MUTATION_VERB_SEQUENCE}\s+{_NO_MUTATION_OBJECT})"
+    rf"|(?:avoid|(?:please\s+)?refrain\s+from|without)\s+(?:"
+    rf"making\s+(?:any\s+)?(?:file\s+)?(?:changes?|modifications?)"
+    rf"|{_NO_MUTATION_GERUND_SEQUENCE}\s+{_NO_MUTATION_OBJECT})"
+    rf"|make\s+no\s+(?:file\s+)?(?:changes?|modifications?)"
+    rf"(?:\s+to\s+{_NO_MUTATION_OBJECT})?"
+    rf"|(?:keep|leave)\s+{_NO_MUTATION_OBJECT}(?=.{{0,80}}\bunchanged\b)"
+    rf"|{_NO_MUTATION_OBJECT}\s+(?:must|should)\s+not\s+be\s+{_NO_MUTATION_PAST}"
+    rf"|{_NO_MUTATION_OBJECT}\s+must\s+(?:remain|stay)\s+unchanged"
+    rf")\b",
+    re.IGNORECASE,
+)
+_READ_ONLY_PHASE_RE = re.compile(r"\b(?:analy[sz]e|inspect|read)\s+only\b", re.IGNORECASE)
+_MUTATION_AFTER_TRANSITION_RE = re.compile(
+    r"(?:\b(?:then|afterwards?|subsequently|actually|and|but|however|though|while|yet)\b|[,.;]\s*).{0,120}"
+    r"\b(?:add|change|correct|create|delete|edit|fix|modify|remove|rename|replace|update|write)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_SCOPED_EXCEPTION_RE = re.compile(
+    r"\b(?:apart\s+from|except|other\s+than|unless)\b",
+    re.IGNORECASE,
+)
+_SCOPED_CONSTRAINT_TAIL_RE = re.compile(
+    r"^\s+(?:(?:for|from|in|inside|matching|named|on|outside|to|under|within)\b"
+    r"|located\s+(?:in|under|within)\b"
+    r"|that\s+(?:are\s+)?(?:in|matching|named|under|within)\b"
+    r"|(?:associated\s+with|belonging\s+to|related\s+to)\b)",
+    re.IGNORECASE,
+)
+_MARKDOWN_DATA_SECTION_RE = re.compile(
+    r"(?P<header>^(?:"
+    r"[ \t]*(?:example|markdown|payload)(?:\s+(?:example|payload))?[ \t]*:"
+    r"|[^\n]{0,160}\b(?:the\s+following|this)\s+"
+    r"(?:example|markdown|payload)\b[^\n]*:"
+    r"|[ \t]*(?:append|copy|create|output|paste|put|replace|save|write)\b[^\n]{0,120}"
+    r"\b(?:the\s+following|this)\s+(?:content|text)\b[^\n]*:"
+    r"|[ \t]*(?:append|copy|create|explain|output|paste|provide|put|quote|render|replace|return|save|show|use|write)\b[^\n]{0,120}"
+    r"\b(?:contains?|containing)\b[^\n]*:"
+    r"|[ \t]*(?:append|copy|create|explain|output|paste|provide|put|quote|render|replace|return|save|show|use|write)\b[^\n]{0,120}"
+    r"\b(?:here\s+is|the\s+following)\s+(?:an?\s+)?(?:markdown\s+)?"
+    r"(?:content|example|payload)\b[^\n]*:"
+    r"|[ \t]*(?:here\s+is|the\s+following)\s+(?:an?\s+)?(?:markdown\s+)?"
+    r"(?:content|example|payload)\b[^\n]*:"
+    r"|[ \t]*(?:append|copy|create|explain|output|paste|provide|put|quote|render|replace|return|save|show|use|write)\b[^\n]{0,120}"
+    r"\ban?\s+markdown\s+(?:example|payload)\s+follows\b[^\n]*:"
+    r")\s*\n)"
+    r"(?P<body>(?:^[ \t]*(?:[-*+]|\d+[.)])\s+.*(?:\n|$))+"
+    r"|^[ \t]*\S.*(?:\n|$))",
+    re.IGNORECASE | re.MULTILINE,
+)
+_AMBIGUOUS_MARKDOWN_LIST_RE = re.compile(
+    r"^[^\n]{0,160}\b(?:following|these|this)\s+"
+    r"(?:bullets?|items?|lines?)\s*:\s*\n"
+    r"(?:^[ \t]*(?:[-*+]|\d+[.)])\s+.*(?:\n|$))+",
+    re.IGNORECASE | re.MULTILINE,
+)
+_INERT_USER_TEXT_RE = re.compile(
+    r"```.*?(?:```|\Z)"
+    r"|~~~.*?(?:~~~|\Z)"
+    r"|`[^`\n]*`"
+    r'|"(?:\\.|[^"\\])*"'
+    r"|(?<![A-Za-z0-9])'(?:\\.|[^'\\])*'(?![A-Za-z0-9])"
+    r"|^[ \t]*>.*$",
+    re.DOTALL | re.MULTILINE,
+)
+_NO_MUTATION_NONE = "none"
+_NO_MUTATION_GLOBAL = "global"
+_NO_MUTATION_MIXED = "mixed"
 
 
 def exec_shell_full_definition() -> dict[str, Any]:
@@ -192,6 +286,7 @@ def exec_shell_full_definition() -> dict[str, Any]:
             "name": "exec_shell_full_command",
             "description": (
                 "Unrestricted local shell launched from the current workdir. May read, write, delete, execute, access network, and access paths outside workdir. "
+                "Each invocation starts in a fresh shell at workdir; directory changes do not persist across tool calls. "
                 "Use whatever commands are needed to complete the task. "
                 "For analysis, prefer direct evidence from content, source, binaries, strings, logs, archives, and fetched data, not only metadata. "
                 'For generic web search, use orbit-web-search "query"; for explicit URL content requests, prefer fetch_url and use shell fetch commands only when needed. '
@@ -312,15 +407,6 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
             return (
                 f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, explicit URL requests require direct URL content/failure evidence from the requested URL."
             )
-    if not _requires_direct_content_evidence(user_prompt):
-        return None
-    if _CONTENT_EVIDENCE_RE.search(raw_command):
-        return None
-    if _METADATA_ONLY_RE.search(raw_command):
-        return (
-            f"{SHELL_FULL_CONTRACT_ERROR_PREFIX}, not only metadata/listing. "
-            "Use a bounded command such as sed/head/grep/strings on the target file."
-    )
     return None
 
 
@@ -328,17 +414,30 @@ def validate_read_only_shell_mutation(arguments: dict[str, Any], *, user_prompt:
     raw_command = arguments.get("command")
     if not isinstance(raw_command, str) or not raw_command.strip():
         return None
+    explicit_mode = classify_explicit_no_mutation_constraint(user_prompt)
+    if explicit_mode != _NO_MUTATION_NONE:
+        return read_only_mutation_policy_error(user_prompt, action="unrestricted shell command")
     if not is_read_only_user_request(user_prompt):
         return None
     if not is_mutating_shell_command(raw_command):
         return None
-    return (
-        f"{SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX}. "
-        "Use a non-mutating command or answer from existing evidence unless the latest user request explicitly asks for a change."
-    )
+    return read_only_mutation_policy_error(user_prompt, action="mutating shell command")
 
 
-def _requires_direct_content_evidence(user_prompt: str) -> bool:
+def validate_tool_no_mutation_policy(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    user_prompt: str | None,
+) -> str | None:
+    if name == "exec_shell_full_command":
+        return validate_read_only_shell_mutation(arguments, user_prompt=user_prompt)
+    return None
+
+
+def requires_direct_content_evidence(user_prompt: str | None) -> bool:
+    if not user_prompt:
+        return False
     if _ANALYSIS_PROMPT_RE.search(user_prompt):
         return True
     if _METADATA_REQUEST_RE.search(user_prompt):
@@ -419,10 +518,6 @@ def looks_like_url_content_evidence(text: str | None) -> bool:
 
 def is_shell_full_contract_error(content: str) -> bool:
     return content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX)
-
-
-def is_shell_full_read_only_mutation_error(content: str) -> bool:
-    return content.startswith(SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX)
 
 
 def build_shell_full_file_recovery_guard_prompt(
@@ -581,25 +676,99 @@ def should_verify_shell_mutation(command: str, *, user_prompt: str | None) -> bo
 def is_read_only_user_request(user_prompt: str | None) -> bool:
     if not user_prompt:
         return False
-    if _NEGATED_MUTATION_PROMPT_RE.search(user_prompt):
+    if classify_explicit_no_mutation_constraint(user_prompt) != _NO_MUTATION_NONE:
         return True
-    intent_text = _without_user_paths_and_urls(user_prompt)
-    return _READ_ONLY_PROMPT_RE.search(user_prompt) is not None and _MUTATION_PROMPT_RE.search(intent_text) is None
+    active_text = _without_inert_user_text(user_prompt)
+    intent_text = _without_user_paths_and_urls(active_text)
+    return _READ_ONLY_PROMPT_RE.search(active_text) is not None and _MUTATION_PROMPT_RE.search(intent_text) is None
 
 
 def is_mutative_user_request(user_prompt: str | None) -> bool:
     if not user_prompt:
         return False
-    intent_text = _without_user_paths_and_urls(user_prompt)
-    if _NEGATED_MUTATION_PROMPT_RE.search(user_prompt) and not re.search(
+    active_text = _without_inert_user_text(user_prompt)
+    intent_text = _without_user_paths_and_urls(active_text)
+    if classify_explicit_no_mutation_constraint(user_prompt) != _NO_MUTATION_NONE:
+        return False
+    if _NEGATED_MUTATION_PROMPT_RE.search(active_text) and not re.search(
         r"\b(?:fix|update|change|create|write|rename|refactor|edit)\b.*\b(?:file|code|implementation|config|test)\b",
         intent_text,
         re.IGNORECASE,
     ):
         return False
-    if _READ_ONLY_PROMPT_RE.search(user_prompt) and not _MUTATION_PROMPT_RE.search(intent_text):
+    if _READ_ONLY_PROMPT_RE.search(active_text) and not _MUTATION_PROMPT_RE.search(intent_text):
         return False
     return _MUTATION_PROMPT_RE.search(intent_text) is not None
+
+
+def classify_explicit_no_mutation_constraint(text: str | None) -> str:
+    if not text:
+        return _NO_MUTATION_NONE
+    active_text = _without_inert_user_text(text)
+    global_match = _GLOBAL_NO_MUTATION_CONSTRAINT_RE.search(active_text)
+    ambiguous_markdown = _AMBIGUOUS_MARKDOWN_LIST_RE.search(active_text)
+    scoped_match = _NEGATED_MUTATION_PROMPT_RE.search(active_text)
+    phase_match = _READ_ONLY_PHASE_RE.search(active_text)
+    fallback_matches = [match for match in (scoped_match, phase_match) if match is not None]
+    constraint = global_match or (
+        min(fallback_matches, key=lambda match: match.start()) if fallback_matches else None
+    )
+    if constraint is None:
+        return _NO_MUTATION_NONE
+    remainder = active_text[constraint.end() :]
+    if (
+        (ambiguous_markdown is not None and ambiguous_markdown.start() < constraint.start())
+        or _SCOPED_EXCEPTION_RE.search(remainder)
+        or _SCOPED_CONSTRAINT_TAIL_RE.search(remainder)
+        or _MUTATION_AFTER_TRANSITION_RE.search(remainder)
+    ):
+        return _NO_MUTATION_MIXED
+    if constraint is global_match:
+        return _NO_MUTATION_GLOBAL
+    return _NO_MUTATION_MIXED
+
+
+def read_only_mutation_policy_error(user_prompt: str | None, *, action: str) -> str:
+    if classify_explicit_no_mutation_constraint(user_prompt) == _NO_MUTATION_MIXED:
+        prefix = (
+            SHELL_FULL_MIXED_MUTATION_ERROR_PREFIX
+            if action == "mutating shell command"
+            else f"error: mixed or scoped mutation constraint rejected {action}"
+        )
+        return (
+            f"{prefix}. "
+            "Split inspection and mutation into separate user requests with one unambiguous scope."
+        )
+    prefix = (
+        SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX
+        if action == "mutating shell command"
+        else f"error: read-only request rejected {action}"
+    )
+    return (
+        f"{prefix}. "
+        "Use a non-mutating action or answer from existing evidence unless the latest user request explicitly asks for a change."
+    )
+
+
+def _without_inert_user_text(text: str) -> str:
+    def mask(match: re.Match[str]) -> str:
+        return "".join("\n" if char == "\n" else " " for char in match.group(0))
+
+    def mask_markdown_body(match: re.Match[str]) -> str:
+        return match.group("header") + "".join(
+            "\n" if char == "\n" else " " for char in match.group("body")
+        )
+
+    normalized = text.translate(
+        {
+            0x2018: "'",
+            0x2019: "'",
+            0x201C: '"',
+            0x201D: '"',
+        }
+    )
+    without_markdown_payloads = _MARKDOWN_DATA_SECTION_RE.sub(mask_markdown_body, normalized)
+    return _INERT_USER_TEXT_RE.sub(mask, without_markdown_payloads)
 
 
 def _without_user_paths_and_urls(text: str) -> str:
@@ -984,15 +1153,34 @@ def _is_mutating_shell_command(command: str) -> bool:
     if _has_shell_write_operator(command):
         return True
     try:
-        tokens = shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
     except ValueError:
         return any(marker in command for marker in (">", ">>", "| tee", " -i", "--in-place"))
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and all(char in ";&|()" for char in token):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return any(_is_mutating_shell_segment(segment) for segment in segments)
+
+
+def _is_mutating_shell_segment(tokens: list[str]) -> bool:
     if not tokens:
         return False
     words = [Path(token).name for token in tokens if token not in {"sudo", "env", "command", "xargs"}]
     if not words:
         return False
     primary = words[0]
+    segment_text = " ".join(tokens)
     if primary in {"cp", "install", "ln", "mkdir", "mv", "rm", "rmdir", "tee", "touch", "truncate"}:
         return True
     if primary in {"chmod", "chgrp", "chown", "setfacl"}:
@@ -1003,10 +1191,29 @@ def _is_mutating_shell_command(command: str) -> bool:
         return True
     if primary == "git" and len(words) > 1 and words[1] in {"add", "am", "apply", "checkout", "clean", "commit", "merge", "mv", "rebase", "reset", "restore", "rm", "stash", "switch"}:
         return True
-    if primary == "sqlite3" and re.search(r"\b(?:alter|create|delete|drop|insert|replace|update)\b", command, re.IGNORECASE):
+    if primary == "sqlite3" and re.search(
+        r"\b(?:alter|create|delete|drop|insert|replace|update)\b",
+        segment_text,
+        re.IGNORECASE,
+    ):
         return True
-    if primary in {"bash", "dash", "fish", "sh", "zsh", "python", "python3", "node", "ruby"}:
-        return _has_shell_write_operator(command) or re.search(r"\b(?:open|write_text|write_bytes|remove|rename|unlink|mkdir)\b", command) is not None
+    if primary in {"bash", "dash", "fish", "sh", "zsh"} and "-c" in tokens:
+        command_index = tokens.index("-c") + 1
+        return command_index < len(tokens) and _is_mutating_shell_command(tokens[command_index])
+    if primary in {"python", "python3", "node", "ruby"}:
+        return re.search(r"\b(?:open|write_text|write_bytes|remove|rename|unlink|mkdir)\b", segment_text) is not None
+    if primary == "dd" and any(token.startswith("of=") for token in tokens[1:]):
+        return True
+    if primary == "find" and ("-delete" in tokens or "-exec" in tokens or "-execdir" in tokens):
+        return True
+    if primary in {"tar", "bsdtar"} and any("x" in token[1:] for token in tokens[1:] if token.startswith("-")):
+        return True
+    if primary == "unzip" and not any(token in {"-l", "-t", "-v", "-Z"} for token in tokens[1:]):
+        return True
+    if primary == "cpio" and any(
+        token in {"-i", "--extract", "-p", "--pass-through"} for token in tokens[1:]
+    ):
+        return True
     if len(words) > 1 and words[1] in {"install", "update", "add", "remove"} and primary in {"apt", "apt-get", "brew", "cargo", "npm", "pip", "pip3", "uv"}:
         return True
     return False

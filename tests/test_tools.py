@@ -46,6 +46,19 @@ class ToolTests(unittest.TestCase):
 
         self.assertIn("invalid JSON", result.content)
 
+    def test_direct_dispatch_enforces_explicit_no_mutation_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = execute_tool(
+                "exec_shell_full_command",
+                {"command": "printf unsafe > marker.txt"},
+                workdir=root,
+                user_prompt="Analyze without changing any files.",
+            )
+
+        self.assertIn("unrestricted shell command", result.content)
+        self.assertFalse((root / "marker.txt").exists())
+
     def test_fetch_url_runs_with_structured_result(self) -> None:
         class FakeHeaders:
             def get_content_type(self) -> str:
