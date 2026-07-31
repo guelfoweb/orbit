@@ -70,7 +70,7 @@ scripts/suggest-server-profile.sh
 Start the native server:
 
 ```bash
-PYTHONPATH=src .venv/bin/orbit server
+orbit server
 ```
 
 The current release gate expects:
@@ -84,13 +84,13 @@ The current release gate expects:
 In another terminal:
 
 ```bash
-.venv/bin/orbit --workdir workdir --think off "hi, how are you?"
+orbit --workdir workdir --think off "hi, how are you?"
 ```
 
 Enable tools only when you want to expose model-driven shell access:
 
 ```bash
-.venv/bin/orbit --workdir workdir --tools on --think off
+orbit --workdir workdir --tools on --think off
 ```
 
 Orbit has one bounded, model-driven tool loop. The model chooses every tool and
@@ -108,7 +108,7 @@ environment for untrusted prompts.
 For route/KV diagnostics:
 
 ```bash
-ORBIT_KV_DIAG=1 .venv/bin/orbit --workdir workdir --tools on --think off "hi"
+ORBIT_KV_DIAG=1 orbit --workdir workdir --tools on --think off "hi"
 ```
 
 `ORBIT_KV_DIAG=1` is diagnostic only. It is not required for normal use.
@@ -124,7 +124,7 @@ orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/mtp-gemma-4-26B-A4B-it-Q4_0.gguf
 ```
 
 ```bash
-PYTHONPATH=src .venv/bin/orbit server --mtp
+orbit server --mtp
 ```
 
 Use it for targeted validation or experiments, not as a default speed
@@ -141,13 +141,13 @@ is not needed.
 Keep tools disabled at server startup:
 
 ```bash
-ORBIT_TOOLS=off .venv/bin/orbit server
+ORBIT_TOOLS=off orbit server
 ```
 
 Disable tools for a client/session:
 
 ```bash
-.venv/bin/orbit --tools off "hello"
+orbit --tools off "hello"
 ```
 
 Interactive toggles:
@@ -185,13 +185,13 @@ also enabled by default for the tools-on route prefix.
 Disable only startup prewarm:
 
 ```bash
-ORBIT_KV_PREFIX_PREWARM=off .venv/bin/orbit server
+ORBIT_KV_PREFIX_PREWARM=off orbit server
 ```
 
 Disable route-prefix anchor and prewarm:
 
 ```bash
-ORBIT_KV_PREFIX_ANCHOR=off .venv/bin/orbit server
+ORBIT_KV_PREFIX_ANCHOR=off orbit server
 ```
 
 The prewarm cost is paid at startup. It does not remove CPU work; it shifts part
@@ -229,8 +229,8 @@ backend/model supports it. Think-on paths can be much slower on CPU.
 When the matching `mmproj` is available and detected by the native server:
 
 ```bash
-.venv/bin/orbit --image workdir/media/image1.jpg "Describe this image."
-.venv/bin/orbit --audio workdir/media/audio1.wav "Summarize this audio."
+orbit --image workdir/media/image1.jpg "Describe this image."
+orbit --audio workdir/media/audio1.wav "Summarize this audio."
 ```
 
 Multimodal capability should be visible through `/v1/models` and `/props`.
@@ -294,7 +294,7 @@ performance.
 
 ## Troubleshooting
 
-- backend unavailable: run `.venv/bin/orbit --health --base-url ...`
+- backend unavailable: run `orbit --health --base-url ...`
 - native libraries missing: run `python3 scripts/build_native.py`
 - model not found: verify the Orbit model cache under `models/`
 - multimodal unavailable: verify the matching `mmproj` is present

@@ -159,7 +159,7 @@ class ReplTests(unittest.TestCase):
         self.assertIn("Tools        on", output)
         self.assertIn("Workdir", output)
         self.assertIn("Type /help for commands, /status for runtime details.", output)
-        self.assertIn("warning: tools on", output)
+        self.assertNotIn("warning: tools on", output)
         self.assertIn("recent session context:", output)
         self.assertIn("user: first question", output)
         self.assertIn("assistant: first answer", output)
@@ -648,8 +648,7 @@ class ReplTests(unittest.TestCase):
 
         self.assertIn("tools: on", repl._handle_tools_command("/tools"))
         tools_on = repl._handle_tools_command("/tools on")
-        self.assertIn("tools: on", tools_on)
-        self.assertIn("warning: tools on", tools_on)
+        self.assertEqual(tools_on, "tools: on")
         self.assertEqual(repl.tools_mode, "on")
         self.assertIn("tools: on", repl._handle_tools_command("/tools"))
         self.assertEqual(repl._handle_tools_command("/tools off"), "tools: off")

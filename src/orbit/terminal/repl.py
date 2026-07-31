@@ -22,7 +22,7 @@ from orbit.terminal.status import estimate_context_status_tokens, format_memory_
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
-from orbit.terminal.theme import danger, dim
+from orbit.terminal.theme import dim
 from orbit.runtime.thinking_mode import ThinkingMode
 from orbit.runtime.turn_trace import ModelPhaseStart
 
@@ -50,13 +50,6 @@ class Repl:
         status = collect_runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode)
         for line in format_startup_banner(status).splitlines():
             print(dim(line))
-        if tools_are_enabled(self.tools_mode or "off"):
-            print(
-                danger(
-                    "warning: tools on gives the model unrestricted local shell access. Commands may read, modify, delete files, execute programs, or access network. "
-                    "Use only in an isolated lab."
-                )
-            )
         if has_existing_session_context(self.runtime.messages):
             print(dim("recent session context:"))
             for line in format_recent_session_messages(self.runtime.messages):
@@ -277,14 +270,6 @@ class Repl:
         except ValueError:
             return f"error: usage: /tools [{USAGE}]"
         if self.tools_mode:
-            if self.tools_mode == "on":
-                return (
-                    f"tools: {self.tools_mode}\n"
-                    + danger(
-                        "warning: tools on gives the model unrestricted local shell access. Commands may read, modify, delete files, execute programs, or access network. "
-                        "Use only in an isolated lab."
-                    )
-                )
             return f"tools: {self.tools_mode}"
         return f"error: usage: /tools [{USAGE}]"
 
