@@ -904,6 +904,62 @@ class ToolHealingShadowTests(unittest.TestCase):
         self.assertEqual(outcomes[1], outcomes[2])
         self.assertEqual(outcomes[0], ("specs complete", "stop", 2, [("system_info", {})], 1))
 
+    def test_healing_on_off_cannot_bypass_explicit_no_mutation_policy(self) -> None:
+        class Backend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages, *, temperature, max_tokens, tools=None):
+                self.calls += 1
+                return ChatResult(
+                    content='<tool_call>{"name":"exec_shell_full_command","arguments":{"command":"cat README.md"},}</tool_call>',
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=10,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        observed = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for healing in ("0", "1"):
+                with self.subTest(healing=healing):
+                    backend = Backend()
+                    tool_events: list[tuple[str, dict[str, object]]] = []
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "ORBIT_TOOL_CALL_CANONICAL_GATE": "1",
+                            "ORBIT_TOOL_CALL_HEALING": healing,
+                        },
+                        clear=False,
+                    ), mock.patch("orbit.runtime.tool_backends.execute_tool") as execute:
+                        result = ChatRuntime(backend=backend, system_prompt=None).ask_with_tools(
+                            "Inspect without changing any files.",
+                            temperature=0,
+                            max_tokens=32,
+                            workdir=Path(tmp),
+                            tool_names=("exec_shell_full_command",),
+                            on_tool_call=lambda name, arguments: tool_events.append(
+                                (name, json.loads(arguments))
+                            ),
+                        )
+
+                    observed.append(
+                        (result.finish_reason, backend.calls, tool_events, execute.call_count)
+                    )
+
+        self.assertEqual(observed[0], observed[1])
+        self.assertEqual(observed[0][0], "stop")
+        self.assertEqual(
+            observed[0][2],
+            [("exec_shell_full_command", {"command": "cat README.md"})],
+        )
+        self.assertEqual(observed[0][3], 0)
+
     def test_default_on_and_kill_switch_matrix_for_all_authorized_repairs(self) -> None:
         cases = (
             '<tool_call>{"name":"system_info","arguments":{}}</tool_call>',

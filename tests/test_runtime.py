@@ -5660,7 +5660,7 @@ class ToolRuntimeTests(unittest.TestCase):
             backend = ReadOnlyBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="route system")
             result = runtime.ask_auto(
-                "Review vulnerable_service.py and report the vulnerable function. Do not modify files.",
+                "Review vulnerable_service.py and report the vulnerable function.",
                 temperature=0,
                 max_tokens=64,
                 workdir=workdir,

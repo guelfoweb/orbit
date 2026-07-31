@@ -331,6 +331,99 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   `inspect_python`/`read_file` schemas, harness, and tests were removed after
   the failed first smoke. No completion verifier, recovery flag, or restricted
   recovery path remains.
+- A later obligation-driven Agent v2 probe stopped at its mandatory
+  generation-only contract gate and never entered runtime integration. Three
+  exact-span representations were compared. On the four-subject configuration
+  request, atomic spans passed once, while the initial shared-instruction and
+  complete-partition encodings failed structural validation.
+- Across the required ten-shape contract corpus, the first atomic encoding was
+  structurally valid in 6/10 cases and matched the independent expected
+  decomposition in 3/10. A refined shared-subject encoding with exact
+  model-selected span references and structural coordination groups improved
+  those results to 8/10 structurally valid and 5/10 expected, but still split
+  simple requests, confused ordinary file capabilities, selected partial or
+  duplicate spans, and mishandled inert Markdown.
+- A final model-owned `existing` fast-path choice did not protect bounded
+  workflows: Gemma selected obligation orchestration for system information,
+  create/edit/verify, and inert JSON controls. The targeted mode probe passed
+  only the configuration audit (1/4). All measured contract calls stopped
+  normally, but the complete contract gate failed, so no source index, child
+  context, synthesis path, flag, or default change was implemented.
+- The Agent v2 contract module, benchmark harness, and tests were removed.
+  Reopen obligation orchestration only for a model/template that passes the
+  complete generation-only corpus with exact spans, no missing or invented
+  obligations, correct capability classes, and preservation of existing fast
+  paths before any runtime integration.
+- A later normal-loop qualification kept `tools=True` and `agent=False`.
+  Exact repeated-call rejection and mutation epochs were already shared by the
+  normal loop, so no runtime port was needed. `apply_patch` was selected in
+  0/2 normal-loop edit probes and increased the tool-call prompt cost, so it
+  remains agent-only. Mandatory post-mutation verification and mutating-action
+  review improved specific safety properties but caused material regressions
+  on valid bounded mutations; both remain agent-only.
+- The qualification retained one canonical policy hardening: explicit
+  no-mutation constraints such as "without changing any files" are
+  authoritative even when the same request also contains a mutation verb.
+  The measured contradictory deletion changed from an unsafe eight-call
+  execution to a safe four-call rejection, while the ten unaffected baseline
+  scenarios retained their existing model/tool-call counts.
+- The final adversarial review restricts that policy to unquoted active user
+  prose. Quoted strings, inline or fenced code, Markdown blockquotes, JSON
+  strings, explicitly introduced Markdown example/payload lists, and tool
+  output cannot activate the explicit constraint. Ordinary Markdown
+  instruction lists remain active. The classifier has only three bounded
+  structural outcomes: `none`, `global`, and `mixed`.
+- Global forms include `without changing any files`, `make no changes`,
+  `leave files unchanged`, and coordinated `do not`/`don't` file-mutation
+  clauses. Generic shell strings are never treated as provably read-only under
+  a global or mixed constraint; every `exec_shell_full_command` call is denied
+  without parsing, rewriting, or substituting it. Structured read-only tools
+  remain available. `apply_patch` is denied through the same runtime policy.
+- The invariant is independent of `ORBIT_TOOL_CALL_CANONICAL_GATE`. The
+  canonical preflight and legacy executor adapter apply the shared decision
+  before dispatch, and the common dispatcher enforces the same pure policy as
+  the final boundary. Disabling canonical schema validation cannot disable
+  explicit user safety.
+- Policy rejection is propagated only through the structured execution outcome
+  and reason. Tool stdout/stderr that resembles a rejection message is never
+  interpreted as user policy.
+- Scoped exceptions and phase changes are intentionally unsupported. Requests
+  such as inspect-then-fix, all-files-except-one, source-read-only plus report
+  creation, or analyze-then-actually-correct are classified as `mixed`.
+  Unquoted generic bullet/item/line lists containing a no-mutation phrase are
+  also `mixed`. Explicitly labeled Markdown examples or payloads, and
+  `this`/`following content|text` sections introduced by a bounded output
+  action, are masked as inert data only for one immediate plain line or one
+  bounded Markdown list.
+  Structured read-only observations may run, but generic shell and every
+  mutation fail closed with a bounded instruction to split the work into
+  separate unambiguous user requests.
+- The real-model adversarial matrix completed 17/17 stop responses with zero
+  mutation under global constraints, zero false blocks on quoted/inert data,
+  and 3/3 legitimate mutations preserved. The post-review matrix used 45 model
+  calls, 21 model-proposed tool calls, 10 executed tools, 11 policy rejections,
+  15,868 evaluated tokens, 849 output tokens, and 722.862 seconds of observed
+  CPU wall time. All generic-shell attempts under global or mixed constraints
+  were rejected; structured directory listings remained usable.
+- A separate normal-loop production corpus remained 11/11 correct and stopped:
+  direct chat, read, list, search, create, edit, command, bounded workflow,
+  inert tool-like data, explicit no-mutation, and command failure. It used 26
+  model calls, 12 proposed tool calls, 10 executed tools, 7,351 evaluated
+  tokens, 598 output tokens, and 329.358 seconds. These non-isolated timings are
+  descriptive safety and regression evidence, not a performance claim.
+- Generic file reads and test execution cannot be promised under an explicit
+  global no-mutation constraint when the model selects unrestricted shell.
+  Arbitrary executables can mutate state even when passed as an argv array, so
+  no nominally read-only process allowlist was added. Such requests receive a
+  bounded denial unless the model can use an existing structured read-only
+  tool. Add a dedicated structured capability only after a separate measured
+  need and a complete side-effect contract.
+- No normal-loop `read_file` or `run_process` schema was added. Existing read,
+  list, search, command, creation, edit, and bounded workflow baselines were
+  already correct; adding a schema would require route/prefill changes without
+  a measured failure. Legacy `--agent` remains an explicit stricter
+  orchestration profile for workflows where its extra review and verification
+  cost is intentionally accepted, not a default capability upgrade.
 - Removing shell competition therefore reduced wasted discovery but did not
   make the model acquire source evidence. The profile failed its first
   correctness and natural-tool-selection gates. Its resolver, restricted
