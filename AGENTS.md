@@ -146,7 +146,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC23
 
-- Current published baseline: `v0.0.1-rc23`.
+- Published predecessor: `v0.0.1-rc23`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc23
 - Release-notes commit: `2aada5ca15b6dc3c3ad945a0fd9591c580eecbed`.
 - Tag object: `af89a85b66d86d362d1a6abe480cea1a4bf2c7f4`.
@@ -161,7 +161,32 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - RC23 validation: focused ABI/native tests PASS with 105 tests; full unit discovery PASS with 1,223 tests; all six MTP helpers rebuilt from staging; real vision and audio mmproj inputs PASS; MTP initialization/completion PASS; final-prefix capture and `cached=64` restore PASS; cancel, timeout, reset, and restart coverage PASS; artificial ABI mismatch fails safely without a crash; `compileall` PASS; `git diff --check` PASS.
 - RC23 makes no performance claim. Future vendor revisions require a separate process-isolated compatibility and performance comparison through the hardened bridge.
 
-## Post-RC23 Tool-Loop Convergence
+### RC24
+
+- Current published baseline: `v0.0.1-rc24`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc24
+- Release-notes commit: `41dbc63f19cd5d88a2b0f1aee1d44a29557bc431`.
+- Tag object: `52ce691fe724d3c8c6272345f24e07bcdfe684b7`.
+- Tag commit: `41dbc63f19cd5d88a2b0f1aee1d44a29557bc431`.
+- Prerelease: yes. Draft: false. Latest: false. The GitHub
+  `releases/latest` endpoint does not resolve to RC24.
+- Includes squash merge `f424e9a` from #156 plus the documentation-only
+  technical-stop merges after RC23.
+- Focus: convergence on one production tool loop, explicit no-mutation safety,
+  Gemma 4 26B-A4B Q4_0 CPU-first guidance, download progress, exact active-model
+  reporting, and simpler installed CLI examples.
+- RC24 validation: focused pre-merge selection PASS with 475 tests; independent
+  focused review PASS with 496 tests and two skips; full discovery PASS with
+  1,251 tests and three skips; MTP helper/native rebuild PASS; strict 26B target,
+  draft MTP, and mmproj smoke PASS; final-prefix default `cached=64` and kill
+  switch `cached=4` PASS; post-tool final reuse PASS; lifecycle and safety
+  coverage PASS; `compileall` and `git diff --check` PASS.
+- RC24 does not claim deterministic performance improvement or resolution of
+  broad multi-deliverable agentic workflows. The production llama.cpp vendor
+  remains `b9551` at upstream commit
+  `379ac6673b5cd75c7b4e07d1521c50f1e093878c`.
+
+## RC24 Tool-Loop Convergence
 
 - Orbit now has one production tool loop. The former opt-in agent path,
   `--agent`, `--no-agent`, action-review model call, agent prompts, exact
