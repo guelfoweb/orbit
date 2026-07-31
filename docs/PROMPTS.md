@@ -26,7 +26,7 @@ Use:
 ```
 
 1. `Explain why local CPU-only inference is slower than GPU inference, in three concise bullets.`
-2. `Tell me what grep is used for, but do not run any command.`
+2. `Tell me in one concise sentence what grep is used for, but do not run any command.`
 3. `Write a short five-line story about a lighthouse and a storm.`
 4. `What is the difference between a command decision and a final answer in an agentic CLI?`
 5. `Give me a compact checklist for reviewing suspicious JavaScript safely, in up to eight bullets, without analyzing any local file.`

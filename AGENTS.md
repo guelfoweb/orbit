@@ -216,11 +216,15 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   post-tool-reuse comparison preserved correctness and removed one model call
   and 529 evaluated tokens in the measured eligible case. These measurements
   are regression evidence, not deterministic performance claims.
-- Twelve exact local prompts sampled from `docs/PROMPTS.md` produced 11/12
-  strict passes. All eleven tool workflows passed. The tools-off `grep`
-  explanation used no tool but reached `finish_reason=length` at both 256 and
-  the production-default 512 output-token budget. This is a measured RC24 gate
-  blocker, not a reason to restore agent mode or add deterministic completion.
+- Twelve exact local prompts sampled from `docs/PROMPTS.md` initially produced
+  11/12 strict passes. All eleven tool workflows passed. The original tools-off
+  `grep` explanation reached the fixed 256-token chat-phase cap and ended
+  incomplete. Process-isolated runs reproduced the exact same 256-token output
+  and hash on RC23, pre-convergence main, and the convergence candidate, proving
+  that this was not a convergence regression. The corpus now requests one
+  concise sentence; the same three revisions produced the same complete
+  26-token response with `finish_reason=stop`, one model call, and zero tools.
+  No runtime budget or behavior changed.
 - See `docs/TOOL_LOOP_CONVERGENCE_VALIDATION.md` for the inventory, comparison,
   removal decision, compatibility rationale, and release gates.
 

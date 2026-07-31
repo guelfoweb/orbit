@@ -204,11 +204,17 @@ bypass.
 Twelve exact local prompts sampled from `docs/PROMPTS.md` were also run in clean
 temporary workdirs. All eleven tool workflows passed: list, read, search,
 create-note, create-script, edit, append, directory creation, system info, line
-count, and create/read/remove workflow. The tools-off `grep` explanation used
-zero tools but reached `finish_reason=length` at both 256 tokens and the
-production-default 512-token budget. Therefore the exact-prompt sample is 11/12
-strict PASS. The failure is a verbose model completion, not an agent-removal
-regression, and it blocks RC24 publication under the stated all-gates policy.
+count, and create/read/remove workflow. The original tools-off `grep` prompt
+used zero tools but filled the fixed 256-token chat-phase cap and ended in the
+middle of a sentence. A process-isolated comparison reproduced the same output
+hash, 48 prompt tokens, 256 output tokens, and `finish_reason=length` on RC23,
+pre-convergence main, and the convergence candidate. The failure was therefore
+a pre-existing prompt/model verbosity mismatch, not an agent-removal
+regression. The corpus prompt was narrowed honestly to request one concise
+sentence instead of hiding the truncation or increasing a global budget. RC23,
+main, and the candidate then produced the same complete 26-token answer with
+`finish_reason=stop`, one model call, and zero tools. The revised direct-chat
+gate passes without a runtime behavior change.
 
 The canonical and healing kill switches were tested together on fresh native
 requests. With both OFF, an explicit no-mutation request still preserved its
