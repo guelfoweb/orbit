@@ -27,6 +27,7 @@ class CompletionBudgetPolicyTests(unittest.TestCase):
         self.assertEqual(resolve_max_tokens("chat", 32), 64)
         self.assertEqual(resolve_max_tokens("chat", 512), 512)
         self.assertEqual(resolve_max_tokens("chat", 2048), 2048)
+        self.assertEqual(resolve_max_tokens("chat", 8192), 4096)
 
     def test_final_from_tool_structural_evidence_budgets(self) -> None:
         self.assertEqual(resolve_max_tokens("final_from_tool", 32, evidence_kind="shell", evidence_chars=80), 96)
