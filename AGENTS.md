@@ -255,7 +255,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Post-RC24 Chat Output Budget
 
-- A local post-RC24 fix removes the hidden 256-token cap from user-visible chat
+- A post-RC24 fix removes the hidden 256-token cap from user-visible chat
   output. An explicit CLI, JSON, or REPL `max_tokens` value is now authoritative
   for chat responses, within the existing validated configuration range.
 - Internal route, tool-call, retry, repair, and final-from-tool budgets keep
