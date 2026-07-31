@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from orbit.runtime.shell_guardrails import validate_read_only_shell_mutation, validate_shell_full_contract
+from orbit.runtime.shell_guardrails import (
+    validate_shell_full_contract,
+    validate_tool_no_mutation_policy,
+)
 from orbit.runtime.tool_contract import (
     CanonicalToolDecision,
     canonical_rejection_content,
@@ -105,15 +108,16 @@ class HybridToolExecutor:
         parsed = parse_tool_arguments(arguments)
         if isinstance(parsed, str):
             return ToolExecution(ToolResult(name=name, content=parsed), "orbit", "rejected_parse", "invalid_arguments")
-        if name == "exec_shell_full_command" and not canonical_validated:
-            read_only_mutation_error = validate_read_only_shell_mutation(parsed, user_prompt=self.user_prompt)
-            if read_only_mutation_error:
+        if not canonical_validated:
+            policy_error = validate_tool_no_mutation_policy(name, parsed, user_prompt=self.user_prompt)
+            if policy_error:
                 return ToolExecution(
-                    ToolResult(name=name, content=read_only_mutation_error),
+                    ToolResult(name=name, content=policy_error),
                     "orbit",
                     "rejected_policy",
-                    "read_only_mutation",
+                    "policy_read_only_mutation",
                 )
+        if name == "exec_shell_full_command" and not canonical_validated:
             contract_error = validate_shell_full_contract(parsed, user_prompt=self.user_prompt)
             if contract_error:
                 return ToolExecution(

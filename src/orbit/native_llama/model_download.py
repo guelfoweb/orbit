@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.request import urlretrieve
 import os
 import tempfile
+from typing import Callable
 
 from orbit.native_llama.model_registry import (
     ModelManifest,
@@ -16,6 +17,7 @@ from orbit.native_llama.model_registry import (
 
 
 HF_RESOLVE_BASE = "https://huggingface.co"
+DownloadProgress = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,7 @@ def download_model(
     models_dir: Path | None = None,
     prefer: str = "target",
     retrieve=urlretrieve,
+    progress: DownloadProgress | None = None,
 ) -> DownloadResult:
     request = parse_huggingface_spec(spec, prefer=prefer)
     destination = local_model_path(
@@ -78,7 +81,10 @@ def download_model(
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
-        retrieve(url, str(tmp_path))
+        if progress is None:
+            retrieve(url, str(tmp_path))
+        else:
+            retrieve(url, str(tmp_path), _progress_hook(progress))
         tmp_path.replace(destination)
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -91,6 +97,7 @@ def download_all_for_repo(
     *,
     models_dir: Path | None = None,
     retrieve=urlretrieve,
+    progress: DownloadProgress | None = None,
 ) -> DownloadBatchResult:
     manifest = _find_manifest_by_target_repo(repo)
     if manifest is None:
@@ -107,6 +114,7 @@ def download_all_for_repo(
             f"{request.repo}/{request.file}",
             models_dir=models_dir,
             retrieve=retrieve,
+            progress=progress,
         )
         for request in requests
     )
@@ -115,6 +123,16 @@ def download_all_for_repo(
 
 def huggingface_resolve_url(request: DownloadRequest) -> str:
     return f"{HF_RESOLVE_BASE}/{request.repo}/resolve/main/{request.file}"
+
+
+def _progress_hook(progress: DownloadProgress):
+    def report(block_count: int, block_size: int, total_size: int) -> None:
+        downloaded = max(0, block_count * block_size)
+        if total_size > 0:
+            downloaded = min(downloaded, total_size)
+        progress(downloaded, total_size)
+
+    return report
 
 
 def _find_manifest_file_for_repo(repo: str, *, prefer: str = "target") -> ModelFileSpec | None:

@@ -16,6 +16,7 @@ from orbit.native_server.app import (
     build_parser,
     prewarm_startup_route_prefix,
     resolve_bootstrap_paths,
+    resolve_model_alias,
     route_prefix_prewarm_mode,
     run_server,
     tools_startup_enabled,
@@ -97,8 +98,8 @@ class NativeServerBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             vendor_lib = root / "vendor/lib"
             models_dir = root / "models"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             vendor_lib.mkdir(parents=True)
             (vendor_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
@@ -120,8 +121,8 @@ class NativeServerBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             env_lib = root / "custom-lib"
             models_dir = root / "models"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             env_lib.mkdir(parents=True)
             (env_lib / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
@@ -146,8 +147,8 @@ class NativeServerBootstrapTests(unittest.TestCase):
             llama_root = root / "llama"
             models_dir = root / "models"
             build_bin = llama_root / "build/bin"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
             build_bin.mkdir(parents=True)
             (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
@@ -159,7 +160,14 @@ class NativeServerBootstrapTests(unittest.TestCase):
 
         self.assertEqual(paths.model, target)
         self.assertEqual(paths.mmproj_model, mmproj)
-        self.assertEqual(paths.model_id, "gemma4-12b-it-q4km")
+        self.assertEqual(paths.model_id, "gemma4-26b-a4b-it-q40")
+
+    def test_model_alias_defaults_to_exact_gguf_filename(self) -> None:
+        paths = mock.Mock()
+        paths.model = Path("/models/gemma-4-26B-A4B-it-Q4_0.gguf")
+
+        self.assertEqual(resolve_model_alias(None, paths), "gemma-4-26B-A4B-it-Q4_0.gguf")
+        self.assertEqual(resolve_model_alias("custom-name", paths), "custom-name")
 
     def test_parser_accepts_think_flag(self) -> None:
         args = build_parser().parse_args(["--think", "on"])
@@ -292,18 +300,18 @@ class NativeServerBootstrapTests(unittest.TestCase):
             llama_root = root / "llama"
             models_dir = root / "models"
             build_bin = llama_root / "build/bin"
-            target = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "gemma-4-12B-it-Q4_K_M.gguf"
-            mmproj = models_dir / "ggml-org--gemma-4-12B-it-GGUF" / "mmproj-gemma-4-12B-it-Q8_0.gguf"
-            draft = models_dir / "unsloth--gemma-4-12b-it-GGUF" / "MTP/gemma-4-12b-it-Q8_0-MTP.gguf"
+            target = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
+            draft = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF" / "mtp-gemma-4-26B-A4B-it-Q4_0.gguf"
             build_bin.mkdir(parents=True)
             (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
             target.parent.mkdir(parents=True)
-            draft.parent.mkdir(parents=True)
+            draft.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("target", encoding="utf-8")
             mmproj.write_text("mmproj", encoding="utf-8")
             draft.write_text("draft", encoding="utf-8")
 
-            args = build_parser().parse_args(["--llama-root", str(llama_root), "--model-id", "gemma4-12b-it-q4km", "--models-dir", str(models_dir), "--hf-cache", str(root / "hf")])
+            args = build_parser().parse_args(["--llama-root", str(llama_root), "--model-id", "gemma4-26b-a4b-it-q40", "--models-dir", str(models_dir), "--hf-cache", str(root / "hf")])
             paths = resolve_bootstrap_paths(args)
 
         self.assertEqual(paths.model, target)
@@ -320,7 +328,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             build_bin.mkdir(parents=True)
             (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
 
-            args = build_parser().parse_args(["--llama-root", str(llama_root), "--model-id", "gemma4-12b-it-q4km", "--models-dir", str(root / "models"), "--hf-cache", str(root / "hf")])
+            args = build_parser().parse_args(["--llama-root", str(llama_root), "--model-id", "gemma4-26b-a4b-it-q40", "--models-dir", str(root / "models"), "--hf-cache", str(root / "hf")])
             with self.assertRaises(FileNotFoundError):
                 resolve_bootstrap_paths(args)
 
@@ -361,7 +369,10 @@ class NativeServerBootstrapTests(unittest.TestCase):
         _FakeNativeClient.instances.clear()
         _FakeHTTPServer.instances.clear()
         with (
-            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/test.gguf")),
+            ),
             mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
             mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
             mock.patch("sys.stdout", new_callable=io.StringIO),
@@ -379,7 +390,10 @@ class NativeServerBootstrapTests(unittest.TestCase):
         _FakeNativeClient.instances.clear()
         _FakeHTTPServer.instances.clear()
         with (
-            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/test.gguf")),
+            ),
             mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
             mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
             mock.patch("sys.stdout", new_callable=io.StringIO),
@@ -400,7 +414,10 @@ class NativeServerBootstrapTests(unittest.TestCase):
         _FakeNativeClient.instances.clear()
         _FakeHTTPServer.instances.clear()
         with (
-            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", return_value=SimpleNamespace()),
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/test.gguf")),
+            ),
             mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
             mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
             mock.patch("sys.stdout", new_callable=io.StringIO),

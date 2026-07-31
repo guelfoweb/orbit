@@ -1,6 +1,6 @@
 # orbit
 
-Orbit is a small Python-first local runtime for Gemma 4 12B on CPU-only
+Orbit is a small Python-first local runtime for Gemma 4 26B-A4B on CPU-only
 machines. The primary path is the native `orbit server` backend, using
 vendored `llama.cpp`/`ggml` libraries built and loaded by Orbit. It does not
 require an external `llama-server` process for normal use.
@@ -13,7 +13,7 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 
 ## Current Scope
 
-- local CLI and native HTTP server for Gemma 4 12B
+- local CLI and native HTTP server for Gemma 4 26B-A4B
 - CPU-first native backend
 - explicit shell tools when tools mode is enabled
 - streaming terminal output and compact progress phases
@@ -30,7 +30,8 @@ and is not a guaranteed performance win.
 
 - Python 3.11 or newer
 - Linux recommended
-- Gemma 4 12B target GGUF
+- CMake for building the vendored native libraries
+- Gemma 4 26B-A4B target GGUF
 - optional Gemma 4 `mmproj` GGUF for multimodal input
 - optional MTP draft GGUF for `orbit server --mtp`
 
@@ -39,6 +40,7 @@ and is not a guaranteed performance win.
 ```bash
 git clone https://github.com/guelfoweb/orbit.git
 cd orbit
+sudo apt install cmake
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
@@ -53,8 +55,14 @@ python3 scripts/build_native.py
 Download model artifacts as needed:
 
 ```bash
-orbit download ggml-org/gemma-4-12B-it-GGUF
-orbit download ggml-org/gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
+orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_0.gguf
+orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/mtp-gemma-4-26B-A4B-it-Q4_0.gguf
+```
+
+Inspect the host and review the recommended server configuration:
+
+```bash
+scripts/suggest-server-profile.sh
 ```
 
 ## Quick Start
@@ -62,7 +70,7 @@ orbit download ggml-org/gemma-4-12B-it-GGUF/mmproj-gemma-4-12B-it-Q8_0.gguf
 Start the native server:
 
 ```bash
-PYTHONPATH=src .venv/bin/orbit server
+orbit server
 ```
 
 The current release gate expects:
@@ -76,19 +84,31 @@ The current release gate expects:
 In another terminal:
 
 ```bash
-.venv/bin/orbit --workdir workdir --think off "hi, how are you?"
+orbit --workdir workdir --think off "hi, how are you?"
 ```
 
 Enable tools only when you want to expose model-driven shell access:
 
 ```bash
-.venv/bin/orbit --workdir workdir --tools on --think off
+orbit --workdir workdir --tools on --think off
 ```
+
+Orbit has one bounded, model-driven tool loop. The model chooses every tool and
+argument; canonical validation, formal healing, permissions, repeated-call
+protection, mutation epochs, and explicit no-mutation constraints are enforced
+before execution. Each shell call starts from `--workdir` in a fresh shell, so
+commands must use explicit paths instead of relying on a previous `cd`.
+
+The former experimental `--agent`/`--no-agent` profile was removed before the
+first stable release after matched Gemma 4 26B-A4B tests found no repeatable
+production benefit sufficient to justify a second orchestration path. Use
+`--tools off` for chat-only operation and a dedicated workdir or isolated
+environment for untrusted prompts.
 
 For route/KV diagnostics:
 
 ```bash
-ORBIT_KV_DIAG=1 .venv/bin/orbit --workdir workdir --tools on --think off "hi"
+ORBIT_KV_DIAG=1 orbit --workdir workdir --tools on --think off "hi"
 ```
 
 `ORBIT_KV_DIAG=1` is diagnostic only. It is not required for normal use.
@@ -100,11 +120,11 @@ Native MTP is explicit:
 Only download the MTP draft model if you intentionally want to test native MTP:
 
 ```bash
-orbit download unsloth/gemma-4-12b-it-GGUF/MTP/gemma-4-12b-it-Q8_0-MTP.gguf
+orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/mtp-gemma-4-26B-A4B-it-Q4_0.gguf
 ```
 
 ```bash
-PYTHONPATH=src .venv/bin/orbit server --mtp
+orbit server --mtp
 ```
 
 Use it for targeted validation or experiments, not as a default speed
@@ -113,20 +133,21 @@ on some CPU-only workloads.
 
 ## Tools
 
-Tools are off by default. Tools-on mode exposes unrestricted local shell access
-through the model-facing shell tool. Use it only in an isolated lab or safe
-workdir.
+Tools are enabled by default in the client configuration. Tools-on mode exposes
+unrestricted local shell access through the model-facing shell tool. Use it
+only in an isolated lab or safe workdir, or pass `--tools off` when tool access
+is not needed.
 
 Keep tools disabled at server startup:
 
 ```bash
-ORBIT_TOOLS=off .venv/bin/orbit server
+ORBIT_TOOLS=off orbit server
 ```
 
 Disable tools for a client/session:
 
 ```bash
-.venv/bin/orbit --tools off "hello"
+orbit --tools off "hello"
 ```
 
 Interactive toggles:
@@ -164,13 +185,13 @@ also enabled by default for the tools-on route prefix.
 Disable only startup prewarm:
 
 ```bash
-ORBIT_KV_PREFIX_PREWARM=off .venv/bin/orbit server
+ORBIT_KV_PREFIX_PREWARM=off orbit server
 ```
 
 Disable route-prefix anchor and prewarm:
 
 ```bash
-ORBIT_KV_PREFIX_ANCHOR=off .venv/bin/orbit server
+ORBIT_KV_PREFIX_ANCHOR=off orbit server
 ```
 
 The prewarm cost is paid at startup. It does not remove CPU work; it shifts part
@@ -208,8 +229,8 @@ backend/model supports it. Think-on paths can be much slower on CPU.
 When the matching `mmproj` is available and detected by the native server:
 
 ```bash
-.venv/bin/orbit --image workdir/media/image1.jpg "Describe this image."
-.venv/bin/orbit --audio workdir/media/audio1.wav "Summarize this audio."
+orbit --image workdir/media/image1.jpg "Describe this image."
+orbit --audio workdir/media/audio1.wav "Summarize this audio."
 ```
 
 Multimodal capability should be visible through `/v1/models` and `/props`.
@@ -273,7 +294,7 @@ performance.
 
 ## Troubleshooting
 
-- backend unavailable: run `.venv/bin/orbit --health --base-url ...`
+- backend unavailable: run `orbit --health --base-url ...`
 - native libraries missing: run `python3 scripts/build_native.py`
 - model not found: verify the Orbit model cache under `models/`
 - multimodal unavailable: verify the matching `mmproj` is present

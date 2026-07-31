@@ -223,7 +223,7 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(smoke_harness.TOOL_CALL_GENERATION_PROTOCOL_VERSION, 1)
         self.assertEqual(
             smoke_harness.tool_call_generation_protocol_hash(),
-            "1407e2a5f7444446ebd2bd0d6cbdb3c81c155f814c587e203515de9babe55301",
+            "dad2a2a62a258f9c8f8cfa39bbf0038d282374ee39e690cc85c7fc10ba52a5b1",
         )
 
     def test_tool_call_generation_configuration_hash_uses_comparable_fields_only(self) -> None:

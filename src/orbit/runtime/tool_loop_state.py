@@ -91,6 +91,7 @@ class ToolTurnState:
     pending_completion_guard: bool = False
     pending_minimal_patch_guard: bool = False
     metadata_only_rejections: int = 0
+    metadata_only_observations: int = 0
     shell_commands_seen: int = 0
     shell_mutation_attempted: bool = False
     shell_mutation_succeeded: bool = False
@@ -187,7 +188,8 @@ class ToolLoopState:
 
     allowed_tool_names: tuple[str, ...]
     chunk_budget: dict[str, int] = field(default_factory=dict)
-    seen_tool_calls: set[tuple[str, str]] = field(default_factory=set)
+    seen_tool_calls: set[tuple[int, str, str]] = field(default_factory=set)
+    mutation_epoch: int = 0
     tool_rounds: int = 0
     used_tool_call_prompt: bool = False
 
@@ -205,11 +207,18 @@ class ToolLoopState:
 
     def mark_tool_call(self, tool_call: dict[str, object]) -> tuple[str, str]:
         signature = tool_call_signature(tool_call)
-        self.seen_tool_calls.add(signature)
+        self.seen_tool_calls.add((self.mutation_epoch, *signature))
         return signature
 
     def has_seen_tool_call(self, tool_call: dict[str, object]) -> bool:
-        return tool_call_signature(tool_call) in self.seen_tool_calls
+        return (self.mutation_epoch, *tool_call_signature(tool_call)) in self.seen_tool_calls
 
     def tool_call_signature(self, tool_call: dict[str, object]) -> tuple[str, str]:
         return tool_call_signature(tool_call)
+
+    def advance_after_mutation(self, tool_call: dict[str, object]) -> None:
+        self.mutation_epoch += 1
+        signature = tool_call_signature(tool_call)
+        # Observations may be repeated against new state; the exact successful
+        # mutation remains blocked in the new epoch.
+        self.seen_tool_calls.add((self.mutation_epoch, *signature))

@@ -113,6 +113,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.tools, "on")
         self.assertEqual(config.render_markdown, "live")
 
+    def test_removed_agent_flags_are_rejected(self) -> None:
+        for flag in ("--agent", "--no-agent"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                _parse(flag)
+
+    def test_legacy_agent_json_member_has_no_runtime_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"agent": True, "tools": "on"}), encoding="utf-8")
+
+            config = load_app_config(_parse("--config", str(path)))
+
+        self.assertFalse(hasattr(config, "agent"))
+        self.assertEqual(config.tools, "on")
+
     def test_orbit_tools_env_can_disable_default_tools(self) -> None:
         with mock.patch.dict(os.environ, {"ORBIT_TOOLS": "off"}):
             config = load_app_config(_parse("--config", "/tmp/orbit-missing-config.json"))

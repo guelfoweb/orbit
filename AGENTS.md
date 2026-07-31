@@ -8,7 +8,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 - Correctness, stability, reliability, and simplicity come before performance.
 - Orbit remains Python-first: prefer the standard library and small, readable, debuggable code.
-- Primary target: CPU-only Gemma 4 12B through native `orbit server`.
+- Primary target: CPU-only Gemma 4 26B-A4B Q4_0 through native `orbit server`.
 - Runtime owns behavior; backend owns inference.
 - Do not add hardcoded semantic fixes in routing or the tool loop.
 - Deterministic guardrails are allowed only for safety, validation, bounded retry, and diagnostics.
@@ -160,6 +160,73 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - `LLAMA_BUILD_COMMIT` and `LLAMA_BUILD_NUMBER` are explicit vendor metadata and are not derived from the parent Orbit repository. The staged b10068 candidate is not included in RC23.
 - RC23 validation: focused ABI/native tests PASS with 105 tests; full unit discovery PASS with 1,223 tests; all six MTP helpers rebuilt from staging; real vision and audio mmproj inputs PASS; MTP initialization/completion PASS; final-prefix capture and `cached=64` restore PASS; cancel, timeout, reset, and restart coverage PASS; artificial ABI mismatch fails safely without a crash; `compileall` PASS; `git diff --check` PASS.
 - RC23 makes no performance claim. Future vendor revisions require a separate process-isolated compatibility and performance comparison through the hardened bridge.
+
+## Post-RC23 Tool-Loop Convergence
+
+- Orbit now has one production tool loop. The former opt-in agent path,
+  `--agent`, `--no-agent`, action-review model call, agent prompts, exact
+  `apply_patch` tool, and mandatory agent verification state were removed before
+  the first stable release.
+- A process-isolated Gemma 4 26B-A4B Q4_0 comparison found no important,
+  repeatable benefit unique to the second loop. After correcting one invalid
+  repeated-action fixture, both modes completed 15/16 common scenarios. The
+  normal loop failed code repair twice; agent mode passed once and failed once,
+  so the apparent advantage was not repeatable.
+- On the common cohort, the normal loop used 39 model calls, 18 proposed tool
+  calls, 8,734 evaluated tokens, 927 output tokens, and 465.448 seconds. Agent
+  mode used 61 model calls, 28 proposed tool calls, 52,277 evaluated tokens,
+  1,688 output tokens, and 2,061.623 seconds. CPU wall time is descriptive, not
+  a deterministic speed claim.
+- Agent mode also proposed an unwanted mutation for inert tool-like JSON. The
+  shared no-mutation policy prevented the filesystem change, but the proposal
+  and extra calls were a correctness regression. The unique code-repair result
+  did not survive a fresh-process repetition.
+- Shared protections remain in the single loop: canonical validation,
+  deterministic formal healing, exact repeated-call rejection, mutation
+  epochs, permissions, lifecycle cleanup, and the explicit no-mutation policy
+  from #155. A successful mutation reopens prior observations in the new epoch
+  while the exact successful mutation remains blocked.
+- The no-mutation classifier inspects only active latest-user prose. Quoted
+  strings, code, JSON values, Markdown blockquotes, explicitly introduced data
+  payloads, and tool output are not policy input. Global and unsupported mixed
+  constraints deny generic shell before dispatch under canonical-gate ON or
+  OFF; structured read-only tools remain available.
+- Compatibility removal is intentional: Orbit is still in `0.0.1` release-
+  candidate development and no stable contract included the agent flags. Old
+  `--agent` and `--no-agent` invocations now fail as unknown CLI options rather
+  than selecting a hidden compatibility path. JSON `agent` data has no runtime
+  field or effect.
+- The removed path does not migrate planning, review, hidden retries,
+  decomposition, source-query experiments, or semantic decisions into the
+  normal loop. Broad multi-deliverable source audits remain a model/template
+  limitation.
+- Post-removal validation completed 16/16 scenarios with a terminal `stop` and
+  preserved every expected artifact. An intermediate removal accidentally
+  dropped shared inert-data route guidance and caused one unwanted shell
+  proposal; review restored the existing normal-loop guidance, and the targeted
+  inert-JSON rerun used no tool and passed. A separate ten-case safety corpus
+  preserved all artifacts; nine stopped normally, while one no-tool quoted-text
+  explanation reached its output budget.
+- Final focused regression tests passed 436/436 and full discovery passed
+  1,251/1,251
+  after obsolete agent/apply-patch suites were removed. The six MTP helpers
+  rebuilt successfully. The 26B target, draft, and mmproj initialized together;
+  strict MTP completed correctly. Final-prefix ON captured and restored
+  `cached=64`; its kill switch retained `cached=4`. A process-isolated
+  post-tool-reuse comparison preserved correctness and removed one model call
+  and 529 evaluated tokens in the measured eligible case. These measurements
+  are regression evidence, not deterministic performance claims.
+- Twelve exact local prompts sampled from `docs/PROMPTS.md` initially produced
+  11/12 strict passes. All eleven tool workflows passed. The original tools-off
+  `grep` explanation reached the fixed 256-token chat-phase cap and ended
+  incomplete. Process-isolated runs reproduced the exact same 256-token output
+  and hash on RC23, pre-convergence main, and the convergence candidate, proving
+  that this was not a convergence regression. The corpus now requests one
+  concise sentence; the same three revisions produced the same complete
+  26-token response with `finish_reason=stop`, one model call, and zero tools.
+  No runtime budget or behavior changed.
+- See `docs/TOOL_LOOP_CONVERGENCE_VALIDATION.md` for the inventory, comparison,
+  removal decision, compatibility rationale, and release gates.
 
 ## Post-Tool Final Prose Reuse
 
