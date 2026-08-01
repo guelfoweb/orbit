@@ -31,6 +31,10 @@ class LlamaServerBackend:
         self._display_model_name: str | None = None
         self._server_tools_cache: list[dict[str, Any]] | None = None
         self._props_cache: dict[str, Any] | None = None
+        self._result_observer: Callable[[ChatResult], None] | None = None
+
+    def set_result_observer(self, observer: Callable[[ChatResult], None] | None) -> None:
+        self._result_observer = observer
 
     def chat(
         self,
@@ -257,9 +261,10 @@ class LlamaServerBackend:
 
     def _with_display_model(self, result: ChatResult) -> ChatResult:
         display = self.display_model_name()
-        if not display:
-            return result
-        return replace(result, model=display)
+        displayed = replace(result, model=display) if display else result
+        if self._result_observer is not None:
+            self._result_observer(displayed)
+        return displayed
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")

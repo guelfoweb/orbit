@@ -13,6 +13,7 @@ from orbit.native_server.app import run_server
 from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.media import load_audio, load_image
+from orbit.runtime.turn_trace import ModelStepMetrics
 from orbit.terminal.config import add_config_arguments, load_app_config
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
@@ -21,7 +22,7 @@ from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, TOOL_PREFILL_
 from orbit.terminal.repl import Repl
 from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, think_mode_text, tools_text
 from orbit.terminal.session_selection import select_interactive_session
-from orbit.terminal.status import estimate_context_status_tokens, format_turn_status
+from orbit.terminal.status import TokenUsageAccumulator, estimate_context_status_tokens, format_turn_status, summarize_turn_token_usage
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.theme import dim
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
@@ -168,6 +169,23 @@ def _run_one_shot(
     render_markdown_mode: str = "plain",
 ) -> int:
     prefill_estimator = PrefillEstimator()
+    model_steps: list[ModelStepMetrics] = []
+    backend_token_usage = TokenUsageAccumulator()
+    backend_usage_observer_installed = False
+
+    set_result_observer = getattr(getattr(runtime, "backend", None), "set_result_observer", None)
+    if callable(set_result_observer):
+        set_result_observer(backend_token_usage.add_result)
+        backend_usage_observer_installed = True
+
+    def record_model_step(metrics: ModelStepMetrics) -> None:
+        model_steps.append(metrics)
+        prefill_estimator.update(
+            prompt_tokens=metrics.prompt_tokens,
+            prompt_tokens_per_second=metrics.prompt_tokens_per_second,
+            profile=prefill_profile_for_phase(metrics.phase),
+        )
+
     tools_enabled = tools_are_enabled(tools)
     system_prompt = ROUTE_SYSTEM_PROMPT if tools_enabled else CHAT_SYSTEM_PROMPT
     prefill_tokens = estimate_prefill_tokens(runtime.messages, prompt, system_prompt=system_prompt)
@@ -194,6 +212,7 @@ def _run_one_shot(
                 audios=audios,
                 on_final_delta=renderer.write,
                 on_progress=renderer.progress,
+                on_model_step=record_model_step,
             )
         elif not tools_enabled:
             result = runtime.ask_chat(
@@ -202,6 +221,7 @@ def _run_one_shot(
                 max_tokens=max_tokens,
                 on_final_delta=renderer.write,
                 on_progress=renderer.progress,
+                on_model_step=record_model_step,
             )
         else:
             result = runtime.ask_auto(
@@ -212,6 +232,7 @@ def _run_one_shot(
                 allowed_tool_names=allowed_tool_names_for_spec(tools),
                 on_final_delta=renderer.write,
                 on_progress=renderer.progress,
+                on_model_step=record_model_step,
                 on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
                 on_tool_result=lambda name, chars, source, content: _show_tool_result(
                     renderer,
@@ -236,11 +257,12 @@ def _run_one_shot(
         print(f"error: {exc}", file=sys.stderr)
         return 1
     renderer.finish()
-    prefill_estimator.update(
-        prompt_tokens=result.prompt_tokens,
-        prompt_tokens_per_second=result.prompt_tokens_per_second,
-        profile=prefill_profile_for_phase("final_from_tool" if tools_enabled else "chat_final"),
-    )
+    if not model_steps:
+        prefill_estimator.update(
+            prompt_tokens=result.prompt_tokens,
+            prompt_tokens_per_second=result.prompt_tokens_per_second,
+            profile=prefill_profile_for_phase("final_from_tool" if tools_enabled else "chat_final"),
+        )
     elapsed = time.monotonic() - started
     print("\n\n", end="", flush=True)
     print(
@@ -250,6 +272,11 @@ def _run_one_shot(
                 elapsed_seconds=elapsed,
                 estimated_context_tokens=estimate_context_status_tokens(runtime.messages),
                 context_tokens=runtime.context_tokens,
+                turn_token_usage=(
+                    backend_token_usage.snapshot()
+                    if backend_usage_observer_installed
+                    else summarize_turn_token_usage(model_steps)
+                ),
             )
         ),
         flush=True,

@@ -96,6 +96,24 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertIsNone(backend.count_chat_tokens([{"role": "user", "content": "hello"}]))
         self.assertIsNone(backend.count_text_tokens("hello"))
 
+    def test_result_observer_receives_every_completed_backend_result(self) -> None:
+        class Backend(LlamaServerBackend):
+            def display_model_name(self) -> str:
+                return "display-model"
+
+        backend = Backend(base_url="http://localhost", timeout=1)
+        observed: list[ChatResult] = []
+        backend.set_result_observer(observed.append)
+        source = ChatResult("ok", "source", "stop", [], 100, 5, 20, 10.0, 2.0)
+
+        result = backend._with_display_model(source)
+
+        self.assertEqual(result.model, "display-model")
+        self.assertEqual(observed, [result])
+        backend.set_result_observer(None)
+        backend._with_display_model(source)
+        self.assertEqual(observed, [result])
+
     def test_backend_props_overlay_runtime_tool_healing_diagnostics(self) -> None:
         class Backend(LlamaServerBackend):
             def _props_or_empty(self) -> dict[str, object]:

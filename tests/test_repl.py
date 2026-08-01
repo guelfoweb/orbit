@@ -38,7 +38,7 @@ from orbit.terminal.session_preview import format_recent_session_messages
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE
-from orbit.runtime.turn_trace import ModelPhaseStart
+from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
 class InterruptingBackend:
@@ -128,6 +128,63 @@ class CountingRuntime(ChatRuntime):
 
 
 class ReplTests(unittest.TestCase):
+    def test_status_reports_accumulated_session_token_usage(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        repl._record_model_step(ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0))
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            handled = repl._handle_command("/status")
+
+        self.assertTrue(handled)
+        self.assertIn(
+            "session tks: 105 total (100 in + 5 out) | work: 85 (80 prefill + 5 decode) | cache: 20 (20%) | calls: 1",
+            stdout.getvalue(),
+        )
+
+    def test_exit_reports_accumulated_session_token_usage(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        repl._record_model_step(ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0))
+        stdout = io.StringIO()
+
+        with (
+            mock.patch("builtins.input", return_value="/exit"),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = repl.run()
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "session tks: 105 total (100 in + 5 out) | work: 85 (80 prefill + 5 decode) | cache: 20 (20%) | calls: 1",
+            stdout.getvalue(),
+        )
+
+    def test_keyboard_interrupt_exit_reports_session_token_usage(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        stdout = io.StringIO()
+
+        with (
+            mock.patch("builtins.input", side_effect=KeyboardInterrupt),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = repl.run()
+
+        self.assertEqual(code, 130)
+        self.assertIn("session tks: 0 total (0 in + 0 out) | work: 0 (0 prefill + 0 decode) | calls: 0", stdout.getvalue())
+
+    def test_new_turn_discards_previous_turn_token_metrics(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        repl._record_model_step(ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0))
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            repl._ask("hello")
+
+        self.assertEqual(repl.turn_model_steps, [])
+
     def test_readline_enables_bracketed_paste_when_available(self) -> None:
         fake_readline = mock.Mock()
         with mock.patch.dict(sys.modules, {"readline": fake_readline}):

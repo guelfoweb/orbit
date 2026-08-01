@@ -16,12 +16,54 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.runtime.sessions import SessionStore
+from orbit.runtime.turn_trace import ModelStepMetrics
 from orbit.terminal.session_selection import display_datetime, preview_prompt, select_interactive_session
 from orbit.terminal import cli
 from orbit.backend.base import ChatResult
 
 
 class CliTests(unittest.TestCase):
+    def test_one_shot_footer_reports_complete_turn_token_usage(self) -> None:
+        class FakeRuntime:
+            messages = []
+            context_tokens = None
+
+            def ask_chat(self, *args, **kwargs):
+                on_model_step = kwargs["on_model_step"]
+                on_model_step(ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0))
+                on_model_step(ModelStepMetrics(1, "chat_final", "stop", 300, 15, 0, 10.0, 2.0, 0))
+                return ChatResult(
+                    content="complete",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=300,
+                    completion_tokens=15,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=10.0,
+                    generation_tokens_per_second=2.0,
+                )
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = cli._run_one_shot(
+                FakeRuntime(),
+                "hello",
+                image_paths=[],
+                audio_paths=[],
+                temperature=0.0,
+                max_tokens=32,
+                workdir=ROOT,
+                tools="off",
+                thinking=False,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "tks: 420 total (400 in + 20 out) | work: 400 (380 prefill + 20 decode) | cache: 20 (5%) | calls: 2",
+            stream.getvalue(),
+        )
+
     def test_one_shot_think_on_does_not_crash(self) -> None:
         completed = _run_cli("", "--think", "on", "/think")
 
