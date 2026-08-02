@@ -7,7 +7,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .base import ChatResult, Message, ModelInfo, StreamProgress
+from .base import ChatResult, Message, ModelInfo, StreamProgress, TokenCount
 from .model_names import resolve_model_display_name
 from .payloads import ChatPayloadOptions, build_chat_payload
 from orbit.final_prefix_config import resolve_final_prefix_reuse
@@ -193,6 +193,38 @@ class LlamaServerBackend:
         if isinstance(data.get("plain_text_response"), str):
             return data["plain_text_response"]
         return json.dumps(data, ensure_ascii=False)
+
+    def count_chat_tokens(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        thinking: bool = False,
+    ) -> TokenCount | None:
+        if not self._is_orbit_native_backend():
+            return None
+        try:
+            data = self._post_json(
+                "/tokens/count",
+                {
+                    "mode": "chat",
+                    "messages": messages,
+                    "tools": tools or [],
+                    "thinking": thinking,
+                },
+            )
+        except LlamaServerError:
+            return None
+        return _parse_token_count(data)
+
+    def count_text_tokens(self, text: str) -> TokenCount | None:
+        if not self._is_orbit_native_backend():
+            return None
+        try:
+            data = self._post_json("/tokens/count", {"mode": "text", "text": text})
+        except LlamaServerError:
+            return None
+        return _parse_token_count(data)
 
     def _get_json(self, path: str) -> Any:
         request = Request(f"{self.base_url}{path}", method="GET")
@@ -695,6 +727,29 @@ def _enrich_model_info_with_props(info: ModelInfo | None, props: dict[str, Any])
         parameter_count=info.parameter_count,
         size_bytes=info.size_bytes,
     )
+
+
+def _parse_token_count(data: object) -> TokenCount | None:
+    if not isinstance(data, dict):
+        return None
+    tokens = _int_or_none(data.get("tokens"))
+    context_tokens = _int_or_none(data.get("context_tokens"))
+    if tokens is None or tokens < 0:
+        return None
+    rendered_hash = _sha256_or_none(data.get("rendered_hash"))
+    token_hash = _sha256_or_none(data.get("token_hash"))
+    return TokenCount(
+        tokens=tokens,
+        context_tokens=context_tokens,
+        rendered_hash=rendered_hash,
+        token_hash=token_hash,
+    )
+
+
+def _sha256_or_none(value: object) -> str | None:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        return None
+    return value
 
 
 def _str_or_none(value: object) -> str | None:

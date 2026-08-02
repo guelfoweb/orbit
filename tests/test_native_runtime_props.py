@@ -61,6 +61,37 @@ class NativeRuntimePropsTests(unittest.TestCase):
         self.assertTrue(server.client.supports_vision)
         self.assertTrue(server.client.supports_audio)
 
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_token_counts_do_not_touch_completion_state(self, _mocked_lib) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(context_tokens=16384))
+        client.count_text_tokens = mock.Mock(return_value=17)
+        client.inspect_chat_tokens = mock.Mock(return_value=(29, "a" * 64, "b" * 64))
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        text = server.count_text_tokens("hello")
+        chat = server.count_chat_tokens(
+            [{"role": "user", "content": "hello"}],
+            tools=[],
+            thinking=False,
+        )
+
+        self.assertEqual(text, {"tokens": 17, "context_tokens": 16384})
+        self.assertEqual(
+            chat,
+            {
+                "tokens": 29,
+                "context_tokens": 16384,
+                "rendered_hash": "a" * 64,
+                "token_hash": "b" * 64,
+            },
+        )
+        client.count_text_tokens.assert_called_once_with("hello")
+        client.inspect_chat_tokens.assert_called_once_with(
+            [{"role": "user", "content": "hello"}],
+            tools=[],
+            thinking=False,
+        )
+
     @mock.patch("orbit.native_server.app.safe_gemma4_capability_manifest")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_server_caches_bounded_native_capability_manifest(self, _mocked_lib, build_manifest) -> None:

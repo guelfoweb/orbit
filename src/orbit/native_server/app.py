@@ -187,6 +187,31 @@ class OrbitNativeServer:
             "thinking_mode": "on" if self.client.config.thinking else "off",
         }
 
+    def count_text_tokens(self, text: str) -> dict[str, int]:
+        return {
+            "tokens": self.client.count_text_tokens(text),
+            "context_tokens": self.client.config.context_tokens,
+        }
+
+    def count_chat_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        thinking: bool,
+    ) -> dict[str, int | str]:
+        tokens, rendered_hash, token_hash = self.client.inspect_chat_tokens(
+            messages,
+            tools=tools,
+            thinking=thinking,
+        )
+        return {
+            "tokens": tokens,
+            "context_tokens": self.client.config.context_tokens,
+            "rendered_hash": rendered_hash,
+            "token_hash": token_hash,
+        }
+
     def error_result(self, message: str, payload: dict[str, Any]) -> dict[str, Any]:
         session_id = DEFAULT_SESSION_ID
         try:
@@ -317,6 +342,27 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            if self.path == "/tokens/count":
+                if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > 8 * 1024 * 1024:
+                    raise ValueError("token count payload exceeds 8388608 bytes")
+                mode = payload.get("mode")
+                if mode == "text":
+                    text = payload.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError("text token count requires a string")
+                    self._json(self._state().count_text_tokens(text))
+                    return
+                if mode == "chat":
+                    request = parse_chat_request(payload)
+                    self._json(
+                        self._state().count_chat_tokens(
+                            request.messages,
+                            tools=request.tools,
+                            thinking=bool(request.thinking),
+                        )
+                    )
+                    return
+                raise ValueError("token count mode must be text or chat")
             if self.path == "/chat":
                 try:
                     with native_kv_request_context(endpoint="/chat", payload=payload):

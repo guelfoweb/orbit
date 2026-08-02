@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
 from orbit.runtime.shell_guardrails import (
     classify_explicit_no_mutation_constraint,
+    execute_exec_shell_full_command,
     is_mutating_shell_command,
     is_mutative_user_request,
     is_read_only_user_request,
@@ -12,6 +18,236 @@ from orbit.runtime.shell_guardrails import (
 
 
 class ShellGuardrailsTests(unittest.TestCase):
+    def test_targeted_search_discards_result_when_source_changes_during_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            target = workdir / "note.txt"
+            target.write_text("alpha\nneedle\nomega\n" + "filler\n" * 2000, encoding="utf-8")
+
+            def mutate(*args, **kwargs):
+                target.write_text("alpha\nchanged\nomega\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="2:needle\n", stderr="")
+
+            with patch("orbit.runtime.shell_guardrails._run_shell_command", side_effect=mutate):
+                result = execute_exec_shell_full_command(
+                    {"command": "grep -n needle note.txt"},
+                    workdir=workdir,
+                )
+
+        self.assertEqual(result, "error: source file changed during targeted search; result discarded")
+
+    def test_overlapping_search_windows_are_deduplicated_into_one_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text(
+                "a\nneedle one\nneedle two\nz\n" + "filler\n" * 2000,
+                encoding="utf-8",
+            )
+
+            result = execute_exec_shell_full_command(
+                {"command": "grep -n -C 1 needle note.txt"},
+                workdir=workdir,
+            )
+
+        self.assertIn("returned_line_ranges: 1-4", result)
+        self.assertEqual(result.count("returned_line_ranges:"), 1)
+    def test_single_file_numbered_search_reports_exact_identity_and_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            content = "alpha\nneedle one\ncontext\nneedle two\nomega\n" + "filler\n" * 2000
+            (workdir / "note file.txt").write_text(content, encoding="utf-8")
+
+            result = execute_exec_shell_full_command(
+                {"command": "grep -n -C 1 'needle' 'note file.txt'"},
+                workdir=workdir,
+            )
+
+        self.assertIn("targeted_file_search: true", result)
+        self.assertIn("path: note file.txt", result)
+        self.assertIn(f"bytes: {len(content.encode('utf-8'))}", result)
+        self.assertIn("lines: 2005", result)
+        self.assertIn(f"sha256: {hashlib.sha256(content.encode('utf-8')).hexdigest()}", result)
+        self.assertIn("search_coverage: complete_file", result)
+        self.assertIn("semantic_coverage: partial", result)
+        self.assertIn("returned_line_ranges: 1-5", result)
+        self.assertIn("result_truncated: false", result)
+        self.assertLessEqual(len(result.encode("utf-8")), 800)
+
+    def test_exact_sed_line_range_uses_internal_page_with_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            content = "one\ntwo\nthree\nfour\n"
+            (workdir / "note file.txt").write_text(content, encoding="utf-8")
+
+            result = execute_exec_shell_full_command(
+                {"command": "sed -n '2,3p' 'note file.txt'"},
+                workdir=workdir,
+            )
+
+        self.assertIn("file_display_result: true", result)
+        self.assertIn("coverage: partial", result)
+        self.assertIn("line_range: 2-3", result)
+        self.assertIn(hashlib.sha256(content.encode()).hexdigest(), result)
+        self.assertTrue(result.endswith("two\nthree\n"))
+
+    def test_exact_sed_range_rejects_more_than_two_hundred_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("line\n" * 300, encoding="utf-8")
+
+            result = execute_exec_shell_full_command(
+                {"command": "sed -n '1,201p' note.txt"},
+                workdir=workdir,
+            )
+
+        self.assertIn("between 1 and 200 lines", result)
+
+    def test_search_max_count_reports_partial_file_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("needle\nneedle\n" + "filler\n" * 2000, encoding="utf-8")
+
+            result = execute_exec_shell_full_command(
+                {"command": "grep -n -m 1 needle note.txt"},
+                workdir=workdir,
+            )
+
+        self.assertIn("targeted_file_search: true", result)
+        self.assertIn("search_coverage: partial_file", result)
+        self.assertIn("returned_line_ranges: 1", result)
+
+    def test_single_file_search_no_match_is_partial_semantic_evidence_not_shell_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            content = "alpha\nbeta\n" + "filler\n" * 2000
+            (workdir / "note.txt").write_text(content, encoding="utf-8")
+
+            result = execute_exec_shell_full_command(
+                {"command": "grep -n absent note.txt"},
+                workdir=workdir,
+            )
+
+        self.assertIn("targeted_file_search: true", result)
+        self.assertIn("search_coverage: complete_file", result)
+        self.assertIn("semantic_coverage: partial", result)
+        self.assertIn("match_count: 0", result)
+        self.assertIn("returned_line_ranges: unavailable", result)
+        self.assertIn("(no lexical matches)", result)
+        self.assertNotIn("shell_command_failed", result)
+
+    def test_unnumbered_search_derives_ranges_only_from_exact_source_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text(
+                "alpha\nneedle\nomega\n" + "filler\n" * 2000,
+                encoding="utf-8",
+            )
+
+            result = execute_exec_shell_full_command(
+                {"command": "grep needle note.txt"},
+                workdir=workdir,
+            )
+
+        self.assertIn("targeted_file_search: true", result)
+        self.assertIn("returned_line_ranges: 2", result)
+
+    def test_short_single_file_search_keeps_existing_shell_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("alpha\nneedle\nomega\n", encoding="utf-8")
+
+            result = execute_exec_shell_full_command(
+                {"command": "grep needle note.txt"},
+                workdir=workdir,
+            )
+
+        self.assertEqual(result, "needle")
+        self.assertNotIn("targeted_file_search: true", result)
+
+    def test_quoted_regex_alternation_is_not_mistaken_for_a_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text(
+                "alpha\nbeta\nomega\n" + "filler\n" * 2000,
+                encoding="utf-8",
+            )
+
+            result = execute_exec_shell_full_command(
+                {"command": 'grep -nE "alpha|omega" note.txt'},
+                workdir=workdir,
+            )
+
+        self.assertIn("targeted_file_search: true", result)
+        self.assertIn("returned_line_ranges: 1,3", result)
+
+    def test_unstructured_search_forms_keep_existing_bounded_output(self) -> None:
+        commands = (
+            "grep -n needle note.txt other.txt",
+            "grep -n needle note.txt | head -n 1",
+            "grep -n needle note.txt > matches.txt",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            for name in ("note.txt", "other.txt"):
+                (workdir / name).write_text("needle\n", encoding="utf-8")
+            for command in commands:
+                with self.subTest(command=command):
+                    result = execute_exec_shell_full_command({"command": command}, workdir=workdir)
+                    self.assertNotIn("targeted_file_search: true", result)
+
+    def test_successful_compound_cat_keeps_normal_bounded_shell_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            content = "alpha\n" * 2000
+            (workdir / "note file.txt").write_text(content, encoding="utf-8")
+
+            result = execute_exec_shell_full_command(
+                {
+                    "command": (
+                        "sha256sum 'note file.txt' && wc -c 'note file.txt' && "
+                        "wc -l 'note file.txt' && cat 'note file.txt'"
+                    )
+                },
+                workdir=workdir,
+            )
+
+        self.assertNotIn("full_document_snapshot: true", result)
+        self.assertIn(hashlib.sha256(content.encode()).hexdigest(), result)
+        self.assertIn("[truncated]", result)
+        self.assertLessEqual(len(result.encode("utf-8")), 12_012)
+
+    def test_ambiguous_compound_cat_forms_do_not_claim_full_snapshot(self) -> None:
+        commands = (
+            "cat long.txt | head -n 2",
+            "cat long.txt > copy.txt",
+            "cat long.txt || true",
+            "cat long.txt; printf done",
+            "cat long.txt && cat other.txt",
+            "cat long.txt && wc -l long.txt",
+            "wc -l long.txt && cat -n long.txt",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            content = "alpha\n" * 2000
+            (workdir / "long.txt").write_text(content, encoding="utf-8")
+            (workdir / "other.txt").write_text(content, encoding="utf-8")
+            for command in commands:
+                with self.subTest(command=command):
+                    result = execute_exec_shell_full_command({"command": command}, workdir=workdir)
+                    self.assertNotIn("full_document_snapshot: true", result)
+
+    def test_invalid_utf8_search_result_is_not_enriched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "binary.txt").write_bytes(b"needle\n\xff\n")
+
+            result = execute_exec_shell_full_command(
+                {"command": "grep -a -n needle binary.txt"},
+                workdir=workdir,
+            )
+
+        self.assertNotIn("targeted_file_search: true", result)
+
     def test_set_enable_disable_are_mutative_requests(self) -> None:
         self.assertTrue(is_mutative_user_request("Set service.timeout to 30 in config.json."))
         self.assertTrue(is_mutative_user_request("Enable the service in settings.ini."))

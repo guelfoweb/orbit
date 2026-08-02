@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import signal
@@ -10,12 +11,15 @@ from pathlib import Path
 from typing import Any
 
 from orbit.runtime.file_tools import (
+    MAX_FULL_DOCUMENT_BYTES,
     PDF_CHUNK_CHARS,
     extract_pdf_text,
     format_pdf_result,
+    load_text_file,
     read_file,
     read_pdf,
 )
+from orbit.runtime.document_tool import execute_read_file
 from orbit.runtime.path_guardrails import resolve_inside_workdir
 from orbit.runtime.web import html_to_text, search_web
 
@@ -25,11 +29,22 @@ MAX_SHELL_TIMEOUT = 15
 DEFAULT_SHELL_OUTPUT_BYTES = 12_000
 MAX_SHELL_OUTPUT_BYTES = 12_000
 SEARCH_SHELL_OUTPUT_BYTES = 800
+FULL_DOCUMENT_SNAPSHOT_MIN_BYTES = 8 * 1024
 SHELL_FAILURE_STREAM_CHARS = 1200
-SHELL_READ_FILE_THRESHOLD_BYTES = 8 * 1024
 SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
 SHELL_FULL_READ_ONLY_MUTATION_ERROR_PREFIX = "error: read-only request rejected mutating shell command"
 SHELL_FULL_MIXED_MUTATION_ERROR_PREFIX = "error: mixed or scoped mutation constraint rejected mutating shell command"
+
+
+@dataclass(frozen=True)
+class _TargetedSourceIdentity:
+    target: Path
+    relative_path: str
+    complete_search: bool
+    digest: str
+    byte_count: int
+    line_count: int
+    text: str
 SHELL_FULL_CONTRACT_RETRY_PROMPT = (
     "The previous shell-full command was rejected because it only listed metadata. "
     "Use the available exec_shell_full_command tool now to inspect source/content/string evidence. "
@@ -323,6 +338,16 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
     pdf_result = _read_pdf_target(raw_command, workdir=workdir)
     if pdf_result is not None:
         return _bounded_text(pdf_result, output_size)
+    exact_text_result = _read_exact_cat_target(raw_command, workdir=workdir)
+    if exact_text_result is not None:
+        return exact_text_result
+    exact_range_result = _read_exact_sed_range_target(raw_command, workdir=workdir)
+    if exact_range_result is not None:
+        return exact_range_result
+    targeted_spec = _single_file_search(raw_command, workdir=workdir)
+    targeted_before = _targeted_source_identity(targeted_spec, workdir=workdir) if targeted_spec is not None else None
+    if isinstance(targeted_before, str):
+        return targeted_before
     env = dict(os.environ)
     env["HOME"] = str(resolved_workdir)
     env["PWD"] = str(resolved_workdir)
@@ -332,6 +357,22 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
         return f"error: exec_shell_full_command failed: {exc}"
     except subprocess.TimeoutExpired as exc:
         return f"error: exec_shell_full_command timed out after {timeout}s"
+    targeted_after = _targeted_source_identity(targeted_spec, workdir=workdir) if targeted_spec is not None else None
+    if isinstance(targeted_after, str):
+        return targeted_after
+    if targeted_before is not None and targeted_after != targeted_before:
+        return "error: source file changed during targeted search; result discarded"
+    if completed.returncode == 1 and _is_search_command(raw_command):
+        targeted = _targeted_single_file_search_result(
+            raw_command,
+            "",
+            workdir=workdir,
+            output_size=min(output_size, SEARCH_SHELL_OUTPUT_BYTES),
+            match_count=0,
+            identity=targeted_after,
+        )
+        if targeted is not None:
+            return targeted
     if completed.returncode != 0:
         return _format_shell_failure(completed.returncode, completed.stdout, completed.stderr)
     output_parts = []
@@ -346,6 +387,15 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
     if processed is not None:
         return processed
     if _is_search_command(raw_command):
+        targeted = _targeted_single_file_search_result(
+            raw_command,
+            content,
+            workdir=workdir,
+            output_size=min(output_size, SEARCH_SHELL_OUTPUT_BYTES),
+            identity=targeted_after,
+        )
+        if targeted is not None:
+            return targeted
         return _bounded_text(content, min(output_size, SEARCH_SHELL_OUTPUT_BYTES))
     return _bounded_text(content, output_size)
 
@@ -869,9 +919,6 @@ def _postprocess_shell_full_output(
     output_size: int,
     user_prompt: str | None = None,
 ) -> str | None:
-    cat_result = _read_large_cat_target(raw_command, workdir=workdir)
-    if cat_result is not None:
-        return cat_result
     if _looks_like_html_or_fragment(content) and not _wants_html_source(user_prompt):
         text = html_to_text(content)
         if not text:
@@ -1110,7 +1157,7 @@ def _safe_int(value: str, default: int) -> int:
         return default
 
 
-def _read_large_cat_target(raw_command: str, *, workdir: Path) -> str | None:
+def _read_exact_cat_target(raw_command: str, *, workdir: Path) -> str | None:
     try:
         tokens = shlex.split(raw_command)
     except ValueError:
@@ -1125,17 +1172,46 @@ def _read_large_cat_target(raw_command: str, *, workdir: Path) -> str | None:
     if not target.is_file():
         return None
     try:
-        size = target.stat().st_size
+        if target.stat().st_size <= FULL_DOCUMENT_SNAPSHOT_MIN_BYTES:
+            return None
     except OSError:
         return None
-    if size <= SHELL_READ_FILE_THRESHOLD_BYTES:
-        return None
-    result = read_file(path, arguments={}, workdir=workdir)
+    result = execute_read_file({"path": path}, workdir=workdir)
     return "\n".join(
         [
             "shell_output_read_file: true",
             f"original_command: {raw_command}",
-            f"threshold_bytes: {SHELL_READ_FILE_THRESHOLD_BYTES}",
+            result,
+        ]
+    )
+
+
+def _read_exact_sed_range_target(raw_command: str, *, workdir: Path) -> str | None:
+    try:
+        tokens = shlex.split(raw_command)
+    except ValueError:
+        return None
+    if len(tokens) != 4 or Path(tokens[0]).name != "sed" or tokens[1] != "-n":
+        return None
+    match = re.fullmatch(r"([1-9][0-9]*)(?:,([1-9][0-9]*))?p", tokens[2])
+    if match is None:
+        return None
+    start_line = int(match.group(1))
+    end_line = int(match.group(2) or match.group(1))
+    if end_line < start_line or end_line - start_line + 1 > 200:
+        return "error: exact line display must contain between 1 and 200 lines"
+    result = execute_read_file(
+        {
+            "path": tokens[3],
+            "start_line": start_line,
+            "line_count": end_line - start_line + 1,
+        },
+        workdir=workdir,
+    )
+    return "\n".join(
+        [
+            "shell_output_read_file: true",
+            f"original_command: {raw_command}",
             result,
         ]
     )
@@ -1147,6 +1223,243 @@ def _is_search_command(raw_command: str) -> bool:
     except ValueError:
         return False
     return bool(tokens and tokens[0] in {"ag", "grep", "rg"})
+
+
+def _targeted_single_file_search_result(
+    raw_command: str,
+    content: str,
+    *,
+    workdir: Path,
+    output_size: int,
+    match_count: int | None = None,
+    identity: _TargetedSourceIdentity | None = None,
+) -> str | None:
+    if identity is None:
+        parsed = _single_file_search(raw_command, workdir=workdir)
+        if parsed is None:
+            return None
+        loaded_identity = _targeted_source_identity(parsed, workdir=workdir)
+        if isinstance(loaded_identity, str) or loaded_identity is None:
+            return None
+        identity = loaded_identity
+    target = identity.target
+    relative_path = identity.relative_path
+    complete_search = identity.complete_search
+    digest = identity.digest
+    byte_count = identity.byte_count
+    line_count = identity.line_count
+    if content and _search_result_line_ranges(
+        content,
+        source_text=identity.text,
+        relative_path=relative_path,
+    ) == "":
+        return None
+    header = [
+        "targeted_file_search: true",
+        f"path: {relative_path}",
+        f"bytes: {byte_count}",
+        f"lines: {line_count}",
+        f"sha256: {digest}",
+        f"search_coverage: {'complete_file' if complete_search else 'partial_file'}",
+        "semantic_coverage: partial",
+    ]
+    if match_count is not None:
+        header.append(f"match_count: {match_count}")
+    # Range metadata depends on the bounded body, so converge on a body budget
+    # rather than dropping metadata or returning an oversized result.
+    body_budget = output_size - len(("\n".join(header) + "\n").encode("utf-8")) - 80
+    if body_budget <= 0:
+        return None
+    while body_budget > 0:
+        bounded = _bounded_text(content, body_budget) if content else "(no lexical matches)"
+        ranges = _search_result_line_ranges(
+            bounded,
+            source_text=identity.text,
+            relative_path=relative_path,
+        )
+        result = "\n".join(
+            [
+                *header,
+                f"returned_line_ranges: {ranges or 'unavailable'}",
+                f"result_truncated: {'true' if bounded.endswith(chr(10) + '[truncated]') else 'false'}",
+                "content:",
+                bounded,
+            ]
+        )
+        excess = len(result.encode("utf-8")) - output_size
+        if excess <= 0:
+            return result
+        body_budget -= excess
+    return None
+
+
+def _single_file_search(raw_command: str, *, workdir: Path) -> tuple[Path, str, bool, str] | None:
+    if _contains_shell_control_operator(raw_command):
+        return None
+    try:
+        tokens = shlex.split(raw_command)
+    except ValueError:
+        return None
+    if not tokens or Path(tokens[0]).name not in {"grep", "rg"}:
+        return None
+    positional: list[str] = []
+    complete_search = True
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            positional.extend(tokens[index + 1 :])
+            break
+        if token in {"-C", "-A", "-B", "--context", "--after-context", "--before-context"}:
+            if index + 1 >= len(tokens) or not tokens[index + 1].isdigit():
+                return None
+            index += 2
+            continue
+        if token in {"-m", "--max-count"}:
+            if index + 1 >= len(tokens) or not tokens[index + 1].isdigit() or int(tokens[index + 1]) < 1:
+                return None
+            complete_search = False
+            index += 2
+            continue
+        if re.fullmatch(r"-[CAB]\d+", token) or re.fullmatch(
+            r"--(?:context|after-context|before-context)=\d+", token
+        ):
+            index += 1
+            continue
+        if re.fullmatch(r"-m\d+", token) or re.fullmatch(r"--max-count=[1-9]\d*", token):
+            complete_search = False
+            index += 1
+            continue
+        if token.startswith("-"):
+            if token.startswith("--") and token not in {
+                "--line-number",
+                "--ignore-case",
+                "--fixed-strings",
+                "--extended-regexp",
+                "--word-regexp",
+                "--line-regexp",
+                "--no-heading",
+                "--with-filename",
+                "--no-filename",
+            } and token != "--color=never":
+                return None
+            if not token.startswith("--") and any(char not in "nHiFEwx" for char in token[1:]):
+                return None
+            index += 1
+            continue
+        positional.append(token)
+        index += 1
+    if len(positional) != 2:
+        return None
+    target_or_error = resolve_inside_workdir(positional[1], workdir=workdir)
+    if isinstance(target_or_error, str) or not target_or_error.is_file():
+        return None
+    root = workdir.expanduser().resolve()
+    try:
+        relative = str(target_or_error.relative_to(root))
+    except ValueError:
+        return None
+    return target_or_error, relative, complete_search, positional[1]
+
+
+def _targeted_source_identity(
+    parsed: tuple[Path, str, bool, str],
+    *,
+    workdir: Path,
+) -> _TargetedSourceIdentity | str | None:
+    target, relative_path, complete_search, supplied_path = parsed
+    loaded = load_text_file(supplied_path, workdir=workdir, max_bytes=MAX_FULL_DOCUMENT_BYTES)
+    if isinstance(loaded, str):
+        return f"error: targeted search source rejected: {loaded.removeprefix('error: ')}"
+    stable_target, text = loaded
+    raw = text.encode("utf-8")
+    if len(raw) <= FULL_DOCUMENT_SNAPSHOT_MIN_BYTES:
+        return None
+    return _TargetedSourceIdentity(
+        target=stable_target,
+        relative_path=relative_path,
+        complete_search=complete_search,
+        digest=hashlib.sha256(raw).hexdigest(),
+        byte_count=len(raw),
+        line_count=len(text.splitlines()),
+        text=text,
+    )
+
+
+def _contains_shell_control_operator(command: str) -> bool:
+    quote: str | None = None
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            elif quote == '"' and char in {"$", "`"}:
+                return True
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in {"\n", "|", ";", "&", ">", "<", "$", "`"}:
+            return True
+    return quote is not None or escaped
+
+
+def _search_result_line_ranges(
+    content: str,
+    *,
+    source_text: str | None = None,
+    relative_path: str | None = None,
+) -> str:
+    numbers = sorted(
+        {
+            int(match.group(1))
+            for line in content.splitlines()
+            if (match := re.match(r"^(?:[^:\n]+:)?(\d+)[:-]", line)) is not None
+        }
+    )
+    if not numbers and source_text is not None:
+        returned = _unnumbered_search_lines(content, relative_path=relative_path)
+        if returned:
+            numbers = [
+                number
+                for number, line in enumerate(source_text.splitlines(), 1)
+                if line in returned
+            ]
+    if not numbers:
+        return ""
+    ranges: list[tuple[int, int]] = []
+    start = end = numbers[0]
+    for number in numbers[1:]:
+        if number == end + 1:
+            end = number
+            continue
+        ranges.append((start, end))
+        start = end = number
+    ranges.append((start, end))
+    return ",".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
+
+
+def _unnumbered_search_lines(content: str, *, relative_path: str | None) -> set[str]:
+    returned: set[str] = set()
+    for raw_line in content.splitlines():
+        if raw_line in {"--", "[truncated]"}:
+            continue
+        line = raw_line
+        if relative_path:
+            for separator in (":", "-"):
+                prefix = f"{relative_path}{separator}"
+                if line.startswith(prefix):
+                    line = line[len(prefix) :]
+                    break
+        if line:
+            returned.add(line)
+    return returned
 
 
 def _is_mutating_shell_command(command: str) -> bool:

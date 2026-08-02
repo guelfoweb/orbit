@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import unittest
 import tempfile
 import os
@@ -3883,7 +3884,8 @@ class ToolRuntimeTests(unittest.TestCase):
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-        self.assertEqual(result.content, "vulnerability found from source evidence")
+        self.assertIn("Document coverage: complete exact display", result.content)
+        self.assertTrue(result.content.endswith("vulnerability found from source evidence"))
         self.assertEqual(backend.calls, 3)
         self.assertEqual(backend.tools_seen[0], None)
         self.assertIsNotNone(backend.tools_seen[1])
@@ -4047,7 +4049,8 @@ class ToolRuntimeTests(unittest.TestCase):
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-        self.assertEqual(result.content, "Final summary from both chunks.")
+        self.assertIn("Document coverage: partial exact display", result.content)
+        self.assertTrue(result.content.endswith("Final summary from both chunks."))
 
     def test_file_recovery_guard_guides_model_to_candidate_read(self) -> None:
         class FileRecoveryBackend:
@@ -8371,19 +8374,71 @@ EOF"""
         self.assertEqual(result.content, "done")
         self.assertEqual(_last_tool_message(runtime)["content"], "")
 
-    def test_ask_with_tools_can_read_file_chunk_mode(self) -> None:
+    def test_ask_with_tools_large_cat_uses_internal_bounded_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            (workdir / "large.txt").write_text("abcdef" * 50000, encoding="utf-8")
+            (workdir / "large.txt").write_text("abcdef\n" * 50000, encoding="utf-8")
             backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat large.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
+            observed_results: list[str] = []
 
-            result = runtime.ask_with_tools("read chunk", temperature=0, max_tokens=32, workdir=workdir)
+            result = runtime.ask_with_tools(
+                "read chunk",
+                temperature=0,
+                max_tokens=32,
+                workdir=workdir,
+                on_tool_result=lambda name, size, source, content: observed_results.append(content),
+            )
+        self.assertIn("Document coverage: partial exact display", result.content)
+        self.assertTrue(result.content.endswith("done"))
+        self.assertEqual(backend.calls, 2)
+        self.assertTrue(any("file_display_result: true" in value for value in observed_results))
+        self.assertTrue(any("coverage: partial" in value for value in observed_results))
+        self.assertFalse(any("full_document_snapshot: true" in value for value in observed_results))
 
-        self.assertEqual(result.content, "done")
-        tool_message = _last_tool_message(runtime)
-        self.assertIn("shell_output_read_file: true", tool_message["content"])
-        self.assertIn("large_file_excerpt: true", tool_message["content"])
+    def test_targeted_single_file_search_prepends_verified_partial_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            content = "alpha\nneedle\nomega\n" + "filler\n" * 2000
+            (workdir / "note.txt").write_text(content, encoding="utf-8")
+            backend = ToolCallingBackend(arguments='{"command":"grep -n -C 1 needle note.txt"}')
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "find needle in note.txt",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+            )
+
+        self.assertEqual(backend.calls, 2)
+        self.assertIn("Document coverage: partial semantic retrieval", result.content)
+        self.assertIn("returned lines 1-3", result.content)
+        self.assertIn(hashlib.sha256(content.encode("utf-8")).hexdigest(), result.content)
+        self.assertIn("cannot establish absence", result.content)
+        self.assertTrue(result.content.endswith("done"))
+
+    def test_targeted_no_match_returns_safe_partial_notice_without_final_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text(
+                "alpha\nomega\n" + "filler\n" * 2000,
+                encoding="utf-8",
+            )
+            backend = ToolCallingBackend(arguments='{"command":"grep -n missing note.txt"}')
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_with_tools(
+                "is missing present in note.txt?",
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+            )
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertIn("does not prove", result.content)
+        self.assertNotIn("The requested fact is absent", result.content)
 
     def test_ask_with_tools_records_memory_refresh_event(self) -> None:
         class MemoryThenAnswerBackend:

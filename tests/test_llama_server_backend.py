@@ -53,6 +53,48 @@ class FakeNativeStreamWithTrailingNoise:
 
 
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_native_token_count_uses_non_generating_endpoint(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", timeout=1)
+                self.requests: list[tuple[str, dict[str, object]]] = []
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "orbit-native"}
+
+            def _post_json(self, path: str, payload: dict[str, object]):
+                self.requests.append((path, payload))
+                return {
+                    "tokens": 123,
+                    "context_tokens": 8192,
+                    "rendered_hash": "a" * 64,
+                    "token_hash": "b" * 64,
+                }
+
+        backend = Backend()
+        chat = backend.count_chat_tokens([{"role": "user", "content": "hello"}], thinking=False)
+        text_count = backend.count_text_tokens("hello")
+
+        assert chat is not None and text_count is not None
+        self.assertEqual((chat.tokens, chat.context_tokens), (123, 8192))
+        self.assertEqual((chat.rendered_hash, chat.token_hash), ("a" * 64, "b" * 64))
+        self.assertEqual((text_count.tokens, text_count.context_tokens), (123, 8192))
+        self.assertEqual([request[0] for request in backend.requests], ["/tokens/count", "/tokens/count"])
+        self.assertEqual(backend.requests[0][1]["mode"], "chat")
+        self.assertEqual(backend.requests[1][1], {"mode": "text", "text": "hello"})
+
+    def test_external_backend_does_not_attempt_native_token_count(self) -> None:
+        class Backend(LlamaServerBackend):
+            def _props_or_empty(self) -> dict[str, object]:
+                return {"backend": "external"}
+
+            def _post_json(self, path: str, payload: dict[str, object]):
+                raise AssertionError("native token endpoint must not be called")
+
+        backend = Backend(base_url="http://localhost", timeout=1)
+        self.assertIsNone(backend.count_chat_tokens([{"role": "user", "content": "hello"}]))
+        self.assertIsNone(backend.count_text_tokens("hello"))
+
     def test_backend_props_overlay_runtime_tool_healing_diagnostics(self) -> None:
         class Backend(LlamaServerBackend):
             def _props_or_empty(self) -> dict[str, object]:
