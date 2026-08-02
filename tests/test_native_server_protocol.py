@@ -65,6 +65,7 @@ class NativeServerProtocolTests(unittest.TestCase):
         self.assertEqual(request.stop, ())
         self.assertEqual(request.tools, [])
         self.assertFalse(request.route_prefix_anchor)
+        self.assertFalse(request.qwen_route_prefix_anchor)
         self.assertIsNone(request.allow_mtp_experimental)
         self.assertFalse(request.final_prefix_experiment)
 
@@ -104,6 +105,10 @@ class NativeServerProtocolTests(unittest.TestCase):
     def test_parse_chat_request_accepts_route_prefix_anchor_flag(self) -> None:
         request = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "route_prefix_anchor": True})
         self.assertTrue(request.route_prefix_anchor)
+
+    def test_parse_chat_request_accepts_qwen_route_prefix_anchor_flag(self) -> None:
+        request = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "qwen_route_prefix_anchor": True})
+        self.assertTrue(request.qwen_route_prefix_anchor)
 
     def test_parse_chat_request_accepts_allow_mtp_flag(self) -> None:
         disabled = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "allow_mtp_experimental": False})
@@ -231,6 +236,36 @@ class NativeServerProtocolTests(unittest.TestCase):
         self.assertEqual(response["choices"][0]["message"]["content"], "")
         self.assertEqual(response["choices"][0]["finish_reason"], "cancelled")
         self.assertEqual(response["timings"]["predicted_ms"], 0.0)
+
+    def test_openai_response_keeps_reasoning_and_tools_structurally_separate(self) -> None:
+        tool_call = {
+            "id": "",
+            "type": "function",
+            "function": {"name": "system_info", "arguments": "{}"},
+        }
+        native = native_chat_response(
+            content="",
+            model="qwen",
+            finish_reason="tool_calls",
+            session_id=DEFAULT_SESSION_ID,
+            prompt_tokens=20,
+            completion_tokens=8,
+            reused_prompt_tokens=0,
+            evaluated_prompt_tokens=20,
+            prefill_ms=1.0,
+            generation_ms=1.0,
+            cancelled=False,
+            reasoning_content="private planning",
+            reasoning_tokens=3,
+            tool_calls=(tool_call,),
+        )
+
+        response = openai_chat_response(native)
+        message = response["choices"][0]["message"]
+        self.assertEqual(message["content"], "")
+        self.assertEqual(message["reasoning_content"], "private planning")
+        self.assertEqual(message["tool_calls"], [tool_call])
+        self.assertEqual(native["native"]["reasoning_tokens"], 3)
 
 
 if __name__ == "__main__":

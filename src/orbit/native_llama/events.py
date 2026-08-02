@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 
 NativePhase = Literal["load", "prefill", "generation"]
@@ -37,3 +37,6 @@ class NativeCompletion:
     timings: NativeTimings
     stopped_by_stop: bool = False
     completed_after_thought: bool = False
+    reasoning_content: str = ""
+    reasoning_tokens: int = 0
+    tool_calls: tuple[dict[str, Any], ...] = ()

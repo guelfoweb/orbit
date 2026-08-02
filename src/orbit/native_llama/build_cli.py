@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from .build_support import BUNDLED_SOURCE_ROOT, DEFAULT_VENDOR_BUILD_BIN, DEFAULT_VENDOR_BUILD_ROOT, validate_llama_source_root
+from .chat_bridge import build_chat_bridge, install_chat_bridge
 from .llama_provenance import load_llama_provenance
 from .mtp_accept_probe import build_mtp_accept_probe_helper
 from .mtp_completion import build_mtp_completion_helper
@@ -280,6 +281,12 @@ def _copy_runtime_libraries(build_bin: Path) -> None:
 
 
 def _build_packaged_shims(source_root: Path, build_bin: Path) -> None:
+    chat_bridge, _provenance = build_chat_bridge(
+        llama_root=source_root,
+        build_dir=build_bin,
+        build_bin=build_bin,
+    )
+    install_chat_bridge(chat_bridge, DEFAULT_VENDOR_LIB_DIR)
     mtmd_bridge, _provenance = build_mtmd_bridge(
         llama_root=source_root,
         build_dir=build_bin,

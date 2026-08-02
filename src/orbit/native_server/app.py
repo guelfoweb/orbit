@@ -13,7 +13,7 @@ import time
 from typing import Any, Mapping
 
 from orbit.final_prefix_config import resolve_final_prefix_reuse
-from orbit.native_llama.capabilities import safe_gemma4_capability_manifest
+from orbit.native_llama.capabilities import safe_native_capability_manifest
 from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
 from orbit.native_llama.client import (
     NativeClientConfig,
@@ -24,6 +24,7 @@ from orbit.native_llama.client import (
 from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_context as native_kv_request_context
 from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
+from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
 from orbit.native_server.protocol import (
     ContinueRequest,
     DEFAULT_SESSION_ID,
@@ -54,7 +55,7 @@ class OrbitNativeServer:
         self.client = client
         self.model_alias = model_alias
         self.lock = threading.Lock()
-        self.native_backend_capabilities = safe_gemma4_capability_manifest(
+        self.native_backend_capabilities = safe_native_capability_manifest(
             client,
             final_system_prompt=FINAL_FROM_TOOL_SYSTEM_PROMPT,
         )
@@ -82,6 +83,7 @@ class OrbitNativeServer:
                 tools=request.tools,
                 thinking=thinking,
                 route_prefix_anchor=request.route_prefix_anchor,
+                qwen_route_prefix_anchor=request.qwen_route_prefix_anchor,
                 allow_mtp_experimental=request.allow_mtp_experimental,
                 final_prefix_experiment=final_prefix_experiment,
                 on_progress=on_progress,
@@ -103,6 +105,12 @@ class OrbitNativeServer:
             finish_reason = "length"
         elif timings.output_tokens >= request.max_tokens and not timings.cancelled and not stopped:
             finish_reason = "length"
+        tool_calls = getattr(completion, "tool_calls", ())
+        # A structurally parsed call must not turn a budget-truncated generation
+        # into an executable completion. The canonical gate remains authoritative
+        # after this transport-level finish reason is preserved.
+        if tool_calls and finish_reason not in {"cancelled", "length"}:
+            finish_reason = "tool_calls"
         return native_chat_response(
             content=content,
             model=self.model_alias,
@@ -115,6 +123,9 @@ class OrbitNativeServer:
             prefill_ms=timings.prefill_ms,
             generation_ms=timings.generation_ms,
             cancelled=timings.cancelled and not stopped,
+            reasoning_content=getattr(completion, "reasoning_content", ""),
+            reasoning_tokens=getattr(completion, "reasoning_tokens", 0),
+            tool_calls=tool_calls,
         )
 
     def continue_current(self, request: ContinueRequest, *, on_token=None, on_progress=None, should_cancel=None) -> dict[str, Any]:
@@ -200,11 +211,15 @@ class OrbitNativeServer:
         tools: list[dict[str, Any]],
         thinking: bool,
     ) -> dict[str, int | str]:
-        tokens, rendered_hash, token_hash = self.client.inspect_chat_tokens(
-            messages,
-            tools=tools,
-            thinking=thinking,
-        )
+        # The Qwen bridge keeps the parser associated with its latest render.
+        # Serialize inspection with completion so concurrent token accounting
+        # cannot replace parser state while generated text is being decoded.
+        with self.lock:
+            tokens, rendered_hash, token_hash = self.client.inspect_chat_tokens(
+                messages,
+                tools=tools,
+                thinking=thinking,
+            )
         return {
             "tokens": tokens,
             "context_tokens": self.client.config.context_tokens,
@@ -260,6 +275,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             mtp_last_validate_equivalence = _mtp_last_validate_equivalence_payload(state.client)
             mtp_config = _mtp_config_payload(state.client)
             final_prefix = state.client.final_prefix_experiment_status()
+            qwen_route_prefix = state.client.qwen_route_prefix_reuse_status()
             final_prefix_config = _final_prefix_reuse_props(state.client)
             self._json(
                 {
@@ -301,6 +317,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "model_id": state.client.paths.model_id,
                     "backend": "orbit-native",
                     "native_backend_capabilities": state.native_backend_capabilities,
+                    "model_compatibility": state.client.compatibility_diagnostics(),
                     "backend_mode": session["backend_mode"],
                     "thinking_mode": runtime["thinking_mode"],
                     "session_id": session["id"],
@@ -321,6 +338,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "final_prefix_experiment_failure_reason": final_prefix["failure_reason"],
                     "final_prefix_experiment_last_used": final_prefix["last_used"],
                     "final_prefix_experiment_checkpoint_size_bytes": final_prefix["checkpoint_size_bytes"],
+                    "qwen_route_prefix_reuse": qwen_route_prefix,
                     **final_prefix_config,
                     **_tool_call_healing_props(),
                 }
@@ -530,6 +548,11 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     should_cancel=lambda: disconnect.is_set() or self._client_disconnected(),
                 )
             disconnect.disarm()
+            reasoning = result.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                emit("reasoning", {"text": reasoning, "session_id": request.session_id})
+            if result.get("tool_calls"):
+                emit("tool_calls", {"tool_calls": result["tool_calls"], "session_id": request.session_id})
             emit("metrics", {"usage": result["usage"], "timings": result["timings"], "native": result["native"]})
             emit("done", {"finish_reason": result["finish_reason"], "session_id": request.session_id})
         except RuntimeError as exc:
@@ -629,6 +652,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
 def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     final_prefix_config = resolve_final_prefix_reuse()
+    qwen_route_prefix_config = resolve_qwen_route_prefix_reuse()
 
     try:
         paths = resolve_bootstrap_paths(args)
@@ -650,6 +674,9 @@ def run_server(argv: list[str] | None = None) -> int:
                 final_prefix_reuse_source=final_prefix_config.source,
                 final_prefix_reuse_config_error=final_prefix_config.validation_error,
                 final_prefix_reuse_legacy_detected=final_prefix_config.legacy_detected,
+                qwen_route_prefix_reuse_enabled=qwen_route_prefix_config.enabled,
+                qwen_route_prefix_reuse_source=qwen_route_prefix_config.source,
+                qwen_route_prefix_reuse_config_error=qwen_route_prefix_config.validation_error,
             ),
         )
         if not args.verbose_llama_log:
@@ -729,6 +756,11 @@ def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefix
         return result
     if not prefix_anchor_enabled():
         result = _startup_prewarm_skipped("anchor_disabled")
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
+        return result
+    profile = getattr(client, "model_profile", None)
+    if profile is not None and not profile.gemma_prefix_reuse_supported:
+        result = _startup_prewarm_skipped("model_profile_ineligible")
         _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
         return result
     try:

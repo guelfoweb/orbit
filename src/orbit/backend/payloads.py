@@ -16,6 +16,7 @@ class ChatPayloadOptions:
     stream: bool = False
     cache_prompt: bool = True
     route_prefix_anchor: bool = False
+    qwen_route_prefix_anchor: bool = False
     allow_mtp_experimental: bool | None = None
     final_prefix_experiment: bool = False
 
@@ -34,6 +35,8 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
         payload["stream"] = True
     if options.route_prefix_anchor:
         payload["route_prefix_anchor"] = True
+    if options.qwen_route_prefix_anchor:
+        payload["qwen_route_prefix_anchor"] = True
     if options.allow_mtp_experimental is not None:
         payload["allow_mtp_experimental"] = options.allow_mtp_experimental
     if options.final_prefix_experiment:

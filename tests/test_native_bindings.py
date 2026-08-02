@@ -35,6 +35,9 @@ def _stub_library() -> SimpleNamespace:
         "llama_state_seq_get_data",
         "llama_state_seq_set_data",
         "llama_model_get_vocab",
+        "llama_model_meta_count",
+        "llama_model_meta_key_by_index",
+        "llama_model_meta_val_str_by_index",
         "llama_vocab_n_tokens",
         "llama_model_chat_template",
         "llama_chat_apply_template",
@@ -76,6 +79,8 @@ class NativeBindingsTests(unittest.TestCase):
         self.assertEqual(len(library.lib.llama_state_seq_get_size.argtypes), 2)
         self.assertEqual(len(library.lib.llama_state_seq_get_data.argtypes), 4)
         self.assertEqual(len(library.lib.llama_state_seq_set_data.argtypes), 4)
+        self.assertEqual(len(library.lib.llama_model_meta_key_by_index.argtypes), 4)
+        self.assertEqual(len(library.lib.llama_model_meta_val_str_by_index.argtypes), 4)
         self.assertEqual(len(library.lib.llama_vocab_n_tokens.argtypes), 1)
         self.assertEqual(len(library.lib.llama_batch_init.argtypes), 3)
         self.assertEqual(len(library.lib.llama_batch_free.argtypes), 1)

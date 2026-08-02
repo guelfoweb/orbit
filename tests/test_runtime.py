@@ -2149,6 +2149,51 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(backend.chat_calls, 2)
         self.assertEqual(backend.thinking_seen, [True, False])
 
+    def test_ask_chat_uses_one_call_for_verified_native_separated_reasoning(self) -> None:
+        class NativeSeparatedReasoningBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.thinking = True
+                self.thinking_seen: list[bool] = []
+
+            def uses_native_separated_reasoning(self) -> bool:
+                return True
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages = messages
+                self.thinking_seen.append(self.thinking)
+                return ChatResult(
+                    content="The answer is 4.",
+                    reasoning_content="private arithmetic",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=4,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        backend = NativeSeparatedReasoningBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None, thinking_mode=True)
+        emitted: list[str] = []
+
+        result = runtime.ask_chat(
+            "What is 2 + 2?",
+            temperature=0,
+            max_tokens=256,
+            on_final_delta=emitted.append,
+        )
+
+        self.assertEqual(result.content, "The answer is 4.")
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(backend.thinking_seen, [True])
+        self.assertEqual(emitted, ["<|channel>thought\nprivate arithmetic<channel|>", "The answer is 4."])
+        self.assertEqual(runtime.messages[-1], {"role": "assistant", "content": "The answer is 4."})
+        self.assertNotIn("private arithmetic", repr(runtime.messages))
+
     def test_ask_chat_emits_distinct_phase_reasons_for_reasoning_repair(self) -> None:
         class ReasoningThenFinalBackend(FakeBackend):
             def __init__(self) -> None:

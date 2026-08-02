@@ -1,7 +1,8 @@
 # orbit
 
-Orbit is a small Python-first local runtime for Gemma 4 26B-A4B on CPU-only
-machines. The primary path is the native `orbit server` backend, using
+Orbit is a small Python-first local runtime for Gemma 4 26B-A4B and the
+verified Qwen 3.6 35B-A3B profile on CPU-only machines. The primary path is the
+native `orbit server` backend, using
 vendored `llama.cpp`/`ggml` libraries built and loaded by Orbit. It does not
 require an external `llama-server` process for normal use.
 
@@ -13,7 +14,7 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 
 ## Current Scope
 
-- local CLI and native HTTP server for Gemma 4 26B-A4B
+- local CLI and native HTTP server for Gemma 4 26B-A4B and verified Qwen 3.6
 - CPU-first native backend
 - explicit shell tools when tools mode is enabled
 - streaming terminal output and compact progress phases
@@ -32,6 +33,7 @@ and is not a guaranteed performance win.
 - Linux recommended
 - CMake for building the vendored native libraries
 - Gemma 4 26B-A4B target GGUF
+- optional verified Qwen 3.6 35B-A3B Q4_K_M target GGUF
 - optional Gemma 4 `mmproj` GGUF for multimodal input
 - optional MTP draft GGUF for `orbit server --mtp`
 
@@ -86,6 +88,22 @@ In another terminal:
 ```bash
 orbit --workdir workdir --think off "hi, how are you?"
 ```
+
+The verified Qwen 3.6 profile uses the model's reviewed embedded template and a
+revision-bound native parser bridge:
+
+```bash
+orbit download ggml-org/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf
+orbit server \
+  --model models/ggml-org--Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf \
+  --think off
+```
+
+Qwen MTP and Gemma-specific prefix checkpoints are not enabled for Qwen. The
+verified Qwen profile has its own default-on 768-token route checkpoint with
+`ORBIT_QWEN_ROUTE_PREFIX_REUSE=0` as its kill switch. See
+[`docs/QWEN_3_6_COMPATIBILITY.md`](docs/QWEN_3_6_COMPATIBILITY.md) for the exact
+identity gate, thinking behavior, tool protocol, diagnostics, and limits.
 
 Enable tools only when you want to expose model-driven shell access:
 
