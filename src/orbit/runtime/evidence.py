@@ -25,6 +25,7 @@ POST_TOOL_ROUTE_OUTPUT_CHARS = 80
 POST_TOOL_ROUTE_SMALL_RAW_CHARS = 200
 ROUTE_OUTPUT_EXCERPT_CHARS = 400
 WEB_FINAL_SNIPPET_CHARS = 220
+RAW_MEMORY_CACHE_MAX_CHARS = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class EvidenceStore:
         return store
 
     def clear_memory(self) -> None:
+        self.cleanup_ephemeral()
         self.records.clear()
         self.raw_cache.clear()
 
@@ -72,6 +74,7 @@ class EvidenceStore:
             record = _record_from_index(value)
             if record is not None:
                 self.records[record.evidence_id] = record
+        self.cleanup_ephemeral()
 
     def add(self, tool_name: str, content: str, *, metadata: dict[str, object] | None = None) -> EvidenceRecord:
         record = build_evidence_record(
@@ -81,18 +84,21 @@ class EvidenceStore:
             evidence_sequence=self._next_sequence(),
         )
         self.records[record.evidence_id] = record
-        self.raw_cache[record.evidence_id] = content
         try:
             self.save(record, content)
         except OSError:
+            # Preserve evidence when durable storage is unavailable.
+            self.raw_cache[record.evidence_id] = content
             failed = _record_with_sidecar_status(record, "sidecar_write_failed")
             self.records[failed.evidence_id] = failed
             return failed
+        if len(content) <= RAW_MEMORY_CACHE_MAX_CHARS:
+            self.raw_cache[record.evidence_id] = content
         return record
 
     def save(self, record: EvidenceRecord, content: str) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / f"{record.evidence_id}.txt").write_text(content, encoding="utf-8")
+        (self.root / f"{record.evidence_id}.txt").write_bytes(content.encode("utf-8"))
         index = self._load_index()
         index[record.evidence_id] = asdict(record)
         tmp = self.root / f"{INDEX_FILENAME}.tmp"
@@ -105,9 +111,34 @@ class EvidenceStore:
         path = self.root / f"{evidence_id}.txt"
         if not path.exists():
             raise FileNotFoundError(f"missing evidence sidecar: {evidence_id}")
-        content = path.read_text(encoding="utf-8")
-        self.raw_cache[evidence_id] = content
+        content = path.read_bytes().decode("utf-8")
+        if len(content) <= RAW_MEMORY_CACHE_MAX_CHARS:
+            self.raw_cache[evidence_id] = content
         return content
+
+    def discard(self, evidence_id: str) -> bool:
+        try:
+            (self.root / f"{evidence_id}.txt").unlink(missing_ok=True)
+        except OSError:
+            return False
+        self.records.pop(evidence_id, None)
+        self.raw_cache.pop(evidence_id, None)
+        index = self._load_index()
+        index.pop(evidence_id, None)
+        try:
+            self._write_index(index)
+        except OSError:
+            return False
+        return True
+
+    def cleanup_ephemeral(self) -> None:
+        ephemeral_ids = [
+            record.evidence_id
+            for record in self.records.values()
+            if record.metadata.get("ephemeral") == "full_document_snapshot"
+        ]
+        for evidence_id in ephemeral_ids:
+            self.discard(evidence_id)
 
     def recent_records(self, limit: int = RECENT_EVIDENCE_LIMIT) -> list[EvidenceRecord]:
         if limit <= 0:
@@ -138,6 +169,19 @@ class EvidenceStore:
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _write_index(self, index: dict[str, object]) -> None:
+        if not index:
+            try:
+                (self.root / INDEX_FILENAME).unlink(missing_ok=True)
+                self.root.rmdir()
+            except OSError:
+                pass
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        tmp = self.root / f"{INDEX_FILENAME}.tmp"
+        tmp.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.root / INDEX_FILENAME)
 
 
 def build_evidence_record(
@@ -386,6 +430,12 @@ def _optional_int(value: object) -> int | None:
 
 def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) -> str:
     command = str(metadata.get("command") or "")
+    if (
+        tool_name == "read_file"
+        or "full_document_snapshot: true" in content
+        or "file_display_result: true" in content
+    ):
+        return "read"
     if "web_search_results: true" in content or "orbit-web-search" in command:
         return "web_search"
     if (
@@ -419,12 +469,26 @@ def _enriched_metadata(kind: str, content: str, metadata: dict[str, object]) -> 
     enriched = dict(metadata)
     if kind == "web_search":
         enriched.update(_web_metadata(content, metadata))
-    elif kind in {"shell", "grep_search", "unknown"}:
+    elif kind in {"read", "shell", "grep_search", "unknown"}:
         enriched.update(_shell_metadata(content))
+    if kind == "read":
+        enriched.update(_document_metadata(content))
     if kind == "grep_search":
         enriched.update(_grep_metadata(content, metadata))
     enriched = _enrich_excerpts(content, enriched)
     return enriched
+
+
+def _document_metadata(content: str) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    for key in ("path", "bytes", "chars", "lines", "sha256"):
+        value = _line_value(content, key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value):
+            metadata[f"document_{key}"] = value
+    coverage = _line_value(content, "coverage")
+    if isinstance(coverage, str) and coverage:
+        metadata["document_coverage"] = coverage
+    return metadata
 
 
 def _web_metadata(content: str, metadata: dict[str, object]) -> dict[str, object]:
@@ -459,6 +523,18 @@ def _shell_metadata(content: str) -> dict[str, object]:
 
 
 def _grep_metadata(content: str, metadata: dict[str, object]) -> dict[str, object]:
+    if "targeted_file_search: true" in content:
+        path = _line_value(content, "path") or ""
+        match_count = _optional_int(_line_value(content, "match_count"))
+        return {
+            "query": _grep_query_from_command(str(metadata.get("command") or "")),
+            "match_count": match_count if match_count is not None else "",
+            "files_count": 1 if path else "",
+            "file_paths": [path] if path else [],
+            "first_matches": _targeted_grep_matches(content, path=path),
+            "search_coverage": _line_value(content, "search_coverage") or "",
+            "semantic_coverage": _line_value(content, "semantic_coverage") or "",
+        }
     stdout = _section_text(content, "STDOUT:", "STDERR:")
     source = stdout if stdout is not None else content
     lines = [line.strip() for line in source.splitlines() if line.strip() and line.strip() != "(empty)"]
@@ -484,6 +560,24 @@ def _grep_metadata(content: str, metadata: dict[str, object]) -> dict[str, objec
         "file_paths": unique_paths[:8],
         "first_matches": matches[:5],
     }
+
+
+def _targeted_grep_matches(content: str, *, path: str) -> list[str]:
+    separator = "\ncontent:\n"
+    if separator not in content:
+        return []
+    body = content.split(separator, 1)[1]
+    matches: list[str] = []
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line or line in {"(no lexical matches)", "[truncated]"}:
+            continue
+        if path and not line.startswith(f"{path}:"):
+            line = f"{path}:{line}"
+        matches.append(_bounded_text(line, 300))
+        if len(matches) == 5:
+            break
+    return matches
 
 
 def _card_metadata_lines(record: EvidenceRecord, *, compact: bool) -> list[str]:
@@ -596,7 +690,7 @@ def _route_operational_card(record: EvidenceRecord) -> str:
     if tool_name != record.kind:
         fields.insert(1, f"t={tool_name}")
     if record.kind == "grep_search":
-        keys = ("query", "files_count", "file_paths")
+        keys = ("query", "match_count", "files_count", "file_paths", "search_coverage", "semantic_coverage")
     elif record.kind == "web_search":
         keys = ("query", "result_count", "top_domains")
     elif record.kind in {"shell", "unknown"}:

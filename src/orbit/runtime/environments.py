@@ -11,6 +11,7 @@ from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.completion_budget import CompletionBudget, resolve_max_tokens
 from orbit.runtime.continue_controller import ContinueController
 from orbit.runtime.file_input_resolver import FileInputResolver
+from orbit.runtime.file_tools import read_full_document_snapshot
 from orbit.runtime.final_policy import (
     build_final_tool_policy,
     classify_final_answer_completeness,
@@ -23,6 +24,21 @@ from orbit.runtime.final_policy import (
     is_repetitive_final_answer,
     last_user_text,
     looks_like_incomplete_final,
+)
+from orbit.runtime.full_document import (
+    attest_full_document_snapshot,
+    exact_coverage_notice,
+    file_display_coverage_notice,
+    full_document_blocked_notice,
+    full_document_changed_notice,
+    full_document_control_marker,
+    full_document_messages,
+    full_document_source_blocked_notice,
+    identify_full_document_request,
+    parse_full_document_snapshot,
+    required_full_document_context,
+    targeted_search_coverage_notice,
+    targeted_search_no_match_notice,
 )
 from orbit.runtime.kv_diag import current_tools_mode, model_call_context
 from orbit.runtime.media import AudioInput, ImageInput
@@ -364,6 +380,228 @@ class PureChatEnvironment:
 
 
 @dataclass(frozen=True)
+class FullDocumentPreflightEnvironment:
+    runtime: ChatRuntime
+    transport: TransportEnvironment
+
+    def answer_if_eligible(
+        self,
+        prompt: str,
+        *,
+        route_result: ChatResult,
+        temperature: float,
+        max_tokens: int,
+        workdir: Path,
+        allowed_tool_names: tuple[str, ...] | None,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+    ) -> ChatResult | None:
+        request = identify_full_document_request(prompt)
+        if request is None:
+            return None
+        if allowed_tool_names is not None and "exec_shell_full_command" not in allowed_tool_names:
+            return None
+
+        raw = read_full_document_snapshot(request.path, workdir=workdir)
+        if raw.startswith("error:"):
+            return self._blocked(
+                route_result,
+                full_document_source_blocked_notice(request.path, raw.removeprefix("error:").strip()),
+                on_final_delta=on_final_delta,
+            )
+        snapshot = parse_full_document_snapshot(raw)
+        if snapshot is None:
+            return self._blocked(
+                route_result,
+                full_document_source_blocked_notice(request.path, "snapshot_integrity_failure"),
+                on_final_delta=on_final_delta,
+            )
+
+        record = None
+        if self.runtime.evidence_store is not None:
+            record = self.runtime.evidence_store.add(
+                "exec_shell_full_command",
+                raw,
+                metadata={
+                    "ephemeral": "full_document_snapshot",
+                    "mode": "preflight",
+                    "path": snapshot.path,
+                },
+            )
+        try:
+            return self._answer_snapshot(
+                prompt,
+                snapshot=snapshot,
+                route_result=route_result,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                workdir=workdir,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+            )
+        finally:
+            if record is not None and self.runtime.evidence_store is not None:
+                self.runtime.evidence_store.discard(record.evidence_id)
+
+    def _answer_snapshot(
+        self,
+        prompt: str,
+        *,
+        snapshot,
+        route_result: ChatResult,
+        temperature: float,
+        max_tokens: int,
+        workdir: Path,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+    ) -> ChatResult:
+        user_message: Message = {"role": "user", "content": prompt}
+        output_reserve = resolve_max_tokens(
+            "final_from_tool",
+            max_tokens,
+            evidence_kind="read",
+            evidence_chars=snapshot.char_count,
+        )
+        reason = full_document_control_marker(snapshot)
+        reason = f"unsafe_model_control_markup:{reason}" if reason is not None else None
+        messages: list[Message] | None = None
+        first_count = second_count = text_count = None
+        if reason is None:
+            try:
+                messages = full_document_messages(user_message, snapshot)
+            except ValueError:
+                reason = "document_delimiter_collision"
+            else:
+                count_chat = getattr(self.runtime.backend, "count_chat_tokens", None)
+                count_text = getattr(self.runtime.backend, "count_text_tokens", None)
+                first_count = count_chat(messages, tools=None, thinking=False) if callable(count_chat) else None
+                text_count = count_text(snapshot.content) if callable(count_text) else None
+                second_count = count_chat(messages, tools=None, thinking=False) if callable(count_chat) else None
+                if not _token_count_is_exact(first_count):
+                    reason = "exact_token_identity_unavailable"
+                elif not _same_token_attestation(first_count, second_count):
+                    reason = "tokenizer_template_or_context_changed"
+                else:
+                    source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+                    if source_error is not None:
+                        reason = source_error
+
+        prompt_tokens = first_count.tokens if first_count is not None else None
+        active_context = first_count.context_tokens if first_count is not None else None
+        file_tokens = text_count.tokens if text_count is not None else None
+        required_context = (
+            required_full_document_context(prompt_tokens, output_reserve)
+            if prompt_tokens is not None
+            else None
+        )
+        if (
+            reason is None
+            and messages is not None
+            and required_context is not None
+            and active_context is not None
+            and required_context <= active_context
+        ):
+            if on_phase_start is not None:
+                on_phase_start(
+                    ModelPhaseStart(
+                        "full_document",
+                        streamed=on_final_delta is not None,
+                        attempt=1,
+                        reason="exact_complete_preflight",
+                    )
+                )
+            buffered_deltas: list[str] | None = [] if on_final_delta is not None else None
+            with self.transport.backend_thinking(False):
+                with model_call_context(phase="full_document", tools_mode="on"):
+                    result = self.transport.chat_once(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=output_reserve,
+                        on_final_delta=buffered_deltas.append if buffered_deltas is not None else None,
+                        on_progress=on_progress,
+                    )
+            if on_model_step is not None:
+                on_model_step(ModelStepMetrics.from_result(loop=2, result=result, phase="full_document"))
+            if result.finish_reason in {"cancelled", "timeout"}:
+                self.runtime.messages.append({"role": "assistant", "content": result.content})
+                return result
+            source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+            if source_error is not None:
+                notice = full_document_changed_notice(snapshot, source_error)
+                blocked = replace(result, content=notice, finish_reason="stop", tool_calls=[])
+                if on_final_delta is not None:
+                    on_final_delta(notice)
+                self.runtime.messages.append({"role": "assistant", "content": notice})
+                return blocked
+            prefix = exact_coverage_notice(snapshot)
+            if on_final_delta is not None:
+                on_final_delta(prefix)
+                if result.content:
+                    on_final_delta(result.content)
+            result = replace(result, content=prefix + result.content)
+            self.runtime.messages.append({"role": "assistant", "content": result.content})
+            return result
+
+        if reason is None:
+            reason = "context_too_small"
+        return self._blocked(
+            route_result,
+            full_document_blocked_notice(
+                snapshot,
+                reason=reason,
+                file_tokens=file_tokens,
+                prompt_tokens=prompt_tokens,
+                output_reserve=output_reserve,
+                required_context=required_context,
+                active_context=active_context,
+            ),
+            on_final_delta=on_final_delta,
+        )
+
+    def _blocked(
+        self,
+        route_result: ChatResult,
+        notice: str,
+        *,
+        on_final_delta: Callable[[str], None] | None,
+    ) -> ChatResult:
+        result = replace(route_result, content=notice, finish_reason="stop", tool_calls=[])
+        if on_final_delta is not None:
+            on_final_delta(notice)
+        self.runtime.messages.append({"role": "assistant", "content": notice})
+        return result
+
+
+def _token_count_is_exact(value) -> bool:
+    return (
+        value is not None
+        and isinstance(value.tokens, int)
+        and isinstance(value.context_tokens, int)
+        and isinstance(value.rendered_hash, str)
+        and len(value.rendered_hash) == 64
+        and isinstance(value.token_hash, str)
+        and len(value.token_hash) == 64
+    )
+
+
+def _same_token_attestation(first, second) -> bool:
+    return (
+        _token_count_is_exact(first)
+        and _token_count_is_exact(second)
+        and first.tokens == second.tokens
+        and first.context_tokens == second.context_tokens
+        and first.rendered_hash == second.rendered_hash
+        and first.token_hash == second.token_hash
+    )
+
+
+@dataclass(frozen=True)
 class ToolLoopEnvironment:
     runtime: ChatRuntime
 
@@ -426,6 +664,27 @@ class FinalFromToolEnvironment:
         use_tool_prompt: bool,
         compact_window: bool = False,
     ) -> FinalAnswerResult:
+        evidence_kind, evidence_chars = self._latest_evidence_budget_metadata()
+        targeted_prefix = self._targeted_search_prefix()
+        display_prefix = self._file_display_prefix()
+        targeted_no_match = self._targeted_search_no_match()
+        if targeted_no_match is not None:
+            result = ChatResult(
+                content=targeted_no_match,
+                model=None,
+                finish_reason="stop",
+                tool_calls=[],
+                prompt_tokens=0,
+                completion_tokens=0,
+                cached_tokens=0,
+                prompt_tokens_per_second=None,
+                generation_tokens_per_second=None,
+            )
+            if on_final_delta is not None:
+                on_final_delta(result.content)
+            self.runtime.messages.append({"role": "assistant", "content": result.content})
+            return FinalAnswerResult(result=result, used_retry_or_repair_pass=False)
+        response_prefix = targeted_prefix or display_prefix
         if self.runtime._should_use_web_final_view(use_tool_prompt=use_tool_prompt):
             call_messages = self.runtime._web_final_from_tool_messages()
         elif (
@@ -437,7 +696,6 @@ class FinalFromToolEnvironment:
         else:
             call_messages = self.runtime._with_final_tool_prompt() if use_tool_prompt else self.runtime.messages
             call_messages = self.runtime._with_final_evidence_context(call_messages)
-        evidence_kind, evidence_chars = self._latest_evidence_budget_metadata()
         policy = build_final_tool_policy(
             call_messages,
             max_tokens=max_tokens,
@@ -461,6 +719,8 @@ class FinalFromToolEnvironment:
                     attempt=1,
                 )
             )
+        if response_prefix and on_final_delta is not None:
+            on_final_delta(response_prefix)
         with self.transport.backend_thinking(False):
             with model_call_context(phase="final_from_tool", tools_mode="on"):
                 if on_final_delta is None:
@@ -655,6 +915,8 @@ class FinalFromToolEnvironment:
                     on_final_delta(chunk)
         elif direct_delta is not None and on_final_delta is not None and not direct_delta.chunks and result.content:
             on_final_delta(result.content)
+        if response_prefix:
+            result = replace(result, content=response_prefix + result.content)
         self.runtime.messages.append({"role": "assistant", "content": result.content})
         return FinalAnswerResult(
             result=result,
@@ -678,6 +940,38 @@ class FinalFromToolEnvironment:
             return "shell_error", record.raw_chars
         return record.kind, record.raw_chars
 
+    def _targeted_search_prefix(self) -> str:
+        store = self.runtime.evidence_store
+        record = next(iter(store.recent_records(1)), None) if store is not None else None
+        if record is None or record.kind != "grep_search":
+            return ""
+        try:
+            raw = store.load_raw(record.evidence_id) if store is not None else ""
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
+            return ""
+        return targeted_search_coverage_notice(raw) or ""
+
+    def _targeted_search_no_match(self) -> str | None:
+        store = self.runtime.evidence_store
+        record = next(iter(store.recent_records(1)), None) if store is not None else None
+        if record is None or record.kind != "grep_search":
+            return None
+        try:
+            raw = store.load_raw(record.evidence_id) if store is not None else ""
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
+            return None
+        return targeted_search_no_match_notice(raw)
+
+    def _file_display_prefix(self) -> str:
+        store = self.runtime.evidence_store
+        record = next(iter(store.recent_records(1)), None) if store is not None else None
+        if record is None or record.kind != "read":
+            return ""
+        try:
+            raw = store.load_raw(record.evidence_id) if store is not None else ""
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
+            return ""
+        return file_display_coverage_notice(raw) or ""
 
 @dataclass(frozen=True)
 class ContinueEnvironment:

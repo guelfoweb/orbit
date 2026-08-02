@@ -14,6 +14,7 @@ from orbit.runtime.environments import (
     ContinueEnvironment,
     FileInputEnvironment,
     FinalFromToolEnvironment,
+    FullDocumentPreflightEnvironment,
     PureChatEnvironment,
     ToolLoopEnvironment,
     TransportEnvironment,
@@ -280,20 +281,24 @@ class ChatRuntime:
             on_model_step=on_model_step,
             on_phase_start=on_phase_start,
         )
-        result = self._run_tool_loop(
-            temperature=temperature,
-            max_tokens=max_tokens,
-            workdir=workdir,
-            max_loops=max_loops,
-            on_final_delta=on_final_delta,
-            on_progress=on_progress,
-            on_tool_call=on_tool_call,
-            on_tool_result=on_tool_result,
-            on_model_step=on_model_step,
-            on_phase_start=on_phase_start,
-            tool_names=tool_names,
-        )
-        return self._remember_visible_result(result.result)
+        try:
+            result = self._run_tool_loop(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                workdir=workdir,
+                max_loops=max_loops,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+                tool_names=tool_names,
+            )
+            return self._remember_visible_result(result.result)
+        finally:
+            if self.evidence_store is not None:
+                self.evidence_store.cleanup_ephemeral()
 
     @user_request
     def ask_auto(
@@ -341,7 +346,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
         )
         if resolution.bypass_tool_route:
-            bundle = self._run_tool_loop(
+            bundle = self._run_tool_loop_for_request(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 workdir=workdir,
@@ -470,7 +475,7 @@ class ChatRuntime:
                     decision = retry_decision
             if decision is None:
                 if explicit_web_search or file_content_evidence:
-                    bundle = self._run_tool_loop(
+                    bundle = self._run_tool_loop_for_request(
                         temperature=temperature,
                         max_tokens=max_tokens,
                         workdir=workdir,
@@ -613,6 +618,21 @@ class ChatRuntime:
                 on_phase_start=on_phase_start,
                 command_result=first,
             )
+        if decision.route == ToolRoute.FILESYSTEM:
+            preflight = self._full_document_preflight_environment().answer_if_eligible(
+                prompt,
+                route_result=first,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                workdir=workdir,
+                allowed_tool_names=allowed_tool_names,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+            )
+            if preflight is not None:
+                return self._remember_visible_result(preflight)
         tools = decision_tool_names(decision, prompt)
         if allowed_tool_names is not None:
             allowed = set(allowed_tool_names)
@@ -629,7 +649,7 @@ class ChatRuntime:
             if on_final_delta:
                 on_final_delta(result.content)
             return self._remember_visible_result(result)
-        bundle = self._run_tool_loop(
+        bundle = self._run_tool_loop_for_request(
             temperature=temperature,
             max_tokens=max_tokens,
             workdir=workdir,
@@ -983,6 +1003,16 @@ class ChatRuntime:
 
     def _tool_loop_environment(self) -> ToolLoopEnvironment:
         return ToolLoopEnvironment(runtime=self)
+
+    def _run_tool_loop_for_request(self, **kwargs):
+        try:
+            return self._run_tool_loop(**kwargs)
+        finally:
+            if self.evidence_store is not None:
+                self.evidence_store.cleanup_ephemeral()
+
+    def _full_document_preflight_environment(self) -> FullDocumentPreflightEnvironment:
+        return FullDocumentPreflightEnvironment(runtime=self, transport=self._transport_environment())
 
     def _final_from_tool_environment(self) -> FinalFromToolEnvironment:
         return FinalFromToolEnvironment(runtime=self, transport=self._transport_environment())

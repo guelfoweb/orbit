@@ -37,6 +37,14 @@ class ModelInfo:
     size_bytes: int | None
 
 
+@dataclass(frozen=True)
+class TokenCount:
+    tokens: int
+    context_tokens: int | None
+    rendered_hash: str | None = None
+    token_hash: str | None = None
+
+
 class ChatBackend(Protocol):
     def chat(
         self,

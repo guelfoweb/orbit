@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orbit.runtime.media import AudioInput, ImageInput, load_referenced_media
+from orbit.runtime.full_document import identify_full_document_request
 
 
 _LOCAL_DOCUMENT_ROUTE_RE = re.compile(r"(?:[\"'`](?:[^\"'`]+)[\"'`]|[A-Za-z0-9_./ -]+?\.(?:pdf|docx?|md|txt))", re.IGNORECASE)
@@ -20,5 +21,7 @@ class FileInputResolver:
 
     def should_bypass_tool_route(self, prompt: str, allowed_tool_names: tuple[str, ...] | None) -> bool:
         if allowed_tool_names is None or "exec_shell_full_command" not in allowed_tool_names:
+            return False
+        if identify_full_document_request(prompt) is not None:
             return False
         return bool(_LOCAL_DOCUMENT_ROUTE_RE.search(prompt) and _DOCUMENTISH_BYPASS_RE.search(prompt))

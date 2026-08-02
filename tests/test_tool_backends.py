@@ -677,7 +677,7 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("timed out after 1s", execution.result.content)
         self.assertFalse(child_survived)
 
-    def test_exec_shell_full_cat_large_text_uses_read_file_shape(self) -> None:
+    def test_exec_shell_full_cat_large_text_uses_internal_bounded_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             target = workdir / "long.txt"
@@ -688,14 +688,21 @@ class HybridToolExecutorTests(unittest.TestCase):
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-            execution = executor.execute("exec_shell_full_command", {"command": "cat long.txt"}, chunk_budget={})
+            with patch("orbit.runtime.shell_guardrails._run_shell_command") as run_shell:
+                execution = executor.execute("exec_shell_full_command", {"command": "cat long.txt"}, chunk_budget={})
 
+        run_shell.assert_not_called()
         self.assertEqual(execution.source, "orbit")
         self.assertIn("shell_output_read_file: true", execution.result.content)
         self.assertIn("original_command: cat long.txt", execution.result.content)
-        self.assertIn("chunk_index: 0", execution.result.content)
+        self.assertIn("file_display_result: true", execution.result.content)
+        self.assertIn("bytes: 12000", execution.result.content)
+        self.assertIn("coverage: partial", execution.result.content)
+        self.assertIn("line_range: 1-100", execution.result.content)
+        self.assertIn("sha256:", execution.result.content)
+        self.assertTrue(execution.result.content.endswith("alpha\n" * 100))
 
-    def test_exec_shell_full_cat_small_text_keeps_raw_output(self) -> None:
+    def test_exec_shell_full_cat_small_text_preserves_normal_shell_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "small.txt").write_text("alpha\nbeta\n", encoding="utf-8")
@@ -709,6 +716,7 @@ class HybridToolExecutorTests(unittest.TestCase):
 
         self.assertEqual(execution.source, "orbit")
         self.assertEqual(execution.result.content, "alpha\nbeta")
+        self.assertNotIn("full_document_snapshot: true", execution.result.content)
 
     def test_exec_shell_full_bounds_large_search_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,6 +25,55 @@ from orbit.runtime.sessions import SessionStore
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_ephemeral_full_document_sidecar_is_removed_without_touching_durable_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            durable = store.add("exec_shell_full_command", "durable")
+            ephemeral = store.add(
+                "exec_shell_full_command",
+                "full_document_snapshot: true\ncontent:\nlarge",
+                metadata={"ephemeral": "full_document_snapshot"},
+            )
+
+            store.cleanup_ephemeral()
+
+            self.assertTrue((store.root / f"{durable.evidence_id}.txt").exists())
+            self.assertFalse((store.root / f"{ephemeral.evidence_id}.txt").exists())
+            self.assertEqual([record.evidence_id for record in store.recent_records(2)], [durable.evidence_id])
+
+    def test_restart_removes_abandoned_ephemeral_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "session.evidence"
+            first = EvidenceStore(root)
+            ephemeral = first.add(
+                "exec_shell_full_command",
+                "full_document_snapshot: true\ncontent:\nlarge",
+                metadata={"ephemeral": "full_document_snapshot"},
+            )
+            sidecar = root / f"{ephemeral.evidence_id}.txt"
+            self.assertTrue(sidecar.exists())
+
+            restarted = EvidenceStore(root)
+            restarted.load_index()
+
+            self.assertFalse(sidecar.exists())
+            self.assertEqual(restarted.recent_records(1), [])
+
+    def test_repeated_ephemeral_cleanup_has_no_linear_disk_growth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            for index in range(50):
+                store.add(
+                    "exec_shell_full_command",
+                    f"full_document_snapshot: true\ncontent:\n{index}",
+                    metadata={"ephemeral": "full_document_snapshot"},
+                )
+                store.cleanup_ephemeral()
+
+            self.assertEqual(store.recent_records(1), [])
+            self.assertEqual(list(store.root.glob("*.txt")), [])
+            self.assertFalse((store.root / "index.json").exists())
+
     def test_record_has_id_hash_size_and_raw_ref(self) -> None:
         record = build_evidence_record("exec_shell_full_command", "hello\nworld", {"command": "printf hello"})
 
@@ -47,6 +96,29 @@ class EvidenceTests(unittest.TestCase):
             self.assertIsNone(record.user_turn_id)
             self.assertIsNone(record.producer_model_call_id)
             self.assertIsNone(record.produced_by_phase)
+
+    def test_sidecar_preserves_crlf_byte_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            content = "first\r\nsecond\r\n"
+            record = store.add("exec_shell_full_command", content, metadata={"command": "cat note.txt"})
+            store.raw_cache.clear()
+
+            loaded = store.load_raw(record.evidence_id)
+
+            self.assertEqual(loaded, content)
+            self.assertEqual((store.root / f"{record.evidence_id}.txt").read_bytes(), content.encode("utf-8"))
+
+    def test_large_sidecar_does_not_remain_in_memory_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            content = "x" * (256 * 1024 + 1)
+
+            record = store.add("exec_shell_full_command", content, metadata={"command": "cat large.txt"})
+
+            self.assertNotIn(record.evidence_id, store.raw_cache)
+            self.assertEqual(store.load_raw(record.evidence_id), content)
+            self.assertNotIn(record.evidence_id, store.raw_cache)
 
     def test_lineage_fields_roundtrip_and_sequence_increments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,6 +404,43 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("file_paths: src/orbit/runtime/evidence.py; tests/test_evidence.py", record.route_card)
         self.assertNotIn("match_count:", record.route_card)
         self.assertIn("- src/orbit/runtime/evidence.py", record.final_card)
+
+    def test_targeted_grep_keeps_exact_matches_in_compact_final_context(self) -> None:
+        content = "\n".join(
+            [
+                "targeted_file_search: true",
+                "path: long.txt",
+                "bytes: 28045",
+                "lines: 540",
+                "sha256: " + ("a" * 64),
+                "search_coverage: complete_file",
+                "semantic_coverage: partial",
+                "match_count: 1",
+                "returned_line_ranges: 270",
+                "result_truncated: false",
+                "content:",
+                "270:MIDDLE-ORBIT: project codename is Heron.",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add(
+                "exec_shell_full_command",
+                content,
+                metadata={"command": 'rg -n "codename" long.txt'},
+            )
+
+            context = build_compact_final_evidence_context(store)
+
+            self.assertEqual(record.kind, "grep_search")
+            self.assertEqual(
+                record.metadata["first_matches"],
+                ["long.txt:270:MIDDLE-ORBIT: project codename is Heron."],
+            )
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertIn("long.txt:270:MIDDLE-ORBIT: project codename is Heron.", context)
+            self.assertNotIn("bounded_raw_excerpt:", context)
 
     def test_failed_grep_with_empty_stdout_does_not_invent_matches(self) -> None:
         content = "\n".join(

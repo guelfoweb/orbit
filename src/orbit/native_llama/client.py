@@ -1797,6 +1797,43 @@ class NativeLlamaClient:
             raise RuntimeError("native client not loaded")
         return self._tokenize_text(prompt, add_special=not prompt.startswith("<bos>"))
 
+    def count_text_tokens(self, text: str) -> int:
+        if not self._vocab:
+            raise RuntimeError("native client not loaded")
+        return len(self._tokenize_text(text, add_special=False))
+
+    def count_chat_tokens(
+        self,
+        messages: list[NativeMessage],
+        *,
+        tools: list[dict] | None = None,
+        thinking: bool | None = None,
+    ) -> int:
+        count, _rendered_hash, _token_hash = self.inspect_chat_tokens(
+            messages,
+            tools=tools,
+            thinking=thinking,
+        )
+        return count
+
+    def inspect_chat_tokens(
+        self,
+        messages: list[NativeMessage],
+        *,
+        tools: list[dict] | None = None,
+        thinking: bool | None = None,
+    ) -> tuple[int, str, str]:
+        prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
+        token_ids = self.tokenize(prompt)
+        token_digest = hashlib.sha256()
+        for token in token_ids:
+            token_digest.update(int(token).to_bytes(4, byteorder="little", signed=True))
+        return (
+            len(token_ids),
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            token_digest.hexdigest(),
+        )
+
     def _content_token_count(self, text: str) -> int:
         if not text:
             return 0
