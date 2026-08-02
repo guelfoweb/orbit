@@ -163,7 +163,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC24
 
-- Current published baseline: `v0.0.1-rc24`.
+- Published predecessor: `v0.0.1-rc24`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc24
 - Release-notes commit: `41dbc63f19cd5d88a2b0f1aee1d44a29557bc431`.
 - Tag object: `52ce691fe724d3c8c6272345f24e07bcdfe684b7`.
@@ -185,6 +185,31 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   broad multi-deliverable agentic workflows. The production llama.cpp vendor
   remains `b9551` at upstream commit
   `379ac6673b5cd75c7b4e07d1521c50f1e093878c`.
+
+### RC25
+
+- Current published baseline: `v0.0.1-rc25`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc25
+- Release-notes commit: `452a8583a7f5eb5cb3fc077d2462801949245719`.
+- Tag object: `76b8f4160fd8e1b212422e8531a7a73d499541fd`.
+- Tag commit: `452a8583a7f5eb5cb3fc077d2462801949245719`.
+- Prerelease: yes. Draft: false. Latest: false.
+- Focus: deterministic long-document display, complete literal search,
+  bounded multilingual concept search, tokenizer-proven full-document
+  admission, and explicit file, scan, and semantic coverage.
+- Literal search scans one stable snapshot with zero model calls. Concept
+  search uses at most one bounded multilingual planner and one verifier over
+  exact evidence windows. Semantic chunking remains a technical stop.
+- RC25 validation: document-search tests PASS with 42 tests; shared runtime,
+  path, and evidence tests PASS with 329 tests; full discovery PASS with 1,349
+  tests; native and MTP helper rebuild PASS; strict Gemma target, draft MTP,
+  and mmproj smoke PASS; production corpus PASS 12/12; final-prefix default
+  `cached=64` and kill switch `cached=4` PASS; `compileall` and
+  `git diff --check` PASS.
+- RC25 makes no complete semantic-recall or deterministic performance claim.
+  See `docs/FULL_DOCUMENT_READING.md`,
+  `docs/DETERMINISTIC_DOCUMENT_SEARCH.md`, and
+  `docs/releases/v0.0.1-rc25.md`.
 
 ## RC24 Tool-Loop Convergence
 
@@ -286,6 +311,39 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Current vendor provenance is upstream `b9551` at `379ac6673b5cd75c7b4e07d1521c50f1e093878c`, source-tree hash `4adb967e643363e7dc4d01d632b3a8471e0df2ec84ff304d364dc182f63e7ee1`, and Orbit patchset hash `dea2f205ed2a73d09ad203e08ba85545474742dbb0191f4f1a9b3a86beb4b435`.
 - Native CMake builds receive vendor commit/build metadata explicitly. `LLAMA_COMMIT` must never be inferred from the enclosing Orbit repository.
 - This hardening does not update the production llama.cpp revision. See `docs/NATIVE_MTMD_ABI.md`.
+
+## Qwen 3.6 Native Compatibility
+
+- Native Qwen support is restricted to the verified
+  `Qwen3.6-35B-A3B-Q4_K_M.gguf` identity. The profile ID is
+  `orbit-qwen36-native-v1`, the GGUF architecture is `qwen35moe`, and the
+  embedded-template SHA-256 is
+  `e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259`.
+- Profile authorization uses GGUF architecture, model identity, tokenizer
+  metadata, `general.file_type=15` (`Q4_K_M`), and the exact template hash.
+  Filename matching alone never enables the profile. Other Qwen variants,
+  templates, and quantizations fail before inference.
+- A revision-bound native chat bridge applies the official embedded template,
+  passes `enable_thinking` explicitly, and separates reasoning, visible
+  content, and Qwen XML tool calls. Structured phases force thinking off;
+  reasoning never reaches route or canonical tool parsers.
+- Qwen route-prefix reuse is default-on only for the exact verified profile.
+  It captures the complete hybrid sequence state at a 768-token batch-aligned
+  boundary within the 810-token invariant route prefix. The checkpoint is
+  81,608,684 bytes and is model, quantization, context, template, tokenizer,
+  schema, backend-build, and process bound.
+- Cold, explicitly segmented, captured, and restored probes produced
+  byte-identical logits with maximum absolute difference `0.0`. The measured
+  11-route comparison reduced evaluated prompt tokens from 9,094 to 1,414 and
+  restored 7,680 tokens with zero fallback and identical outputs, tools, and
+  arguments. CPU timings are descriptive, not a universal speed guarantee.
+- `ORBIT_QWEN_ROUTE_PREFIX_REUSE=0` is the immediate kill switch. Invalid
+  values disable reuse safely. Cancel, timeout, reset, restart, context or
+  identity changes, and restore errors invalidate the process-local blob.
+- Qwen MTP and Qwen multimodal input are unsupported. Gemma rendering,
+  checkpoints, MTP/mmproj, and tool behavior remain separate and unchanged.
+- See `docs/QWEN_3_6_COMPATIBILITY.md` for the exact identity, protocol,
+  diagnostics, validation evidence, and current limits.
 
 ## MTP
 

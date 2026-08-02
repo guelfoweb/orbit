@@ -75,6 +75,28 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn("route_prefix_anchor", baseline)
         self.assertTrue(experimental["route_prefix_anchor"])
 
+    def test_build_chat_payload_includes_qwen_route_prefix_anchor_only_when_requested(self) -> None:
+        baseline = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0,
+                max_tokens=32,
+            )
+        )
+        enabled = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0,
+                max_tokens=32,
+                qwen_route_prefix_anchor=True,
+            )
+        )
+
+        self.assertNotIn("qwen_route_prefix_anchor", baseline)
+        self.assertTrue(enabled["qwen_route_prefix_anchor"])
+
     def test_build_chat_payload_includes_allow_mtp_only_when_explicit(self) -> None:
         baseline = build_chat_payload(
             ChatPayloadOptions(

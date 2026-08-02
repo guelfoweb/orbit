@@ -18,6 +18,7 @@ class ChatResult:
     cached_tokens: int | None
     prompt_tokens_per_second: float | None
     generation_tokens_per_second: float | None
+    reasoning_content: str = ""
 
 
 @dataclass(frozen=True)

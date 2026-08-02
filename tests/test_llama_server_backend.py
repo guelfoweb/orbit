@@ -21,6 +21,7 @@ from orbit.backend.llama_server import (
     _parse_model_info,
     _parse_native_stream,
     _final_prefix_experiment_requested,
+    _qwen_route_prefix_anchor_requested,
 )
 from orbit.backend.base import ChatResult
 from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
@@ -124,6 +125,38 @@ class LlamaServerBackendTests(unittest.TestCase):
                 return {}
 
         self.assertEqual(Backend(base_url="http://localhost", timeout=1).backend_props(), {})
+
+    def test_native_separated_reasoning_requires_verified_qwen_profile(self) -> None:
+        class Backend(LlamaServerBackend):
+            props: dict[str, object] = {}
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return self.props
+
+        backend = Backend(base_url="http://localhost", timeout=1)
+        backend.props = {
+            "model_compatibility": {
+                "verified": True,
+                "reasoning_protocol": "qwen-think",
+            }
+        }
+        self.assertTrue(backend.uses_native_separated_reasoning())
+
+        backend.props = {
+            "model_compatibility": {
+                "verified": True,
+                "reasoning_protocol": "gemma4-control-channel",
+            }
+        }
+        self.assertFalse(backend.uses_native_separated_reasoning())
+
+        backend.props = {
+            "model_compatibility": {
+                "verified": False,
+                "reasoning_protocol": "qwen-think",
+            }
+        }
+        self.assertFalse(backend.uses_native_separated_reasoning())
 
     def test_backend_connection_error_mentions_backend_server(self) -> None:
         backend = LlamaServerBackend(base_url="http://127.0.0.1:12120", model="fake", timeout=1)
@@ -380,6 +413,26 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertTrue(backend.payloads[1]["route_prefix_anchor"])
         self.assertNotIn("route_prefix_anchor", backend.payloads[2])
         self.assertNotIn("route_prefix_anchor", backend.payloads[3])
+
+    def test_qwen_route_prefix_request_is_bounded_to_native_route_tools_on(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_QWEN_ROUTE_PREFIX_REUSE": "1"}, clear=True):
+            with model_call_context(phase="route", tools_mode="on"):
+                self.assertTrue(_qwen_route_prefix_anchor_requested(native_backend=True))
+            with model_call_context(phase="route", tools_mode="off"):
+                self.assertFalse(_qwen_route_prefix_anchor_requested(native_backend=True))
+            with model_call_context(phase="chat_final", tools_mode="on"):
+                self.assertFalse(_qwen_route_prefix_anchor_requested(native_backend=True))
+            with model_call_context(phase="route", tools_mode="on"):
+                self.assertFalse(_qwen_route_prefix_anchor_requested(native_backend=False))
+
+    def test_qwen_route_prefix_kill_switch_and_invalid_value_disable_request(self) -> None:
+        for value in ("0", "invalid"):
+            with self.subTest(value=value), mock.patch.dict(
+                os.environ,
+                {"ORBIT_QWEN_ROUTE_PREFIX_REUSE": value},
+                clear=True,
+            ), model_call_context(phase="route", tools_mode="on"):
+                self.assertFalse(_qwen_route_prefix_anchor_requested(native_backend=True))
 
     def test_final_prefix_experiment_payload_is_limited_to_native_final_tool_phase(self) -> None:
         class Backend(LlamaServerBackend):
@@ -969,6 +1022,36 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(result.finish_reason, "tool_calls")
         self.assertEqual(result.tool_calls[0]["function"]["name"], "exec_shell_full_command")
         self.assertEqual(result.tool_calls[0]["function"]["arguments"], '{"command": "cat note.txt"}')
+
+    def test_parse_native_stream_keeps_qwen_reasoning_and_tool_calls_out_of_content(self) -> None:
+        emitted: list[str] = []
+
+        result = _parse_native_stream(
+            FakeStream(
+                [
+                    'event: reasoning\n',
+                    'data: {"text":"private planning"}\n',
+                    '\n',
+                    'event: tool_calls\n',
+                    'data: {"tool_calls":[{"id":"","type":"function","function":{"name":"system_info","arguments":"{}"}}]}\n',
+                    '\n',
+                    'event: metrics\n',
+                    'data: {"usage":{"prompt_tokens":20,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":0}},"timings":{}}\n',
+                    '\n',
+                    'event: done\n',
+                    'data: {"finish_reason":"tool_calls"}\n',
+                    '\n',
+                ]
+            ),
+            on_delta=emitted.append,
+            on_progress=None,
+        )
+
+        self.assertEqual(emitted, [])
+        self.assertEqual(result.content, "")
+        self.assertEqual(result.reasoning_content, "private planning")
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(result.tool_calls[0]["function"], {"name": "system_info", "arguments": "{}"})
 
 
 if __name__ == "__main__":

@@ -10,11 +10,11 @@ from typing import Any, Protocol
 
 from .bindings import load_native_cdll, native_cdll_flags
 from .chat_template import render_gemma4_chat, render_gemma4_route_prompt_segments
+from .model_profiles import GEMMA4_PROFILE_ID, QWEN36_PROFILE_ID
 from .native_names import runtime_library_filename
 
 
 CAPABILITY_SCHEMA_VERSION = 1
-GEMMA4_PROFILE_ID = "orbit-gemma4-native-v1"
 GEMMA4_RENDERER_FIXTURE_SUITE_VERSION = 1
 GEMMA4_TOOL_PROTOCOL_TEXT_HASH = "ab72a1f741975b8b541ae3f3842a2ac0593dec6477dd41f1ea105410077eee1c"
 GEMMA4_RENDERER_FIXTURE_HASHES = {
@@ -33,8 +33,56 @@ VERIFIED_LLAMA_CPP_COMMITS = frozenset({"6f79e02"})
 
 class _TokenizingClient(Protocol):
     paths: object
+    model_profile: object
 
     def tokenize(self, prompt: str) -> list[int]: ...
+
+
+def safe_native_capability_manifest(client: _TokenizingClient, *, final_system_prompt: str) -> dict[str, object]:
+    profile = getattr(client, "model_profile", None)
+    if getattr(profile, "profile_id", None) == GEMMA4_PROFILE_ID:
+        return safe_gemma4_capability_manifest(client, final_system_prompt=final_system_prompt)
+    if getattr(profile, "profile_id", None) == QWEN36_PROFILE_ID:
+        build_bin = _client_build_bin(client)
+        build = read_llama_cpp_build_info(build_bin) if build_bin is not None else _unavailable_build("build_bin_unavailable")
+        return {
+            "schema_version": CAPABILITY_SCHEMA_VERSION,
+            "profile_id": QWEN36_PROFILE_ID,
+            "status": "verified" if getattr(profile, "verified", False) else "unverified",
+            "verification_scope": "model_metadata_template_identity_and_revision_bound_parser",
+            "behavior_enforced": True,
+            "backend": {
+                "engine": "llama.cpp",
+                "build_number": build.build_number,
+                "commit": build.commit,
+                "target": build.target,
+                "compiler": build.compiler,
+                "library_hash": build.library_hash,
+                "source": build.source,
+                "error": build.error,
+            },
+            "renderer": {
+                "implementation": getattr(profile, "renderer", "unknown"),
+                "template_source": getattr(profile, "template_source", "unknown"),
+                "template_hash": getattr(profile, "template_sha256", ""),
+                "reasoning_protocol": getattr(profile, "reasoning_protocol", "unknown"),
+                "tool_call_protocol": getattr(profile, "tool_call_protocol", "unknown"),
+                "history_serialization": getattr(profile, "history_serialization", "unknown"),
+            },
+            "requirements": {
+                "chat_bridge": "co-located-revision-bound",
+                "mtp_supported": False,
+                "gemma_prefix_reuse_supported": False,
+            },
+        }
+    return {
+        "schema_version": CAPABILITY_SCHEMA_VERSION,
+        "profile_id": "unsupported",
+        "status": "unverified",
+        "verification_scope": "model_profile_detection",
+        "behavior_enforced": True,
+        "error": getattr(profile, "failure_reason", "model_profile_uninitialized"),
+    }
 
 
 @dataclass(frozen=True)

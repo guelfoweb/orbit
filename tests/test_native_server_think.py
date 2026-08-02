@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from orbit.native_server.app import OrbitNativeHandler, OrbitNativeServer, _DisconnectWatcher
 from orbit.native_server.protocol import openai_chat_response, parse_chat_request
-from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT
+from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 
 
 @dataclass
@@ -25,11 +25,14 @@ class _FakeCompletion:
     timings: _FakeTimings = field(default_factory=_FakeTimings)
     stopped_by_stop: bool = False
     completed_after_thought: bool = False
+    reasoning_content: str = ""
+    reasoning_tokens: int = 0
+    tool_calls: tuple[dict[str, object], ...] = ()
 
 
 class _FakeClient:
     def __init__(self, thinking: bool) -> None:
-        self.config = type("Config", (), {"thinking": thinking})()
+        self.config = type("Config", (), {"thinking": thinking, "context_tokens": 8192})()
         self.calls: list[bool] = []
         self.paths = type("Paths", (), {})()
         self.mtp_probe = type("Probe", (), {"enabled": False, "initialized": False, "error": None})()
@@ -40,6 +43,7 @@ class _FakeClient:
         self.mtp_fallback_reason = None
         self.allow_mtp_calls: list[bool | None] = []
         self.final_prefix_calls: list[bool] = []
+        self.qwen_route_prefix_calls: list[bool] = []
 
     def complete_chat_text(
         self,
@@ -50,6 +54,7 @@ class _FakeClient:
         tools,
         thinking,
         route_prefix_anchor=False,
+        qwen_route_prefix_anchor=False,
         allow_mtp_experimental=None,
         final_prefix_experiment=False,
         on_progress=None,
@@ -59,6 +64,7 @@ class _FakeClient:
         self.calls.append(thinking)
         self.allow_mtp_calls.append(allow_mtp_experimental)
         self.final_prefix_calls.append(final_prefix_experiment)
+        self.qwen_route_prefix_calls.append(qwen_route_prefix_anchor)
         return _FakeCompletion()
 
     def session_snapshot(self, session_id: str):
@@ -76,6 +82,10 @@ class _FakeClient:
                 "mtp_failure_reason": None,
             },
         )()
+
+    def inspect_chat_tokens(self, messages, *, tools, thinking):
+        del messages, tools, thinking
+        return 7, "rendered", "tokens"
 
 
 class NativeServerThinkTests(unittest.TestCase):
@@ -97,6 +107,28 @@ class NativeServerThinkTests(unittest.TestCase):
         server.complete(parse_chat_request({"messages": unknown_messages, "final_prefix_experiment": True}))
 
         self.assertEqual(client.final_prefix_calls, [True, False])
+
+    def test_qwen_route_prefix_requires_exact_route_prompt_family(self) -> None:
+        client = _FakeClient(thinking=False)
+        server = OrbitNativeServer(client=client, model_alias="fake")
+        route_messages = [
+            {"role": "system", "content": ROUTE_SYSTEM_PROMPT},
+            {"role": "user", "content": "hello"},
+        ]
+        unknown_messages = [
+            {"role": "system", "content": "different prompt"},
+            {"role": "user", "content": "hello"},
+        ]
+
+        server.complete(parse_chat_request({"messages": route_messages, "qwen_route_prefix_anchor": True}))
+        server.complete(parse_chat_request({"messages": unknown_messages, "qwen_route_prefix_anchor": True}))
+        server.complete(
+            parse_chat_request(
+                {"messages": route_messages, "qwen_route_prefix_anchor": True, "thinking": True}
+            )
+        )
+
+        self.assertEqual(client.qwen_route_prefix_calls, [True, False, False])
 
     def test_disconnect_watcher_disarm_skips_cancel_callback(self) -> None:
         called: list[str] = []
@@ -243,6 +275,79 @@ class NativeServerThinkTests(unittest.TestCase):
         result = server.complete(parse_chat_request({"messages": [{"role": "user", "content": "hello"}], "thinking": True}))
 
         self.assertEqual(result["finish_reason"], "cancelled")
+
+    def test_budget_truncated_tool_call_cannot_override_length_finish_reason(self) -> None:
+        client = _FakeClient(thinking=False)
+
+        def fake_complete(_messages, **kwargs):
+            return _FakeCompletion(
+                content="",
+                timings=_FakeTimings(output_tokens=16, cancelled=False),
+                tool_calls=(
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "system_info", "arguments": "{}"},
+                    },
+                ),
+            )
+
+        client.complete_chat_text = fake_complete
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        result = server.complete(
+            parse_chat_request(
+                {
+                    "messages": [{"role": "user", "content": "system info"}],
+                    "max_tokens": 16,
+                }
+            )
+        )
+
+        self.assertEqual(result["finish_reason"], "length")
+        self.assertEqual(len(result["tool_calls"]), 1)
+
+    def test_complete_tool_call_uses_tool_calls_finish_reason(self) -> None:
+        client = _FakeClient(thinking=False)
+
+        def fake_complete(_messages, **kwargs):
+            return _FakeCompletion(
+                content="",
+                timings=_FakeTimings(output_tokens=8, cancelled=False),
+                tool_calls=(
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "system_info", "arguments": "{}"},
+                    },
+                ),
+            )
+
+        client.complete_chat_text = fake_complete
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        result = server.complete(
+            parse_chat_request(
+                {
+                    "messages": [{"role": "user", "content": "system info"}],
+                    "max_tokens": 16,
+                }
+            )
+        )
+
+        self.assertEqual(result["finish_reason"], "tool_calls")
+
+    def test_chat_token_inspection_uses_the_completion_lock(self) -> None:
+        client = _FakeClient(thinking=False)
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        result = server.count_chat_tokens(
+            [{"role": "user", "content": "hello"}],
+            tools=[],
+            thinking=False,
+        )
+
+        self.assertEqual(result["tokens"], 7)
 
     def test_error_result_handles_continue_payload_without_messages(self) -> None:
         server = OrbitNativeServer(client=_FakeClient(thinking=False), model_alias="m")

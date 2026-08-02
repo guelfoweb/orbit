@@ -19,6 +19,7 @@ class ChatRequest:
     stream: bool
     tools: list[dict[str, Any]]
     route_prefix_anchor: bool
+    qwen_route_prefix_anchor: bool
     allow_mtp_experimental: bool | None
     final_prefix_experiment: bool
 
@@ -42,6 +43,7 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
         stream=payload.get("stream") is True,
         tools=_tools_from_payload(payload.get("tools")),
         route_prefix_anchor=payload.get("route_prefix_anchor") is True,
+        qwen_route_prefix_anchor=payload.get("qwen_route_prefix_anchor") is True,
         allow_mtp_experimental=_optional_bool(payload.get("allow_mtp_experimental")),
         final_prefix_experiment=payload.get("final_prefix_experiment") is True,
     )
@@ -69,12 +71,17 @@ def native_chat_response(
     prefill_ms: float,
     generation_ms: float,
     cancelled: bool,
+    reasoning_content: str = "",
+    reasoning_tokens: int = 0,
+    tool_calls: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     return {
         "content": content,
         "model": model,
         "session_id": session_id,
         "finish_reason": finish_reason,
+        "reasoning_content": reasoning_content,
+        "tool_calls": list(tool_calls),
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -98,16 +105,27 @@ def native_chat_response(
             "prefill_ms": prefill_ms,
             "generation_ms": generation_ms,
             "cancelled": cancelled,
+            "reasoning_tokens": reasoning_tokens,
         },
     }
 
 
 def openai_chat_response(result: dict[str, Any], *, content: str | None = None) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": result["content"] if content is None else content,
+    }
+    reasoning = result.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        message["reasoning_content"] = reasoning
+    tool_calls = result.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "model": result["model"],
         "choices": [
             {
-                "message": {"role": "assistant", "content": result["content"] if content is None else content},
+                "message": message,
                 "finish_reason": result["finish_reason"],
             }
         ],

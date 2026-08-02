@@ -327,6 +327,27 @@ class PureChatEnvironment:
         loop: int,
     ) -> ChatResult:
         self.runtime.messages.append({"role": "user", "content": user_content})
+        if self.runtime.thinking_mode and _uses_native_separated_reasoning(self.runtime.backend):
+            if on_phase_start:
+                on_phase_start(ModelPhaseStart("chat_final", streamed=False, attempt=1, reason="native_separated_reasoning"))
+            with self.transport.backend_thinking(True):
+                with model_call_context(phase="chat_final", tools_mode="off"):
+                    result = self.transport.chat_once(
+                        call_messages,
+                        temperature=temperature,
+                        max_tokens=resolve_max_tokens("chat", max_tokens),
+                        on_final_delta=None,
+                        on_progress=on_progress,
+                    )
+            if on_model_step:
+                on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="chat_final"))
+            if on_final_delta:
+                if result.reasoning_content:
+                    on_final_delta(f"<|channel>thought\n{result.reasoning_content}<channel|>")
+                if result.content:
+                    on_final_delta(result.content)
+            self.runtime.messages.append({"role": "assistant", "content": result.content})
+            return result
         if self.runtime.thinking_mode:
             thinking_max_tokens = CompletionBudget(max_tokens).internal(CHAT_THINKING_MAX_TOKENS)
             chat_max_tokens = resolve_max_tokens("chat", max_tokens)
@@ -393,6 +414,16 @@ class PureChatEnvironment:
         )
         self.runtime.messages.append({"role": "assistant", "content": result.content})
         return result
+
+
+def _uses_native_separated_reasoning(backend: object) -> bool:
+    capability = getattr(backend, "uses_native_separated_reasoning", None)
+    if not callable(capability):
+        return False
+    try:
+        return capability() is True
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)

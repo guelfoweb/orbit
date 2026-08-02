@@ -92,7 +92,7 @@ class NativeRuntimePropsTests(unittest.TestCase):
             thinking=False,
         )
 
-    @mock.patch("orbit.native_server.app.safe_gemma4_capability_manifest")
+    @mock.patch("orbit.native_server.app.safe_native_capability_manifest")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_server_caches_bounded_native_capability_manifest(self, _mocked_lib, build_manifest) -> None:
         build_manifest.return_value = {

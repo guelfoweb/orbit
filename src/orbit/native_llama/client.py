@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import ctypes
 import hashlib
+import json
 from ctypes import POINTER, byref, c_char, c_float, cast, c_ubyte, create_string_buffer, c_void_p, sizeof
 from dataclasses import dataclass, replace
 import os
@@ -12,6 +13,7 @@ import threading
 from orbit.final_prefix_config import FINAL_PREFIX_TOKEN_COUNT
 
 from .bindings import (
+    ChatBridgeLibrary,
     GgmlAbortCallback,
     GgmlLogCallback,
     LlamaLibrary,
@@ -21,10 +23,12 @@ from .bindings import (
     llama_token,
     llama_pos,
 )
+from .chat_bridge import chat_bridge_filename
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativeProgress, NativeTimings
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
+from .model_profiles import QWEN36_PROFILE_ID, NativeModelProfile, detect_native_model_profile
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
 from .mtp_accept_probe import MtpAcceptProbeResult, run_mtp_accept_probe
@@ -39,6 +43,15 @@ from .prefix_anchor import (
     prefix_anchor_enabled,
     restore_prefix_anchor,
 )
+from .qwen_route_prefix import (
+    QWEN_ROUTE_PREFIX_FORMAT_VERSION,
+    QWEN_ROUTE_PREFIX_TOKEN_COUNT,
+    QWEN_ROUTE_TOKENIZER_IDENTITY,
+    QwenRoutePrefixSpec,
+    QwenRoutePrefixStatus,
+    derive_qwen_route_prefix_spec,
+    hash_text,
+)
 from .persistent_mtp import (
     PersistentMtpSessionRuntime,
     create_persistent_mtp_session,
@@ -50,6 +63,13 @@ from .session_state import DEFAULT_NATIVE_SESSION_ID, NativeSessionSnapshot, Nat
 
 
 DEFAULT_MEDIA_MARKER = "<__media__>"
+
+
+@dataclass(frozen=True)
+class _ProfileParsedOutput:
+    content: str
+    reasoning_content: str
+    tool_calls: tuple[dict[str, object], ...]
 
 
 @dataclass(frozen=True)
@@ -71,6 +91,9 @@ class NativeClientConfig:
     final_prefix_reuse_source: str = "default"
     final_prefix_reuse_config_error: str | None = None
     final_prefix_reuse_legacy_detected: bool = False
+    qwen_route_prefix_reuse_enabled: bool = False
+    qwen_route_prefix_reuse_source: str = "default"
+    qwen_route_prefix_reuse_config_error: str | None = None
 
 
 @dataclass
@@ -89,6 +112,15 @@ class _RouteAnchorRuntimePlan:
     segments: RoutePromptSegments
     prefix_tokens: list[int]
     prefix_hash: str
+    metadata: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _QwenRouteAnchorRuntimePlan:
+    prefix_tokens: list[int]
+    prefix_hash: str
+    state_kwargs: dict[str, str | None]
+    spec: QwenRoutePrefixSpec
     metadata: dict[str, object]
 
 
@@ -135,6 +167,11 @@ def _resolve_mtmd_bridge_path(paths: NativeLlamaPaths) -> Path | None:
     return bridge if bridge.exists() else None
 
 
+def _resolve_chat_bridge_path(paths: NativeLlamaPaths) -> Path | None:
+    bridge = paths.build_bin / chat_bridge_filename()
+    return bridge if bridge.exists() else None
+
+
 class NativeLlamaClient:
     def __init__(self, paths: NativeLlamaPaths, config: NativeClientConfig | None = None) -> None:
         self.paths = paths
@@ -150,6 +187,12 @@ class NativeLlamaClient:
         self._callbacks: list[object] = []
         self._model: c_void_p | None = None
         self._vocab: c_void_p | None = None
+        self.model_profile: NativeModelProfile | None = None
+        self.chat_bridge: ChatBridgeLibrary | None = None
+        self._chat_bridge_context: c_void_p | None = None
+        self._active_profile_render: dict[str, object] | None = None
+        self._profile_last_raw_output = ""
+        self._profile_last_parsed_content = ""
         self._mtmd_ctx: c_void_p | None = None
         self._media_marker = (
             self.mtmd.lib.orbit_mtmd_default_marker().decode("utf-8", errors="replace")
@@ -172,6 +215,11 @@ class NativeLlamaClient:
         self._last_prompt_decode_batch_n_tokens = 0
         self._route_prefix_anchor_state = PrefixAnchorState()
         self._route_prefix_prefill_lock = threading.Lock()
+        self._qwen_route_prefix_anchor_state = PrefixAnchorState()
+        self._qwen_route_prefix_spec: QwenRoutePrefixSpec | None = None
+        self._qwen_route_prefix_status = QwenRoutePrefixStatus()
+        self._model_metadata_identity: dict[str, str] = {}
+        self._qwen_native_build_identity: str | None = None
         self._final_prefix_anchor_state = PrefixAnchorState()
         self._final_prefix_status = FinalPrefixExperimentStatus()
 
@@ -182,8 +230,10 @@ class NativeLlamaClient:
 
     def final_prefix_experiment_status(self) -> dict[str, object]:
         status = self._final_prefix_status
+        profile = getattr(self, "model_profile", None)
+        profile_eligible = profile is None or profile.gemma_prefix_reuse_supported
         return {
-            "enabled": self.config.final_prefix_experiment_enabled,
+            "enabled": self.config.final_prefix_experiment_enabled and profile_eligible,
             "initialized": status.initialized,
             "prefix_tokens": status.prefix_tokens,
             "capture_count": status.capture_count,
@@ -193,6 +243,51 @@ class NativeLlamaClient:
             "last_used": status.last_used,
             "checkpoint_size_bytes": self._final_prefix_anchor_state.checkpoint_size,
         }
+
+    def qwen_route_prefix_reuse_status(self) -> dict[str, object]:
+        status = self._qwen_route_prefix_status
+        profile = getattr(self, "model_profile", None)
+        profile_eligible = (
+            getattr(profile, "profile_id", None) == QWEN36_PROFILE_ID
+            and getattr(profile, "verified", False)
+            and self._model_metadata_identity.get("general.file_type") == "15"
+        )
+        spec = self._qwen_route_prefix_spec
+        return {
+            "enabled": self.config.qwen_route_prefix_reuse_enabled and profile_eligible,
+            "source": self.config.qwen_route_prefix_reuse_source,
+            "config_error": self.config.qwen_route_prefix_reuse_config_error,
+            "initialized": status.initialized,
+            "prefix_tokens": status.prefix_tokens,
+            "capture_count": status.capture_count,
+            "restore_count": status.restore_count,
+            "fallback_count": status.fallback_count,
+            "invalidation_count": status.invalidation_count,
+            "failure_reason": status.failure_reason,
+            "last_used": status.last_used,
+            "checkpoint_size_bytes": self._qwen_route_prefix_anchor_state.checkpoint_size,
+            "profile_identity": getattr(profile, "profile_id", None),
+            "template_identity": getattr(profile, "template_sha256", None),
+            "tokenizer_identity": hash_text(QWEN_ROUTE_TOKENIZER_IDENTITY),
+            "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
+            "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
+        }
+
+    def compatibility_diagnostics(self) -> dict[str, object]:
+        profile = getattr(self, "model_profile", None)
+        if profile is None:
+            return {
+                "model_family": "unknown",
+                "compatibility_profile": "uninitialized",
+                "verified": False,
+                "failure_reason": "model_profile_uninitialized",
+            }
+        diagnostics = profile.diagnostics(thinking_enabled=self.config.thinking)
+        diagnostics["chat_bridge_loaded"] = self.chat_bridge is not None
+        diagnostics["chat_bridge_revision_bound"] = bool(
+            self.chat_bridge is not None and self.chat_bridge.build_identity
+        )
+        return diagnostics
 
     def _current_backend_mode(self) -> str:
         if not self.config.use_mtp_experimental:
@@ -213,7 +308,11 @@ class NativeLlamaClient:
 
     def close(self) -> None:
         lib = self.lib.lib
+        self._invalidate_qwen_route_prefix("client_closed")
         self._free_persistent_mtp_session()
+        if self.chat_bridge is not None and self._chat_bridge_context:
+            self.chat_bridge.free(self._chat_bridge_context)
+            self._chat_bridge_context = None
         if self._mtmd_ctx:
             assert self.mtmd is not None
             self.mtmd.lib.orbit_mtmd_context_free(self._mtmd_ctx)
@@ -232,6 +331,7 @@ class NativeLlamaClient:
 
     def cancel(self) -> None:
         self._invalidate_final_prefix("cancelled")
+        self._invalidate_qwen_route_prefix("cancelled")
         self._session.cancel_requested = True
         self._session.continuation_ready = False
         self.cancel_event.set()
@@ -262,6 +362,13 @@ class NativeLlamaClient:
         if not self._model:
             raise RuntimeError(f"failed to load model: {self.paths.model}")
 
+        try:
+            self._initialize_model_profile()
+        except Exception:
+            lib.llama_model_free(self._model)
+            self._model = None
+            raise
+
         ctx_params = lib.llama_context_default_params()
         ctx_params.n_ctx = self.config.context_tokens
         ctx_params.n_batch = self.config.batch_size
@@ -289,9 +396,72 @@ class NativeLlamaClient:
         self._initialize_mtp_decode_probe()
         self._initialize_persistent_mtp_session()
 
+    def _initialize_model_profile(self) -> None:
+        if not self._model:
+            raise RuntimeError("native model is not loaded")
+        metadata = self._read_model_metadata()
+        self._model_metadata_identity = dict(metadata)
+        template_ptr = self.lib.lib.llama_model_chat_template(self._model, None)
+        template = template_ptr.decode("utf-8", errors="replace") if template_ptr else ""
+        profile = detect_native_model_profile(metadata, template)
+        self.model_profile = profile
+        if not profile.verified:
+            raise RuntimeError(
+                "unsupported or unverified native model compatibility: "
+                f"family={profile.family}; reason={profile.failure_reason}"
+            )
+        if not profile.uses_native_chat_bridge:
+            return
+        bridge_path = _resolve_chat_bridge_path(self.paths)
+        if bridge_path is None:
+            raise RuntimeError(
+                "Qwen 3.6 requires the co-located Orbit chat compatibility bridge; "
+                "run `orbit build-native` for this llama.cpp revision"
+            )
+        bridge = ChatBridgeLibrary(self.paths.build_bin, bridge_path)
+        self._chat_bridge_context = bridge.create(self._model)
+        self.chat_bridge = bridge
+
+    def _read_model_metadata(self) -> dict[str, str]:
+        if not self._model:
+            return {}
+        lib = self.lib.lib
+        metadata: dict[str, str] = {}
+        count = max(0, int(lib.llama_model_meta_count(self._model)))
+        for index in range(count):
+            key = self._model_metadata_text(lib.llama_model_meta_key_by_index, index)
+            if key not in {
+                "general.architecture",
+                "general.name",
+                "general.file_type",
+                "tokenizer.ggml.model",
+                "tokenizer.ggml.pre",
+                "tokenizer.ggml.bos_token_id",
+                "tokenizer.ggml.eos_token_id",
+            }:
+                continue
+            metadata[key] = self._model_metadata_text(lib.llama_model_meta_val_str_by_index, index)
+        return metadata
+
+    def _model_metadata_text(self, function, index: int) -> str:
+        if not self._model:
+            return ""
+        needed = int(function(self._model, index, None, 0))
+        if needed < 0:
+            return ""
+        buffer = create_string_buffer(needed + 1)
+        written = int(function(self._model, index, buffer, len(buffer)))
+        if written < 0:
+            return ""
+        return bytes(buffer[:written]).decode("utf-8", errors="replace")
+
     def _initialize_mtp_probe(self) -> None:
         if not self.config.mtp_probe_enabled:
             self.mtp_probe = MtpProbeResult(enabled=False, initialized=False, error=None)
+            return
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.mtp_supported:
+            self.mtp_probe = MtpProbeResult(enabled=True, initialized=False, error="model_profile_mtp_unsupported")
             return
         self.mtp_probe = run_mtp_probe(llama_root=self.paths.llama_root, paths=self.paths)
 
@@ -299,17 +469,29 @@ class NativeLlamaClient:
         if not self.config.mtp_dry_run_enabled:
             self.mtp_dry_run = MtpDryRunResult(enabled=False, success=False, error=None)
             return
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.mtp_supported:
+            self.mtp_dry_run = MtpDryRunResult(enabled=True, success=False, error="model_profile_mtp_unsupported")
+            return
         self.mtp_dry_run = run_mtp_dry_run(llama_root=self.paths.llama_root, paths=self.paths)
 
     def _initialize_mtp_accept_probe(self) -> None:
         if not self.config.mtp_accept_probe_enabled:
             self.mtp_accept_probe = MtpAcceptProbeResult(enabled=False, success=False, error=None)
             return
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.mtp_supported:
+            self.mtp_accept_probe = MtpAcceptProbeResult(enabled=True, success=False, error="model_profile_mtp_unsupported")
+            return
         self.mtp_accept_probe = run_mtp_accept_probe(llama_root=self.paths.llama_root, paths=self.paths)
 
     def _initialize_mtp_decode_probe(self) -> None:
         if not self.config.mtp_decode_probe_enabled:
             self.mtp_decode_probe = MtpDecodeProbeResult(enabled=False, success=False, error=None)
+            return
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.mtp_supported:
+            self.mtp_decode_probe = MtpDecodeProbeResult(enabled=True, success=False, error="model_profile_mtp_unsupported")
             return
         self.mtp_decode_probe = run_mtp_decode_probe(llama_root=self.paths.llama_root, paths=self.paths)
 
@@ -321,6 +503,10 @@ class NativeLlamaClient:
         self._session.mtp_failed = False
         self._session.mtp_failure_reason = None
         if not self.config.use_mtp_experimental:
+            return
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.mtp_supported:
+            self._session.mtp_failure_reason = "model_profile_mtp_unsupported"
             return
         if not self.paths.mtp_available or self.paths.draft_mtp_model is None:
             self._session.mtp_failure_reason = self.paths.fallback_reason or "draft-mtp-unavailable"
@@ -362,7 +548,11 @@ class NativeLlamaClient:
         self._session.prompt_cache_mode = None
         self._session.continuation_ready = False
         self._session.last_metrics = None
+        self._active_profile_render = None
+        self._profile_last_raw_output = ""
+        self._profile_last_parsed_content = ""
         self._invalidate_final_prefix("session_reset")
+        self._invalidate_qwen_route_prefix("session_reset")
         if self._persistent_mtp_runtime is None:
             return
         try:
@@ -464,6 +654,9 @@ class NativeLlamaClient:
         tools_mode: str = "on",
         should_cancel=None,
     ) -> NativeRoutePrefixPrefillResult:
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.gemma_prefix_reuse_supported:
+            return _route_prefix_prefill_skipped("model_profile_ineligible")
         if tools_mode != "on":
             return _route_prefix_prefill_skipped("tools_mode_ineligible")
         if not prefix_anchor_enabled():
@@ -581,6 +774,7 @@ class NativeLlamaClient:
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
+        qwen_route_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
         final_prefix_experiment: bool = False,
         on_progress=None,
@@ -620,6 +814,12 @@ class NativeLlamaClient:
             finally:
                 self._session.in_flight = False
         prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
+        qwen_route_anchor_plan = self._qwen_route_anchor_plan_for_prompt(
+            messages,
+            tools=tools,
+            thinking=thinking,
+            prompt=prompt,
+        ) if qwen_route_prefix_anchor else None
         route_anchor_segments = self._route_anchor_segments_for_prompt(
             messages,
             tools=tools,
@@ -632,7 +832,14 @@ class NativeLlamaClient:
             thinking=thinking,
             prompt=prompt,
         ) if self._final_prefix_experiment_eligible(final_prefix_experiment) else None
-        allow_mtp = not tools and route_anchor_segments is None
+        allow_mtp = (
+            not tools
+            and route_anchor_segments is None
+            and (
+                getattr(self, "model_profile", None) is None
+                or getattr(self, "model_profile").mtp_supported
+            )
+        )
         if final_prefix_segments is not None:
             allow_mtp = False
         if allow_mtp_experimental is False:
@@ -643,6 +850,7 @@ class NativeLlamaClient:
             allow_mtp_experimental=allow_mtp,
             thinking=thinking,
             route_anchor_segments=route_anchor_segments,
+            qwen_route_anchor_plan=qwen_route_anchor_plan,
             final_prefix_segments=final_prefix_segments,
             kv_diag_messages=messages,
             on_progress=on_progress,
@@ -659,6 +867,7 @@ class NativeLlamaClient:
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
+        qwen_route_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
         final_prefix_experiment: bool = False,
         on_progress=None,
@@ -673,6 +882,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
+            qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
             final_prefix_experiment=final_prefix_experiment,
             on_progress=on_progress,
@@ -719,12 +929,29 @@ class NativeLlamaClient:
         tools: list[dict] | None,
         thinking: bool,
         route_prefix_anchor: bool = False,
+        qwen_route_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
         final_prefix_experiment: bool = False,
         on_progress=None,
         on_token=None,
         should_cancel=None,
     ) -> NativeCompletion:
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and profile.uses_native_chat_bridge:
+            return self._complete_profile_chat_text_once(
+                messages,
+                max_tokens=max_tokens,
+                stop=stop,
+                tools=tools,
+                thinking=thinking,
+                route_prefix_anchor=route_prefix_anchor,
+                qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+                allow_mtp_experimental=allow_mtp_experimental,
+                final_prefix_experiment=final_prefix_experiment,
+                on_progress=on_progress,
+                on_token=on_token,
+                should_cancel=should_cancel,
+            )
         parts: list[str] = []
         channel_filter = None if thinking else _ControlChannelStreamFilter()
         thought_label_filter = None if thinking else _LeadingThoughtLabelFilter()
@@ -786,6 +1013,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
+            qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
             final_prefix_experiment=final_prefix_experiment,
             on_progress=on_progress,
@@ -800,6 +1028,98 @@ class NativeLlamaClient:
         self._session.continuation_ready = _can_continue_from_completion(completion, thinking=thinking)
         return completion
 
+    def _complete_profile_chat_text_once(
+        self,
+        messages: list[NativeMessage],
+        *,
+        max_tokens: int,
+        stop: tuple[str, ...],
+        tools: list[dict] | None,
+        thinking: bool,
+        route_prefix_anchor: bool,
+        qwen_route_prefix_anchor: bool,
+        allow_mtp_experimental: bool | None,
+        final_prefix_experiment: bool,
+        on_progress=None,
+        on_token=None,
+        should_cancel=None,
+    ) -> NativeCompletion:
+        raw_parts: list[str] = []
+        visible_parts: list[str] = []
+        emitted_content = ""
+        stop_filter = _StopSequenceStreamFilter(stop, emit=visible_parts.append) if stop else None
+
+        def emit_visible(delta: str) -> None:
+            if not delta:
+                return
+            if stop_filter is not None:
+                for emitted in stop_filter.write(delta):
+                    if on_token:
+                        on_token(emitted)
+                if stop_filter.stopped:
+                    self.cancel()
+                return
+            visible_parts.append(delta)
+            if on_token:
+                on_token(delta)
+
+        def collect(raw: str) -> None:
+            nonlocal emitted_content
+            raw_parts.append(raw)
+            if tools:
+                return
+            try:
+                parsed = self._parse_profile_output("".join(raw_parts), partial=True)
+            except RuntimeError:
+                return
+            if not parsed.content.startswith(emitted_content):
+                return
+            delta = parsed.content[len(emitted_content) :]
+            emitted_content = parsed.content
+            emit_visible(delta)
+
+        timings = self.complete_chat(
+            messages,
+            max_tokens=max_tokens,
+            tools=tools,
+            thinking=thinking,
+            route_prefix_anchor=route_prefix_anchor,
+            qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+            allow_mtp_experimental=allow_mtp_experimental,
+            final_prefix_experiment=final_prefix_experiment,
+            on_progress=on_progress,
+            on_token=collect,
+            should_cancel=should_cancel,
+        )
+        raw_content = "".join(raw_parts)
+        try:
+            parsed = self._parse_profile_output(raw_content, partial=False)
+        except RuntimeError:
+            if not timings.cancelled and timings.output_tokens < max_tokens:
+                raise
+            parsed = self._parse_profile_output(raw_content, partial=True)
+
+        if (not tools or not parsed.tool_calls) and parsed.content.startswith(emitted_content):
+            emit_visible(parsed.content[len(emitted_content) :])
+        if stop_filter is not None:
+            for emitted in stop_filter.finish():
+                if on_token:
+                    on_token(emitted)
+
+        content = _trim_at_stop(parsed.content, stop)
+        self._profile_last_raw_output = raw_content
+        self._profile_last_parsed_content = content
+        completion = NativeCompletion(
+            content=content,
+            timings=timings,
+            stopped_by_stop=bool(stop_filter and stop_filter.stopped),
+            reasoning_content=parsed.reasoning_content,
+            reasoning_tokens=self._content_token_count(parsed.reasoning_content),
+            tool_calls=tuple(parsed.tool_calls),
+        )
+        self._session.continuation_ready = _can_continue_from_completion(completion, thinking=False)
+        return completion
+
     def _continue_chat_text_from_current_context(
         self,
         *,
@@ -810,6 +1130,15 @@ class NativeLlamaClient:
         on_token=None,
         should_cancel=None,
     ) -> NativeCompletion:
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and profile.uses_native_chat_bridge:
+            return self._continue_profile_chat_text_from_current_context(
+                max_tokens=max_tokens,
+                stop=stop,
+                on_progress=on_progress,
+                on_token=on_token,
+                should_cancel=should_cancel,
+            )
         parts: list[str] = []
         stop_filter = _StopSequenceStreamFilter(stop, emit=parts.append) if stop else None
 
@@ -840,6 +1169,48 @@ class NativeLlamaClient:
         if not thinking:
             content = _strip_reasoning_preamble(content)
         return NativeCompletion(content=content, timings=timings, stopped_by_stop=bool(stop_filter and stop_filter.stopped))
+
+    def _continue_profile_chat_text_from_current_context(
+        self,
+        *,
+        max_tokens: int,
+        stop: tuple[str, ...],
+        on_progress=None,
+        on_token=None,
+        should_cancel=None,
+    ) -> NativeCompletion:
+        raw_parts: list[str] = []
+        timings = self._continue_generation_from_current_context(
+            max_tokens=max_tokens,
+            on_progress=on_progress,
+            on_token=raw_parts.append,
+            should_cancel=should_cancel,
+        )
+        raw_content = self._profile_last_raw_output + "".join(raw_parts)
+        try:
+            parsed = self._parse_profile_output(raw_content, partial=False)
+        except RuntimeError:
+            if not timings.cancelled and timings.output_tokens < max_tokens:
+                raise
+            parsed = self._parse_profile_output(raw_content, partial=True)
+        prior_content = self._profile_last_parsed_content
+        if not parsed.content.startswith(prior_content):
+            raise RuntimeError("Qwen continuation changed previously parsed visible content")
+        content = _trim_at_stop(parsed.content[len(prior_content) :], stop)
+        if on_token and content:
+            on_token(content)
+        self._profile_last_raw_output = raw_content
+        self._profile_last_parsed_content = parsed.content
+        completion = NativeCompletion(
+            content=content,
+            timings=timings,
+            stopped_by_stop=content != parsed.content[len(prior_content) :],
+            reasoning_content=parsed.reasoning_content,
+            reasoning_tokens=self._content_token_count(parsed.reasoning_content),
+            tool_calls=tuple(parsed.tool_calls),
+        )
+        self._session.continuation_ready = _can_continue_from_completion(completion, thinking=False)
+        return completion
 
     def continue_chat_text_current_context(
         self,
@@ -1010,6 +1381,7 @@ class NativeLlamaClient:
         allow_mtp_experimental: bool = True,
         thinking: bool | None = None,
         route_anchor_segments: RoutePromptSegments | None = None,
+        qwen_route_anchor_plan: _QwenRouteAnchorRuntimePlan | None = None,
         final_prefix_segments: RoutePromptSegments | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
@@ -1049,6 +1421,7 @@ class NativeLlamaClient:
                 prompt,
                 max_tokens=max_tokens,
                 route_anchor_segments=route_anchor_segments,
+                qwen_route_anchor_plan=qwen_route_anchor_plan,
                 final_prefix_segments=final_prefix_segments,
                 kv_diag_messages=kv_diag_messages,
                 on_progress=on_progress,
@@ -1059,10 +1432,14 @@ class NativeLlamaClient:
             self._session.continuation_ready = _can_continue_from_timings(timings)
             if final_prefix_segments is not None and timings.cancelled:
                 self._invalidate_final_prefix("cancelled")
+            if qwen_route_anchor_plan is not None and timings.cancelled:
+                self._invalidate_qwen_route_prefix("cancelled")
             return timings
         except Exception:
             if final_prefix_segments is not None:
                 self._invalidate_final_prefix("completion_error")
+            if qwen_route_anchor_plan is not None:
+                self._invalidate_qwen_route_prefix("completion_error")
             raise
         finally:
             self._session.in_flight = False
@@ -1077,6 +1454,11 @@ class NativeLlamaClient:
         on_token=None,
     ) -> NativeTimings | None:
         thinking = self._thinking_enabled(thinking)
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.mtp_supported:
+            self.mtp_fallback_reason = "model_profile_mtp_unsupported"
+            self.last_mtp_completion = MtpCompletionResult(enabled=False, success=False, error=self.mtp_fallback_reason)
+            return None
         if thinking:
             self.mtp_fallback_reason = "thinking-mode"
             self.last_mtp_completion = MtpCompletionResult(enabled=self.config.use_mtp_experimental, success=False, error="thinking-mode")
@@ -1197,6 +1579,7 @@ class NativeLlamaClient:
         *,
         max_tokens: int = 16,
         route_anchor_segments: RoutePromptSegments | None = None,
+        qwen_route_anchor_plan: _QwenRouteAnchorRuntimePlan | None = None,
         final_prefix_segments: RoutePromptSegments | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
@@ -1215,11 +1598,16 @@ class NativeLlamaClient:
         previous_prompt_tokens = list(self._session.cached_prompt_tokens)
         pf_start = lib.llama_time_us()
         anchor_plan = self._route_anchor_plan(prompt, prompt_tokens, route_anchor_segments)
+        if qwen_route_anchor_plan is not None and prompt_tokens[: len(qwen_route_anchor_plan.prefix_tokens)] != qwen_route_anchor_plan.prefix_tokens:
+            self._record_qwen_route_prefix_fallback("production_prefix_changed")
+            qwen_route_anchor_plan = None
         final_plan = self._final_prefix_plan(prompt, prompt_tokens, final_prefix_segments)
         anchor_metadata: dict[str, object] | None = None
         processed_start = 0
         if final_plan is not None:
             processed_start, reused = self._prepare_memory_with_final_prefix(final_plan, prompt_tokens)
+        elif qwen_route_anchor_plan is not None:
+            processed_start, reused = self._prepare_memory_with_qwen_route_anchor(qwen_route_anchor_plan)
         elif anchor_plan is None:
             reused = self._prepare_memory_for_prompt(prompt_tokens)
         else:
@@ -1229,7 +1617,7 @@ class NativeLlamaClient:
                 processed_start = reused
         processed = 0
         step = max(1, min(self.config.progress_step, self.config.batch_size))
-        processed = processed_start if final_plan is not None or (anchor_plan is not None and anchor_metadata is not None) else reused
+        processed = processed_start if final_plan is not None or qwen_route_anchor_plan is not None or (anchor_plan is not None and anchor_metadata is not None) else reused
         if on_progress:
             on_progress(NativeProgress("prefill", processed, n_prompt))
         token_array = (llama_token * n_prompt)(*prompt_tokens)
@@ -1312,6 +1700,254 @@ class NativeLlamaClient:
                     break
                 raise RuntimeError(f"llama_decode failed during prefill: {decode_rc}")
         return processed
+
+    def _qwen_route_anchor_plan_for_prompt(
+        self,
+        messages: list[NativeMessage],
+        *,
+        tools: list[dict] | None,
+        thinking: bool,
+        prompt: str,
+    ) -> _QwenRouteAnchorRuntimePlan | None:
+        if not self.config.qwen_route_prefix_reuse_enabled:
+            return None
+        profile = getattr(self, "model_profile", None)
+        if getattr(profile, "profile_id", None) != QWEN36_PROFILE_ID or not getattr(profile, "verified", False):
+            self._record_qwen_route_prefix_fallback("model_profile_ineligible")
+            return None
+        if self._model_metadata_identity.get("general.file_type") != "15":
+            self._record_qwen_route_prefix_fallback("qwen_quantization_unverified")
+            return None
+        if tools or thinking:
+            self._record_qwen_route_prefix_fallback("structured_route_mode_ineligible")
+            return None
+        if self.config.use_mtp_experimental or self._session.mtp_enabled:
+            self._record_qwen_route_prefix_fallback("mtp_ineligible")
+            return None
+        if not messages or messages[0].get("role") != "system" or not isinstance(messages[0].get("content"), str):
+            self._record_qwen_route_prefix_fallback("missing_route_system_prompt")
+            return None
+        if self.chat_bridge is None or not self._chat_bridge_context:
+            self._record_qwen_route_prefix_fallback("chat_bridge_unavailable")
+            return None
+
+        system_prompt = str(messages[0]["content"])
+        system_hash = hash_text(system_prompt)
+        prompt_tokens = self.tokenize(prompt)
+        spec = self._qwen_route_prefix_spec
+        if spec is None or spec.system_prompt_hash != system_hash:
+            if self._qwen_route_prefix_anchor_state.valid:
+                self._invalidate_qwen_route_prefix("route_identity_changed")
+
+            def render_reference(user_text: str) -> str:
+                rendered = self.chat_bridge.render(
+                    self._chat_bridge_context,
+                    [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}],
+                    [],
+                    thinking=False,
+                )
+                value = rendered.get("prompt")
+                if not isinstance(value, str) or not value:
+                    raise RuntimeError("empty Qwen route reference prompt")
+                return value
+
+            reason = None
+            try:
+                spec, reason = derive_qwen_route_prefix_spec(
+                    system_prompt=system_prompt,
+                    full_prompt=prompt,
+                    full_tokens=prompt_tokens,
+                    render_reference=render_reference,
+                    tokenize=self.tokenize,
+                )
+            except Exception as exc:
+                spec = None
+                reason = f"route_boundary_probe_failed:{type(exc).__name__}"
+            finally:
+                # The bridge parser is tied to the most recent render. Restore the
+                # exact production render after the two boundary-only fixtures.
+                restored = self.chat_bridge.render(
+                    self._chat_bridge_context,
+                    self._serialize_profile_messages([dict(message) for message in messages]),
+                    [],
+                    thinking=False,
+                )
+                restored_prompt = restored.get("prompt")
+                if restored_prompt != prompt:
+                    spec = None
+                    reason = "production_render_not_repeatable"
+                else:
+                    self._active_profile_render = restored
+            if spec is None:
+                self._record_qwen_route_prefix_fallback(reason or "route_boundary_unavailable")
+                return None
+            self._qwen_route_prefix_spec = spec
+
+        if list(prompt_tokens[:QWEN_ROUTE_PREFIX_TOKEN_COUNT]) != list(spec.prefix_tokens):
+            self._invalidate_qwen_route_prefix("production_prefix_changed")
+            self._record_qwen_route_prefix_fallback("production_prefix_changed")
+            return None
+
+        state_kwargs = self._qwen_route_prefix_state_kwargs(spec)
+        prefix_hash = compute_prefix_anchor_key(**state_kwargs)
+        return _QwenRouteAnchorRuntimePlan(
+            prefix_tokens=list(spec.prefix_tokens),
+            prefix_hash=prefix_hash,
+            state_kwargs=state_kwargs,
+            spec=spec,
+            metadata={
+                "profile": QWEN36_PROFILE_ID,
+                "prefix_token_count": QWEN_ROUTE_PREFIX_TOKEN_COUNT,
+                "prefix_token_hash": spec.prefix_token_hash,
+                "invariant_token_count": spec.invariant_token_count,
+                "next_boundary_token": spec.next_boundary_token,
+            },
+        )
+
+    def _prepare_memory_with_qwen_route_anchor(self, plan: _QwenRouteAnchorRuntimePlan) -> tuple[int, int]:
+        if not self._session.ctx_tgt:
+            raise RuntimeError("native client not loaded")
+        if self._qwen_route_prefix_anchor_state.valid:
+            self._clear_target_memory()
+            ok, restored, metadata = restore_prefix_anchor(
+                self._qwen_route_prefix_anchor_state,
+                lib=self.lib.lib,
+                ctx=self._session.ctx_tgt,
+                prefix_hash=plan.prefix_hash,
+                token_count=len(plan.prefix_tokens),
+                enabled=True,
+                **plan.state_kwargs,
+            )
+            self._qwen_route_prefix_anchor_state = restored
+            if ok:
+                self._session.cached_prompt_tokens = list(plan.prefix_tokens)
+                status = self._qwen_route_prefix_status
+                status.initialized = True
+                status.prefix_tokens = len(plan.prefix_tokens)
+                status.restore_count += 1
+                status.failure_reason = None
+                status.last_used = "restore"
+                return len(plan.prefix_tokens), len(plan.prefix_tokens)
+            self._clear_target_memory()
+            self._qwen_route_prefix_status.invalidation_count += 1
+            self._record_qwen_route_prefix_fallback(str(metadata.get("fallback_reason") or "restore_failed"))
+            return 0, 0
+
+        self._clear_target_memory()
+        token_array = (llama_token * len(plan.prefix_tokens))(*plan.prefix_tokens)
+        step = max(1, min(self.config.progress_step, self.config.batch_size))
+        self._decode_prompt_range(
+            token_array,
+            processed=0,
+            end=len(plan.prefix_tokens),
+            step=step,
+            total=len(plan.prefix_tokens),
+            on_progress=None,
+            should_cancel=None,
+        )
+        self._session.cached_prompt_tokens = list(plan.prefix_tokens)
+        state, metadata = capture_prefix_anchor(
+            lib=self.lib.lib,
+            ctx=self._session.ctx_tgt,
+            prefix_hash=plan.prefix_hash,
+            token_count=len(plan.prefix_tokens),
+            enabled=True,
+            **plan.state_kwargs,
+        )
+        self._qwen_route_prefix_anchor_state = state
+        if state.valid:
+            status = self._qwen_route_prefix_status
+            status.initialized = True
+            status.prefix_tokens = len(plan.prefix_tokens)
+            status.capture_count += 1
+            status.failure_reason = None
+            status.last_used = "capture"
+        else:
+            self._record_qwen_route_prefix_fallback(str(metadata.get("fallback_reason") or "capture_failed"))
+        # Capture is part of the normal first prefill. Even if the read-only
+        # capture fails, the decoded prefix remains valid for this completion.
+        return len(plan.prefix_tokens), 0
+
+    def _qwen_route_prefix_state_kwargs(self, spec: QwenRoutePrefixSpec) -> dict[str, str | None]:
+        profile = self.model_profile
+        try:
+            stat = self.paths.model.stat()
+            model_file_identity = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        except OSError:
+            model_file_identity = {"size": None, "mtime_ns": None}
+        model_identity = hash_text(
+            json.dumps(
+                {
+                    "profile": getattr(profile, "profile_id", None),
+                    "metadata": self._model_metadata_identity,
+                    "file": model_file_identity,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return {
+            "model_id": model_identity,
+            "template_id": hash_text(
+                f"{QWEN_ROUTE_PREFIX_FORMAT_VERSION}:{getattr(profile, 'template_sha256', '')}:"
+                f"{QWEN_ROUTE_TOKENIZER_IDENTITY}:ctx={self.config.context_tokens}"
+            ),
+            "tool_schema_hash": spec.system_prompt_hash,
+            "capability_summary_hash": spec.system_prompt_hash,
+            "runtime_policy_hash": spec.invariant_text_hash,
+            "route_contract_hash": spec.prefix_token_hash,
+            "backend_version": self._qwen_backend_build_identity(),
+            "native_version": hash_text(
+                f"{runtime_library_filename('llama')}:batch={self.config.batch_size}:"
+                f"ubatch={self.config.ubatch_size}:step={self.config.progress_step}:"
+                f"threads={self.config.threads}:threads_batch={self.config.threads_batch}"
+            ),
+            "tools_mode": "qwen-route-tools-on-thinking-off",
+        }
+
+    def _qwen_backend_build_identity(self) -> str:
+        if self._qwen_native_build_identity is None:
+            from .capabilities import read_llama_cpp_build_info
+
+            build = read_llama_cpp_build_info(self.paths.build_bin)
+            self._qwen_native_build_identity = hash_text(
+                json.dumps(
+                    {
+                        "build_number": build.build_number,
+                        "commit": build.commit,
+                        "target": build.target,
+                        "compiler": build.compiler,
+                        "library_hash": build.library_hash,
+                        "source": build.source,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        return self._qwen_native_build_identity
+
+    def _record_qwen_route_prefix_fallback(self, reason: str) -> None:
+        status = self._qwen_route_prefix_status
+        status.fallback_count += 1
+        status.failure_reason = reason
+        status.last_used = "fallback"
+        if not self._qwen_route_prefix_anchor_state.valid:
+            status.initialized = False
+            status.prefix_tokens = 0
+
+    def _invalidate_qwen_route_prefix(self, reason: str) -> None:
+        if not hasattr(self, "_qwen_route_prefix_anchor_state"):
+            return
+        had_state = self._qwen_route_prefix_anchor_state.valid or self._qwen_route_prefix_anchor_state.checkpoint_size > 0
+        self._qwen_route_prefix_anchor_state = PrefixAnchorState()
+        self._qwen_route_prefix_spec = None
+        status = self._qwen_route_prefix_status
+        if had_state:
+            status.invalidation_count += 1
+        status.initialized = False
+        status.prefix_tokens = 0
+        status.failure_reason = reason
+        status.last_used = "invalidated"
 
     def _route_anchor_plan(
         self,
@@ -1451,6 +2087,17 @@ class NativeLlamaClient:
         thinking: bool,
         prompt: str,
     ) -> RoutePromptSegments | None:
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and not profile.gemma_prefix_reuse_supported:
+            emit_route_prefix_anchor_event(
+                _route_anchor_metadata(
+                    enabled=False,
+                    attempted=False,
+                    prefix_hash=None,
+                    fallback_reason="model_profile_ineligible",
+                )
+            )
+            return None
         if not prefix_anchor_enabled():
             emit_route_prefix_anchor_event(
                 _route_anchor_metadata(
@@ -1518,7 +2165,15 @@ class NativeLlamaClient:
         return segments
 
     def _final_prefix_experiment_eligible(self, requested: bool) -> bool:
-        return requested and self.config.final_prefix_experiment_enabled and not self.config.use_mtp_experimental
+        return (
+            requested
+            and self.config.final_prefix_experiment_enabled
+            and not self.config.use_mtp_experimental
+            and (
+                getattr(self, "model_profile", None) is None
+                or getattr(self, "model_profile").gemma_prefix_reuse_supported
+            )
+        )
 
     def _final_prefix_plan(
         self,
@@ -1869,7 +2524,12 @@ class NativeLlamaClient:
             if common == 0:
                 lib.llama_memory_clear(mem, True)
             else:
-                lib.llama_memory_seq_rm(mem, 0, common, -1)
+                removed = lib.llama_memory_seq_rm(mem, 0, common, -1)
+                if not removed:
+                    # Hybrid/recurrent models may reject partial state removal.
+                    # A cold prefill is the only safe fallback for a new prompt.
+                    lib.llama_memory_clear(mem, True)
+                    common = 0
         self._session.cached_prompt_tokens = list(prompt_tokens)
         return common
 
@@ -1884,6 +2544,23 @@ class NativeLlamaClient:
             raise RuntimeError("native client not loaded")
         thinking = self._thinking_enabled(thinking)
         rendered_messages = [dict(message) for message in messages]
+        profile = getattr(self, "model_profile", None)
+        if profile is not None and profile.uses_native_chat_bridge:
+            if self.chat_bridge is None or not self._chat_bridge_context:
+                raise RuntimeError("Orbit chat compatibility bridge is unavailable")
+            rendered = self.chat_bridge.render(
+                self._chat_bridge_context,
+                self._serialize_profile_messages(rendered_messages),
+                [dict(tool) for tool in (tools or [])],
+                thinking=thinking,
+            )
+            prompt = rendered.get("prompt")
+            if not isinstance(prompt, str) or not prompt:
+                raise RuntimeError("Orbit chat compatibility bridge returned an empty prompt")
+            self._active_profile_render = rendered
+            self._profile_last_raw_output = ""
+            self._profile_last_parsed_content = ""
+            return prompt
         if thinking:
             return render_gemma4_chat(rendered_messages, tools=tools, thinking=True)
         if tools or any(message.get("role") == "tool" or message.get("tool_calls") for message in rendered_messages):
@@ -1910,6 +2587,50 @@ class NativeLlamaClient:
         if not thinking:
             rendered = _strip_thinking_prompt(rendered)
         return rendered
+
+    def _serialize_profile_messages(self, messages: list[NativeMessage]) -> list[NativeMessage]:
+        profile = getattr(self, "model_profile", None)
+        if profile is None or profile.family != "qwen3.6":
+            return messages
+        serialized: list[NativeMessage] = []
+        for index, message in enumerate(messages):
+            item = dict(message)
+            if item.get("role") == "system" and index != 0:
+                # The reviewed Qwen template accepts a system role only at the
+                # beginning. Preserve later Orbit evidence cards in place as a
+                # normal input turn instead of reordering or dropping content.
+                item["role"] = "user"
+            serialized.append(item)
+        return serialized
+
+    def _parse_profile_output(self, generated_text: str, *, partial: bool) -> _ProfileParsedOutput:
+        if self.chat_bridge is None or not self._chat_bridge_context:
+            raise RuntimeError("Orbit chat compatibility parser is unavailable")
+        value = self.chat_bridge.parse(self._chat_bridge_context, generated_text, partial=partial)
+        content = value.get("content")
+        reasoning = value.get("reasoning_content")
+        raw_calls = value.get("tool_calls")
+        if not isinstance(content, str) or not isinstance(reasoning, str) or not isinstance(raw_calls, list):
+            raise RuntimeError("Orbit chat compatibility parser returned an invalid result")
+        calls: list[dict[str, object]] = []
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict):
+                raise RuntimeError("Orbit chat compatibility parser returned an invalid tool call")
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                raise RuntimeError("Orbit chat compatibility parser returned an invalid tool function")
+            name = function.get("name")
+            arguments = function.get("arguments")
+            if not isinstance(name, str) or not name or not isinstance(arguments, str):
+                raise RuntimeError("Orbit chat compatibility parser returned invalid tool arguments")
+            calls.append(
+                {
+                    "id": raw_call.get("id") if isinstance(raw_call.get("id"), str) else "",
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            )
+        return _ProfileParsedOutput(content=content, reasoning_content=reasoning, tool_calls=tuple(calls))
 
     def _token_to_bytes(self, token: int) -> bytes:
         if not self._vocab:
@@ -2112,6 +2833,9 @@ def _merge_completions(first: NativeCompletion, second: NativeCompletion) -> Nat
         ),
         stopped_by_stop=first.stopped_by_stop or second.stopped_by_stop,
         completed_after_thought=_has_closed_thought_with_final(merged_content),
+        reasoning_content=first.reasoning_content + second.reasoning_content,
+        reasoning_tokens=first.reasoning_tokens + second.reasoning_tokens,
+        tool_calls=second.tool_calls or first.tool_calls,
     )
 
 

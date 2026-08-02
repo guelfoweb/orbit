@@ -23,6 +23,7 @@ import ctypes
 import json
 import os
 
+from .chat_bridge import CHAT_BRIDGE_API_VERSION, validate_chat_bridge_artifact
 from .native_names import platform_runtime_libs, runtime_library_filename
 from .mtmd_bridge import validate_mtmd_bridge_artifact
 
@@ -221,6 +222,12 @@ class LlamaLibrary:
 
         lib.llama_model_get_vocab.argtypes = [c_void_p]
         lib.llama_model_get_vocab.restype = c_void_p
+        lib.llama_model_meta_count.argtypes = [c_void_p]
+        lib.llama_model_meta_count.restype = c_int32
+        lib.llama_model_meta_key_by_index.argtypes = [c_void_p, c_int32, POINTER(c_char), c_size_t]
+        lib.llama_model_meta_key_by_index.restype = c_int32
+        lib.llama_model_meta_val_str_by_index.argtypes = [c_void_p, c_int32, POINTER(c_char), c_size_t]
+        lib.llama_model_meta_val_str_by_index.restype = c_int32
         lib.llama_vocab_n_tokens.argtypes = [c_void_p]
         lib.llama_vocab_n_tokens.restype = c_int32
         lib.llama_model_chat_template.argtypes = [c_void_p, c_char_p]
@@ -270,6 +277,105 @@ class LlamaLibrary:
         lib.llama_sampler_reset.restype = None
         lib.llama_sampler_free.argtypes = [c_void_p]
         lib.llama_sampler_free.restype = None
+
+
+class ChatBridgeLibrary:
+    def __init__(self, build_bin: Path, bridge_path: Path) -> None:
+        self.build_identity = validate_chat_bridge_artifact(build_bin, bridge_path)
+        flags = native_cdll_flags()
+        self._handles: list[CDLL] = []
+        for dependency in platform_runtime_libs():
+            path = build_bin / dependency
+            if path.exists():
+                self._handles.append(load_native_cdll(path, mode=flags))
+        self.lib = load_native_cdll(bridge_path, mode=flags)
+        self._configure_api()
+        if self.lib.orbit_chat_bridge_api_version() != CHAT_BRIDGE_API_VERSION:
+            raise RuntimeError("unsupported Orbit chat bridge API version")
+
+    def _configure_api(self) -> None:
+        lib = self.lib
+        lib.orbit_chat_bridge_api_version.argtypes = []
+        lib.orbit_chat_bridge_api_version.restype = c_uint32
+        lib.orbit_chat_bridge_last_error.argtypes = []
+        lib.orbit_chat_bridge_last_error.restype = c_char_p
+        lib.orbit_chat_bridge_create.argtypes = [c_void_p]
+        lib.orbit_chat_bridge_create.restype = c_void_p
+        lib.orbit_chat_bridge_free.argtypes = [c_void_p]
+        lib.orbit_chat_bridge_free.restype = None
+        lib.orbit_chat_bridge_render.argtypes = [
+            c_void_p,
+            c_char_p,
+            c_char_p,
+            c_bool,
+            POINTER(c_char),
+            c_size_t,
+        ]
+        lib.orbit_chat_bridge_render.restype = c_int
+        lib.orbit_chat_bridge_parse.argtypes = [
+            c_void_p,
+            c_char_p,
+            c_bool,
+            POINTER(c_char),
+            c_size_t,
+        ]
+        lib.orbit_chat_bridge_parse.restype = c_int
+
+    def create(self, model: c_void_p) -> c_void_p:
+        context = self.lib.orbit_chat_bridge_create(model)
+        if not context:
+            raise RuntimeError(f"failed to initialize Orbit chat bridge: {self.last_error()}")
+        return context
+
+    def free(self, context: c_void_p | None) -> None:
+        if context:
+            self.lib.orbit_chat_bridge_free(context)
+
+    def render(
+        self,
+        context: c_void_p,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+        *,
+        thinking: bool,
+    ) -> dict[str, object]:
+        messages_json = json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return self._json_call(
+            self.lib.orbit_chat_bridge_render,
+            context,
+            messages_json,
+            tools_json,
+            thinking,
+        )
+
+    def parse(self, context: c_void_p, generated_text: str, *, partial: bool) -> dict[str, object]:
+        return self._json_call(
+            self.lib.orbit_chat_bridge_parse,
+            context,
+            generated_text.encode("utf-8"),
+            partial,
+        )
+
+    def _json_call(self, function, *args) -> dict[str, object]:
+        needed = function(*args, None, 0)
+        if needed < 0:
+            raise RuntimeError(self.last_error())
+        buffer = (c_char * (needed + 1))()
+        written = function(*args, buffer, len(buffer))
+        if written < 0 or written > needed:
+            raise RuntimeError(self.last_error())
+        try:
+            value = json.loads(bytes(buffer[:written]).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError("Orbit chat bridge returned invalid JSON") from exc
+        if not isinstance(value, dict):
+            raise RuntimeError("Orbit chat bridge returned a non-object result")
+        return value
+
+    def last_error(self) -> str:
+        value = self.lib.orbit_chat_bridge_last_error()
+        return value.decode("utf-8", errors="replace") if value else "unknown chat bridge error"
 
 
 class MtmdLibrary:

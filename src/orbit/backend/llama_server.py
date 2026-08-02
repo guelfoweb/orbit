@@ -11,6 +11,7 @@ from .base import ChatResult, Message, ModelInfo, StreamProgress, TokenCount
 from .model_names import resolve_model_display_name
 from .payloads import ChatPayloadOptions, build_chat_payload
 from orbit.final_prefix_config import resolve_final_prefix_reuse
+from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 from orbit.runtime.tool_healing import tool_call_healing_status
@@ -49,6 +50,7 @@ class LlamaServerBackend:
                 thinking=self.thinking,
                 tools=tools,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
+                qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
                 final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
             )
@@ -87,6 +89,7 @@ class LlamaServerBackend:
                 tools=tools,
                 stream=True,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
+                qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
                 final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
             )
@@ -187,6 +190,14 @@ class LlamaServerBackend:
             return props
         props.update(tool_call_healing_status())
         return props
+
+    def uses_native_separated_reasoning(self) -> bool:
+        compatibility = self._props_or_empty().get("model_compatibility")
+        return bool(
+            isinstance(compatibility, dict)
+            and compatibility.get("verified") is True
+            and compatibility.get("reasoning_protocol") == "qwen-think"
+        )
 
     def execute_server_tool(self, name: str, arguments: dict[str, Any]) -> str:
         data = self._post_json("/tools", {"tool": name, "params": arguments})
@@ -343,6 +354,9 @@ def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
     if not tool_calls and parsed_raw_tool_calls:
         tool_calls = parsed_raw_tool_calls
         content = ""
+    reasoning_content = message.get("reasoning_content")
+    if not isinstance(reasoning_content, str):
+        reasoning_content = ""
 
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
@@ -358,6 +372,7 @@ def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
         cached_tokens=_int_or_none(details.get("cached_tokens")),
         prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
         generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
+        reasoning_content=reasoning_content,
     )
 
 
@@ -369,6 +384,7 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
     finish_reason: str | None = None
     usage: dict[str, Any] = {}
     timings: dict[str, Any] = {}
+    reasoning_parts: list[str] = []
 
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="replace").strip()
@@ -402,6 +418,9 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
         if isinstance(text, str) and text:
             content_parts.append(text)
             content_filter.write(text)
+        reasoning = delta.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            reasoning_parts.append(reasoning)
         _merge_stream_tool_calls(tool_calls_by_index, delta.get("tool_calls"))
 
     content_filter.finish()
@@ -423,6 +442,7 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
         cached_tokens=_int_or_none(details.get("cached_tokens")),
         prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
         generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
+        reasoning_content="".join(reasoning_parts),
     )
 
 
@@ -439,6 +459,7 @@ def _parse_native_stream(
     finish_reason: str | None = None
     usage: dict[str, Any] = {}
     timings: dict[str, Any] = {}
+    reasoning_parts: list[str] = []
     current_event: str | None = None
     current_data_lines: list[str] = []
     stream_done = False
@@ -466,6 +487,10 @@ def _parse_native_stream(
             if isinstance(text, str) and text:
                 content_parts.append(text)
                 content_filter.write(text)
+        elif current_event == "reasoning":
+            text = data.get("text")
+            if isinstance(text, str) and text:
+                reasoning_parts.append(text)
         elif current_event.startswith("progress.") and on_progress:
             phase = current_event.split(".", maxsplit=1)[1]
             progress = StreamProgress(
@@ -524,6 +549,7 @@ def _parse_native_stream(
         cached_tokens=_int_or_none(details.get("cached_tokens")),
         prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
         generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
+        reasoning_content="".join(reasoning_parts),
     )
 
 
@@ -768,6 +794,12 @@ def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     if not native_backend:
         return False
     if not prefix_anchor_enabled():
+        return False
+    return current_phase() == "route" and current_tools_mode() == "on"
+
+
+def _qwen_route_prefix_anchor_requested(*, native_backend: bool) -> bool:
+    if not native_backend or not resolve_qwen_route_prefix_reuse().enabled:
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
 
