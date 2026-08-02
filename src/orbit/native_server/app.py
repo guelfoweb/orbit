@@ -76,6 +76,12 @@ class OrbitNativeServer:
         with self.lock:
             thinking = self.client.config.thinking if request.thinking is None else request.thinking
             final_prefix_experiment = request.final_prefix_experiment and _is_final_from_tool_prompt(request.messages)
+            qwen_route_prefix_anchor = (
+                request.qwen_route_prefix_anchor
+                and not thinking
+                and not request.tools
+                and _is_qwen_route_prompt(request.messages)
+            )
             completion = self.client.complete_chat_text(
                 request.messages,
                 max_tokens=request.max_tokens,
@@ -83,7 +89,7 @@ class OrbitNativeServer:
                 tools=request.tools,
                 thinking=thinking,
                 route_prefix_anchor=request.route_prefix_anchor,
-                qwen_route_prefix_anchor=request.qwen_route_prefix_anchor,
+                qwen_route_prefix_anchor=qwen_route_prefix_anchor,
                 allow_mtp_experimental=request.allow_mtp_experimental,
                 final_prefix_experiment=final_prefix_experiment,
                 on_progress=on_progress,
@@ -740,6 +746,14 @@ def _is_final_from_tool_prompt(messages: list[dict[str, Any]]) -> bool:
         len(messages) == 3
         and [message.get("role") for message in messages] == ["system", "user", "system"]
         and messages[0].get("content") == FINAL_FROM_TOOL_SYSTEM_PROMPT
+    )
+
+
+def _is_qwen_route_prompt(messages: list[dict[str, Any]]) -> bool:
+    return bool(
+        len(messages) >= 2
+        and messages[0].get("role") == "system"
+        and messages[0].get("content") == ROUTE_SYSTEM_PROMPT
     )
 
 

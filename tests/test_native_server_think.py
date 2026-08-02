@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from orbit.native_server.app import OrbitNativeHandler, OrbitNativeServer, _DisconnectWatcher
 from orbit.native_server.protocol import openai_chat_response, parse_chat_request
-from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT
+from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 
 
 @dataclass
@@ -43,6 +43,7 @@ class _FakeClient:
         self.mtp_fallback_reason = None
         self.allow_mtp_calls: list[bool | None] = []
         self.final_prefix_calls: list[bool] = []
+        self.qwen_route_prefix_calls: list[bool] = []
 
     def complete_chat_text(
         self,
@@ -63,6 +64,7 @@ class _FakeClient:
         self.calls.append(thinking)
         self.allow_mtp_calls.append(allow_mtp_experimental)
         self.final_prefix_calls.append(final_prefix_experiment)
+        self.qwen_route_prefix_calls.append(qwen_route_prefix_anchor)
         return _FakeCompletion()
 
     def session_snapshot(self, session_id: str):
@@ -105,6 +107,28 @@ class NativeServerThinkTests(unittest.TestCase):
         server.complete(parse_chat_request({"messages": unknown_messages, "final_prefix_experiment": True}))
 
         self.assertEqual(client.final_prefix_calls, [True, False])
+
+    def test_qwen_route_prefix_requires_exact_route_prompt_family(self) -> None:
+        client = _FakeClient(thinking=False)
+        server = OrbitNativeServer(client=client, model_alias="fake")
+        route_messages = [
+            {"role": "system", "content": ROUTE_SYSTEM_PROMPT},
+            {"role": "user", "content": "hello"},
+        ]
+        unknown_messages = [
+            {"role": "system", "content": "different prompt"},
+            {"role": "user", "content": "hello"},
+        ]
+
+        server.complete(parse_chat_request({"messages": route_messages, "qwen_route_prefix_anchor": True}))
+        server.complete(parse_chat_request({"messages": unknown_messages, "qwen_route_prefix_anchor": True}))
+        server.complete(
+            parse_chat_request(
+                {"messages": route_messages, "qwen_route_prefix_anchor": True, "thinking": True}
+            )
+        )
+
+        self.assertEqual(client.qwen_route_prefix_calls, [True, False, False])
 
     def test_disconnect_watcher_disarm_skips_cancel_callback(self) -> None:
         called: list[str] = []
