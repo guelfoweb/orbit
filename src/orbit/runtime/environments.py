@@ -5,11 +5,25 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable
 import json
 import re
+import time
 
 from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.completion_budget import CompletionBudget, resolve_max_tokens
 from orbit.runtime.continue_controller import ContinueController
+from orbit.runtime.document_search import (
+    DOCUMENT_SEARCH_PLAN_MAX_TOKENS,
+    concept_document_search_answer,
+    document_search_blocked_answer,
+    document_search_plan_messages,
+    document_search_verification_messages,
+    identify_document_search_request,
+    literal_document_search_answer,
+    parse_document_concept_verification,
+    parse_document_search_plan,
+    search_document_snapshot,
+    stratified_language_samples,
+)
 from orbit.runtime.file_input_resolver import FileInputResolver
 from orbit.runtime.file_tools import read_full_document_snapshot
 from orbit.runtime.final_policy import (
@@ -26,6 +40,8 @@ from orbit.runtime.final_policy import (
     looks_like_incomplete_final,
 )
 from orbit.runtime.full_document import (
+    FullDocumentAdmission,
+    assess_full_document_admission,
     attest_full_document_snapshot,
     exact_coverage_notice,
     file_display_coverage_notice,
@@ -40,7 +56,7 @@ from orbit.runtime.full_document import (
     targeted_search_coverage_notice,
     targeted_search_no_match_notice,
 )
-from orbit.runtime.kv_diag import current_tools_mode, model_call_context
+from orbit.runtime.kv_diag import current_tools_mode, emit_document_search, model_call_context
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import TOOL_CALL_JSON_RETRY_PROMPT
 from orbit.runtime.thinking_mode import ThinkingMode, last_assistant_has_open_reasoning
@@ -431,12 +447,17 @@ class FullDocumentPreflightEnvironment:
                 },
             )
         try:
-            return self._answer_snapshot(
+            admission = assess_full_document_admission(
+                self.runtime.backend,
                 prompt,
-                snapshot=snapshot,
+                snapshot,
+                max_tokens=max_tokens,
+                workdir=workdir,
+            )
+            return self.answer_admitted_snapshot(
+                admission,
                 route_result=route_result,
                 temperature=temperature,
-                max_tokens=max_tokens,
                 workdir=workdir,
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
@@ -447,66 +468,22 @@ class FullDocumentPreflightEnvironment:
             if record is not None and self.runtime.evidence_store is not None:
                 self.runtime.evidence_store.discard(record.evidence_id)
 
-    def _answer_snapshot(
+    def answer_admitted_snapshot(
         self,
-        prompt: str,
+        admission: FullDocumentAdmission,
         *,
-        snapshot,
-        route_result: ChatResult,
+        route_result: ChatResult | None,
         temperature: float,
-        max_tokens: int,
         workdir: Path,
         on_final_delta: Callable[[str], None] | None,
         on_progress: Callable[[StreamProgress], None] | None,
         on_model_step: Callable[[ModelStepMetrics], None] | None,
         on_phase_start: Callable[[ModelPhaseStart], None] | None,
-    ) -> ChatResult:
-        user_message: Message = {"role": "user", "content": prompt}
-        output_reserve = resolve_max_tokens(
-            "final_from_tool",
-            max_tokens,
-            evidence_kind="read",
-            evidence_chars=snapshot.char_count,
-        )
-        reason = full_document_control_marker(snapshot)
-        reason = f"unsafe_model_control_markup:{reason}" if reason is not None else None
-        messages: list[Message] | None = None
-        first_count = second_count = text_count = None
-        if reason is None:
-            try:
-                messages = full_document_messages(user_message, snapshot)
-            except ValueError:
-                reason = "document_delimiter_collision"
-            else:
-                count_chat = getattr(self.runtime.backend, "count_chat_tokens", None)
-                count_text = getattr(self.runtime.backend, "count_text_tokens", None)
-                first_count = count_chat(messages, tools=None, thinking=False) if callable(count_chat) else None
-                text_count = count_text(snapshot.content) if callable(count_text) else None
-                second_count = count_chat(messages, tools=None, thinking=False) if callable(count_chat) else None
-                if not _token_count_is_exact(first_count):
-                    reason = "exact_token_identity_unavailable"
-                elif not _same_token_attestation(first_count, second_count):
-                    reason = "tokenizer_template_or_context_changed"
-                else:
-                    source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
-                    if source_error is not None:
-                        reason = source_error
-
-        prompt_tokens = first_count.tokens if first_count is not None else None
-        active_context = first_count.context_tokens if first_count is not None else None
-        file_tokens = text_count.tokens if text_count is not None else None
-        required_context = (
-            required_full_document_context(prompt_tokens, output_reserve)
-            if prompt_tokens is not None
-            else None
-        )
-        if (
-            reason is None
-            and messages is not None
-            and required_context is not None
-            and active_context is not None
-            and required_context <= active_context
-        ):
+        coverage_prefix: str = "",
+    ) -> ChatResult | None:
+        snapshot = admission.snapshot
+        if admission.compatible:
+            assert admission.messages is not None
             if on_phase_start is not None:
                 on_phase_start(
                     ModelPhaseStart(
@@ -520,9 +497,9 @@ class FullDocumentPreflightEnvironment:
             with self.transport.backend_thinking(False):
                 with model_call_context(phase="full_document", tools_mode="on"):
                     result = self.transport.chat_once(
-                        messages,
+                        list(admission.messages),
                         temperature=temperature,
-                        max_tokens=output_reserve,
+                        max_tokens=admission.output_reserve,
                         on_final_delta=buffered_deltas.append if buffered_deltas is not None else None,
                         on_progress=on_progress,
                     )
@@ -539,7 +516,7 @@ class FullDocumentPreflightEnvironment:
                     on_final_delta(notice)
                 self.runtime.messages.append({"role": "assistant", "content": notice})
                 return blocked
-            prefix = exact_coverage_notice(snapshot)
+            prefix = coverage_prefix + exact_coverage_notice(snapshot)
             if on_final_delta is not None:
                 on_final_delta(prefix)
                 if result.content:
@@ -547,19 +524,18 @@ class FullDocumentPreflightEnvironment:
             result = replace(result, content=prefix + result.content)
             self.runtime.messages.append({"role": "assistant", "content": result.content})
             return result
-
-        if reason is None:
-            reason = "context_too_small"
+        if route_result is None:
+            return None
         return self._blocked(
             route_result,
             full_document_blocked_notice(
                 snapshot,
-                reason=reason,
-                file_tokens=file_tokens,
-                prompt_tokens=prompt_tokens,
-                output_reserve=output_reserve,
-                required_context=required_context,
-                active_context=active_context,
+                reason=admission.reason or "context_too_small",
+                file_tokens=admission.file_tokens,
+                prompt_tokens=admission.prompt_tokens,
+                output_reserve=admission.output_reserve,
+                required_context=admission.required_context,
+                active_context=admission.active_context,
             ),
             on_final_delta=on_final_delta,
         )
@@ -578,27 +554,426 @@ class FullDocumentPreflightEnvironment:
         return result
 
 
-def _token_count_is_exact(value) -> bool:
-    return (
-        value is not None
-        and isinstance(value.tokens, int)
-        and isinstance(value.context_tokens, int)
-        and isinstance(value.rendered_hash, str)
-        and len(value.rendered_hash) == 64
-        and isinstance(value.token_hash, str)
-        and len(value.token_hash) == 64
+@dataclass(frozen=True)
+class DocumentSearchEnvironment:
+    runtime: ChatRuntime
+    transport: TransportEnvironment
+    full_document: FullDocumentPreflightEnvironment
+
+    def answer_if_eligible(
+        self,
+        prompt: str,
+        *,
+        temperature: float,
+        max_tokens: int,
+        workdir: Path,
+        allowed_tool_names: tuple[str, ...] | None,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+    ) -> ChatResult | None:
+        intent = identify_document_search_request(prompt)
+        if intent is None:
+            return None
+        if allowed_tool_names is not None and "exec_shell_full_command" not in allowed_tool_names:
+            return None
+        raw = read_full_document_snapshot(intent.path, workdir=workdir)
+        if raw.startswith("error:"):
+            return self._visible(
+                _runtime_result(
+                    document_search_blocked_answer(
+                        intent.path,
+                        reason=raw.removeprefix("error:").strip().replace(" ", "_")[:160],
+                    )
+                ),
+                on_final_delta=on_final_delta,
+            )
+        snapshot = parse_full_document_snapshot(raw)
+        if snapshot is None:
+            return self._visible(
+                _runtime_result(document_search_blocked_answer(intent.path, reason="snapshot_integrity_failure")),
+                on_final_delta=on_final_delta,
+            )
+        marker = full_document_control_marker(snapshot)
+        if marker is not None:
+            return self._visible(
+                _runtime_result(
+                    document_search_blocked_answer(
+                        intent.path,
+                        reason=f"unsafe_model_control_markup:{marker}",
+                        snapshot=snapshot,
+                    )
+                ),
+                on_final_delta=on_final_delta,
+            )
+
+        record = None
+        if self.runtime.evidence_store is not None:
+            record = self.runtime.evidence_store.add(
+                "document_search",
+                raw,
+                metadata={
+                    "ephemeral": "full_document_snapshot",
+                    "mode": intent.mode,
+                    "path": snapshot.path,
+                },
+            )
+        try:
+            if intent.mode == "literal":
+                assert intent.literal_term is not None
+                return self._literal(
+                    intent.literal_term,
+                    whole_word=intent.whole_word,
+                    case_sensitive=intent.case_sensitive,
+                    snapshot=snapshot,
+                    workdir=workdir,
+                    on_final_delta=on_final_delta,
+                )
+            return self._concept(
+                prompt,
+                snapshot=snapshot,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                workdir=workdir,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+            )
+        finally:
+            if record is not None and self.runtime.evidence_store is not None:
+                self.runtime.evidence_store.discard(record.evidence_id)
+
+    def _literal(
+        self,
+        term: str,
+        *,
+        whole_word: bool,
+        case_sensitive: bool,
+        snapshot,
+        workdir: Path,
+        on_final_delta: Callable[[str], None] | None,
+    ) -> ChatResult:
+        started = time.monotonic()
+        source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+        if source_error is not None:
+            return self._visible(
+                _runtime_result(document_search_blocked_answer(snapshot.path, reason=source_error, snapshot=snapshot)),
+                on_final_delta=on_final_delta,
+            )
+        result = search_document_snapshot(
+            snapshot,
+            mode="literal",
+            terms=(term,),
+            case_sensitive=case_sensitive,
+            whole_word=whole_word,
+        )
+        source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+        if source_error is not None:
+            return self._visible(
+                _runtime_result(document_search_blocked_answer(snapshot.path, reason=source_error, snapshot=snapshot)),
+                on_final_delta=on_final_delta,
+            )
+        emit_document_search(
+            {
+                "route": "deterministic_document_search",
+                "search_mode": "literal",
+                "document_languages": [],
+                "term_count": 1,
+                "total_matches": result.total_matches,
+                "returned_windows": len(result.windows),
+                "results_truncated": result.results_truncated,
+                "full_document_escalation": False,
+                "fallback_reason": None,
+                "planning_ms": 0.0,
+                "search_ms": _elapsed_ms(started),
+            }
+        )
+        return self._visible(
+            _runtime_result(literal_document_search_answer(result, whole_word=whole_word)),
+            on_final_delta=on_final_delta,
+        )
+
+    def _concept(
+        self,
+        prompt: str,
+        *,
+        snapshot,
+        temperature: float,
+        max_tokens: int,
+        workdir: Path,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+    ) -> ChatResult:
+        samples = stratified_language_samples(snapshot)
+        plan_messages = document_search_plan_messages(prompt, snapshot, samples)
+        if on_phase_start is not None:
+            on_phase_start(ModelPhaseStart("document_search_plan", streamed=False, attempt=1, reason="concept_terms"))
+        plan_started = time.monotonic()
+        with self.transport.backend_thinking(False):
+            with model_call_context(phase="document_search_plan", tools_mode="on"):
+                plan_result = self.transport.chat_once(
+                    plan_messages,
+                    temperature=temperature,
+                    max_tokens=DOCUMENT_SEARCH_PLAN_MAX_TOKENS,
+                    on_final_delta=None,
+                    on_progress=on_progress,
+                )
+        planning_ms = _elapsed_ms(plan_started)
+        if on_model_step is not None:
+            on_model_step(ModelStepMetrics.from_result(loop=1, result=plan_result, phase="document_search_plan"))
+        if plan_result.finish_reason in {"cancelled", "timeout"}:
+            self.runtime.messages.append({"role": "assistant", "content": plan_result.content})
+            return plan_result
+        if plan_result.finish_reason != "stop":
+            return self._visible(
+                replace(
+                    plan_result,
+                    content=document_search_blocked_answer(
+                        snapshot.path,
+                        reason=f"planner_finish_reason:{plan_result.finish_reason}",
+                        snapshot=snapshot,
+                    ),
+                    finish_reason="stop",
+                    tool_calls=[],
+                ),
+                on_final_delta=on_final_delta,
+            )
+        plan, plan_error = parse_document_search_plan(plan_result.content)
+        if plan is None:
+            emit_document_search(
+                {
+                    "route": "deterministic_document_search",
+                    "search_mode": "concept",
+                    "document_languages": [],
+                    "term_count": 0,
+                    "total_matches": 0,
+                    "returned_windows": 0,
+                    "results_truncated": False,
+                    "full_document_escalation": False,
+                    "fallback_reason": plan_error,
+                    "planning_ms": planning_ms,
+                    "search_ms": 0.0,
+                }
+            )
+            return self._visible(
+                replace(
+                    plan_result,
+                    content=document_search_blocked_answer(
+                        snapshot.path,
+                        reason=plan_error or "invalid_plan",
+                        snapshot=snapshot,
+                    ),
+                    finish_reason="stop",
+                    tool_calls=[],
+                ),
+                on_final_delta=on_final_delta,
+            )
+        source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+        if source_error is not None:
+            return self._visible(
+                replace(
+                    plan_result,
+                    content=document_search_blocked_answer(snapshot.path, reason=source_error, snapshot=snapshot),
+                    finish_reason="stop",
+                    tool_calls=[],
+                ),
+                on_final_delta=on_final_delta,
+            )
+
+        search_started = time.monotonic()
+        search_result = search_document_snapshot(
+            snapshot,
+            mode="concept",
+            terms=plan.terms,
+            document_languages=plan.document_languages,
+            whole_word=True,
+        )
+        search_ms = _elapsed_ms(search_started)
+        source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+        if source_error is not None:
+            return self._visible(
+                replace(
+                    plan_result,
+                    content=document_search_blocked_answer(snapshot.path, reason=source_error, snapshot=snapshot),
+                    finish_reason="stop",
+                    tool_calls=[],
+                ),
+                on_final_delta=on_final_delta,
+            )
+
+        if search_result.total_matches == 0:
+            admission = assess_full_document_admission(
+                self.runtime.backend,
+                prompt,
+                snapshot,
+                max_tokens=max_tokens,
+                workdir=workdir,
+            )
+            if admission.compatible:
+                emit_document_search(
+                    {
+                        "route": "deterministic_document_search",
+                        "search_mode": "concept",
+                        "document_languages": list(plan.document_languages),
+                        "term_count": len(plan.terms),
+                        "total_matches": 0,
+                        "returned_windows": 0,
+                        "results_truncated": False,
+                        "full_document_escalation": True,
+                        "fallback_reason": None,
+                        "planning_ms": planning_ms,
+                        "search_ms": search_ms,
+                    }
+                )
+                prefix = (
+                    "Document search escalation: initial_scan_coverage=complete; "
+                    "initial_semantic_coverage=partial; initial_matches=0; initial_search_mode=concept; "
+                    "escalation=full_document.\n"
+                    "Full-document analysis coverage: file_coverage=complete; scan_coverage=complete; "
+                    "semantic_coverage=complete; search_mode=full_document.\n"
+                )
+                complete = self.full_document.answer_admitted_snapshot(
+                    admission,
+                    route_result=None,
+                    temperature=temperature,
+                    workdir=workdir,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
+                    coverage_prefix=prefix,
+                )
+                assert complete is not None
+                return complete
+            emit_document_search(
+                {
+                    "route": "deterministic_document_search",
+                    "search_mode": "concept",
+                    "document_languages": list(plan.document_languages),
+                    "term_count": len(plan.terms),
+                    "total_matches": 0,
+                    "returned_windows": 0,
+                    "results_truncated": False,
+                    "full_document_escalation": False,
+                    "fallback_reason": admission.reason,
+                    "planning_ms": planning_ms,
+                    "search_ms": search_ms,
+                }
+            )
+            return self._visible(
+                replace(
+                    plan_result,
+                    content=concept_document_search_answer(
+                        search_result,
+                        None,
+                        fallback_reason=admission.reason,
+                    ),
+                    finish_reason="stop",
+                    tool_calls=[],
+                ),
+                on_final_delta=on_final_delta,
+            )
+
+        verify_messages = document_search_verification_messages(prompt, search_result)
+        if on_phase_start is not None:
+            on_phase_start(ModelPhaseStart("document_search_verify", streamed=False, attempt=1, reason="match_relevance"))
+        with self.transport.backend_thinking(False):
+            with model_call_context(phase="document_search_verify", tools_mode="on"):
+                verification_result = self.transport.chat_once(
+                    verify_messages,
+                    temperature=temperature,
+                    max_tokens=resolve_max_tokens(
+                        "final_from_tool",
+                        max_tokens,
+                        evidence_kind="read",
+                        evidence_chars=sum(len(window.text) for window in search_result.windows),
+                    ),
+                    on_final_delta=None,
+                    on_progress=on_progress,
+                )
+        if on_model_step is not None:
+            on_model_step(
+                ModelStepMetrics.from_result(loop=2, result=verification_result, phase="document_search_verify")
+            )
+        if verification_result.finish_reason in {"cancelled", "timeout"}:
+            self.runtime.messages.append({"role": "assistant", "content": verification_result.content})
+            return verification_result
+        if verification_result.finish_reason != "stop":
+            verification = None
+            verification_error = f"verification_finish_reason:{verification_result.finish_reason}"
+        else:
+            verification, verification_error = parse_document_concept_verification(
+                verification_result.content,
+                valid_line_ranges=search_result.evidence_line_ranges,
+            )
+        source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+        if source_error is not None:
+            return self._visible(
+                replace(
+                    verification_result,
+                    content=document_search_blocked_answer(snapshot.path, reason=source_error, snapshot=snapshot),
+                    finish_reason="stop",
+                    tool_calls=[],
+                ),
+                on_final_delta=on_final_delta,
+            )
+        emit_document_search(
+            {
+                "route": "deterministic_document_search",
+                "search_mode": "concept",
+                "document_languages": list(plan.document_languages),
+                "term_count": len(plan.terms),
+                "total_matches": search_result.total_matches,
+                "returned_windows": len(search_result.windows),
+                "results_truncated": search_result.results_truncated,
+                "full_document_escalation": False,
+                "fallback_reason": verification_error,
+                "planning_ms": planning_ms,
+                "search_ms": search_ms,
+            }
+        )
+        content = concept_document_search_answer(
+            search_result,
+            verification,
+            fallback_reason=verification_error,
+        )
+        return self._visible(
+            replace(verification_result, content=content, finish_reason="stop", tool_calls=[]),
+            on_final_delta=on_final_delta,
+        )
+
+    def _visible(
+        self,
+        result: ChatResult,
+        *,
+        on_final_delta: Callable[[str], None] | None,
+    ) -> ChatResult:
+        if on_final_delta is not None and result.content:
+            on_final_delta(result.content)
+        self.runtime.messages.append({"role": "assistant", "content": result.content})
+        return result
+
+
+def _runtime_result(content: str) -> ChatResult:
+    return ChatResult(
+        content=content,
+        model=None,
+        finish_reason="stop",
+        tool_calls=[],
+        prompt_tokens=0,
+        completion_tokens=0,
+        cached_tokens=0,
+        prompt_tokens_per_second=None,
+        generation_tokens_per_second=None,
     )
 
 
-def _same_token_attestation(first, second) -> bool:
-    return (
-        _token_count_is_exact(first)
-        and _token_count_is_exact(second)
-        and first.tokens == second.tokens
-        and first.context_tokens == second.context_tokens
-        and first.rendered_hash == second.rendered_hash
-        and first.token_hash == second.token_hash
-    )
+def _elapsed_ms(started: float) -> float:
+    return round((time.monotonic() - started) * 1000.0, 3)
 
 
 @dataclass(frozen=True)

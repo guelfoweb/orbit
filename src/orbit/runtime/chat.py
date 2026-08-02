@@ -12,6 +12,7 @@ from orbit.runtime.client_state import ClientState
 from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.environments import (
     ContinueEnvironment,
+    DocumentSearchEnvironment,
     FileInputEnvironment,
     FinalFromToolEnvironment,
     FullDocumentPreflightEnvironment,
@@ -337,6 +338,19 @@ class ChatRuntime:
         if media_result is not None:
             return self._remember_visible_result(media_result)
         self.messages.append({"role": "user", "content": prompt})
+        document_search = self._document_search_environment().answer_if_eligible(
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            workdir=workdir,
+            allowed_tool_names=allowed_tool_names,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
+        )
+        if document_search is not None:
+            return self._remember_visible_result(document_search)
         self._stream_tool_thinking_plan(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -1013,6 +1027,14 @@ class ChatRuntime:
 
     def _full_document_preflight_environment(self) -> FullDocumentPreflightEnvironment:
         return FullDocumentPreflightEnvironment(runtime=self, transport=self._transport_environment())
+
+    def _document_search_environment(self) -> DocumentSearchEnvironment:
+        transport = self._transport_environment()
+        return DocumentSearchEnvironment(
+            runtime=self,
+            transport=transport,
+            full_document=FullDocumentPreflightEnvironment(runtime=self, transport=transport),
+        )
 
     def _final_from_tool_environment(self) -> FinalFromToolEnvironment:
         return FinalFromToolEnvironment(runtime=self, transport=self._transport_environment())

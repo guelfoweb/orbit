@@ -6,12 +6,15 @@ Orbit never presents a prefix or a search window as a complete file read.
 Every long-file result reports the relative path, total bytes and lines,
 SHA-256, exact returned ranges, and complete, partial, or no coverage.
 
-For non-integral requests, the model chooses every tool, path, search
-expression, synonym, translation, and final answer. For an explicit integral
-request naming exactly one local file, runtime performs deterministic admission
-after the existing route decision and before tool selection. Runtime otherwise
-performs only path confinement, exact extraction, integrity checks, tokenizer
-admission, output bounds, and diagnostics.
+For clear targeted-search requests naming exactly one local file, runtime
+selects the internal literal or conceptual document-search path before normal
+tool selection. Literal terms come directly from the request. For conceptual
+search, one bounded model call selects translations and synonyms from
+stratified language samples, and one bounded model call verifies positive
+source windows. Ambiguous requests retain the normal model-driven route. For an
+explicit integral request naming exactly one local file, runtime performs
+deterministic admission after the existing route decision and before tool
+selection.
 
 ## Three Paths
 
@@ -33,20 +36,36 @@ not select a command for the model or turn a page into a full analysis.
 
 ### Targeted question or search
 
-For a targeted fact, the model selects one bounded `grep` or `rg` search. It
-may put exact terms, synonyms, stems, or translations in the same expression.
-Orbit does not generate terms, rank matches, or silently run fallback queries.
-For a recognized single-file search, Orbit attaches the immutable file
-identity and exact returned line ranges without rewriting the command.
+Clear literal and conceptual searches naming exactly one local file use an
+internal `document_search` primitive. It is not registered in the production
+tool schema and never executes shell. Search runs over one immutable UTF-8
+snapshot using NFKC normalization, Unicode case folding, exact phrases, and
+controlled whole-word boundaries. It counts all occurrences, returns bounded
+deduplicated windows in source order, and preserves exact line ranges and the
+snapshot SHA-256.
 
-The final model verifies the retrieved passage semantically. A positive answer
-may stop on clear source evidence. Search evidence always reports partial
-semantic coverage, even when the literal search examined the complete file.
-A negative or exhaustive answer is valid only after complete semantic coverage.
-If a model-selected search returns no passages, Orbit returns a bounded partial-
-coverage notice directly and does not ask a final model call to turn lexical
-absence into semantic absence. Recognized searches attest the source before and
-after execution and discard results if the source changed.
+Literal search extracts one exact word or phrase from the request and does not
+add a model call. A complete literal scan may support a definitive statement
+about whether that exact string occurs. Conceptual search uses one bounded
+model call to identify up to three document languages and at most twelve
+validated translations or synonyms. The planner sees only stratified samples
+from the beginning, middle, and end for language and term selection; those
+samples are not answer evidence. A second bounded call checks whether returned
+exact windows are semantically relevant and must cite existing line ranges.
+
+`scan_coverage=complete` means every line was searched, while
+`semantic_coverage=partial` means that lexical terms cannot exhaust every way a
+concept may be expressed. Therefore a zero-match conceptual search cannot
+support a definitive semantic negative. If the exact full-document admission
+check proves that the complete document fits, Orbit escalates once to the
+existing full-document path and reports `semantic_coverage=complete`.
+Otherwise it reports the searched terms and a bounded non-definitive result.
+No chunk inference, map-reduce pass, semantic ranker, or hidden retry exists.
+
+Source identity is attested before and after planning, scanning, and model
+verification. Concurrent replacement or mutation discards the result. An
+ambiguous file or request fails safely to the normal route rather than choosing
+a path in runtime.
 
 ### Full-document analysis
 
@@ -141,16 +160,20 @@ Disk read and hash cost is small compared with CPU prefill.
   run used two model calls, 3,086 evaluated prompt tokens, 38 output tokens, and
   109 seconds. No reading tool was selected; the preflight followed the normal
   route decision directly. CPU timing is descriptive.
-- A beginning/middle/end positive lookup naturally selected one bounded regex,
-  returned lines 1, 270, and 540 with full file identity, and stopped correctly
-  in two model calls. Coverage remained explicitly partial semantic retrieval.
-- A multilingual lookup used model-selected English alternatives and matched
-  the relevant Italian passage, then stopped on exact line evidence.
-- Natural negative probes did not select complete analysis reliably. A zero-
-  match targeted result now terminates with an explicit partial-coverage
-  refusal, so it cannot become a definitive model-authored negative. No
-  automatic semantic scan is active, and no production-readiness claim is made
-  for long-file negative questions at an insufficient context.
+- A complete literal scan found a sentinel at line 219 without a route call or
+  model-selected `cat`; the internal search took approximately 0.689 ms.
+- Italian-question/English-document, English-question/Italian-document, and
+  mixed Italian/English concept cases each passed three clean repetitions. The
+  model selected document-language terms and the verifier cited exact evidence
+  at line 160, line 150, and lines 110 and 210 respectively.
+- The English-question/Italian-document plans included terms such as `inferno`,
+  `abisso`, `dannazione`, and `luogo di tormento`. The mixed-document plans
+  included both `cybersecurity` and `sicurezza informatica` families. Runtime
+  did not add or translate those terms.
+- An incidental `what the hell` match was not accepted as evidence that the
+  document discussed the religious concept. A 12,000-line zero-match concept
+  case scanned the full snapshot but retained partial semantic coverage and a
+  non-definitive answer because the document did not fit in one context.
 
 The supported common case is targeted positive retrieval. Exact full analysis
 is supported only when tokenizer admission proves that the complete document
@@ -158,16 +181,21 @@ fits safely in one context.
 
 | Scenario | Result | Model calls | Evaluated prompt tokens | Output tokens | Wall |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Three-position targeted positive | Correct lines 1, 270, and 540; partial semantic coverage | 2 | 1,943 | 99 | 69 s |
-| Cross-language targeted positive | Correct Italian passage from model-selected alternatives | 2 | 1,281 | 50 | 48 s |
+| Literal line-219 positive | Exact complete scan; no model inference | 0 | 0 | 0 | 0.689 ms search |
+| Italian question, English document, 3/3 | Correct line 160; partial semantic coverage | 2 median | 1,286 median | 86 median | 49.286 s median |
+| English question, Italian document, 3/3 | Correct line 150; partial semantic coverage | 2 median | 1,597 median | 102 median | 63.383 s median |
+| Mixed-language document, 3/3 | Correct lines 110 and 210; partial semantic coverage | 2 median | 1,724 median | 136 median | 72.840 s median |
+| Incidental `what the hell` | Lexical-only match; no unsupported concept claim | 2 | 1,554 | 114 | 70.690 s |
+| 12,000-line concept negative outside context | Full lexical scan; prudent semantic result | 1 | 928 | 63 | 41.180 s |
 | Exact full fit, beginning/middle/end plus negative | Correct; complete coverage | 2 | 3,086 | 38 | 109 s |
 | Long negative, exact prompt does not fit | Safe refusal; coverage none; `--ctx 18432` | 1 | 46 | 8 | 2 s |
 | Rejected seven-chunk protocol plus synthesis | Incorrect records; fail-closed synthesis | 8 | 10,686 | 410 | 413.6 s |
 
-The targeted and exact-fit rows are successful answers. The long negative row
-is a correct refusal, not a semantic answer. The rejected chunk row is retained
-only as technical-stop evidence. Timings came from one CPU-only machine and are
-not deterministic performance claims.
+The literal, concept-positive, and exact-fit rows are successful answers. The
+concept-negative row is deliberately non-definitive. The long full-document
+negative row is a correct refusal, not a semantic answer. The rejected chunk
+row is retained only as technical-stop evidence. Timings came from one
+CPU-only machine and are descriptive, not deterministic performance claims.
 
 The internal reader is absent from the production model schema. The normal
 tool-mode prompt therefore retains the pre-change tool surface. The schema and
@@ -177,9 +205,13 @@ of the edit fixture rendered 943 tokens before and after removal of the visible
 reader. The preflight adds no model call to direct chat, targeted reads,
 searches, or other existing shell paths.
 
-The final production corpus completed 12/12 scenarios with `finish_reason=stop`:
-27 model calls, 15,647 input tokens, 656 output tokens, 4,863 evaluated prefill
-tokens, 10,784 cached tokens, and 220 seconds observed wall time. CPU wall time
-is descriptive. The previously failing edit workflow executed and verified its
-mutation in three independent final-patch runs; no prose-to-command repair was
-needed.
+The pre-search full-document baseline production corpus completed 12/12
+scenarios with 27 model calls, 4,863 evaluated prefill tokens, 656 output
+tokens, and 220 seconds observed wall time. The deterministic-search branch
+also completed 12/12 with `finish_reason=stop`: 31 model calls, 19,343 input
+tokens, 11,642 cached tokens, 7,701 evaluated prefill tokens, 739 output tokens,
+and 406.686 seconds observed wall time. None of those corpus prompts selected
+the document-search route, the tool schema and prompt source were unchanged,
+and the variation is treated as model/run and CPU variability rather than a
+search-path performance change. The previously failing edit workflow still
+executed and verified its mutation. No performance improvement is claimed.

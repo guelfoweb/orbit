@@ -586,6 +586,30 @@ def emit_evidence_lineage(metadata: dict[str, Any]) -> None:
     _emit(event)
 
 
+def emit_document_search(metadata: dict[str, Any]) -> None:
+    if not enabled():
+        return
+    languages = metadata.get("document_languages")
+    languages = languages if isinstance(languages, list) else []
+    event = {
+        "event": "document_search",
+        "route": _safe_str(metadata.get("route")),
+        "search_mode": _safe_str(metadata.get("search_mode")),
+        "document_languages": [
+            value[:16] for value in languages[:3] if isinstance(value, str) and value
+        ],
+        "term_count": _safe_int(metadata.get("term_count")),
+        "total_matches": _safe_int(metadata.get("total_matches")),
+        "returned_windows": _safe_int(metadata.get("returned_windows")),
+        "results_truncated": bool(metadata.get("results_truncated")),
+        "full_document_escalation": bool(metadata.get("full_document_escalation")),
+        "fallback_reason": _safe_str(metadata.get("fallback_reason")),
+        "planning_ms": _safe_float(metadata.get("planning_ms")),
+        "search_ms": _safe_float(metadata.get("search_ms")),
+    }
+    _emit(event)
+
+
 def _next_call_context(phase: str, tools_mode: str | None) -> dict[str, Any]:
     request = _REQUEST.get()
     call_id = next(_CALL_IDS)
@@ -696,6 +720,13 @@ def _safe_int(value: object) -> int | None:
 
 def _safe_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _safe_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    return round(numeric, 3) if numeric >= 0 and numeric == numeric else None
 
 
 def _component_changes(request_id: str | None, phase: str, tools_mode: str | None, fingerprint: PromptFingerprint) -> list[str]:
