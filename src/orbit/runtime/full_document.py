@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from orbit.backend.base import Message
+from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.file_tools import FULL_DOCUMENT_SNAPSHOT_MARKER, read_full_document_snapshot
 from orbit.runtime.messages import with_final_tool_system_prompt
 from orbit.runtime.path_guardrails import TEXT_EXTENSIONS
@@ -78,6 +79,22 @@ class FullDocumentRequest:
     path: str
 
 
+@dataclass(frozen=True)
+class FullDocumentAdmission:
+    snapshot: FullDocumentSnapshot
+    messages: tuple[Message, ...] | None
+    output_reserve: int
+    file_tokens: int | None
+    prompt_tokens: int | None
+    required_context: int | None
+    active_context: int | None
+    reason: str | None
+
+    @property
+    def compatible(self) -> bool:
+        return self.reason is None and self.messages is not None
+
+
 def identify_full_document_request(prompt: str) -> FullDocumentRequest | None:
     """Recognize only explicit full-read forms with one syntactic local path."""
     if not isinstance(prompt, str) or not prompt or len(prompt) > FULL_DOCUMENT_REQUEST_MAX_CHARS:
@@ -87,7 +104,7 @@ def identify_full_document_request(prompt: str) -> FullDocumentRequest | None:
         return None
     if not any(pattern.search(prompt) for pattern in _EXPLICIT_FULL_DOCUMENT_PATTERNS):
         return None
-    paths = _document_path_candidates(prompt)
+    paths = document_path_candidates(prompt)
     if len(paths) != 1:
         return None
     return FullDocumentRequest(path=paths[0])
@@ -116,7 +133,7 @@ def attest_full_document_snapshot(snapshot: FullDocumentSnapshot, *, workdir: Pa
     return None
 
 
-def _document_path_candidates(prompt: str) -> list[str]:
+def document_path_candidates(prompt: str) -> list[str]:
     values: list[str] = []
     occupied: list[tuple[int, int]] = []
     for match in _QUOTED_PATH_RE.finditer(prompt):
@@ -146,6 +163,94 @@ def _clean_document_path(value: str) -> str | None:
 
 def required_full_document_context(prompt_tokens: int, output_reserve: int) -> int:
     return prompt_tokens + output_reserve + FULL_DOCUMENT_SAFETY_MARGIN_TOKENS
+
+
+def assess_full_document_admission(
+    backend,
+    prompt: str,
+    snapshot: FullDocumentSnapshot,
+    *,
+    max_tokens: int,
+    workdir: Path,
+) -> FullDocumentAdmission:
+    output_reserve = resolve_max_tokens(
+        "final_from_tool",
+        max_tokens,
+        evidence_kind="read",
+        evidence_chars=snapshot.char_count,
+    )
+    reason = full_document_control_marker(snapshot)
+    reason = f"unsafe_model_control_markup:{reason}" if reason is not None else None
+    messages: list[Message] | None = None
+    first_count = second_count = text_count = None
+    if reason is None:
+        try:
+            messages = full_document_messages({"role": "user", "content": prompt}, snapshot)
+        except ValueError:
+            reason = "document_delimiter_collision"
+        else:
+            count_chat = getattr(backend, "count_chat_tokens", None)
+            count_text = getattr(backend, "count_text_tokens", None)
+            first_count = count_chat(messages, tools=None, thinking=False) if callable(count_chat) else None
+            text_count = count_text(snapshot.content) if callable(count_text) else None
+            second_count = count_chat(messages, tools=None, thinking=False) if callable(count_chat) else None
+            if not _token_count_is_exact(first_count):
+                reason = "exact_token_identity_unavailable"
+            elif not _same_token_attestation(first_count, second_count):
+                reason = "tokenizer_template_or_context_changed"
+            else:
+                source_error = attest_full_document_snapshot(snapshot, workdir=workdir)
+                if source_error is not None:
+                    reason = source_error
+
+    prompt_tokens = first_count.tokens if first_count is not None else None
+    active_context = first_count.context_tokens if first_count is not None else None
+    file_tokens = text_count.tokens if text_count is not None else None
+    required_context = (
+        required_full_document_context(prompt_tokens, output_reserve)
+        if prompt_tokens is not None
+        else None
+    )
+    if (
+        reason is None
+        and required_context is not None
+        and active_context is not None
+        and required_context > active_context
+    ):
+        reason = "context_too_small"
+    return FullDocumentAdmission(
+        snapshot=snapshot,
+        messages=tuple(messages) if messages is not None else None,
+        output_reserve=output_reserve,
+        file_tokens=file_tokens,
+        prompt_tokens=prompt_tokens,
+        required_context=required_context,
+        active_context=active_context,
+        reason=reason,
+    )
+
+
+def _token_count_is_exact(value) -> bool:
+    return (
+        value is not None
+        and isinstance(value.tokens, int)
+        and isinstance(value.context_tokens, int)
+        and isinstance(value.rendered_hash, str)
+        and len(value.rendered_hash) == 64
+        and isinstance(value.token_hash, str)
+        and len(value.token_hash) == 64
+    )
+
+
+def _same_token_attestation(first, second) -> bool:
+    return (
+        _token_count_is_exact(first)
+        and _token_count_is_exact(second)
+        and first.tokens == second.tokens
+        and first.context_tokens == second.context_tokens
+        and first.rendered_hash == second.rendered_hash
+        and first.token_hash == second.token_hash
+    )
 
 
 def parse_full_document_snapshot(raw: str) -> FullDocumentSnapshot | None:
