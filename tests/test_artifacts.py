@@ -80,6 +80,35 @@ class ArtifactPublicationTests(unittest.TestCase):
         finally:
             pending.abort()
 
+    def _register_recovery_entry(self, root: Path):
+        parent = root / "samples"
+        parent.mkdir()
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            temp_fd, temp_name = artifact_module._open_named_artifact_temp(parent_fd)
+            lease = artifact_module._register_private_entry(
+                workdir=root,
+                parent_relative=Path("samples"),
+                temp_name=temp_name,
+                temp_fd=temp_fd,
+            )
+            os.close(temp_fd)
+        finally:
+            os.close(parent_fd)
+        manifest = root / ".orbit-artifact-state" / lease.manifest_name
+        return parent, temp_name, manifest, lease
+
+    def _discard_preserved_recovery_entry(
+        self,
+        parent: Path,
+        temp_name: str,
+        lease,
+    ) -> None:
+        private = parent / temp_name
+        if private.is_symlink() or private.exists():
+            private.unlink()
+        lease.release()
+
     def test_schema_is_small_and_content_is_not_an_argument(self) -> None:
         function = write_artifact_definition()["function"]
         properties = function["parameters"]["properties"]
@@ -1366,6 +1395,209 @@ class ArtifactPublicationTests(unittest.TestCase):
             (parent / temp_name).unlink()
             lease.release()
             self.assertFalse((root / ".orbit-artifact-state").exists())
+
+    def test_recovery_preserves_active_owner_when_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=True,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=10**9)
+
+            self.assertEqual((result.removed, result.preserved), (0, 1))
+            self.assertEqual(
+                (result.owner_active, result.owner_inactive, result.owner_unknown),
+                (1, 0, 0),
+            )
+            self.assertEqual(
+                set(result.__dict__),
+                {
+                    "scanned",
+                    "removed",
+                    "preserved",
+                    "errors",
+                    "owner_active",
+                    "owner_inactive",
+                    "owner_unknown",
+                },
+            )
+            self.assertTrue((parent / temp_name).is_file())
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
+
+    def test_recovery_preserves_active_owner_when_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=True,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            self.assertEqual((result.removed, result.preserved), (0, 1))
+            self.assertEqual(result.owner_active, 1)
+            self.assertTrue((parent / temp_name).is_file())
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
+
+    def test_recovery_preserves_unknown_owner_when_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=None,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=10**9)
+
+            self.assertEqual((result.removed, result.preserved), (0, 1))
+            self.assertEqual(
+                (result.owner_active, result.owner_inactive, result.owner_unknown),
+                (0, 0, 1),
+            )
+            self.assertTrue((parent / temp_name).is_file())
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
+
+    def test_recovery_preserves_unknown_owner_when_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=None,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            self.assertEqual((result.removed, result.preserved), (0, 1))
+            self.assertEqual(result.owner_unknown, 1)
+            self.assertTrue((parent / temp_name).is_file())
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
+
+    def test_second_review_unknown_owner_reproducer_preserves_exact_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=None,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            self.assertEqual(result.removed, 0)
+            self.assertEqual(result.preserved, 1)
+            self.assertTrue((parent / temp_name).is_file())
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
+
+    def test_recovery_cleans_inactive_owner_when_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, _lease = self._register_recovery_entry(root)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=False,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=10**9)
+
+            self.assertEqual((result.removed, result.preserved), (1, 0))
+            self.assertEqual(
+                (result.owner_active, result.owner_inactive, result.owner_unknown),
+                (0, 1, 0),
+            )
+            self.assertFalse((parent / temp_name).exists())
+            self.assertFalse(manifest.exists())
+
+    def test_recovery_cleans_inactive_owner_when_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, _lease = self._register_recovery_entry(root)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=False,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            self.assertEqual((result.removed, result.preserved), (1, 0))
+            self.assertEqual(result.owner_inactive, 1)
+            self.assertFalse((parent / temp_name).exists())
+            self.assertFalse(manifest.exists())
+
+    def test_recovery_preserves_malformed_manifest_before_owner_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+            manifest.write_text("{}", encoding="utf-8")
+            manifest.chmod(0o600)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=False,
+            ) as owner_active:
+                result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            owner_active.assert_not_called()
+            self.assertEqual((result.removed, result.preserved), (0, 1))
+            self.assertTrue((parent / temp_name).is_file())
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
+
+    def test_recovery_preserves_inactive_owner_with_inode_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["inode"] += 1
+            manifest.write_text(
+                json.dumps(value, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            manifest.chmod(0o600)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=False,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            self.assertEqual((result.removed, result.preserved), (0, 1))
+            self.assertEqual(result.owner_inactive, 1)
+            self.assertTrue((parent / temp_name).is_file())
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
+
+    def test_recovery_preserves_inactive_owner_with_symlink_ambiguity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent, temp_name, manifest, lease = self._register_recovery_entry(root)
+            outside = root / "outside.txt"
+            outside.write_text("outside", encoding="utf-8")
+            (parent / temp_name).unlink()
+            (parent / temp_name).symlink_to(outside)
+
+            with mock.patch(
+                "orbit.runtime.artifacts._artifact_owner_active",
+                return_value=False,
+            ):
+                result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            self.assertEqual((result.removed, result.preserved), (0, 1))
+            self.assertEqual(result.owner_inactive, 1)
+            self.assertTrue((parent / temp_name).is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+            self.assertTrue(manifest.is_file())
+            self._discard_preserved_recovery_entry(parent, temp_name, lease)
 
     def test_restart_cleanup_removes_exact_private_entry_from_dead_process(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

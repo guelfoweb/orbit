@@ -245,6 +245,9 @@ class ArtifactCleanupResult:
     removed: int = 0
     preserved: int = 0
     errors: int = 0
+    owner_active: int = 0
+    owner_inactive: int = 0
+    owner_unknown: int = 0
 
 
 def _open_private_artifact_temp(parent_fd: int) -> tuple[int, str | None, bool]:
@@ -407,6 +410,9 @@ def cleanup_stale_artifact_entries(
     *,
     stale_seconds: int = _RECOVERY_STALE_SECONDS,
 ) -> ArtifactCleanupResult:
+    # Retained for call compatibility. Age never substitutes for positive
+    # proof that the owning process is inactive.
+    del stale_seconds
     try:
         state_fd = _open_recovery_directory(workdir, create=False)
     except (OSError, ValueError):
@@ -414,6 +420,7 @@ def cleanup_stale_artifact_entries(
     if state_fd < 0:
         return ArtifactCleanupResult()
     scanned = removed = preserved = errors = 0
+    owner_active_count = owner_inactive_count = owner_unknown_count = 0
     try:
         try:
             names = sorted(os.listdir(state_fd))[:_RECOVERY_MAX_MANIFESTS]
@@ -451,13 +458,15 @@ def cleanup_stale_artifact_entries(
                     preserved += 1
                     continue
                 owner_active = _artifact_owner_active(entry)
-                age_ns = max(0, time.time_ns() - entry["created_ns"])
-                if owner_active is True or (
-                    owner_active is None
-                    and age_ns < max(0, stale_seconds) * 1_000_000_000
-                ):
+                if owner_active is True:
+                    owner_active_count += 1
                     preserved += 1
                     continue
+                if owner_active is None:
+                    owner_unknown_count += 1
+                    preserved += 1
+                    continue
+                owner_inactive_count += 1
                 parent_fd = _open_recovery_parent(workdir, entry["parent"])
                 try:
                     try:
@@ -512,6 +521,9 @@ def cleanup_stale_artifact_entries(
         removed=removed,
         preserved=preserved,
         errors=errors,
+        owner_active=owner_active_count,
+        owner_inactive=owner_inactive_count,
+        owner_unknown=owner_unknown_count,
     )
 
 

@@ -106,9 +106,11 @@ Normal failures clean its private objects. Named private files are paired with
 bounded manifests in `.orbit-artifact-state`. The manifest binds the random
 name, parent, device, inode, uid, boot identity, PID, and process start time.
 Startup cleanup stays inside the active workdir, never follows symlinks, keeps
-entries owned by a live process, and removes a dead process's entry only when
-every manifest, ownership, mode, link-count, and inode check still matches.
-Malformed, replaced, linked, or otherwise ambiguous entries are preserved.
+entries owned by a live process, and removes an entry only after positively
+proving that its owner process is inactive and every manifest, ownership, mode,
+link-count, and inode check still matches. Unknown owner state is always
+preserved; stale age alone never authorizes deletion. Malformed, replaced,
+linked, or otherwise ambiguous entries are preserved for manual inspection.
 
 Zero residual private state after an uncatchable crash or power loss cannot be
 proved for every filesystem. A crash between private-file creation and manifest
