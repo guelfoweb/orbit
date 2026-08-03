@@ -80,8 +80,9 @@ Do not claim no access for local/system/web.
 Never use <|tool_call>, call:shell, markdown, fences, or prose for shell.
 Do not write long prose in the route pass.
 
-Example:
-specs of this computer -> {{"include_cpu":true,"include_memory":true,"include_disks":true,"include_os":true}}
+Create/save one bounded UTF-8 text file ->
+{{"tool":"write_artifact","arguments":{{"path":"x","overwrite":false,"create_parents":true}}}}
+Use model-selected values; never emit file content in this route pass.
 
 For analysis, prefer content, source, binaries, strings, logs, archives, or fetched data, not metadata."""
 ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shell_name=_detect_shell())

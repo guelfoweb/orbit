@@ -44,6 +44,7 @@ class _FakeClient:
         self.allow_mtp_calls: list[bool | None] = []
         self.final_prefix_calls: list[bool] = []
         self.qwen_route_prefix_calls: list[bool] = []
+        self.artifact_calls = 0
 
     def complete_chat_text(
         self,
@@ -67,6 +68,13 @@ class _FakeClient:
         self.qwen_route_prefix_calls.append(qwen_route_prefix_anchor)
         return _FakeCompletion()
 
+    def complete_artifact_text(self, messages, **kwargs):
+        del messages
+        self.artifact_calls += 1
+        if kwargs.get("on_token") is not None:
+            kwargs["on_token"]('<tool_call>{"command":"inert"}</tool_call>')
+        return _FakeCompletion(content='<tool_call>{"command":"inert"}</tool_call>')
+
     def session_snapshot(self, session_id: str):
         return type(
             "Snapshot",
@@ -89,6 +97,67 @@ class _FakeClient:
 
 
 class NativeServerThinkTests(unittest.TestCase):
+    def test_artifact_content_uses_literal_path_without_tool_parsing(self) -> None:
+        client = _FakeClient(thinking=False)
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        result = server.complete(
+            parse_chat_request(
+                {
+                    "messages": [{"role": "user", "content": "file content only"}],
+                    "artifact_content": True,
+                    "thinking": False,
+                }
+            )
+        )
+
+        self.assertEqual(client.artifact_calls, 1)
+        self.assertEqual(result["content"], '<tool_call>{"command":"inert"}</tool_call>')
+        self.assertEqual(result["finish_reason"], "stop")
+
+    def test_artifact_content_rejects_thinking_tools_or_stop_sequences(self) -> None:
+        server = OrbitNativeServer(client=_FakeClient(thinking=False), model_alias="m")
+        tool = {"type": "function", "function": {"name": "exec_shell_full_command"}}
+
+        for payload in (
+            {"messages": [{"role": "user", "content": "x"}], "artifact_content": True, "thinking": True},
+            {"messages": [{"role": "user", "content": "x"}], "artifact_content": True, "tools": [tool]},
+            {"messages": [{"role": "user", "content": "x"}], "artifact_content": True, "stop": ["EOF"]},
+        ):
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "stop sequences"):
+                server.complete(parse_chat_request(payload))
+
+    def test_artifact_stream_rejects_invalid_options_before_sending_sse_headers(self) -> None:
+        server = OrbitNativeServer(client=_FakeClient(thinking=False), model_alias="m")
+
+        class _Handler:
+            def __init__(self) -> None:
+                self.responses: list[tuple[dict[str, object], int]] = []
+                self.headers_sent = False
+
+            def _state(self):
+                return server
+
+            def _json(self, data, *, status=200):
+                self.responses.append((data, status))
+
+            def send_response(self, _status):
+                self.headers_sent = True
+
+        handler = _Handler()
+        OrbitNativeHandler._native_stream(
+            handler,
+            {
+                "messages": [{"role": "user", "content": "x"}],
+                "artifact_content": True,
+                "thinking": True,
+            },
+        )
+
+        self.assertFalse(handler.headers_sent)
+        self.assertEqual(handler.responses[0][1], 400)
+        self.assertIn("artifact content generation requires", handler.responses[0][0]["error"])
+
     def test_final_prefix_experiment_requires_exact_final_prompt_family(self) -> None:
         client = _FakeClient(thinking=False)
         server = OrbitNativeServer(client=client, model_alias="fake")

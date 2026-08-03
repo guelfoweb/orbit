@@ -135,11 +135,13 @@ timeout, reset, restart, model or context replacement, profile/template/schema
 identity change, restore failure, and completion error. A restore error clears
 partial state and performs one cold prefill without recursive retry.
 
-The verified boundary is 768 production tokens. The full invariant prefix is
-810 tokens for the measured route fixtures; 768 is the longest useful
-production-batch-aligned boundary below it. The token immediately after the
-checkpoint is token ID 1802. The boundary token hash is
-`095416e9dcf73f8a9db7b39b1d3f289da66a705c32418c194964938d58876b9b`.
+The verified boundary remains 768 production tokens and is the longest useful
+production-batch-aligned boundary below the dynamic request. The artifact
+route contract intentionally changed the revision-bound checkpoint identity.
+Its current boundary token hash is
+`baeeb55560c99e981fb169deed085f80439ab71c6251725c10a40fd02fc5268f`;
+the rendered invariant-prefix hash is
+`2adc7eef6acc7affce39eb2e774af5289a063cfe226b1a13aa5fd7dda498e05e`.
 
 Cold full prefill, explicit segmentation at token 768, and capture/restore
 produced byte-identical logits in the native validation probe: maximum absolute
@@ -163,6 +165,8 @@ guarantee.
   uses complete sequence-state capture/restore for the verified route prefix
   and falls back to a cold prefill for other incompatible cache transitions.
 - Qwen thinking can consume a substantial decode budget before visible output.
+- Non-trivial UTF-8 text artifacts use the bounded content-only protocol in
+  `docs/ARTIFACT_GENERATION.md`; Qwen MTP remains disabled for that phase.
 - CPU wall time depends on model, prompt, context, threads, and host state; no
   deterministic speed claim is made.
 

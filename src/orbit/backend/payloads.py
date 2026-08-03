@@ -5,6 +5,11 @@ from typing import Any
 
 from .base import Message
 
+
+ARTIFACT_CONTENT_PROTOCOL_ID = "orbit-artifact-content-v1"
+ARTIFACT_CONTENT_PROTOCOL_VERSION = 1
+
+
 @dataclass(frozen=True)
 class ChatPayloadOptions:
     model: str
@@ -19,6 +24,7 @@ class ChatPayloadOptions:
     qwen_route_prefix_anchor: bool = False
     allow_mtp_experimental: bool | None = None
     final_prefix_experiment: bool = False
+    artifact_content: bool = False
 
 
 def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
@@ -41,6 +47,8 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
         payload["allow_mtp_experimental"] = options.allow_mtp_experimental
     if options.final_prefix_experiment:
         payload["final_prefix_experiment"] = True
+    if options.artifact_content:
+        payload["artifact_content"] = True
     if options.tools:
         payload["tools"] = options.tools
         payload["tool_choice"] = "auto"

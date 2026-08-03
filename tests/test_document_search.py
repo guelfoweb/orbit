@@ -836,9 +836,16 @@ class DocumentSearchRuntimeTests(unittest.TestCase):
     def test_production_schema_remains_unchanged(self) -> None:
         self.assertEqual(
             [definition["function"]["name"] for definition in tool_definitions()],
-            ["exec_shell_full_command", "fetch_url", "list_directory", "system_info"],
+            [
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+                "write_artifact",
+            ],
         )
         self.assertNotIn("document_search", str(tool_definitions()))
+        self.assertNotIn("verify_artifact", str(tool_definitions()))
 
 
 if __name__ == "__main__":

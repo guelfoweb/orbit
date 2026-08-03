@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orbit.runtime.artifacts import (
+    ARTIFACT_TOOL_NAME,
+    ARTIFACT_VERIFY_TOOL_NAME,
+    verify_artifact_definition,
+    write_artifact_definition,
+)
 from orbit.runtime.directory_listing import execute_list_directory, list_directory_definition
 from orbit.runtime.shell_guardrails import (
     exec_shell_full_definition,
@@ -21,8 +27,15 @@ class ToolResult:
     content: str
 
 
-TOOL_NAMES = ("exec_shell_full_command", "fetch_url", "list_directory", "system_info")
+TOOL_NAMES = (
+    "exec_shell_full_command",
+    "fetch_url",
+    "list_directory",
+    "system_info",
+    ARTIFACT_TOOL_NAME,
+)
 DEFAULT_TOOL_NAMES = TOOL_NAMES
+_RUNTIME_TOOL_NAMES = (*TOOL_NAMES, ARTIFACT_VERIFY_TOOL_NAME)
 
 
 def tool_names() -> tuple[str, ...]:
@@ -34,10 +47,15 @@ def default_tool_names() -> tuple[str, ...]:
 
 
 def tool_definitions(names: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    definitions = [exec_shell_full_definition(), fetch_url_definition(), list_directory_definition(), system_info_definition()]
-    if names is None:
-        return definitions
-    allowed = set(names)
+    definitions = [
+        exec_shell_full_definition(),
+        fetch_url_definition(),
+        list_directory_definition(),
+        system_info_definition(),
+        write_artifact_definition(),
+        verify_artifact_definition(),
+    ]
+    allowed = set(DEFAULT_TOOL_NAMES if names is None else names)
     return [tool for tool in definitions if tool["function"]["name"] in allowed]
 
 
@@ -50,7 +68,7 @@ def execute_tool(
     user_prompt: str | None = None,
 ) -> ToolResult:
     del chunk_budget
-    if name not in TOOL_NAMES:
+    if name not in _RUNTIME_TOOL_NAMES:
         return ToolResult(name=name, content=f"error: unknown tool: {name}")
     parsed = parse_tool_arguments(arguments)
     if isinstance(parsed, str):
@@ -64,4 +82,6 @@ def execute_tool(
         return ToolResult(name=name, content=execute_list_directory(parsed, workdir=workdir))
     if name == "system_info":
         return ToolResult(name=name, content=execute_system_info(parsed))
+    if name in {ARTIFACT_TOOL_NAME, ARTIFACT_VERIFY_TOOL_NAME}:
+        return ToolResult(name=name, content="error: artifact generation requires runtime orchestration")
     return ToolResult(name=name, content=execute_exec_shell_full_command(parsed, workdir=workdir, user_prompt=user_prompt))

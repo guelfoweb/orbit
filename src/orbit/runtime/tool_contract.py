@@ -7,6 +7,7 @@ import shlex
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from orbit.runtime.artifacts import ARTIFACT_TOOL_NAME, ARTIFACT_VERIFY_TOOL_NAME, validate_artifact_path
 from orbit.runtime.directory_listing import MAX_DEPTH_LIMIT, MAX_ENTRIES_LIMIT
 from orbit.runtime.path_guardrails import resolve_inside_workdir
 from orbit.runtime.shell_guardrails import (
@@ -241,6 +242,26 @@ def _policy_and_operational(
         if limit is None:
             limit = _integer_limit(arguments, "max_entries", 1, MAX_ENTRIES_LIMIT)
         return neutral, limit or neutral
+    if name in {ARTIFACT_TOOL_NAME, ARTIFACT_VERIFY_TOOL_NAME}:
+        path = arguments.get("path")
+        path_error = validate_artifact_path(path, workdir=workdir)
+        if path_error:
+            return neutral, ContractStageOutcome(
+                False,
+                "invalid_artifact_path",
+                "arguments.path",
+                path_error,
+            )
+        if name == ARTIFACT_TOOL_NAME:
+            policy_error = validate_tool_no_mutation_policy(name, arguments, user_prompt=user_prompt)
+            if policy_error:
+                return ContractStageOutcome(
+                    False,
+                    "policy_read_only_mutation",
+                    "arguments.path",
+                    policy_error,
+                ), neutral
+        return neutral, neutral
     return neutral, neutral
 
 

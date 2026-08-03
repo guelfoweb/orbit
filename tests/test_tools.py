@@ -16,10 +16,18 @@ from orbit.runtime.tools import default_tool_names, execute_tool, tool_definitio
 
 class ToolTests(unittest.TestCase):
     def test_shell_and_fetch_url_are_exposed(self) -> None:
-        self.assertEqual(tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
-        self.assertEqual(default_tool_names(), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        all_names = (
+            "exec_shell_full_command",
+            "fetch_url",
+            "list_directory",
+            "system_info",
+            "write_artifact",
+        )
+        default_names = all_names
+        self.assertEqual(tool_names(), all_names)
+        self.assertEqual(default_tool_names(), default_names)
         definitions = tool_definitions()
-        self.assertEqual([item["function"]["name"] for item in definitions], ["exec_shell_full_command", "fetch_url", "list_directory", "system_info"])
+        self.assertEqual([item["function"]["name"] for item in definitions], list(default_names))
 
     def test_tool_definitions_respect_allowed_names(self) -> None:
         self.assertEqual(tool_definitions(("read_file",)), [])
@@ -27,6 +35,8 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(len(tool_definitions(("fetch_url",))), 1)
         self.assertEqual(len(tool_definitions(("list_directory",))), 1)
         self.assertEqual(len(tool_definitions(("system_info",))), 1)
+        self.assertEqual(len(tool_definitions(("write_artifact",))), 1)
+        self.assertEqual(len(tool_definitions(("verify_artifact",))), 1)
 
     def test_unknown_tool_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

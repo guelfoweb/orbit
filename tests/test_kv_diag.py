@@ -99,6 +99,21 @@ def _result(content: str, *, finish_reason: str, prompt_tokens: int = 10, comple
 
 
 class KVDiagTests(unittest.TestCase):
+    def test_diagnostic_wrapper_reports_unsupported_artifact_backend_cleanly(self) -> None:
+        with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": "1"}):
+            backend = instrument_backend(FakeBackend())
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "artifact content generation requires the native Orbit backend",
+        ):
+            backend.artifact_content_stream(
+                [{"role": "user", "content": "content only"}],
+                temperature=0,
+                max_tokens=16,
+                on_delta=lambda _text: None,
+            )
+
     def setUp(self) -> None:
         reset_diagnostics_for_tests()
         reset_native_diagnostics_for_tests()

@@ -920,6 +920,42 @@ class NativeLlamaClient:
                 break
         return result
 
+    def complete_artifact_text(
+        self,
+        messages: list[NativeMessage],
+        *,
+        max_tokens: int,
+        stop: tuple[str, ...] = (),
+        on_progress=None,
+        on_token=None,
+        should_cancel=None,
+    ) -> NativeCompletion:
+        """Generate literal artifact bytes without applying the tool-call parser."""
+        raw_parts: list[str] = []
+
+        def collect(text: str) -> None:
+            raw_parts.append(text)
+            if on_token is not None:
+                on_token(text)
+
+        timings = self.complete_chat(
+            messages,
+            max_tokens=max_tokens,
+            tools=None,
+            thinking=False,
+            route_prefix_anchor=False,
+            qwen_route_prefix_anchor=False,
+            allow_mtp_experimental=False,
+            final_prefix_experiment=False,
+            on_progress=on_progress,
+            on_token=collect,
+            should_cancel=should_cancel,
+        )
+        content = _trim_at_stop("".join(raw_parts), stop)
+        completion = NativeCompletion(content=content, timings=timings)
+        self._session.continuation_ready = False
+        return completion
+
     def _complete_chat_text_once(
         self,
         messages: list[NativeMessage],

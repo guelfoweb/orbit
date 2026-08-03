@@ -104,6 +104,8 @@ def build_final_tool_policy(
     list_like_result = directory_listing_result and is_compact_list_request(prompt)
     shell_full_result = has_tool_result(call_messages, "exec_shell_full_command")
     verified_mutation_result = has_verified_mutation_evidence(call_messages)
+    verified_artifact_result = has_verified_artifact_evidence(call_messages)
+    failed_artifact_result = has_failed_artifact_evidence(call_messages)
     system_info_result = has_tool_result(call_messages, "system_info")
     operational_status_result = shell_full_result and is_operational_status_request(prompt)
     brief_request = is_brief_final_request(prompt)
@@ -117,8 +119,22 @@ def build_final_tool_policy(
         and not (large_file_excerpt or web_fetch_result or pdf_text_result or list_like_result or operational_status_result)
     )
     mutation_instruction = (
-        "The mutation command completed successfully and the later read-only output verified the result. "
-        "State both the completed change and what the verification confirmed. "
+        (
+            "The model-selected bounded check passed and the artifact was atomically published in this turn. "
+            "Name the exact artifact path. State that this turn created or overwrote it as indicated by evidence, "
+            "then state exactly what the selected verification confirmed. Do not describe the artifact as pre-existing. "
+        )
+        if verified_artifact_result
+        else (
+            "The artifact workflow failed before verified publication, so no artifact was published. "
+            "Name the exact requested path and report the observed verification failure. "
+            "Do not claim that the file exists, is valid, or contains the requested content. "
+        )
+        if failed_artifact_result
+        else (
+            "The mutation command completed successfully and the later read-only output verified the result. "
+            "State both the completed change and what the verification confirmed. "
+        )
         if verified_mutation_result
         else ""
     )
@@ -204,6 +220,18 @@ def build_final_tool_policy(
                     "Return every listed path exactly once, one per line. "
                     "Preserve directory markers. Omit sizes and other metadata unless requested. "
                     "No introduction or conclusion. Stop after the final path."
+                ),
+            },
+        ]
+    elif verified_artifact_result or failed_artifact_result:
+        call_messages = [
+            *call_messages,
+            {
+                "role": "user",
+                "content": (
+                    mutation_instruction
+                    + "Answer the latest request directly and concisely from the publication and verification evidence. "
+                    "Do not call tools again or add unsupported claims."
                 ),
             },
         ]
@@ -424,6 +452,75 @@ def has_verified_mutation_evidence(messages: list[Message]) -> bool:
         and is_mutating_shell_command(mutation_command)
         and verification_command
         and not is_mutating_shell_command(verification_command)
+    )
+
+
+def has_verified_artifact_evidence(messages: list[Message]) -> bool:
+    publication_index = _latest_artifact_request_index(messages)
+    if publication_index is None:
+        return False
+    publication_content = messages[publication_index].get("content")
+    if not isinstance(publication_content, str) or not (
+        "artifact_publication: complete" in publication_content
+        or ("kind: artifact" in publication_content and "status: ok" in publication_content)
+        or "artifact_generation: complete" in publication_content
+        or ("kind: artifact_pending" in publication_content and "status: ok" in publication_content)
+    ):
+        return False
+    for message in messages[publication_index + 1 :]:
+        if message.get("role") != "tool" or message.get("name") != "verify_artifact":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip() or _is_error_tool_content(content):
+            continue
+        if (
+            "artifact_verification: complete" in content
+            or ("kind: artifact_verification" in content and "status: ok" in content)
+        ):
+            return True
+    return False
+
+
+def has_failed_artifact_evidence(messages: list[Message]) -> bool:
+    pending_index = _latest_artifact_request_index(messages)
+    if pending_index is None:
+        return False
+    pending_content = messages[pending_index].get("content")
+    if not isinstance(pending_content, str):
+        return False
+    if _is_error_tool_content(pending_content) or (
+        "kind: artifact_error" in pending_content and "status: error" in pending_content
+    ):
+        return True
+    if not (
+        "artifact_generation: complete" in pending_content
+        or ("kind: artifact_pending" in pending_content and "status: ok" in pending_content)
+    ):
+        return False
+    return any(
+        message.get("role") == "tool"
+        and message.get("name") == "verify_artifact"
+        and isinstance(message.get("content"), str)
+        and (
+            _is_error_tool_content(message["content"])
+            or (
+                "kind: artifact_verification" in message["content"]
+                and "status: error" in message["content"]
+            )
+        )
+        for message in messages[pending_index + 1 :]
+    )
+
+
+def _latest_artifact_request_index(messages: list[Message]) -> int | None:
+    return next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if messages[index].get("role") == "tool"
+            and messages[index].get("name") == "write_artifact"
+        ),
+        None,
     )
 
 

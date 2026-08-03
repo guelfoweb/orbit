@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from orbit.runtime.shell_guardrails import (
     validate_shell_full_contract,
@@ -46,11 +46,15 @@ class HybridToolExecutor:
         allowed_tool_names: tuple[str, ...],
         user_prompt: str | None = None,
         prefer_server: bool = True,
+        artifact_writer: Callable[[dict[str, Any]], ToolExecution] | None = None,
+        artifact_verifier: Callable[[dict[str, Any]], ToolExecution] | None = None,
     ) -> None:
         del backend, prefer_server
         self.workdir = workdir
         self.allowed_tool_names = allowed_tool_names
         self.user_prompt = user_prompt
+        self.artifact_writer = artifact_writer
+        self.artifact_verifier = artifact_verifier
 
     def tool_definitions(self) -> list[dict[str, Any]]:
         return tool_definitions(self.allowed_tool_names)
@@ -70,7 +74,7 @@ class HybridToolExecutor:
             decision = validate_canonical_tool_call(
                 name,
                 arguments,
-                tool_definitions=tool_definitions(),
+                tool_definitions=tool_definitions(self.allowed_tool_names),
                 allowed_tool_names=self.allowed_tool_names,
                 workdir=self.workdir,
                 user_prompt=self.user_prompt,
@@ -98,14 +102,17 @@ class HybridToolExecutor:
                 "rejected_permission",
                 "tool_not_enabled",
             )
-        if name not in {"exec_shell_full_command", "fetch_url", "list_directory", "system_info"}:
+        if name not in {"exec_shell_full_command", "fetch_url", "list_directory", "system_info", "write_artifact", "verify_artifact"}:
             return ToolExecution(
                 ToolResult(name=name, content=f"error: unknown tool: {name}"),
                 "orbit",
                 "rejected_schema",
                 "unknown_tool",
             )
-        parsed = parse_tool_arguments(arguments)
+        parsed = parse_tool_arguments(
+            arguments,
+            reject_duplicate_keys=name in {"write_artifact", "verify_artifact"},
+        )
         if isinstance(parsed, str):
             return ToolExecution(ToolResult(name=name, content=parsed), "orbit", "rejected_parse", "invalid_arguments")
         if not canonical_validated:
@@ -117,6 +124,24 @@ class HybridToolExecutor:
                     "rejected_policy",
                     "policy_read_only_mutation",
                 )
+        if name == "write_artifact":
+            if self.artifact_writer is None:
+                return ToolExecution(
+                    ToolResult(name=name, content="error: artifact generation is unavailable on this backend"),
+                    "orbit",
+                    "runtime_error",
+                    "artifact_backend_unavailable",
+                )
+            return self.artifact_writer(parsed)
+        if name == "verify_artifact":
+            if self.artifact_verifier is None:
+                return ToolExecution(
+                    ToolResult(name=name, content="error: artifact verification is unavailable"),
+                    "orbit-artifact",
+                    "runtime_error",
+                    "artifact_verifier_unavailable",
+                )
+            return self.artifact_verifier(parsed)
         if name == "exec_shell_full_command" and not canonical_validated:
             contract_error = validate_shell_full_contract(parsed, user_prompt=self.user_prompt)
             if contract_error:

@@ -66,6 +66,7 @@ class CanonicalToolContractTests(unittest.TestCase):
         self.assertEqual(definitions["fetch_url"]["required"], ["url"])
         self.assertEqual(definitions["list_directory"]["required"], [])
         self.assertEqual(definitions["system_info"]["required"], [])
+        self.assertEqual(definitions["write_artifact"]["required"], ["path"])
         self.assertEqual(definitions["exec_shell_full_command"]["properties"]["timeout"]["maximum"], 15)
         self.assertEqual(definitions["fetch_url"]["properties"]["timeout"]["maximum"], 15)
         self.assertEqual(definitions["list_directory"]["properties"]["max_entries"]["maximum"], 1000)

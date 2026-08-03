@@ -135,7 +135,10 @@ class EvidenceStore:
         ephemeral_ids = [
             record.evidence_id
             for record in self.records.values()
-            if record.metadata.get("ephemeral") == "full_document_snapshot"
+            if record.metadata.get("ephemeral") in {
+                "full_document_snapshot",
+                "artifact_pending",
+            }
         ]
         for evidence_id in ephemeral_ids:
             self.discard(evidence_id)
@@ -430,6 +433,14 @@ def _optional_int(value: object) -> int | None:
 
 def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) -> str:
     command = str(metadata.get("command") or "")
+    if tool_name == "write_artifact" and content.lstrip().lower().startswith("error:"):
+        return "artifact_error"
+    if tool_name == "write_artifact" and "artifact_publication: complete" in content:
+        return "artifact"
+    if tool_name == "write_artifact" and "artifact_generation: complete" in content:
+        return "artifact_pending"
+    if tool_name == "verify_artifact":
+        return "artifact_verification"
     if (
         tool_name == "read_file"
         or "full_document_snapshot: true" in content
@@ -452,6 +463,8 @@ def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) ->
 
 
 def _status_for(kind: str, content: str, metadata: dict[str, object]) -> str:
+    if kind in {"artifact_error", "artifact_verification"} and content.lstrip().lower().startswith("error:"):
+        return "error"
     if kind == "web_search":
         if content.lstrip().lower().startswith("error:"):
             return "error"
@@ -473,6 +486,14 @@ def _enriched_metadata(kind: str, content: str, metadata: dict[str, object]) -> 
         enriched.update(_shell_metadata(content))
     if kind == "read":
         enriched.update(_document_metadata(content))
+    if kind in {"artifact", "artifact_pending"}:
+        enriched.update(_artifact_metadata(content))
+    if kind == "artifact_pending":
+        enriched["ephemeral"] = "artifact_pending"
+    if kind == "artifact_error":
+        enriched["artifact_error_detail"] = content.strip()
+    if kind == "artifact_verification":
+        enriched.update(_artifact_verification_metadata(content))
     if kind == "grep_search":
         enriched.update(_grep_metadata(content, metadata))
     enriched = _enrich_excerpts(content, enriched)
@@ -489,6 +510,35 @@ def _document_metadata(content: str) -> dict[str, object]:
     if isinstance(coverage, str) and coverage:
         metadata["document_coverage"] = coverage
     return metadata
+
+
+def _artifact_metadata(content: str) -> dict[str, object]:
+    return {
+        "artifact_path": _line_value(content, "path") or "",
+        "artifact_bytes": _line_value(content, "bytes") or "",
+        "artifact_sha256": _line_value(content, "sha256") or "",
+        "artifact_overwrite": _line_value(content, "overwrite") or "",
+        "created_parent_directories": _line_value(content, "created_parent_directories") or "",
+        "artifact_directory_sync": _line_value(content, "directory_sync") or "",
+        "verification_required": _line_value(content, "verification_required") or "",
+        "artifact_verification_completed": _line_value(content, "verification_completed") or "",
+    }
+
+
+def _artifact_verification_metadata(content: str) -> dict[str, object]:
+    return {
+        "artifact_path": _line_value(content, "path") or "",
+        "artifact_bytes": _line_value(content, "bytes") or "",
+        "artifact_sha256": _line_value(content, "sha256") or "",
+        "artifact_overwrite": _line_value(content, "overwrite") or "",
+        "created_parent_directories": _line_value(content, "created_parent_directories") or "",
+        "artifact_directory_sync": _line_value(content, "directory_sync") or "",
+        "artifact_verification_completed": _line_value(content, "verification_completed") or "",
+        "artifact_check": _line_value(content, "check") or "",
+        "artifact_verification_status": _line_value(content, "status") or "",
+        "artifact_verification_detail": _line_value(content, "detail") or "",
+        "artifact_content_coverage": _line_value(content, "content_coverage") or "",
+    }
 
 
 def _web_metadata(content: str, metadata: dict[str, object]) -> dict[str, object]:
@@ -597,6 +647,19 @@ def _card_metadata_lines(record: EvidenceRecord, *, compact: bool) -> list[str]:
         "files_count",
         "first_matches",
         "sidecar_status",
+        "artifact_path",
+        "artifact_bytes",
+        "artifact_sha256",
+        "artifact_overwrite",
+        "created_parent_directories",
+        "artifact_directory_sync",
+        "artifact_verification_completed",
+        "artifact_check",
+        "artifact_verification_status",
+        "artifact_verification_detail",
+        "artifact_content_coverage",
+        "verification_required",
+        "artifact_error_detail",
     )
     lines: list[str] = []
     for key in keys:
@@ -648,12 +711,46 @@ def _compact_final_prompt_card(record: EvidenceRecord) -> str:
 def _should_use_small_final_prompt_card(record: EvidenceRecord) -> bool:
     if record.raw_chars > COMPACT_FINAL_RAW_EXCERPT_CHARS:
         return False
-    return record.kind in {"shell", "grep_search", "unknown"}
+    return record.kind in {
+        "artifact",
+        "artifact_error",
+        "artifact_pending",
+        "artifact_verification",
+        "shell",
+        "grep_search",
+        "unknown",
+    }
 
 
 def _small_final_prompt_metadata_keys(record: EvidenceRecord) -> tuple[str, ...]:
     if record.kind == "grep_search":
         return ("query", "exit_code", "match_count", "files_count", "file_paths", "first_matches")
+    if record.kind in {"artifact", "artifact_pending"}:
+        return (
+            "artifact_path",
+            "artifact_bytes",
+            "artifact_sha256",
+            "artifact_overwrite",
+            "created_parent_directories",
+            "artifact_directory_sync",
+            "verification_required",
+        )
+    if record.kind == "artifact_verification":
+        return (
+            "artifact_path",
+            "artifact_bytes",
+            "artifact_sha256",
+            "artifact_overwrite",
+            "created_parent_directories",
+            "artifact_directory_sync",
+            "artifact_verification_completed",
+            "artifact_check",
+            "artifact_verification_status",
+            "artifact_verification_detail",
+            "artifact_content_coverage",
+        )
+    if record.kind == "artifact_error":
+        return ("artifact_error_detail",)
     return ("exit_code", "stdout_excerpt", "stderr_excerpt", "sidecar_status")
 
 
@@ -693,6 +790,32 @@ def _route_operational_card(record: EvidenceRecord) -> str:
         keys = ("query", "match_count", "files_count", "file_paths", "search_coverage", "semantic_coverage")
     elif record.kind == "web_search":
         keys = ("query", "result_count", "top_domains")
+    elif record.kind in {"artifact", "artifact_pending"}:
+        keys = (
+            "artifact_path",
+            "artifact_bytes",
+            "artifact_sha256",
+            "artifact_overwrite",
+            "created_parent_directories",
+            "artifact_directory_sync",
+            "verification_required",
+        )
+    elif record.kind == "artifact_error":
+        keys = ("artifact_error_detail",)
+    elif record.kind == "artifact_verification":
+        keys = (
+            "artifact_path",
+            "artifact_bytes",
+            "artifact_sha256",
+            "artifact_overwrite",
+            "created_parent_directories",
+            "artifact_directory_sync",
+            "artifact_verification_completed",
+            "artifact_check",
+            "artifact_verification_status",
+            "artifact_verification_detail",
+            "artifact_content_coverage",
+        )
     elif record.kind in {"shell", "unknown"}:
         keys = ("exit_code", "stdout_chars", "stderr_chars", "stdout_excerpt", "stderr_excerpt")
         if record.raw_chars <= POST_TOOL_ROUTE_SMALL_RAW_CHARS:

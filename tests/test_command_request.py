@@ -54,6 +54,7 @@ class RouteRequestTests(unittest.TestCase):
             '{"url":"https://example.com?a=1&b=2"}',
             '{"path":".","recursive":false,"max_depth":null}',
             '{"include_cpu":true,"include_memory":true}',
+            '{"tool":"write_artifact","arguments":{"path":"samples/game.js","overwrite":false,"create_parents":true}}',
         ):
             with self.subTest(content=content):
                 diagnostic = self._classify(content)
@@ -574,7 +575,10 @@ EOF"}""",
         self.assertIsNone(tool_call)
 
     def test_tool_names_for_decision_are_bounded(self) -> None:
-        self.assertEqual(tool_names_for_decision(ToolRoute.FILESYSTEM), ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        self.assertEqual(
+            tool_names_for_decision(ToolRoute.FILESYSTEM),
+            ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"),
+        )
         self.assertEqual(tool_names_for_decision(ToolRoute.FILE_EDIT), ())
         self.assertEqual(tool_names_for_decision(ToolRoute.WEB), ())
 
@@ -597,6 +601,60 @@ EOF"}""",
     def test_command_stream_state_detects_complete_chat_route_json(self) -> None:
         self.assertEqual(command_stream_state('{"route":"CHAT"}'), "route")
         self.assertEqual(command_stream_state('{"route"'), "pending")
+
+    def test_artifact_route_is_bounded_and_preserves_model_arguments(self) -> None:
+        content = '{"tool":"write_artifact","arguments":{"path":"samples/game.js","overwrite":false,"create_parents":true}}'
+        decision = parse_command_decision(content)
+        tool_call = command_tool_call_from_content(
+            content,
+            ("write_artifact", "verify_artifact"),
+        )
+
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(
+            decision_tool_names(decision),
+            ("write_artifact",),
+        )
+        self.assertEqual(tool_call["function"]["name"], "write_artifact")
+        self.assertEqual(
+            json.loads(tool_call["function"]["arguments"]),
+            {"path": "samples/game.js", "overwrite": False, "create_parents": True},
+        )
+        self.assertEqual(command_stream_state(content), "route")
+
+    def test_artifact_route_rejects_duplicate_json_keys(self) -> None:
+        content = (
+            '{"tool":"write_artifact","arguments":'
+            '{"path":"safe.txt","path":"other.txt","overwrite":false}}'
+        )
+
+        self.assertIsNone(parse_command_decision(content))
+        self.assertIsNone(command_tool_call_from_content(content, ("write_artifact",)))
+
+    def test_malformed_artifact_tool_call_is_never_substituted_with_shell(self) -> None:
+        call = {
+            "id": "artifact-malformed",
+            "type": "function",
+            "function": {
+                "name": "write_artifact",
+                "arguments": json.dumps(
+                    {
+                        "path": "samples/game.js",
+                        "command": "printf bypassed > samples/game.js",
+                    }
+                ),
+            },
+        }
+
+        decision = parse_command_decision_from_tool_calls([call])
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision_tool_names(decision), ("write_artifact",))
+        self.assertEqual(
+            command_tool_call_from_tool_calls([call], ("write_artifact",)),
+            call,
+        )
 
     def test_command_stream_filter_suppresses_command_json(self) -> None:
         emitted: list[str] = []

@@ -650,7 +650,14 @@ class ChatRuntime:
         tools = decision_tool_names(decision, prompt)
         if allowed_tool_names is not None:
             allowed = set(allowed_tool_names)
-            tools = tuple(tool for tool in tools if tool in allowed)
+            artifact_workflow = "write_artifact" in tools and "write_artifact" in allowed
+            tools = tuple(
+                tool
+                for tool in tools
+                if tool in allowed
+            )
+            if artifact_workflow:
+                tools = (*tools, "verify_artifact")
             if (
                 not tools
                 and decision.route in {ToolRoute.FILESYSTEM, ToolRoute.FILE_EDIT, ToolRoute.WEB}
@@ -1099,7 +1106,14 @@ class ChatRuntime:
         record = next(iter(self.evidence_store.recent_records(1)), None)
         if record is None:
             return False
-        if record.kind in {"web_search", "fetch"}:
+        if record.kind in {
+            "web_search",
+            "fetch",
+            "artifact",
+            "artifact_pending",
+            "artifact_verification",
+            "artifact_error",
+        }:
             return False
         return record.raw_chars >= FINAL_FROM_TOOL_COMPACT_MIN_RAW_CHARS
 

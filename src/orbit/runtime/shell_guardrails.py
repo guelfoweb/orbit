@@ -482,6 +482,8 @@ def validate_tool_no_mutation_policy(
 ) -> str | None:
     if name == "exec_shell_full_command":
         return validate_read_only_shell_mutation(arguments, user_prompt=user_prompt)
+    if name == "write_artifact" and classify_explicit_no_mutation_constraint(user_prompt) != _NO_MUTATION_NONE:
+        return read_only_mutation_policy_error(user_prompt, action="artifact creation")
     return None
 
 

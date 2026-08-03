@@ -136,5 +136,25 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn("final_prefix_experiment", baseline)
         self.assertTrue(experimental["final_prefix_experiment"])
 
+    def test_artifact_content_flag_is_explicit_and_does_not_add_tools(self) -> None:
+        baseline = build_chat_payload(
+            ChatPayloadOptions(model="m", messages=[{"role": "user", "content": "hello"}], temperature=0, max_tokens=32)
+        )
+        artifact = build_chat_payload(
+            ChatPayloadOptions(
+                model="m",
+                messages=[{"role": "user", "content": "file content only"}],
+                temperature=0,
+                max_tokens=2048,
+                thinking=False,
+                artifact_content=True,
+            )
+        )
+
+        self.assertNotIn("artifact_content", baseline)
+        self.assertTrue(artifact["artifact_content"])
+        self.assertNotIn("tools", artifact)
+        self.assertNotIn("tool_choice", artifact)
+
 if __name__ == "__main__":
     unittest.main()

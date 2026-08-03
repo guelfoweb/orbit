@@ -129,9 +129,16 @@ class FullDocumentTests(unittest.TestCase):
 
         self.assertEqual(
             names,
-            ["exec_shell_full_command", "fetch_url", "list_directory", "system_info"],
+            [
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+                "write_artifact",
+            ],
         )
         self.assertEqual(tool_definitions(("read_file",)), [])
+        self.assertNotIn("verify_artifact", names)
 
     def test_corrupted_snapshot_fails_closed(self) -> None:
         workdir, _ = self._snapshot("alpha")

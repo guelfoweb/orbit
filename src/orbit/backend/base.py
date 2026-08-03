@@ -68,3 +68,14 @@ class ChatBackend(Protocol):
         on_progress: Callable[[StreamProgress], None] | None = None,
     ) -> ChatResult:
         ...
+
+    def artifact_content_stream(
+        self,
+        messages: list[Message],
+        *,
+        temperature: float,
+        max_tokens: int,
+        on_delta: Callable[[str], None],
+        on_progress: Callable[[StreamProgress], None] | None = None,
+    ) -> ChatResult:
+        ...

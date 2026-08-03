@@ -9,7 +9,12 @@ from urllib.request import Request, urlopen
 
 from .base import ChatResult, Message, ModelInfo, StreamProgress, TokenCount
 from .model_names import resolve_model_display_name
-from .payloads import ChatPayloadOptions, build_chat_payload
+from .payloads import (
+    ARTIFACT_CONTENT_PROTOCOL_ID,
+    ARTIFACT_CONTENT_PROTOCOL_VERSION,
+    ChatPayloadOptions,
+    build_chat_payload,
+)
 from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
@@ -113,6 +118,47 @@ class LlamaServerBackend:
             )
         return self._observe_call(
             lambda: self._post_stream("/v1/chat/completions", payload, on_delta=on_delta)
+        )
+
+    def artifact_content_stream(
+        self,
+        messages: list[Message],
+        *,
+        temperature: float,
+        max_tokens: int,
+        on_delta: Callable[[str], None],
+        on_progress: Callable[[StreamProgress], None] | None = None,
+    ) -> ChatResult:
+        if not self._is_orbit_native_backend():
+            raise LlamaServerError("artifact content generation requires the native Orbit backend")
+        protocol = self._props_or_empty().get("artifact_content_protocol")
+        if not (
+            isinstance(protocol, dict)
+            and protocol.get("id") == ARTIFACT_CONTENT_PROTOCOL_ID
+            and protocol.get("version") == ARTIFACT_CONTENT_PROTOCOL_VERSION
+            and protocol.get("literal_stream") is True
+        ):
+            raise LlamaServerError("native Orbit backend does not support the verified artifact content protocol")
+        payload = build_chat_payload(
+            ChatPayloadOptions(
+                model=self.request_model_name(),
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                thinking=False,
+                stream=True,
+                artifact_content=True,
+            )
+        )
+        _attach_native_kv_diag_payload(payload, native_backend=True)
+        return self._observe_call(
+            lambda: self._post_native_stream(
+                "/chat/stream",
+                payload,
+                on_delta=on_delta,
+                on_progress=on_progress,
+                literal_content=True,
+            )
         )
 
     def continue_current(
@@ -322,6 +368,7 @@ class LlamaServerBackend:
         *,
         on_delta: Callable[[str], None],
         on_progress: Callable[[StreamProgress], None] | None,
+        literal_content: bool = False,
     ) -> ChatResult:
         body = json.dumps(payload).encode("utf-8")
         request = Request(
@@ -332,7 +379,12 @@ class LlamaServerBackend:
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                return _parse_native_stream(response, on_delta=on_delta, on_progress=on_progress)
+                return _parse_native_stream(
+                    response,
+                    on_delta=on_delta,
+                    on_progress=on_progress,
+                    literal_content=literal_content,
+                )
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise LlamaServerError(f"backend server HTTP {exc.code}: {detail}") from exc
@@ -476,10 +528,11 @@ def _parse_native_stream(
     *,
     on_delta: Callable[[str], None],
     on_progress: Callable[[StreamProgress], None] | None,
+    literal_content: bool = False,
 ) -> ChatResult:
     content_parts: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
-    content_filter = _ContentStreamFilter(on_delta)
+    content_filter = None if literal_content else _ContentStreamFilter(on_delta)
     model: str | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] = {}
@@ -511,7 +564,10 @@ def _parse_native_stream(
             text = data.get("text")
             if isinstance(text, str) and text:
                 content_parts.append(text)
-                content_filter.write(text)
+                if content_filter is None:
+                    on_delta(text)
+                else:
+                    content_filter.write(text)
         elif current_event == "reasoning":
             text = data.get("text")
             if isinstance(text, str) and text:
@@ -556,13 +612,15 @@ def _parse_native_stream(
 
     if not stream_done:
         flush_event()
-    content_filter.finish()
+    if content_filter is not None:
+        content_filter.finish()
     content = "".join(content_parts)
     tool_calls = [tool_calls_by_index[index] for index in sorted(tool_calls_by_index)]
-    parsed_raw_tool_calls = _parse_raw_tool_call_content(content)
-    if not tool_calls and parsed_raw_tool_calls:
-        tool_calls = parsed_raw_tool_calls
-        content = ""
+    if not literal_content:
+        parsed_raw_tool_calls = _parse_raw_tool_call_content(content)
+        if not tool_calls and parsed_raw_tool_calls:
+            tool_calls = parsed_raw_tool_calls
+            content = ""
     details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
     return ChatResult(
         content=content,
