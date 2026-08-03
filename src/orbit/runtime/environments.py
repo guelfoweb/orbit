@@ -1340,6 +1340,8 @@ class FinalFromToolEnvironment:
         record = next(iter(store.recent_records(1)), None)
         if record is None:
             return None, None
+        if record.tool_name == "list_directory":
+            return "directory_listing", record.raw_chars
         if record.tool_name == "system_info":
             return "system_info", record.raw_chars
         if record.kind in {"shell", "unknown"} and record.status == "error":
