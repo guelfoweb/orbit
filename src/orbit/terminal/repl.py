@@ -4,6 +4,7 @@ import sys
 import time
 from dataclasses import dataclass, field, replace
 
+from orbit.backend.base import ChatResult
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
@@ -18,13 +19,21 @@ from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TO
 from orbit.terminal.repl_input import clear_input_echo, read_prompt_input, replace_input_echo
 from orbit.terminal.runtime_status import collect_runtime_status, format_startup_banner
 from orbit.terminal.session_preview import format_recent_session_messages, has_existing_session_context
-from orbit.terminal.status import estimate_context_status_tokens, format_memory_refresh, format_turn_status
+from orbit.terminal.status import (
+    TokenUsageAccumulator,
+    TurnTokenUsage,
+    estimate_context_status_tokens,
+    format_memory_refresh,
+    format_session_token_usage,
+    format_turn_status,
+    summarize_turn_token_usage,
+)
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
 from orbit.terminal.theme import dim
 from orbit.runtime.thinking_mode import ThinkingMode
-from orbit.runtime.turn_trace import ModelPhaseStart
+from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
 @dataclass
@@ -38,11 +47,22 @@ class Repl:
     can_continue: bool = False
     tools_mode: ToolSpec | None = None
     queued_prompts: list[str] = field(default_factory=list)
+    turn_model_steps: list[ModelStepMetrics] = field(default_factory=list, repr=False)
+    turn_backend_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
+    session_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
+    backend_usage_observer_installed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tools_mode is None:
             self.tools_mode = self.config.tools
         self.backend.thinking = self.config.think
+        set_result_observer = getattr(self.backend, "set_result_observer", None)
+        if callable(set_result_observer):
+            set_result_observer(self._record_backend_result)
+            self.backend_usage_observer_installed = True
+        set_failure_observer = getattr(self.backend, "set_failure_observer", None)
+        if callable(set_failure_observer):
+            set_failure_observer(self._record_backend_failure)
 
     def run(self) -> int:
         if self.history:
@@ -58,21 +78,16 @@ class Repl:
             try:
                 prompt = self._read_next_prompt().strip()
             except EOFError:
-                self._save_history()
-                print()
-                return 0
+                return self._finish_interactive_session(0, leading_newline=True)
             except KeyboardInterrupt:
-                self._save_history()
-                print()
-                return 130
+                return self._finish_interactive_session(130, leading_newline=True)
             if not prompt:
                 continue
             if prompt.startswith("/"):
                 clear_input_echo(prompt)
                 if self._handle_command(prompt):
                     continue
-                self._save_history()
-                return 0
+                return self._finish_interactive_session(0)
             if self.history:
                 resolution = self.history.resolve_prompt(prompt)
                 if resolution.missing_full_text:
@@ -95,6 +110,8 @@ class Repl:
         return read_prompt_input()
 
     def _ask(self, prompt: str) -> None:
+        self.turn_model_steps.clear()
+        self.turn_backend_token_usage = TokenUsageAccumulator()
         tools_enabled = tools_are_enabled(self.tools_mode or "off")
         system_prompt = ROUTE_SYSTEM_PROMPT if tools_enabled else CHAT_SYSTEM_PROMPT
         prefill_tokens = estimate_prefill_tokens(self.runtime.messages, prompt, system_prompt=system_prompt)
@@ -169,6 +186,7 @@ class Repl:
                     elapsed_seconds=elapsed_seconds,
                     estimated_context_tokens=estimate_context_status_tokens(self.runtime.messages),
                     context_tokens=self.runtime.context_tokens,
+                    turn_token_usage=self._turn_token_usage(),
                 )
             ),
             flush=True,
@@ -182,12 +200,28 @@ class Repl:
             print(dim("/continue       continue the answer"), flush=True)
             print(dim("/max-tokens N   increase output budget"), flush=True)
 
-    def _record_model_step(self, metrics) -> None:
+    def _record_model_step(self, metrics: ModelStepMetrics) -> None:
+        self.turn_model_steps.append(metrics)
+        if not self.backend_usage_observer_installed:
+            self.session_token_usage.add(metrics)
         self.prefill_estimator.update(
             prompt_tokens=metrics.prompt_tokens,
             prompt_tokens_per_second=metrics.prompt_tokens_per_second,
             profile=prefill_profile_for_phase(metrics.phase),
         )
+
+    def _record_backend_result(self, result: ChatResult) -> None:
+        self.turn_backend_token_usage.add_result(result)
+        self.session_token_usage.add_result(result)
+
+    def _record_backend_failure(self) -> None:
+        self.turn_backend_token_usage.add_failed_call()
+        self.session_token_usage.add_failed_call()
+
+    def _turn_token_usage(self) -> TurnTokenUsage | None:
+        if self.backend_usage_observer_installed:
+            return self.turn_backend_token_usage.snapshot()
+        return summarize_turn_token_usage(self.turn_model_steps)
 
     def _record_phase_start(self, renderer: StreamRenderer, phase: ModelPhaseStart) -> None:
         renderer.set_phase_label(_phase_progress_label(phase))
@@ -211,6 +245,7 @@ class Repl:
             return True
         if command == "/reset":
             print(reset_session(self.runtime, self.session))
+            self._reset_token_usage()
             self.can_continue = False
             return True
         if command == "/compact":
@@ -237,6 +272,7 @@ class Repl:
             return True
         if command == "/status":
             print(runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode))
+            print(format_session_token_usage(self.session_token_usage.snapshot()))
             return True
         if command in {"/status ctx", "/status context"}:
             print(context_status_text(self.runtime.messages, context_tokens=self.runtime.context_tokens))
@@ -252,9 +288,15 @@ class Repl:
             return "sessions clear cancelled"
         removed = SessionStore.clear_for_workdir(self.config.workdir)
         self.runtime.reset()
+        self._reset_token_usage()
         self.can_continue = False
         self.session = SessionStore.new_for_workdir(self.config.workdir)
         return f"sessions cleared: {removed}"
+
+    def _reset_token_usage(self) -> None:
+        self.turn_model_steps.clear()
+        self.turn_backend_token_usage = TokenUsageAccumulator()
+        self.session_token_usage = TokenUsageAccumulator()
 
     def _handle_tools_command(self, command: str) -> str:
         value = command.removeprefix("/tools").strip().lower()
@@ -305,7 +347,16 @@ class Repl:
         if self.history:
             self.history.save()
 
+    def _finish_interactive_session(self, code: int, *, leading_newline: bool = False) -> int:
+        self._save_history()
+        if leading_newline:
+            print()
+        print(dim(format_session_token_usage(self.session_token_usage.snapshot())), flush=True)
+        return code
+
     def _ask_continue(self) -> None:
+        self.turn_model_steps.clear()
+        self.turn_backend_token_usage = TokenUsageAccumulator()
         prefill_tokens = estimate_prefill_tokens(self.runtime.messages, "")
         prefill_seconds = self.prefill_estimator.estimate_seconds(prefill_tokens)
         renderer = StreamRenderer(
