@@ -87,9 +87,9 @@ def _final_from_tool_tokens(requested: int | None, evidence_kind: str, evidence_
         return _floor_and_cap(requested, FINAL_SHELL_ERROR_MAX_TOKENS, FINAL_SHELL_ERROR_MAX_TOKENS)
     if evidence_kind == "system_info":
         return _floor_and_cap(requested, FINAL_SYSTEM_INFO_MAX_TOKENS, FINAL_SYSTEM_INFO_MAX_TOKENS)
-    if evidence_kind in {"shell", "unknown", "grep_search"} and evidence_chars is not None and evidence_chars <= 500:
+    if evidence_kind in {"shell", "unknown", "grep_search", "directory_listing"} and evidence_chars is not None and evidence_chars <= 500:
         return _floor_and_cap(requested, FINAL_SMALL_MAX_TOKENS, FINAL_SMALL_MAX_TOKENS)
-    if evidence_kind in {"shell", "unknown", "grep_search"}:
+    if evidence_kind in {"shell", "unknown", "grep_search", "directory_listing"}:
         return _floor_and_cap(requested, FINAL_MEDIUM_MAX_TOKENS, FINAL_MEDIUM_MAX_TOKENS)
     return _floor_and_cap(requested, FINAL_MEDIUM_MAX_TOKENS, DEFAULT_MAX_TOKENS)
 

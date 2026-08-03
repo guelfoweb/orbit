@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from orbit.backend import ChatResult
 from orbit.backend.base import Message
 from orbit.runtime.completion_budget import resolve_max_tokens
+from orbit.runtime.shell_guardrails import is_mutating_shell_command
 
 
 FINAL_FROM_TOOL_MIN_TOKENS = 256
@@ -99,8 +100,10 @@ def build_final_tool_policy(
     web_fetch_result = has_html_cleaned_tool_result(call_messages)
     web_search_result = has_web_search_tool_result(call_messages)
     pdf_text_result = has_pdf_text_tool_result(call_messages)
-    list_like_result = has_list_like_tool_result(call_messages) and is_compact_list_request(prompt)
+    directory_listing_result = evidence_kind == "directory_listing" or has_list_like_tool_result(call_messages)
+    list_like_result = directory_listing_result and is_compact_list_request(prompt)
     shell_full_result = has_tool_result(call_messages, "exec_shell_full_command")
+    verified_mutation_result = has_verified_mutation_evidence(call_messages)
     system_info_result = has_tool_result(call_messages, "system_info")
     operational_status_result = shell_full_result and is_operational_status_request(prompt)
     brief_request = is_brief_final_request(prompt)
@@ -112,6 +115,12 @@ def build_final_tool_policy(
         and _has_long_shell_tool_result(messages)
         and is_shell_review_request(prompt)
         and not (large_file_excerpt or web_fetch_result or pdf_text_result or list_like_result or operational_status_result)
+    )
+    mutation_instruction = (
+        "The mutation command completed successfully and the later read-only output verified the result. "
+        "State both the completed change and what the verification confirmed. "
+        if verified_mutation_result
+        else ""
     )
     if large_file_excerpt:
         call_messages = [
@@ -152,7 +161,8 @@ def build_final_tool_policy(
             {
                 "role": "user",
                 "content": (
-                    "Answer the latest operational/status question directly. "
+                    mutation_instruction
+                    + "Answer the latest operational/status question directly. "
                     "Use only the most recent relevant shell output. "
                     "Ignore older tool results or content analysis unless explicitly requested. "
                     "Do not summarize file or page content. "
@@ -185,13 +195,26 @@ def build_final_tool_policy(
             *call_messages,
             {"role": "user", "content": "Return only the listed names, compactly. No categories or explanations."},
         ]
+    elif directory_listing_result:
+        call_messages = [
+            *call_messages,
+            {
+                "role": "user",
+                "content": (
+                    "Return every listed path exactly once, one per line. "
+                    "Preserve directory markers. Omit sizes and other metadata unless requested. "
+                    "No introduction or conclusion. Stop after the final path."
+                ),
+            },
+        ]
     elif shell_full_result:
         call_messages = [
             *call_messages,
             {
                 "role": "user",
                 "content": (
-                    (
+                    mutation_instruction
+                    + (
                         (
                             "Use only the latest relevant shell-full output. "
                             "Answer in at most two short sentences. "
@@ -317,29 +340,36 @@ def prepare_final_tool_messages(messages: list[Message]) -> list[Message]:
 
 
 def _prune_to_latest_successful_tool_evidence(messages: list[Message]) -> list[Message]:
-    tool_message, _command = last_successful_shell_result_and_command(messages)
-    if tool_message is None:
+    selected = _selected_successful_shell_evidence(messages)
+    if not selected:
         return [dict(message) for message in messages]
-    selected_tool_call_id = tool_message.get("tool_call_id")
-    selected_tool_identity = id(tool_message)
+    selected_tool_call_ids = {
+        tool_message.get("tool_call_id")
+        for tool_message, _command in selected
+        if isinstance(tool_message.get("tool_call_id"), str)
+    }
+    selected_tool_identities = {id(tool_message) for tool_message, _command in selected}
     pruned: list[Message] = []
     for message in messages:
         role = message.get("role")
         if role == "tool" and message.get("name") == "exec_shell_full_command":
-            keep_tool = False
-            if isinstance(selected_tool_call_id, str):
-                keep_tool = message.get("tool_call_id") == selected_tool_call_id
-            else:
-                keep_tool = id(message) == selected_tool_identity
+            tool_call_id = message.get("tool_call_id")
+            keep_tool = (
+                tool_call_id in selected_tool_call_ids
+                if isinstance(tool_call_id, str)
+                else id(message) in selected_tool_identities
+            )
             if not keep_tool:
                 continue
             pruned.append(dict(message))
             continue
         if role == "assistant" and isinstance(message.get("tool_calls"), list):
             filtered_calls = list(message["tool_calls"])
-            if isinstance(selected_tool_call_id, str):
+            if selected_tool_call_ids:
                 filtered_calls = [
-                    tool_call for tool_call in filtered_calls if isinstance(tool_call, dict) and tool_call.get("id") == selected_tool_call_id
+                    tool_call
+                    for tool_call in filtered_calls
+                    if isinstance(tool_call, dict) and tool_call.get("id") in selected_tool_call_ids
                 ]
             if not filtered_calls and not str(message.get("content") or "").strip():
                 continue
@@ -352,6 +382,49 @@ def _prune_to_latest_successful_tool_evidence(messages: list[Message]) -> list[M
             continue
         pruned.append(dict(message))
     return pruned
+
+
+def _selected_successful_shell_evidence(messages: list[Message]) -> list[tuple[Message, str | None]]:
+    latest_user_index = max(
+        (index for index, message in enumerate(messages) if message.get("role") == "user"),
+        default=-1,
+    )
+    latest: tuple[int, Message, str | None] | None = None
+    mutation: tuple[int, Message, str | None] | None = None
+    for index in range(len(messages) - 1, latest_user_index, -1):
+        message = messages[index]
+        if message.get("role") != "tool" or message.get("name") != "exec_shell_full_command":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or _is_error_tool_content(content):
+            continue
+        command = _shell_command_for_tool_call_id(messages[:index], message.get("tool_call_id"))
+        if latest is None:
+            latest = (index, message, command)
+        if command and is_mutating_shell_command(command):
+            mutation = (index, message, command)
+            break
+    selected = [item for item in (mutation, latest) if item is not None]
+    if not selected:
+        tool_message, command = last_successful_shell_result_and_command(messages)
+        if tool_message is not None:
+            selected.append((-1, tool_message, command))
+    deduplicated = {id(message): (index, message, command) for index, message, command in selected}
+    return [(message, command) for index, message, command in sorted(deduplicated.values())]
+
+
+def has_verified_mutation_evidence(messages: list[Message]) -> bool:
+    selected = _selected_successful_shell_evidence(messages)
+    if len(selected) != 2:
+        return False
+    mutation_command = selected[0][1]
+    verification_command = selected[1][1]
+    return bool(
+        mutation_command
+        and is_mutating_shell_command(mutation_command)
+        and verification_command
+        and not is_mutating_shell_command(verification_command)
+    )
 
 
 def _compact_latest_tool_evidence(messages: list[Message], *, prompt: str | None) -> list[Message]:
@@ -708,10 +781,19 @@ def has_tool_result(messages: list[Message], name: str) -> bool:
 
 
 def has_list_like_tool_result(messages: list[Message]) -> bool:
-    tool_message, command = last_successful_shell_result_and_command(messages)
-    if tool_message is None:
-        return False
-    return is_list_shell_command(command)
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or _is_error_tool_content(content):
+            return False
+        if message.get("name") == "list_directory":
+            return True
+        if message.get("name") != "exec_shell_full_command":
+            return False
+        return is_list_shell_command(
+            _shell_command_for_tool_call_id(messages, message.get("tool_call_id"))
+        )
     return False
 
 

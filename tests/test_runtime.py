@@ -1263,6 +1263,39 @@ class RuntimeTests(unittest.TestCase):
         rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
         self.assertIn("evidence_context:", rendered)
 
+    def test_final_from_tool_compact_directory_evidence_keeps_listing_identity(self) -> None:
+        raw = "directory_listing: path=. recursive=true\n[dir] samples/\n[file] README.md (20 B)"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            record = store.add("list_directory", raw, metadata={"path": ".", "recursive": True})
+            backend = FakeBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt=None, evidence_store=store)
+            runtime.messages = [
+                {"role": "user", "content": "List all files and directories in this workdir, including subdirectories."},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-list",
+                    "name": "list_directory",
+                    "content": tool_evidence_ref(record),
+                    "evidence_id": record.evidence_id,
+                },
+            ]
+
+            runtime._answer_from_tool_results(
+                temperature=0,
+                max_tokens=512,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                loop=1,
+                use_tool_prompt=False,
+            )
+
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages)
+        self.assertIn("evidence_context:", rendered)
+        self.assertIn("Return every listed path exactly once", rendered)
+        self.assertIn("Stop after the final path", rendered)
+
     def test_final_from_tool_small_evidence_excludes_web_and_medium(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             web_store = EvidenceStore(Path(tmp) / "web.evidence")

@@ -234,6 +234,73 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertTrue(has_list_like_tool_result(messages))
         self.assertFalse(is_compact_list_request(messages[0]["content"]))
         self.assertNotIn("Return only the listed names", policy.messages[-1]["content"])
+        self.assertIn("Return every listed path exactly once", policy.messages[-1]["content"])
+        self.assertEqual(policy.max_tokens, 192)
+
+    def test_structured_directory_listing_uses_bounded_path_instruction(self) -> None:
+        messages = [
+            {"role": "user", "content": "List all files and directories in this workdir, including subdirectories."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-list",
+                        "function": {
+                            "name": "list_directory",
+                            "arguments": {"path": ".", "recursive": True},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-list",
+                "name": "list_directory",
+                "content": "[dir] samples/\n[file] samples/demo.py (20 B)\n[file] README.md (30 B)",
+            },
+        ]
+
+        policy = build_final_tool_policy(
+            messages,
+            max_tokens=512,
+            streamed=False,
+            evidence_kind="unknown",
+            evidence_chars=75,
+        )
+
+        self.assertTrue(has_list_like_tool_result(messages))
+        self.assertEqual(policy.max_tokens, 96)
+        self.assertIn("Return every listed path exactly once", policy.messages[-1]["content"])
+        self.assertIn("Stop after the final path", policy.messages[-1]["content"])
+
+    def test_prior_directory_listing_does_not_override_later_tool_error(self) -> None:
+        messages = [
+            {"role": "user", "content": "List files, then run the requested check."},
+            {
+                "role": "tool",
+                "tool_call_id": "call-list",
+                "name": "list_directory",
+                "content": "[file] README.md (30 B)",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-check",
+                "name": "exec_shell_full_command",
+                "content": "shell_command_failed: true\nexit_code: 127",
+            },
+        ]
+
+        policy = build_final_tool_policy(
+            messages,
+            max_tokens=512,
+            streamed=False,
+            evidence_kind="shell_error",
+            evidence_chars=48,
+        )
+
+        self.assertFalse(has_list_like_tool_result(messages))
+        self.assertNotIn("Return every listed path exactly once", policy.messages[-1]["content"])
 
     def test_shell_full_policy_answers_latest_request_directly(self) -> None:
         messages = [
@@ -408,6 +475,103 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertEqual(sum(1 for message in prepared if message.get("role") == "tool"), 1)
         self.assertIn("Useful text", str(prepared[-1].get("content")))
         self.assertNotIn("command not found", json.dumps(prepared, ensure_ascii=False))
+
+    def test_prepare_final_tool_messages_keeps_current_mutation_and_verification(self) -> None:
+        messages = [
+            {"role": "user", "content": "Replace beta with BETA in edit-target.txt and tell me what changed."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-mutate",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "sed -i 's/beta/BETA/' edit-target.txt"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-mutate",
+                "name": "exec_shell_full_command",
+                "content": "",
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-verify",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "grep BETA edit-target.txt"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-verify",
+                "name": "exec_shell_full_command",
+                "content": "BETA",
+            },
+        ]
+
+        prepared = prepare_final_tool_messages(messages)
+        serialized = json.dumps(prepared, ensure_ascii=False)
+
+        self.assertEqual(sum(1 for message in prepared if message.get("role") == "tool"), 2)
+        self.assertIn("sed -i", serialized)
+        self.assertIn("grep BETA", serialized)
+        self.assertIn('"content": "BETA"', serialized)
+
+        policy = build_final_tool_policy(messages, max_tokens=512, streamed=False)
+        self.assertIn("State both the completed change", policy.messages[-1]["content"])
+        self.assertIn("what the verification confirmed", policy.messages[-1]["content"])
+
+    def test_prepare_final_tool_messages_does_not_keep_prior_turn_mutation(self) -> None:
+        messages = [
+            {"role": "user", "content": "Create old.txt."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-old",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "printf old > old.txt"},
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-old", "name": "exec_shell_full_command", "content": ""},
+            {"role": "assistant", "content": "Created old.txt."},
+            {"role": "user", "content": "Read current.txt."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-read",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": {"command": "cat current.txt"},
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-read", "name": "exec_shell_full_command", "content": "current"},
+        ]
+
+        prepared = prepare_final_tool_messages(messages)
+        serialized = json.dumps(prepared, ensure_ascii=False)
+
+        self.assertNotIn("call-old", serialized)
+        self.assertNotIn("printf old", serialized)
+        self.assertIn("call-read", serialized)
 
     def test_prepare_final_tool_messages_compacts_large_pdf_tool_content(self) -> None:
         messages = [
