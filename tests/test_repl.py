@@ -353,6 +353,10 @@ class ReplTests(unittest.TestCase):
             format_tool_call_event("fetch_url", json.dumps({"url": "https://example.com"})),
             "Fetch: https://example.com",
         )
+        self.assertEqual(
+            format_tool_call_event("verify_artifact", json.dumps({"check": "text_integrity"})),
+            "Verify: published artifact (text_integrity)",
+        )
 
     def test_tool_result_event_previews_pdf_and_list_output(self) -> None:
         pdf_content = "\n".join(
@@ -722,7 +726,16 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(runtime.ask_auto_calls, 1)
         self.assertEqual(runtime.ask_chat_calls, 0)
         self.assertIsNotNone(runtime.last_allowed_tool_names)
-        self.assertEqual(runtime.last_allowed_tool_names, ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        self.assertEqual(
+            runtime.last_allowed_tool_names,
+            (
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+                "write_artifact",
+            ),
+        )
 
     def test_repl_reads_queued_prompt_before_new_input(self) -> None:
         runtime = CountingRuntime()

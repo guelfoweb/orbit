@@ -25,7 +25,12 @@ from orbit.backend.llama_server import (
     _qwen_route_prefix_anchor_requested,
 )
 from orbit.backend.base import ChatResult
-from orbit.backend.payloads import ChatPayloadOptions, build_chat_payload
+from orbit.backend.payloads import (
+    ARTIFACT_CONTENT_PROTOCOL_ID,
+    ARTIFACT_CONTENT_PROTOCOL_VERSION,
+    ChatPayloadOptions,
+    build_chat_payload,
+)
 from orbit.backend import model_names
 from orbit.runtime.kv_diag import model_call_context
 from urllib.error import URLError
@@ -55,6 +60,74 @@ class FakeNativeStreamWithTrailingNoise:
 
 
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_artifact_content_stream_is_native_content_only(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", model="fake", timeout=1)
+                self.payload = None
+
+            def _props_or_empty(self) -> dict[str, object]:
+                return {
+                    "backend": "orbit-native",
+                    "artifact_content_protocol": {
+                        "id": ARTIFACT_CONTENT_PROTOCOL_ID,
+                        "version": ARTIFACT_CONTENT_PROTOCOL_VERSION,
+                        "literal_stream": True,
+                    },
+                }
+
+            def _post_native_stream(
+                self,
+                path,
+                payload,
+                *,
+                on_delta,
+                on_progress,
+                literal_content=False,
+            ):
+                del on_delta, on_progress
+                self.assert_path = path
+                self.payload = payload
+                self.literal_content = literal_content
+                return ChatResult("content", "fake", "stop", [], 1, 1, 0, None, None)
+
+        backend = Backend()
+        result = backend.artifact_content_stream(
+            [{"role": "user", "content": "content only"}],
+            temperature=0,
+            max_tokens=2048,
+            on_delta=lambda _text: None,
+        )
+
+        self.assertEqual(result.content, "content")
+        self.assertEqual(backend.assert_path, "/chat/stream")
+        self.assertTrue(backend.payload["artifact_content"])
+        self.assertFalse(backend.payload["thinking"])
+        self.assertNotIn("tools", backend.payload)
+        self.assertTrue(backend.literal_content)
+
+    def test_artifact_content_stream_rejects_external_backend(self) -> None:
+        backend = LlamaServerBackend(base_url="http://localhost", model="fake", timeout=1)
+        with mock.patch.object(backend, "_is_orbit_native_backend", return_value=False):
+            with self.assertRaisesRegex(LlamaServerError, "native Orbit backend"):
+                backend.artifact_content_stream(
+                    [{"role": "user", "content": "content only"}],
+                    temperature=0,
+                    max_tokens=32,
+                    on_delta=lambda _text: None,
+                )
+
+    def test_artifact_content_stream_rejects_native_backend_without_verified_protocol(self) -> None:
+        backend = LlamaServerBackend(base_url="http://localhost", model="fake", timeout=1)
+        with mock.patch.object(backend, "_props_or_empty", return_value={"backend": "orbit-native"}):
+            with self.assertRaisesRegex(LlamaServerError, "verified artifact content protocol"):
+                backend.artifact_content_stream(
+                    [{"role": "user", "content": "content only"}],
+                    temperature=0,
+                    max_tokens=32,
+                    on_delta=lambda _text: None,
+                )
+
     def test_native_token_count_uses_non_generating_endpoint(self) -> None:
         class Backend(LlamaServerBackend):
             def __init__(self) -> None:
@@ -1083,6 +1156,31 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(result.finish_reason, "tool_calls")
         self.assertEqual(result.tool_calls[0]["function"]["name"], "exec_shell_full_command")
         self.assertEqual(result.tool_calls[0]["function"]["arguments"], '{"command": "cat note.txt"}')
+
+    def test_parse_native_stream_literal_mode_preserves_raw_tool_markers(self) -> None:
+        emitted: list[str] = []
+        literal = '<|tool_call>call:exec_shell_full_command{command:<|"|>inert<|"|>}<tool_call|>'
+
+        result = _parse_native_stream(
+            FakeStream(
+                [
+                    'event: delta\n',
+                    f'data: {json.dumps({"text": literal})}\n',
+                    '\n',
+                    'event: done\n',
+                    'data: {"finish_reason":"stop"}\n',
+                    '\n',
+                ]
+            ),
+            on_delta=emitted.append,
+            on_progress=None,
+            literal_content=True,
+        )
+
+        self.assertEqual(emitted, [literal])
+        self.assertEqual(result.content, literal)
+        self.assertEqual(result.tool_calls, [])
+        self.assertEqual(result.finish_reason, "stop")
 
     def test_parse_native_stream_keeps_qwen_reasoning_and_tool_calls_out_of_content(self) -> None:
         emitted: list[str] = []

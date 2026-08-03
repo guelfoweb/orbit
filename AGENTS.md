@@ -355,7 +355,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   reasoning never reaches route or canonical tool parsers.
 - Qwen route-prefix reuse is default-on only for the exact verified profile.
   It captures the complete hybrid sequence state at a 768-token batch-aligned
-  boundary within the 810-token invariant route prefix. The checkpoint is
+  boundary within the revision-bound invariant route prefix. The checkpoint is
   81,608,684 bytes and is model, quantization, context, template, tokenizer,
   schema, backend-build, and process bound.
 - Cold, explicitly segmented, captured, and restored probes produced
@@ -370,6 +370,50 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   checkpoints, MTP/mmproj, and tool behavior remain separate and unchanged.
 - See `docs/QWEN_3_6_COMPATIBILITY.md` for the exact identity, protocol,
   diagnostics, validation evidence, and current limits.
+
+## Atomic Text Artifact Generation
+
+- Non-trivial UTF-8 files use one model-selected `write_artifact` request with
+  path, overwrite, and parent-creation arguments. File content is generated in
+  one dedicated native phase without tools, shell, JSON, XML, or heredoc
+  framing. The runtime never invents or repairs task content.
+- Complete content is published only after `finish_reason=stop`, UTF-8 and
+  64-KiB validation, stable path attestation, and an atomic same-filesystem
+  commit. The exact published path is intrinsic to the pending capability; the
+  model then selects one bounded read-only `verify_artifact` check without
+  supplying another path. That ephemeral capability is absent from the normal
+  tools-on registry.
+- Length, cancel, timeout, reset, path race, or generation error before commit
+  publishes nothing. Verification never publishes or mutates. A verification
+  failure leaves the atomically published file in place and is reported as
+  published but unverified.
+- Existing parents use an unnamed same-filesystem temporary file when
+  supported. An unsupported anonymous open/link falls back to an exclusive
+  private mode-`0600` file in the same directory; unsupported regular-file
+  `RENAME_NOREPLACE` then uses an atomic no-replace hard link without weakening
+  fsync, race checks, or post-publication attestation.
+- The destination file is the atomic unit; shared parent trees are never moved
+  for publication or rollback. Overwrite requires atomic exchange, and
+  unsupported filesystems fail closed rather than using a pathname-check/
+  ordinary-rename fallback with a TOCTOU window.
+- `create_parents` explicitly authorizes descriptor-relative creation of
+  missing directories. Cleanup attempts to remove only exact directories made
+  by the request and only while empty; concurrent or pre-existing content is
+  never moved or removed. The mutation epoch advances after file publication,
+  while successful completion still requires model-selected verification.
+- Named private files use process- and inode-bound recovery manifests. Startup
+  removes only exact dead-process entries; symlinks, malformed state, changed
+  identities, linked files, and other ambiguity are preserved. Absolute zero
+  residue after power loss is not claimed because narrow pre-registration and
+  publication crash windows cannot be cleaned without risking user data.
+  Explicitly created empty parent directories may likewise remain after an
+  uncatchable crash when later ownership cannot be proved safely.
+- The dedicated 4,096-token content budget does not change route, normal tool,
+  chat, or final budgets. One file per request and native backend only are the
+  initial bounds. Semantic chunking, hidden retries, deterministic content,
+  and incomplete-envelope repair remain prohibited.
+- See `docs/ARTIFACT_GENERATION.md` for protocol, atomicity, lifecycle,
+  validation evidence, and measured CPU limits.
 
 ## MTP
 

@@ -142,6 +142,58 @@ class NativeQwenProfileTests(unittest.TestCase):
         self.assertEqual("".join(emitted), result.content)
         self.assertNotIn("private", "".join(emitted))
 
+    def test_artifact_content_bypasses_qwen_tool_parser_and_keeps_literal_markup(self) -> None:
+        client = self._client()
+        emitted: list[str] = []
+        literal = '<tool_call>{"command":"inert"}</tool_call>\nconst ready = true;'
+        timings = NativeTimings(10, 5, 0, 10, 1.0, 2.0, False)
+
+        def complete(_messages, **kwargs):
+            self.assertIsNone(kwargs["tools"])
+            self.assertFalse(kwargs["thinking"])
+            self.assertFalse(kwargs["route_prefix_anchor"])
+            self.assertFalse(kwargs["qwen_route_prefix_anchor"])
+            self.assertFalse(kwargs["allow_mtp_experimental"])
+            self.assertFalse(kwargs["final_prefix_experiment"])
+            kwargs["on_token"](literal)
+            return timings
+
+        with mock.patch.object(client, "complete_chat", side_effect=complete):
+            result = client.complete_artifact_text(
+                [{"role": "user", "content": "file content only"}],
+                max_tokens=128,
+                on_token=emitted.append,
+            )
+
+        self.assertEqual(result.content, literal)
+        self.assertEqual("".join(emitted), literal)
+        self.assertEqual(result.tool_calls, ())
+
+    def test_artifact_content_keeps_literal_control_markup_without_profile_parser(self) -> None:
+        client = self._client()
+        client.model_profile = None
+        emitted: list[str] = []
+        literal = '<think>inert XML</think>\n<tool_call>{"command":"inert"}</tool_call>'
+        timings = NativeTimings(10, 5, 0, 10, 1.0, 2.0, False)
+
+        def complete(_messages, **kwargs):
+            self.assertIsNone(kwargs["tools"])
+            self.assertFalse(kwargs["thinking"])
+            self.assertFalse(kwargs["allow_mtp_experimental"])
+            kwargs["on_token"](literal)
+            return timings
+
+        with mock.patch.object(client, "complete_chat", side_effect=complete):
+            result = client.complete_artifact_text(
+                [{"role": "user", "content": "literal fixture"}],
+                max_tokens=128,
+                on_token=emitted.append,
+            )
+
+        self.assertEqual(result.content, literal)
+        self.assertEqual("".join(emitted), literal)
+        self.assertEqual(result.tool_calls, ())
+
     def test_qwen_tool_call_arguments_remain_exact_json_for_canonical_gate(self) -> None:
         client = self._client()
 

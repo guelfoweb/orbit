@@ -46,6 +46,178 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertEqual(policy.max_tokens, 96)
         self.assertIn("Return only the listed names", policy.messages[-1]["content"])
 
+    def test_verified_artifact_final_instruction_preserves_creation_and_verification(self) -> None:
+        messages = [
+            {"role": "user", "content": "create a JavaScript game in samples"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "artifact-1",
+                        "type": "function",
+                        "function": {
+                            "name": "write_artifact",
+                            "arguments": '{"path":"samples/game.js"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "write_artifact",
+                "tool_call_id": "artifact-1",
+                "content": "artifact_publication: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\noverwrite: false",
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "verify-1",
+                        "type": "function",
+                        "function": {
+                            "name": "verify_artifact",
+                            "arguments": '{"path":"samples/game.js","check":"text_integrity"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "verify_artifact",
+                "tool_call_id": "verify-1",
+                "content": "artifact_verification: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\ncheck: text_integrity\nstatus: pass",
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        self.assertIn("artifact was atomically published in this turn", policy.messages[-1]["content"])
+        self.assertIn("Name the exact artifact path", policy.messages[-1]["content"])
+        self.assertIn("what the selected verification confirmed", policy.messages[-1]["content"])
+
+    def test_failed_artifact_verification_reports_published_but_unverified(self) -> None:
+        messages = [
+            {"role": "user", "content": "create samples/snake.html"},
+            {
+                "role": "tool",
+                "name": "write_artifact",
+                "content": "artifact_publication: complete\npath: samples/snake.html\nbytes: 42\nsha256: " + "a" * 64,
+            },
+            {
+                "role": "tool",
+                "name": "verify_artifact",
+                "content": "error: artifact verification failed: selected integrity check failed",
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        instruction = policy.messages[-1]["content"]
+        self.assertIn("artifact was atomically published", instruction)
+        self.assertIn("file remains published", instruction)
+        self.assertIn("do not claim that its content passed verification", instruction)
+
+    def test_failed_artifact_generation_cannot_be_reported_as_published(self) -> None:
+        messages = [
+            {"role": "user", "content": "Create samples/game.js."},
+            {
+                "role": "tool",
+                "name": "write_artifact",
+                "content": "error: artifact content was not published: finish_reason=length",
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        instruction = policy.messages[-1]["content"]
+        self.assertIn("failed before verified publication", instruction)
+        self.assertIn("no artifact was published", instruction)
+
+    def test_compact_failed_artifact_generation_cannot_be_reported_as_published(self) -> None:
+        messages = [
+            {"role": "user", "content": "Create samples/game.js."},
+            {
+                "role": "tool",
+                "name": "write_artifact",
+                "content": (
+                    "tool_evidence_card: true\n"
+                    "kind: artifact_error\n"
+                    "status: error\n"
+                    "artifact_error_detail: generation timed out"
+                ),
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        self.assertIn("no artifact was published", policy.messages[-1]["content"])
+
+    def test_compact_failed_artifact_evidence_cannot_be_reported_as_published(self) -> None:
+        messages = [
+            {"role": "user", "content": "create samples/note.txt"},
+            {
+                "role": "tool",
+                "name": "write_artifact",
+                "content": (
+                    "tool_evidence_ref: true\n"
+                    "tool: write_artifact\n"
+                    "kind: artifact\n"
+                    "status: ok\n"
+                    "artifact_path: samples/note.txt"
+                ),
+            },
+            {
+                "role": "tool",
+                "name": "verify_artifact",
+                "content": (
+                    "tool_evidence_ref: true\n"
+                    "tool: verify_artifact\n"
+                    "kind: artifact_verification\n"
+                    "status: error"
+                ),
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        instruction = policy.messages[-1]["content"]
+        self.assertIn("file remains published", instruction)
+        self.assertIn("do not claim that its content passed verification", instruction)
+
+    def test_latest_failed_artifact_is_not_masked_by_previous_success(self) -> None:
+        messages = [
+            {"role": "user", "content": "create samples/first.js"},
+            {
+                "role": "tool",
+                "name": "write_artifact",
+                "content": "artifact_publication: complete\npath: samples/first.js",
+            },
+            {
+                "role": "tool",
+                "name": "verify_artifact",
+                "content": "artifact_verification: complete\nstatus: pass",
+            },
+            {"role": "user", "content": "create samples/second.js"},
+            {
+                "role": "tool",
+                "name": "write_artifact",
+                "content": "artifact_publication: complete\npath: samples/second.js",
+            },
+            {
+                "role": "tool",
+                "name": "verify_artifact",
+                "content": "error: artifact verification failed: invalid syntax",
+            },
+        ]
+
+        policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
+
+        instruction = policy.messages[-1]["content"]
+        self.assertIn("file remains published", instruction)
+        self.assertIn("artifact was atomically published", instruction)
+
     def test_html_cleaned_policy_caps_tokens_and_allows_length_retry_when_not_streamed(self) -> None:
         messages = [{"role": "tool", "name": "exec_shell_full_command", "content": "shell_output_html_cleaned: true\ntext:\ncontent"}]
 

@@ -59,6 +59,32 @@ class EvidenceTests(unittest.TestCase):
             self.assertFalse(sidecar.exists())
             self.assertEqual(restarted.recent_records(1), [])
 
+    def test_restart_preserves_completed_artifact_publication_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "session.evidence"
+            first = EvidenceStore(root)
+            publication = first.add(
+                "write_artifact",
+                "\n".join(
+                    (
+                        "artifact_publication: complete",
+                        "path: note.txt",
+                        "bytes: 4",
+                        "sha256: " + "a" * 64,
+                        "verification_required: true",
+                    )
+                ),
+            )
+            self.assertNotIn("ephemeral", publication.metadata)
+            sidecar = root / f"{publication.evidence_id}.txt"
+            self.assertTrue(sidecar.exists())
+
+            restarted = EvidenceStore(root)
+            restarted.load_index()
+
+            self.assertTrue(sidecar.exists())
+            self.assertEqual(restarted.recent_records(1)[0].kind, "artifact")
+
     def test_repeated_ephemeral_cleanup_has_no_linear_disk_growth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = EvidenceStore(Path(tmp) / "session.evidence")
@@ -83,6 +109,91 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(record.raw_ref.startswith("evidence:"))
         self.assertIn("sha256:", record.route_card)
         self.assertIn("hello", record.final_card)
+
+    def test_artifact_publication_keeps_path_hash_and_parent_evidence(self) -> None:
+        record = build_evidence_record(
+            "write_artifact",
+            "\n".join(
+                (
+                    "artifact_publication: complete",
+                    "path: samples/game.js",
+                    "bytes: 42",
+                    "sha256: " + "a" * 64,
+                    "overwrite: false",
+                    "created_parent_directories: samples",
+                    "directory_sync: complete",
+                    "verification_completed: false",
+                )
+            ),
+        )
+
+        self.assertEqual(record.kind, "artifact")
+        self.assertEqual(record.metadata["artifact_path"], "samples/game.js")
+        self.assertEqual(record.metadata["artifact_bytes"], "42")
+        self.assertEqual(record.metadata["artifact_sha256"], "a" * 64)
+        self.assertEqual(record.metadata["artifact_directory_sync"], "complete")
+        self.assertIn("artifact_path: samples/game.js", record.final_card)
+        self.assertIn("created_parent_directories: samples", record.route_card)
+
+    def test_publication_and_read_only_verification_keep_distinct_evidence(self) -> None:
+        publication = build_evidence_record(
+            "write_artifact",
+            "\n".join(
+                (
+                    "artifact_publication: complete",
+                    "path: samples/game.js",
+                    "bytes: 42",
+                    "sha256: " + "a" * 64,
+                    "overwrite: false",
+                    "created_parent_directories: samples",
+                    "directory_sync: complete",
+                    "verification_required: true",
+                    "verification_completed: false",
+                )
+            ),
+        )
+        verified = build_evidence_record(
+            "verify_artifact",
+            "\n".join(
+                (
+                    "artifact_verification: complete",
+                    "path: samples/game.js",
+                    "bytes: 42",
+                    "sha256: " + "a" * 64,
+                    "check: text_integrity",
+                    "status: pass",
+                    "detail: syntax valid",
+                )
+            ),
+        )
+
+        self.assertEqual(publication.kind, "artifact")
+        self.assertEqual(verified.kind, "artifact_verification")
+        self.assertEqual(publication.metadata["created_parent_directories"], "samples")
+        self.assertEqual(publication.metadata["artifact_overwrite"], "false")
+        self.assertEqual(publication.metadata["artifact_verification_completed"], "false")
+        self.assertEqual(verified.metadata["artifact_check"], "text_integrity")
+
+    def test_failed_artifact_verification_is_structured_error_evidence(self) -> None:
+        record = build_evidence_record(
+            "verify_artifact",
+            "error: artifact verification failed: destination changed",
+        )
+
+        self.assertEqual(record.kind, "artifact_verification")
+        self.assertEqual(record.status, "error")
+        self.assertIn("kind: artifact_verification", record.final_card)
+        self.assertIn("status: error", record.final_card)
+
+    def test_failed_artifact_generation_is_structured_error_evidence(self) -> None:
+        record = build_evidence_record(
+            "write_artifact",
+            "error: artifact content was not published: finish_reason=length",
+        )
+
+        self.assertEqual(record.kind, "artifact_error")
+        self.assertEqual(record.status, "error")
+        self.assertIn("artifact content was not published", record.final_card)
 
     def test_sidecar_write_read_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

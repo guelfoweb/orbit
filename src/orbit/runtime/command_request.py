@@ -15,6 +15,7 @@ FETCH_URL_TOOL_ALIASES = {"fetch_url"}
 LIST_DIRECTORY_TOOL_ALIASES = {"list_directory"}
 LIST_DIRECTORY_KEYS = ("path", "recursive", "max_depth", "max_entries", "include_hidden", "dirs_first", "files_only", "dirs_only")
 SYSTEM_INFO_TOOL_ALIASES = {"system_info"}
+ARTIFACT_TOOL_ALIASES = {"write_artifact"}
 SYSTEM_INFO_KEYS = ("include_disks", "include_cpu", "include_memory", "include_os", "include_runtime", "include_gpu", "human_readable")
 
 
@@ -105,6 +106,8 @@ def _canonical_route_reason(text: str) -> str | None:
         return "canonical_chat"
     if keys == {"command"} and _nonempty_string(value.get("command")):
         return "canonical_command"
+    if _has_artifact_request(value):
+        return "canonical_artifact"
     if keys == {"url"} and _nonempty_string(value.get("url")):
         return "canonical_url"
     if keys and keys <= set(LIST_DIRECTORY_KEYS) and _canonical_list_directory(value):
@@ -147,7 +150,7 @@ def _nonempty_string(value: Any) -> bool:
 def _looks_like_route_syntax(text: str) -> bool:
     if text.startswith(("{", "[", "```", "<|tool_call>")):
         return True
-    return any(marker in text for marker in ('{"route"', '{"command"', '{"url"', '{"path"', '{"include_'))
+    return any(marker in text for marker in ('{"route"', '{"command"', '{"url"', '{"path"', '{"include_', '{"tool"'))
 
 
 def parse_tool_command(content: str) -> ToolRoute | None:
@@ -164,6 +167,10 @@ def parse_command_decision_from_tool_calls(tool_calls: list[dict[str, Any]]) -> 
         if not isinstance(name, str):
             continue
         args = parse_tool_arguments_or_empty(function.get("arguments"))
+        if name in ARTIFACT_TOOL_ALIASES:
+            # Preserve the selected capability so malformed artifact arguments
+            # reach its canonical contract instead of becoming a shell call.
+            return RouteDecision(ToolRoute.FILESYSTEM, ("write_artifact",))
         if _has_command(args) or name in SHELL_TOOL_ALIASES:
             return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
         if name in WEB_SEARCH_TOOL_ALIASES and _web_search_command_from_args(args):
@@ -182,7 +189,7 @@ def command_tool_call_from_tool_calls(
     allowed_tool_names: tuple[str, ...],
 ) -> dict[str, Any] | None:
     allowed = set(allowed_tool_names)
-    if not ({"exec_shell_full_command", "fetch_url", "list_directory", "system_info"} & allowed):
+    if not ({"exec_shell_full_command", "fetch_url", "list_directory", "system_info", "write_artifact"} & allowed):
         return None
     for tool_call in tool_calls:
         function = tool_call.get("function")
@@ -193,6 +200,12 @@ def command_tool_call_from_tool_calls(
             continue
         raw_arguments = function.get("arguments")
         args = parse_tool_arguments_or_empty(raw_arguments)
+        if name in ARTIFACT_TOOL_ALIASES:
+            if "write_artifact" not in allowed:
+                return None
+            # Return the exact call, including malformed arguments, so the
+            # canonical artifact schema can reject it without tool substitution.
+            return tool_call
         parsed_valid_command = _has_command(args)
         if not parsed_valid_command and isinstance(raw_arguments, str):
             args = _extract_loose_command_object(raw_arguments) or _extract_last_json_object(raw_arguments) or {}
@@ -230,7 +243,7 @@ def command_tool_call_from_content(
     allowed_tool_names: tuple[str, ...],
 ) -> dict[str, Any] | None:
     allowed = set(allowed_tool_names)
-    if not ({"exec_shell_full_command", "fetch_url", "list_directory", "system_info"} & allowed):
+    if not ({"exec_shell_full_command", "fetch_url", "list_directory", "system_info", "write_artifact"} & allowed):
         return None
     raw_command = _extract_raw_tool_call_command(content)
     if raw_command:
@@ -253,6 +266,8 @@ def command_tool_call_from_content(
             return None
         return _tool_call("system_info", raw_system_info)
     value = _parse_command_json_object(content) or _extract_last_json_object(content) or _extract_loose_command_object(content)
+    if _has_artifact_request(value) and "write_artifact" in allowed:
+        return _tool_call("write_artifact", _artifact_args(value["arguments"]))
     if not _has_command(value):
         if _has_url(value) and "fetch_url" in allowed:
             return _tool_call("fetch_url", {"url": value["url"]})
@@ -279,6 +294,8 @@ def parse_command_decision(content: str) -> RouteDecision | None:
     if _parse_raw_tool_call_decision(text) is not None:
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
     value = _parse_command_json_object(text)
+    if _has_artifact_request(value):
+        return RouteDecision(ToolRoute.FILESYSTEM, ("write_artifact",))
     if _has_command(value):
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
     if _has_url(value):
@@ -293,6 +310,8 @@ def parse_command_decision(content: str) -> RouteDecision | None:
         return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
     for line in text.splitlines():
         value = _parse_command_json_object(_strip_json_fence(line.strip()))
+        if _has_artifact_request(value):
+            return RouteDecision(ToolRoute.FILESYSTEM, ("write_artifact",))
         if _has_command(value):
             return RouteDecision(ToolRoute.FILESYSTEM, ("exec_shell_full_command",))
         if _has_url(value):
@@ -322,6 +341,7 @@ def command_stream_state(text: str, *, max_prefix_chars: int = ROUTE_STREAM_PREF
         or _is_partial_prefix(stripped, '{"path"')
         or _is_partial_prefix(stripped, '{"include_')
         or _is_partial_prefix(stripped, '{"route"')
+        or _is_partial_prefix(stripped, '{"tool"')
     ):
         return "pending"
     if stripped.startswith("<|tool_call>"):
@@ -334,6 +354,7 @@ def command_stream_state(text: str, *, max_prefix_chars: int = ROUTE_STREAM_PREF
         or stripped.startswith('{"path"')
         or stripped.startswith('{"include_')
         or stripped.startswith('{"route"')
+        or stripped.startswith('{"tool"')
     ):
         if _looks_like_complete_json_object(stripped):
             return "route" if parse_tool_command(stripped) is not None else "not_command"
@@ -389,14 +410,30 @@ class CommandStreamFilter:
 def tool_names_for_decision(route: ToolRoute, prompt: str | None = None) -> tuple[str, ...]:
     del prompt
     if route == ToolRoute.FILESYSTEM:
-        return ("exec_shell_full_command", "fetch_url", "list_directory", "system_info")
+        return (
+            "exec_shell_full_command",
+            "fetch_url",
+            "list_directory",
+            "system_info",
+        )
     return ()
 
 
 def decision_tool_names(decision: RouteDecision, prompt: str | None = None) -> tuple[str, ...]:
     del prompt
     if decision.tool_names:
-        return tuple(name for name in decision.tool_names if name in {"exec_shell_full_command", "fetch_url", "list_directory", "system_info"})
+        return tuple(
+            name
+            for name in decision.tool_names
+            if name
+            in {
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+                "write_artifact",
+            }
+        )
     return tool_names_for_decision(decision.route)
 
 
@@ -548,10 +585,44 @@ def _system_info_args(value: dict[str, Any]) -> dict[str, Any]:
     return {key: value[key] for key in SYSTEM_INFO_KEYS if key in value}
 
 
+def _has_artifact_request(value: dict[str, Any] | None) -> bool:
+    if not isinstance(value, dict) or set(value) != {"tool", "arguments"}:
+        return False
+    return value.get("tool") == "write_artifact" and _valid_artifact_args(value.get("arguments"))
+
+
+def _valid_artifact_args(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if not set(value).issubset({"path", "overwrite", "create_parents"}):
+        return False
+    path = value.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return False
+    return all(
+        key not in value or isinstance(value[key], bool)
+        for key in ("overwrite", "create_parents")
+    )
+
+
+def _artifact_args(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value[key]
+        for key in ("path", "overwrite", "create_parents")
+        if key in value
+    }
+
+
 def _has_chat_route(value: dict[str, Any] | None) -> bool:
     if not isinstance(value, dict):
         return False
-    if _has_command(value) or _has_url(value) or _has_list_directory_args(value) or _has_system_info_args(value):
+    if (
+        _has_command(value)
+        or _has_url(value)
+        or _has_list_directory_args(value)
+        or _has_system_info_args(value)
+        or _has_artifact_request(value)
+    ):
         return False
     route = value.get("route")
     return isinstance(route, str) and route.strip().upper() == ToolRoute.CHAT.value
@@ -575,8 +646,8 @@ def _parse_command_json_object(content: str) -> dict[str, Any] | None:
     if not text:
         return None
     try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
+        parsed = json.loads(text, object_pairs_hook=_unique_json_object)
+    except (json.JSONDecodeError, _DuplicateJsonKey):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -586,8 +657,8 @@ def _extract_last_json_object(content: str) -> dict[str, Any] | None:
     for candidate in reversed(matches):
         normalized = re.sub(r'([,{]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', candidate)
         try:
-            parsed = json.loads(normalized)
-        except json.JSONDecodeError:
+            parsed = json.loads(normalized, object_pairs_hook=_unique_json_object)
+        except (json.JSONDecodeError, _DuplicateJsonKey):
             continue
         if isinstance(parsed, dict):
             return parsed

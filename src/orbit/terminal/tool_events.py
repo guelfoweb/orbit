@@ -15,6 +15,8 @@ DISPLAY_TOOL_NAMES = {
     "fetch_url": "fetch_url",
     "list_directory": "list_directory",
     "system_info": "system_info",
+    "write_artifact": "write_artifact",
+    "verify_artifact": "verify_artifact",
 }
 
 
@@ -38,6 +40,22 @@ def format_tool_call_event(name: str, args: str) -> str:
             return f"ListDir{suffix}: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}"
     if name == "system_info":
         return "SystemInfo"
+    if name == "write_artifact":
+        try:
+            parsed = json.loads(args)
+        except (TypeError, ValueError):
+            parsed = {}
+        path = parsed.get("path") if isinstance(parsed, dict) else None
+        if isinstance(path, str) and path:
+            return f"Artifact: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}"
+    if name == "verify_artifact":
+        try:
+            parsed = json.loads(args)
+        except (TypeError, ValueError):
+            parsed = {}
+        check = parsed.get("check") if isinstance(parsed, dict) else None
+        if isinstance(check, str):
+            return f"Verify: published artifact ({check})"
     return f"{display_tool_name(name)} {args}"
 
 

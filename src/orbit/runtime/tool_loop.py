@@ -9,6 +9,15 @@ from typing import Callable
 from orbit.backend import ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.post_tool_final_reuse_config import resolve_post_tool_final_reuse
+from orbit.runtime.artifacts import (
+    ARTIFACT_TOOL_NAME,
+    ARTIFACT_VERIFY_TOOL_NAME,
+    ARTIFACT_VERIFICATION_PROMPT,
+    ArtifactPublication,
+    ArtifactGenerationError,
+    PendingArtifact,
+    begin_artifact_generation,
+)
 from orbit.runtime.capabilities import LocalCapabilities
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
 from orbit.runtime.completion_budget import resolve_max_tokens
@@ -50,7 +59,7 @@ from orbit.runtime.shell_guardrails import (
     should_verify_shell_mutation,
 )
 from orbit.runtime.tool_arguments import parse_tool_arguments_or_empty
-from orbit.runtime.tool_backends import HybridToolExecutor
+from orbit.runtime.tool_backends import HybridToolExecutor, ToolExecution
 from orbit.runtime.tool_calls import execute_tool_call
 from orbit.runtime.tool_contract import (
     CanonicalToolDecision,
@@ -76,7 +85,7 @@ from orbit.runtime.tool_loop_state import (
     ToolTurnState,
 )
 from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
-from orbit.runtime.tools import default_tool_names
+from orbit.runtime.tools import ToolResult, default_tool_names
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 from orbit.runtime.web import fetch_url_result_error, fetch_url_result_has_text, fetch_url_result_status
 from orbit.tool_contract_config import resolve_tool_call_canonical_gate
@@ -115,6 +124,8 @@ def run_tool_loop(
     user_turn_id: str | None = None,
 ) -> ChatResult:
     allowed_tool_names = tool_names or default_tool_names()
+    if ARTIFACT_TOOL_NAME in allowed_tool_names and ARTIFACT_VERIFY_TOOL_NAME not in allowed_tool_names:
+        allowed_tool_names = (*allowed_tool_names, ARTIFACT_VERIFY_TOOL_NAME)
     executor = HybridToolExecutor(
         backend=runtime.backend if hasattr(runtime.backend, "server_tools") else None,
         workdir=workdir,
@@ -144,6 +155,13 @@ def run_tool_loop(
     suppress_tool_delta = (lambda _delta: None) if on_final_delta is not None and shell_full_enabled else None
     terminal_attempt_ids: set[str] = set()
     canonical_decisions: dict[str, CanonicalToolDecision] = {}
+    artifact_verification_required = False
+    artifact_path_pending_verification: str | None = None
+    artifact_pending_verification: PendingArtifact | None = None
+    artifact_publication_completed: ArtifactPublication | None = None
+    artifact_finalization_required = False
+    active_tools = tools
+    active_allowed_tool_names = allowed_tool_names
 
     # These local helpers still couple policy and runtime counters in one place.
     # The state objects only store turn-local facts; they do not decide tasks.
@@ -151,12 +169,165 @@ def run_tool_loop(
     def answer_from_tool_results(**kwargs) -> ChatResult:
         return runtime._answer_from_tool_results(**kwargs)
 
+    def write_artifact(arguments: dict[str, object]) -> ToolExecution:
+        nonlocal artifact_path_pending_verification, artifact_pending_verification
+        nonlocal artifact_publication_completed
+        path = arguments.get("path")
+        overwrite = arguments.get("overwrite", False)
+        create_parents = arguments.get("create_parents", False)
+        if (
+            not set(arguments).issubset({"path", "overwrite", "create_parents"})
+            or not isinstance(path, str)
+            or not isinstance(overwrite, bool)
+            or not isinstance(create_parents, bool)
+        ):
+            return ToolExecution(
+                ToolResult(ARTIFACT_TOOL_NAME, "error: invalid artifact arguments"),
+                "orbit-artifact",
+                "rejected_schema",
+                "invalid_arguments",
+            )
+        if on_phase_start:
+            on_phase_start(
+                ModelPhaseStart(
+                    "artifact_content",
+                    streamed=False,
+                    attempt=1,
+                    reason="model_selected_artifact",
+                )
+            )
+        try:
+            with model_call_context(phase="artifact_content", tools_mode="on"):
+                pending = begin_artifact_generation(
+                    backend=runtime.backend,
+                    user_request=user_prompt or "",
+                    path=path,
+                    overwrite=overwrite,
+                    create_parents=create_parents,
+                    workdir=Path(workdir),
+                    temperature=temperature,
+                    on_progress=on_progress,
+                )
+        except ArtifactGenerationError as exc:
+            if on_model_step:
+                on_model_step(
+                    ModelStepMetrics.from_result(
+                        loop=state.tool_rounds + 1,
+                        result=exc.result,
+                        phase="artifact_content",
+                    )
+                )
+            if exc.result.finish_reason == "cancelled":
+                raise
+            return ToolExecution(
+                ToolResult(ARTIFACT_TOOL_NAME, f"error: {exc}"),
+                "orbit-artifact",
+                "runtime_error",
+                "artifact_generation_incomplete",
+            )
+        except TimeoutError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            return ToolExecution(
+                ToolResult(ARTIFACT_TOOL_NAME, f"error: artifact generation did not complete: {exc}"),
+                "orbit-artifact",
+                "runtime_error",
+                "artifact_generation_failed",
+            )
+        if on_model_step:
+            on_model_step(
+                ModelStepMetrics.from_result(
+                    loop=state.tool_rounds + 1,
+                    result=pending.generation,
+                    phase="artifact_content",
+                )
+            )
+        artifact_pending_verification = pending
+        artifact_path_pending_verification = pending.path
+        artifact_publication_completed = pending.publication
+        return ToolExecution(
+            ToolResult(ARTIFACT_TOOL_NAME, pending.evidence()),
+            "orbit-artifact",
+        )
+
+    def verify_artifact(arguments: dict[str, object]) -> ToolExecution:
+        nonlocal artifact_pending_verification
+        pending = artifact_pending_verification
+        if pending is None:
+            return ToolExecution(
+                ToolResult(ARTIFACT_VERIFY_TOOL_NAME, "error: no artifact request is pending verification"),
+                "orbit-artifact",
+                "rejected_guardrail",
+                "artifact_verification_not_pending",
+            )
+        if set(arguments) != {"check"}:
+            pending.abort()
+            artifact_pending_verification = None
+            return ToolExecution(
+                ToolResult(ARTIFACT_VERIFY_TOOL_NAME, "error: invalid artifact verification arguments"),
+                "orbit-artifact",
+                "rejected_schema",
+                "invalid_arguments",
+            )
+        try:
+            content = pending.verify(arguments)
+        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+            pending.abort()
+            artifact_pending_verification = None
+            return ToolExecution(
+                ToolResult(ARTIFACT_VERIFY_TOOL_NAME, f"error: artifact verification failed: {exc}"),
+                "orbit-artifact",
+                "runtime_error",
+                "artifact_verification_failed",
+            )
+        artifact_pending_verification = None
+        return ToolExecution(
+            ToolResult(ARTIFACT_VERIFY_TOOL_NAME, content),
+            "orbit-artifact",
+        )
+
+    def abort_pending_artifact() -> None:
+        nonlocal artifact_pending_verification
+        if artifact_pending_verification is not None:
+            artifact_pending_verification.abort()
+            artifact_pending_verification = None
+
+    def balance_cancelled_artifact_call(tool_call: dict[str, object]) -> None:
+        cancellation = ToolResult(
+            ARTIFACT_TOOL_NAME,
+            "error: artifact generation was cancelled; no artifact was published",
+        )
+        runtime.messages.append(tool_result_message(tool_call, cancellation))
+        if on_tool_result is not None:
+            on_tool_result(
+                cancellation.name,
+                len(cancellation.content),
+                "orbit-artifact",
+                cancellation.content,
+            )
+
+    def artifact_failure_result(result: ChatResult, message: str) -> ChatResult:
+        abort_pending_artifact()
+        failure = replace(
+            result,
+            content=message,
+            finish_reason="stop",
+            tool_calls=[],
+        )
+        runtime.messages.append({"role": "assistant", "content": message})
+        if on_final_delta is not None:
+            on_final_delta(message)
+        return failure
+
+    executor.artifact_writer = write_artifact
+    executor.artifact_verifier = verify_artifact
+
     def observe_shadow(result: ChatResult, *, attempt_id: str | None, phase: str = "tool_call"):
         return observe_tool_attempt_shadow(
             text=result.content,
             tool_calls=result.tool_calls,
-            tool_definitions=tools,
-            allowed_tool_names=allowed_tool_names,
+            tool_definitions=active_tools,
+            allowed_tool_names=active_allowed_tool_names,
             workdir=Path(workdir),
             user_prompt=user_prompt,
             finish_reason=result.finish_reason,
@@ -189,8 +360,8 @@ def run_tool_loop(
             active_outcome=outcome,
             terminal_reason=reason,
             phase=phase,
-            tool_definitions=tools,
-            allowed_tool_names=allowed_tool_names,
+            tool_definitions=active_tools,
+            allowed_tool_names=active_allowed_tool_names,
             workdir=Path(workdir),
             user_prompt=user_prompt,
             canonical_decision=canonical_decisions.get(attempt_id),
@@ -208,8 +379,8 @@ def run_tool_loop(
             return None
         resolved = decision or validate_canonical_tool_call_payload(
             tool_call,
-            tool_definitions=tools,
-            allowed_tool_names=allowed_tool_names,
+            tool_definitions=active_tools,
+            allowed_tool_names=active_allowed_tool_names,
             workdir=Path(workdir),
             user_prompt=user_prompt,
         )
@@ -469,6 +640,27 @@ def run_tool_loop(
         # This remains the main transition reducer for tool evidence and bounded
         # repair state. It updates turn-local state, while runtime counters stay
         # here to avoid leaking telemetry into the state objects themselves.
+        nonlocal artifact_path_pending_verification, artifact_verification_required
+        if tool_result.name == ARTIFACT_TOOL_NAME:
+            turn.shell_mutation_attempted = True
+            if execution_outcome == "executed":
+                state.advance_after_mutation(tool_call)
+                turn.shell_mutation_succeeded = True
+                artifact_verification_required = True
+                repair.mutation_verification_pending = True
+                runtime.mutation_verifications += 1
+            else:
+                turn.last_error = execution_reason
+            return
+        if tool_result.name == ARTIFACT_VERIFY_TOOL_NAME:
+            if execution_outcome != "executed":
+                abort_pending_artifact()
+                turn.last_error = execution_reason
+                artifact_verification_required = False
+                artifact_path_pending_verification = None
+                repair.shell_error_final_pending = True
+                turn.mark_exhausted()
+            return
         if tool_result.name not in {"exec_shell_full_command", "fetch_url"}:
             return
         command = _shell_command_from_tool_call(tool_call)
@@ -679,6 +871,7 @@ def run_tool_loop(
             if (
                 (is_mutation_verification or is_mutation_verification_repair)
                 and not repair.mutation_semantic_repair_used
+                and not artifact_verification_required
             ):
                 request_mutation_semantic_repair()
             if has_required_direct_evidence() or repair.shell_error_final_pending:
@@ -744,12 +937,17 @@ def run_tool_loop(
                 signature = state.mark_tool_call(tool_call)
                 if on_tool_call:
                     on_tool_call(*signature)
-                execution = execute_tool_call(
-                    tool_call,
-                    chunk_budget=state.chunk_budget,
-                    executor=executor,
-                    canonical_decision=initial_decision,
-                )
+                try:
+                    execution = execute_tool_call(
+                        tool_call,
+                        chunk_budget=state.chunk_budget,
+                        executor=executor,
+                        canonical_decision=initial_decision,
+                    )
+                except ArtifactGenerationError as exc:
+                    abort_pending_artifact()
+                    balance_cancelled_artifact_call(tool_call)
+                    return exc.result
                 tool_result = execution.result
                 update_state_after_tool_result(
                     tool_call,
@@ -763,23 +961,26 @@ def run_tool_loop(
                     execution_outcome=execution.terminal_outcome,
                     execution_reason=execution.terminal_reason,
                 )
-                if execution.terminal_outcome == "executed" and _tool_call_is_mutating(tool_call):
+                if (
+                    execution.terminal_outcome == "executed"
+                    and _tool_call_is_mutating(tool_call)
+                    and tool_result.name != ARTIFACT_TOOL_NAME
+                ):
                     state.advance_after_mutation(tool_call)
                 if on_tool_result:
                     on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
-                runtime.messages.append(
-                    tool_result_message(
+                history_message = tool_result_message(
+                    tool_call,
+                    tool_result,
+                    evidence_store=evidence_store,
+                    metadata=_tool_evidence_metadata(
                         tool_call,
-                        tool_result,
-                        evidence_store=evidence_store,
-                        metadata=_tool_evidence_metadata(
-                            tool_call,
-                            source=execution.source,
-                            user_turn_id=user_turn_id,
-                            produced_by_phase="initial_tool_call",
-                        ),
-                    )
+                        source=execution.source,
+                        user_turn_id=user_turn_id,
+                        produced_by_phase="initial_tool_call",
+                    ),
                 )
+                runtime.messages.append(history_message)
                 if should_handoff_to_final_from_tool():
                     return answer_from_tool_results(
                         temperature=temperature,
@@ -864,10 +1065,40 @@ def run_tool_loop(
             or executing_completion_guard
             or executing_minimal_patch_guard
         )
+        active_tools = tools
+        active_allowed_tool_names = allowed_tool_names
+        if executing_mutation_verification and artifact_verification_required:
+            active_allowed_tool_names = tuple(
+                name for name in allowed_tool_names if name == ARTIFACT_VERIFY_TOOL_NAME
+            )
+            active_tools = [
+                definition
+                for definition in tools
+                if definition.get("function", {}).get("name") in active_allowed_tool_names
+            ]
+        elif ARTIFACT_VERIFY_TOOL_NAME in active_allowed_tool_names:
+            active_allowed_tool_names = tuple(
+                name for name in active_allowed_tool_names if name != ARTIFACT_VERIFY_TOOL_NAME
+            )
+            active_tools = [
+                definition
+                for definition in tools
+                if definition.get("function", {}).get("name") in active_allowed_tool_names
+            ]
         call_messages = with_tool_call_system_prompt(runtime.messages)
         if capability_context:
             call_messages = [*call_messages, {"role": "system", "content": capability_context}]
-        if repair.shell_repair_prompt_pending is not None:
+        if executing_mutation_verification and artifact_verification_required:
+            path_line = (
+                f"\nExact artifact path: {artifact_path_pending_verification}"
+                if artifact_path_pending_verification
+                else ""
+            )
+            call_messages = [
+                *call_messages,
+                {"role": "user", "content": ARTIFACT_VERIFICATION_PROMPT + path_line},
+            ]
+        elif repair.shell_repair_prompt_pending is not None:
             call_messages = [*call_messages, {"role": "user", "content": repair.shell_repair_prompt_pending}]
         elif repair.shell_empty_result_check_pending:
             call_messages = [*call_messages, {"role": "user", "content": SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT}]
@@ -906,10 +1137,14 @@ def run_tool_loop(
             ),
             file_recovery=turn.pending_file_recovery_guard,
         )
+        artifact_verification_round = executing_mutation_verification and artifact_verification_required
         tool_delta_callback = (
             suppress_tool_delta
-            if shell_full_enabled
-            and (state.tool_rounds > 0 or repair.contract_retry_pending)
+            if artifact_verification_round
+            or (
+                shell_full_enabled
+                and (state.tool_rounds > 0 or repair.contract_retry_pending)
+            )
             else on_final_delta
         )
         if on_phase_start:
@@ -921,17 +1156,22 @@ def run_tool_loop(
                     reason="model_tool_call",
                 )
             )
-        result, shadow_report, attempt_id = observed_model_call(
-            lambda: runtime._chat_tool_call_once(
-                call_messages,
-                temperature=temperature,
-                max_tokens=tool_max_tokens,
-                tools=tools,
-                on_final_delta=tool_delta_callback,
-                on_progress=on_progress,
-            ),
-            phase="tool_call",
-        )
+        try:
+            result, shadow_report, attempt_id = observed_model_call(
+                lambda: runtime._chat_tool_call_once(
+                    call_messages,
+                    temperature=temperature,
+                    max_tokens=tool_max_tokens,
+                    tools=active_tools,
+                    on_final_delta=tool_delta_callback,
+                    on_progress=on_progress,
+                ),
+                phase="tool_call",
+            )
+        except BaseException:
+            if artifact_verification_round:
+                abort_pending_artifact()
+            raise
         produced_by_phase: str | None = "tool_call"
         last_result = result
         if on_model_step:
@@ -970,7 +1210,7 @@ def run_tool_loop(
                     retry_messages,
                     temperature=temperature,
                     max_tokens=tool_max_tokens,
-                    tools=tools,
+                    tools=active_tools,
                     on_final_delta=suppress_tool_delta,
                     on_progress=on_progress,
                 ),
@@ -990,6 +1230,26 @@ def run_tool_loop(
             elif result.tool_calls:
                 repair.contract_retry_pending = False
         turn.clear_pending_after_model_call()
+        if (
+            executing_mutation_verification
+            and artifact_verification_required
+            and result.finish_reason in {"cancelled", "error", "length", "timeout"}
+        ):
+            abort_pending_artifact()
+            artifact_verification_required = False
+            artifact_path_pending_verification = None
+            record_terminal(
+                attempt_id=attempt_id,
+                report=shadow_report,
+                result=result,
+                outcome="rejected_guardrail",
+                reason="artifact_verification_incomplete",
+                phase=produced_by_phase or "tool_call",
+            )
+            return artifact_failure_result(
+                result,
+                "error: artifact was published but verification did not complete",
+            )
         truncated_tool_attempt = (
             result.finish_reason == "length"
             and not result.tool_calls
@@ -997,7 +1257,7 @@ def run_tool_loop(
             .detect(
                 text=result.content,
                 tool_calls=[],
-                registered_tool_names=allowed_tool_names,
+                registered_tool_names=active_allowed_tool_names,
             )
             .detected
         )
@@ -1024,6 +1284,14 @@ def run_tool_loop(
             request_minimal_patch_guard()
             continue
         if result.finish_reason == "length" and not result.tool_calls and state.tool_rounds > 0:
+            if artifact_verification_required:
+                abort_pending_artifact()
+                artifact_verification_required = False
+                artifact_path_pending_verification = None
+                return artifact_failure_result(
+                    result,
+                    "error: artifact was published but verification did not complete",
+                )
             record_post_tool_final_reuse_fallback("finish_reason")
             record_terminal(
                 attempt_id=attempt_id,
@@ -1054,7 +1322,7 @@ def run_tool_loop(
                 phase=produced_by_phase or "tool_call",
             )
             result, shadow_report, attempt_id = observed_model_call(
-                lambda: _backend_tool_retry(runtime, call_messages, temperature, max_tokens, tools),
+                lambda: _backend_tool_retry(runtime, call_messages, temperature, max_tokens, active_tools),
                 phase="tool_call_retry",
             )
             produced_by_phase = "tool_call_retry"
@@ -1070,7 +1338,7 @@ def run_tool_loop(
                 phase=produced_by_phase or "tool_call",
             )
             result, shadow_report, attempt_id = observed_model_call(
-                lambda: _backend_tool_retry(runtime, call_messages, temperature, tool_max_tokens, tools),
+                lambda: _backend_tool_retry(runtime, call_messages, temperature, tool_max_tokens, active_tools),
                 phase="tool_call_retry",
             )
             produced_by_phase = "tool_call_retry"
@@ -1085,6 +1353,13 @@ def run_tool_loop(
                     reason="empty_after_retry",
                     phase=produced_by_phase,
                 )
+                if executing_mutation_verification and artifact_verification_required:
+                    artifact_verification_required = False
+                    artifact_path_pending_verification = None
+                    return artifact_failure_result(
+                        result,
+                        "error: artifact was published but verification did not complete",
+                    )
                 return runtime._chat_final(
                     with_chat_system_prompt(runtime.messages),
                     temperature=temperature,
@@ -1111,13 +1386,29 @@ def run_tool_loop(
                 tool_calls=[],
             )
         if result.tool_calls:
-            route_tool_call = command_tool_call_from_tool_calls(result.tool_calls, allowed_tool_names)
+            route_tool_call = command_tool_call_from_tool_calls(result.tool_calls, active_allowed_tool_names)
             if route_tool_call is not None:
                 if canonical_gate_enabled and _is_exact_canonical_tool_call(result.tool_calls[0]):
                     route_tool_call = result.tool_calls[0]
                 result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
         if not result.tool_calls:
-            route_tool_call = command_like_tool_call(result.content, allowed_tool_names)
+            if executing_mutation_verification and artifact_verification_required:
+                abort_pending_artifact()
+                artifact_verification_required = False
+                artifact_path_pending_verification = None
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="rejected_guardrail",
+                    reason="artifact_verification_missing",
+                    phase=produced_by_phase or "tool_call",
+                )
+                return artifact_failure_result(
+                    result,
+                    "error: artifact was published but verification was not selected",
+                )
+            route_tool_call = command_like_tool_call(result.content, active_allowed_tool_names)
             if route_tool_call is not None:
                 result = replace(result, content="", finish_reason="tool_calls", tool_calls=[route_tool_call])
         repaired_decision: CanonicalToolDecision | None = None
@@ -1125,8 +1416,8 @@ def run_tool_loop(
             repaired = build_tool_call_repair(
                 text=result.content,
                 tool_calls=result.tool_calls,
-                tool_definitions=tools,
-                allowed_tool_names=allowed_tool_names,
+                tool_definitions=active_tools,
+                allowed_tool_names=active_allowed_tool_names,
                 workdir=Path(workdir),
                 user_prompt=user_prompt,
                 finish_reason=result.finish_reason,
@@ -1142,7 +1433,53 @@ def run_tool_loop(
                     tool_calls=[repaired.tool_call],
                 )
         canonical_decision: CanonicalToolDecision | None = None
-        if result.tool_calls and canonical_gate_enabled:
+        if result.tool_calls and executing_mutation_verification and artifact_verification_required:
+            verification_call = result.tool_calls[0]
+            function = verification_call.get("function")
+            name = function.get("name") if isinstance(function, dict) else None
+            verification_decision = validate_canonical_tool_call_payload(
+                verification_call,
+                tool_definitions=active_tools,
+                allowed_tool_names=active_allowed_tool_names,
+                workdir=Path(workdir),
+                user_prompt=user_prompt,
+            )
+            arguments = (
+                verification_decision.normalized_call.arguments
+                if verification_decision.accepted and verification_decision.normalized_call is not None
+                else {}
+            )
+            verification_check = arguments.get("check")
+            path = artifact_path_pending_verification
+            invalid_verification = (
+                len(result.tool_calls) != 1
+                or not verification_decision.accepted
+                or name != ARTIFACT_VERIFY_TOOL_NAME
+                or not path
+                or verification_check
+                not in {
+                    "content",
+                    "text_integrity",
+                }
+            )
+            if invalid_verification:
+                abort_pending_artifact()
+                artifact_verification_required = False
+                artifact_path_pending_verification = None
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=result,
+                    outcome="rejected_guardrail",
+                    reason="artifact_verification_not_read_only",
+                    phase=produced_by_phase or "tool_call",
+                )
+                return artifact_failure_result(
+                    result,
+                    "error: artifact was published but verification was invalid",
+                )
+            canonical_decision = verification_decision
+        if result.tool_calls and canonical_gate_enabled and canonical_decision is None:
             canonical_decision = canonical_preflight(
                 result.tool_calls[0],
                 attempt_id=attempt_id,
@@ -1391,6 +1728,18 @@ def run_tool_loop(
                     executor=executor,
                     canonical_decision=canonical_decision,
                 )
+            except ArtifactGenerationError as exc:
+                abort_pending_artifact()
+                balance_cancelled_artifact_call(tool_call)
+                record_terminal(
+                    attempt_id=attempt_id,
+                    report=shadow_report,
+                    result=exc.result,
+                    outcome="cancelled",
+                    reason="artifact_generation_cancelled",
+                    phase="artifact_content",
+                )
+                return exc.result
             except Exception as exc:
                 timeout = isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
                 record_terminal(
@@ -1423,25 +1772,53 @@ def run_tool_loop(
                 execution_outcome=execution.terminal_outcome,
                 execution_reason=execution.terminal_reason,
             )
-            if execution.terminal_outcome == "executed" and _tool_call_is_mutating(tool_call):
+            if (
+                executing_mutation_verification
+                and artifact_verification_required
+                and execution.terminal_outcome == "executed"
+                and tool_result.name == ARTIFACT_VERIFY_TOOL_NAME
+                and "artifact_verification: complete" in tool_result.content
+                and "status: pass" in tool_result.content
+                and artifact_publication_completed is not None
+            ):
+                artifact_verification_required = False
+                artifact_path_pending_verification = None
+                artifact_publication_completed = None
+                artifact_finalization_required = True
+            if (
+                execution.terminal_outcome == "executed"
+                and _tool_call_is_mutating(tool_call)
+                and tool_result.name != ARTIFACT_TOOL_NAME
+            ):
                 state.advance_after_mutation(tool_call)
             if on_tool_result:
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
             if should_refresh_for_append(runtime.messages, tool_result.content, context_tokens=runtime.context_tokens):
                 runtime.refresh_memory_if_needed(temperature=temperature, force=True)
-            runtime.messages.append(
-                tool_result_message(
+            history_message = tool_result_message(
+                tool_call,
+                tool_result,
+                evidence_store=evidence_store,
+                metadata=_tool_evidence_metadata(
                     tool_call,
-                    tool_result,
-                    evidence_store=evidence_store,
-                    metadata=_tool_evidence_metadata(
-                        tool_call,
-                        source=execution.source,
-                        user_turn_id=user_turn_id,
-                        produced_by_phase=produced_by_phase,
-                    ),
-                )
+                    source=execution.source,
+                    user_turn_id=user_turn_id,
+                    produced_by_phase=produced_by_phase,
+                ),
             )
+            runtime.messages.append(history_message)
+            if artifact_finalization_required:
+                turn.mark_finalizable()
+                return answer_from_tool_results(
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
+                    loop=loop_index + 1,
+                    use_tool_prompt=True,
+                )
             if should_handoff_to_final_from_tool():
                 return answer_from_tool_results(
                     temperature=temperature,
@@ -1480,6 +1857,22 @@ def run_tool_loop(
                 loop=loop_index + 1,
                 use_tool_prompt=state.used_tool_call_prompt,
             )
+    if artifact_pending_verification is not None or artifact_verification_required:
+        base_result = last_result or ChatResult(
+            content="",
+            model=None,
+            finish_reason=None,
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+        return artifact_failure_result(
+            base_result,
+            "error: artifact was published but verification could not run within the bounded tool loop",
+        )
     return last_result or ChatResult(
         content="error: tool loop did not produce a response",
         model=None,
@@ -1511,6 +1904,7 @@ def _is_exact_canonical_tool_call(tool_call: dict[str, object]) -> bool:
         "fetch_url",
         "list_directory",
         "system_info",
+        ARTIFACT_TOOL_NAME,
     }
 
 
@@ -1588,6 +1982,8 @@ def _tool_call_is_mutating(tool_call: dict[str, object]) -> bool:
     function = tool_call.get("function")
     if not isinstance(function, dict):
         return False
+    if function.get("name") == ARTIFACT_TOOL_NAME:
+        return True
     command = _shell_command_from_tool_call(tool_call)
     return bool(command and is_mutating_shell_command(command))
 

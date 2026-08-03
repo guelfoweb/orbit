@@ -211,6 +211,39 @@ class _DiagnosticBackend:
             ),
         )
 
+    def artifact_content_stream(
+        self,
+        messages: list[Message],
+        *,
+        temperature: float,
+        max_tokens: int,
+        on_delta: Callable[[str], None],
+        on_progress: Callable[[StreamProgress], None] | None = None,
+    ) -> ChatResult:
+        generate = getattr(self._backend, "artifact_content_stream", None)
+        if not callable(generate):
+            raise RuntimeError("artifact content generation requires the native Orbit backend")
+        timings = _ProgressTimings()
+
+        def wrapped_progress(progress: StreamProgress) -> None:
+            timings.observe(progress)
+            if on_progress is not None:
+                on_progress(progress)
+
+        return self._record_call(
+            messages,
+            tools=None,
+            streamed=True,
+            progress_timings=timings,
+            invoke=lambda: generate(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_delta=on_delta,
+                on_progress=wrapped_progress if on_progress is not None else None,
+            ),
+        )
+
     def continue_current(self, *args: Any, **kwargs: Any) -> ChatResult:
         call_context = _next_call_context(_PHASE.get() or "continue", _TOOLS_MODE.get())
         started = time.monotonic()

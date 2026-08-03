@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from orbit.backend.payloads import ARTIFACT_CONTENT_PROTOCOL_ID, ARTIFACT_CONTENT_PROTOCOL_VERSION
 from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.capabilities import safe_native_capability_manifest
 from orbit.native_llama.chat_template import render_gemma4_route_prompt_segments
@@ -65,7 +66,15 @@ class OrbitNativeServer:
         validate_session_id(request.session_id)
         return self.complete(request, on_token=on_token, on_progress=on_progress, should_cancel=should_cancel)
 
+    def validate_request(self, request: ChatRequest) -> None:
+        thinking = self.client.config.thinking if request.thinking is None else request.thinking
+        if request.artifact_content and (request.tools or thinking or request.stop):
+            raise ValueError(
+                "artifact content generation requires tools, thinking, and stop sequences to be disabled"
+            )
+
     def complete(self, request: ChatRequest, *, on_token=None, on_progress=None, should_cancel=None) -> dict[str, Any]:
+        self.validate_request(request)
         parts: list[str] = []
 
         def collect(text: str) -> None:
@@ -82,20 +91,30 @@ class OrbitNativeServer:
                 and not request.tools
                 and _is_qwen_route_prompt(request.messages)
             )
-            completion = self.client.complete_chat_text(
-                request.messages,
-                max_tokens=request.max_tokens,
-                stop=request.stop,
-                tools=request.tools,
-                thinking=thinking,
-                route_prefix_anchor=request.route_prefix_anchor,
-                qwen_route_prefix_anchor=qwen_route_prefix_anchor,
-                allow_mtp_experimental=request.allow_mtp_experimental,
-                final_prefix_experiment=final_prefix_experiment,
-                on_progress=on_progress,
-                on_token=collect,
-                should_cancel=should_cancel,
-            )
+            if request.artifact_content:
+                completion = self.client.complete_artifact_text(
+                    request.messages,
+                    max_tokens=request.max_tokens,
+                    stop=request.stop,
+                    on_progress=on_progress,
+                    on_token=collect,
+                    should_cancel=should_cancel,
+                )
+            else:
+                completion = self.client.complete_chat_text(
+                    request.messages,
+                    max_tokens=request.max_tokens,
+                    stop=request.stop,
+                    tools=request.tools,
+                    thinking=thinking,
+                    route_prefix_anchor=request.route_prefix_anchor,
+                    qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+                    allow_mtp_experimental=request.allow_mtp_experimental,
+                    final_prefix_experiment=final_prefix_experiment,
+                    on_progress=on_progress,
+                    on_token=collect,
+                    should_cancel=should_cancel,
+                )
         timings = completion.timings
         content, stopped = trim_at_stop(completion.content, request.stop)
         stopped = stopped or completion.stopped_by_stop
@@ -322,6 +341,11 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_failure_reason": session["mtp_failure_reason"],
                     "model_id": state.client.paths.model_id,
                     "backend": "orbit-native",
+                    "artifact_content_protocol": {
+                        "id": ARTIFACT_CONTENT_PROTOCOL_ID,
+                        "version": ARTIFACT_CONTENT_PROTOCOL_VERSION,
+                        "literal_stream": True,
+                    },
                     "native_backend_capabilities": state.native_backend_capabilities,
                     "model_compatibility": state.client.compatibility_diagnostics(),
                     "backend_mode": session["backend_mode"],
@@ -507,6 +531,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
         try:
             request = parse_chat_request(payload)
             validate_session_id(request.session_id)
+            self._state().validate_request(request)
         except ValueError as exc:
             self._json({"error": str(exc)}, status=400)
             return

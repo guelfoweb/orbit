@@ -259,7 +259,16 @@ class ConfigTests(unittest.TestCase):
     def test_tools_on_uses_shell_fetch_url_list_directory_and_system_info(self) -> None:
         names = allowed_tool_names_for_spec("on")
 
-        self.assertEqual(names, ("exec_shell_full_command", "fetch_url", "list_directory", "system_info"))
+        self.assertEqual(
+            names,
+            (
+                "exec_shell_full_command",
+                "fetch_url",
+                "list_directory",
+                "system_info",
+                "write_artifact",
+            ),
+        )
 
     def test_legacy_tools_object_config_key_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
