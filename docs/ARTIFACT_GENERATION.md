@@ -19,18 +19,25 @@ decision from the potentially long file body:
 3. One native content phase receives the original request and validated target
    and emits UTF-8 file content only. It has no tools and does not parse its
    output as JSON, XML, shell, a heredoc, or a tool call.
-4. A stopped, non-empty result of at most 64 KiB remains pending in bounded
-   memory. No destination file or parent directory exists yet.
-5. The next model round exposes only `verify_artifact`. The model selects the
-   exact pending path and one bounded check.
-6. A passing check and atomic publication complete one mutation epoch. The
-   final response remains model-authored from exact path, byte-count, SHA-256,
-   overwrite, created-parent, and verification evidence.
+4. A stopped, non-empty result of at most 64 KiB is validated as UTF-8 and
+   published to the exact target with an atomic file operation.
+5. Publication evidence records the exact path, byte count, SHA-256,
+   overwrite state, and any parents created by this request.
+6. The next model round exposes only `verify_artifact`. The capability is
+   intrinsically bound to the exact published path, and the model selects one
+   bounded read-only check without supplying a replacement path.
+7. The final response remains model-authored from separate publication and
+   verification evidence.
 
 `verify_artifact` is an ephemeral internal capability. It is not part of the
 normal tools-on registry and cannot be selected outside a pending artifact
 request. Ordinary chat and non-artifact tool routes gain no model call and do
 not receive the artifact schemas.
+
+Publication and verification are intentionally separate. A verification
+failure does not undo or replace an already published target. Orbit reports
+the file as published but unverified and does not claim that its content passed
+the selected check.
 
 ## Checks
 
@@ -53,14 +60,14 @@ control characters, symlink components, symlink destinations, FIFOs, devices,
 and other non-regular targets fail closed. Existing files require explicit
 `overwrite=true` and are attested before and during publication.
 
-Missing parents are part of the same atomic operation. Orbit records exactly
-which parents were absent when the request was prepared. After content and
-model-selected verification pass, it builds those parents and the file in one
-private directory below the deepest existing parent, fsyncs the private tree,
-and publishes the top missing parent with one no-replace rename. If another
-process creates that parent first, publication fails and preserves the
-concurrent tree. Failure cleanup removes only Orbit's private empty hierarchy;
-it never removes pre-existing or concurrently created paths.
+Missing parents require the model-selected `create_parents=true` argument.
+After content validation, Orbit creates each absent directory relative to an
+attested descriptor and records its exact inode. Parent directories are not
+published or rolled back as one tree. On failure Orbit attempts `rmdir` only
+for an exact directory created by this request and only while it remains empty.
+A directory containing concurrent files or directories stays at its original
+visible path. Pre-existing directories are never removed, renamed, or moved
+into private Orbit state.
 
 For an existing parent, Orbit uses an unnamed or private same-filesystem file
 and atomically links or exchanges it into place. Overwrite races are detected;
@@ -73,31 +80,46 @@ Orbit uses an atomic no-replace hard link for the private inode and removes only
 the private name. Fsync and post-publication identity/hash attestation remain
 unchanged.
 
-Publishing a new parent tree still requires filesystem support for atomic
-no-replace directory rename, and replacing an existing file requires atomic
-exchange. Orbit fails closed when those primitives are unavailable; it does not
-fall back to a pathname check followed by a racy ordinary rename. Creation in
-an existing directory remains supported through the no-replace hard-link
-fallback described above.
+The destination file, rather than a shared parent tree, is the atomic unit.
+New files use no-replace link or rename semantics and replacing an existing file
+requires atomic exchange. Orbit fails closed when those primitives are
+unavailable; it does not fall back to a pathname check followed by a racy
+ordinary rename.
 
-Parent creation is not a successful mutation by itself. The mutation epoch
-advances exactly once, only after the selected check passes and publication is
-complete.
+Parent creation is not a successful artifact publication by itself. The
+mutation epoch advances exactly once after atomic file publication; the
+workflow remains structurally incomplete until the model selects and passes a
+read-only verification.
 
 ## Lifecycle
 
-`finish_reason=length`, malformed verification, cancellation, timeout, reset,
-generation error, UTF-8 failure, size failure, path race, or check failure
-publishes nothing. Pending state is turn-local and process-local. Content is
-buffered before any temporary filesystem object is created, so cancellation or
-restart during the long generation phase leaves no file, parent, or stale
-temporary artifact.
+`finish_reason=length`, cancellation or timeout during content generation,
+generation error, UTF-8 failure, size failure, or a pre-commit path race
+publishes no destination file. Content is buffered before any temporary
+filesystem object is created, so interruption during the long generation phase
+leaves no file, parent, or private artifact entry. Once atomic publication
+succeeds, a later malformed, cancelled, timed-out, or failed verification does
+not mutate or remove the published file.
 
 The final atomic filesystem section is intentionally short and synchronous.
-Normal failures clean its private objects. As with any userspace atomic-write
-protocol, an uncatchable process or power loss in the narrow interval before a
-private staging directory is renamed can leave a hidden `.orbit-artifact-*`
-entry; it never exposes a partial destination or removes unrelated data.
+Normal failures clean its private objects. Named private files are paired with
+bounded manifests in `.orbit-artifact-state`. The manifest binds the random
+name, parent, device, inode, uid, boot identity, PID, and process start time.
+Startup cleanup stays inside the active workdir, never follows symlinks, keeps
+entries owned by a live process, and removes a dead process's entry only when
+every manifest, ownership, mode, link-count, and inode check still matches.
+Malformed, replaced, linked, or otherwise ambiguous entries are preserved.
+
+Zero residual private state after an uncatchable crash or power loss cannot be
+proved for every filesystem. A crash between private-file creation and manifest
+registration can leave an untracked private name. A crash during hard-link
+publication or overwrite exchange can leave an entry whose identity is
+ambiguous or may contain displaced user data; recovery preserves it rather than
+guessing. A crash after explicitly authorized parent creation but before file
+publication can also leave empty visible directories because Orbit cannot later
+distinguish them safely from directories retained or reused by another process.
+These narrow cases may require manual inspection. They never justify deleting a
+user-visible target or moving concurrent content.
 
 ## Bounds And Limits
 
@@ -124,12 +146,16 @@ generation speed.
 ## Validation
 
 The Qwen 3.6 35B-A3B Q4_K_M validation covered standalone JavaScript, one-file
-HTML/CSS/JavaScript, Markdown, JSON, and Python. Five clean standalone Snake
-runs produced the same 3,058-byte artifact and SHA-256, selected the generic
-text-integrity check, and stopped normally. Separately, validation extracted
-the script from the 10,290-byte self-contained browser artifact and confirmed
-its syntax with `node --check`; that external check is not an Orbit verifier
-capability.
+HTML/CSS/JavaScript, Markdown, JSON, Python, and plain text. Five clean runs of
+the original standalone Snake request produced the same 4,590-byte artifact
+with SHA-256
+`3dac570c5e1c7b24bd304bc776651eea0901db2a423bd68b00550301f723ab45`,
+selected the generic text-integrity check, and stopped normally. Each run used
+four model calls, published before the read-only verification, passed
+`node --check`, and left no private artifact entry. Separately, validation
+extracted the script from the 10,290-byte self-contained browser artifact and
+confirmed its syntax with `node --check`; that external check is not an Orbit
+verifier capability.
 
 A 2,048-token content probe ended at `length` and correctly published nothing.
 The retained 4,096-token bound completed the measured browser artifact.

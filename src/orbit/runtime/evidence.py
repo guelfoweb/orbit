@@ -137,7 +137,6 @@ class EvidenceStore:
             for record in self.records.values()
             if record.metadata.get("ephemeral") in {
                 "full_document_snapshot",
-                "artifact_pending",
             }
         ]
         for evidence_id in ephemeral_ids:
@@ -437,8 +436,6 @@ def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) ->
         return "artifact_error"
     if tool_name == "write_artifact" and "artifact_publication: complete" in content:
         return "artifact"
-    if tool_name == "write_artifact" and "artifact_generation: complete" in content:
-        return "artifact_pending"
     if tool_name == "verify_artifact":
         return "artifact_verification"
     if (
@@ -486,10 +483,8 @@ def _enriched_metadata(kind: str, content: str, metadata: dict[str, object]) -> 
         enriched.update(_shell_metadata(content))
     if kind == "read":
         enriched.update(_document_metadata(content))
-    if kind in {"artifact", "artifact_pending"}:
+    if kind == "artifact":
         enriched.update(_artifact_metadata(content))
-    if kind == "artifact_pending":
-        enriched["ephemeral"] = "artifact_pending"
     if kind == "artifact_error":
         enriched["artifact_error_detail"] = content.strip()
     if kind == "artifact_verification":
@@ -714,7 +709,6 @@ def _should_use_small_final_prompt_card(record: EvidenceRecord) -> bool:
     return record.kind in {
         "artifact",
         "artifact_error",
-        "artifact_pending",
         "artifact_verification",
         "shell",
         "grep_search",
@@ -725,7 +719,7 @@ def _should_use_small_final_prompt_card(record: EvidenceRecord) -> bool:
 def _small_final_prompt_metadata_keys(record: EvidenceRecord) -> tuple[str, ...]:
     if record.kind == "grep_search":
         return ("query", "exit_code", "match_count", "files_count", "file_paths", "first_matches")
-    if record.kind in {"artifact", "artifact_pending"}:
+    if record.kind == "artifact":
         return (
             "artifact_path",
             "artifact_bytes",
@@ -790,7 +784,7 @@ def _route_operational_card(record: EvidenceRecord) -> str:
         keys = ("query", "match_count", "files_count", "file_paths", "search_coverage", "semantic_coverage")
     elif record.kind == "web_search":
         keys = ("query", "result_count", "top_domains")
-    elif record.kind in {"artifact", "artifact_pending"}:
+    elif record.kind == "artifact":
         keys = (
             "artifact_path",
             "artifact_bytes",

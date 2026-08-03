@@ -377,27 +377,37 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   path, overwrite, and parent-creation arguments. File content is generated in
   one dedicated native phase without tools, shell, JSON, XML, or heredoc
   framing. The runtime never invents or repairs task content.
-- Complete content remains unpublished until the model selects the exact
-  pending path and one bounded `verify_artifact` check. That verifier is an
-  ephemeral capability and is absent from the normal tools-on registry.
-- Publication requires `finish_reason=stop`, valid UTF-8, at most 64 KiB, a
-  passing selected check, stable path identity, and an atomic same-filesystem
-  commit. Length, cancel, timeout, reset, path race, failed check, or generation
-  error publishes nothing.
+- Complete content is published only after `finish_reason=stop`, UTF-8 and
+  64-KiB validation, stable path attestation, and an atomic same-filesystem
+  commit. The exact published path is intrinsic to the pending capability; the
+  model then selects one bounded read-only `verify_artifact` check without
+  supplying another path. That ephemeral capability is absent from the normal
+  tools-on registry.
+- Length, cancel, timeout, reset, path race, or generation error before commit
+  publishes nothing. Verification never publishes or mutates. A verification
+  failure leaves the atomically published file in place and is reported as
+  published but unverified.
 - Existing parents use an unnamed same-filesystem temporary file when
   supported. An unsupported anonymous open/link falls back to an exclusive
   private mode-`0600` file in the same directory; unsupported regular-file
   `RENAME_NOREPLACE` then uses an atomic no-replace hard link without weakening
   fsync, race checks, or post-publication attestation.
-- Atomic publication of a new parent tree still requires no-replace directory
-  rename support, and overwrite requires atomic exchange. Unsupported
-  filesystems fail closed rather than using a pathname-check/ordinary-rename
-  fallback with a TOCTOU window.
-- `create_parents` is part of the same atomic operation. Missing parents are
-  built in a private subtree and exposed with one no-replace rename. Cleanup
-  removes only Orbit-created private empty paths and never pre-existing or
-  concurrently created content. The mutation epoch advances only after
-  verification and publication both complete.
+- The destination file is the atomic unit; shared parent trees are never moved
+  for publication or rollback. Overwrite requires atomic exchange, and
+  unsupported filesystems fail closed rather than using a pathname-check/
+  ordinary-rename fallback with a TOCTOU window.
+- `create_parents` explicitly authorizes descriptor-relative creation of
+  missing directories. Cleanup attempts to remove only exact directories made
+  by the request and only while empty; concurrent or pre-existing content is
+  never moved or removed. The mutation epoch advances after file publication,
+  while successful completion still requires model-selected verification.
+- Named private files use process- and inode-bound recovery manifests. Startup
+  removes only exact dead-process entries; symlinks, malformed state, changed
+  identities, linked files, and other ambiguity are preserved. Absolute zero
+  residue after power loss is not claimed because narrow pre-registration and
+  publication crash windows cannot be cleaned without risking user data.
+  Explicitly created empty parent directories may likewise remain after an
+  uncatchable crash when later ownership cannot be proved safely.
 - The dedicated 4,096-token content budget does not change route, normal tool,
   chat, or final budgets. One file per request and native backend only are the
   initial bounds. Semantic chunking, hidden retries, deterministic content,

@@ -11,6 +11,7 @@ from orbit.dev.release_confidence import main as release_confidence_main
 from orbit.native_llama.download_cli import main as native_download_main
 from orbit.native_server.app import run_server
 from orbit.runtime import ChatRuntime
+from orbit.runtime.artifacts import cleanup_stale_artifact_entries
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.media import load_audio, load_image
 from orbit.runtime.turn_trace import ModelStepMetrics
@@ -68,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    cleanup_stale_artifact_entries(config.workdir)
 
     backend = LlamaServerBackend(base_url=config.base_url, timeout=config.timeout)
     backend.thinking = config.think

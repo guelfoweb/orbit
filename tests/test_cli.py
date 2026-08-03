@@ -7,6 +7,7 @@ import unittest
 import contextlib
 import io
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -23,6 +24,31 @@ from orbit.backend.base import ChatResult
 
 
 class CliTests(unittest.TestCase):
+    def test_cli_startup_runs_bounded_artifact_recovery_for_active_workdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            config = SimpleNamespace(
+                workdir=workdir,
+                base_url="http://127.0.0.1:12120",
+                timeout=30.0,
+                think=False,
+            )
+            stream = io.StringIO()
+            with mock.patch(
+                "orbit.terminal.cli.load_app_config", return_value=config
+            ), mock.patch(
+                "orbit.terminal.cli.cleanup_stale_artifact_entries"
+            ) as cleanup, mock.patch(
+                "orbit.terminal.cli.LlamaServerBackend"
+            ), mock.patch(
+                "orbit.terminal.cli.health_text", return_value="health"
+            ), contextlib.redirect_stdout(stream):
+                code = cli.main(["--health"])
+
+            self.assertEqual(code, 0)
+            cleanup.assert_called_once_with(workdir)
+            self.assertEqual(stream.getvalue().strip(), "health")
+
     def test_one_shot_footer_reports_complete_turn_token_usage(self) -> None:
         class FakeRuntime:
             messages = []

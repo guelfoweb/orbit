@@ -58,7 +58,7 @@ class _ArtifactWorkflowBackend:
         self.initial_result = initial_result
         self.verification_call = verification_call or _tool_call(
             "verify_artifact",
-            {"path": "samples/game.js", "check": "text_integrity"},
+            {"check": "text_integrity"},
             "verify-1",
         )
         self.verification_result = verification_result
@@ -165,7 +165,7 @@ class ArtifactToolLoopTests(unittest.TestCase):
             artifact_result=_result("x" * 2_000),
             verification_call=_tool_call(
                 "verify_artifact",
-                {"path": "samples/game.js", "check": "content"},
+                {"check": "content"},
                 "verify-content",
             ),
         )
@@ -234,9 +234,9 @@ class ArtifactToolLoopTests(unittest.TestCase):
                     artifact_exists = (root / "samples/game.js").exists()
                     parent_exists = (root / "samples").exists()
 
-                self.assertFalse(artifact_exists)
-                self.assertFalse(parent_exists)
-                self.assertIn("no artifact was published", result.content)
+                self.assertTrue(artifact_exists)
+                self.assertTrue(parent_exists)
+                self.assertIn("published but verification was invalid", result.content)
                 self.assertEqual(backend.calls, 2)
 
     def test_malformed_artifact_call_cannot_fall_through_to_shell(self) -> None:
@@ -262,6 +262,40 @@ class ArtifactToolLoopTests(unittest.TestCase):
 
             self.assertFalse((root / "samples/game.js").exists())
             self.assertEqual(backend.artifact_calls, [])
+            self.assertNotIn("Created samples/game.js", result.content)
+
+    def test_verify_artifact_before_publication_is_structurally_unavailable(self) -> None:
+        backend = _ArtifactWorkflowBackend(
+            initial_result=_result(
+                "",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _tool_call(
+                        "verify_artifact",
+                        {"path": "samples/game.js", "check": "text_integrity"},
+                        "verify-before-publication",
+                    )
+                ],
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = ChatRuntime(backend=backend, system_prompt=None).ask_auto(
+                "verify samples/game.js",
+                temperature=0,
+                max_tokens=256,
+                workdir=root,
+            )
+
+            self.assertFalse((root / "samples/game.js").exists())
+            self.assertEqual(backend.artifact_calls, [])
+            visible_tools = {
+                tool["function"]["name"]
+                for tools in backend.tools_seen
+                if tools is not None
+                for tool in tools
+            }
+            self.assertNotIn("verify_artifact", visible_tools)
             self.assertNotIn("Created samples/game.js", result.content)
 
     def test_cancelled_artifact_generation_terminates_without_another_model_call(self) -> None:
@@ -335,7 +369,8 @@ class ArtifactToolLoopTests(unittest.TestCase):
                 workdir=root,
             )
 
-            self.assertIn("no artifact was published", result.content)
+            self.assertTrue((root / "samples/game.js").is_file())
+            self.assertIn("published but verification was invalid", result.content)
             self.assertNotIn(
                 "artifact_pending",
                 [record.kind for record in runtime.evidence_store.recent_records(10)],
@@ -360,8 +395,8 @@ class ArtifactToolLoopTests(unittest.TestCase):
             )
 
             self.assertEqual(backend.calls, 3)
-            self.assertFalse((root / "samples").exists())
-            self.assertIn("no artifact was published", result.content)
+            self.assertTrue((root / "samples/game.js").is_file())
+            self.assertIn("published but verification did not complete", result.content)
             self.assertNotIn(
                 "artifact_pending",
                 [record.kind for record in runtime.evidence_store.recent_records(10)],
@@ -412,7 +447,7 @@ class ArtifactToolLoopTests(unittest.TestCase):
                     workdir=root,
                 )
 
-            self.assertFalse((root / "samples").exists())
+            self.assertTrue((root / "samples/game.js").is_file())
             self.assertNotIn(
                 "artifact_pending",
                 [record.kind for record in runtime.evidence_store.recent_records(10)],
@@ -436,8 +471,8 @@ class ArtifactToolLoopTests(unittest.TestCase):
                 tool_names=("write_artifact",),
             )
 
-            self.assertFalse((root / "samples").exists())
-            self.assertIn("no artifact was published", result.content)
+            self.assertTrue((root / "samples/game.js").is_file())
+            self.assertIn("published but verification could not run", result.content)
             self.assertNotIn(
                 "artifact_pending",
                 [record.kind for record in runtime.evidence_store.recent_records(10)],
@@ -508,14 +543,15 @@ class ArtifactToolLoopTests(unittest.TestCase):
                 workdir=root,
             )
 
-            self.assertFalse((root / "samples").exists())
+            self.assertTrue((root / "samples/game.js").is_file())
             self.assertEqual(len(backend.artifact_calls), 1)
-            self.assertIn("no artifact was published", result.content)
+            self.assertFalse((root / "samples/second.js").exists())
+            self.assertIn("published but verification was invalid", result.content)
 
     def test_verification_requires_exactly_one_call_with_canonical_gate_on_or_off(self) -> None:
         valid = _tool_call(
             "verify_artifact",
-            {"path": "samples/game.js", "check": "text_integrity"},
+            {"check": "text_integrity"},
             "verify",
         )
         second = _tool_call(
@@ -543,9 +579,9 @@ class ArtifactToolLoopTests(unittest.TestCase):
                     workdir=root,
                 )
 
-                self.assertFalse((root / "samples").exists())
+                self.assertTrue((root / "samples/game.js").is_file())
                 self.assertEqual(len(backend.artifact_calls), 1)
-                self.assertIn("no artifact was published", result.content)
+                self.assertIn("published but verification", result.content)
 
     def test_duplicate_verification_arguments_fail_with_canonical_gate_on_or_off(self) -> None:
         duplicate = {
@@ -554,8 +590,7 @@ class ArtifactToolLoopTests(unittest.TestCase):
             "function": {
                 "name": "verify_artifact",
                 "arguments": (
-                    '{"path":"samples/game.js","path":"samples/game.js",'
-                    '"check":"text_integrity"}'
+                    '{"check":"text_integrity","check":"text_integrity"}'
                 ),
             },
         }
@@ -573,8 +608,8 @@ class ArtifactToolLoopTests(unittest.TestCase):
                     workdir=root,
                 )
 
-                self.assertFalse((root / "samples").exists())
-                self.assertIn("no artifact was published", result.content)
+                self.assertTrue((root / "samples/game.js").is_file())
+                self.assertIn("published but verification", result.content)
 
     def test_internal_verifier_prose_is_not_streamed(self) -> None:
         backend = _ArtifactWorkflowBackend(
@@ -591,11 +626,11 @@ class ArtifactToolLoopTests(unittest.TestCase):
                 on_final_delta=emitted.append,
             )
 
-            self.assertFalse((root / "samples").exists())
+            self.assertTrue((root / "samples/game.js").is_file())
         self.assertEqual("".join(emitted), result.content)
         self.assertNotIn("I cannot verify", "".join(emitted))
 
-    def test_verification_must_reference_the_model_selected_artifact(self) -> None:
+    def test_verification_rejects_path_substitution(self) -> None:
         backend = _ArtifactWorkflowBackend(
             verification_call=_tool_call(
                 "verify_artifact",
@@ -612,9 +647,9 @@ class ArtifactToolLoopTests(unittest.TestCase):
                 workdir=Path(tmp),
             )
 
-            self.assertFalse((Path(tmp) / "samples").exists())
+            self.assertTrue((Path(tmp) / "samples/game.js").is_file())
 
-        self.assertIn("no artifact was published", result.content)
+        self.assertIn("published but verification was invalid", result.content)
 
     def test_verification_extra_arguments_fail_closed_with_canonical_gate_on_or_off(self) -> None:
         for canonical_gate in ("0", "1"):
@@ -626,7 +661,6 @@ class ArtifactToolLoopTests(unittest.TestCase):
                     verification_call=_tool_call(
                         "verify_artifact",
                         {
-                            "path": "samples/game.js",
                             "check": "text_integrity",
                             "command": "printf unexpected",
                         },
@@ -643,7 +677,7 @@ class ArtifactToolLoopTests(unittest.TestCase):
                         workdir=root,
                     )
 
-                    self.assertFalse((root / "samples").exists())
+                    self.assertTrue((root / "samples/game.js").is_file())
                     self.assertNotIn("Created samples/game.js", result.content)
                     self.assertIn("verification was invalid", result.content)
 
@@ -667,7 +701,7 @@ class ArtifactToolLoopTests(unittest.TestCase):
         self.assertEqual(result.finish_reason, "stop")
         self.assertNotIn("Created samples/game.js", result.content)
 
-    def test_cancelled_or_length_verification_aborts_pending_file_and_parents(self) -> None:
+    def test_cancelled_or_length_verification_preserves_published_file(self) -> None:
         cases = (
             ("cancelled", None),
             ("length", None),
@@ -675,7 +709,7 @@ class ArtifactToolLoopTests(unittest.TestCase):
                 "length",
                 _tool_call(
                     "verify_artifact",
-                    {"path": "samples/game.js", "check": "text_integrity"},
+                    {"check": "text_integrity"},
                     "truncated-verification",
                 ),
             ),
@@ -703,10 +737,10 @@ class ArtifactToolLoopTests(unittest.TestCase):
                     on_final_delta=emitted.append,
                 )
 
-                self.assertFalse((root / "samples").exists())
+                self.assertTrue((root / "samples/game.js").is_file())
                 self.assertEqual(list(root.glob(".orbit-artifact-*")), [])
                 self.assertEqual(result.finish_reason, "stop")
-                self.assertIn("no artifact was published", result.content)
+                self.assertIn("artifact was published but verification", result.content)
                 self.assertEqual("".join(emitted), result.content)
                 self.assertEqual(runtime.messages[-1], {"role": "assistant", "content": result.content})
 

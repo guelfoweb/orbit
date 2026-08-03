@@ -106,6 +106,9 @@ def build_final_tool_policy(
     verified_mutation_result = has_verified_mutation_evidence(call_messages)
     verified_artifact_result = has_verified_artifact_evidence(call_messages)
     failed_artifact_result = has_failed_artifact_evidence(call_messages)
+    unverified_published_artifact_result = has_unverified_published_artifact_evidence(
+        call_messages
+    )
     system_info_result = has_tool_result(call_messages, "system_info")
     operational_status_result = shell_full_result and is_operational_status_request(prompt)
     brief_request = is_brief_final_request(prompt)
@@ -125,6 +128,12 @@ def build_final_tool_policy(
             "then state exactly what the selected verification confirmed. Do not describe the artifact as pre-existing. "
         )
         if verified_artifact_result
+        else (
+            "The artifact was atomically published in this turn, but its required read-only verification failed. "
+            "Name the exact artifact path and report the observed verification failure. "
+            "State that the file remains published, but do not claim that its content passed verification or satisfies the request. "
+        )
+        if unverified_published_artifact_result
         else (
             "The artifact workflow failed before verified publication, so no artifact was published. "
             "Name the exact requested path and report the observed verification failure. "
@@ -463,8 +472,6 @@ def has_verified_artifact_evidence(messages: list[Message]) -> bool:
     if not isinstance(publication_content, str) or not (
         "artifact_publication: complete" in publication_content
         or ("kind: artifact" in publication_content and "status: ok" in publication_content)
-        or "artifact_generation: complete" in publication_content
-        or ("kind: artifact_pending" in publication_content and "status: ok" in publication_content)
     ):
         return False
     for message in messages[publication_index + 1 :]:
@@ -493,8 +500,8 @@ def has_failed_artifact_evidence(messages: list[Message]) -> bool:
     ):
         return True
     if not (
-        "artifact_generation: complete" in pending_content
-        or ("kind: artifact_pending" in pending_content and "status: ok" in pending_content)
+        "artifact_publication: complete" in pending_content
+        or ("kind: artifact" in pending_content and "status: ok" in pending_content)
     ):
         return False
     return any(
@@ -510,6 +517,24 @@ def has_failed_artifact_evidence(messages: list[Message]) -> bool:
         )
         for message in messages[pending_index + 1 :]
     )
+
+
+def has_unverified_published_artifact_evidence(messages: list[Message]) -> bool:
+    publication_index = _latest_artifact_request_index(messages)
+    if publication_index is None:
+        return False
+    publication_content = messages[publication_index].get("content")
+    if not isinstance(publication_content, str) or not (
+        "artifact_publication: complete" in publication_content
+        or ("kind: artifact" in publication_content and "status: ok" in publication_content)
+    ):
+        return False
+    verification_messages = [
+        message
+        for message in messages[publication_index + 1 :]
+        if message.get("role") == "tool" and message.get("name") == "verify_artifact"
+    ]
+    return bool(verification_messages) and not has_verified_artifact_evidence(messages)
 
 
 def _latest_artifact_request_index(messages: list[Message]) -> int | None:

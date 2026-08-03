@@ -1110,7 +1110,6 @@ class ChatRuntime:
             "web_search",
             "fetch",
             "artifact",
-            "artifact_pending",
             "artifact_verification",
             "artifact_error",
         }:

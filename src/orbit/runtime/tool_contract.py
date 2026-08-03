@@ -243,16 +243,15 @@ def _policy_and_operational(
             limit = _integer_limit(arguments, "max_entries", 1, MAX_ENTRIES_LIMIT)
         return neutral, limit or neutral
     if name in {ARTIFACT_TOOL_NAME, ARTIFACT_VERIFY_TOOL_NAME}:
-        path = arguments.get("path")
-        path_error = validate_artifact_path(path, workdir=workdir)
-        if path_error:
-            return neutral, ContractStageOutcome(
-                False,
-                "invalid_artifact_path",
-                "arguments.path",
-                path_error,
-            )
         if name == ARTIFACT_TOOL_NAME:
+            path_error = validate_artifact_path(arguments.get("path"), workdir=workdir)
+            if path_error:
+                return neutral, ContractStageOutcome(
+                    False,
+                    "invalid_artifact_path",
+                    "arguments.path",
+                    path_error,
+                )
             policy_error = validate_tool_no_mutation_policy(name, arguments, user_prompt=user_prompt)
             if policy_error:
                 return ContractStageOutcome(

@@ -53,10 +53,9 @@ def format_tool_call_event(name: str, args: str) -> str:
             parsed = json.loads(args)
         except (TypeError, ValueError):
             parsed = {}
-        path = parsed.get("path") if isinstance(parsed, dict) else None
         check = parsed.get("check") if isinstance(parsed, dict) else None
-        if isinstance(path, str) and isinstance(check, str):
-            return f"Verify: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)} ({check})"
+        if isinstance(check, str):
+            return f"Verify: published artifact ({check})"
     return f"{display_tool_name(name)} {args}"
 
 

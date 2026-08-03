@@ -353,6 +353,10 @@ class ReplTests(unittest.TestCase):
             format_tool_call_event("fetch_url", json.dumps({"url": "https://example.com"})),
             "Fetch: https://example.com",
         )
+        self.assertEqual(
+            format_tool_call_event("verify_artifact", json.dumps({"check": "text_integrity"})),
+            "Verify: published artifact (text_integrity)",
+        )
 
     def test_tool_result_event_previews_pdf_and_list_output(self) -> None:
         pdf_content = "\n".join(

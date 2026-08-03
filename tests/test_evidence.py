@@ -59,32 +59,31 @@ class EvidenceTests(unittest.TestCase):
             self.assertFalse(sidecar.exists())
             self.assertEqual(restarted.recent_records(1), [])
 
-    def test_restart_removes_abandoned_pending_artifact_evidence(self) -> None:
+    def test_restart_preserves_completed_artifact_publication_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "session.evidence"
             first = EvidenceStore(root)
-            pending = first.add(
+            publication = first.add(
                 "write_artifact",
                 "\n".join(
                     (
-                        "artifact_generation: complete",
+                        "artifact_publication: complete",
                         "path: note.txt",
                         "bytes: 4",
                         "sha256: " + "a" * 64,
-                        "publication_status: pending",
                         "verification_required: true",
                     )
                 ),
             )
-            self.assertEqual(pending.metadata.get("ephemeral"), "artifact_pending")
-            sidecar = root / f"{pending.evidence_id}.txt"
+            self.assertNotIn("ephemeral", publication.metadata)
+            sidecar = root / f"{publication.evidence_id}.txt"
             self.assertTrue(sidecar.exists())
 
             restarted = EvidenceStore(root)
             restarted.load_index()
 
-            self.assertFalse(sidecar.exists())
-            self.assertEqual(restarted.recent_records(1), [])
+            self.assertTrue(sidecar.exists())
+            self.assertEqual(restarted.recent_records(1)[0].kind, "artifact")
 
     def test_repeated_ephemeral_cleanup_has_no_linear_disk_growth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,7 +122,7 @@ class EvidenceTests(unittest.TestCase):
                     "overwrite: false",
                     "created_parent_directories: samples",
                     "directory_sync: complete",
-                    "verification_completed: true",
+                    "verification_completed: false",
                 )
             ),
         )
@@ -136,22 +135,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("artifact_path: samples/game.js", record.final_card)
         self.assertIn("created_parent_directories: samples", record.route_card)
 
-    def test_pending_artifact_and_verified_publication_keep_distinct_evidence(self) -> None:
-        pending = build_evidence_record(
+    def test_publication_and_read_only_verification_keep_distinct_evidence(self) -> None:
+        publication = build_evidence_record(
             "write_artifact",
-            "\n".join(
-                (
-                    "artifact_generation: complete",
-                    "path: samples/game.js",
-                    "bytes: 42",
-                    "sha256: " + "a" * 64,
-                    "publication_status: pending",
-                    "verification_required: true",
-                )
-            ),
-        )
-        verified = build_evidence_record(
-            "verify_artifact",
             "\n".join(
                 (
                     "artifact_publication: complete",
@@ -161,8 +147,19 @@ class EvidenceTests(unittest.TestCase):
                     "overwrite: false",
                     "created_parent_directories: samples",
                     "directory_sync: complete",
-                    "verification_completed: true",
+                    "verification_required: true",
+                    "verification_completed: false",
+                )
+            ),
+        )
+        verified = build_evidence_record(
+            "verify_artifact",
+            "\n".join(
+                (
                     "artifact_verification: complete",
+                    "path: samples/game.js",
+                    "bytes: 42",
+                    "sha256: " + "a" * 64,
                     "check: text_integrity",
                     "status: pass",
                     "detail: syntax valid",
@@ -170,11 +167,12 @@ class EvidenceTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(pending.kind, "artifact_pending")
+        self.assertEqual(publication.kind, "artifact")
         self.assertEqual(verified.kind, "artifact_verification")
-        self.assertEqual(verified.metadata["created_parent_directories"], "samples")
-        self.assertEqual(verified.metadata["artifact_overwrite"], "false")
-        self.assertEqual(verified.metadata["artifact_verification_completed"], "true")
+        self.assertEqual(publication.metadata["created_parent_directories"], "samples")
+        self.assertEqual(publication.metadata["artifact_overwrite"], "false")
+        self.assertEqual(publication.metadata["artifact_verification_completed"], "false")
+        self.assertEqual(verified.metadata["artifact_check"], "text_integrity")
 
     def test_failed_artifact_verification_is_structured_error_evidence(self) -> None:
         record = build_evidence_record(

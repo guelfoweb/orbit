@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -17,6 +18,7 @@ from orbit.runtime.artifacts import (
     MAX_ARTIFACT_BYTES,
     artifact_content_messages,
     begin_artifact_generation,
+    cleanup_stale_artifact_entries,
     prepare_artifact_target,
     validate_artifact_path,
     verify_artifact_definition,
@@ -73,11 +75,8 @@ class ArtifactPublicationTests(unittest.TestCase):
             on_progress=None,
         )
         try:
-            publication, _evidence = pending.verify_and_publish(
-                {"path": path, "check": check},
-                workdir=root,
-            )
-            return pending.generation, publication
+            pending.verify({"check": check})
+            return pending.generation, pending.publication
         finally:
             pending.abort()
 
@@ -93,12 +92,13 @@ class ArtifactPublicationTests(unittest.TestCase):
         self.assertEqual(verify_function["name"], "verify_artifact")
         self.assertEqual(
             set(verify_function["parameters"]["properties"]),
-            {"path", "check"},
+            {"check"},
         )
         self.assertEqual(
             verify_function["parameters"]["properties"]["check"]["enum"],
             ["content", "text_integrity"],
         )
+        self.assertEqual(verify_function["parameters"]["required"], ["check"])
 
     def test_directory_form_destinations_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,16 +116,16 @@ class ArtifactPublicationTests(unittest.TestCase):
         )
 
         system = messages[0]["content"]
-        self.assertIn("first output character must belong to the file body", system)
-        self.assertIn("last output character must complete that body", system)
-        self.assertIn("even when it resembles control syntax", system)
-        self.assertIn("without placeholders, stubs", system)
+        self.assertIn("one complete bounded UTF-8 text artifact", system)
+        self.assertIn("Do not use tools, shell, JSON/XML envelopes", system)
+        self.assertIn("Output the complete file body now", messages[1]["content"])
+        self.assertIn("do not output or discuss the destination path", messages[1]["content"])
         self.assertNotIn("JavaScript", system)
         self.assertNotIn("Python", system)
         self.assertNotIn("HTML", system)
         self.assertEqual(messages[1]["content"].count("chosen/name.ext"), 1)
 
-    def test_generation_and_parent_creation_remain_invisible_until_model_verification(self) -> None:
+    def test_generation_publishes_before_model_selected_read_only_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pending = begin_artifact_generation(
@@ -139,19 +139,43 @@ class ArtifactPublicationTests(unittest.TestCase):
                 on_progress=None,
             )
 
-            self.assertFalse((root / "samples").exists())
-            self.assertIn("publication_status: pending", pending.evidence())
-            publication, evidence = pending.verify_and_publish(
-                {"path": "samples/games/snake.js", "check": "text_integrity"},
-                workdir=root,
+            self.assertTrue((root / "samples/games/snake.js").is_file())
+            self.assertIn("artifact_publication: complete", pending.evidence())
+            before = (root / "samples/games/snake.js").stat()
+            mutation_paths = (
+                "orbit.runtime.artifacts._renameat2",
+                "orbit.runtime.artifacts.os.unlink",
+                "orbit.runtime.artifacts.os.mkdir",
+                "orbit.runtime.artifacts.os.rmdir",
+                "orbit.runtime.artifacts.os.rename",
+                "orbit.runtime.artifacts.os.replace",
+                "orbit.runtime.artifacts.os.link",
+                "orbit.runtime.artifacts.os.write",
+                "orbit.runtime.artifacts.os.fchmod",
+                "orbit.runtime.artifacts.os.chmod",
+            )
+            patchers = [
+                mock.patch(path, side_effect=AssertionError(f"verifier mutated through {path}"))
+                for path in mutation_paths
+            ]
+            for patcher in patchers:
+                patcher.start()
+            try:
+                evidence = pending.verify({"check": "text_integrity"})
+            finally:
+                for patcher in reversed(patchers):
+                    patcher.stop()
+            after = (root / "samples/games/snake.js").stat()
+
+            self.assertEqual(pending.publication.created_parent_directories, ("samples", "samples/games"))
+            self.assertEqual((root / "samples/games/snake.js").read_text(), "console.log('ready');\n")
+            self.assertIn("artifact_verification: complete", evidence)
+            self.assertEqual(
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns),
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
             )
 
-            self.assertEqual(publication.created_parent_directories, ("samples", "samples/games"))
-            self.assertEqual((root / "samples/games/snake.js").read_text(), "console.log('ready');\n")
-            self.assertIn("artifact_publication: complete", evidence)
-            self.assertIn("artifact_verification: complete", evidence)
-
-    def test_invalid_model_selected_verification_publishes_no_file_or_parent(self) -> None:
+    def test_invalid_model_selected_verification_preserves_published_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pending = begin_artifact_generation(
@@ -166,14 +190,11 @@ class ArtifactPublicationTests(unittest.TestCase):
             )
             try:
                 with self.assertRaisesRegex(ValueError, "verification check is invalid"):
-                    pending.verify_and_publish(
-                        {"path": "new/parents/note.txt", "check": "syntax_by_extension"},
-                        workdir=root,
-                    )
+                    pending.verify({"check": "syntax_by_extension"})
             finally:
                 pending.abort()
 
-            self.assertFalse((root / "new").exists())
+            self.assertEqual((root / "new/parents/note.txt").read_text(), "literal content\n")
             self.assertEqual(list(root.glob(".orbit-artifact-*")), [])
 
     def test_verification_never_executes_tool_like_generated_content(self) -> None:
@@ -190,15 +211,12 @@ class ArtifactPublicationTests(unittest.TestCase):
                 temperature=0,
                 on_progress=None,
             )
-            pending.verify_and_publish(
-                {"path": "samples/check-only.js", "check": "text_integrity"},
-                workdir=root,
-            )
+            pending.verify({"check": "text_integrity"})
 
             self.assertFalse((root / "executed.txt").exists())
             self.assertEqual((root / "samples/check-only.js").read_text(), content)
 
-    def test_invalid_verification_preserves_preexisting_destination(self) -> None:
+    def test_invalid_verification_preserves_completed_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "samples").mkdir()
@@ -216,14 +234,11 @@ class ArtifactPublicationTests(unittest.TestCase):
             )
             try:
                 with self.assertRaisesRegex(ValueError, "verification check is invalid"):
-                    pending.verify_and_publish(
-                        {"path": "samples/game.js", "check": "syntax_by_extension"},
-                        workdir=root,
-                    )
+                    pending.verify({"check": "syntax_by_extension"})
             finally:
                 pending.abort()
 
-            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+            self.assertEqual(target.read_text(encoding="utf-8"), "const broken = ;\n")
 
     def test_model_selected_generic_checks_gate_publication(self) -> None:
         cases = (
@@ -244,10 +259,8 @@ class ArtifactPublicationTests(unittest.TestCase):
                     temperature=0,
                     on_progress=None,
                 )
-                publication, evidence = pending.verify_and_publish(
-                    {"path": path, "check": check},
-                    workdir=root,
-                )
+                evidence = pending.verify({"check": check})
+                publication = pending.publication
 
                 self.assertEqual((root / path).read_text(encoding="utf-8"), content)
                 self.assertEqual(publication.sha256, hashlib.sha256(content.encode()).hexdigest())
@@ -273,32 +286,43 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertEqual(backend.calls, [])
             self.assertFalse((root / "missing").exists())
 
-    def test_concurrent_parent_created_before_verification_is_preserved(self) -> None:
+    def test_concurrent_content_in_created_parent_is_not_displaced_on_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            pending = begin_artifact_generation(
-                backend=_Backend(_result("text\n")),
-                user_request="create text",
-                path="samples/note.txt",
-                overwrite=False,
-                create_parents=True,
-                workdir=root,
-                temperature=0,
-                on_progress=None,
-            )
-            (root / "samples").mkdir()
-            (root / "samples/concurrent.txt").write_text("concurrent", encoding="utf-8")
-            try:
-                with self.assertRaisesRegex(ValueError, "parent path changed"):
-                    pending.verify_and_publish(
-                        {"path": "samples/note.txt", "check": "text_integrity"},
-                        workdir=root,
+            real_attest = artifact_module._attest_created_directories
+            calls = 0
+
+            def fail_after_file_publication(created) -> None:
+                nonlocal calls
+                calls += 1
+                real_attest(created)
+                if calls == 3:
+                    (root / "samples/concurrent.txt").write_text(
+                        "concurrent", encoding="utf-8"
                     )
-            finally:
-                pending.abort()
+                    (root / "samples/concurrent-dir").mkdir()
+                    raise ValueError("injected post-publication parent failure")
+
+            with mock.patch(
+                "orbit.runtime.artifacts._attest_created_directories",
+                side_effect=fail_after_file_publication,
+            ):
+                with self.assertRaisesRegex(ValueError, "injected post-publication"):
+                    begin_artifact_generation(
+                        backend=_Backend(_result("text\n")),
+                        user_request="create text",
+                        path="samples/note.txt",
+                        overwrite=False,
+                        create_parents=True,
+                        workdir=root,
+                        temperature=0,
+                        on_progress=None,
+                    )
 
             self.assertEqual((root / "samples/concurrent.txt").read_text(), "concurrent")
+            self.assertTrue((root / "samples/concurrent-dir").is_dir())
             self.assertFalse((root / "samples/note.txt").exists())
+            self.assertEqual(list(root.rglob(".orbit-artifact-*")), [])
 
     def test_path_validation_rejects_escape_absolute_and_control_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -529,7 +553,7 @@ class ArtifactPublicationTests(unittest.TestCase):
                 mock.patch("orbit.runtime.artifacts._sha256_fd", return_value="wrong"),
                 mock.patch("orbit.runtime.artifacts._rename_noreplace") as rename,
             ):
-                with self.assertRaisesRegex(ValueError, "before atomic parent publication"):
+                with self.assertRaisesRegex(ValueError, "temporary content changed before publication"):
                     self._generate(root, _Backend(_result("complete")))
 
             rename.assert_not_called()
@@ -904,21 +928,22 @@ class ArtifactPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             backend = _Backend(_result("content"))
+            real_mkdir = os.mkdir
 
-            def concurrent_parent(**kwargs) -> None:
-                os.mkdir(kwargs["new_name"], dir_fd=kwargs["new_dir_fd"])
+            def concurrent_parent(path, mode=0o777, *, dir_fd=None) -> None:
+                real_mkdir(path, mode, dir_fd=dir_fd)
                 fd = os.open(
-                    f"{kwargs['new_name']}/concurrent.txt",
+                    f"{path}/concurrent.txt",
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                     0o600,
-                    dir_fd=kwargs["new_dir_fd"],
+                    dir_fd=dir_fd,
                 )
                 os.write(fd, b"concurrent")
                 os.close(fd)
-                raise OSError(errno.EEXIST, "exists")
+                raise FileExistsError(errno.EEXIST, "exists")
 
-            with mock.patch("orbit.runtime.artifacts._rename_noreplace", side_effect=concurrent_parent):
-                with self.assertRaisesRegex(OSError, "exists"):
+            with mock.patch("orbit.runtime.artifacts.os.mkdir", side_effect=concurrent_parent):
+                with self.assertRaisesRegex(ValueError, "parent path changed"):
                     self._generate(root, backend)
 
             self.assertEqual((root / "samples/concurrent.txt").read_text(), "concurrent")
@@ -928,25 +953,20 @@ class ArtifactPublicationTests(unittest.TestCase):
     def test_intermediate_parent_setup_failure_removes_private_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            pending = begin_artifact_generation(
-                backend=_Backend(_result("content")),
-                user_request="create text",
-                path="one/two/note.txt",
-                overwrite=False,
-                create_parents=True,
-                workdir=root,
-                temperature=0,
-                on_progress=None,
-            )
-
             with mock.patch(
                 "orbit.runtime.artifacts.os.fchmod",
                 side_effect=OSError(errno.EIO, "injected parent setup failure"),
             ):
                 with self.assertRaisesRegex(OSError, "injected parent setup failure"):
-                    pending.verify_and_publish(
-                        {"path": "one/two/note.txt", "check": "text_integrity"},
+                    begin_artifact_generation(
+                        backend=_Backend(_result("content")),
+                        user_request="create text",
+                        path="one/two/note.txt",
+                        overwrite=False,
+                        create_parents=True,
                         workdir=root,
+                        temperature=0,
+                        on_progress=None,
                     )
 
             self.assertFalse((root / "one").exists())
@@ -955,19 +975,19 @@ class ArtifactPublicationTests(unittest.TestCase):
     def test_new_parent_post_commit_replacement_is_reported_without_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            real_rename = artifact_module._rename_noreplace
-            calls = 0
+            real_attest = artifact_module._attest_published_artifact
+            replaced = False
 
-            def replace_after_commit(**kwargs) -> None:
-                nonlocal calls
-                calls += 1
-                real_rename(**kwargs)
-                if calls == 1:
+            def replace_after_commit(parent_fd, basename, **kwargs) -> None:
+                nonlocal replaced
+                if basename == "game.js" and not replaced:
+                    replaced = True
                     target = root / "samples/game.js"
                     target.write_text("different", encoding="utf-8")
+                return real_attest(parent_fd, basename, **kwargs)
 
             with mock.patch(
-                "orbit.runtime.artifacts._rename_noreplace",
+                "orbit.runtime.artifacts._attest_published_artifact",
                 side_effect=replace_after_commit,
             ):
                 with self.assertRaisesRegex(ValueError, "changed after atomic publication"):
@@ -981,20 +1001,20 @@ class ArtifactPublicationTests(unittest.TestCase):
             root = Path(tmp)
             base = root / "base"
             base.mkdir()
-            real_rename = artifact_module._rename_noreplace
+            real_attest = artifact_module._attest_created_directories
             calls = 0
 
-            def move_ancestor_then_commit(**kwargs) -> None:
+            def move_ancestor_after_commit(created) -> None:
                 nonlocal calls
                 calls += 1
-                if calls == 1:
+                if calls == 3:
                     base.rename(root / "old-base")
                     base.mkdir()
-                real_rename(**kwargs)
+                real_attest(created)
 
             with mock.patch(
-                "orbit.runtime.artifacts._rename_noreplace",
-                side_effect=move_ancestor_then_commit,
+                "orbit.runtime.artifacts._attest_created_directories",
+                side_effect=move_ancestor_after_commit,
             ):
                 with self.assertRaisesRegex(ValueError, "parent directory changed"):
                     self._generate(
@@ -1026,13 +1046,11 @@ class ArtifactPublicationTests(unittest.TestCase):
             (root / "one").rename(moved)
             (root / "one").symlink_to(moved, target_is_directory=True)
 
-            with self.assertRaisesRegex(ValueError, "parent directory changed"):
-                pending.verify_and_publish(
-                    {"path": "one/two/game.js", "check": "text_integrity"},
-                    workdir=root,
-                )
+            with self.assertRaisesRegex(ValueError, "unavailable for verification"):
+                pending.verify({"check": "text_integrity"})
 
-            self.assertFalse((moved / "two/game.js").exists())
+            self.assertTrue((moved / "two/game.js").is_file())
+            self.assertTrue((root / "one").is_symlink())
 
     def test_concurrent_overwrite_replacement_is_rolled_back_without_data_loss(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1240,16 +1258,51 @@ class ArtifactPublicationTests(unittest.TestCase):
                 temperature=0,
                 on_progress=None,
             )
-            pending.verify_and_publish(
-                {"path": "samples/note.txt", "check": "text_integrity"},
-                workdir=root,
-            )
+            pending.verify({"check": "text_integrity"})
 
             with self.assertRaisesRegex(ValueError, "no longer pending"):
-                pending.verify_and_publish(
-                    {"path": "samples/note.txt", "check": "text_integrity"},
-                    workdir=root,
+                pending.verify({"check": "text_integrity"})
+
+    def test_verification_capability_is_intrinsically_target_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pending = begin_artifact_generation(
+                backend=_Backend(_result("bounded content\n")),
+                user_request="create one note",
+                path="samples/note.txt",
+                overwrite=False,
+                create_parents=True,
+                workdir=root,
+                temperature=0,
+                on_progress=None,
+            )
+
+            evidence = pending.verify({"check": "text_integrity"})
+
+            self.assertIn("artifact_verification: complete", evidence)
+            self.assertIn("path: samples/note.txt", evidence)
+
+    def test_verification_rejects_path_substitution_as_an_extra_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pending = begin_artifact_generation(
+                backend=_Backend(_result("bounded content\n")),
+                user_request="create one note",
+                path="samples/note.txt",
+                overwrite=False,
+                create_parents=True,
+                workdir=root,
+                temperature=0,
+                on_progress=None,
+            )
+
+            with self.assertRaisesRegex(ValueError, "arguments are invalid"):
+                pending.verify(
+                    {"path": "samples/other.txt", "check": "text_integrity"}
                 )
+
+            self.assertTrue((root / "samples/note.txt").is_file())
+            self.assertFalse((root / "samples/other.txt").exists())
 
     def test_tool_like_text_is_written_verbatim_not_parsed(self) -> None:
         content = '<tool_call>{"command":"rm -rf /"}</tool_call>\n```sh\ncat <<EOF\n```\n'
@@ -1286,6 +1339,127 @@ class ArtifactPublicationTests(unittest.TestCase):
                 )
 
                 self.assertEqual((root / path).read_text(encoding="utf-8"), content)
+
+    def test_recovery_preserves_private_entry_owned_by_live_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "samples"
+            parent.mkdir()
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                temp_fd, temp_name = artifact_module._open_named_artifact_temp(parent_fd)
+                assert temp_name is not None
+                lease = artifact_module._register_private_entry(
+                    workdir=root,
+                    parent_relative=Path("samples"),
+                    temp_name=temp_name,
+                    temp_fd=temp_fd,
+                )
+                os.close(temp_fd)
+            finally:
+                os.close(parent_fd)
+
+            result = cleanup_stale_artifact_entries(root, stale_seconds=0)
+
+            self.assertEqual(result.preserved, 1)
+            self.assertTrue((parent / temp_name).is_file())
+            (parent / temp_name).unlink()
+            lease.release()
+            self.assertFalse((root / ".orbit-artifact-state").exists())
+
+    def test_restart_cleanup_removes_exact_private_entry_from_dead_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "samples"
+            parent.mkdir()
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                temp_fd, temp_name = artifact_module._open_named_artifact_temp(parent_fd)
+                assert temp_name is not None
+                lease = artifact_module._register_private_entry(
+                    workdir=root,
+                    parent_relative=Path("samples"),
+                    temp_name=temp_name,
+                    temp_fd=temp_fd,
+                )
+                os.close(temp_fd)
+            finally:
+                os.close(parent_fd)
+            manifest = root / ".orbit-artifact-state" / lease.manifest_name
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["pid"] = 2**30
+            manifest.write_text(
+                json.dumps(value, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            manifest.chmod(0o600)
+
+            result = cleanup_stale_artifact_entries(root)
+
+            self.assertEqual(result.removed, 1)
+            self.assertFalse((parent / temp_name).exists())
+            self.assertFalse((root / ".orbit-artifact-state").exists())
+
+    def test_recovery_preserves_ambiguous_symlink_and_similar_user_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "samples"
+            parent.mkdir()
+            user_file = parent / ".orbit-artifact-user.tmp"
+            user_file.write_text("user", encoding="utf-8")
+            outside = root / "outside.txt"
+            outside.write_text("outside", encoding="utf-8")
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                temp_fd, temp_name = artifact_module._open_named_artifact_temp(parent_fd)
+                assert temp_name is not None
+                lease = artifact_module._register_private_entry(
+                    workdir=root,
+                    parent_relative=Path("samples"),
+                    temp_name=temp_name,
+                    temp_fd=temp_fd,
+                )
+                os.close(temp_fd)
+            finally:
+                os.close(parent_fd)
+            (parent / temp_name).unlink()
+            (parent / temp_name).symlink_to(outside)
+            manifest = root / ".orbit-artifact-state" / lease.manifest_name
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["pid"] = 2**30
+            manifest.write_text(
+                json.dumps(value, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            manifest.chmod(0o600)
+            malformed = root / ".orbit-artifact-state" / ("f" * 32 + ".json")
+            malformed.write_text("{}", encoding="utf-8")
+            malformed.chmod(0o600)
+
+            result = cleanup_stale_artifact_entries(root)
+
+            self.assertGreaterEqual(result.preserved, 2)
+            self.assertTrue((parent / temp_name).is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(user_file.read_text(encoding="utf-8"), "user")
+            self.assertTrue(manifest.is_file())
+            self.assertTrue(malformed.is_file())
+
+    def test_recovery_scan_failure_is_bounded_and_does_not_raise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".orbit-artifact-state"
+            state.mkdir(mode=0o700)
+
+            with mock.patch(
+                "orbit.runtime.artifacts.os.listdir",
+                side_effect=PermissionError(errno.EACCES, "denied"),
+            ):
+                result = cleanup_stale_artifact_entries(root)
+
+            self.assertEqual(result.errors, 1)
+            self.assertEqual(result.preserved, 1)
+            self.assertTrue(state.is_dir())
 
 if __name__ == "__main__":
     unittest.main()

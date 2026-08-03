@@ -4,10 +4,13 @@ from dataclasses import dataclass
 import ctypes
 import errno
 import hashlib
+import json
 import os
 from pathlib import Path
+import re
 import secrets
 import stat
+import time
 from typing import Any, Callable
 
 from orbit.backend.base import ChatResult, Message, StreamProgress
@@ -20,6 +23,12 @@ MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_ARTIFACT_PATH_CHARS = 512
 MAX_ARTIFACT_VERIFICATION_CHARS = 12 * 1024
 _TEMP_PREFIX = ".orbit-artifact-"
+_RECOVERY_DIRECTORY = ".orbit-artifact-state"
+_RECOVERY_MANIFEST_RE = re.compile(r"^([0-9a-f]{32})\.json$")
+_RECOVERY_VERSION = 1
+_RECOVERY_MAX_MANIFESTS = 128
+_RECOVERY_MAX_MANIFEST_BYTES = 4096
+_RECOVERY_STALE_SECONDS = 300
 _UNSUPPORTED_TMPFILE_ERRNOS = frozenset(
     value
     for value in (
@@ -42,10 +51,10 @@ _UNSUPPORTED_RENAME_NOREPLACE_ERRNOS = frozenset(
 )
 
 ARTIFACT_VERIFICATION_PROMPT = (
-    "Artifact content generation completed, but nothing has been published yet. "
-    "Select exactly one verify_artifact call for the exact pending path. "
+    "The artifact was published atomically and now requires a read-only check. "
+    "Select exactly one verify_artifact call for this published artifact. "
     "Choose content when bounded body evidence is needed, otherwise choose text_integrity. "
-    "A passing check will publish the artifact atomically. Return only one tool call."
+    "The verifier cannot publish or mutate anything. Return only one tool call."
 )
 
 
@@ -58,7 +67,8 @@ def write_artifact_definition() -> dict[str, Any]:
                 "Create one non-trivial UTF-8 text file through a dedicated content-only generation phase. "
                 "Use this instead of embedding file content in shell, JSON, XML, or a heredoc. "
                 "Missing parents are created only when create_parents is true. "
-                "The file and any new parents are published atomically only after complete generation."
+                "The destination file is published atomically only after complete generation; "
+                "new empty parents created by a failed request are removed when still safe."
             ),
             "parameters": {
                 "type": "object",
@@ -89,16 +99,12 @@ def verify_artifact_definition() -> dict[str, Any]:
         "function": {
             "name": ARTIFACT_VERIFY_TOOL_NAME,
             "description": (
-                "Select a bounded verification for the generated content of the pending write_artifact request. "
-                "A passing check atomically completes that already-authorized publication; the verifier never edits or executes the content."
+                "Read and verify the exact artifact already published by write_artifact. "
+                "The verifier never publishes, edits, executes, or otherwise mutates the content."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Exact relative path returned by write_artifact.",
-                    },
                     "check": {
                         "type": "string",
                         "description": (
@@ -110,7 +116,7 @@ def verify_artifact_definition() -> dict[str, Any]:
                         ],
                     },
                 },
-                "required": ["path", "check"],
+                "required": ["check"],
                 "additionalProperties": False,
             },
         },
@@ -153,11 +159,8 @@ def artifact_content_messages(
         {
             "role": "system",
             "content": (
-                "Produce only the complete UTF-8 body to publish at the validated destination. "
-                "The first output character must belong to the file body, and the last output character must complete that body. "
-                "Do not output the path or discuss saving. Do not add a wrapper, fence, tool envelope, or transfer framing around the body. "
-                "Preserve every piece of text required inside the artifact, even when it resembles control syntax. "
-                "Fully implement every requirement in the original request without placeholders, stubs, abbreviations, or omissions."
+                "Generate one complete bounded UTF-8 text artifact. "
+                "Do not use tools, shell, JSON/XML envelopes, Markdown fences, transfer syntax, placeholders, or explanatory prose."
             ),
         },
         {
@@ -166,7 +169,9 @@ def artifact_content_messages(
                 f"Original request:\n{user_request}\n\n"
                 f"Validated destination: {path}\n"
                 f"Overwrite authorized: {'yes' if overwrite else 'no'}\n"
-                f"Maximum UTF-8 size: {MAX_ARTIFACT_BYTES} bytes."
+                f"Maximum UTF-8 size: {MAX_ARTIFACT_BYTES} bytes.\n\n"
+                "Output the complete file body now. Output file content only; "
+                "do not output or discuss the destination path."
             ),
         },
     ]
@@ -180,6 +185,7 @@ class ArtifactPublication:
     overwrite: bool
     created_parent_directories: tuple[str, ...] = ()
     directory_sync_complete: bool = True
+    file_version: tuple[int, int, int, int, int] | None = None
 
     def evidence(self) -> str:
         return "\n".join(
@@ -192,7 +198,8 @@ class ArtifactPublication:
                 "created_parent_directories: "
                 + (", ".join(self.created_parent_directories) if self.created_parent_directories else "none"),
                 "directory_sync: " + ("complete" if self.directory_sync_complete else "unconfirmed"),
-                "verification_completed: true",
+                "verification_required: true",
+                "verification_completed: false",
             ]
         )
 
@@ -201,6 +208,43 @@ class ArtifactGenerationError(RuntimeError):
     def __init__(self, message: str, *, result: ChatResult) -> None:
         super().__init__(message)
         self.result = result
+
+
+@dataclass
+class ArtifactPrivateLease:
+    workdir: Path
+    manifest_name: str
+    token: str
+    _released: bool = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            state_fd = _open_recovery_directory(self.workdir, create=False)
+        except (OSError, ValueError):
+            return
+        if state_fd < 0:
+            return
+        try:
+            try:
+                os.unlink(self.manifest_name, dir_fd=state_fd)
+            except OSError:
+                return
+            else:
+                _try_fsync(state_fd)
+        finally:
+            os.close(state_fd)
+        _remove_empty_recovery_directory(self.workdir)
+
+
+@dataclass(frozen=True)
+class ArtifactCleanupResult:
+    scanned: int = 0
+    removed: int = 0
+    preserved: int = 0
+    errors: int = 0
 
 
 def _open_private_artifact_temp(parent_fd: int) -> tuple[int, str | None, bool]:
@@ -238,68 +282,391 @@ def _open_named_artifact_temp(parent_fd: int) -> tuple[int, str]:
     return fd, name
 
 
+def _open_recovery_directory(workdir: Path, *, create: bool) -> int:
+    root = workdir.expanduser().resolve()
+    root_fd = os.open(
+        root,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        if create:
+            try:
+                os.mkdir(_RECOVERY_DIRECTORY, 0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+        try:
+            state_fd = os.open(
+                _RECOVERY_DIRECTORY,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_fd,
+            )
+        except FileNotFoundError:
+            return -1
+        state = os.fstat(state_fd)
+        if state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) != 0o700:
+            os.close(state_fd)
+            raise ValueError("artifact recovery directory is not safely owned")
+        return state_fd
+    finally:
+        os.close(root_fd)
+
+
+def _register_private_entry(
+    *,
+    workdir: Path,
+    parent_relative: Path,
+    temp_name: str,
+    temp_fd: int,
+) -> ArtifactPrivateLease:
+    token_match = re.fullmatch(r"\.orbit-artifact-([0-9a-f]{32})\.tmp", temp_name)
+    if token_match is None:
+        raise ValueError("artifact private name is invalid")
+    token = token_match.group(1)
+    value = os.fstat(temp_fd)
+    boot_id, process_start = _current_process_identity()
+    manifest = {
+        "version": _RECOVERY_VERSION,
+        "token": token,
+        "parent": parent_relative.as_posix(),
+        "temp_name": temp_name,
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "uid": value.st_uid,
+        "created_ns": time.time_ns(),
+        "pid": os.getpid(),
+        "boot_id": boot_id,
+        "process_start": process_start,
+    }
+    raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    state_fd = _open_recovery_directory(workdir, create=True)
+    manifest_name = f"{token}.json"
+    manifest_fd = -1
+    try:
+        manifest_fd = os.open(
+            manifest_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=state_fd,
+        )
+        _write_all(manifest_fd, raw)
+        os.fsync(manifest_fd)
+        _try_fsync(state_fd)
+    except BaseException:
+        if manifest_fd >= 0:
+            os.close(manifest_fd)
+            manifest_fd = -1
+        try:
+            os.unlink(manifest_name, dir_fd=state_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        if manifest_fd >= 0:
+            os.close(manifest_fd)
+        os.close(state_fd)
+    return ArtifactPrivateLease(
+        workdir=workdir.expanduser().resolve(),
+        manifest_name=manifest_name,
+        token=token,
+    )
+
+
+def _remove_empty_recovery_directory(workdir: Path) -> None:
+    root = workdir.expanduser().resolve()
+    try:
+        root_fd = os.open(
+            root,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return
+    try:
+        try:
+            os.rmdir(_RECOVERY_DIRECTORY, dir_fd=root_fd)
+        except OSError:
+            pass
+    finally:
+        os.close(root_fd)
+
+
+def cleanup_stale_artifact_entries(
+    workdir: Path,
+    *,
+    stale_seconds: int = _RECOVERY_STALE_SECONDS,
+) -> ArtifactCleanupResult:
+    try:
+        state_fd = _open_recovery_directory(workdir, create=False)
+    except (OSError, ValueError):
+        return ArtifactCleanupResult(preserved=1, errors=1)
+    if state_fd < 0:
+        return ArtifactCleanupResult()
+    scanned = removed = preserved = errors = 0
+    try:
+        try:
+            names = sorted(os.listdir(state_fd))[:_RECOVERY_MAX_MANIFESTS]
+        except OSError:
+            return ArtifactCleanupResult(preserved=1, errors=1)
+        for manifest_name in names:
+            if _RECOVERY_MANIFEST_RE.fullmatch(manifest_name) is None:
+                preserved += 1
+                continue
+            scanned += 1
+            try:
+                manifest_fd = os.open(
+                    manifest_name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=state_fd,
+                )
+                try:
+                    info = os.fstat(manifest_fd)
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or info.st_size > _RECOVERY_MAX_MANIFEST_BYTES
+                    ):
+                        preserved += 1
+                        continue
+                    raw = _read_fd(manifest_fd, _RECOVERY_MAX_MANIFEST_BYTES)
+                finally:
+                    os.close(manifest_fd)
+                value = json.loads(raw.decode("utf-8"))
+                entry = _validated_recovery_manifest(value, manifest_name=manifest_name)
+                if entry is None:
+                    preserved += 1
+                    continue
+                owner_active = _artifact_owner_active(entry)
+                age_ns = max(0, time.time_ns() - entry["created_ns"])
+                if owner_active is True or (
+                    owner_active is None
+                    and age_ns < max(0, stale_seconds) * 1_000_000_000
+                ):
+                    preserved += 1
+                    continue
+                parent_fd = _open_recovery_parent(workdir, entry["parent"])
+                try:
+                    try:
+                        temp_fd = os.open(
+                            entry["temp_name"],
+                            os.O_RDONLY
+                            | getattr(os, "O_CLOEXEC", 0)
+                            | getattr(os, "O_NOFOLLOW", 0)
+                            | getattr(os, "O_NONBLOCK", 0),
+                            dir_fd=parent_fd,
+                        )
+                    except FileNotFoundError:
+                        os.unlink(manifest_name, dir_fd=state_fd)
+                        removed += 1
+                        continue
+                    except OSError:
+                        preserved += 1
+                        continue
+                    try:
+                        current = os.fstat(temp_fd)
+                        path_current = os.stat(
+                            entry["temp_name"],
+                            dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            not stat.S_ISREG(current.st_mode)
+                            or current.st_uid != entry["uid"]
+                            or stat.S_IMODE(current.st_mode) != 0o600
+                            or current.st_nlink != 1
+                            or (current.st_dev, current.st_ino) != (entry["device"], entry["inode"])
+                            or not _same_inode(current, path_current)
+                        ):
+                            preserved += 1
+                            continue
+                    finally:
+                        os.close(temp_fd)
+                    os.unlink(entry["temp_name"], dir_fd=parent_fd)
+                    os.unlink(manifest_name, dir_fd=state_fd)
+                    _try_fsync(parent_fd)
+                    removed += 1
+                finally:
+                    os.close(parent_fd)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                errors += 1
+                preserved += 1
+    finally:
+        os.close(state_fd)
+    _remove_empty_recovery_directory(workdir)
+    return ArtifactCleanupResult(
+        scanned=scanned,
+        removed=removed,
+        preserved=preserved,
+        errors=errors,
+    )
+
+
+def _validated_recovery_manifest(value: object, *, manifest_name: str) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "token",
+        "parent",
+        "temp_name",
+        "device",
+        "inode",
+        "uid",
+        "created_ns",
+        "pid",
+        "boot_id",
+        "process_start",
+    }:
+        return None
+    token = value.get("token")
+    parent = value.get("parent")
+    temp_name = value.get("temp_name")
+    boot_id = value.get("boot_id")
+    numeric = (
+        value.get("device"),
+        value.get("inode"),
+        value.get("uid"),
+        value.get("created_ns"),
+        value.get("pid"),
+        value.get("process_start"),
+    )
+    if (
+        value.get("version") != _RECOVERY_VERSION
+        or not isinstance(token, str)
+        or manifest_name != f"{token}.json"
+        or not isinstance(parent, str)
+        or not isinstance(temp_name, str)
+        or temp_name != f"{_TEMP_PREFIX}{token}.tmp"
+        or not isinstance(boot_id, str)
+        or re.fullmatch(r"[0-9a-f-]{1,64}", boot_id) is None
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in numeric)
+    ):
+        return None
+    supplied = Path(parent)
+    if supplied.is_absolute() or any(part in {"", ".."} for part in supplied.parts):
+        return None
+    return value
+
+
+def _current_process_identity() -> tuple[str, int]:
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip().lower()
+        process_start = _read_process_start(os.getpid())
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError("artifact recovery requires a verifiable process identity") from exc
+    if re.fullmatch(r"[0-9a-f-]{1,64}", boot_id) is None:
+        raise RuntimeError("artifact recovery boot identity is invalid")
+    return boot_id, process_start
+
+
+def _read_process_start(pid: int) -> int:
+    raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    marker = raw.rfind(") ")
+    if marker < 0:
+        raise ValueError("process identity is malformed")
+    fields = raw[marker + 2 :].split()
+    if len(fields) <= 19:
+        raise ValueError("process identity is incomplete")
+    return int(fields[19])
+
+
+def _artifact_owner_active(entry: dict[str, Any]) -> bool | None:
+    try:
+        current_boot = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="ascii"
+        ).strip().lower()
+    except (OSError, UnicodeError):
+        return None
+    if current_boot != entry["boot_id"]:
+        return False
+    try:
+        return _read_process_start(entry["pid"]) == entry["process_start"]
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _open_recovery_parent(workdir: Path, parent: str) -> int:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current_fd = os.open(workdir.expanduser().resolve(), directory_flags)
+    try:
+        if parent not in {"", "."}:
+            for part in Path(parent).parts:
+                next_fd = os.open(part, directory_flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
 @dataclass
 class PendingArtifact:
-    target: PreparedArtifactTarget
+    publication: ArtifactPublication
+    workdir: Path
     generation: ChatResult
-    content: str
-    raw: bytes
     _closed: bool = False
 
     @property
     def path(self) -> str:
-        return self.target.relative_path.as_posix()
+        return self.publication.path
 
     def evidence(self) -> str:
-        return "\n".join(
-            [
-                "artifact_generation: complete",
-                f"path: {self.path}",
-                f"bytes: {len(self.raw)}",
-                f"sha256: {hashlib.sha256(self.raw).hexdigest()}",
-                "publication_status: pending",
-                "verification_required: true",
-            ]
-        )
+        return self.publication.evidence()
 
-    def verify_and_publish(
+    def verify(
         self,
         arguments: dict[str, object],
-        *,
-        workdir: Path,
-    ) -> tuple[ArtifactPublication, str]:
+    ) -> str:
         if self._closed:
-            raise ValueError("artifact request is no longer pending")
-        path = arguments.get("path")
+            raise ValueError("artifact verification is no longer pending")
+        if set(arguments) != {"check"}:
+            raise ValueError("artifact verification arguments are invalid")
         check = arguments.get("check")
-        if path != self.path:
-            raise ValueError("artifact verification path does not match the pending request")
+        raw = _read_published_artifact(
+            self.publication,
+            workdir=self.workdir,
+        )
         detail, content_lines = _verify_artifact_bytes(
-            self.raw,
+            raw,
             check=check,
         )
-        try:
-            publication = self.target.publish(self.content)
-        finally:
-            self.abort()
+        self._closed = True
         lines = [
-            publication.evidence(),
             "artifact_verification: complete",
-            f"path: {publication.path}",
+            f"path: {self.publication.path}",
             f"check: {check}",
-            f"bytes: {len(self.raw)}",
-            f"sha256: {publication.sha256}",
+            f"bytes: {len(raw)}",
+            f"sha256: {self.publication.sha256}",
             "status: pass",
             f"detail: {detail}",
             *content_lines,
         ]
-        return publication, "\n".join(lines)
+        return "\n".join(lines)
 
     def abort(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self.target.close()
 
     def __del__(self) -> None:
         self.abort()
@@ -351,12 +718,20 @@ class PreparedArtifactTarget:
         temp_name: str | None = None
         temp_fd = -1
         unnamed_temp = False
+        temp_lease: ArtifactPrivateLease | None = None
         temp_cleanup_safe = False
         published_new_file = False
         directory_sync_complete = True
         try:
             temp_fd, temp_name, unnamed_temp = _open_private_artifact_temp(self.parent_fd)
             temp_cleanup_safe = temp_name is not None
+            if temp_name is not None:
+                temp_lease = _register_private_entry(
+                    workdir=self.workdir,
+                    parent_relative=self.existing_parent_relative,
+                    temp_name=temp_name,
+                    temp_fd=temp_fd,
+                )
             _write_all(temp_fd, raw)
             if replacing_existing:
                 assert self.destination_mode is not None
@@ -385,6 +760,12 @@ class PreparedArtifactTarget:
                     temp_fd, temp_name = _open_named_artifact_temp(self.parent_fd)
                     unnamed_temp = False
                     temp_cleanup_safe = True
+                    temp_lease = _register_private_entry(
+                        workdir=self.workdir,
+                        parent_relative=self.existing_parent_relative,
+                        temp_name=temp_name,
+                        temp_fd=temp_fd,
+                    )
                     _write_all(temp_fd, raw)
                     if replacing_existing:
                         assert self.destination_mode is not None
@@ -395,6 +776,14 @@ class PreparedArtifactTarget:
                 else:
                     temp_name = link_name if replacing_existing else None
                     published_new_file = not replacing_existing
+                    if temp_name is not None:
+                        temp_cleanup_safe = True
+                        temp_lease = _register_private_entry(
+                            workdir=self.workdir,
+                            parent_relative=self.existing_parent_relative,
+                            temp_name=temp_name,
+                            temp_fd=temp_fd,
+                        )
             if replacing_existing:
                 assert temp_name is not None and self.destination_version is not None
                 _rename_exchange(
@@ -440,6 +829,9 @@ class PreparedArtifactTarget:
                 os.unlink(temp_name, dir_fd=self.parent_fd)
                 temp_name = None
                 temp_cleanup_safe = False
+                if temp_lease is not None:
+                    temp_lease.release()
+                    temp_lease = None
                 directory_sync_complete = _try_fsync(self.parent_fd) and directory_sync_complete
             elif not unnamed_temp:
                 assert temp_name is not None
@@ -452,11 +844,14 @@ class PreparedArtifactTarget:
                 temp_name = None
                 temp_cleanup_safe = False
                 published_new_file = True
+                if temp_lease is not None:
+                    temp_lease.release()
+                    temp_lease = None
                 directory_sync_complete = _try_fsync(self.parent_fd)
             elif not replacing_existing:
                 directory_sync_complete = _try_fsync(self.parent_fd)
             try:
-                _attest_published_artifact(
+                published_version = _attest_published_artifact(
                     self.parent_fd,
                     basename,
                     expected_identity=generated_identity,
@@ -483,42 +878,44 @@ class PreparedArtifactTarget:
                     os.unlink(temp_name, dir_fd=self.parent_fd)
                 except FileNotFoundError:
                     pass
+            if temp_lease is not None:
+                temp_lease.release()
+        assert published_version is not None
         return ArtifactPublication(
             path=self.relative_path.as_posix(),
             bytes_written=len(raw),
             sha256=generated_sha256,
             overwrite=replacing_existing,
             directory_sync_complete=directory_sync_complete,
+            file_version=published_version,
         )
 
     def _publish_with_new_parents(self, raw: bytes) -> ArtifactPublication:
         self._attest_existing_parent()
-        top_name = self.missing_parent_parts[0]
-        try:
-            os.stat(top_name, dir_fd=self.parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            raise ValueError("artifact parent path changed before atomic publication")
-
-        stage_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
-        os.mkdir(stage_name, 0o700, dir_fd=self.parent_fd)
         directory_flags = (
             os.O_RDONLY
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_DIRECTORY", 0)
             | getattr(os, "O_NOFOLLOW", 0)
         )
-        dir_fds: list[int] = []
-        file_fd = -1
-        published = False
+        opened_fds: list[int] = [os.dup(self.parent_fd)]
+        created: list[tuple[int, str, int, str]] = []
+        current_relative = self.existing_parent_relative
+        temp_fd = -1
+        temp_name: str | None = None
+        temp_cleanup_safe = False
+        temp_lease: ArtifactPrivateLease | None = None
+        published_identity: tuple[int, int, int] | None = None
+        published_version: tuple[int, int, int, int, int] | None = None
         directory_sync_complete = True
         try:
-            stage_fd = os.open(stage_name, directory_flags, dir_fd=self.parent_fd)
-            dir_fds.append(stage_fd)
-            current_fd = stage_fd
-            for part in self.missing_parent_parts[1:]:
-                os.mkdir(part, 0o755, dir_fd=current_fd)
+            current_fd = opened_fds[-1]
+            for part in self.missing_parent_parts:
+                self._attest_existing_parent()
+                try:
+                    os.mkdir(part, 0o755, dir_fd=current_fd)
+                except FileExistsError as exc:
+                    raise ValueError("artifact parent path changed before publication") from exc
                 try:
                     next_fd = os.open(part, directory_flags, dir_fd=current_fd)
                 except BaseException:
@@ -527,111 +924,146 @@ class PreparedArtifactTarget:
                     except OSError:
                         pass
                     raise
-                dir_fds.append(next_fd)
+                opened_fds.append(next_fd)
+                current = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+                opened = os.fstat(next_fd)
+                if not stat.S_ISDIR(current.st_mode) or not _same_inode(current, opened):
+                    raise ValueError("artifact parent path changed during creation")
+                current_relative = current_relative / part
+                created.append((current_fd, part, next_fd, current_relative.as_posix()))
                 os.fchmod(next_fd, 0o755)
-                os.fsync(current_fd)
+                directory_sync_complete = _try_fsync(current_fd) and directory_sync_complete
                 current_fd = next_fd
-            file_fd = os.open(
-                self.relative_path.name,
-                os.O_RDWR
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=current_fd,
-            )
-            _write_all(file_fd, raw)
-            os.fsync(file_fd)
-            generated_sha256 = _sha256_fd(file_fd)
-            if generated_sha256 != hashlib.sha256(raw).hexdigest():
-                raise ValueError("artifact changed before atomic parent publication")
-            os.fsync(current_fd)
+            _attest_created_directories(created)
             self._attest_existing_parent()
             try:
-                os.stat(top_name, dir_fd=self.parent_fd, follow_symlinks=False)
+                os.stat(self.relative_path.name, dir_fd=current_fd, follow_symlinks=False)
             except FileNotFoundError:
                 pass
             else:
-                raise ValueError("artifact parent path changed before atomic publication")
-            os.fchmod(stage_fd, 0o755)
-            os.fsync(stage_fd)
-            _rename_noreplace(
-                old_dir_fd=self.parent_fd,
-                old_name=stage_name,
-                new_dir_fd=self.parent_fd,
-                new_name=top_name,
-            )
-            published = True
+                raise ValueError("artifact destination changed before publication")
+
+            temp_fd, temp_name, unnamed_temp = _open_private_artifact_temp(current_fd)
+            temp_cleanup_safe = temp_name is not None
+            if temp_name is not None:
+                temp_lease = _register_private_entry(
+                    workdir=self.workdir,
+                    parent_relative=current_relative,
+                    temp_name=temp_name,
+                    temp_fd=temp_fd,
+                )
+            _write_all(temp_fd, raw)
+            os.fsync(temp_fd)
+            generated_identity = _file_identity(os.fstat(temp_fd))
+            generated_sha256 = hashlib.sha256(raw).hexdigest()
+            if _sha256_fd(temp_fd) != generated_sha256:
+                raise ValueError("artifact temporary content changed before publication")
+            _attest_created_directories(created)
+            self._attest_existing_parent()
             try:
-                directory_sync_complete = _try_fsync(self.parent_fd)
-                _attest_published_artifact_path(
-                    self.parent_fd,
-                    self.missing_parent_parts,
+                os.stat(self.relative_path.name, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError("artifact destination changed before publication")
+            if unnamed_temp:
+                try:
+                    os.link(
+                        f"/proc/self/fd/{temp_fd}",
+                        self.relative_path.name,
+                        dst_dir_fd=current_fd,
+                        follow_symlinks=True,
+                    )
+                except OSError as exc:
+                    if exc.errno not in _UNSUPPORTED_TMPFILE_ERRNOS:
+                        raise
+                    os.close(temp_fd)
+                    temp_fd = -1
+                    temp_fd, temp_name = _open_named_artifact_temp(current_fd)
+                    temp_cleanup_safe = True
+                    temp_lease = _register_private_entry(
+                        workdir=self.workdir,
+                        parent_relative=current_relative,
+                        temp_name=temp_name,
+                        temp_fd=temp_fd,
+                    )
+                    _write_all(temp_fd, raw)
+                    os.fsync(temp_fd)
+                    generated_identity = _file_identity(os.fstat(temp_fd))
+                    _attest_created_directories(created)
+                    self._attest_existing_parent()
+                    _commit_named_file_noreplace(
+                        old_dir_fd=current_fd,
+                        old_name=temp_name,
+                        new_dir_fd=current_fd,
+                        new_name=self.relative_path.name,
+                    )
+                    temp_name = None
+                    temp_cleanup_safe = False
+                    if temp_lease is not None:
+                        temp_lease.release()
+                        temp_lease = None
+            else:
+                assert temp_name is not None
+                _commit_named_file_noreplace(
+                    old_dir_fd=current_fd,
+                    old_name=temp_name,
+                    new_dir_fd=current_fd,
+                    new_name=self.relative_path.name,
+                )
+                temp_name = None
+                temp_cleanup_safe = False
+                if temp_lease is not None:
+                    temp_lease.release()
+                    temp_lease = None
+            published_identity = generated_identity
+            try:
+                directory_sync_complete = _try_fsync(current_fd) and directory_sync_complete
+                published_version = _attest_published_artifact(
+                    current_fd,
                     self.relative_path.name,
-                    expected_identity=_file_identity(os.fstat(file_fd)),
+                    expected_identity=generated_identity,
                     expected_sha256=generated_sha256,
                 )
+                _attest_created_directories(created)
                 self._attest_existing_parent()
             except BaseException:
                 try:
-                    _attest_published_artifact_path(
-                        self.parent_fd,
-                        self.missing_parent_parts,
-                        self.relative_path.name,
-                        expected_identity=_file_identity(os.fstat(file_fd)),
+                    _retract_published_file(
+                        parent_fd=current_fd,
+                        basename=self.relative_path.name,
+                        expected_identity=generated_identity,
                         expected_sha256=generated_sha256,
                     )
-                except ValueError:
-                    # Preserve a tree whose content or identity was changed by
-                    # another actor; it is no longer safe for Orbit to remove.
+                    published_identity = None
+                except (OSError, ValueError):
                     pass
-                else:
-                    _retract_published_directory(
-                        parent_fd=self.parent_fd,
-                        published_name=top_name,
-                        private_name=stage_name,
-                        expected_directory_fd=stage_fd,
-                    )
-                    published = False
                 raise
         finally:
-            if not published:
-                if file_fd >= 0 and dir_fds:
-                    try:
-                        os.unlink(self.relative_path.name, dir_fd=dir_fds[-1])
-                    except FileNotFoundError:
-                        pass
-                for index in range(len(dir_fds) - 1, 0, -1):
-                    os.close(dir_fds[index])
-                    try:
-                        os.rmdir(self.missing_parent_parts[index], dir_fd=dir_fds[index - 1])
-                    except OSError:
-                        pass
-                if dir_fds:
-                    os.close(dir_fds[0])
+            if temp_fd >= 0:
+                os.close(temp_fd)
+            if temp_name is not None and temp_cleanup_safe:
                 try:
-                    os.rmdir(stage_name, dir_fd=self.parent_fd)
-                except OSError:
+                    os.unlink(temp_name, dir_fd=opened_fds[-1])
+                except FileNotFoundError:
                     pass
-            else:
-                for directory_fd in reversed(dir_fds):
-                    os.close(directory_fd)
-            if file_fd >= 0:
-                os.close(file_fd)
+            if temp_lease is not None:
+                temp_lease.release()
+            if published_identity is None:
+                _remove_created_directories(created)
+            for directory_fd in reversed(opened_fds):
+                os.close(directory_fd)
 
-        created: list[str] = []
-        current = self.existing_parent_relative
-        for part in self.missing_parent_parts:
-            current = current / part
-            created.append(current.as_posix())
+        created_paths = tuple(item[3] for item in created)
+        assert published_identity is not None and published_version is not None
         return ArtifactPublication(
             path=self.relative_path.as_posix(),
             bytes_written=len(raw),
             sha256=hashlib.sha256(raw).hexdigest(),
             overwrite=False,
-            created_parent_directories=tuple(created),
+            created_parent_directories=created_paths,
             directory_sync_complete=directory_sync_complete,
+            file_version=published_version,
         )
 
     def _attest_existing_parent(self) -> None:
@@ -780,6 +1212,7 @@ def begin_artifact_generation(
     generate = getattr(backend, "artifact_content_stream", None)
     if not callable(generate):
         raise RuntimeError("artifact content generation requires the native Orbit backend")
+    cleanup_stale_artifact_entries(workdir)
     target = prepare_artifact_target(
         path,
         overwrite=overwrite,
@@ -830,11 +1263,12 @@ def begin_artifact_generation(
                 f"artifact content failed validation: {exc}",
                 result=result,
             ) from exc
+        publication = target.publish(result.content)
+        target.close()
         return PendingArtifact(
-            target=target,
+            publication=publication,
+            workdir=workdir.expanduser().resolve(),
             generation=result,
-            content=result.content,
-            raw=raw,
         )
     except BaseException:
         target.close()
@@ -862,6 +1296,59 @@ def _verify_artifact_bytes(
             _bounded_verification_text(text, MAX_ARTIFACT_VERIFICATION_CHARS),
         ]
     return detail, content_lines
+
+
+def _read_published_artifact(
+    publication: ArtifactPublication,
+    *,
+    workdir: Path,
+) -> bytes:
+    if publication.file_version is None:
+        raise ValueError("artifact publication identity is unavailable")
+    relative = Path(publication.path)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current_fd = os.open(workdir, directory_flags)
+    file_fd = -1
+    try:
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        file_fd = os.open(
+            relative.name,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=current_fd,
+        )
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or _file_version(before) != publication.file_version:
+            raise ValueError("published artifact changed before verification")
+        raw = _read_fd(file_fd, MAX_ARTIFACT_BYTES)
+        after = os.fstat(file_fd)
+        path_version = _file_version(
+            os.stat(relative.name, dir_fd=current_fd, follow_symlinks=False)
+        )
+        if (
+            _file_version(after) != publication.file_version
+            or path_version != publication.file_version
+            or len(raw) != publication.bytes_written
+            or hashlib.sha256(raw).hexdigest() != publication.sha256
+        ):
+            raise ValueError("published artifact changed during verification")
+        return raw
+    except OSError as exc:
+        raise ValueError("published artifact is unavailable for verification") from exc
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.close(current_fd)
 
 
 def _write_all(fd: int, raw: bytes) -> None:
@@ -906,6 +1393,33 @@ def _file_identity_from_version(value: tuple[int, int, int, int, int]) -> tuple[
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _attest_created_directories(created: list[tuple[int, str, int, str]]) -> None:
+    for parent_fd, name, directory_fd, _relative in created:
+        opened = os.fstat(directory_fd)
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("artifact parent directory changed during publication") from exc
+        if not stat.S_ISDIR(current.st_mode) or not _same_inode(current, opened):
+            raise ValueError("artifact parent directory changed during publication")
+
+
+def _remove_created_directories(created: list[tuple[int, str, int, str]]) -> None:
+    for parent_fd, name, directory_fd, _relative in reversed(created):
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            opened = os.fstat(directory_fd)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(current.st_mode) or not _same_inode(current, opened):
+            continue
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+        except OSError:
+            # A non-empty or concurrently changed directory remains visible.
+            continue
 
 
 def _rollback_artifact_overwrite(
@@ -985,41 +1499,6 @@ def _retract_published_file(
     _try_fsync(parent_fd)
 
 
-def _retract_published_directory(
-    *,
-    parent_fd: int,
-    published_name: str,
-    private_name: str,
-    expected_directory_fd: int,
-) -> None:
-    """Move an exact Orbit-created tree back to its private staging name."""
-
-    try:
-        _rename_noreplace(
-            old_dir_fd=parent_fd,
-            old_name=published_name,
-            new_dir_fd=parent_fd,
-            new_name=private_name,
-        )
-    except OSError as exc:
-        raise ValueError("artifact parent publication rollback failed safely") from exc
-    moved = os.stat(private_name, dir_fd=parent_fd, follow_symlinks=False)
-    expected = os.fstat(expected_directory_fd)
-    if not stat.S_ISDIR(moved.st_mode) or not _same_inode(moved, expected):
-        try:
-            _rename_noreplace(
-                old_dir_fd=parent_fd,
-                old_name=private_name,
-                new_dir_fd=parent_fd,
-                new_name=published_name,
-            )
-        except OSError as exc:
-            raise ValueError(
-                "artifact parent path changed and unrelated tree was preserved under a private name"
-            ) from exc
-        raise ValueError("artifact parent path changed after atomic publication")
-
-
 def _read_fd(fd: int, maximum: int) -> bytes:
     os.lseek(fd, 0, os.SEEK_SET)
     chunks: list[bytes] = []
@@ -1046,7 +1525,7 @@ def _attest_published_artifact(
     *,
     expected_identity: tuple[int, int, int],
     expected_sha256: str,
-) -> None:
+) -> tuple[int, int, int, int, int]:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -1074,50 +1553,11 @@ def _attest_published_artifact(
             or path_version != version_after_read
         ):
             raise ValueError("artifact destination changed after atomic publication")
+        return version_after_read
     except OSError as exc:
         raise ValueError("artifact destination changed after atomic publication") from exc
     finally:
         os.close(fd)
-
-
-def _attest_published_artifact_path(
-    parent_fd: int,
-    directory_parts: tuple[str, ...],
-    basename: str,
-    *,
-    expected_identity: tuple[int, int, int],
-    expected_sha256: str,
-) -> None:
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    opened_fds = [os.dup(parent_fd)]
-    edges: list[tuple[int, str, tuple[int, int]]] = []
-    try:
-        for part in directory_parts:
-            next_fd = os.open(part, directory_flags, dir_fd=opened_fds[-1])
-            current = os.fstat(next_fd)
-            identity = (current.st_dev, current.st_ino)
-            edges.append((opened_fds[-1], part, identity))
-            opened_fds.append(next_fd)
-        _attest_published_artifact(
-            opened_fds[-1],
-            basename,
-            expected_identity=expected_identity,
-            expected_sha256=expected_sha256,
-        )
-        for ancestor_fd, name, expected in reversed(edges):
-            current = os.stat(name, dir_fd=ancestor_fd, follow_symlinks=False)
-            if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != expected:
-                raise ValueError("artifact parent path changed after atomic publication")
-    except OSError as exc:
-        raise ValueError("artifact parent path changed after atomic publication") from exc
-    finally:
-        for fd in reversed(opened_fds):
-            os.close(fd)
 
 
 def _directory_path_matches(

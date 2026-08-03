@@ -158,9 +158,7 @@ def run_tool_loop(
     artifact_verification_required = False
     artifact_path_pending_verification: str | None = None
     artifact_pending_verification: PendingArtifact | None = None
-    artifact_pending_evidence_id: str | None = None
     artifact_publication_completed: ArtifactPublication | None = None
-    artifact_mutation_call_pending: dict[str, object] | None = None
     artifact_finalization_required = False
     active_tools = tools
     active_allowed_tool_names = allowed_tool_names
@@ -173,6 +171,7 @@ def run_tool_loop(
 
     def write_artifact(arguments: dict[str, object]) -> ToolExecution:
         nonlocal artifact_path_pending_verification, artifact_pending_verification
+        nonlocal artifact_publication_completed
         path = arguments.get("path")
         overwrite = arguments.get("overwrite", False)
         create_parents = arguments.get("create_parents", False)
@@ -245,14 +244,14 @@ def run_tool_loop(
             )
         artifact_pending_verification = pending
         artifact_path_pending_verification = pending.path
+        artifact_publication_completed = pending.publication
         return ToolExecution(
             ToolResult(ARTIFACT_TOOL_NAME, pending.evidence()),
             "orbit-artifact",
         )
 
     def verify_artifact(arguments: dict[str, object]) -> ToolExecution:
-        nonlocal artifact_pending_verification, artifact_pending_evidence_id
-        nonlocal artifact_publication_completed
+        nonlocal artifact_pending_verification
         pending = artifact_pending_verification
         if pending is None:
             return ToolExecution(
@@ -261,7 +260,7 @@ def run_tool_loop(
                 "rejected_guardrail",
                 "artifact_verification_not_pending",
             )
-        if set(arguments) != {"path", "check"}:
+        if set(arguments) != {"check"}:
             pending.abort()
             artifact_pending_verification = None
             return ToolExecution(
@@ -271,10 +270,7 @@ def run_tool_loop(
                 "invalid_arguments",
             )
         try:
-            publication, content = pending.verify_and_publish(
-                arguments,
-                workdir=Path(workdir),
-            )
+            content = pending.verify(arguments)
         except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
             pending.abort()
             artifact_pending_verification = None
@@ -285,28 +281,16 @@ def run_tool_loop(
                 "artifact_verification_failed",
             )
         artifact_pending_verification = None
-        artifact_pending_evidence_id = None
-        artifact_publication_completed = publication
         return ToolExecution(
             ToolResult(ARTIFACT_VERIFY_TOOL_NAME, content),
             "orbit-artifact",
         )
 
     def abort_pending_artifact() -> None:
-        nonlocal artifact_pending_verification, artifact_pending_evidence_id
+        nonlocal artifact_pending_verification
         if artifact_pending_verification is not None:
             artifact_pending_verification.abort()
             artifact_pending_verification = None
-        if artifact_pending_evidence_id is not None:
-            for message in runtime.messages:
-                if message.get("evidence_id") == artifact_pending_evidence_id:
-                    message.pop("evidence_id", None)
-                    message["content"] = (
-                        "error: artifact request did not reach verified publication; "
-                        "no artifact was published"
-                    )
-            evidence_store.discard(artifact_pending_evidence_id)
-            artifact_pending_evidence_id = None
 
     def balance_cancelled_artifact_call(tool_call: dict[str, object]) -> None:
         cancellation = ToolResult(
@@ -657,12 +641,12 @@ def run_tool_loop(
         # repair state. It updates turn-local state, while runtime counters stay
         # here to avoid leaking telemetry into the state objects themselves.
         nonlocal artifact_path_pending_verification, artifact_verification_required
-        nonlocal artifact_mutation_call_pending
         if tool_result.name == ARTIFACT_TOOL_NAME:
             turn.shell_mutation_attempted = True
             if execution_outcome == "executed":
+                state.advance_after_mutation(tool_call)
+                turn.shell_mutation_succeeded = True
                 artifact_verification_required = True
-                artifact_mutation_call_pending = tool_call
                 repair.mutation_verification_pending = True
                 runtime.mutation_verifications += 1
             else:
@@ -674,7 +658,6 @@ def run_tool_loop(
                 turn.last_error = execution_reason
                 artifact_verification_required = False
                 artifact_path_pending_verification = None
-                artifact_mutation_call_pending = None
                 repair.shell_error_final_pending = True
                 turn.mark_exhausted()
             return
@@ -998,10 +981,6 @@ def run_tool_loop(
                     ),
                 )
                 runtime.messages.append(history_message)
-                if tool_result.name == ARTIFACT_TOOL_NAME:
-                    evidence_id = history_message.get("evidence_id")
-                    if isinstance(evidence_id, str):
-                        artifact_pending_evidence_id = evidence_id
                 if should_handoff_to_final_from_tool():
                     return answer_from_tool_results(
                         temperature=temperature,
@@ -1259,7 +1238,6 @@ def run_tool_loop(
             abort_pending_artifact()
             artifact_verification_required = False
             artifact_path_pending_verification = None
-            artifact_mutation_call_pending = None
             record_terminal(
                 attempt_id=attempt_id,
                 report=shadow_report,
@@ -1270,7 +1248,7 @@ def run_tool_loop(
             )
             return artifact_failure_result(
                 result,
-                "error: artifact verification did not complete; no artifact was published",
+                "error: artifact was published but verification did not complete",
             )
         truncated_tool_attempt = (
             result.finish_reason == "length"
@@ -1310,10 +1288,9 @@ def run_tool_loop(
                 abort_pending_artifact()
                 artifact_verification_required = False
                 artifact_path_pending_verification = None
-                artifact_mutation_call_pending = None
                 return artifact_failure_result(
                     result,
-                    "error: artifact verification did not complete; no artifact was published",
+                    "error: artifact was published but verification did not complete",
                 )
             record_post_tool_final_reuse_fallback("finish_reason")
             record_terminal(
@@ -1379,10 +1356,9 @@ def run_tool_loop(
                 if executing_mutation_verification and artifact_verification_required:
                     artifact_verification_required = False
                     artifact_path_pending_verification = None
-                    artifact_mutation_call_pending = None
                     return artifact_failure_result(
                         result,
-                        "error: artifact verification did not complete; no artifact was published",
+                        "error: artifact was published but verification did not complete",
                     )
                 return runtime._chat_final(
                     with_chat_system_prompt(runtime.messages),
@@ -1420,7 +1396,6 @@ def run_tool_loop(
                 abort_pending_artifact()
                 artifact_verification_required = False
                 artifact_path_pending_verification = None
-                artifact_mutation_call_pending = None
                 record_terminal(
                     attempt_id=attempt_id,
                     report=shadow_report,
@@ -1431,7 +1406,7 @@ def run_tool_loop(
                 )
                 return artifact_failure_result(
                     result,
-                    "error: artifact verification was not selected; no artifact was published",
+                    "error: artifact was published but verification was not selected",
                 )
             route_tool_call = command_like_tool_call(result.content, active_allowed_tool_names)
             if route_tool_call is not None:
@@ -1474,7 +1449,6 @@ def run_tool_loop(
                 if verification_decision.accepted and verification_decision.normalized_call is not None
                 else {}
             )
-            verification_path = arguments.get("path")
             verification_check = arguments.get("check")
             path = artifact_path_pending_verification
             invalid_verification = (
@@ -1482,7 +1456,6 @@ def run_tool_loop(
                 or not verification_decision.accepted
                 or name != ARTIFACT_VERIFY_TOOL_NAME
                 or not path
-                or verification_path != path
                 or verification_check
                 not in {
                     "content",
@@ -1493,7 +1466,6 @@ def run_tool_loop(
                 abort_pending_artifact()
                 artifact_verification_required = False
                 artifact_path_pending_verification = None
-                artifact_mutation_call_pending = None
                 record_terminal(
                     attempt_id=attempt_id,
                     report=shadow_report,
@@ -1504,7 +1476,7 @@ def run_tool_loop(
                 )
                 return artifact_failure_result(
                     result,
-                    "error: artifact verification was invalid; no artifact was published",
+                    "error: artifact was published but verification was invalid",
                 )
             canonical_decision = verification_decision
         if result.tool_calls and canonical_gate_enabled and canonical_decision is None:
@@ -1809,12 +1781,8 @@ def run_tool_loop(
                 and "status: pass" in tool_result.content
                 and artifact_publication_completed is not None
             ):
-                if artifact_mutation_call_pending is not None:
-                    state.advance_after_mutation(artifact_mutation_call_pending)
-                turn.shell_mutation_succeeded = True
                 artifact_verification_required = False
                 artifact_path_pending_verification = None
-                artifact_mutation_call_pending = None
                 artifact_publication_completed = None
                 artifact_finalization_required = True
             if (
@@ -1839,10 +1807,6 @@ def run_tool_loop(
                 ),
             )
             runtime.messages.append(history_message)
-            if tool_result.name == ARTIFACT_TOOL_NAME:
-                evidence_id = history_message.get("evidence_id")
-                if isinstance(evidence_id, str):
-                    artifact_pending_evidence_id = evidence_id
             if artifact_finalization_required:
                 turn.mark_finalizable()
                 return answer_from_tool_results(
@@ -1907,7 +1871,7 @@ def run_tool_loop(
         )
         return artifact_failure_result(
             base_result,
-            "error: artifact verification could not run within the bounded tool loop; no artifact was published",
+            "error: artifact was published but verification could not run within the bounded tool loop",
         )
     return last_result or ChatResult(
         content="error: tool loop did not produce a response",

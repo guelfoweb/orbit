@@ -67,7 +67,7 @@ class FinalPolicyTests(unittest.TestCase):
                 "role": "tool",
                 "name": "write_artifact",
                 "tool_call_id": "artifact-1",
-                "content": "artifact_generation: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\npublication_status: pending",
+                "content": "artifact_publication: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\noverwrite: false",
             },
             {
                 "role": "assistant",
@@ -87,7 +87,7 @@ class FinalPolicyTests(unittest.TestCase):
                 "role": "tool",
                 "name": "verify_artifact",
                 "tool_call_id": "verify-1",
-                "content": "artifact_publication: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\noverwrite: false\nartifact_verification: complete\ncheck: text_integrity\nstatus: pass",
+                "content": "artifact_verification: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\ncheck: text_integrity\nstatus: pass",
             },
         ]
 
@@ -97,13 +97,13 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("Name the exact artifact path", policy.messages[-1]["content"])
         self.assertIn("what the selected verification confirmed", policy.messages[-1]["content"])
 
-    def test_failed_artifact_verification_cannot_be_reported_as_published(self) -> None:
+    def test_failed_artifact_verification_reports_published_but_unverified(self) -> None:
         messages = [
             {"role": "user", "content": "create samples/snake.html"},
             {
                 "role": "tool",
                 "name": "write_artifact",
-                "content": "artifact_generation: complete\npath: samples/snake.html\npublication_status: pending",
+                "content": "artifact_publication: complete\npath: samples/snake.html\nbytes: 42\nsha256: " + "a" * 64,
             },
             {
                 "role": "tool",
@@ -115,8 +115,9 @@ class FinalPolicyTests(unittest.TestCase):
         policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
 
         instruction = policy.messages[-1]["content"]
-        self.assertIn("no artifact was published", instruction)
-        self.assertIn("Do not claim that the file exists", instruction)
+        self.assertIn("artifact was atomically published", instruction)
+        self.assertIn("file remains published", instruction)
+        self.assertIn("do not claim that its content passed verification", instruction)
 
     def test_failed_artifact_generation_cannot_be_reported_as_published(self) -> None:
         messages = [
@@ -162,7 +163,7 @@ class FinalPolicyTests(unittest.TestCase):
                 "content": (
                     "tool_evidence_ref: true\n"
                     "tool: write_artifact\n"
-                    "kind: artifact_pending\n"
+                    "kind: artifact\n"
                     "status: ok\n"
                     "artifact_path: samples/note.txt"
                 ),
@@ -182,8 +183,8 @@ class FinalPolicyTests(unittest.TestCase):
         policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
 
         instruction = policy.messages[-1]["content"]
-        self.assertIn("no artifact was published", instruction)
-        self.assertIn("Do not claim that the file exists", instruction)
+        self.assertIn("file remains published", instruction)
+        self.assertIn("do not claim that its content passed verification", instruction)
 
     def test_latest_failed_artifact_is_not_masked_by_previous_success(self) -> None:
         messages = [
@@ -191,7 +192,7 @@ class FinalPolicyTests(unittest.TestCase):
             {
                 "role": "tool",
                 "name": "write_artifact",
-                "content": "artifact_generation: complete\npath: samples/first.js",
+                "content": "artifact_publication: complete\npath: samples/first.js",
             },
             {
                 "role": "tool",
@@ -202,7 +203,7 @@ class FinalPolicyTests(unittest.TestCase):
             {
                 "role": "tool",
                 "name": "write_artifact",
-                "content": "artifact_generation: complete\npath: samples/second.js",
+                "content": "artifact_publication: complete\npath: samples/second.js",
             },
             {
                 "role": "tool",
@@ -214,8 +215,8 @@ class FinalPolicyTests(unittest.TestCase):
         policy = build_final_tool_policy(messages, max_tokens=256, streamed=False)
 
         instruction = policy.messages[-1]["content"]
-        self.assertIn("no artifact was published", instruction)
-        self.assertNotIn("artifact was atomically published", instruction)
+        self.assertIn("file remains published", instruction)
+        self.assertIn("artifact was atomically published", instruction)
 
     def test_html_cleaned_policy_caps_tokens_and_allows_length_retry_when_not_streamed(self) -> None:
         messages = [{"role": "tool", "name": "exec_shell_full_command", "content": "shell_output_html_cleaned: true\ntext:\ncontent"}]
