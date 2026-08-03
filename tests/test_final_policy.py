@@ -274,6 +274,34 @@ class FinalPolicyTests(unittest.TestCase):
         self.assertIn("Return every listed path exactly once", policy.messages[-1]["content"])
         self.assertIn("Stop after the final path", policy.messages[-1]["content"])
 
+    def test_prior_directory_listing_does_not_override_later_tool_error(self) -> None:
+        messages = [
+            {"role": "user", "content": "List files, then run the requested check."},
+            {
+                "role": "tool",
+                "tool_call_id": "call-list",
+                "name": "list_directory",
+                "content": "[file] README.md (30 B)",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-check",
+                "name": "exec_shell_full_command",
+                "content": "shell_command_failed: true\nexit_code: 127",
+            },
+        ]
+
+        policy = build_final_tool_policy(
+            messages,
+            max_tokens=512,
+            streamed=False,
+            evidence_kind="shell_error",
+            evidence_chars=48,
+        )
+
+        self.assertFalse(has_list_like_tool_result(messages))
+        self.assertNotIn("Return every listed path exactly once", policy.messages[-1]["content"])
+
     def test_shell_full_policy_answers_latest_request_directly(self) -> None:
         messages = [
             {"role": "user", "content": "Use the shell output and answer with the exact first line only."},

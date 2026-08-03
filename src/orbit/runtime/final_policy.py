@@ -786,7 +786,7 @@ def has_list_like_tool_result(messages: list[Message]) -> bool:
             continue
         content = message.get("content")
         if not isinstance(content, str) or _is_error_tool_content(content):
-            continue
+            return False
         if message.get("name") == "list_directory":
             return True
         if message.get("name") != "exec_shell_full_command":
