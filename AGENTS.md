@@ -188,7 +188,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC25
 
-- Current published baseline: `v0.0.1-rc25`.
+- Published predecessor: `v0.0.1-rc25`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc25
 - Release-notes commit: `452a8583a7f5eb5cb3fc077d2462801949245719`.
 - Tag object: `76b8f4160fd8e1b212422e8531a7a73d499541fd`.
@@ -210,6 +210,32 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   See `docs/FULL_DOCUMENT_READING.md`,
   `docs/DETERMINISTIC_DOCUMENT_SEARCH.md`, and
   `docs/releases/v0.0.1-rc25.md`.
+
+### RC26
+
+- Current published baseline: `v0.0.1-rc26`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc26
+- Prerelease: yes. Draft: false. Latest: false.
+- Includes squash merges `792b1d0` from #160, `7d1ccd8` from #161, and
+  `5addc1d` from #162.
+- Focus: the exact verified Qwen 3.6 35B-A3B Q4_K_M native profile,
+  Qwen-specific route-prefix reuse, complete Gemma final projections, and
+  turn/session token observability.
+- Qwen route reuse captures the complete hybrid state at the validated
+  768-token boundary inside the 810-token invariant prefix. Cold, segmented,
+  captured, and restored logits were byte-identical with maximum absolute
+  difference `0.0`.
+- Gemma validation retained the 12/12 strict production corpus, default
+  final-prefix `cached=64`, kill-switch `cached=4`, strict target/draft/mmproj
+  MTP, post-tool reuse, and document-search behavior.
+- RC26 final validation: independent reviews PASS; full discovery PASS with
+  1,417 tests; native runtime and packaged MTP helper rebuild PASS; Qwen and
+  Gemma real-model gates PASS; `compileall` and `git diff --check` PASS.
+- Qwen MTP, Qwen multimodal input, and other Qwen templates, quantizations, or
+  variants remain unsupported. CPU timing measurements are descriptive and do
+  not establish a universal speedup.
+- See `docs/QWEN_3_6_COMPATIBILITY.md` and
+  `docs/releases/v0.0.1-rc26.md`.
 
 ## RC24 Tool-Loop Convergence
 
