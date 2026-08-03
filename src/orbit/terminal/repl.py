@@ -60,6 +60,9 @@ class Repl:
         if callable(set_result_observer):
             set_result_observer(self._record_backend_result)
             self.backend_usage_observer_installed = True
+        set_failure_observer = getattr(self.backend, "set_failure_observer", None)
+        if callable(set_failure_observer):
+            set_failure_observer(self._record_backend_failure)
 
     def run(self) -> int:
         if self.history:
@@ -211,6 +214,10 @@ class Repl:
         self.turn_backend_token_usage.add_result(result)
         self.session_token_usage.add_result(result)
 
+    def _record_backend_failure(self) -> None:
+        self.turn_backend_token_usage.add_failed_call()
+        self.session_token_usage.add_failed_call()
+
     def _turn_token_usage(self) -> TurnTokenUsage | None:
         if self.backend_usage_observer_installed:
             return self.turn_backend_token_usage.snapshot()
@@ -238,6 +245,7 @@ class Repl:
             return True
         if command == "/reset":
             print(reset_session(self.runtime, self.session))
+            self._reset_token_usage()
             self.can_continue = False
             return True
         if command == "/compact":
@@ -280,9 +288,15 @@ class Repl:
             return "sessions clear cancelled"
         removed = SessionStore.clear_for_workdir(self.config.workdir)
         self.runtime.reset()
+        self._reset_token_usage()
         self.can_continue = False
         self.session = SessionStore.new_for_workdir(self.config.workdir)
         return f"sessions cleared: {removed}"
+
+    def _reset_token_usage(self) -> None:
+        self.turn_model_steps.clear()
+        self.turn_backend_token_usage = TokenUsageAccumulator()
+        self.session_token_usage = TokenUsageAccumulator()
 
     def _handle_tools_command(self, command: str) -> str:
         value = command.removeprefix("/tools").strip().lower()

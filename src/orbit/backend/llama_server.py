@@ -32,9 +32,13 @@ class LlamaServerBackend:
         self._server_tools_cache: list[dict[str, Any]] | None = None
         self._props_cache: dict[str, Any] | None = None
         self._result_observer: Callable[[ChatResult], None] | None = None
+        self._failure_observer: Callable[[], None] | None = None
 
     def set_result_observer(self, observer: Callable[[ChatResult], None] | None) -> None:
         self._result_observer = observer
+
+    def set_failure_observer(self, observer: Callable[[], None] | None) -> None:
+        self._failure_observer = observer
 
     def chat(
         self,
@@ -61,16 +65,15 @@ class LlamaServerBackend:
         )
         _attach_native_kv_diag_payload(payload, native_backend=native_backend)
         if native_backend:
-            return self._with_display_model(
-                self._post_native_stream(
+            return self._observe_call(
+                lambda: self._post_native_stream(
                     "/chat/stream",
                     payload,
                     on_delta=lambda _text: None,
                     on_progress=None,
                 )
             )
-        data = self._post_json("/v1/chat/completions", payload)
-        return self._with_display_model(_parse_chat_result(data))
+        return self._observe_call(lambda: _parse_chat_result(self._post_json("/v1/chat/completions", payload)))
 
     def chat_stream(
         self,
@@ -100,15 +103,17 @@ class LlamaServerBackend:
         )
         _attach_native_kv_diag_payload(payload, native_backend=native_backend)
         if native_backend:
-            return self._with_display_model(
-                self._post_native_stream(
+            return self._observe_call(
+                lambda: self._post_native_stream(
                     "/chat/stream",
                     payload,
                     on_delta=on_delta,
                     on_progress=on_progress,
                 )
             )
-        return self._with_display_model(self._post_stream("/v1/chat/completions", payload, on_delta=on_delta))
+        return self._observe_call(
+            lambda: self._post_stream("/v1/chat/completions", payload, on_delta=on_delta)
+        )
 
     def continue_current(
         self,
@@ -121,16 +126,16 @@ class LlamaServerBackend:
             raise LlamaServerError("native continuation is unavailable for this backend")
         payload = {"max_tokens": max_tokens, "thinking": self.thinking, "stream": True}
         if on_delta is None:
-            return self._with_display_model(
-                self._post_native_stream(
+            return self._observe_call(
+                lambda: self._post_native_stream(
                     "/chat/continue/stream",
                     payload,
                     on_delta=lambda _text: None,
                     on_progress=None,
                 )
             )
-        return self._with_display_model(
-            self._post_native_stream(
+        return self._observe_call(
+            lambda: self._post_native_stream(
                 "/chat/continue/stream",
                 payload,
                 on_delta=on_delta,
@@ -263,8 +268,23 @@ class LlamaServerBackend:
         display = self.display_model_name()
         displayed = replace(result, model=display) if display else result
         if self._result_observer is not None:
-            self._result_observer(displayed)
+            try:
+                self._result_observer(displayed)
+            except Exception:
+                pass
         return displayed
+
+    def _observe_call(self, call: Callable[[], ChatResult]) -> ChatResult:
+        try:
+            result = call()
+        except BaseException:
+            if self._failure_observer is not None:
+                try:
+                    self._failure_observer()
+                except Exception:
+                    pass
+            raise
+        return self._with_display_model(result)
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")

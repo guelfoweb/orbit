@@ -127,7 +127,31 @@ class CountingRuntime(ChatRuntime):
         )
 
 
+class ObservedBackend(InterruptingBackend):
+    def set_result_observer(self, observer) -> None:
+        self.result_observer = observer
+
+    def set_failure_observer(self, observer) -> None:
+        self.failure_observer = observer
+
+
 class ReplTests(unittest.TestCase):
+    def test_backend_observer_prevents_model_step_double_counting(self) -> None:
+        backend = ObservedBackend()
+        runtime = ChatRuntime(backend=backend, system_prompt=None)
+        repl = Repl(runtime=runtime, backend=backend, config=AppConfig(workdir=Path(".")))
+        result = ChatResult("ok", "fake", "stop", [], 100, 5, 20, 10.0, 2.0)
+
+        repl._record_model_step(ModelStepMetrics.from_result(loop=1, result=result, phase="route"))
+        backend.result_observer(result)
+
+        usage = repl.session_token_usage.snapshot()
+        self.assertEqual(usage.model_calls, 1)
+        self.assertEqual(usage.prompt_tokens, 100)
+        self.assertEqual(usage.evaluated_tokens, 80)
+        self.assertEqual(usage.cached_tokens, 20)
+        self.assertEqual(usage.completion_tokens, 5)
+
     def test_status_reports_accumulated_session_token_usage(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
@@ -183,6 +207,22 @@ class ReplTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             repl._ask("hello")
 
+        self.assertEqual(repl.turn_model_steps, [])
+
+    def test_reset_clears_turn_and_session_token_usage(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+        repl._record_model_step(ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0))
+        result = ChatResult("ok", "fake", "stop", [], 100, 5, 20, 10.0, 2.0)
+        repl.turn_backend_token_usage.add_result(result)
+        repl.session_token_usage.add_result(result)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            handled = repl._handle_command("/reset")
+
+        self.assertTrue(handled)
+        self.assertEqual(repl.session_token_usage.snapshot().model_calls, 0)
+        self.assertEqual(repl.turn_backend_token_usage.snapshot().model_calls, 0)
         self.assertEqual(repl.turn_model_steps, [])
 
     def test_readline_enables_bracketed_paste_when_available(self) -> None:

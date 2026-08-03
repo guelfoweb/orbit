@@ -33,6 +33,17 @@ class StatusTests(unittest.TestCase):
             "session tks: 420 total (400 in + 20 out) | work: 400 (380 prefill + 20 decode) | cache: 20 (5%) | calls: 2",
         )
 
+    def test_failed_call_makes_token_total_unavailable_without_hiding_attempt(self) -> None:
+        usage = TokenUsageAccumulator()
+        usage.add(ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0))
+        usage.add_failed_call()
+
+        rendered = format_session_token_usage(usage.snapshot())
+
+        self.assertIn("session tks: unavailable", rendered)
+        self.assertIn("calls: 2", rendered)
+        self.assertIn("failed: 1 (token usage unavailable)", rendered)
+
     def test_turn_token_usage_sums_every_model_call_and_real_evaluated_tokens(self) -> None:
         steps = [
             ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0),

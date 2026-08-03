@@ -18,11 +18,13 @@ class TurnTokenUsage:
     evaluated_tokens: int | None
     cached_tokens: int | None
     completion_tokens: int | None
+    failed_calls: int = 0
 
 
 @dataclass
 class TokenUsageAccumulator:
     model_calls: int = 0
+    failed_calls: int = 0
     prompt_tokens: int | None = 0
     evaluated_tokens: int | None = 0
     cached_tokens: int | None = 0
@@ -41,6 +43,14 @@ class TokenUsageAccumulator:
             completion_tokens=result.completion_tokens,
             cached_tokens=result.cached_tokens,
         )
+
+    def add_failed_call(self) -> None:
+        self.model_calls += 1
+        self.failed_calls += 1
+        self.prompt_tokens = None
+        self.evaluated_tokens = None
+        self.cached_tokens = None
+        self.completion_tokens = None
 
     def _add_metrics(
         self,
@@ -72,6 +82,7 @@ class TokenUsageAccumulator:
             evaluated_tokens=self.evaluated_tokens,
             cached_tokens=self.cached_tokens,
             completion_tokens=self.completion_tokens,
+            failed_calls=self.failed_calls,
         )
 
 
@@ -101,6 +112,7 @@ def summarize_turn_token_usage(model_steps: Sequence[ModelStepMetrics]) -> TurnT
         evaluated_tokens=evaluated_tokens,
         cached_tokens=cached_tokens,
         completion_tokens=completion_tokens,
+        failed_calls=0,
     )
 
 
@@ -207,6 +219,8 @@ def _token_usage_parts(usage: TurnTokenUsage, *, prefix: str) -> list[str]:
         ratio = (usage.cached_tokens / usage.prompt_tokens) * 100
         parts.append(f"cache: {usage.cached_tokens} ({ratio:.0f}%)")
     parts.append(f"calls: {usage.model_calls}")
+    if usage.failed_calls:
+        parts.append(f"failed: {usage.failed_calls} (token usage unavailable)")
     return parts
 
 

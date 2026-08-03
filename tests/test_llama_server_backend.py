@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.llama_server import (
     LlamaServerBackend,
+    LlamaServerError,
     _enrich_model_info_with_props,
     _parse_chat_result,
     _parse_chat_stream,
@@ -113,6 +114,48 @@ class LlamaServerBackendTests(unittest.TestCase):
         backend.set_result_observer(None)
         backend._with_display_model(source)
         self.assertEqual(observed, [result])
+
+    def test_observer_failure_does_not_change_successful_result(self) -> None:
+        class Backend(LlamaServerBackend):
+            def display_model_name(self) -> str:
+                return "display-model"
+
+        backend = Backend(base_url="http://localhost", timeout=1)
+        backend.set_result_observer(lambda _result: (_ for _ in ()).throw(RuntimeError("observer failed")))
+        source = ChatResult("ok", "source", "stop", [], 100, 5, 20, 10.0, 2.0)
+
+        self.assertEqual(backend._with_display_model(source).content, "ok")
+
+    def test_failed_backend_call_is_observed_and_original_error_is_preserved(self) -> None:
+        backend = LlamaServerBackend(base_url="http://localhost", timeout=1)
+        failures: list[str] = []
+        backend.set_failure_observer(lambda: failures.append("failed"))
+
+        with self.assertRaisesRegex(LlamaServerError, "boom"):
+            backend._observe_call(lambda: (_ for _ in ()).throw(LlamaServerError("boom")))
+
+        self.assertEqual(failures, ["failed"])
+
+    def test_failure_observer_error_does_not_replace_original_error(self) -> None:
+        backend = LlamaServerBackend(base_url="http://localhost", timeout=1)
+        backend.set_failure_observer(
+            lambda: (_ for _ in ()).throw(RuntimeError("observer failed"))
+        )
+
+        with self.assertRaisesRegex(LlamaServerError, "original"):
+            backend._observe_call(
+                lambda: (_ for _ in ()).throw(LlamaServerError("original"))
+            )
+
+    def test_cancelled_backend_call_is_observed(self) -> None:
+        backend = LlamaServerBackend(base_url="http://localhost", timeout=1)
+        failures: list[str] = []
+        backend.set_failure_observer(lambda: failures.append("cancelled"))
+
+        with self.assertRaises(KeyboardInterrupt):
+            backend._observe_call(lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+        self.assertEqual(failures, ["cancelled"])
 
     def test_backend_props_overlay_runtime_tool_healing_diagnostics(self) -> None:
         class Backend(LlamaServerBackend):
