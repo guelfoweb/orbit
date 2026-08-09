@@ -72,12 +72,22 @@ def _claim_runtime_family(build_bin: Path) -> Path:
 
 
 def _require_runtime_prefix(build_bin: Path, through: str) -> tuple[Path, ...]:
+    family_root = build_bin.resolve()
     required: list[Path] = []
     for name in platform_runtime_load_order():
-        path = build_bin / name
-        if not path.is_file():
+        path = family_root / name
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            raise RuntimeError(f"incomplete native runtime family: missing {path}") from None
+        if not resolved.is_file():
             raise RuntimeError(f"incomplete native runtime family: missing {path}")
-        required.append(path)
+        if resolved.parent != family_root:
+            raise RuntimeError(
+                "native runtime library escapes family root: "
+                f"{path} resolves outside {family_root}"
+            )
+        required.append(resolved)
         if name == through:
             return tuple(required)
     raise RuntimeError(f"unknown native runtime library: {through}")

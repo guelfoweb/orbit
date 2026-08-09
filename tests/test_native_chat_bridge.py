@@ -60,6 +60,26 @@ class NativeChatBridgeTests(unittest.TestCase):
 
         load.assert_not_called()
 
+    def test_llama_runtime_rejects_dependency_symlink_outside_family_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            build_bin = base / "runtime"
+            external = base / "external"
+            build_bin.mkdir()
+            external.mkdir()
+            escaped_name = runtime_library_filename("ggml-base")
+            for name in platform_runtime_libs():
+                target = external / name if name == escaped_name else build_bin / name
+                target.touch()
+                if name == escaped_name:
+                    (build_bin / name).symlink_to(target)
+
+            with mock.patch("orbit.native_llama.bindings.load_native_cdll") as load:
+                with self.assertRaisesRegex(RuntimeError, "escapes family root"):
+                    LlamaLibrary(build_bin)
+
+        load.assert_not_called()
+
     def test_bridge_must_be_co_located_with_active_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             build_bin = Path(tmp)
