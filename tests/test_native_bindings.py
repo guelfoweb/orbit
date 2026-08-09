@@ -54,6 +54,7 @@ def _stub_library() -> SimpleNamespace:
         "llama_sampler_chain_init",
         "llama_sampler_chain_add",
         "llama_sampler_init_greedy",
+        "llama_sampler_init_grammar",
         "llama_sampler_sample",
         "llama_sampler_accept",
         "llama_sampler_reset",
@@ -86,6 +87,7 @@ class NativeBindingsTests(unittest.TestCase):
         self.assertEqual(len(library.lib.llama_batch_free.argtypes), 1)
         self.assertEqual(len(library.lib.llama_synchronize.argtypes), 1)
         self.assertEqual(len(library.lib.llama_get_logits_ith.argtypes), 2)
+        self.assertEqual(len(library.lib.llama_sampler_init_grammar.argtypes), 3)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,10 @@ QWEN36_PROFILE_ID = "orbit-qwen36-native-v1"
 QWEN36_OFFICIAL_TEMPLATE_SHA256 = "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259"
 QWEN36_VERIFIED_FILE_TYPE = "15"
 QWEN36_VERIFIED_QUANTIZATION = "Q4_K_M"
+QWEN3_CODER_PROFILE_ID = "orbit-qwen3-coder-native-v1"
+QWEN3_CODER_OFFICIAL_TEMPLATE_SHA256 = "87710339d25b4e789c1d723f93c91ee861a86d305bb3d20a845536f251d6ea8a"
+QWEN3_CODER_VERIFIED_FILE_TYPE = "15"
+QWEN3_CODER_VERIFIED_QUANTIZATION = "Q4_K_M"
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,9 @@ class NativeModelProfile:
     mtp_supported: bool
     gemma_prefix_reuse_supported: bool
     verified_quantization: str | None = None
+    artifact_content_protocol: str = "literal-content-v1"
+    route_prefix_reuse_supported: bool = False
+    multimodal_supported: bool = False
 
     @property
     def uses_native_chat_bridge(self) -> bool:
@@ -53,6 +60,19 @@ class NativeModelProfile:
             "failure_reason": self.failure_reason,
             "mtp_supported": self.mtp_supported,
             "verified_quantization": self.verified_quantization,
+            "artifact_content_protocol": self.artifact_content_protocol,
+            "capabilities": {
+                "chat": self.verified,
+                "tools": self.verified,
+                "tool_history_results": self.verified,
+                "write_artifact": self.verified,
+                "verify_artifact": self.verified,
+                "mtp": self.mtp_supported,
+                "route_prefix_reuse": self.route_prefix_reuse_supported,
+                "multimodal": self.multimodal_supported,
+                "arbitrary_exact_copy_artifact": False,
+                "empty_artifact": False,
+            },
         }
 
 
@@ -81,6 +101,8 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             thinking_supported=True,
             mtp_supported=True,
             gemma_prefix_reuse_supported=True,
+            route_prefix_reuse_supported=True,
+            multimodal_supported=True,
         )
 
     qwen_identity = (
@@ -109,6 +131,43 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             mtp_supported=False,
             gemma_prefix_reuse_supported=False,
             verified_quantization=QWEN36_VERIFIED_QUANTIZATION,
+            route_prefix_reuse_supported=True,
+        )
+
+    qwen3_coder_identity = (
+        architecture == "qwen3moe"
+        and model_name == "Qwen3-Coder-30B-A3B-Instruct"
+        and tokenizer_model == "gpt2"
+        and tokenizer_pre == "qwen2"
+        and file_type == QWEN3_CODER_VERIFIED_FILE_TYPE
+        and metadata.get("general.quantization_version", "").strip() == "2"
+        and metadata.get("tokenizer.ggml.add_bos_token", "").strip().lower() == "false"
+        and metadata.get("tokenizer.ggml.eos_token_id", "").strip() == "151645"
+        and metadata.get("tokenizer.ggml.padding_token_id", "").strip() == "151654"
+        and metadata.get("qwen3moe.context_length", "").strip() == "262144"
+        and metadata.get("qwen3moe.expert_count", "").strip() == "128"
+        and metadata.get("qwen3moe.expert_used_count", "").strip() == "8"
+        and template_hash == QWEN3_CODER_OFFICIAL_TEMPLATE_SHA256
+    )
+    if qwen3_coder_identity:
+        return NativeModelProfile(
+            profile_id=QWEN3_CODER_PROFILE_ID,
+            family="qwen3-coder",
+            model_name=model_name,
+            architecture=architecture,
+            renderer="llama.cpp-jinja",
+            reasoning_protocol="none",
+            tool_call_protocol="qwen3-coder-xml",
+            history_serialization="qwen3-coder-chatml",
+            verified=True,
+            failure_reason=None,
+            template_source="gguf-embedded-official",
+            template_sha256=template_hash,
+            thinking_supported=False,
+            mtp_supported=False,
+            gemma_prefix_reuse_supported=False,
+            verified_quantization=QWEN3_CODER_VERIFIED_QUANTIZATION,
+            artifact_content_protocol="qwen3-coder-json-string-v1",
         )
 
     reason = _unverified_reason(
@@ -156,4 +215,14 @@ def _unverified_reason(
             return "qwen36_quantization_identity_mismatch"
         if template_hash != QWEN36_OFFICIAL_TEMPLATE_SHA256:
             return "qwen36_template_identity_mismatch"
+    if architecture == "qwen3moe":
+        if model_name != "Qwen3-Coder-30B-A3B-Instruct":
+            return "qwen3_coder_model_identity_mismatch"
+        if tokenizer_model != "gpt2" or tokenizer_pre != "qwen2":
+            return "qwen3_coder_tokenizer_identity_mismatch"
+        if file_type != QWEN3_CODER_VERIFIED_FILE_TYPE:
+            return "qwen3_coder_quantization_identity_mismatch"
+        if template_hash != QWEN3_CODER_OFFICIAL_TEMPLATE_SHA256:
+            return "qwen3_coder_template_identity_mismatch"
+        return "qwen3_coder_metadata_identity_mismatch"
     return "unsupported_model_profile"

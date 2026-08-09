@@ -22,7 +22,8 @@ decision from the potentially long file body:
 4. A stopped, non-empty result of at most 64 KiB is validated as UTF-8 and
    published to the exact target with an atomic file operation.
 5. Publication evidence records the exact path, byte count, SHA-256,
-   overwrite state, and any parents created by this request.
+   overwrite state, explicit `publication_action` (`created` or `replaced`),
+   and any parents created by this request.
 6. The next model round exposes only `verify_artifact`. The capability is
    intrinsically bound to the exact published path, and the model selects one
    bounded read-only check without supplying a replacement path.
@@ -52,6 +53,21 @@ file type, choose a check, repair content, or judge whether the artifact solves
 the user's semantic task. Format-specific correctness checks in validation,
 such as parsing source or configuration text, run outside Orbit after the
 artifact workflow completes.
+
+The verified Qwen3-Coder profile uses a model-specific reversible JSON-string
+transport for this content phase because its generic chat response wrapped file
+bodies in a Markdown presentation fence. The backend pre-opens the string,
+constrains only its structural grammar, decodes the model-generated value with
+strict UTF-8, and rejects malformed or incomplete framing. It does not trim,
+normalize, repair, or semantically alter the decoded value. This does not
+change the shared generative artifact contract or publication lifecycle. See
+`docs/QWEN3_CODER_COMPATIBILITY.md`.
+
+The JSON string is transport, not an exact-copy contract. The model remains
+responsible for the decoded semantic content. Orbit guarantees that valid
+generated string characters and escapes are decoded reversibly; it does not
+guarantee that a generative model reproduces externally authoritative Unicode
+or newline bytes on request.
 
 ## Publication And Parent Directories
 

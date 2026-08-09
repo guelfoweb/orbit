@@ -401,6 +401,40 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - See `docs/QWEN_3_6_COMPATIBILITY.md` for the exact identity, protocol,
   diagnostics, validation evidence, and current limits.
 
+## Qwen3-Coder Native Compatibility
+
+- Native Qwen3-Coder support is restricted to the verified
+  `Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf` identity. The profile ID is
+  `orbit-qwen3-coder-native-v1`, the GGUF architecture is `qwen3moe`, and the
+  embedded-template SHA-256 is
+  `87710339d25b4e789c1d723f93c91ee861a86d305bb3d20a845536f251d6ea8a`.
+- Authorization uses exact model, quantization, tokenizer, template, context,
+  and expert metadata. Filename matching never enables the profile; drifted
+  or unknown variants fail before inference.
+- The official embedded ChatML and XML tool protocol provide chat, routing,
+  tools, history/results, existing-file modification, and post-tool final
+  behavior through the revision-bound native bridge. Thinking is unsupported
+  and fails closed.
+- Generative artifacts use a backend-owned, structurally pre-opened JSON string
+  with a profile-local grammar. The backend reversibly decodes the generated
+  value with strict UTF-8. It does not trim, normalize, retry, repair, or
+  reinterpret content. Shared runtime publication and read-only verification
+  remain unchanged.
+- Independent review rejected the original in-band fence because artifact
+  content ending in the same fence was ambiguous. The corrected profile uses a
+  grammar-constrained JSON string and strict UTF-8 decoding. Its production
+  first smoke passed 4/4 and the extended normal-tool-loop corpus passed 8/8,
+  including artifact verification, existing-file modification, failure
+  recovery, inert payload handling, and autonomous path/format choice.
+- Measured CPU performance at context 8192 and six threads was approximately
+  18.80 prefill tokens/s, 11.35 decode tokens/s, and 31.14 GiB peak RSS. Timing
+  is descriptive and workload-dependent.
+- Qwen3-Coder MTP, multimodal input, Qwen 3.6 route-prefix reuse, arbitrary
+  exact-copy artifact guarantees, and empty artifacts are unsupported. Gemma
+  and Qwen 3.6 profile identities and behavior remain separate.
+- See `docs/QWEN3_CODER_COMPATIBILITY.md` and
+  `docs/QWEN3_CODER_QUALIFICATION.md`.
+
 ## Atomic Text Artifact Generation
 
 - Non-trivial UTF-8 files use one model-selected `write_artifact` request with
@@ -412,7 +446,8 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   commit. The exact published path is intrinsic to the pending capability; the
   model then selects one bounded read-only `verify_artifact` check without
   supplying another path. That ephemeral capability is absent from the normal
-  tools-on registry.
+  tools-on registry. Evidence distinguishes overwrite authorization from the
+  actual `publication_action` (`created` or `replaced`) used by final prose.
 - Length, cancel, timeout, reset, path race, or generation error before commit
   publishes nothing. Verification never publishes or mutates. A verification
   failure leaves the atomically published file in place and is reported as

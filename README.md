@@ -1,7 +1,8 @@
 # orbit
 
-Orbit is a small Python-first local runtime for Gemma 4 26B-A4B and the
-verified Qwen 3.6 35B-A3B profile on CPU-only machines. The primary path is the
+Orbit is a small Python-first local runtime for Gemma 4 26B-A4B, verified
+Qwen 3.6 35B-A3B, and verified Qwen3-Coder 30B-A3B profiles on CPU-only
+machines. The primary path is the
 native `orbit server` backend, using
 vendored `llama.cpp`/`ggml` libraries built and loaded by Orbit. It does not
 require an external `llama-server` process for normal use.
@@ -14,7 +15,7 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 
 ## Current Scope
 
-- local CLI and native HTTP server for Gemma 4 26B-A4B and verified Qwen 3.6
+- local CLI and native HTTP server for Gemma 4 26B-A4B, verified Qwen 3.6, and verified Qwen3-Coder
 - CPU-first native backend
 - explicit shell tools when tools mode is enabled
 - streaming terminal output and compact progress phases
@@ -34,6 +35,7 @@ and is not a guaranteed performance win.
 - CMake for building the vendored native libraries
 - Gemma 4 26B-A4B target GGUF
 - optional verified Qwen 3.6 35B-A3B Q4_K_M target GGUF
+- optional verified Qwen3-Coder 30B-A3B Instruct Q4_K_M target GGUF
 - optional Gemma 4 `mmproj` GGUF for multimodal input
 - optional MTP draft GGUF for `orbit server --mtp`
 
@@ -104,6 +106,22 @@ verified Qwen profile has its own default-on 768-token route checkpoint with
 `ORBIT_QWEN_ROUTE_PREFIX_REUSE=0` as its kill switch. See
 [`docs/QWEN_3_6_COMPATIBILITY.md`](docs/QWEN_3_6_COMPATIBILITY.md) for the exact
 identity gate, thinking behavior, tool protocol, diagnostics, and limits.
+
+The verified Qwen3-Coder profile supports chat, tools, tool history, and
+bounded generative UTF-8 artifacts through its reviewed embedded ChatML and
+XML tool protocol:
+
+```bash
+orbit download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
+orbit server \
+  --model models/unsloth--Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf \
+  --think off
+```
+
+Qwen3-Coder MTP, multimodal input, arbitrary exact-copy artifacts, empty
+artifacts, and Qwen 3.6 route checkpoints are not supported. See
+[`docs/QWEN3_CODER_COMPATIBILITY.md`](docs/QWEN3_CODER_COMPATIBILITY.md) for
+the exact identity and reversible artifact-content protocol.
 
 Enable tools only when you want to expose model-driven shell access:
 

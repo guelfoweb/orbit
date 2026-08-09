@@ -195,6 +195,7 @@ class ArtifactPublication:
                 f"bytes: {self.bytes_written}",
                 f"sha256: {self.sha256}",
                 f"overwrite: {'true' if self.overwrite else 'false'}",
+                f"publication_action: {'replaced' if self.overwrite else 'created'}",
                 "created_parent_directories: "
                 + (", ".join(self.created_parent_directories) if self.created_parent_directories else "none"),
                 "directory_sync: " + ("complete" if self.directory_sync_complete else "unconfirmed"),
@@ -669,6 +670,7 @@ class PendingArtifact:
             f"check: {check}",
             f"bytes: {len(raw)}",
             f"sha256: {self.publication.sha256}",
+            f"publication_action: {'replaced' if self.publication.overwrite else 'created'}",
             "status: pass",
             f"detail: {detail}",
             *content_lines,

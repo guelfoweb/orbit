@@ -170,6 +170,7 @@ class ArtifactPublicationTests(unittest.TestCase):
 
             self.assertTrue((root / "samples/games/snake.js").is_file())
             self.assertIn("artifact_publication: complete", pending.evidence())
+            self.assertIn("publication_action: created", pending.evidence())
             before = (root / "samples/games/snake.js").stat()
             mutation_paths = (
                 "orbit.runtime.artifacts._renameat2",
@@ -199,6 +200,7 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertEqual(pending.publication.created_parent_directories, ("samples", "samples/games"))
             self.assertEqual((root / "samples/games/snake.js").read_text(), "console.log('ready');\n")
             self.assertIn("artifact_verification: complete", evidence)
+            self.assertIn("publication_action: created", evidence)
             self.assertEqual(
                 (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns),
                 (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
@@ -430,6 +432,7 @@ class ArtifactPublicationTests(unittest.TestCase):
                 create_parents=False,
             )
             self.assertTrue(publication.overwrite)
+            self.assertIn("publication_action: replaced", publication.evidence())
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
 
     def test_overwrite_preserves_existing_permission_bits(self) -> None:
@@ -464,6 +467,7 @@ class ArtifactPublicationTests(unittest.TestCase):
 
             self.assertEqual((root / "samples/game.js").read_text(), "new")
             self.assertFalse(publication.overwrite)
+            self.assertIn("publication_action: created", publication.evidence())
             self.assertEqual(list((root / "samples").glob(".orbit-artifact-*")), [])
 
     def test_existing_parent_falls_back_when_filesystem_rejects_o_tmpfile(self) -> None:

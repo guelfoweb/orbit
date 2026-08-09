@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from .bindings import load_native_cdll, native_cdll_flags
 from .chat_template import render_gemma4_chat, render_gemma4_route_prompt_segments
-from .model_profiles import GEMMA4_PROFILE_ID, QWEN36_PROFILE_ID
+from .model_profiles import GEMMA4_PROFILE_ID, QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID
 from .native_names import runtime_library_filename
 
 
@@ -42,12 +42,12 @@ def safe_native_capability_manifest(client: _TokenizingClient, *, final_system_p
     profile = getattr(client, "model_profile", None)
     if getattr(profile, "profile_id", None) == GEMMA4_PROFILE_ID:
         return safe_gemma4_capability_manifest(client, final_system_prompt=final_system_prompt)
-    if getattr(profile, "profile_id", None) == QWEN36_PROFILE_ID:
+    if getattr(profile, "profile_id", None) in {QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID}:
         build_bin = _client_build_bin(client)
         build = read_llama_cpp_build_info(build_bin) if build_bin is not None else _unavailable_build("build_bin_unavailable")
         return {
             "schema_version": CAPABILITY_SCHEMA_VERSION,
-            "profile_id": QWEN36_PROFILE_ID,
+            "profile_id": getattr(profile, "profile_id", "unsupported"),
             "status": "verified" if getattr(profile, "verified", False) else "unverified",
             "verification_scope": "model_metadata_template_identity_and_revision_bound_parser",
             "behavior_enforced": True,
@@ -68,11 +68,15 @@ def safe_native_capability_manifest(client: _TokenizingClient, *, final_system_p
                 "reasoning_protocol": getattr(profile, "reasoning_protocol", "unknown"),
                 "tool_call_protocol": getattr(profile, "tool_call_protocol", "unknown"),
                 "history_serialization": getattr(profile, "history_serialization", "unknown"),
+                "artifact_content_protocol": getattr(profile, "artifact_content_protocol", "unknown"),
             },
             "requirements": {
                 "chat_bridge": "co-located-revision-bound",
-                "mtp_supported": False,
-                "gemma_prefix_reuse_supported": False,
+                "thinking_supported": getattr(profile, "thinking_supported", False),
+                "mtp_supported": getattr(profile, "mtp_supported", False),
+                "gemma_prefix_reuse_supported": getattr(profile, "gemma_prefix_reuse_supported", False),
+                "route_prefix_reuse_supported": getattr(profile, "route_prefix_reuse_supported", False),
+                "multimodal_supported": getattr(profile, "multimodal_supported", False),
             },
         }
     return {
