@@ -468,6 +468,23 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - See `docs/QWEN3_CODER_COMPATIBILITY.md` and
   `docs/QWEN3_CODER_QUALIFICATION.md`.
 
+## Post-RC28 Qwen3-Coder Route-Prefix Reuse
+
+- The exact verified `orbit-qwen3-coder-native-v1` profile has its own
+  default-on route checkpoint. It does not reuse Qwen 3.6 state, identity,
+  template assumptions, or kill switch.
+- The invariant route prefix is 789 tokens and the unpadded checkpoint boundary
+  is token 768. The serialized sequence state is 75,507,864 bytes. Cold,
+  segmented, and restored logits were byte-identical with maximum absolute
+  difference `0.0` across chat, tool, failure, inert-data, and artifact routes.
+- Warm matched routes restored `cached=768`; median route prefill changed from
+  22.03 seconds to 1.44 seconds and median route wall time from 22.54 seconds
+  to 1.97 seconds. Timing is descriptive and hardware-dependent.
+- `ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0` is the immediate dedicated kill
+  switch. Invalid values disable safely. Cancel, timeout, reset, reload,
+  context or identity changes, restore failure, and restart invalidate or omit
+  state. `/props` reports bounded state and identity diagnostics.
+
 ## Atomic Text Artifact Generation
 
 - Non-trivial UTF-8 files use one model-selected `write_artifact` request with

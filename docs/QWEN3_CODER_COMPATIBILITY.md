@@ -66,6 +66,30 @@ orbit server \
 protocols, artifact protocol, verified quantization, and bounded capability
 flags. It does not expose prompt content.
 
+## Route-Prefix Reuse
+
+Tools-on route calls use a process-local checkpoint only for the exact
+`orbit-qwen3-coder-native-v1` profile. The rendered route prompt has a
+789-token invariant prefix; Orbit captures the complete llama.cpp sequence
+state at token 768 without padding. The checkpoint is bound to the model and
+file identity, profile, template, tokenizer, route-system and tool-schema
+identity, context, batch and thread configuration, backend build, and process.
+It is never shared with Qwen 3.6 or Gemma.
+
+Cold full prefill, explicit segmentation at token 768, and restored prefill
+produced byte-identical logits with maximum absolute difference `0.0` for chat,
+filesystem, failed-command, inert-payload, and artifact routes. The checkpoint
+is 75,507,864 bytes. In the matched six-route measurement, a warm request
+evaluated only the 32-52 dynamic tokens and reported `cached=768`; median route
+prefill fell from 22.03 seconds to 1.44 seconds and median route wall time from
+22.54 seconds to 1.97 seconds. CPU timing is descriptive.
+
+`ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0` is the dedicated kill switch. Invalid
+values disable reuse safely. Cancel, timeout, reset, model reload, context or
+identity changes, restore errors, and process restart invalidate or omit the
+checkpoint. `/props` exposes bounded capture, restore, fallback, invalidation,
+identity-hash, and checkpoint-size diagnostics without prompt content.
+
 ## Validation And Limits
 
 The corrected production profile passed a four-case fail-fast smoke and an
@@ -100,7 +124,7 @@ Unsupported capabilities:
 
 - Qwen3-Coder MTP;
 - multimodal input;
-- Qwen 3.6 route-prefix checkpoint reuse;
+- Qwen 3.6 route-prefix checkpoint reuse or checkpoint identity;
 - arbitrary exact-copy artifact guarantees;
 - empty artifacts;
 - binary artifacts or hidden multi-file planning;

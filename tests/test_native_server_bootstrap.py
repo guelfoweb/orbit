@@ -431,6 +431,31 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertTrue(config.final_prefix_reuse_legacy_detected)
         self.assertIsNone(config.final_prefix_reuse_config_error)
 
+    @mock.patch.dict(
+        "os.environ",
+        {"ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE": "0"},
+        clear=True,
+    )
+    def test_run_server_applies_dedicated_qwen3_coder_route_kill_switch(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/test.gguf")),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        config = _FakeNativeClient.instances[0].config
+        self.assertFalse(config.qwen3_coder_route_prefix_reuse_enabled)
+        self.assertEqual(config.qwen3_coder_route_prefix_reuse_source, "stable")
+        self.assertIsNone(config.qwen3_coder_route_prefix_reuse_config_error)
+
 
 if __name__ == "__main__":
     unittest.main()

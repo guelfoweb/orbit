@@ -17,6 +17,7 @@ from .payloads import (
 )
 from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
+from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 from orbit.runtime.tool_healing import tool_call_healing_status
@@ -882,7 +883,12 @@ def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
 
 
 def _qwen_route_prefix_anchor_requested(*, native_backend: bool) -> bool:
-    if not native_backend or not resolve_qwen_route_prefix_reuse().enabled:
+    if not native_backend:
+        return False
+    if not (
+        resolve_qwen_route_prefix_reuse().enabled
+        or resolve_qwen3_coder_route_prefix_reuse().enabled
+    ):
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
 

@@ -29,6 +29,7 @@ def _coder_profile() -> NativeModelProfile:
         thinking_supported=False,
         mtp_supported=False,
         gemma_prefix_reuse_supported=False,
+        route_prefix_reuse_supported=True,
         verified_quantization="Q4_K_M",
         artifact_content_protocol="qwen3-coder-json-string-v1",
     )

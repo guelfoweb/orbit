@@ -392,6 +392,7 @@ def run_first_smoke(
         use_mtp_experimental=False,
         final_prefix_experiment_enabled=False,
         qwen_route_prefix_reuse_enabled=False,
+        qwen3_coder_route_prefix_reuse_enabled=True,
     )
     client = NativeLlamaClient(paths, config)
     observed: list[ChatResult] = []
@@ -410,6 +411,7 @@ def run_first_smoke(
             "thinking": False,
             "mtp": False,
             "qwen36_route_prefix_reuse": False,
+            "qwen3_coder_route_prefix_reuse": True,
         },
         "steps": [],
         "mode": "extended-corpus" if include_extended else "first-smoke",
@@ -568,6 +570,8 @@ def run_first_smoke(
                 return report
             if not include_extended:
                 report["passed"] = True
+                report["peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+                report["qwen3_coder_route_prefix_reuse"] = client.qwen3_coder_route_prefix_reuse_status()
                 save()
                 return report
 
@@ -681,6 +685,7 @@ def run_first_smoke(
                 return report
         report["passed"] = True
         report["peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        report["qwen3_coder_route_prefix_reuse"] = client.qwen3_coder_route_prefix_reuse_status()
         save()
         return report
     finally:

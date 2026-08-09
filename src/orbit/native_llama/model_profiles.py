@@ -167,6 +167,7 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             mtp_supported=False,
             gemma_prefix_reuse_supported=False,
             verified_quantization=QWEN3_CODER_VERIFIED_QUANTIZATION,
+            route_prefix_reuse_supported=True,
             artifact_content_protocol="qwen3-coder-json-string-v1",
         )
 
