@@ -113,7 +113,7 @@ class NativeModelProfileTests(unittest.TestCase):
         self.assertFalse(profile.thinking_supported)
         self.assertFalse(profile.mtp_supported)
         self.assertFalse(profile.gemma_prefix_reuse_supported)
-        self.assertFalse(profile.route_prefix_reuse_supported)
+        self.assertTrue(profile.route_prefix_reuse_supported)
         self.assertFalse(profile.multimodal_supported)
         self.assertEqual(profile.verified_quantization, "Q4_K_M")
 

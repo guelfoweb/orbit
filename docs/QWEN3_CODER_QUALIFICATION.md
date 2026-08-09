@@ -35,8 +35,9 @@ The production-profile runner is `scripts/qualify_qwen3_coder.py`. Its `ready`
 operation does not open the GGUF. `inspect` requires the final regular file,
 rejects an active Orbit download and uses the current native API with
 `vocab_only=true`. `smoke` requires the exact inspection manifest and loads the
-normal production profile without an override. Qwen 3.6 route checkpoint
-reuse, Gemma final-prefix reuse, thinking and MTP are disabled in that smoke.
+normal production profile without an override. The dedicated Qwen3-Coder route
+checkpoint is enabled; Qwen 3.6 route checkpoint reuse, Gemma final-prefix
+reuse, thinking and MTP remain disabled.
 
 ## Sequence
 
@@ -102,8 +103,9 @@ regression review; the current runner exercises the exact production profile.
 Only after the first smoke passes, run Qwen3-Coder and the current verified
 Qwen 3.6 profile in separate clean processes with CPU-only context 8192, six
 threads, batch 256, ubatch 128, temperature zero, thinking off and MTP off.
-Qwen3-Coder must not use the Qwen 3.6 route checkpoint. Use one excluded warmup
-and three measured repetitions where practical.
+Qwen3-Coder must not use the Qwen 3.6 route checkpoint. Its separately
+qualified 768-token checkpoint may be enabled. Use one excluded warmup and
+three measured repetitions where practical.
 
 The prepared corpus is:
 
@@ -474,3 +476,30 @@ or route checkpoint. The corrected profile passed 4/4 fail-fast and 8/8
 extended production workflows; existing Gemma and Qwen 3.6 paths remain
 unchanged. Arbitrary exact-copy behavior remains a separately documented
 technical stop.
+
+## Dedicated Route-Prefix Qualification
+
+The production route renderer has a 789-token invariant prefix for the exact
+verified profile. A separate Qwen3-Coder checkpoint captures token 768 without
+padding. The prefix token SHA-256 is
+`ab9a4ddfba15f3a663825b15c933496deec792c263fc27682664ebffdc810e59` and
+the rendered invariant-prefix SHA-256 is
+`bca0bbd865469067abcea5ecda1f0b2cebf8f70d085cdfc1cfb3c12812d32e94`.
+The serialized sequence state is 75,507,864 bytes.
+
+Cold, explicitly segmented, and restored probes covered chat, exact `pwd`, a
+failed-command request, inert tool-like input, and an artifact request. Logits
+were byte-identical with maximum absolute difference `0.0`; next token,
+ordered top candidates, route, tool names and arguments, output, and finish
+reason were identical. A matched process-isolated OFF/ON run preserved all six
+route outputs. After capture, evaluated prompt tokens fell from 800-820 to
+32-52 with `cached=768`; median warm prefill was 22.03 seconds OFF and 1.44
+seconds ON, while median warm route wall time was 22.54 seconds OFF and 1.97
+seconds ON. Steady RSS increased by approximately the 75.7 MB checkpoint blob;
+the capture process peak increased by approximately 150.3 MB. A 20-restore
+probe changed final RSS by 4 KiB, with no linear growth.
+
+The dedicated kill switch is `ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0`.
+Qwen 3.6 retains `ORBIT_QWEN_ROUTE_PREFIX_REUSE` and an independent state and
+identity. Reset and lifecycle failures discard the Qwen3-Coder state; the next
+eligible route performs a cold capture rather than using stale memory.

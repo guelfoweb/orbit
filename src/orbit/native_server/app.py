@@ -26,6 +26,7 @@ from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_
 from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
+from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_server.protocol import (
     ContinueRequest,
     DEFAULT_SESSION_ID,
@@ -301,6 +302,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             mtp_config = _mtp_config_payload(state.client)
             final_prefix = state.client.final_prefix_experiment_status()
             qwen_route_prefix = state.client.qwen_route_prefix_reuse_status()
+            qwen3_coder_route_prefix = state.client.qwen3_coder_route_prefix_reuse_status()
             final_prefix_config = _final_prefix_reuse_props(state.client)
             self._json(
                 {
@@ -369,6 +371,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "final_prefix_experiment_last_used": final_prefix["last_used"],
                     "final_prefix_experiment_checkpoint_size_bytes": final_prefix["checkpoint_size_bytes"],
                     "qwen_route_prefix_reuse": qwen_route_prefix,
+                    "qwen3_coder_route_prefix_reuse": qwen3_coder_route_prefix,
                     **final_prefix_config,
                     **_tool_call_healing_props(),
                 }
@@ -684,6 +687,7 @@ def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     final_prefix_config = resolve_final_prefix_reuse()
     qwen_route_prefix_config = resolve_qwen_route_prefix_reuse()
+    qwen3_coder_route_prefix_config = resolve_qwen3_coder_route_prefix_reuse()
 
     try:
         paths = resolve_bootstrap_paths(args)
@@ -708,6 +712,9 @@ def run_server(argv: list[str] | None = None) -> int:
                 qwen_route_prefix_reuse_enabled=qwen_route_prefix_config.enabled,
                 qwen_route_prefix_reuse_source=qwen_route_prefix_config.source,
                 qwen_route_prefix_reuse_config_error=qwen_route_prefix_config.validation_error,
+                qwen3_coder_route_prefix_reuse_enabled=qwen3_coder_route_prefix_config.enabled,
+                qwen3_coder_route_prefix_reuse_source=qwen3_coder_route_prefix_config.source,
+                qwen3_coder_route_prefix_reuse_config_error=qwen3_coder_route_prefix_config.validation_error,
             ),
         )
         if not args.verbose_llama_log:

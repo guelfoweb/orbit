@@ -563,7 +563,10 @@ class LlamaServerBackendTests(unittest.TestCase):
         for value in ("0", "invalid"):
             with self.subTest(value=value), mock.patch.dict(
                 os.environ,
-                {"ORBIT_QWEN_ROUTE_PREFIX_REUSE": value},
+                {
+                    "ORBIT_QWEN_ROUTE_PREFIX_REUSE": value,
+                    "ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE": value,
+                },
                 clear=True,
             ), model_call_context(phase="route", tools_mode="on"):
                 self.assertFalse(_qwen_route_prefix_anchor_requested(native_backend=True))

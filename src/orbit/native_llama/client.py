@@ -59,6 +59,12 @@ from .qwen3_coder import (
     qwen3_coder_artifact_messages,
     qwen3_coder_artifact_prompt,
 )
+from .qwen3_coder_route_prefix import (
+    QWEN3_CODER_ROUTE_PREFIX_FORMAT_VERSION,
+    QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+    QWEN3_CODER_ROUTE_TOKENIZER_IDENTITY,
+    derive_qwen3_coder_route_prefix_spec,
+)
 from .persistent_mtp import (
     PersistentMtpSessionRuntime,
     create_persistent_mtp_session,
@@ -101,6 +107,9 @@ class NativeClientConfig:
     qwen_route_prefix_reuse_enabled: bool = False
     qwen_route_prefix_reuse_source: str = "default"
     qwen_route_prefix_reuse_config_error: str | None = None
+    qwen3_coder_route_prefix_reuse_enabled: bool = False
+    qwen3_coder_route_prefix_reuse_source: str = "default"
+    qwen3_coder_route_prefix_reuse_config_error: str | None = None
 
 
 @dataclass
@@ -129,6 +138,7 @@ class _QwenRouteAnchorRuntimePlan:
     state_kwargs: dict[str, str | None]
     spec: QwenRoutePrefixSpec
     metadata: dict[str, object]
+    profile_id: str = QWEN36_PROFILE_ID
 
 
 @dataclass(frozen=True)
@@ -225,6 +235,9 @@ class NativeLlamaClient:
         self._qwen_route_prefix_anchor_state = PrefixAnchorState()
         self._qwen_route_prefix_spec: QwenRoutePrefixSpec | None = None
         self._qwen_route_prefix_status = QwenRoutePrefixStatus()
+        self._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState()
+        self._qwen3_coder_route_prefix_spec: QwenRoutePrefixSpec | None = None
+        self._qwen3_coder_route_prefix_status = QwenRoutePrefixStatus()
         self._model_metadata_identity: dict[str, str] = {}
         self._qwen_native_build_identity: str | None = None
         self._final_prefix_anchor_state = PrefixAnchorState()
@@ -276,6 +289,35 @@ class NativeLlamaClient:
             "profile_identity": getattr(profile, "profile_id", None),
             "template_identity": getattr(profile, "template_sha256", None),
             "tokenizer_identity": hash_text(QWEN_ROUTE_TOKENIZER_IDENTITY),
+            "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
+            "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
+        }
+
+    def qwen3_coder_route_prefix_reuse_status(self) -> dict[str, object]:
+        status = self._qwen3_coder_route_prefix_status
+        profile = getattr(self, "model_profile", None)
+        profile_eligible = (
+            getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
+            and getattr(profile, "verified", False)
+            and self._model_metadata_identity.get("general.file_type") == "15"
+        )
+        spec = self._qwen3_coder_route_prefix_spec
+        return {
+            "enabled": self.config.qwen3_coder_route_prefix_reuse_enabled and profile_eligible,
+            "source": self.config.qwen3_coder_route_prefix_reuse_source,
+            "config_error": self.config.qwen3_coder_route_prefix_reuse_config_error,
+            "initialized": status.initialized,
+            "prefix_tokens": status.prefix_tokens,
+            "capture_count": status.capture_count,
+            "restore_count": status.restore_count,
+            "fallback_count": status.fallback_count,
+            "invalidation_count": status.invalidation_count,
+            "failure_reason": status.failure_reason,
+            "last_used": status.last_used,
+            "checkpoint_size_bytes": self._qwen3_coder_route_prefix_anchor_state.checkpoint_size,
+            "profile_identity": getattr(profile, "profile_id", None),
+            "template_identity": getattr(profile, "template_sha256", None),
+            "tokenizer_identity": hash_text(QWEN3_CODER_ROUTE_TOKENIZER_IDENTITY),
             "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
             "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
         }
@@ -1573,13 +1615,13 @@ class NativeLlamaClient:
             if final_prefix_segments is not None and timings.cancelled:
                 self._invalidate_final_prefix("cancelled")
             if qwen_route_anchor_plan is not None and timings.cancelled:
-                self._invalidate_qwen_route_prefix("cancelled")
+                self._invalidate_qwen_route_prefix("cancelled", profile_id=qwen_route_anchor_plan.profile_id)
             return timings
         except Exception:
             if final_prefix_segments is not None:
                 self._invalidate_final_prefix("completion_error")
             if qwen_route_anchor_plan is not None:
-                self._invalidate_qwen_route_prefix("completion_error")
+                self._invalidate_qwen_route_prefix("completion_error", profile_id=qwen_route_anchor_plan.profile_id)
             raise
         finally:
             self._session.in_flight = False
@@ -1853,35 +1895,46 @@ class NativeLlamaClient:
         thinking: bool,
         prompt: str,
     ) -> _QwenRouteAnchorRuntimePlan | None:
-        if not self.config.qwen_route_prefix_reuse_enabled:
-            return None
         profile = getattr(self, "model_profile", None)
-        if getattr(profile, "profile_id", None) != QWEN36_PROFILE_ID or not getattr(profile, "verified", False):
-            self._record_qwen_route_prefix_fallback("model_profile_ineligible")
+        profile_id = getattr(profile, "profile_id", None)
+        if profile_id == QWEN36_PROFILE_ID:
+            enabled = self.config.qwen_route_prefix_reuse_enabled
+            prefix_token_count = QWEN_ROUTE_PREFIX_TOKEN_COUNT
+            derive_spec = derive_qwen_route_prefix_spec
+        elif profile_id == QWEN3_CODER_PROFILE_ID:
+            enabled = self.config.qwen3_coder_route_prefix_reuse_enabled
+            prefix_token_count = QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT
+            derive_spec = derive_qwen3_coder_route_prefix_spec
+        else:
+            return None
+        if not enabled:
+            return None
+        if not getattr(profile, "verified", False) or not getattr(profile, "route_prefix_reuse_supported", False):
+            self._record_qwen_route_prefix_fallback("model_profile_ineligible", profile_id=profile_id)
             return None
         if self._model_metadata_identity.get("general.file_type") != "15":
-            self._record_qwen_route_prefix_fallback("qwen_quantization_unverified")
+            self._record_qwen_route_prefix_fallback("qwen_quantization_unverified", profile_id=profile_id)
             return None
         if tools or thinking:
-            self._record_qwen_route_prefix_fallback("structured_route_mode_ineligible")
+            self._record_qwen_route_prefix_fallback("structured_route_mode_ineligible", profile_id=profile_id)
             return None
         if self.config.use_mtp_experimental or self._session.mtp_enabled:
-            self._record_qwen_route_prefix_fallback("mtp_ineligible")
+            self._record_qwen_route_prefix_fallback("mtp_ineligible", profile_id=profile_id)
             return None
         if not messages or messages[0].get("role") != "system" or not isinstance(messages[0].get("content"), str):
-            self._record_qwen_route_prefix_fallback("missing_route_system_prompt")
+            self._record_qwen_route_prefix_fallback("missing_route_system_prompt", profile_id=profile_id)
             return None
         if self.chat_bridge is None or not self._chat_bridge_context:
-            self._record_qwen_route_prefix_fallback("chat_bridge_unavailable")
+            self._record_qwen_route_prefix_fallback("chat_bridge_unavailable", profile_id=profile_id)
             return None
 
         system_prompt = str(messages[0]["content"])
         system_hash = hash_text(system_prompt)
         prompt_tokens = self.tokenize(prompt)
-        spec = self._qwen_route_prefix_spec
+        spec = self._qwen_route_prefix_spec_for_profile(profile_id)
         if spec is None or spec.system_prompt_hash != system_hash:
-            if self._qwen_route_prefix_anchor_state.valid:
-                self._invalidate_qwen_route_prefix("route_identity_changed")
+            if self._qwen_route_prefix_state_for_profile(profile_id).valid:
+                self._invalidate_qwen_route_prefix("route_identity_changed", profile_id=profile_id)
 
             def render_reference(user_text: str) -> str:
                 rendered = self.chat_bridge.render(
@@ -1897,7 +1950,7 @@ class NativeLlamaClient:
 
             reason = None
             try:
-                spec, reason = derive_qwen_route_prefix_spec(
+                spec, reason = derive_spec(
                     system_prompt=system_prompt,
                     full_prompt=prompt,
                     full_tokens=prompt_tokens,
@@ -1923,16 +1976,19 @@ class NativeLlamaClient:
                 else:
                     self._active_profile_render = restored
             if spec is None:
-                self._record_qwen_route_prefix_fallback(reason or "route_boundary_unavailable")
+                self._record_qwen_route_prefix_fallback(
+                    reason or "route_boundary_unavailable",
+                    profile_id=profile_id,
+                )
                 return None
-            self._qwen_route_prefix_spec = spec
+            self._set_qwen_route_prefix_spec(profile_id, spec)
 
-        if list(prompt_tokens[:QWEN_ROUTE_PREFIX_TOKEN_COUNT]) != list(spec.prefix_tokens):
-            self._invalidate_qwen_route_prefix("production_prefix_changed")
-            self._record_qwen_route_prefix_fallback("production_prefix_changed")
+        if list(prompt_tokens[:prefix_token_count]) != list(spec.prefix_tokens):
+            self._invalidate_qwen_route_prefix("production_prefix_changed", profile_id=profile_id)
+            self._record_qwen_route_prefix_fallback("production_prefix_changed", profile_id=profile_id)
             return None
 
-        state_kwargs = self._qwen_route_prefix_state_kwargs(spec)
+        state_kwargs = self._qwen_route_prefix_state_kwargs(spec, profile_id=profile_id)
         prefix_hash = compute_prefix_anchor_key(**state_kwargs)
         return _QwenRouteAnchorRuntimePlan(
             prefix_tokens=list(spec.prefix_tokens),
@@ -1940,21 +1996,51 @@ class NativeLlamaClient:
             state_kwargs=state_kwargs,
             spec=spec,
             metadata={
-                "profile": QWEN36_PROFILE_ID,
-                "prefix_token_count": QWEN_ROUTE_PREFIX_TOKEN_COUNT,
+                "profile": profile_id,
+                "prefix_token_count": prefix_token_count,
                 "prefix_token_hash": spec.prefix_token_hash,
                 "invariant_token_count": spec.invariant_token_count,
                 "next_boundary_token": spec.next_boundary_token,
             },
+            profile_id=profile_id,
         )
+
+    def _qwen_route_prefix_state_for_profile(self, profile_id: str) -> PrefixAnchorState:
+        if profile_id == QWEN3_CODER_PROFILE_ID:
+            return self._qwen3_coder_route_prefix_anchor_state
+        return self._qwen_route_prefix_anchor_state
+
+    def _set_qwen_route_prefix_state(self, profile_id: str, state: PrefixAnchorState) -> None:
+        if profile_id == QWEN3_CODER_PROFILE_ID:
+            self._qwen3_coder_route_prefix_anchor_state = state
+        else:
+            self._qwen_route_prefix_anchor_state = state
+
+    def _qwen_route_prefix_spec_for_profile(self, profile_id: str) -> QwenRoutePrefixSpec | None:
+        if profile_id == QWEN3_CODER_PROFILE_ID:
+            return self._qwen3_coder_route_prefix_spec
+        return self._qwen_route_prefix_spec
+
+    def _set_qwen_route_prefix_spec(self, profile_id: str, spec: QwenRoutePrefixSpec | None) -> None:
+        if profile_id == QWEN3_CODER_PROFILE_ID:
+            self._qwen3_coder_route_prefix_spec = spec
+        else:
+            self._qwen_route_prefix_spec = spec
+
+    def _qwen_route_prefix_status_for_profile(self, profile_id: str) -> QwenRoutePrefixStatus:
+        if profile_id == QWEN3_CODER_PROFILE_ID:
+            return self._qwen3_coder_route_prefix_status
+        return self._qwen_route_prefix_status
 
     def _prepare_memory_with_qwen_route_anchor(self, plan: _QwenRouteAnchorRuntimePlan) -> tuple[int, int]:
         if not self._session.ctx_tgt:
             raise RuntimeError("native client not loaded")
-        if self._qwen_route_prefix_anchor_state.valid:
+        state = self._qwen_route_prefix_state_for_profile(plan.profile_id)
+        status = self._qwen_route_prefix_status_for_profile(plan.profile_id)
+        if state.valid:
             self._clear_target_memory()
             ok, restored, metadata = restore_prefix_anchor(
-                self._qwen_route_prefix_anchor_state,
+                state,
                 lib=self.lib.lib,
                 ctx=self._session.ctx_tgt,
                 prefix_hash=plan.prefix_hash,
@@ -1962,10 +2048,9 @@ class NativeLlamaClient:
                 enabled=True,
                 **plan.state_kwargs,
             )
-            self._qwen_route_prefix_anchor_state = restored
+            self._set_qwen_route_prefix_state(plan.profile_id, restored)
             if ok:
                 self._session.cached_prompt_tokens = list(plan.prefix_tokens)
-                status = self._qwen_route_prefix_status
                 status.initialized = True
                 status.prefix_tokens = len(plan.prefix_tokens)
                 status.restore_count += 1
@@ -1973,8 +2058,11 @@ class NativeLlamaClient:
                 status.last_used = "restore"
                 return len(plan.prefix_tokens), len(plan.prefix_tokens)
             self._clear_target_memory()
-            self._qwen_route_prefix_status.invalidation_count += 1
-            self._record_qwen_route_prefix_fallback(str(metadata.get("fallback_reason") or "restore_failed"))
+            status.invalidation_count += 1
+            self._record_qwen_route_prefix_fallback(
+                str(metadata.get("fallback_reason") or "restore_failed"),
+                profile_id=plan.profile_id,
+            )
             return 0, 0
 
         self._clear_target_memory()
@@ -1998,22 +2086,38 @@ class NativeLlamaClient:
             enabled=True,
             **plan.state_kwargs,
         )
-        self._qwen_route_prefix_anchor_state = state
+        self._set_qwen_route_prefix_state(plan.profile_id, state)
         if state.valid:
-            status = self._qwen_route_prefix_status
             status.initialized = True
             status.prefix_tokens = len(plan.prefix_tokens)
             status.capture_count += 1
             status.failure_reason = None
             status.last_used = "capture"
         else:
-            self._record_qwen_route_prefix_fallback(str(metadata.get("fallback_reason") or "capture_failed"))
+            self._record_qwen_route_prefix_fallback(
+                str(metadata.get("fallback_reason") or "capture_failed"),
+                profile_id=plan.profile_id,
+            )
         # Capture is part of the normal first prefill. Even if the read-only
         # capture fails, the decoded prefix remains valid for this completion.
         return len(plan.prefix_tokens), 0
 
-    def _qwen_route_prefix_state_kwargs(self, spec: QwenRoutePrefixSpec) -> dict[str, str | None]:
+    def _qwen_route_prefix_state_kwargs(
+        self,
+        spec: QwenRoutePrefixSpec,
+        *,
+        profile_id: str | None = None,
+    ) -> dict[str, str | None]:
         profile = self.model_profile
+        profile_id = profile_id or getattr(profile, "profile_id", QWEN36_PROFILE_ID)
+        if profile_id == QWEN3_CODER_PROFILE_ID:
+            format_version = QWEN3_CODER_ROUTE_PREFIX_FORMAT_VERSION
+            tokenizer_identity = QWEN3_CODER_ROUTE_TOKENIZER_IDENTITY
+            tools_mode = "qwen3-coder-route-tools-on-thinking-off"
+        else:
+            format_version = QWEN_ROUTE_PREFIX_FORMAT_VERSION
+            tokenizer_identity = QWEN_ROUTE_TOKENIZER_IDENTITY
+            tools_mode = "qwen-route-tools-on-thinking-off"
         try:
             stat = self.paths.model.stat()
             model_file_identity = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
@@ -2033,8 +2137,8 @@ class NativeLlamaClient:
         return {
             "model_id": model_identity,
             "template_id": hash_text(
-                f"{QWEN_ROUTE_PREFIX_FORMAT_VERSION}:{getattr(profile, 'template_sha256', '')}:"
-                f"{QWEN_ROUTE_TOKENIZER_IDENTITY}:ctx={self.config.context_tokens}"
+                f"{format_version}:{getattr(profile, 'template_sha256', '')}:"
+                f"{tokenizer_identity}:ctx={self.config.context_tokens}"
             ),
             "tool_schema_hash": spec.system_prompt_hash,
             "capability_summary_hash": spec.system_prompt_hash,
@@ -2046,7 +2150,7 @@ class NativeLlamaClient:
                 f"ubatch={self.config.ubatch_size}:step={self.config.progress_step}:"
                 f"threads={self.config.threads}:threads_batch={self.config.threads_batch}"
             ),
-            "tools_mode": "qwen-route-tools-on-thinking-off",
+            "tools_mode": tools_mode,
         }
 
     def _qwen_backend_build_identity(self) -> str:
@@ -2070,28 +2174,32 @@ class NativeLlamaClient:
             )
         return self._qwen_native_build_identity
 
-    def _record_qwen_route_prefix_fallback(self, reason: str) -> None:
-        status = self._qwen_route_prefix_status
+    def _record_qwen_route_prefix_fallback(self, reason: str, *, profile_id: str | None = None) -> None:
+        profile_id = profile_id or getattr(getattr(self, "model_profile", None), "profile_id", QWEN36_PROFILE_ID)
+        status = self._qwen_route_prefix_status_for_profile(profile_id)
         status.fallback_count += 1
         status.failure_reason = reason
         status.last_used = "fallback"
-        if not self._qwen_route_prefix_anchor_state.valid:
+        if not self._qwen_route_prefix_state_for_profile(profile_id).valid:
             status.initialized = False
             status.prefix_tokens = 0
 
-    def _invalidate_qwen_route_prefix(self, reason: str) -> None:
+    def _invalidate_qwen_route_prefix(self, reason: str, *, profile_id: str | None = None) -> None:
         if not hasattr(self, "_qwen_route_prefix_anchor_state"):
             return
-        had_state = self._qwen_route_prefix_anchor_state.valid or self._qwen_route_prefix_anchor_state.checkpoint_size > 0
-        self._qwen_route_prefix_anchor_state = PrefixAnchorState()
-        self._qwen_route_prefix_spec = None
-        status = self._qwen_route_prefix_status
-        if had_state:
-            status.invalidation_count += 1
-        status.initialized = False
-        status.prefix_tokens = 0
-        status.failure_reason = reason
-        status.last_used = "invalidated"
+        profile_ids = (profile_id,) if profile_id is not None else (QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID)
+        for selected_profile_id in profile_ids:
+            state = self._qwen_route_prefix_state_for_profile(selected_profile_id)
+            had_state = state.valid or state.checkpoint_size > 0
+            self._set_qwen_route_prefix_state(selected_profile_id, PrefixAnchorState())
+            self._set_qwen_route_prefix_spec(selected_profile_id, None)
+            status = self._qwen_route_prefix_status_for_profile(selected_profile_id)
+            if had_state:
+                status.invalidation_count += 1
+            status.initialized = False
+            status.prefix_tokens = 0
+            status.failure_reason = reason
+            status.last_used = "invalidated"
 
     def _route_anchor_plan(
         self,

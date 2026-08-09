@@ -101,6 +101,7 @@ def _profile() -> NativeModelProfile:
         thinking_supported=True,
         mtp_supported=False,
         gemma_prefix_reuse_supported=False,
+        route_prefix_reuse_supported=True,
     )
 
 

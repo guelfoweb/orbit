@@ -123,7 +123,9 @@ orbit server \
 ```
 
 Qwen3-Coder MTP, multimodal input, arbitrary exact-copy artifacts, empty
-artifacts, and Qwen 3.6 route checkpoints are not supported. See
+artifacts, and Qwen 3.6 route checkpoints are not supported. Its own verified
+768-token route checkpoint is enabled by default; disable it with
+`ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0`. See
 [`docs/QWEN3_CODER_COMPATIBILITY.md`](docs/QWEN3_CODER_COMPATIBILITY.md) for
 the exact identity and reversible artifact-content protocol.
 

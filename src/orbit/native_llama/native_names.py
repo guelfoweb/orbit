@@ -15,6 +15,11 @@ def platform_runtime_libs() -> tuple[str, ...]:
     return tuple(runtime_library_filename(stem) for stem in ("llama", "llama-common", "ggml", "ggml-base", "ggml-cpu"))
 
 
+def platform_runtime_load_order() -> tuple[str, ...]:
+    """Return native libraries in dependency-first order for explicit loading."""
+    return tuple(runtime_library_filename(stem) for stem in ("ggml-base", "ggml-cpu", "ggml", "llama", "llama-common"))
+
+
 def platform_optional_runtime_libs() -> tuple[str, ...]:
     return (runtime_library_filename("mtmd"),)
 

@@ -69,10 +69,11 @@ def derive_qwen_route_prefix_spec(
     full_tokens: Sequence[int],
     render_reference: Callable[[str], str],
     tokenize: Callable[[str], list[int]],
+    prefix_token_count: int = QWEN_ROUTE_PREFIX_TOKEN_COUNT,
 ) -> tuple[QwenRoutePrefixSpec | None, str | None]:
     if not system_prompt:
         return None, "missing_route_system_prompt"
-    if len(full_tokens) <= QWEN_ROUTE_PREFIX_TOKEN_COUNT:
+    if len(full_tokens) <= prefix_token_count:
         return None, "route_prompt_too_short"
 
     first = render_reference("A-orbit-qwen-route-boundary")
@@ -80,13 +81,13 @@ def derive_qwen_route_prefix_spec(
     first_tokens = tokenize(first)
     second_tokens = tokenize(second)
     token_lcp = _longest_common_prefix(first_tokens, second_tokens)
-    if token_lcp <= QWEN_ROUTE_PREFIX_TOKEN_COUNT:
+    if token_lcp <= prefix_token_count:
         return None, "stable_token_boundary_unavailable"
 
-    prefix = tuple(first_tokens[:QWEN_ROUTE_PREFIX_TOKEN_COUNT])
-    if tuple(second_tokens[:QWEN_ROUTE_PREFIX_TOKEN_COUNT]) != prefix:
+    prefix = tuple(first_tokens[:prefix_token_count])
+    if tuple(second_tokens[:prefix_token_count]) != prefix:
         return None, "reference_prefix_mismatch"
-    if tuple(full_tokens[:QWEN_ROUTE_PREFIX_TOKEN_COUNT]) != prefix:
+    if tuple(full_tokens[:prefix_token_count]) != prefix:
         return None, "production_prefix_mismatch"
 
     char_lcp = _longest_common_prefix_text(first, second)
@@ -100,7 +101,7 @@ def derive_qwen_route_prefix_spec(
             invariant_text_hash=hash_text(first[:char_lcp]),
             system_prompt_hash=hash_text(system_prompt),
             invariant_token_count=token_lcp,
-            next_boundary_token=int(first_tokens[QWEN_ROUTE_PREFIX_TOKEN_COUNT]),
+            next_boundary_token=int(first_tokens[prefix_token_count]),
         ),
         None,
     )
