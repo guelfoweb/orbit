@@ -269,6 +269,8 @@ class LlamaLibrary:
         lib.llama_sampler_chain_add.restype = None
         lib.llama_sampler_init_greedy.argtypes = []
         lib.llama_sampler_init_greedy.restype = c_void_p
+        lib.llama_sampler_init_grammar.argtypes = [c_void_p, c_char_p, c_char_p]
+        lib.llama_sampler_init_grammar.restype = c_void_p
         lib.llama_sampler_sample.argtypes = [c_void_p, c_void_p, c_int32]
         lib.llama_sampler_sample.restype = llama_token
         lib.llama_sampler_accept.argtypes = [c_void_p, llama_token]

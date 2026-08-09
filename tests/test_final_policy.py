@@ -67,7 +67,7 @@ class FinalPolicyTests(unittest.TestCase):
                 "role": "tool",
                 "name": "write_artifact",
                 "tool_call_id": "artifact-1",
-                "content": "artifact_publication: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\noverwrite: false",
+                "content": "artifact_publication: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\noverwrite: false\npublication_action: created",
             },
             {
                 "role": "assistant",
@@ -87,7 +87,7 @@ class FinalPolicyTests(unittest.TestCase):
                 "role": "tool",
                 "name": "verify_artifact",
                 "tool_call_id": "verify-1",
-                "content": "artifact_verification: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\ncheck: text_integrity\nstatus: pass",
+                "content": "artifact_verification: complete\npath: samples/game.js\nbytes: 42\nsha256: " + "a" * 64 + "\npublication_action: created\ncheck: text_integrity\nstatus: pass",
             },
         ]
 
@@ -95,6 +95,7 @@ class FinalPolicyTests(unittest.TestCase):
 
         self.assertIn("artifact was atomically published in this turn", policy.messages[-1]["content"])
         self.assertIn("Name the exact artifact path", policy.messages[-1]["content"])
+        self.assertIn("artifact_publication_action", policy.messages[-1]["content"])
         self.assertIn("what the selected verification confirmed", policy.messages[-1]["content"])
 
     def test_failed_artifact_verification_reports_published_but_unverified(self) -> None:

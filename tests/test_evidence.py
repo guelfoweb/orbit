@@ -120,6 +120,7 @@ class EvidenceTests(unittest.TestCase):
                     "bytes: 42",
                     "sha256: " + "a" * 64,
                     "overwrite: false",
+                    "publication_action: created",
                     "created_parent_directories: samples",
                     "directory_sync: complete",
                     "verification_completed: false",
@@ -131,6 +132,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(record.metadata["artifact_path"], "samples/game.js")
         self.assertEqual(record.metadata["artifact_bytes"], "42")
         self.assertEqual(record.metadata["artifact_sha256"], "a" * 64)
+        self.assertEqual(record.metadata["artifact_publication_action"], "created")
         self.assertEqual(record.metadata["artifact_directory_sync"], "complete")
         self.assertIn("artifact_path: samples/game.js", record.final_card)
         self.assertIn("created_parent_directories: samples", record.route_card)
@@ -145,6 +147,7 @@ class EvidenceTests(unittest.TestCase):
                     "bytes: 42",
                     "sha256: " + "a" * 64,
                     "overwrite: false",
+                    "publication_action: created",
                     "created_parent_directories: samples",
                     "directory_sync: complete",
                     "verification_required: true",
@@ -160,6 +163,7 @@ class EvidenceTests(unittest.TestCase):
                     "path: samples/game.js",
                     "bytes: 42",
                     "sha256: " + "a" * 64,
+                    "publication_action: created",
                     "check: text_integrity",
                     "status: pass",
                     "detail: syntax valid",
@@ -171,8 +175,10 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(verified.kind, "artifact_verification")
         self.assertEqual(publication.metadata["created_parent_directories"], "samples")
         self.assertEqual(publication.metadata["artifact_overwrite"], "false")
+        self.assertEqual(publication.metadata["artifact_publication_action"], "created")
         self.assertEqual(publication.metadata["artifact_verification_completed"], "false")
         self.assertEqual(verified.metadata["artifact_check"], "text_integrity")
+        self.assertEqual(verified.metadata["artifact_publication_action"], "created")
 
     def test_failed_artifact_verification_is_structured_error_evidence(self) -> None:
         record = build_evidence_record(

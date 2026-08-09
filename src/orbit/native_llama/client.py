@@ -28,7 +28,7 @@ from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_cha
 from .events import NativeCompletion, NativeProgress, NativeTimings
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
-from .model_profiles import QWEN36_PROFILE_ID, NativeModelProfile, detect_native_model_profile
+from .model_profiles import QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, NativeModelProfile, detect_native_model_profile
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
 from .mtp_accept_probe import MtpAcceptProbeResult, run_mtp_accept_probe
@@ -51,6 +51,13 @@ from .qwen_route_prefix import (
     QwenRoutePrefixStatus,
     derive_qwen_route_prefix_spec,
     hash_text,
+)
+from .qwen3_coder import (
+    QWEN3_CODER_ARTIFACT_GRAMMAR,
+    QWEN3_CODER_ARTIFACT_PROTOCOL_ID,
+    parse_qwen3_coder_artifact_content,
+    qwen3_coder_artifact_messages,
+    qwen3_coder_artifact_prompt,
 )
 from .persistent_mtp import (
     PersistentMtpSessionRuntime,
@@ -410,12 +417,14 @@ class NativeLlamaClient:
                 "unsupported or unverified native model compatibility: "
                 f"family={profile.family}; reason={profile.failure_reason}"
             )
+        if self.config.thinking and not profile.thinking_supported:
+            raise RuntimeError(f"thinking is unsupported by model profile {profile.profile_id}")
         if not profile.uses_native_chat_bridge:
             return
         bridge_path = _resolve_chat_bridge_path(self.paths)
         if bridge_path is None:
             raise RuntimeError(
-                "Qwen 3.6 requires the co-located Orbit chat compatibility bridge; "
+                "the verified Qwen profile requires the co-located Orbit chat compatibility bridge; "
                 "run `orbit build-native` for this llama.cpp revision"
             )
         bridge = ChatBridgeLibrary(self.paths.build_bin, bridge_path)
@@ -434,10 +443,16 @@ class NativeLlamaClient:
                 "general.architecture",
                 "general.name",
                 "general.file_type",
+                "general.quantization_version",
                 "tokenizer.ggml.model",
                 "tokenizer.ggml.pre",
+                "tokenizer.ggml.add_bos_token",
                 "tokenizer.ggml.bos_token_id",
                 "tokenizer.ggml.eos_token_id",
+                "tokenizer.ggml.padding_token_id",
+                "qwen3moe.context_length",
+                "qwen3moe.expert_count",
+                "qwen3moe.expert_used_count",
             }:
                 continue
             metadata[key] = self._model_metadata_text(lib.llama_model_meta_val_str_by_index, index)
@@ -594,6 +609,12 @@ class NativeLlamaClient:
             assert self.mtmd is not None
             self.mtmd.lib.orbit_mtmd_context_free(self._mtmd_ctx)
             self._mtmd_ctx = None
+        profile = getattr(self, "model_profile", None)
+        if (
+            self.paths.mmproj_model is not None
+            and getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
+        ):
+            raise RuntimeError("multimodal input is unsupported by the verified Qwen3-Coder profile")
         if self.paths.mmproj_model is not None and self._model and self.mtmd is None:
             raise RuntimeError(
                 "matching Orbit mtmd ABI bridge is required for multimodal inference"
@@ -931,6 +952,16 @@ class NativeLlamaClient:
         should_cancel=None,
     ) -> NativeCompletion:
         """Generate literal artifact bytes without applying the tool-call parser."""
+        profile = getattr(self, "model_profile", None)
+        if getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID:
+            return self._complete_qwen3_coder_artifact_text(
+                messages,
+                max_tokens=max_tokens,
+                stop=stop,
+                on_progress=on_progress,
+                on_token=on_token,
+                should_cancel=should_cancel,
+            )
         raw_parts: list[str] = []
 
         def collect(text: str) -> None:
@@ -955,6 +986,73 @@ class NativeLlamaClient:
         completion = NativeCompletion(content=content, timings=timings)
         self._session.continuation_ready = False
         return completion
+
+    def _complete_qwen3_coder_artifact_text(
+        self,
+        messages: list[NativeMessage],
+        *,
+        max_tokens: int,
+        stop: tuple[str, ...],
+        on_progress=None,
+        on_token=None,
+        should_cancel=None,
+    ) -> NativeCompletion:
+        if stop:
+            raise RuntimeError("Qwen3-Coder artifact generation does not accept stop sequences")
+        framed_messages = qwen3_coder_artifact_messages(messages)
+        rendered = self.apply_chat_template(framed_messages, tools=None, thinking=False)
+        prompt = qwen3_coder_artifact_prompt(rendered)
+        self._final_prefix_status.last_used = False
+        self._ensure_prompt_cache_mode(f"artifact:{QWEN3_CODER_ARTIFACT_PROTOCOL_ID}")
+        raw_parts: list[str] = []
+        sampler = self._create_qwen3_coder_artifact_sampler()
+        try:
+            timings = self.complete_prompt(
+                prompt,
+                max_tokens=max_tokens,
+                allow_mtp_experimental=False,
+                thinking=False,
+                kv_diag_messages=framed_messages,
+                on_progress=on_progress,
+                on_token=raw_parts.append,
+                should_cancel=should_cancel,
+                sampler_override=sampler,
+                utf8_errors="strict",
+            )
+        finally:
+            self.lib.lib.llama_sampler_free(sampler)
+        content = ""
+        if not timings.cancelled and timings.output_tokens < max_tokens:
+            content = parse_qwen3_coder_artifact_content("".join(raw_parts))
+            if content and on_token is not None:
+                on_token(content)
+        self._session.continuation_ready = False
+        return NativeCompletion(content=content, timings=timings)
+
+    def _create_qwen3_coder_artifact_sampler(self) -> c_void_p:
+        if not self._vocab:
+            raise RuntimeError("Qwen3-Coder artifact generation requires a loaded vocabulary")
+        lib = self.lib.lib
+        params = lib.llama_sampler_chain_default_params()
+        params.no_perf = False
+        sampler = lib.llama_sampler_chain_init(params)
+        if not sampler:
+            raise RuntimeError("failed to create Qwen3-Coder artifact sampler")
+        grammar = lib.llama_sampler_init_grammar(
+            self._vocab,
+            QWEN3_CODER_ARTIFACT_GRAMMAR.encode("utf-8"),
+            b"root",
+        )
+        if not grammar:
+            lib.llama_sampler_free(sampler)
+            raise RuntimeError("failed to create Qwen3-Coder artifact grammar")
+        lib.llama_sampler_chain_add(sampler, grammar)
+        greedy = lib.llama_sampler_init_greedy()
+        if not greedy:
+            lib.llama_sampler_free(sampler)
+            raise RuntimeError("failed to create Qwen3-Coder artifact greedy sampler")
+        lib.llama_sampler_chain_add(sampler, greedy)
+        return c_void_p(sampler)
 
     def _complete_chat_text_once(
         self,
@@ -1387,9 +1485,11 @@ class NativeLlamaClient:
         return max(1, min(self.config.batch_size, self.config.ubatch_size))
 
     def _thinking_enabled(self, thinking: bool | None) -> bool:
-        if thinking is None:
-            return self.config.thinking
-        return thinking
+        enabled = self.config.thinking if thinking is None else thinking
+        profile = getattr(self, "model_profile", None)
+        if enabled and profile is not None and profile.verified and not profile.thinking_supported:
+            raise RuntimeError(f"thinking is unsupported by model profile {profile.profile_id}")
+        return enabled
 
     def _should_continue_thought_after_completion(
         self,
@@ -1423,6 +1523,8 @@ class NativeLlamaClient:
         on_progress=None,
         on_token=None,
         should_cancel=None,
+        sampler_override=None,
+        utf8_errors: str = "replace",
     ) -> NativeTimings:
         thinking = self._thinking_enabled(thinking)
         self.reset_cancel()
@@ -1463,6 +1565,8 @@ class NativeLlamaClient:
                 on_progress=on_progress,
                 on_token=on_token,
                 should_cancel=should_cancel,
+                sampler_override=sampler_override,
+                utf8_errors=utf8_errors,
             )
             self._session.last_metrics = timings
             self._session.continuation_ready = _can_continue_from_timings(timings)
@@ -1621,6 +1725,8 @@ class NativeLlamaClient:
         on_progress=None,
         on_token=None,
         should_cancel=None,
+        sampler_override=None,
+        utf8_errors: str = "replace",
     ) -> NativeTimings:
         if not self._session.ctx_tgt or not self._vocab or not self._session.sampler:
             raise RuntimeError("native client not loaded")
@@ -1673,6 +1779,8 @@ class NativeLlamaClient:
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
+            sampler_override=sampler_override,
+            utf8_errors=utf8_errors,
         )
         component_tokens = None
         if kv_diag_enabled() and kv_diag_messages is not None:
@@ -2381,16 +2489,19 @@ class NativeLlamaClient:
         on_progress=None,
         on_token=None,
         should_cancel=None,
+        sampler_override=None,
+        utf8_errors: str = "replace",
     ) -> tuple[int, float, bool]:
         if not self._session.ctx_tgt or not self._session.sampler or not self._vocab:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
-        lib.llama_sampler_reset(self._session.sampler)
+        sampler = sampler_override or self._session.sampler
+        lib.llama_sampler_reset(sampler)
         self.last_target_only_token_hashes = []
         self.last_target_only_first_sample_trace = None
         generated = 0
         gen_start = lib.llama_time_us()
-        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        decoder = codecs.getincrementaldecoder("utf-8")(utf8_errors)
         while generated < max_tokens and not self.cancel_event.is_set():
             if should_cancel and should_cancel():
                 self.cancel()
@@ -2398,8 +2509,12 @@ class NativeLlamaClient:
             first_sample_before = None
             if generated == 0 and _mtp_trace_enabled():
                 first_sample_before = self._target_only_first_sample_metadata(path_name="target_only", generated_count=generated)
-            token = lib.llama_sampler_sample(self._session.sampler, self._session.ctx_tgt, -1)
-            lib.llama_sampler_accept(self._session.sampler, token)
+            token = lib.llama_sampler_sample(sampler, self._session.ctx_tgt, -1)
+            # This vendored llama_sampler_sample() accepts into its sampler chain.
+            # Preserve the historical default-sampler call, but do not accept a
+            # profile-local grammar twice.
+            if sampler_override is None:
+                lib.llama_sampler_accept(sampler, token)
             if lib.llama_vocab_is_eog(self._vocab, token):
                 break
             self.last_target_only_token_hashes.append(_stable_token_hash(int(token)))

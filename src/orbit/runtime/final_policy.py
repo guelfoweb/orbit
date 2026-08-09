@@ -124,7 +124,8 @@ def build_final_tool_policy(
     mutation_instruction = (
         (
             "The model-selected bounded check passed and the artifact was atomically published in this turn. "
-            "Name the exact artifact path. State that this turn created or overwrote it as indicated by evidence, "
+            "Name the exact artifact path. Use artifact_publication_action to state whether this turn created a new "
+            "file or replaced an existing file, "
             "then state exactly what the selected verification confirmed. Do not describe the artifact as pre-existing. "
         )
         if verified_artifact_result
