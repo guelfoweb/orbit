@@ -22,9 +22,10 @@ from pathlib import Path
 import ctypes
 import json
 import os
+import threading
 
 from .chat_bridge import CHAT_BRIDGE_API_VERSION, validate_chat_bridge_artifact
-from .native_names import platform_runtime_libs, runtime_library_filename
+from .native_names import platform_runtime_libs, platform_runtime_load_order, runtime_library_filename
 from .mtmd_bridge import validate_mtmd_bridge_artifact
 
 
@@ -34,6 +35,8 @@ llama_seq_id = c_int32
 
 
 _CDLL_CACHE: dict[tuple[str, int], CDLL] = {}
+_RUNTIME_FAMILY_LOCK = threading.Lock()
+_RUNTIME_FAMILY_ROOT: Path | None = None
 
 
 def native_cdll_flags() -> int:
@@ -51,6 +54,33 @@ def load_native_cdll(path: Path, *, mode: int) -> CDLL:
         lib = ctypes.CDLL(str(path), mode=mode)
         _CDLL_CACHE[key] = lib
     return lib
+
+
+def _claim_runtime_family(build_bin: Path) -> Path:
+    """Bind this process to one co-located llama/ggml runtime family."""
+    global _RUNTIME_FAMILY_ROOT
+    resolved = build_bin.resolve()
+    with _RUNTIME_FAMILY_LOCK:
+        if _RUNTIME_FAMILY_ROOT is None:
+            _RUNTIME_FAMILY_ROOT = resolved
+        elif _RUNTIME_FAMILY_ROOT != resolved:
+            raise RuntimeError(
+                "native runtime family conflict: this process is already bound "
+                f"to {_RUNTIME_FAMILY_ROOT} and cannot load {resolved}"
+            )
+    return resolved
+
+
+def _require_runtime_prefix(build_bin: Path, through: str) -> tuple[Path, ...]:
+    required: list[Path] = []
+    for name in platform_runtime_load_order():
+        path = build_bin / name
+        if not path.is_file():
+            raise RuntimeError(f"incomplete native runtime family: missing {path}")
+        required.append(path)
+        if name == through:
+            return tuple(required)
+    raise RuntimeError(f"unknown native runtime library: {through}")
 
 LlamaProgressCallback = CFUNCTYPE(c_bool, c_float, c_void_p)
 GgmlAbortCallback = CFUNCTYPE(c_bool, c_void_p)
@@ -145,25 +175,21 @@ class LlamaChatMessage(Structure):
 
 class LlamaLibrary:
     def __init__(self, build_bin: Path) -> None:
-        self.build_bin = build_bin
+        required = _require_runtime_prefix(build_bin.resolve(), runtime_library_filename("llama"))
+        self.build_bin = _claim_runtime_family(build_bin)
         self._handles: list[CDLL] = []
-        self.lib = self._load_library(runtime_library_filename("llama"))
+        self.lib = self._load_library(runtime_library_filename("llama"), required=required)
         self._configure_api()
 
-    def _load_library(self, name: str) -> CDLL:
+    def _load_library(self, name: str, *, required: tuple[Path, ...] | None = None) -> CDLL:
         flags = native_cdll_flags()
         # Load dependencies explicitly because LD_LIBRARY_PATH cannot be changed
-        # reliably after Python startup.
-        for dep in platform_runtime_libs():
-            if dep == name:
-                continue
-            path = self.build_bin / dep
-            if path.exists():
-                try:
-                    self._handles.append(load_native_cdll(path, mode=flags))
-                except OSError:
-                    pass
-        return load_native_cdll(self.build_bin / name, mode=flags)
+        # reliably after Python startup. Stop at the requested library so a
+        # higher-level dependency cannot pull another runtime through RUNPATH.
+        paths = required or _require_runtime_prefix(self.build_bin, name)
+        for path in paths[:-1]:
+            self._handles.append(load_native_cdll(path, mode=flags))
+        return load_native_cdll(paths[-1], mode=flags)
 
     def _configure_api(self) -> None:
         lib = self.lib
@@ -284,12 +310,12 @@ class LlamaLibrary:
 class ChatBridgeLibrary:
     def __init__(self, build_bin: Path, bridge_path: Path) -> None:
         self.build_identity = validate_chat_bridge_artifact(build_bin, bridge_path)
+        required = _require_runtime_prefix(build_bin.resolve(), runtime_library_filename("llama-common"))
+        build_bin = _claim_runtime_family(build_bin)
         flags = native_cdll_flags()
         self._handles: list[CDLL] = []
-        for dependency in platform_runtime_libs():
-            path = build_bin / dependency
-            if path.exists():
-                self._handles.append(load_native_cdll(path, mode=flags))
+        for path in required:
+            self._handles.append(load_native_cdll(path, mode=flags))
         self.lib = load_native_cdll(bridge_path, mode=flags)
         self._configure_api()
         if self.lib.orbit_chat_bridge_api_version() != CHAT_BRIDGE_API_VERSION:
