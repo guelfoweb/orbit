@@ -13,6 +13,10 @@ or use exposed tools.
 
 Linux is the main target environment. macOS may work. Windows is not a target.
 
+The current published prerelease baseline is
+[`v0.0.1-rc28`](docs/releases/v0.0.1-rc28.md). It adds the exact verified
+Qwen3-Coder profile described below; `v0.0.1-rc27` remains its predecessor.
+
 ## Current Scope
 
 - local CLI and native HTTP server for Gemma 4 26B-A4B, verified Qwen 3.6, and verified Qwen3-Coder

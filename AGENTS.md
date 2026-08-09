@@ -239,7 +239,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC27
 
-- Current published baseline: `v0.0.1-rc27`.
+- Published predecessor: `v0.0.1-rc27`.
 - Focus: model-driven atomic generation of one bounded UTF-8 text artifact,
   content-only native generation, and ephemeral read-only verification.
 - The model selects `write_artifact`, destination, overwrite behavior, parent
@@ -266,6 +266,39 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   descriptive and no deterministic speedup is claimed.
 - See `docs/ARTIFACT_GENERATION.md` and
   `docs/releases/v0.0.1-rc27.md`.
+
+### RC28
+
+- Current published baseline: `v0.0.1-rc28`.
+- Includes squash merge `7b03221` from #164.
+- Focus: exact verified native support for
+  `Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf` through the dedicated
+  `orbit-qwen3-coder-native-v1` profile.
+- Authorization is bound to reviewed GGUF architecture, model, file type,
+  tokenizer, expert layout, and embedded-template metadata. Filename matching
+  alone never enables the profile, and unverified variants fail before
+  inference.
+- The profile uses its native ChatML and XML tool protocol. Generative artifact
+  content uses a constrained JSON-string transport with strict UTF-8 decoding;
+  malformed framing, invalid UTF-8, and length termination fail closed without
+  trimming, normalization, semantic repair, or hidden retries.
+- Supported capabilities include chat, tools, tool history and results,
+  generative `write_artifact`, read-only `verify_artifact`, existing-file
+  modification, and normal coding/tool workflows. Qwen3-Coder MTP, multimodal
+  input, Qwen 3.6 route-prefix reuse, arbitrary exact-copy guarantees, empty
+  artifacts, and unverified variants remain unsupported.
+- RC28 validation: independent PR review PASS; Qwen3-Coder production corpus
+  8/8; focused tests 344/344; full discovery 1,566/1,566; native build,
+  `compileall`, and `git diff --check` PASS. Qwen 3.6 artifact/tool behavior and
+  route-prefix reuse, Gemma artifact behavior, final-prefix `cached=64`, and
+  strict target/draft/mmproj MTP remained passing and isolated.
+- Local CPU measurements were approximately 18.8 tok/s for synthetic long
+  prefill, 11.35 tok/s for synthetic decode, and 31.1 GiB peak RSS. The
+  production corpus measured median prefill 28.16 tok/s, median decode 8.16
+  tok/s, and 31.24 GiB peak RSS. These workloads are not directly comparable,
+  and no universal performance claim is made.
+- See `docs/QWEN3_CODER_COMPATIBILITY.md` and
+  `docs/releases/v0.0.1-rc28.md`.
 
 ## RC24 Tool-Loop Convergence
 
