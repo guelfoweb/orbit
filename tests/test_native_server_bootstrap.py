@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import signal
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from orbit.native_llama.client import NativeRoutePrefixPrefillResult
+from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.native_names import runtime_library_filename
 from orbit.native_server.app import (
     PREFIX_PREWARM_OFF,
@@ -30,7 +32,9 @@ class _FakeNativeClient:
         self.config = _args[1] if len(_args) > 1 else None
         self.loaded = False
         self.closed = False
+        self.cancelled = False
         self.capture_calls = 0
+        self.qwen3_coder_capture_calls = 0
         self.raise_on_capture = False
         _FakeNativeClient.instances.append(self)
 
@@ -42,6 +46,9 @@ class _FakeNativeClient:
 
     def close(self) -> None:
         self.closed = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
     def capture_route_prefix_prefill_only(self, segments, *, tools_mode: str = "on", should_cancel=None):
         del should_cancel
@@ -71,6 +78,37 @@ class _FakeNativeClient:
             checkpoint_size_bytes=238454176,
             prefill_ms=12.0,
             decode_calls=3,
+            restore_ready=True,
+        )
+
+    def capture_qwen3_coder_route_prefix_prefill_only(self, *, system_prompt: str, tools_mode: str = "on"):
+        del system_prompt
+        self.qwen3_coder_capture_calls += 1
+        if self.raise_on_capture:
+            raise RuntimeError("synthetic capture failure")
+        if not self.config.qwen3_coder_route_prefix_reuse_enabled:
+            return NativeRoutePrefixPrefillResult(
+                attempted=False,
+                succeeded=False,
+                skipped=True,
+                skip_reason="route_prefix_reuse_disabled",
+            )
+        if tools_mode != "on":
+            return NativeRoutePrefixPrefillResult(
+                attempted=False,
+                succeeded=False,
+                skipped=True,
+                skip_reason="tools_mode_ineligible",
+            )
+        return NativeRoutePrefixPrefillResult(
+            attempted=True,
+            succeeded=True,
+            skipped=False,
+            prefix_hash="qwen3-coder-prefix-hash",
+            prefix_token_count=768,
+            checkpoint_size_bytes=75_507_864,
+            prefill_ms=10.0,
+            decode_calls=12,
             restore_ready=True,
         )
 
@@ -245,6 +283,72 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(result.generated_tokens, 0)
         self.assertEqual(client.capture_calls, 1)
 
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "startup"}, clear=True)
+    def test_startup_prewarm_qwen3_coder_invokes_profile_hook(self) -> None:
+        client = _FakeNativeClient()
+        client.config = SimpleNamespace(qwen3_coder_route_prefix_reuse_enabled=True)
+        client.model_profile = SimpleNamespace(
+            profile_id=QWEN3_CODER_PROFILE_ID,
+            gemma_prefix_reuse_supported=False,
+        )
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.succeeded)
+        self.assertTrue(result.restore_ready)
+        self.assertEqual(result.prefix_token_count, 768)
+        self.assertEqual(client.qwen3_coder_capture_calls, 1)
+        self.assertEqual(client.capture_calls, 0)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_startup_prewarm_off_leaves_qwen3_coder_lazy_reuse_untouched(self) -> None:
+        client = _FakeNativeClient()
+        client.config = SimpleNamespace(qwen3_coder_route_prefix_reuse_enabled=True)
+        client.model_profile = SimpleNamespace(
+            profile_id=QWEN3_CODER_PROFILE_ID,
+            gemma_prefix_reuse_supported=False,
+        )
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.skipped)
+        self.assertTrue(client.config.qwen3_coder_route_prefix_reuse_enabled)
+        self.assertEqual(client.qwen3_coder_capture_calls, 0)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "startup"}, clear=True)
+    def test_startup_prewarm_qwen3_coder_reuse_kill_switch_skips(self) -> None:
+        client = _FakeNativeClient()
+        client.model_profile = SimpleNamespace(
+            profile_id=QWEN3_CODER_PROFILE_ID,
+            gemma_prefix_reuse_supported=False,
+        )
+        client.config = SimpleNamespace(qwen3_coder_route_prefix_reuse_enabled=False)
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "route_prefix_reuse_disabled")
+        self.assertEqual(client.qwen3_coder_capture_calls, 1)
+
+    @mock.patch.dict(
+        "os.environ",
+        {"ORBIT_KV_PREFIX_PREWARM": "startup", "ORBIT_KV_PREFIX_ANCHOR": "off"},
+        clear=True,
+    )
+    def test_startup_prewarm_anchor_off_skips_qwen3_coder(self) -> None:
+        client = _FakeNativeClient()
+        client.config = SimpleNamespace(qwen3_coder_route_prefix_reuse_enabled=True)
+        client.model_profile = SimpleNamespace(
+            profile_id=QWEN3_CODER_PROFILE_ID,
+            gemma_prefix_reuse_supported=False,
+        )
+
+        result = prewarm_startup_route_prefix(client)  # type: ignore[arg-type]
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "anchor_disabled")
+        self.assertEqual(client.qwen3_coder_capture_calls, 0)
+
     @mock.patch.dict(
         "os.environ",
         {"ORBIT_KV_PREFIX_PREWARM": "startup", "ORBIT_KV_PREFIX_ANCHOR": "off", "ORBIT_KV_PREFIX_ANCHOR_EXPERIMENT": "1"},
@@ -383,6 +487,72 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(len(_FakeNativeClient.instances), 1)
         self.assertEqual(_FakeNativeClient.instances[0].capture_calls, 1)
         self.assertTrue(_FakeNativeClient.instances[0].closed)
+        self.assertTrue(_FakeHTTPServer.instances[0].closed)
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_run_server_sigint_during_prewarm_exits_before_binding(self) -> None:
+        _FakeNativeClient.instances.clear()
+
+        def coder_client(*args, **kwargs):
+            client = _FakeNativeClient(*args, **kwargs)
+            client.model_profile = SimpleNamespace(profile_id=QWEN3_CODER_PROFILE_ID)
+            return client
+
+        def interrupt_prewarm(_client):
+            signal.raise_signal(signal.SIGINT)
+            return NativeRoutePrefixPrefillResult(
+                attempted=True,
+                succeeded=False,
+                skipped=False,
+                failed_reason="cancelled",
+                restore_ready=False,
+            )
+
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/test.gguf")),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", side_effect=coder_client),
+            mock.patch("orbit.native_server.app.prewarm_startup_route_prefix", side_effect=interrupt_prewarm),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer") as http_server,
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 130)
+        self.assertEqual(len(_FakeNativeClient.instances), 1)
+        self.assertTrue(_FakeNativeClient.instances[0].cancelled)
+        self.assertTrue(_FakeNativeClient.instances[0].closed)
+        http_server.assert_not_called()
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_run_server_prewarm_failure_still_serves_for_cold_fallback(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        failed = NativeRoutePrefixPrefillResult(
+            attempted=True,
+            succeeded=False,
+            skipped=False,
+            failed_reason="checkpoint_capture_failed",
+            restore_ready=False,
+        )
+
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/test.gguf")),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.prewarm_startup_route_prefix", return_value=failed),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        self.assertFalse(_FakeNativeClient.instances[0].cancelled)
+        self.assertTrue(_FakeNativeClient.instances[0].closed)
+        self.assertEqual(len(_FakeHTTPServer.instances), 1)
         self.assertTrue(_FakeHTTPServer.instances[0].closed)
 
     @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)

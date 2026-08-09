@@ -2,8 +2,9 @@
 
 ## Status
 
-This document describes the first controlled runtime integration for native route
-prefix prewarm.
+This document describes the controlled runtime integration for native route
+prefix prewarm. It covers the Gemma route anchor and the separately identified
+Qwen3-Coder route checkpoint.
 
 The feature now runs by default when the native server starts with tools enabled.
 It can still be disabled explicitly.
@@ -28,15 +29,18 @@ When enabled, startup prewarm uses the internal native prefill-only hook to
 prepare the stable route tools-on prefix before the server starts accepting
 requests.
 
-The prewarmed prefix is the same route tools-on prefix used by real route calls:
+The prewarmed prefix is the same profile-specific route tools-on prefix used by
+real route calls:
 
 - route system contract
 - route tool schema
 - stable route template boundary
 
 The hook tokenizes the prefix with the native tokenizer, decodes only the prefix,
-captures a real KV checkpoint, and marks the checkpoint restore-ready only after
-full success.
+captures a real sequence-state checkpoint, and marks it restore-ready only after
+full success. For `orbit-qwen3-coder-native-v1`, the existing Qwen boundary proof
+renders two internal suffix fixtures but decodes only the proven 768-token
+invariant prefix; no fixture suffix is evaluated.
 
 No model response is generated during prewarm.
 
@@ -52,7 +56,7 @@ Startup prewarm does not introduce:
 - final-from-tool anchor
 - tool-call anchor
 - multiple anchors
-- fake user request
+- submitted fake user request
 - prompt workaround
 - `max_tokens=0` through the normal generation path
 - deterministic routing
@@ -76,7 +80,9 @@ This location is intentional:
 Because this is synchronous startup work, server readiness is delayed by the
 prewarm duration when the feature is enabled. With the tested Gemma 4 12B CPU
 setup, the prefill-only capture for the 693-token stable route prefix has been
-observed around 49-59 seconds.
+observed around 49-59 seconds. The verified Qwen3-Coder 30B profile captured its
+768-token checkpoint in 21.62 seconds in production-hook qualification. Timings
+are descriptive.
 
 ## Guardrails
 
@@ -88,6 +94,7 @@ Startup prewarm is eligible only when:
 - native backend/client is loaded
 - route prefix-anchor support is available
 - route tools-on stable prefix boundary is valid
+- the exact profile's route-prefix reuse switch is enabled
 
 It is skipped when:
 
@@ -99,19 +106,22 @@ It is skipped when:
 - the prefix-anchor hook reports an ineligible state
 
 Failures are not user-facing. A failed prewarm leaves the server usable; the
-first real route call falls back to the existing baseline/capture path.
+first real route call falls back to the existing baseline/capture path. Qwen3.6
+retains its existing lazy first-route capture and is unchanged by the
+Qwen3-Coder startup integration.
 
 ## Locking, Cancellation, And Failure
 
-The startup integration relies on the internal
-`NativeLlamaClient.capture_route_prefix_prefill_only(...)` lock and validity
-rules:
+The startup integration relies on the profile-specific native prefill-only
+capture methods and their shared lock and validity rules:
 
 - concurrent capture on the same native client is rejected
 - checkpoint is valid only after complete prefix decode and capture
 - decode/capture failure clears target memory and invalidates the route anchor
 - cancellation or incomplete prefill returns `restore_ready=false`
 - sampler and session history are not touched
+- an operator SIGINT during Qwen3-Coder prewarm cancels capture and exits before
+  the server binds; an ordinary capture failure retains the safe cold fallback
 
 The startup lifecycle runs before serving requests, so there should be no
 request/prewarm race in the normal startup path.
@@ -144,7 +154,9 @@ content, tool output, file content, or web content.
 ## Memory And Startup Tradeoff
 
 The route prefix checkpoint is large. On the tested Gemma 4 12B CPU setup, the
-checkpoint size is about 238 MB.
+checkpoint size is about 238 MB. The verified Qwen3-Coder checkpoint is
+75,507,864 bytes; measured steady RSS increased by roughly 92-102 MB depending
+on allocator state.
 
 Startup prewarm trades startup readiness time for lower first-route latency on
 eligible tools-on requests. It does not make tool execution faster and does not
@@ -162,6 +174,10 @@ Required validation for this integration:
 - invalid prewarm values fall back to `off`
 - hook success yields `restore_ready=true`
 - hook failure leaves the server usable with `restore_ready=false`
+- Qwen3-Coder startup capture is followed by `cached=768` restore on the first
+  real eligible route
+- `ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0` prevents Qwen3-Coder prewarm
+- Qwen3.6 and Gemma checkpoint identities and behavior remain unchanged
 - diagnostics stay metadata-only
 - existing read/list/web/fetch behavior is unchanged
 - stale-evidence and listing-to-read guardrails remain intact

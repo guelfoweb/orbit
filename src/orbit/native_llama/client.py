@@ -829,6 +829,121 @@ class NativeLlamaClient:
         finally:
             self._route_prefix_prefill_lock.release()
 
+    def capture_qwen3_coder_route_prefix_prefill_only(
+        self,
+        *,
+        system_prompt: str,
+        tools_mode: str = "on",
+    ) -> NativeRoutePrefixPrefillResult:
+        profile = getattr(self, "model_profile", None)
+        if (
+            getattr(profile, "profile_id", None) != QWEN3_CODER_PROFILE_ID
+            or not getattr(profile, "verified", False)
+            or not getattr(profile, "route_prefix_reuse_supported", False)
+        ):
+            return _route_prefix_prefill_skipped("model_profile_ineligible")
+        if not self.config.qwen3_coder_route_prefix_reuse_enabled:
+            return _route_prefix_prefill_skipped("route_prefix_reuse_disabled")
+        if tools_mode != "on":
+            return _route_prefix_prefill_skipped("tools_mode_ineligible")
+        if self.config.use_mtp_experimental or self._session.mtp_enabled:
+            return _route_prefix_prefill_skipped("mtp_ineligible")
+        if not self._session.ctx_tgt or not self._vocab:
+            return _route_prefix_prefill_failed("native_client_not_loaded")
+        if self._session.in_flight:
+            return _route_prefix_prefill_skipped("native_request_in_flight")
+        if self._session.continuation_ready or self._session.cached_prompt_tokens:
+            return _route_prefix_prefill_skipped("active_context_present")
+        if self._qwen3_coder_route_prefix_anchor_state.valid:
+            return _route_prefix_prefill_skipped("checkpoint_already_initialized")
+        if not self._route_prefix_prefill_lock.acquire(blocking=False):
+            return _route_prefix_prefill_skipped("prefill_in_flight")
+
+        prefix_hash: str | None = None
+        prefix_token_count: int | None = None
+        started_us = 0
+        try:
+            if self._session.in_flight:
+                return _route_prefix_prefill_skipped("native_request_in_flight")
+            if self._session.continuation_ready or self._session.cached_prompt_tokens:
+                return _route_prefix_prefill_skipped("active_context_present")
+            if self._qwen3_coder_route_prefix_anchor_state.valid:
+                return _route_prefix_prefill_skipped("checkpoint_already_initialized")
+
+            # This boundary fixture is rendered but its dynamic suffix is never
+            # decoded. The shared Qwen planner independently proves that the
+            # captured 768 tokens are invariant across distinct user suffixes.
+            messages: list[NativeMessage] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "A-orbit-qwen-route-boundary"},
+            ]
+            prompt = self.apply_chat_template(messages, tools=None, thinking=False)
+            plan = self._qwen_route_anchor_plan_for_prompt(
+                messages,
+                tools=None,
+                thinking=False,
+                prompt=prompt,
+            )
+            if plan is None or plan.profile_id != QWEN3_CODER_PROFILE_ID:
+                return _route_prefix_prefill_failed("route_anchor_plan_unavailable")
+
+            prefix_hash = plan.prefix_hash
+            prefix_token_count = len(plan.prefix_tokens)
+            lib = self.lib.lib
+            started_us = int(lib.llama_time_us()) if hasattr(lib, "llama_time_us") else 0
+            self.reset_cancel()
+            processed, reused = self._prepare_memory_with_qwen_route_anchor(plan)
+            ended_us = int(lib.llama_time_us()) if hasattr(lib, "llama_time_us") else started_us
+            prefill_ms = max(0.0, (ended_us - started_us) / 1000.0)
+            state = self._qwen3_coder_route_prefix_anchor_state
+            if processed != prefix_token_count or reused != 0 or not state.valid:
+                self._clear_target_memory()
+                return _route_prefix_prefill_failed(
+                    state.invalidation_reason or "checkpoint_capture_failed",
+                    prefix_hash=prefix_hash,
+                    prefix_token_count=prefix_token_count,
+                    prefill_ms=prefill_ms,
+                )
+
+            checkpoint_size = state.checkpoint_size
+            step = max(1, min(self.config.progress_step, self.config.batch_size))
+            self._clear_target_memory()
+            self._session.prompt_cache_mode = None
+            return NativeRoutePrefixPrefillResult(
+                attempted=True,
+                succeeded=True,
+                skipped=False,
+                prefix_hash=prefix_hash,
+                prefix_token_count=prefix_token_count,
+                checkpoint_size_bytes=checkpoint_size,
+                prefill_ms=prefill_ms,
+                decode_calls=(prefix_token_count + step - 1) // step,
+                restore_ready=True,
+            )
+        except Exception as exc:
+            if self._session.ctx_tgt:
+                self._clear_target_memory()
+            self._invalidate_qwen_route_prefix(
+                f"startup_prewarm_failed:{type(exc).__name__}",
+                profile_id=QWEN3_CODER_PROFILE_ID,
+            )
+            ended_us = (
+                int(self.lib.lib.llama_time_us())
+                if started_us and hasattr(self.lib.lib, "llama_time_us")
+                else started_us
+            )
+            return _route_prefix_prefill_failed(
+                f"startup_prewarm_failed:{type(exc).__name__}",
+                prefix_hash=prefix_hash,
+                prefix_token_count=prefix_token_count,
+                prefill_ms=max(0.0, (ended_us - started_us) / 1000.0) if started_us else None,
+            )
+        finally:
+            self._active_profile_render = None
+            self._profile_last_raw_output = ""
+            self._profile_last_parsed_content = ""
+            self._route_prefix_prefill_lock.release()
+
     def complete_chat(
         self,
         messages: list[NativeMessage],
@@ -2068,7 +2183,7 @@ class NativeLlamaClient:
         self._clear_target_memory()
         token_array = (llama_token * len(plan.prefix_tokens))(*plan.prefix_tokens)
         step = max(1, min(self.config.progress_step, self.config.batch_size))
-        self._decode_prompt_range(
+        processed = self._decode_prompt_range(
             token_array,
             processed=0,
             end=len(plan.prefix_tokens),
@@ -2077,6 +2192,14 @@ class NativeLlamaClient:
             on_progress=None,
             should_cancel=None,
         )
+        if processed != len(plan.prefix_tokens) or self.cancel_event.is_set():
+            self._clear_target_memory()
+            self._set_qwen_route_prefix_state(
+                plan.profile_id,
+                PrefixAnchorState(invalidation_reason="cancelled"),
+            )
+            self._record_qwen_route_prefix_fallback("cancelled", profile_id=plan.profile_id)
+            return 0, 0
         self._session.cached_prompt_tokens = list(plan.prefix_tokens)
         state, metadata = capture_prefix_anchor(
             lib=self.lib.lib,
@@ -2087,6 +2210,14 @@ class NativeLlamaClient:
             **plan.state_kwargs,
         )
         self._set_qwen_route_prefix_state(plan.profile_id, state)
+        if self.cancel_event.is_set():
+            self._clear_target_memory()
+            self._set_qwen_route_prefix_state(
+                plan.profile_id,
+                PrefixAnchorState(invalidation_reason="cancelled"),
+            )
+            self._record_qwen_route_prefix_fallback("cancelled", profile_id=plan.profile_id)
+            return 0, 0
         if state.valid:
             status.initialized = True
             status.prefix_tokens = len(plan.prefix_tokens)

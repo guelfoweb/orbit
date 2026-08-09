@@ -124,7 +124,9 @@ orbit server \
 
 Qwen3-Coder MTP, multimodal input, arbitrary exact-copy artifacts, empty
 artifacts, and Qwen 3.6 route checkpoints are not supported. Its own verified
-768-token route checkpoint is enabled by default; disable it with
+768-token route checkpoint is enabled by default and prewarmed synchronously
+before a tools-on server becomes ready. Disable only startup prewarm with
+`ORBIT_KV_PREFIX_PREWARM=off`, or disable Qwen3-Coder checkpoint reuse with
 `ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0`. See
 [`docs/QWEN3_CODER_COMPATIBILITY.md`](docs/QWEN3_CODER_COMPATIBILITY.md) for
 the exact identity and reversible artifact-content protocol.
@@ -230,11 +232,14 @@ Disable only startup prewarm:
 ORBIT_KV_PREFIX_PREWARM=off orbit server
 ```
 
-Disable route-prefix anchor and prewarm:
+Disable the Gemma route-prefix anchor and all startup prewarm:
 
 ```bash
 ORBIT_KV_PREFIX_ANCHOR=off orbit server
 ```
+
+Qwen route checkpoints have their separate profile-specific reuse kill
+switches documented above.
 
 The prewarm cost is paid at startup. It does not remove CPU work; it shifts part
 of the first tools-on route cost before the first user request.

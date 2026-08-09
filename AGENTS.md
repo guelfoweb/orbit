@@ -484,6 +484,17 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   switch. Invalid values disable safely. Cancel, timeout, reset, reload,
   context or identity changes, restore failure, and restart invalidate or omit
   state. `/props` reports bounded state and identity diagnostics.
+- Native tools-on startup captures this same checkpoint before server readiness.
+  Qualification measured a 21.62-second capture; the first real greeting route
+  restored `cached=768`, evaluated 32 dynamic tokens, and took 2.01 seconds,
+  versus 800 evaluated tokens and 36.59 seconds without startup prewarm in that
+  matched run. Timings are descriptive.
+- `ORBIT_KV_PREFIX_PREWARM=off` disables startup capture but leaves lazy
+  Qwen3-Coder reuse enabled: the first eligible route captures and later routes
+  restore. Prewarm failures accept no partial state and fall back to that cold
+  path without a startup retry. An operator SIGINT during Qwen3-Coder prewarm
+  exits before the server binds instead of exposing the cold fallback. Qwen3.6
+  and Gemma behavior remains unchanged.
 
 ## Atomic Text Artifact Generation
 

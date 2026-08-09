@@ -241,6 +241,174 @@ class Qwen3CoderRoutePrefixClientTests(unittest.TestCase):
         self.assertEqual(status["restore_count"], 1)
         self.assertFalse(client._qwen_route_prefix_anchor_state.valid)
 
+    def test_startup_prefill_captures_before_first_request_without_sampling(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._clear_target_memory = mock.Mock(  # type: ignore[method-assign]
+            side_effect=lambda: client._session.cached_prompt_tokens.clear()
+        )
+        client._decode_prompt_range = mock.Mock(
+            return_value=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT
+        )  # type: ignore[method-assign]
+        client.lib.lib = SimpleNamespace(llama_time_us=mock.Mock(side_effect=(1_000_000, 2_000_000)))
+        state = PrefixAnchorState(
+            valid=True,
+            checkpoint_data=b"checkpoint",
+            checkpoint_size=75_507_864,
+            token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+        )
+
+        with mock.patch("orbit.native_llama.client.capture_prefix_anchor", return_value=(state, {})):
+            result = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+
+        self.assertTrue(result.succeeded)
+        self.assertTrue(result.restore_ready)
+        self.assertEqual(result.prefix_token_count, QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT)
+        self.assertEqual(result.checkpoint_size_bytes, 75_507_864)
+        self.assertEqual(result.prefill_ms, 1000.0)
+        self.assertEqual(result.sampled_tokens, 0)
+        self.assertEqual(result.generated_tokens, 0)
+        self.assertFalse(result.sampler_touched)
+        self.assertFalse(result.session_history_touched)
+        self.assertTrue(client._qwen3_coder_route_prefix_anchor_state.valid)
+        self.assertEqual(client._session.cached_prompt_tokens, [])
+        status = client.qwen3_coder_route_prefix_reuse_status()
+        self.assertEqual(status["capture_count"], 1)
+        self.assertEqual(status["restore_count"], 0)
+        self.assertEqual(status["fallback_count"], 0)
+
+    def test_startup_prefill_fails_closed_when_capture_is_invalid(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._clear_target_memory = mock.Mock(  # type: ignore[method-assign]
+            side_effect=lambda: client._session.cached_prompt_tokens.clear()
+        )
+        client._decode_prompt_range = mock.Mock(
+            return_value=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT
+        )  # type: ignore[method-assign]
+        client.lib.lib = SimpleNamespace(llama_time_us=mock.Mock(side_effect=(1_000_000, 2_000_000)))
+
+        with mock.patch(
+            "orbit.native_llama.client.capture_prefix_anchor",
+            return_value=(PrefixAnchorState(invalidation_reason="capture_failed"), {}),
+        ):
+            result = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+
+        self.assertFalse(result.succeeded)
+        self.assertFalse(result.restore_ready)
+        self.assertEqual(result.failed_reason, "capture_failed")
+        self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
+        self.assertEqual(client._session.cached_prompt_tokens, [])
+
+    def test_startup_prefill_never_captures_an_incomplete_decode(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._clear_target_memory = mock.Mock(  # type: ignore[method-assign]
+            side_effect=lambda: client._session.cached_prompt_tokens.clear()
+        )
+        client._decode_prompt_range = mock.Mock(
+            return_value=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT // 2
+        )  # type: ignore[method-assign]
+        client.lib.lib = SimpleNamespace(llama_time_us=mock.Mock(return_value=1_000_000))
+
+        with mock.patch("orbit.native_llama.client.capture_prefix_anchor") as capture:
+            result = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+
+        self.assertFalse(result.succeeded)
+        self.assertFalse(result.restore_ready)
+        self.assertEqual(result.failed_reason, "cancelled")
+        self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
+        self.assertEqual(client._qwen3_coder_route_prefix_anchor_state.invalidation_reason, "cancelled")
+        self.assertEqual(client._session.cached_prompt_tokens, [])
+        capture.assert_not_called()
+
+    def test_startup_prefill_discards_capture_cancelled_during_serialization(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._clear_target_memory = mock.Mock(  # type: ignore[method-assign]
+            side_effect=lambda: client._session.cached_prompt_tokens.clear()
+        )
+        client._decode_prompt_range = mock.Mock(
+            return_value=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT
+        )  # type: ignore[method-assign]
+        client.lib.lib = SimpleNamespace(llama_time_us=mock.Mock(return_value=1_000_000))
+        state = PrefixAnchorState(
+            valid=True,
+            checkpoint_data=b"checkpoint",
+            checkpoint_size=75_507_864,
+            token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+        )
+
+        def capture_then_cancel(**_kwargs):
+            client.cancel_event.set()
+            return state, {}
+
+        with mock.patch(
+            "orbit.native_llama.client.capture_prefix_anchor",
+            side_effect=capture_then_cancel,
+        ):
+            result = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+
+        self.assertFalse(result.succeeded)
+        self.assertFalse(result.restore_ready)
+        self.assertEqual(result.failed_reason, "cancelled")
+        self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
+        self.assertEqual(client._qwen3_coder_route_prefix_anchor_state.invalidation_reason, "cancelled")
+        self.assertEqual(client._session.cached_prompt_tokens, [])
+
+    def test_startup_prefill_respects_reuse_kill_switch_and_profile_identity(self) -> None:
+        client = self._client()
+        client.config = NativeClientConfig(qwen3_coder_route_prefix_reuse_enabled=False)
+
+        disabled = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+        client.config = NativeClientConfig(qwen3_coder_route_prefix_reuse_enabled=True)
+        client.model_profile = NativeModelProfile(
+            **{**_profile().__dict__, "profile_id": "orbit-qwen36-native-v1"}
+        )
+        wrong_profile = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+
+        self.assertTrue(disabled.skipped)
+        self.assertEqual(disabled.skip_reason, "route_prefix_reuse_disabled")
+        self.assertTrue(wrong_profile.skipped)
+        self.assertEqual(wrong_profile.skip_reason, "model_profile_ineligible")
+
+    def test_startup_prefill_failure_releases_lock_and_preserves_cold_fallback(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._clear_target_memory = mock.Mock(  # type: ignore[method-assign]
+            side_effect=lambda: client._session.cached_prompt_tokens.clear()
+        )
+        client.lib.lib = SimpleNamespace(llama_time_us=mock.Mock(return_value=1_000_000))
+
+        with mock.patch.object(
+            client,
+            "_prepare_memory_with_qwen_route_anchor",
+            side_effect=RuntimeError("synthetic prewarm failure"),
+        ):
+            result = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.failed_reason, "startup_prewarm_failed:RuntimeError")
+        self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
+        self.assertFalse(client._route_prefix_prefill_lock.locked())
+        self.assertTrue(client.config.qwen3_coder_route_prefix_reuse_enabled)
+
+    def test_startup_prefill_does_not_recapture_an_initialized_checkpoint(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState(
+            valid=True,
+            checkpoint_data=b"existing",
+            checkpoint_size=8,
+            token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+        )
+
+        result = client.capture_qwen3_coder_route_prefix_prefill_only(system_prompt="s" * 900)
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.skip_reason, "checkpoint_already_initialized")
+        self.assertEqual(client._qwen3_coder_route_prefix_anchor_state.checkpoint_data, b"existing")
+
     def test_restore_failure_falls_back_cold_without_touching_qwen36_state(self) -> None:
         client = self._client()
         client._session.ctx_tgt = 1  # type: ignore[assignment]

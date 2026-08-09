@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import select
+import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
@@ -23,6 +24,7 @@ from orbit.native_llama.client import (
     _has_open_thought_channel,
 )
 from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_context as native_kv_request_context
+from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
@@ -720,7 +722,25 @@ def run_server(argv: list[str] | None = None) -> int:
         if not args.verbose_llama_log:
             client.set_quiet_logging()
         client.load()
-        prewarm_startup_route_prefix(client)
+        if getattr(getattr(client, "model_profile", None), "profile_id", None) != QWEN3_CODER_PROFILE_ID:
+            prewarm_startup_route_prefix(client)
+        else:
+            prewarm_interrupted = False
+            previous_sigint = signal.getsignal(signal.SIGINT)
+
+            def cancel_startup_prewarm(_signum, _frame) -> None:
+                nonlocal prewarm_interrupted
+                prewarm_interrupted = True
+                client.cancel()
+
+            signal.signal(signal.SIGINT, cancel_startup_prewarm)
+            try:
+                prewarm_startup_route_prefix(client)
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint)
+            if prewarm_interrupted:
+                client.close()
+                return 130
     except (FileNotFoundError, RuntimeError) as exc:
         print(_format_native_bootstrap_error(exc), file=sys.stderr)
         return 1
@@ -805,6 +825,22 @@ def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefix
         _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
         return result
     profile = getattr(client, "model_profile", None)
+    if getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID:
+        try:
+            result = client.capture_qwen3_coder_route_prefix_prefill_only(
+                system_prompt=ROUTE_SYSTEM_PROMPT,
+                tools_mode="on",
+            )
+        except Exception as exc:
+            result = NativeRoutePrefixPrefillResult(
+                attempted=True,
+                succeeded=False,
+                skipped=False,
+                failed_reason=f"startup_prewarm_failed:{type(exc).__name__}",
+                restore_ready=False,
+            )
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
+        return result
     if profile is not None and not profile.gemma_prefix_reuse_supported:
         result = _startup_prewarm_skipped("model_profile_ineligible")
         _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)

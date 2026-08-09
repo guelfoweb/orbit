@@ -90,6 +90,20 @@ identity changes, restore errors, and process restart invalidate or omit the
 checkpoint. `/props` exposes bounded capture, restore, fallback, invalidation,
 identity-hash, and checkpoint-size diagnostics without prompt content.
 
+With tools enabled, native server startup synchronously captures this same
+checkpoint before accepting requests. The first real route therefore restores
+`cached=768` instead of paying the lazy capture cost. In matched qualification,
+startup capture took 21.62 seconds; the first greeting route then evaluated 32
+dynamic tokens in 2.01 seconds, versus 800 evaluated tokens and 36.59 seconds
+without prewarm in that run. Model load, startup capture, and request time are
+reported separately; timing is hardware- and load-dependent.
+
+`ORBIT_KV_PREFIX_PREWARM=off` disables only startup prewarm. The validated lazy
+behavior remains: the first eligible route captures and later routes restore. A
+prewarm failure is diagnostic and falls back to that cold path without accepting
+partial state or retrying at startup. An operator SIGINT is treated as shutdown:
+capture is cancelled and the process exits before binding the server port.
+
 ## Validation And Limits
 
 The corrected production profile passed a four-case fail-fast smoke and an
