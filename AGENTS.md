@@ -269,7 +269,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC28
 
-- Current published baseline: `v0.0.1-rc28`.
+- Published predecessor: `v0.0.1-rc28`.
 - Includes squash merge `7b03221` from #164.
 - Focus: exact verified native support for
   `Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf` through the dedicated
@@ -299,6 +299,43 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   and no universal performance claim is made.
 - See `docs/QWEN3_CODER_COMPATIBILITY.md` and
   `docs/releases/v0.0.1-rc28.md`.
+
+### RC29
+
+- Current published baseline: `v0.0.1-rc29`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc29
+- Includes squash merges `0549dea` from #165 and `ce7d802` from #166.
+- Focus: fail-closed native runtime-family loading, exact-profile
+  Qwen3-Coder route-prefix reuse, and synchronous Qwen3-Coder startup prewarm.
+- Native loading now validates the complete dependency prefix before mapping,
+  rejects dependencies that resolve outside the selected runtime root, and
+  prevents a second libllama/libggml family from entering the process. Valid
+  aliases of the same canonical family remain accepted, with no global
+  environment mutation.
+- The verified `orbit-qwen3-coder-native-v1` profile captures complete sequence
+  state at the unpadded 768-token boundary inside its 789-token invariant route
+  prefix. The process-local checkpoint is 75,507,864 bytes and has the dedicated
+  `qwen3-coder-route-prefix-v1` identity. Cold, segmented, and restored logits
+  were byte-identical with maximum absolute difference `0.0`.
+- Native tools-on startup captures that checkpoint before server readiness, so
+  the first real request restores `cached=768`. `ORBIT_KV_PREFIX_PREWARM=off`
+  disables startup capture only; `ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0`
+  disables Qwen3-Coder capture and restore entirely.
+- RC29 validation: Qwen3-Coder production corpus 8/8; focused tests 148/148;
+  full discovery 1,596/1,596 with four expected skips in the release worktree;
+  Qwen 3.6 route-prefix `cached=768`; Gemma final-prefix `cached=64`; strict
+  Gemma target/draft/mmproj MTP; `compileall`; and `git diff --check` PASS.
+- Local measurements observed a warm route prefill of about 1.49 seconds versus
+  24.40 seconds cold, with about 24 seconds moved to startup. The checkpoint
+  added about 91.6 MB ready-state RSS. Timings are descriptive and
+  hardware-dependent; reset invalidates the process-local checkpoint and the
+  next route recaptures cold.
+- Qwen3-Coder MTP and multimodal input remain unsupported. Tools remain on,
+  routing remains model-driven, and Qwen 3.6 and Gemma checkpoint identities
+  and behavior remain separate.
+- See `docs/QWEN3_CODER_COMPATIBILITY.md`,
+  `docs/NATIVE_ROUTE_PREFIX_STARTUP_PREWARM.md`, and
+  `docs/releases/v0.0.1-rc29.md`.
 
 ## RC24 Tool-Loop Convergence
 
