@@ -299,6 +299,42 @@ class QualificationRunnerReportingTests(unittest.TestCase):
             value = RuntimeFixtureExecutor(FakeChatBackend("<think>private</think>OK")).execute(item, Path(directory))
         self.assertEqual(value.protocol_issue, "visible_control_markup")
 
+    def test_runtime_adapter_allows_authoritative_inert_control_text(self) -> None:
+        payload = {"schema_version": 1, "fixtures": [{
+            "name": "quoted_marker", "capability": "chat", "profiles": ["profile-a"],
+            "request": {"prompt": "Quote the literal marker.", "tools": False},
+            "expect": {
+                "finish_reason": "stop", "max_model_calls": 1,
+                "exact_output": 'The literal string "<tool_call>" is inert.',
+            },
+            "parity": {"mode": "exact"},
+        }]}
+        item = load_fixture_text(json.dumps(payload)).fixtures[0]
+        with tempfile.TemporaryDirectory() as directory:
+            value = RuntimeFixtureExecutor(
+                FakeChatBackend('The literal string "<tool_call>" is inert.')
+            ).execute(item, Path(directory))
+        self.assertIsNone(value.protocol_issue)
+
+    def test_runtime_adapter_rejects_inconsistent_cache_accounting(self) -> None:
+        item = self.fixture_set().fixtures[0]
+        backend = FakeChatBackend()
+        original_chat = backend.chat
+
+        def inconsistent_chat(messages, *, temperature, max_tokens, tools=None):
+            result = original_chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+            return ChatResult(
+                result.content, result.model, result.finish_reason, result.tool_calls,
+                10, result.completion_tokens, 20, result.prompt_tokens_per_second,
+                result.generation_tokens_per_second,
+            )
+
+        backend.chat = inconsistent_chat  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as directory:
+            value = RuntimeFixtureExecutor(backend).execute(item, Path(directory))
+        self.assertIsNone(value.calls[0].evaluated_tokens)
+        self.assertIsNone(value.calls[0].cached_tokens)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -233,7 +233,10 @@ class RuntimeFixtureExecutor:
                 on_phase_start=phase_start,
             )
 
-        if _has_control_markup(result.content):
+        if (
+            _has_control_markup(result.content)
+            and result.content != fixture.expect.exact_output
+        ):
             protocol_issue = "visible_control_markup"
         calls = tuple(_metric(item, step_walls[index]) for index, item in enumerate(steps))
         artifact = _artifact_evidence(fixture, workdir, tool_results)
@@ -308,7 +311,7 @@ def _metric(value: ModelStepMetrics, wall: float | None) -> CallMetric:
         phase=value.phase,
         input_tokens=input_tokens,
         evaluated_tokens=evaluated,
-        cached_tokens=cached_tokens,
+        cached_tokens=cached_tokens if valid_cache else None,
         output_tokens=_token_count(value.completion_tokens),
         prefill_tokens_per_second=_positive_rate(value.prompt_tokens_per_second),
         generation_tokens_per_second=_positive_rate(value.generation_tokens_per_second),
