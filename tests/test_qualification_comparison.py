@@ -170,6 +170,21 @@ class OptimizationComparisonTests(unittest.TestCase):
         self.assertIsNone(payload["candidate"]["startup_wall_seconds"])
         self.assertIsNone(payload["performance"]["startup"]["absolute_change_seconds"])
 
+    def test_nonfinite_fixture_and_call_metrics_serialize_as_null(self) -> None:
+        baseline_value = observation(
+            value=replace(metric(), wall_seconds=float("inf")),
+            wall=float("nan"),
+        )
+        comparison = build_optimization_comparison(
+            fixtures(), side("baseline", 101, baseline_value),
+            side("candidate", 202, observation(wall=1.0)),
+        )
+        payload = json.loads(comparison_json(comparison))
+        fixture = payload["baseline"]["result"]["fixtures"][0]
+        self.assertIsNone(fixture["calls"][0]["wall_seconds"])
+        self.assertIsNone(fixture["aggregate_metrics"]["wall_seconds"])
+        self.assertIsNone(payload["performance"]["fixtures"]["pwd_route"]["wall"]["percent_change"])
+
     def test_missing_metrics_remain_null_without_changing_parity(self) -> None:
         missing = metric(input_tokens=None, evaluated=None, cached=None)
         comparison = build_optimization_comparison(

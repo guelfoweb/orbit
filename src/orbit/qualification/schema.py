@@ -250,6 +250,8 @@ class OptimizationComparison:
 def as_primitive(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if is_dataclass(value):
         return {item.name: as_primitive(getattr(value, item.name)) for item in fields(value)}
     if isinstance(value, dict):
