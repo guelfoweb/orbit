@@ -111,6 +111,15 @@ class LifecycleOutcome:
 
 
 @dataclass(frozen=True)
+class DocumentEvidence:
+    coverage: str | None
+    analysis_executed: bool
+    required_context: int | None
+    available_context: int | None
+    snapshot_clean: bool
+
+
+@dataclass(frozen=True)
 class FileStateEvidence:
     path: str
     exists: bool
@@ -189,6 +198,7 @@ class FixtureObservation:
     tool_outcomes: tuple[ToolOutcomeRecord, ...] = ()
     workflow: WorkflowEvidence | None = None
     state_reuse: StateReuseEvidence | None = None
+    document: DocumentEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +234,7 @@ class FixtureResult:
     tool_outcomes: tuple[ToolOutcomeRecord, ...]
     workflow: WorkflowEvidence | None
     state_reuse: StateReuseEvidence | None = None
+    document: DocumentEvidence | None = None
 
 
 @dataclass(frozen=True)

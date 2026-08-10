@@ -2,11 +2,26 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
+
+from orbit.runtime.full_document import FULL_DOCUMENT_SAFETY_MARGIN_TOKENS, round_context_requirement
 
 from .fixtures import FileSpec, FixtureSpec
 from .schema import (
     AggregateMetrics, ArtifactEvidence, ComparisonMode, FixtureObservation, FixtureResult,
     LifecycleOutcome, ParityMode, ParityResult, Reason, Status, WorkflowEvidence,
+)
+
+
+_DOCUMENT_CONTEXT_NOTICE_RE = re.compile(
+    r"The exact full prompt requires at least (?P<required>[0-9,]+) tokens "
+    r"\((?P<file>[0-9,]+) document tokens; (?P<prompt>[0-9,]+) rendered input tokens; "
+    r"(?P<reserve>[0-9,]+)-token output reserve\), but the server provides "
+    r"(?P<available>[0-9,]+)\."
+)
+_DOCUMENT_RESTART_NOTICE_RE = re.compile(
+    r"Restart the native server with the same options and `--ctx (?P<context>[0-9,]+)` "
+    r"if the model and available RAM support it, then repeat the request\."
 )
 
 
@@ -21,6 +36,7 @@ def validate_observation(
         Status.TECHNICAL_STOP
         if failure and failure.code in {
             "lifecycle_evidence_missing", "lifecycle_evidence_incomplete", "lifecycle_evidence_invalid",
+            "document_evidence_missing", "document_evidence_incomplete", "document_evidence_invalid",
         }
         else Status.FAIL if failure else Status.PASS
     )
@@ -68,6 +84,7 @@ def _result(
         tool_outcomes=observation.tool_outcomes,
         workflow=observation.workflow,
         state_reuse=observation.state_reuse,
+        document=observation.document,
     )
 
 
@@ -122,6 +139,7 @@ def compare_fixture_results(
     _different(mismatches, "artifact_state", _artifact_state(baseline.artifact), _artifact_state(candidate.artifact))
     _different(mismatches, "workflow_state", _workflow_state(baseline.workflow), _workflow_state(candidate.workflow))
     _different(mismatches, "state_reuse", _state_reuse_parity(baseline.state_reuse), _state_reuse_parity(candidate.state_reuse))
+    _different(mismatches, "document", baseline.document, candidate.document)
     if comparison_mode is ComparisonMode.OPTIMIZATION and fixture.expect.lifecycle is None:
         _different(mismatches, "model_call_count", baseline.model_call_count, candidate.model_call_count)
         _different(mismatches, "retry_count", baseline.retry_count, candidate.retry_count)
@@ -175,6 +193,10 @@ def _first_failure(
         )
     if expect.lifecycle is not None:
         return _lifecycle_failure(expect.lifecycle.operation, expect.lifecycle.min_restores, observation)
+    if expect.document is not None:
+        failure = _document_failure(fixture, observation)
+        if failure is not None:
+            return failure
     if expect.workflow is not None:
         return _workflow_failure(fixture, observation)
     if expect.route is not None and observation.route != expect.route:
@@ -205,6 +227,92 @@ def _first_failure(
         return Reason("final_workdir_mismatch", "final output does not report the fixture workdir")
     if expect.artifact is not None:
         return _artifact_failure(expect.artifact, observation.artifact)
+    return None
+
+
+def _document_failure(fixture: FixtureSpec, observation: FixtureObservation) -> Reason | None:
+    expected = fixture.expect.document
+    actual = observation.document
+    assert expected is not None
+    if actual is None:
+        return Reason("document_evidence_missing", "full-document evidence is unavailable")
+    booleans = (actual.analysis_executed, actual.snapshot_clean)
+    if any(type(value) is not bool for value in booleans):
+        return Reason("document_evidence_invalid", "full-document evidence has invalid boolean fields")
+    if actual.coverage not in {None, "none", "complete"}:
+        return Reason("document_evidence_invalid", "full-document coverage is invalid")
+    if actual.coverage != expected.coverage:
+        code = "document_evidence_incomplete" if actual.coverage is None else "document_coverage_mismatch"
+        return Reason(code, "full-document coverage differs")
+    if observation.tool_calls or observation.executed_tools or observation.tool_outcomes:
+        return Reason("document_tool_fallback", "full-document qualification unexpectedly used a tool")
+    expected_analysis = expected.coverage == "complete"
+    if actual.analysis_executed != expected_analysis:
+        return Reason("document_analysis_mismatch", "full-document analysis execution differs")
+    if expected.coverage is not None:
+        phases = tuple(item.phase for item in observation.calls)
+        route_phases = phases[:-1] if expected_analysis else phases
+        if (
+            not route_phases or route_phases[0] != "route"
+            or any(phase not in {"route", "route_retry"} for phase in route_phases)
+            or (expected_analysis and (not phases or phases[-1] != "full_document"))
+        ):
+            return Reason("document_phase_mismatch", "full-document route/analysis phases are inconsistent")
+    if expected.coverage == "none":
+        if actual.required_context is None or actual.available_context is None:
+            return Reason("document_evidence_incomplete", "required/available context is unavailable")
+        if (
+            type(actual.required_context) is not int or type(actual.available_context) is not int
+            or actual.required_context <= actual.available_context or actual.available_context <= 0
+        ):
+            return Reason("document_context_contradiction", "required/available context is contradictory")
+    elif actual.required_context is not None or actual.available_context is not None:
+        return Reason("document_context_contradiction", "unexpected context rejection evidence is present")
+    if expected.coverage == "none":
+        lines = observation.final_output.splitlines()
+        source = fixture.workspace.files[0] if fixture.workspace is not None else None
+        encoded = source.content.encode("utf-8") if source is not None else b""
+        context_match = _DOCUMENT_CONTEXT_NOTICE_RE.fullmatch(lines[2]) if len(lines) == 6 else None
+        restart_match = _DOCUMENT_RESTART_NOTICE_RE.fullmatch(lines[3]) if len(lines) == 6 else None
+        context_values = (
+            {
+                name: int(context_match.group(name).replace(",", ""))
+                for name in ("required", "file", "prompt", "reserve", "available")
+            }
+            if context_match is not None else {}
+        )
+        if not (
+            len(lines) == 6
+            and source is not None
+            and lines[0] == f"I cannot read `{source.path}` completely with the active context."
+            and lines[1] == (
+                f"Document coverage: none; bytes 0-{len(encoded)}; "
+                f"lines 1-{len(source.content.splitlines())}; SHA-256 {source.sha256}."
+            )
+            and context_match is not None
+            and context_values["required"] == actual.required_context
+            and context_values["available"] == actual.available_context
+            and all(context_values[name] > 0 for name in ("file", "prompt", "reserve"))
+            and context_values["required"] == (
+                context_values["prompt"] + context_values["reserve"]
+                + FULL_DOCUMENT_SAFETY_MARGIN_TOKENS
+            )
+            and restart_match is not None
+            and int(restart_match.group("context").replace(",", "")) == (
+                round_context_requirement(actual.required_context)
+            )
+            and lines[4] == "No document content was sent to the answering model and no summary was produced."
+            and lines[5] == "`/max-tokens` changes response length; it does not enlarge the server context."
+        ):
+            return Reason("partial_document_inference", "blocked full-document request exposed an answer")
+    if expected_analysis and (
+        "\n\n" not in observation.final_output
+        or not observation.final_output.split("\n\n", 1)[1].strip()
+        or (expected.answer_contains is not None and expected.answer_contains not in observation.final_output)
+    ):
+        return Reason("document_answer_missing", "complete analysis lacks the deterministic answer evidence")
+    if not actual.snapshot_clean:
+        return Reason("document_cleanup_failed", "ephemeral full-document snapshot state remains")
     return None
 
 

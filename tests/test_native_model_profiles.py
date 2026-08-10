@@ -55,6 +55,7 @@ class NativeModelProfileTests(unittest.TestCase):
         self.assertFalse(profile.mtp_supported)
         self.assertFalse(profile.gemma_prefix_reuse_supported)
         self.assertEqual(profile.verified_quantization, "Q4_K_M")
+        self.assertTrue(profile.diagnostics(thinking_enabled=False)["capabilities"]["full_document_analysis"])
 
     def test_qwen_template_drift_fails_closed(self) -> None:
         profile = detect_native_model_profile(QWEN_METADATA, "unreviewed-template")
@@ -96,6 +97,7 @@ class NativeModelProfileTests(unittest.TestCase):
         self.assertEqual(profile.renderer, "orbit-gemma4")
         self.assertTrue(profile.mtp_supported)
         self.assertTrue(profile.gemma_prefix_reuse_supported)
+        self.assertTrue(profile.diagnostics(thinking_enabled=False)["capabilities"]["full_document_analysis"])
 
     def test_detects_verified_qwen3_coder_only_from_complete_identity(self) -> None:
         template = "official-qwen3-coder-template"
@@ -116,6 +118,7 @@ class NativeModelProfileTests(unittest.TestCase):
         self.assertTrue(profile.route_prefix_reuse_supported)
         self.assertFalse(profile.multimodal_supported)
         self.assertEqual(profile.verified_quantization, "Q4_K_M")
+        self.assertTrue(profile.diagnostics(thinking_enabled=False)["capabilities"]["full_document_analysis"])
 
     def test_qwen3_coder_template_drift_fails_closed(self) -> None:
         profile = detect_native_model_profile(QWEN3_CODER_METADATA, "unreviewed-template")

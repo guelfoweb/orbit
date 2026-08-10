@@ -67,6 +67,7 @@ class NativeModelProfile:
                 "tool_history_results": self.verified,
                 "write_artifact": self.verified,
                 "verify_artifact": self.verified,
+                "full_document_analysis": self.verified,
                 "mtp": self.mtp_supported,
                 "route_prefix_reuse": self.route_prefix_reuse_supported,
                 "multimodal": self.multimodal_supported,

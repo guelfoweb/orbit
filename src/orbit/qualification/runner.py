@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from typing import Any, Protocol
 
 from orbit.backend.base import ChatBackend
 from orbit.runtime.chat import ChatRuntime
+from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.command_request import (
     command_tool_call_from_content,
     command_tool_call_from_tool_calls,
@@ -33,6 +35,7 @@ from .schema import (
     CommonGate,
     ComparisonExecution,
     ComparisonMode,
+    DocumentEvidence,
     FileStateEvidence,
     FixtureObservation,
     LifecycleOutcome,
@@ -187,6 +190,7 @@ class RuntimeFixtureExecutor:
         tool_results: list[tuple[str, str]] = []
         tool_outcomes: list[ToolOutcomeRecord] = []
         protocol_issue = None
+        document = None
 
         def phase_start(_phase: ModelPhaseStart) -> None:
             phase_starts.append(time.perf_counter())
@@ -211,8 +215,33 @@ class RuntimeFixtureExecutor:
             tool_outcomes.append(_tool_outcome(name, content))
 
         route = None
-        runtime = ChatRuntime(backend=self.backend)
-        if fixture.request.full_request:
+        evidence_store = (
+            EvidenceStore(workdir / ".qualification-document-evidence")
+            if fixture.expect.document is not None else None
+        )
+        runtime = (
+            ChatRuntime(backend=self.backend, evidence_store=evidence_store)
+            if evidence_store is not None else ChatRuntime(backend=self.backend)
+        )
+        if fixture.expect.document is not None:
+            result = runtime.ask_auto(
+                fixture.request.prompt,
+                temperature=0,
+                max_tokens=128,
+                workdir=workdir,
+                max_loops=fixture.expect.max_model_calls,
+                allowed_tool_names=("exec_shell_full_command",),
+                on_tool_call=tool_call,
+                on_tool_result=tool_result,
+                on_model_step=model_step,
+                on_phase_start=phase_start,
+            )
+            document = _document_evidence(result.content, steps, evidence_store)
+            if document.coverage is not None:
+                route = "FILESYSTEM"
+            elif not tool_calls and any(item.phase not in {"route", "route_retry", "tool_plan"} for item in steps):
+                route = "CHAT"
+        elif fixture.request.full_request:
             result = runtime.ask_auto(
                 fixture.request.prompt,
                 temperature=0,
@@ -285,9 +314,11 @@ class RuntimeFixtureExecutor:
         calls = tuple(_metric(item, step_walls[index]) for index, item in enumerate(steps))
         artifact = _artifact_evidence(fixture, workdir, tool_results)
         residue = _artifact_residue(workdir)
+        if document is not None and not document.snapshot_clean:
+            residue = True
         lifecycle = LifecycleOutcome(
             not residue,
-            "clean" if not residue else "private artifact state remains",
+            "clean" if not residue else "private qualification state remains",
         )
         return FixtureObservation(
             route=route,
@@ -304,6 +335,7 @@ class RuntimeFixtureExecutor:
             wall_seconds=time.perf_counter() - started,
             protocol_issue=protocol_issue,
             tool_outcomes=tuple(tool_outcomes),
+            document=document,
         )
 
     def _route(self, fixture: FixtureSpec):
@@ -529,6 +561,28 @@ def _prepare_workspace(fixture: FixtureSpec, workdir: Path) -> None:
         target = workdir / item.path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(item.content, encoding="utf-8", newline="")
+
+
+_DOCUMENT_COVERAGE_RE = re.compile(r"(?:^|\n)Document coverage: (none|complete)(?:;|\s)")
+_DOCUMENT_CONTEXT_RE = re.compile(
+    r"requires at least ([0-9,]+) tokens .*?but the server provides ([0-9,]+)\.", re.DOTALL)
+
+
+def _document_evidence(
+    output: str, steps: list[ModelStepMetrics], store: EvidenceStore | None,
+) -> DocumentEvidence:
+    coverage_match = _DOCUMENT_COVERAGE_RE.search(output)
+    context_match = _DOCUMENT_CONTEXT_RE.search(output)
+    analysis = any(item.phase == "full_document" for item in steps)
+    return DocumentEvidence(
+        coverage=coverage_match.group(1) if coverage_match else None,
+        analysis_executed=analysis,
+        required_context=int(context_match.group(1).replace(",", "")) if context_match else None,
+        available_context=int(context_match.group(2).replace(",", "")) if context_match else None,
+        snapshot_clean=bool(
+            store is not None and not store.records and not store.raw_cache and not store.root.exists()
+        ),
+    )
 
 
 def _workflow_evidence(
