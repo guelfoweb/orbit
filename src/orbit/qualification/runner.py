@@ -31,10 +31,12 @@ from .schema import (
     ArtifactEvidence,
     CallMetric,
     CommonGate,
+    ComparisonExecution,
     ComparisonMode,
     FileStateEvidence,
     FixtureObservation,
     LifecycleOutcome,
+    OptimizationComparison,
     ParityResult,
     QualificationRun,
     Reason,
@@ -207,7 +209,22 @@ class RuntimeFixtureExecutor:
 
         route = None
         runtime = ChatRuntime(backend=self.backend)
-        if fixture.expect.route is not None:
+        if fixture.request.full_request:
+            result = runtime.ask_auto(
+                fixture.request.prompt,
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                max_loops=fixture.expect.max_model_calls,
+                allowed_tool_names=(),
+                on_tool_call=tool_call,
+                on_tool_result=tool_result,
+                on_model_step=model_step,
+                on_phase_start=phase_start,
+            )
+            final_phase = any(item.phase not in {"route", "route_retry"} for item in steps)
+            route = "CHAT" if final_phase and not tool_calls else None
+        elif fixture.expect.route is not None:
             result, route, route_call = self._route(fixture)
             tool_calls.extend(route_call)
             steps.append(ModelStepMetrics.from_result(loop=1, result=result, phase="route"))
@@ -310,6 +327,17 @@ def compare_runs(
 ) -> tuple[ParityResult, ...]:
     if baseline.provenance.fixture_set_hash != candidate.provenance.fixture_set_hash:
         raise ValueError("qualification fixture sets differ")
+    if comparison_mode is ComparisonMode.OPTIMIZATION:
+        identity_fields = (
+            "qualification_schema_version", "git_revision", "profile_identity", "model_identity",
+            "template_identity", "template_hash", "backend_identity", "backend_revision",
+            "runtime_configuration", "hardware",
+        )
+        if any(
+            getattr(baseline.provenance, field) != getattr(candidate.provenance, field)
+            for field in identity_fields
+        ):
+            raise ValueError("optimization comparison requires the same model and configuration")
     left = {item.name: item for item in baseline.fixtures}
     right = {item.name: item for item in candidate.fixtures}
     fixtures = {item.name: item for item in fixture_set.fixtures}
@@ -321,6 +349,101 @@ def compare_runs(
         )
         for name in sorted(left)
     )
+
+
+def build_optimization_comparison(
+    fixture_set: FixtureSet,
+    baseline: ComparisonExecution,
+    candidate: ComparisonExecution,
+) -> OptimizationComparison:
+    baseline = replace(baseline, startup_wall_seconds=_wall_value(baseline.startup_wall_seconds))
+    candidate = replace(candidate, startup_wall_seconds=_wall_value(candidate.startup_wall_seconds))
+    parity = compare_runs(fixture_set, baseline.result, candidate.result)
+    mismatches = []
+    if not _valid_pid(baseline.server_pid) or not _valid_pid(candidate.server_pid):
+        mismatches.append("invalid_server_pid")
+    elif baseline.server_pid == candidate.server_pid:
+        mismatches.append("process_not_isolated")
+    if baseline.label == candidate.label:
+        mismatches.append("comparison_labels_not_distinct")
+    if _fixed_configuration(baseline.configuration) != _fixed_configuration(candidate.configuration):
+        mismatches.append("execution_configuration_mismatch")
+    if baseline.result.overall_status is not Status.PASS:
+        mismatches.append("baseline_not_qualified")
+    if candidate.result.overall_status is not Status.PASS:
+        mismatches.append("candidate_not_qualified")
+    if any(not item.performance_comparison_valid for item in parity):
+        mismatches.append("fixture_parity_invalid")
+    valid = not mismatches
+    performance = None
+    if valid:
+        baseline_fixtures = {item.name: item for item in baseline.result.fixtures}
+        candidate_fixtures = {item.name: item for item in candidate.result.fixtures}
+        performance = {
+            "startup": _wall_change(
+                baseline.startup_wall_seconds,
+                candidate.startup_wall_seconds,
+            ),
+            "aggregate": _metrics_change(
+                baseline.result.aggregate_metrics,
+                candidate.result.aggregate_metrics,
+            ),
+            "fixtures": {
+                item.fixture_name: _metrics_change(
+                    baseline_fixtures[item.fixture_name].aggregate_metrics,
+                    candidate_fixtures[item.fixture_name].aggregate_metrics,
+                )
+                for item in parity
+            },
+        }
+    return OptimizationComparison(
+        baseline=baseline,
+        candidate=candidate,
+        parity=parity,
+        performance_comparison_valid=valid,
+        mismatches=tuple(mismatches),
+        performance=performance,
+    )
+
+
+def _metrics_change(baseline: AggregateMetrics, candidate: AggregateMetrics) -> dict[str, Any]:
+    return {
+        "baseline": baseline,
+        "candidate": candidate,
+        "wall": _wall_change(baseline.wall_seconds, candidate.wall_seconds),
+    }
+
+
+def _wall_change(baseline: float | None, candidate: float | None) -> dict[str, float | None]:
+    baseline = _wall_value(baseline)
+    candidate = _wall_value(candidate)
+    if baseline is None or candidate is None:
+        return {"baseline_seconds": baseline, "candidate_seconds": candidate,
+                "absolute_change_seconds": None, "percent_change": None}
+    change = candidate - baseline
+    return {
+        "baseline_seconds": baseline,
+        "candidate_seconds": candidate,
+        "absolute_change_seconds": change,
+        "percent_change": change / baseline * 100.0 if baseline > 0 else None,
+    }
+
+
+def _wall_value(value: float | None) -> float | None:
+    if (
+        not isinstance(value, (int, float)) or isinstance(value, bool)
+        or not math.isfinite(value) or value < 0
+    ):
+        return None
+    return float(value)
+
+
+def _valid_pid(value: int) -> bool:
+    return type(value) is int and value > 0
+
+
+def _fixed_configuration(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key != "environment"}
 
 
 def _metric(value: ModelStepMetrics, wall: float | None) -> CallMetric:

@@ -163,6 +163,7 @@ class FixtureObservation:
 
 @dataclass(frozen=True)
 class ParityResult:
+    fixture_name: str
     comparison_mode: ComparisonMode
     mode: ParityMode
     equivalent: bool
@@ -227,9 +228,30 @@ class QualificationRun:
     overall_detail: str
 
 
+@dataclass(frozen=True)
+class ComparisonExecution:
+    label: str
+    server_pid: int
+    startup_wall_seconds: float | None
+    configuration: dict[str, Any]
+    result: QualificationRun
+
+
+@dataclass(frozen=True)
+class OptimizationComparison:
+    baseline: ComparisonExecution
+    candidate: ComparisonExecution
+    parity: tuple[ParityResult, ...]
+    performance_comparison_valid: bool
+    mismatches: tuple[str, ...]
+    performance: dict[str, Any] | None
+
+
 def as_primitive(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if is_dataclass(value):
         return {item.name: as_primitive(getattr(value, item.name)) for item in fields(value)}
     if isinstance(value, dict):
