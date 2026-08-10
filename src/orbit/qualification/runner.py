@@ -50,6 +50,9 @@ from .schema import (
 from .validators import compare_fixture_results, unavailable_result, validate_observation
 
 
+NON_GATING_HARDWARE_PROVENANCE_FIELDS = frozenset({"ram_available"})
+
+
 class FixtureExecutor(Protocol):
     def execute(self, fixture: FixtureSpec, workdir: Path) -> FixtureObservation: ...
 
@@ -331,12 +334,14 @@ def compare_runs(
         identity_fields = (
             "qualification_schema_version", "git_revision", "profile_identity", "model_identity",
             "template_identity", "template_hash", "backend_identity", "backend_revision",
-            "runtime_configuration", "hardware",
+            "runtime_configuration",
         )
         if any(
             getattr(baseline.provenance, field) != getattr(candidate.provenance, field)
             for field in identity_fields
-        ):
+        ) or _stable_hardware_identity(
+            baseline.provenance.hardware
+        ) != _stable_hardware_identity(candidate.provenance.hardware):
             raise ValueError("optimization comparison requires the same model and configuration")
     left = {item.name: item for item in baseline.fixtures}
     right = {item.name: item for item in candidate.fixtures}
@@ -444,6 +449,14 @@ def _valid_pid(value: int) -> bool:
 
 def _fixed_configuration(value: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if key != "environment"}
+
+
+def _stable_hardware_identity(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in value.items()
+        if key not in NON_GATING_HARDWARE_PROVENANCE_FIELDS
+    }
 
 
 def _metric(value: ModelStepMetrics, wall: float | None) -> CallMetric:

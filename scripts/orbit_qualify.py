@@ -82,6 +82,7 @@ def build_provenance(
             "aggregate_wall_seconds": "sum of fixture execution; server startup and model load excluded",
             "prefill_tokens_per_second": "sum evaluated / sum per-call evaluated seconds; complete calls only",
             "generation_tokens_per_second": "sum output / sum per-call decode seconds; complete calls only",
+            "hardware.ram_available": "descriptive snapshot; excluded from optimization hardware identity",
             "peak_rss_bytes": (
                 f"Linux VmHWM for server PID {server_pid}; process lifetime including model load"
                 if server_pid is not None else "unavailable without --server-pid"
