@@ -302,8 +302,17 @@ class LlamaServerBackend:
             return self._props_cache
         try:
             data = self._get_json("/props")
-        except LlamaServerError:
-            return {}
+        except LlamaServerError as exc:
+            cause = exc.__cause__
+            transient = (
+                isinstance(cause, TimeoutError)
+                or (isinstance(cause, URLError) and not isinstance(cause, HTTPError))
+                or (isinstance(cause, HTTPError) and 500 <= cause.code < 600)
+            )
+            if transient:
+                return {}
+            self._props_cache = {}
+            return self._props_cache
         self._props_cache = data if isinstance(data, dict) else {}
         return self._props_cache
 
