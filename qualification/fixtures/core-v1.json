@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "name": "simple_chat",
+      "capability": "chat",
+      "profiles": [
+        "orbit-gemma4-native-v1",
+        "orbit-qwen36-native-v1",
+        "orbit-qwen3-coder-native-v1"
+      ],
+      "request": {
+        "prompt": "Reply with exactly ORBIT_QUALIFICATION_CHAT_OK and nothing else.",
+        "tools": false
+      },
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 1,
+        "exact_output": "ORBIT_QUALIFICATION_CHAT_OK"
+      },
+      "parity": {"mode": "exact"}
+    },
+    {
+      "name": "pwd_route",
+      "capability": "tools",
+      "profiles": [
+        "orbit-gemma4-native-v1",
+        "orbit-qwen36-native-v1",
+        "orbit-qwen3-coder-native-v1"
+      ],
+      "request": {
+        "prompt": "Determine the absolute current working directory using a local capability.",
+        "tools": true
+      },
+      "expect": {
+        "route": "FILESYSTEM",
+        "tool_calls": [
+          {"name": "exec_shell_full_command", "arguments": {"command": "pwd"}}
+        ],
+        "finish_reason": "stop",
+        "max_model_calls": 1
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "pwd_final",
+      "capability": "tools",
+      "profiles": [
+        "orbit-gemma4-native-v1",
+        "orbit-qwen36-native-v1",
+        "orbit-qwen3-coder-native-v1"
+      ],
+      "request": {
+        "prompt": "Run exactly the local shell command `pwd`, then answer with only its output.",
+        "tools": true
+      },
+      "expect": {
+        "tool_calls": [
+          {"name": "exec_shell_full_command", "arguments": {"command": "pwd"}}
+        ],
+        "finish_reason": "stop",
+        "max_model_calls": 6,
+        "final_reports_workdir": true
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "json_artifact",
+      "capability": "artifacts",
+      "profiles": [
+        "orbit-gemma4-native-v1",
+        "orbit-qwen36-native-v1",
+        "orbit-qwen3-coder-native-v1"
+      ],
+      "request": {
+        "prompt": "Create qualification.json with this valid JSON integer, then verify the artifact:\n\n3141592653589793238462643383279502884197169399375105820974944592",
+        "tools": true
+      },
+      "expect": {
+        "tool_calls": [
+          {"name": "write_artifact"},
+          {"name": "verify_artifact"}
+        ],
+        "finish_reason": "stop",
+        "max_model_calls": 6,
+        "artifact": {
+          "path": "qualification.json",
+          "json_equals": 3141592653589793238462643383279502884197169399375105820974944592,
+          "publication": true,
+          "verification": true
+        }
+      },
+      "parity": {"mode": "structural"}
+    }
+  ]
+}
