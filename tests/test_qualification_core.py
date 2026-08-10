@@ -130,7 +130,7 @@ class QualificationValidationTests(unittest.TestCase):
             wrong = [(name, content.replace("path: qualification.json", "path: other.json")) for name, content in valid]
             self.assertFalse(_artifact_evidence(item, root, wrong).published)  # type: ignore[union-attr]
 
-    def test_optimization_parity_requires_equivalent_work(self) -> None:
+    def test_optimization_parity_treats_token_counts_as_metrics(self) -> None:
         item = fixture()
         baseline = validate_observation(item, observation())
         same = compare_fixture_results(item, baseline, validate_observation(item, observation()))
@@ -138,8 +138,16 @@ class QualificationValidationTests(unittest.TestCase):
         different = validate_observation(item, observation(calls=(call(input_tokens=801, evaluated=33), call("final_from_tool"))))
         parity = compare_fixture_results(item, baseline, different)
         self.assertTrue(parity.equivalent)
+        self.assertTrue(parity.performance_comparison_valid)
+
+    def test_optimization_parity_requires_equivalent_call_behavior(self) -> None:
+        item = fixture()
+        baseline = validate_observation(item, observation())
+        different = validate_observation(item, observation(calls=(call(), call("retry"))))
+        parity = compare_fixture_results(item, baseline, different)
+        self.assertFalse(parity.equivalent)
         self.assertFalse(parity.performance_comparison_valid)
-        self.assertIn("model_work", parity.mismatches)
+        self.assertIn("call_behavior", parity.mismatches)
 
     def test_optimization_parity_allows_evaluated_cached_redistribution(self) -> None:
         item = fixture()
@@ -161,14 +169,13 @@ class QualificationValidationTests(unittest.TestCase):
         self.assertIsNone(incomplete.cached_tokens)
         self.assertIsNone(incomplete.prefill_tokens_per_second)
 
-    def test_missing_model_work_invalidates_performance_only(self) -> None:
+    def test_missing_token_metrics_remain_descriptive(self) -> None:
         item = fixture()
         baseline = validate_observation(item, observation())
         missing = observation(calls=(call(input_tokens=None), call("final_from_tool")))
         parity = compare_fixture_results(item, baseline, validate_observation(item, missing))
         self.assertTrue(parity.equivalent)
-        self.assertFalse(parity.performance_comparison_valid)
-        self.assertIn("model_work_unavailable", parity.mismatches)
+        self.assertTrue(parity.performance_comparison_valid)
 
     def test_argument_mismatch_invalidates_optimization_comparison(self) -> None:
         item = fixture()
@@ -292,6 +299,29 @@ class QualificationRunnerReportingTests(unittest.TestCase):
         self.assertEqual(value.calls[0].input_tokens, 10)
         self.assertEqual(value.calls[0].evaluated_tokens, 10)
         self.assertEqual(value.model_call_count, 1)
+
+    def test_runtime_adapter_observes_full_tools_on_chat_request(self) -> None:
+        payload = {"schema_version": 1, "fixtures": [{
+            "name": "full_chat", "capability": "tools", "profiles": ["profile-a"],
+            "request": {"prompt": "hello", "tools": True, "full_request": True},
+            "expect": {"route": "CHAT", "finish_reason": "stop", "max_model_calls": 2},
+            "parity": {"mode": "structural"},
+        }]}
+
+        class Backend:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages, *, temperature, max_tokens, tools=None):
+                self.calls += 1
+                content = '{"route":"CHAT"}' if self.calls == 1 else "Hello"
+                return ChatResult(content, "fake", "stop", [], 10, 1, 0, 20.0, 5.0)
+
+        item = load_fixture_text(json.dumps(payload)).fixtures[0]
+        with tempfile.TemporaryDirectory() as directory:
+            value = RuntimeFixtureExecutor(Backend()).execute(item, Path(directory))
+        self.assertEqual((value.route, value.model_call_count), ("CHAT", 2))
+        self.assertEqual([call.phase for call in value.calls], ["route", "chat_final"])
 
     def test_runtime_adapter_detects_visible_reasoning_markup(self) -> None:
         item = self.fixture_set().fixtures[0]

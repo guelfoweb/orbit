@@ -114,6 +114,10 @@ def compare_fixture_results(
     _different(mismatches, "finish_reason", baseline.finish_reason, candidate.finish_reason)
     _different(mismatches, "artifact_state", _artifact_state(baseline.artifact), _artifact_state(candidate.artifact))
     _different(mismatches, "workflow_state", _workflow_state(baseline.workflow), _workflow_state(candidate.workflow))
+    if comparison_mode is ComparisonMode.OPTIMIZATION:
+        _different(mismatches, "model_call_count", baseline.model_call_count, candidate.model_call_count)
+        _different(mismatches, "retry_count", baseline.retry_count, candidate.retry_count)
+        _different(mismatches, "call_behavior", _call_behavior(baseline), _call_behavior(candidate))
     if comparison_mode is ComparisonMode.OPTIMIZATION and fixture.parity_mode is ParityMode.EXACT:
         _different(
             mismatches,
@@ -121,33 +125,22 @@ def compare_fixture_results(
             baseline.final_output_sha256,
             candidate.final_output_sha256,
         )
-        _different(mismatches, "model_call_count", baseline.model_call_count, candidate.model_call_count)
-        _different(mismatches, "retry_count", baseline.retry_count, candidate.retry_count)
     unique = tuple(dict.fromkeys(mismatches))
     equivalent = not unique
     performance = None
-    performance_valid = False
-    performance_mismatches: list[str] = []
-    if comparison_mode is ComparisonMode.OPTIMIZATION and equivalent:
-        baseline_work = _model_work(baseline)
-        candidate_work = _model_work(candidate)
-        if baseline_work is None or candidate_work is None:
-            performance_mismatches.append("model_work_unavailable")
-        else:
-            _different(performance_mismatches, "model_work", baseline_work, candidate_work)
-        performance_valid = not performance_mismatches
-    all_mismatches = tuple(dict.fromkeys([*unique, *performance_mismatches]))
+    performance_valid = comparison_mode is ComparisonMode.OPTIMIZATION and equivalent
     if performance_valid:
         performance = {
             "baseline": baseline.aggregate_metrics,
             "candidate": candidate.aggregate_metrics,
         }
     return ParityResult(
+        fixture_name=fixture.name,
         comparison_mode=comparison_mode,
         mode=fixture.parity_mode,
         equivalent=equivalent,
         performance_comparison_valid=performance_valid,
-        mismatches=all_mismatches,
+        mismatches=unique,
         performance=performance,
     )
 
@@ -286,7 +279,10 @@ def _artifact_state(value: ArtifactEvidence | None):
 
 
 def _tool_outcome_state(result: FixtureResult):
-    return tuple((item.name, item.status, item.exit_code) for item in result.tool_outcomes)
+    return tuple(
+        (item.name, item.status, item.exit_code, item.content_sha256)
+        for item in result.tool_outcomes
+    )
 
 
 def _workflow_state(value: WorkflowEvidence | None):
@@ -301,14 +297,11 @@ def _workflow_state(value: WorkflowEvidence | None):
     )
 
 
-def _model_work(result: FixtureResult):
-    if any(item.input_tokens is None or item.output_tokens is None for item in result.calls):
-        return None
+def _call_behavior(result: FixtureResult):
     return tuple(
         (
             item.phase,
-            item.input_tokens,
-            item.output_tokens,
+            item.finish_reason,
             item.retry_reason,
         )
         for item in result.calls

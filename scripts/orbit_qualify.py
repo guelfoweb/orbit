@@ -48,7 +48,7 @@ def main() -> int:
         run = QualificationRunner(
             fixture_set=fixture_set,
             profile=profile,
-            provenance=_provenance(args.profile, fixture_set.content_hash, profile, props, args.server_pid),
+            provenance=build_provenance(args.profile, fixture_set.content_hash, profile, props, args.server_pid),
             executor=RuntimeFixtureExecutor(backend, process_pid=args.server_pid),
             workdir=Path(workdir),
         ).run(tuple(args.fixture_names) if args.fixture_names else None)
@@ -57,7 +57,7 @@ def main() -> int:
     return 0 if run.overall_status is Status.PASS else 1
 
 
-def _provenance(
+def build_provenance(
     expected_profile: str,
     fixture_hash: str,
     profile: dict[str, Any],

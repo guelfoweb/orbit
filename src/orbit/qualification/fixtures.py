@@ -25,6 +25,7 @@ class FixtureError(ValueError):
 class RequestSpec:
     prompt: str
     tools: bool
+    full_request: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,10 +152,15 @@ def _fixture(value: Any, version: int) -> FixtureSpec:
 
 
 def _request(value: Any, name: str) -> RequestSpec:
-    row = _object(value, f"{name}.request", {"prompt", "tools"})
-    if not isinstance(row["tools"], bool):
+    row = _object(value, f"{name}.request", {"prompt", "tools"}, {"full_request"})
+    full_request = row.get("full_request", False)
+    if not isinstance(row["tools"], bool) or not isinstance(full_request, bool):
         _fail("invalid_type", f"{name}.request.tools")
-    return RequestSpec(_string(row["prompt"], f"{name}.request.prompt"), row["tools"])
+    return RequestSpec(
+        _string(row["prompt"], f"{name}.request.prompt"),
+        row["tools"],
+        full_request,
+    )
 
 
 def _expect(value: Any, name: str) -> ExpectSpec:
@@ -340,6 +346,11 @@ def _validate_contract(
         _fail("invalid_fixture_contract", f"{name} tools fixture is inconsistent")
     if capability == "artifacts" and (not request.tools or expect.artifact is None or expect.route is not None):
         _fail("invalid_fixture_contract", f"{name} artifact fixture is inconsistent")
+    if request.full_request and not (
+        capability == "tools" and expect.route == "CHAT"
+        and not expect.tool_calls and expect.max_model_calls >= 2
+    ):
+        _fail("invalid_fixture_contract", f"{name} full request fixture is inconsistent")
     if expect.workflow is None:
         if workspace is not None:
             _fail("invalid_fixture_contract", f"{name} workspace requires a workflow")
