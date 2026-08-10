@@ -503,3 +503,21 @@ The dedicated kill switch is `ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE=0`.
 Qwen 3.6 retains `ORBIT_QWEN_ROUTE_PREFIX_REUSE` and an independent state and
 identity. Reset and lifecycle failures discard the Qwen3-Coder state; the next
 eligible route performs a cold capture rather than using stale memory.
+
+Startup prewarm reuses this exact checkpoint rather than defining another
+identity or boundary. A process-isolated comparison kept reuse enabled in both
+modes. Without prewarm, the first greeting route evaluated 800 tokens in 36.59
+seconds and captured the checkpoint. With prewarm, startup captured 768 tokens
+in 21.62 seconds; the first real route restored `cached=768`, evaluated 32
+tokens, and completed in 2.01 seconds. End-to-end greeting wall time in the
+matched runtime comparison changed from 28.00 to 6.20 seconds, while server
+readiness changed from 13.98 to 37.30 seconds. The same nine-case route corpus
+produced identical output hashes, routes, tools, arguments, and finish reasons.
+
+The Qwen3-Coder checkpoint increased ready-state RSS by roughly 92 MB in the
+measured process; repeated restored routes showed no linear growth. Reset
+removed the blob and forced the next route to recapture cold. Failed startup
+capture remains diagnostic and leaves the existing cold path available.
+`ORBIT_KV_PREFIX_PREWARM=off` disables prewarm without disabling lazy reuse.
+All timings are descriptive and were measured while another user-owned model
+server remained active.
