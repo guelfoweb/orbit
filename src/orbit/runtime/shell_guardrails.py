@@ -730,7 +730,7 @@ def is_read_only_user_request(user_prompt: str | None) -> bool:
         return False
     if classify_explicit_no_mutation_constraint(user_prompt) != _NO_MUTATION_NONE:
         return True
-    active_text = _without_inert_user_text(user_prompt)
+    active_text = without_inert_user_text(user_prompt)
     intent_text = _without_user_paths_and_urls(active_text)
     return _READ_ONLY_PROMPT_RE.search(active_text) is not None and _MUTATION_PROMPT_RE.search(intent_text) is None
 
@@ -738,7 +738,7 @@ def is_read_only_user_request(user_prompt: str | None) -> bool:
 def is_mutative_user_request(user_prompt: str | None) -> bool:
     if not user_prompt:
         return False
-    active_text = _without_inert_user_text(user_prompt)
+    active_text = without_inert_user_text(user_prompt)
     intent_text = _without_user_paths_and_urls(active_text)
     if classify_explicit_no_mutation_constraint(user_prompt) != _NO_MUTATION_NONE:
         return False
@@ -756,7 +756,7 @@ def is_mutative_user_request(user_prompt: str | None) -> bool:
 def classify_explicit_no_mutation_constraint(text: str | None) -> str:
     if not text:
         return _NO_MUTATION_NONE
-    active_text = _without_inert_user_text(text)
+    active_text = without_inert_user_text(text)
     global_match = _GLOBAL_NO_MUTATION_CONSTRAINT_RE.search(active_text)
     ambiguous_markdown = _AMBIGUOUS_MARKDOWN_LIST_RE.search(active_text)
     scoped_match = _NEGATED_MUTATION_PROMPT_RE.search(active_text)
@@ -802,7 +802,7 @@ def read_only_mutation_policy_error(user_prompt: str | None, *, action: str) -> 
     )
 
 
-def _without_inert_user_text(text: str) -> str:
+def without_inert_user_text(text: str) -> str:
     def mask(match: re.Match[str]) -> str:
         return "".join("\n" if char == "\n" else " " for char in match.group(0))
 

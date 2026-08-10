@@ -10,6 +10,7 @@ from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.file_tools import FULL_DOCUMENT_SNAPSHOT_MARKER, read_full_document_snapshot
 from orbit.runtime.messages import with_final_tool_system_prompt
 from orbit.runtime.path_guardrails import TEXT_EXTENSIONS
+from orbit.runtime.shell_guardrails import without_inert_user_text
 
 
 _CONTENT_SEPARATOR = "\ncontent:\n"
@@ -24,7 +25,8 @@ _EXPLICIT_FULL_DOCUMENT_PATTERNS = (
     re.compile(
         r"\b(?:read|analyse|analyze|inspect|review|summari[sz]e|check)\b"
         r".{0,160}?\b(?:completely|entirely|in\s+full|from\s+beginning\s+to\s+end|"
-        r"(?:the\s+)?(?:entire|whole|complete|full)\s+(?:file|document))\b",
+        r"(?:the\s+)?(?:entire|whole|complete|full)\s+(?:text\s+)?(?:file|document)|"
+        r"(?:entire|whole|complete|full)\s+the\s+(?:text\s+)?(?:file|document))\b",
         re.IGNORECASE | re.DOTALL,
     ),
     re.compile(
@@ -99,10 +101,11 @@ def identify_full_document_request(prompt: str) -> FullDocumentRequest | None:
     """Recognize only explicit full-read forms with one syntactic local path."""
     if not isinstance(prompt, str) or not prompt or len(prompt) > FULL_DOCUMENT_REQUEST_MAX_CHARS:
         return None
+    active_prompt = without_inert_user_text(prompt)
     # Mixed read/mutation requests must stay in the model-driven tool loop.
-    if _MUTATION_REQUEST_RE.search(prompt):
+    if _MUTATION_REQUEST_RE.search(active_prompt):
         return None
-    if not any(pattern.search(prompt) for pattern in _EXPLICIT_FULL_DOCUMENT_PATTERNS):
+    if not any(pattern.search(active_prompt) for pattern in _EXPLICIT_FULL_DOCUMENT_PATTERNS):
         return None
     paths = document_path_candidates(prompt)
     if len(paths) != 1:
