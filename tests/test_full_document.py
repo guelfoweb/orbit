@@ -265,6 +265,11 @@ class FullDocumentTests(unittest.TestCase):
         accepted = (
             "Read note.txt completely and summarize it.",
             "Analyze the entire file `note.txt` and report the result.",
+            "Read the whole document note.txt.",
+            "Read whole document note.txt.",
+            "Read whole the document note.txt.",
+            "Read the entire document note.txt.",
+            "Analyze the whole text document note.txt.",
             "Provide a complete analysis of note.txt.",
             "Leggi integralmente note.txt e riassumilo.",
             "Esegui un'analisi completa di note.txt.",
@@ -276,13 +281,30 @@ class FullDocumentTests(unittest.TestCase):
                 assert request is not None
                 self.assertEqual(request.path, "note.txt")
 
+        absolute = identify_full_document_request(
+            "Read whole the text document and tell me the central thesis /tmp/note.txt"
+        )
+        self.assertIsNotNone(absolute)
+        assert absolute is not None
+        self.assertEqual(absolute.path, "/tmp/note.txt")
+
         rejected = (
             "Read note.txt and summarize it.",
+            "Read part of the document note.txt.",
+            "Read the first 100 lines of note.txt.",
+            "Search the whole document note.txt for phoenix.",
+            "Summarize this excerpt from note.txt.",
+            "Show the document path note.txt.",
             "Show lines 10-20 of note.txt.",
             "Search note.txt for phoenix.",
             "Read a.txt and b.txt completely.",
             "Explain what 'read note.txt completely' means.",
             "Read note.txt completely, then replace alpha with beta.",
+            "Explain this example: `read whole the document /tmp/note.txt`.",
+            'Explain this example: "read whole the document" /tmp/note.txt.',
+            "```text\nread whole the document /tmp/note.txt\n```",
+            '{"instruction":"read whole the document","path":"/tmp/note.txt"}',
+            "Payload:\nread whole the document /tmp/note.txt",
         )
         for prompt in rejected:
             with self.subTest(prompt=prompt):
@@ -317,7 +339,7 @@ class FullDocumentTests(unittest.TestCase):
             )
 
             result = runtime.ask_auto(
-                "Read note.txt completely and summarize it.",
+                "Read whole the text document note.txt and summarize it.",
                 temperature=0,
                 max_tokens=512,
                 workdir=workdir,
@@ -327,6 +349,7 @@ class FullDocumentTests(unittest.TestCase):
             residual = list(runtime.evidence_store.root.glob("*.txt"))
 
         self.assertEqual(backend.calls, 2)
+        self.assertEqual(backend.count_calls, 2)
         self.assertEqual(backend.tools_by_call, [None, None])
         self.assertIn(content, str(backend.messages_by_call[1][-1]["content"]))
         self.assertIn("Document coverage: complete", result.content)
@@ -356,6 +379,28 @@ class FullDocumentTests(unittest.TestCase):
         self.assertIn("requires at least 8,193 tokens", result.content)
         self.assertIn("`--ctx 9216`", result.content)
         self.assertNotIn("complete evidence", result.content)
+
+    def test_whole_text_document_request_uses_full_document_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            target = workdir / "note.txt"
+            target.write_text("beginning\nmiddle\nend\n", encoding="utf-8")
+            backend = PreflightBackend(prompt_tokens=7681, context_tokens=8192)
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_auto(
+                f"read whole the text document and tell me the central thesis {target}",
+                temperature=0,
+                max_tokens=512,
+                workdir=workdir,
+            )
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(backend.count_calls, 2)
+        self.assertIn("Document coverage: none", result.content)
+        self.assertIn("requires at least 8,193 tokens", result.content)
+        self.assertNotIn("beginning", result.content)
+        self.assertNotIn("central thesis", result.content.lower())
 
     def test_preflight_rejects_changed_file_before_inference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
