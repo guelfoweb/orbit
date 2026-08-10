@@ -2,11 +2,26 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
+
+from orbit.runtime.full_document import FULL_DOCUMENT_SAFETY_MARGIN_TOKENS, round_context_requirement
 
 from .fixtures import FileSpec, FixtureSpec
 from .schema import (
     AggregateMetrics, ArtifactEvidence, ComparisonMode, FixtureObservation, FixtureResult,
     LifecycleOutcome, ParityMode, ParityResult, Reason, Status, WorkflowEvidence,
+)
+
+
+_DOCUMENT_CONTEXT_NOTICE_RE = re.compile(
+    r"The exact full prompt requires at least (?P<required>[0-9,]+) tokens "
+    r"\((?P<file>[0-9,]+) document tokens; (?P<prompt>[0-9,]+) rendered input tokens; "
+    r"(?P<reserve>[0-9,]+)-token output reserve\), but the server provides "
+    r"(?P<available>[0-9,]+)\."
+)
+_DOCUMENT_RESTART_NOTICE_RE = re.compile(
+    r"Restart the native server with the same options and `--ctx (?P<context>[0-9,]+)` "
+    r"if the model and available RAM support it, then repeat the request\."
 )
 
 
@@ -229,6 +244,8 @@ def _document_failure(fixture: FixtureSpec, observation: FixtureObservation) -> 
     if actual.coverage != expected.coverage:
         code = "document_evidence_incomplete" if actual.coverage is None else "document_coverage_mismatch"
         return Reason(code, "full-document coverage differs")
+    if observation.tool_calls or observation.executed_tools or observation.tool_outcomes:
+        return Reason("document_tool_fallback", "full-document qualification unexpectedly used a tool")
     expected_analysis = expected.coverage == "complete"
     if actual.analysis_executed != expected_analysis:
         return Reason("document_analysis_mismatch", "full-document analysis execution differs")
@@ -253,12 +270,37 @@ def _document_failure(fixture: FixtureSpec, observation: FixtureObservation) -> 
         return Reason("document_context_contradiction", "unexpected context rejection evidence is present")
     if expected.coverage == "none":
         lines = observation.final_output.splitlines()
+        source = fixture.workspace.files[0] if fixture.workspace is not None else None
+        encoded = source.content.encode("utf-8") if source is not None else b""
+        context_match = _DOCUMENT_CONTEXT_NOTICE_RE.fullmatch(lines[2]) if len(lines) == 6 else None
+        restart_match = _DOCUMENT_RESTART_NOTICE_RE.fullmatch(lines[3]) if len(lines) == 6 else None
+        context_values = (
+            {
+                name: int(context_match.group(name).replace(",", ""))
+                for name in ("required", "file", "prompt", "reserve", "available")
+            }
+            if context_match is not None else {}
+        )
         if not (
             len(lines) == 6
-            and lines[0].startswith("I cannot read `")
-            and lines[1].startswith("Document coverage: none;")
-            and lines[2].startswith("The exact full prompt requires at least ")
-            and lines[3].startswith("Restart the native server with the same options and `--ctx ")
+            and source is not None
+            and lines[0] == f"I cannot read `{source.path}` completely with the active context."
+            and lines[1] == (
+                f"Document coverage: none; bytes 0-{len(encoded)}; "
+                f"lines 1-{len(source.content.splitlines())}; SHA-256 {source.sha256}."
+            )
+            and context_match is not None
+            and context_values["required"] == actual.required_context
+            and context_values["available"] == actual.available_context
+            and all(context_values[name] > 0 for name in ("file", "prompt", "reserve"))
+            and context_values["required"] == (
+                context_values["prompt"] + context_values["reserve"]
+                + FULL_DOCUMENT_SAFETY_MARGIN_TOKENS
+            )
+            and restart_match is not None
+            and int(restart_match.group("context").replace(",", "")) == (
+                round_context_requirement(actual.required_context)
+            )
             and lines[4] == "No document content was sent to the answering model and no summary was produced."
             and lines[5] == "`/max-tokens` changes response length; it does not enlarge the server context."
         ):

@@ -62,8 +62,18 @@ class QualificationDocumentTests(unittest.TestCase):
         self.assertIn("No document content was sent", observation.final_output)
         appended = replace(observation, final_output=observation.final_output + "\nA fabricated thesis.")
         wrong_phase = replace(observation, calls=(replace(observation.calls[0], phase="chat_final"),))
+        forged_lines = observation.final_output.splitlines()
+        forged_lines[0] = "I cannot read `wrong.txt` completely with the active context."
+        forged_source = replace(observation, final_output="\n".join(forged_lines))
+        forged_context_lines = observation.final_output.splitlines()
+        forged_context_lines[2] = forged_context_lines[2].replace("8,000 rendered", "7,999 rendered")
+        forged_context = replace(observation, final_output="\n".join(forged_context_lines))
+        executed_tool = replace(observation, executed_tools=("exec_shell_full_command",))
         self.assertEqual(validate_observation(_fixture, appended).reason.code, "partial_document_inference")
         self.assertEqual(validate_observation(_fixture, wrong_phase).reason.code, "document_phase_mismatch")
+        self.assertEqual(validate_observation(_fixture, forged_source).reason.code, "partial_document_inference")
+        self.assertEqual(validate_observation(_fixture, forged_context).reason.code, "partial_document_inference")
+        self.assertEqual(validate_observation(_fixture, executed_tool).reason.code, "document_tool_fallback")
 
     def test_fit_document_has_complete_coverage_and_cleanup(self) -> None:
         _fixture, observation, result = execute("fit_full_document")
