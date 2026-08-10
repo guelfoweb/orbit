@@ -33,7 +33,7 @@ from orbit.backend.payloads import (
 )
 from orbit.backend import model_names
 from orbit.runtime.kv_diag import model_call_context
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 
 class FakeStream:
@@ -259,6 +259,125 @@ class LlamaServerBackendTests(unittest.TestCase):
                 return {}
 
         self.assertEqual(Backend(base_url="http://localhost", timeout=1).backend_props(), {})
+
+    def test_transient_props_failure_does_not_disable_native_route_anchor(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", timeout=1)
+                self.props_calls = 0
+                self.payload = None
+
+            def _get_json(self, path: str):
+                if path != "/props":
+                    raise AssertionError(f"unexpected path: {path}")
+                self.props_calls += 1
+                if self.props_calls == 1:
+                    try:
+                        raise URLError("server is still starting")
+                    except URLError as exc:
+                        raise LlamaServerError("server is still starting") from exc
+                return {"backend": "orbit-native"}
+
+            def display_model_name(self):
+                return None
+
+            def _post_native_stream(self, path, payload, *, on_delta, on_progress):
+                del on_delta, on_progress
+                self.assert_path = path
+                self.payload = payload
+                return ChatResult("ok", "fake", "stop", [], 10, 1, 0, None, None)
+
+        backend = Backend()
+        self.assertEqual(backend._props_or_empty(), {})
+        self.assertIsNone(backend._props_cache)
+
+        with model_call_context(phase="route", tools_mode="on"):
+            backend.chat(
+                [{"role": "system", "content": "route"}, {"role": "user", "content": "hi"}],
+                temperature=0,
+                max_tokens=32,
+            )
+
+        self.assertEqual(backend.props_calls, 2)
+        self.assertEqual(backend.assert_path, "/chat/stream")
+        self.assertTrue(backend.payload["qwen_route_prefix_anchor"])
+        self.assertTrue(backend._is_orbit_native_backend())
+        self.assertEqual(backend.props_calls, 2)
+
+    def test_repeated_transient_props_failures_retry_once_per_operation(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://localhost", timeout=1)
+                self.props_calls = 0
+
+            def _get_json(self, path: str):
+                if path != "/props":
+                    raise AssertionError(f"unexpected path: {path}")
+                self.props_calls += 1
+                try:
+                    raise URLError("server is still starting")
+                except URLError as exc:
+                    raise LlamaServerError("server is still starting") from exc
+
+        backend = Backend()
+        for expected_calls in range(1, 4):
+            self.assertEqual(backend._props_or_empty(), {})
+            self.assertEqual(backend.props_calls, expected_calls)
+            self.assertIsNone(backend._props_cache)
+
+    def test_successful_props_response_is_cached_and_fails_closed(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self, response) -> None:
+                super().__init__(base_url="http://localhost", timeout=1)
+                self.response = response
+                self.props_calls = 0
+
+            def _get_json(self, path: str):
+                if path != "/props":
+                    raise AssertionError(f"unexpected path: {path}")
+                self.props_calls += 1
+                return self.response
+
+        cases = (
+            ({"backend": "orbit-native"}, True, {"backend": "orbit-native"}),
+            ({"backend": "external"}, False, {"backend": "external"}),
+            (["malformed"], False, {}),
+        )
+        for response, expected_native, expected_cache in cases:
+            with self.subTest(response=response):
+                backend = Backend(response)
+                self.assertEqual(backend._is_orbit_native_backend(), expected_native)
+                self.assertEqual(backend._is_orbit_native_backend(), expected_native)
+                self.assertEqual(backend.props_calls, 1)
+                self.assertEqual(backend._props_cache, expected_cache)
+
+    def test_permanent_props_failure_is_cached_and_fails_closed(self) -> None:
+        class Backend(LlamaServerBackend):
+            def __init__(self, cause) -> None:
+                super().__init__(base_url="http://localhost", timeout=1)
+                self.cause = cause
+                self.props_calls = 0
+
+            def _get_json(self, path: str):
+                if path != "/props":
+                    raise AssertionError(f"unexpected path: {path}")
+                self.props_calls += 1
+                try:
+                    raise self.cause
+                except BaseException as exc:
+                    raise LlamaServerError("permanent props failure") from exc
+
+        causes = (
+            HTTPError("http://localhost/props", 404, "not found", {}, None),
+            json.JSONDecodeError("invalid JSON", "x", 0),
+        )
+        for cause in causes:
+            with self.subTest(cause=type(cause).__name__):
+                backend = Backend(cause)
+                self.assertFalse(backend._is_orbit_native_backend())
+                self.assertFalse(backend._is_orbit_native_backend())
+                self.assertEqual(backend.props_calls, 1)
+                self.assertEqual(backend._props_cache, {})
 
     def test_native_separated_reasoning_requires_verified_qwen_profile(self) -> None:
         class Backend(LlamaServerBackend):
