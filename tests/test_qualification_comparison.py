@@ -240,6 +240,64 @@ class OptimizationComparisonTests(unittest.TestCase):
         self.assertFalse(different_config.performance_comparison_valid)
         self.assertIn("execution_configuration_mismatch", different_config.mismatches)
 
+    def test_volatile_available_ram_is_descriptive_and_non_gating(self) -> None:
+        hardware = {
+            "machine": "host-a", "cpu": "cpu-a", "physical_cores": "6",
+            "logical_cores": "12", "ram_total": "64 GB", "ram_available": "31 GB",
+            "os_name": "Linux",
+        }
+        baseline = side("baseline", 101, observation())
+        baseline = replace(
+            baseline,
+            result=replace(
+                baseline.result,
+                provenance=replace(baseline.result.provenance, hardware=hardware),
+            ),
+        )
+        candidate = side("candidate", 202, observation())
+        candidate = replace(
+            candidate,
+            result=replace(
+                candidate.result,
+                provenance=replace(
+                    candidate.result.provenance,
+                    hardware={**hardware, "ram_available": "30 GB"},
+                ),
+            ),
+        )
+        comparison = build_optimization_comparison(fixtures(), baseline, candidate)
+        payload = json.loads(comparison_json(comparison))
+        self.assertTrue(comparison.performance_comparison_valid)
+        self.assertEqual(payload["baseline"]["result"]["provenance"]["hardware"]["ram_available"], "31 GB")
+        self.assertEqual(payload["candidate"]["result"]["provenance"]["hardware"]["ram_available"], "30 GB")
+
+    def test_stable_hardware_mismatch_is_rejected(self) -> None:
+        hardware = {
+            "machine": "host-a", "cpu": "cpu-a", "physical_cores": "6",
+            "logical_cores": "12", "ram_total": "64 GB", "ram_available": "31 GB",
+            "os_name": "Linux",
+        }
+        baseline = run(observation())
+        baseline = replace(
+            baseline,
+            provenance=replace(baseline.provenance, hardware=hardware),
+        )
+        for field, value in (
+            ("machine", "host-b"), ("cpu", "cpu-b"), ("physical_cores", "4"),
+            ("logical_cores", "8"), ("ram_total", "32 GB"),
+            ("os_name", "OtherOS x86_64"),
+        ):
+            with self.subTest(field=field):
+                candidate = replace(
+                    baseline,
+                    provenance=replace(
+                        baseline.provenance,
+                        hardware={**hardware, field: value},
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "same model and configuration"):
+                    compare_runs(fixtures(), baseline, candidate)
+
     def test_comparison_environment_is_explicit_and_bounded(self) -> None:
         self.assertEqual(
             _parse_overrides(["ORBIT_QWEN_ROUTE_PREFIX_REUSE=0"]),
