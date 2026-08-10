@@ -303,7 +303,6 @@ class LlamaServerBackend:
         try:
             data = self._get_json("/props")
         except LlamaServerError:
-            self._props_cache = {}
             return {}
         self._props_cache = data if isinstance(data, dict) else {}
         return self._props_cache
