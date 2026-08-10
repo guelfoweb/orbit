@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
+import hashlib
 import math
 from typing import Any
 
@@ -33,6 +34,14 @@ class Reason:
 class ToolCallRecord:
     name: str
     arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ToolOutcomeRecord:
+    name: str
+    status: str
+    exit_code: int | None
+    content_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,38 @@ class LifecycleOutcome:
 
 
 @dataclass(frozen=True)
+class FileStateEvidence:
+    path: str
+    exists: bool
+    regular_file: bool
+    byte_count: int | None
+    sha256: str | None
+
+    @classmethod
+    def from_bytes(cls, path: str, content: bytes) -> FileStateEvidence:
+        return cls(path, True, True, len(content), hashlib.sha256(content).hexdigest())
+
+
+@dataclass(frozen=True)
+class TestEvidence:
+    runner: str
+    status: str
+    exit_code: int | None
+    model_invocation_observed: bool
+    wall_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class WorkflowEvidence:
+    files: tuple[FileStateEvidence, ...]
+    unexpected_paths: tuple[str, ...]
+    failed_tool_calls: int
+    recovery_observed: bool
+    repeated_failed_command: bool
+    test: TestEvidence | None
+
+
+@dataclass(frozen=True)
 class FixtureObservation:
     route: str | None
     tool_calls: tuple[ToolCallRecord, ...]
@@ -116,6 +157,8 @@ class FixtureObservation:
     peak_rss_bytes: int | None
     wall_seconds: float | None = None
     protocol_issue: str | None = None
+    tool_outcomes: tuple[ToolOutcomeRecord, ...] = ()
+    workflow: WorkflowEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +190,8 @@ class FixtureResult:
     aggregate_metrics: AggregateMetrics
     artifact: ArtifactEvidence | None
     lifecycle: LifecycleOutcome
+    tool_outcomes: tuple[ToolOutcomeRecord, ...]
+    workflow: WorkflowEvidence | None
 
 
 @dataclass(frozen=True)

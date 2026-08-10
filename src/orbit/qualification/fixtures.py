@@ -46,6 +46,31 @@ class ArtifactExpectation:
 
 
 @dataclass(frozen=True)
+class FileSpec:
+    path: str
+    content: str
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class WorkspaceSpec:
+    files: tuple[FileSpec, ...]
+
+
+@dataclass(frozen=True)
+class WorkflowExpectation:
+    files: tuple[FileSpec, ...]
+    unchanged_files: tuple[str, ...]
+    max_tool_calls: int
+    timeout_seconds: int
+    test_runner: str | None = None
+    require_recovery: bool = False
+
+
+@dataclass(frozen=True)
 class ExpectSpec:
     finish_reason: str
     max_model_calls: int
@@ -54,6 +79,7 @@ class ExpectSpec:
     exact_output: str | None = None
     final_reports_workdir: bool = False
     artifact: ArtifactExpectation | None = None
+    workflow: WorkflowExpectation | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +91,7 @@ class FixtureSpec:
     expect: ExpectSpec
     parity_mode: ParityMode
     fixture_hash: str
+    workspace: WorkspaceSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -100,7 +127,7 @@ def load_fixture_text(text: str) -> FixtureSet:
 
 def _fixture(value: Any, version: int) -> FixtureSpec:
     required = {"name", "capability", "profiles", "request", "expect", "parity"}
-    row = _object(value, "fixture", required)
+    row = _object(value, "fixture", required, {"workspace"})
     name = _identifier(row["name"], "name")
     capability = _identifier(row["capability"], "capability")
     if capability not in CAPABILITY_REQUIREMENTS:
@@ -117,9 +144,10 @@ def _fixture(value: Any, version: int) -> FixtureSpec:
         _fail("invalid_parity_mode", name)
     request = _request(row["request"], name)
     expect = _expect(row["expect"], name)
-    _validate_contract(name, capability, request, expect)
+    workspace = _workspace(row["workspace"], name) if "workspace" in row else None
+    _validate_contract(name, capability, request, expect, workspace)
     digest = hashlib.sha256(_canonical({"schema_version": version, "fixture": row})).hexdigest()
-    return FixtureSpec(name, capability, profiles, request, expect, parity_mode, digest)
+    return FixtureSpec(name, capability, profiles, request, expect, parity_mode, digest, workspace)
 
 
 def _request(value: Any, name: str) -> RequestSpec:
@@ -131,7 +159,7 @@ def _request(value: Any, name: str) -> RequestSpec:
 
 def _expect(value: Any, name: str) -> ExpectSpec:
     required = {"finish_reason", "max_model_calls"}
-    optional = {"route", "tool_calls", "exact_output", "final_reports_workdir", "artifact"}
+    optional = {"route", "tool_calls", "exact_output", "final_reports_workdir", "artifact", "workflow"}
     row = _object(value, f"{name}.expect", required, optional)
     raw_calls = row.get("tool_calls", [])
     if not isinstance(raw_calls, list):
@@ -147,6 +175,7 @@ def _expect(value: Any, name: str) -> ExpectSpec:
         exact_output=_optional_string(row.get("exact_output"), f"{name}.expect.exact_output"),
         final_reports_workdir=report_workdir,
         artifact=_artifact(row["artifact"], name) if "artifact" in row else None,
+        workflow=_workflow(row["workflow"], name) if "workflow" in row else None,
     )
 
 
@@ -164,6 +193,61 @@ def _artifact(value: Any, name: str) -> ArtifactExpectation:
     if not isinstance(row["publication"], bool) or not isinstance(row["verification"], bool):
         _fail("invalid_type", f"{name}.artifact publication/verification")
     return ArtifactExpectation(_relative_path(row["path"], f"{name}.artifact.path"), row["json_equals"], row["publication"], row["verification"])
+
+
+def _workspace(value: Any, name: str) -> WorkspaceSpec:
+    row = _object(value, f"{name}.workspace", {"files"})
+    files = _files(row["files"], f"{name}.workspace.files")
+    _unique_paths(files, "duplicate_workspace_path", name)
+    return WorkspaceSpec(files)
+
+
+def _workflow(value: Any, name: str) -> WorkflowExpectation:
+    required = {"files", "unchanged_files", "max_tool_calls", "timeout_seconds"}
+    row = _object(value, f"{name}.workflow", required, {"test_runner", "require_recovery"})
+    files = _files(row["files"], f"{name}.workflow.files")
+    _unique_paths(files, "duplicate_expected_path", name)
+    raw_unchanged = row["unchanged_files"]
+    if not isinstance(raw_unchanged, list):
+        _fail("invalid_type", f"{name}.workflow.unchanged_files must be an array")
+    unchanged = tuple(_relative_path(item, f"{name}.workflow.unchanged_files") for item in raw_unchanged)
+    if len(unchanged) != len(set(unchanged)):
+        _fail("duplicate_unchanged_path", name)
+    if set(unchanged) & {item.path for item in files}:
+        _fail("invalid_fixture_contract", f"{name} expected and unchanged files overlap")
+    test_runner = row.get("test_runner")
+    if test_runner is not None and test_runner != "python_unittest":
+        _fail("invalid_test_runner", name)
+    require_recovery = row.get("require_recovery", False)
+    if not isinstance(require_recovery, bool):
+        _fail("invalid_type", f"{name}.workflow.require_recovery")
+    return WorkflowExpectation(
+        files=files,
+        unchanged_files=unchanged,
+        max_tool_calls=_bounded_positive(row["max_tool_calls"], f"{name}.workflow.max_tool_calls", 16),
+        timeout_seconds=_bounded_positive(row["timeout_seconds"], f"{name}.workflow.timeout_seconds", 1800),
+        test_runner=test_runner,
+        require_recovery=require_recovery,
+    )
+
+
+def _files(value: Any, path: str) -> tuple[FileSpec, ...]:
+    if not isinstance(value, list) or not value:
+        _fail("invalid_type", f"{path} must be a non-empty array")
+    files = []
+    for index, item in enumerate(value):
+        row = _object(item, f"{path}[{index}]", {"path", "content"})
+        files.append(FileSpec(
+            _relative_path(row["path"], f"{path}[{index}].path"),
+            _text(row["content"], f"{path}[{index}].content"),
+        ))
+    return tuple(files)
+
+
+def _unique_paths(files: tuple[FileSpec, ...], code: str, detail: str) -> None:
+    paths = tuple(item.path for item in files)
+    if len(paths) != len(set(paths)):
+        _fail(code, detail)
 
 
 def _object(value: Any, path: str, required: set[str], optional: set[str] = set()) -> dict[str, Any]:
@@ -190,6 +274,12 @@ def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _string(value: Any, path: str) -> str:
     if not isinstance(value, str) or not value:
         _fail("invalid_type", f"{path} must be a non-empty string")
+    return value
+
+
+def _text(value: Any, path: str) -> str:
+    if not isinstance(value, str):
+        _fail("invalid_type", f"{path} must be a string")
     return value
 
 
@@ -225,11 +315,24 @@ def _positive(value: Any, path: str) -> int:
     return result
 
 
+def _bounded_positive(value: Any, path: str, maximum: int) -> int:
+    result = _positive(value, path)
+    if result > maximum:
+        _fail("invalid_value", f"{path} must be at most {maximum}")
+    return result
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _validate_contract(name: str, capability: str, request: RequestSpec, expect: ExpectSpec) -> None:
+def _validate_contract(
+    name: str,
+    capability: str,
+    request: RequestSpec,
+    expect: ExpectSpec,
+    workspace: WorkspaceSpec | None,
+) -> None:
     has_tool_contract = bool(expect.route or expect.tool_calls or expect.final_reports_workdir)
     if capability == "chat" and (request.tools or has_tool_contract or expect.artifact is not None):
         _fail("invalid_fixture_contract", f"{name} chat fixture exposes tool behavior")
@@ -237,6 +340,24 @@ def _validate_contract(name: str, capability: str, request: RequestSpec, expect:
         _fail("invalid_fixture_contract", f"{name} tools fixture is inconsistent")
     if capability == "artifacts" and (not request.tools or expect.artifact is None or expect.route is not None):
         _fail("invalid_fixture_contract", f"{name} artifact fixture is inconsistent")
+    if expect.workflow is None:
+        if workspace is not None:
+            _fail("invalid_fixture_contract", f"{name} workspace requires a workflow")
+        return
+    if (
+        capability != "tools"
+        or not request.tools
+        or workspace is None
+        or expect.route is not None
+        or expect.tool_calls
+        or expect.exact_output is not None
+        or expect.final_reports_workdir
+        or expect.artifact is not None
+    ):
+        _fail("invalid_fixture_contract", f"{name} workflow fixture is inconsistent")
+    workspace_paths = {item.path for item in workspace.files}
+    if set(expect.workflow.unchanged_files) - workspace_paths:
+        _fail("invalid_fixture_contract", f"{name} unchanged file is absent from workspace")
 
 
 def _fail(code: str, detail: str):

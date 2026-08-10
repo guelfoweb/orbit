@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .fixtures import FixtureSpec
+from .fixtures import FileSpec, FixtureSpec
 from .schema import (
     AggregateMetrics, ArtifactEvidence, ComparisonMode, FixtureObservation, FixtureResult,
-    LifecycleOutcome, ParityMode, ParityResult, Reason, Status,
+    LifecycleOutcome, ParityMode, ParityResult, Reason, Status, WorkflowEvidence,
 )
 
 
@@ -59,6 +59,8 @@ def _result(
         ),
         artifact=observation.artifact,
         lifecycle=observation.lifecycle,
+        tool_outcomes=observation.tool_outcomes,
+        workflow=observation.workflow,
     )
 
 
@@ -103,12 +105,15 @@ def compare_fixture_results(
     if baseline.status is not Status.PASS or candidate.status is not Status.PASS:
         mismatches.append("status")
     _different(mismatches, "route", baseline.route, candidate.route)
-    baseline_tools = _parity_tools(fixture, baseline, comparison_mode)
-    candidate_tools = _parity_tools(fixture, candidate, comparison_mode)
-    _different(mismatches, "tool_calls", baseline_tools, candidate_tools)
-    _different(mismatches, "executed_tools", baseline.executed_tools, candidate.executed_tools)
+    if comparison_mode is ComparisonMode.OPTIMIZATION or fixture.expect.workflow is None:
+        baseline_tools = _parity_tools(fixture, baseline, comparison_mode)
+        candidate_tools = _parity_tools(fixture, candidate, comparison_mode)
+        _different(mismatches, "tool_calls", baseline_tools, candidate_tools)
+        _different(mismatches, "executed_tools", baseline.executed_tools, candidate.executed_tools)
+        _different(mismatches, "tool_outcomes", _tool_outcome_state(baseline), _tool_outcome_state(candidate))
     _different(mismatches, "finish_reason", baseline.finish_reason, candidate.finish_reason)
     _different(mismatches, "artifact_state", _artifact_state(baseline.artifact), _artifact_state(candidate.artifact))
+    _different(mismatches, "workflow_state", _workflow_state(baseline.workflow), _workflow_state(candidate.workflow))
     if comparison_mode is ComparisonMode.OPTIMIZATION and fixture.parity_mode is ParityMode.EXACT:
         _different(
             mismatches,
@@ -167,6 +172,8 @@ def _first_failure(
             "model_call_limit",
             f"expected at most {expect.max_model_calls}, got {observation.model_call_count}",
         )
+    if expect.workflow is not None:
+        return _workflow_failure(fixture, observation)
     if expect.route is not None and observation.route != expect.route:
         return Reason("route_mismatch", f"expected {expect.route!r}, got {observation.route!r}")
     if len(observation.tool_calls) != len(expect.tool_calls):
@@ -198,6 +205,58 @@ def _first_failure(
     return None
 
 
+def _workflow_failure(fixture: FixtureSpec, observation: FixtureObservation) -> Reason | None:
+    expected = fixture.expect.workflow
+    actual = observation.workflow
+    assert expected is not None
+    if len(observation.tool_calls) > expected.max_tool_calls:
+        return Reason("tool_call_limit", f"expected at most {expected.max_tool_calls}, got {len(observation.tool_calls)}")
+    if len(observation.tool_calls) != len(observation.tool_outcomes):
+        return Reason("tool_execution_incomplete", "selected and completed tool-call counts differ")
+    if any(item.name != "exec_shell_full_command" for item in observation.tool_calls):
+        return Reason("workflow_tool_mismatch", "workflow selected a tool outside its shell capability")
+    if observation.wall_seconds is not None and observation.wall_seconds > expected.timeout_seconds:
+        return Reason("workflow_timeout", "fixture execution exceeded its declared timeout")
+    states = {item.path: item for item in actual.files} if actual is not None else {}
+    for item in expected.files:
+        mismatch = _file_mismatch(item, states.get(item.path))
+        if mismatch:
+            return Reason("filesystem_state_mismatch", f"{item.path}: {mismatch}")
+    workspace = {item.path: item for item in fixture.workspace.files} if fixture.workspace else {}
+    for path in expected.unchanged_files:
+        mismatch = _file_mismatch(workspace[path], states.get(path))
+        if mismatch:
+            return Reason("unrelated_file_changed", f"{path}: {mismatch}")
+    if actual is not None and actual.unexpected_paths:
+        return Reason("unexpected_filesystem_state", actual.unexpected_paths[0])
+    if expected.test_runner is not None:
+        if actual is None or actual.test is None:
+            return Reason("test_evidence_missing", "post-workflow test evidence is unavailable")
+        if actual.test.status != "pass":
+            return Reason("test_failure", f"{expected.test_runner} did not pass")
+        if not actual.test.model_invocation_observed:
+            return Reason("model_test_run_missing", "model did not complete the declared test command")
+    if expected.require_recovery:
+        if actual is None or actual.failed_tool_calls < 1:
+            return Reason("failed_command_missing", "workflow did not observe the required command failure")
+        if actual.repeated_failed_command:
+            return Reason("repeated_failed_command", "the same failing tool call was repeated")
+        if not actual.recovery_observed:
+            return Reason("recovery_missing", "no successful tool call followed the failure")
+    return None
+
+
+def _file_mismatch(expected: FileSpec, actual) -> str | None:
+    if actual is None or not actual.exists:
+        return "file is missing"
+    if not actual.regular_file:
+        return "path is not a regular file"
+    raw = expected.content.encode("utf-8")
+    if actual.byte_count != len(raw) or actual.sha256 != expected.sha256:
+        return "byte count or SHA-256 differs"
+    return None
+
+
 def _artifact_failure(expected, actual: ArtifactEvidence | None) -> Reason | None:
     if actual is None:
         return Reason("artifact_evidence_missing", "no artifact evidence was captured")
@@ -223,6 +282,22 @@ def _artifact_state(value: ArtifactEvidence | None):
         value.verified,
         value.exists,
         value.canonical_json_sha256,
+    )
+
+
+def _tool_outcome_state(result: FixtureResult):
+    return tuple((item.name, item.status, item.exit_code) for item in result.tool_outcomes)
+
+
+def _workflow_state(value: WorkflowEvidence | None):
+    if value is None:
+        return None
+    return (
+        tuple((item.path, item.exists, item.regular_file, item.byte_count, item.sha256) for item in value.files),
+        value.unexpected_paths,
+        value.test.status if value.test is not None else None,
+        value.recovery_observed,
+        value.repeated_failed_command,
     )
 
 

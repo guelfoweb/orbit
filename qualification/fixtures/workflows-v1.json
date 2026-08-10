@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "name": "bug_fix_and_test",
+      "capability": "tools",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "workspace": {
+        "files": [
+          {"path": "calculator.py", "content": "def add(left, right):\n    return left - right\n"},
+          {
+            "path": "test_calculator.py",
+            "content": "import unittest\n\nfrom calculator import add\n\n\nclass CalculatorTests(unittest.TestCase):\n    def test_adds_integers(self):\n        self.assertEqual(add(2, 3), 5)\n        self.assertEqual(add(-1, 1), 0)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+          },
+          {"path": "README.md", "content": "# Calculator fixture\n\nOnly calculator.py may be changed.\n"}
+        ]
+      },
+      "request": {
+        "prompt": "Inspect this small Python project and fix the bug in calculator.py. Limit the edit scope to the required operator change in calculator.py; test_calculator.py and README.md are reference inputs whose hashes are checked by qualification. After the edit, run `python3 -m unittest -q`. Finish only after that command passes.",
+        "tools": true
+      },
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 8,
+        "workflow": {
+          "files": [
+            {"path": "calculator.py", "content": "def add(left, right):\n    return left + right\n"}
+          ],
+          "unchanged_files": ["test_calculator.py", "README.md"],
+          "max_tool_calls": 8,
+          "timeout_seconds": 900,
+          "test_runner": "python_unittest"
+        }
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "existing_file_modification",
+      "capability": "tools",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "workspace": {
+        "files": [
+          {"path": "settings.ini", "content": "[service]\nmode=development\nretries=2\n"},
+          {"path": "notes.txt", "content": "This unrelated file must remain unchanged.\n"}
+        ]
+      },
+      "request": {
+        "prompt": "Inspect settings.ini, then change mode to production and retries to 5. Limit the change scope to those two values in settings.ini while preserving its section, ordering, newline, and every other byte. notes.txt is a reference input whose hash is checked by qualification. Verify the resulting file before answering.",
+        "tools": true
+      },
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 9,
+        "workflow": {
+          "files": [
+            {"path": "settings.ini", "content": "[service]\nmode=production\nretries=5\n"}
+          ],
+          "unchanged_files": ["notes.txt"],
+          "max_tool_calls": 7,
+          "timeout_seconds": 900
+        }
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "failed_command_recovery",
+      "capability": "tools",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "workspace": {
+        "files": [
+          {"path": "fallback.txt", "content": "RECOVERY_OK\n"},
+          {"path": "sentinel.txt", "content": "unchanged\n"}
+        ]
+      },
+      "request": {
+        "prompt": "First run exactly `cat missing.txt`; it is expected to fail and a second identical attempt is outside the contract. Recover by reading fallback.txt, then create recovered.txt containing exactly the same bytes as fallback.txt. fallback.txt and sentinel.txt are reference inputs whose hashes are checked by qualification. Verify recovered.txt before answering.",
+        "tools": true
+      },
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 7,
+        "workflow": {
+          "files": [
+            {"path": "recovered.txt", "content": "RECOVERY_OK\n"}
+          ],
+          "unchanged_files": ["fallback.txt", "sentinel.txt"],
+          "max_tool_calls": 7,
+          "timeout_seconds": 900,
+          "require_recovery": true
+        }
+      },
+      "parity": {"mode": "structural"}
+    }
+  ]
+}

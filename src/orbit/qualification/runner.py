@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import stat
+import subprocess
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -19,6 +22,7 @@ from orbit.runtime.command_request import (
 )
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.messages import ROUTE_SYSTEM_PROMPT
+from orbit.runtime.shell_guardrails import shell_failure_from_output
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 from .fixtures import CAPABILITY_REQUIREMENTS, FixtureSet, FixtureSpec
@@ -28,6 +32,7 @@ from .schema import (
     CallMetric,
     CommonGate,
     ComparisonMode,
+    FileStateEvidence,
     FixtureObservation,
     LifecycleOutcome,
     ParityResult,
@@ -35,7 +40,10 @@ from .schema import (
     Reason,
     RunProvenance,
     Status,
+    TestEvidence,
     ToolCallRecord,
+    ToolOutcomeRecord,
+    WorkflowEvidence,
 )
 from .validators import compare_fixture_results, unavailable_result, validate_observation
 
@@ -74,7 +82,13 @@ class QualificationRunner:
                 fixture_workdir = self.workdir / fixture.name
                 fixture_workdir.mkdir(parents=True, exist_ok=False)
                 try:
+                    _prepare_workspace(fixture, fixture_workdir)
                     observation = self.executor.execute(fixture, fixture_workdir)
+                    if fixture.expect.workflow is not None:
+                        observation = replace(
+                            observation,
+                            workflow=_workflow_evidence(fixture, fixture_workdir, observation),
+                        )
                     results.append(validate_observation(fixture, observation, workdir=fixture_workdir))
                 except Exception as error:
                     results.append(
@@ -166,6 +180,7 @@ class RuntimeFixtureExecutor:
         phase_starts: list[float] = []
         tool_calls: list[ToolCallRecord] = []
         tool_results: list[tuple[str, str]] = []
+        tool_outcomes: list[ToolOutcomeRecord] = []
         protocol_issue = None
 
         def phase_start(_phase: ModelPhaseStart) -> None:
@@ -188,6 +203,7 @@ class RuntimeFixtureExecutor:
 
         def tool_result(name: str, _chars: int, _kind: str, content: str) -> None:
             tool_results.append((name, content))
+            tool_outcomes.append(_tool_outcome(name, content))
 
         route = None
         runtime = ChatRuntime(backend=self.backend)
@@ -219,13 +235,21 @@ class RuntimeFixtureExecutor:
                 on_phase_start=phase_start,
             )
         else:
-            names = tuple(item.name for item in fixture.expect.tool_calls)
+            names = (
+                ("exec_shell_full_command",)
+                if fixture.expect.workflow is not None
+                else tuple(item.name for item in fixture.expect.tool_calls)
+            )
             result = runtime.ask_with_tools(
                 fixture.request.prompt,
                 temperature=0,
                 max_tokens=160,
                 workdir=workdir,
-                max_loops=6,
+                max_loops=(
+                    fixture.expect.max_model_calls
+                    if fixture.expect.workflow is not None
+                    else 6
+                ),
                 tool_names=names or None,
                 on_tool_call=tool_call,
                 on_tool_result=tool_result,
@@ -259,6 +283,7 @@ class RuntimeFixtureExecutor:
             peak_rss_bytes=_peak_rss_bytes(self.process_pid),
             wall_seconds=time.perf_counter() - started,
             protocol_issue=protocol_issue,
+            tool_outcomes=tuple(tool_outcomes),
         )
 
     def _route(self, fixture: FixtureSpec):
@@ -348,6 +373,169 @@ def _tool_record(value: dict[str, Any]) -> ToolCallRecord:
         str(function.get("name") or ""),
         arguments if isinstance(arguments, dict) else {},
     )
+
+
+def _tool_outcome(name: str, content: str) -> ToolOutcomeRecord:
+    failure = shell_failure_from_output(content) if name == "exec_shell_full_command" else None
+    failed = failure is not None or content.startswith("error:") or "\nerror:" in content
+    return ToolOutcomeRecord(
+        name=name,
+        status="failure" if failed else "success",
+        exit_code=failure.exit_code if failure is not None else None,
+        content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
+
+
+def _prepare_workspace(fixture: FixtureSpec, workdir: Path) -> None:
+    if fixture.workspace is None:
+        return
+    for item in fixture.workspace.files:
+        target = workdir / item.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(item.content, encoding="utf-8", newline="")
+
+
+def _workflow_evidence(
+    fixture: FixtureSpec,
+    workdir: Path,
+    observation: FixtureObservation,
+) -> WorkflowEvidence:
+    expected = fixture.expect.workflow
+    assert expected is not None
+    paths = tuple(dict.fromkeys([*(item.path for item in expected.files), *expected.unchanged_files]))
+    files = tuple(_file_state(workdir, path) for path in paths)
+    allowed_paths = {
+        *(item.path for item in fixture.workspace.files),
+        *(item.path for item in expected.files),
+    }
+    failed = tuple(
+        (index, call)
+        for index, (call, outcome) in enumerate(zip(observation.tool_calls, observation.tool_outcomes))
+        if outcome.status == "failure"
+    )
+    failed_signatures = tuple(
+        (call.name, json.dumps(call.arguments, sort_keys=True, separators=(",", ":")))
+        for _index, call in failed
+    )
+    success_indices = tuple(
+        index for index, outcome in enumerate(observation.tool_outcomes) if outcome.status == "success"
+    )
+    return WorkflowEvidence(
+        files=files,
+        unexpected_paths=_unexpected_paths(workdir, allowed_paths),
+        failed_tool_calls=len(failed),
+        recovery_observed=bool(failed and success_indices and max(success_indices) > failed[0][0]),
+        repeated_failed_command=len(failed_signatures) != len(set(failed_signatures)),
+        test=_run_workflow_test(expected.test_runner, expected.timeout_seconds, workdir, observation),
+    )
+
+
+def _unexpected_paths(workdir: Path, allowed_paths: set[str]) -> tuple[str, ...]:
+    allowed_parents = {
+        parent.as_posix()
+        for value in allowed_paths
+        for parent in Path(value).parents
+        if parent.as_posix() != "."
+    }
+    python_sources = {
+        (Path(value).parent / "__pycache__", Path(value).stem)
+        for value in allowed_paths
+        if value.endswith(".py")
+    }
+    unexpected = []
+    for path in workdir.rglob("*"):
+        relative = path.relative_to(workdir).as_posix()
+        if relative in allowed_paths or relative in allowed_parents:
+            continue
+        if not path.is_symlink() and _is_declared_python_cache(path.relative_to(workdir), python_sources):
+            continue
+        unexpected.append(relative)
+    return tuple(sorted(unexpected))
+
+
+def _is_declared_python_cache(
+    relative: Path,
+    sources: set[tuple[Path, str]],
+) -> bool:
+    for cache_directory, stem in sources:
+        if relative == cache_directory:
+            return True
+        if relative.parent == cache_directory:
+            prefix = f"{stem}.cpython-"
+            if relative.name.startswith(prefix) and relative.name.endswith(".pyc"):
+                return True
+    return False
+
+
+def _file_state(workdir: Path, relative: str) -> FileStateEvidence:
+    parts = Path(relative).parts
+    if any(
+        workdir.joinpath(*parts[:index]).is_symlink()
+        for index in range(1, len(parts))
+    ):
+        return FileStateEvidence(relative, True, False, None, None)
+    path = workdir / relative
+    try:
+        info = path.lstat()
+        regular = stat.S_ISREG(info.st_mode) and not path.is_symlink()
+        content = path.read_bytes() if regular else None
+    except OSError:
+        return FileStateEvidence(relative, False, False, None, None)
+    return FileStateEvidence(
+        relative,
+        True,
+        regular,
+        len(content) if content is not None else None,
+        hashlib.sha256(content).hexdigest() if content is not None else None,
+    )
+
+
+def _run_workflow_test(
+    runner: str | None,
+    timeout_seconds: int,
+    workdir: Path,
+    observation: FixtureObservation,
+) -> TestEvidence | None:
+    if runner is None:
+        return None
+    assert runner == "python_unittest"
+    command = "python3 -m unittest -q"
+    observed = any(
+        call.name == "exec_shell_full_command"
+        and _has_successful_command_tail(call.arguments.get("command"), command)
+        and index < len(observation.tool_outcomes)
+        and observation.tool_outcomes[index].status == "success"
+        for index, call in enumerate(observation.tool_calls)
+    )
+    env = dict(os.environ)
+    env.update({"HOME": str(workdir), "PWD": str(workdir)})
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "unittest", "-q"],
+            cwd=workdir,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        status = "pass" if completed.returncode == 0 else "failure"
+        exit_code = completed.returncode
+    except subprocess.TimeoutExpired:
+        status, exit_code = "timeout", None
+    except OSError:
+        status, exit_code = "error", None
+    return TestEvidence(runner, status, exit_code, observed, time.perf_counter() - started)
+
+
+def _has_successful_command_tail(raw: Any, expected: str) -> bool:
+    if not isinstance(raw, str):
+        return False
+    if "||" in raw or ";" in raw or "\n" in raw:
+        return False
+    segments = tuple(segment.strip() for segment in raw.split("&&") if segment.strip())
+    return bool(segments) and segments[-1] == expected
 
 
 def _artifact_evidence(
