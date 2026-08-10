@@ -302,7 +302,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC29
 
-- Current published baseline: `v0.0.1-rc29`.
+- Published predecessor: `v0.0.1-rc29`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc29
 - Includes squash merges `0549dea` from #165 and `ce7d802` from #166.
 - Focus: fail-closed native runtime-family loading, exact-profile
@@ -336,6 +336,50 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - See `docs/QWEN3_CODER_COMPATIBILITY.md`,
   `docs/NATIVE_ROUTE_PREFIX_STARTUP_PREWARM.md`, and
   `docs/releases/v0.0.1-rc29.md`.
+
+### RC30
+
+- Current published baseline: `v0.0.1-rc30`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc30
+- Includes squash merges `b9dbd54` from #167, `286fe53` from #168,
+  `dbfca70` from #169, `a09862e` from #170, `d6f9cb1` from #171,
+  `fad6d06` from #172, `728ab09` from #173, and `69511da` from #174.
+- Focus: the observer-only Qualification Harness v1, safe recovery from
+  transient native capability-discovery failures, and fail-closed recognition
+  of full-document read intent.
+- Qualification uses strict versioned JSON fixtures and canonical `PASS`,
+  `FAIL`, `TECHNICAL_STOP`, and `NOT_APPLICABLE` results. Common, agentic,
+  optimization-parity, lifecycle/failure, and full-document capability suites
+  validate deterministic production evidence without an LLM judge or a
+  universal score. Production runtime and backend modules do not import
+  `orbit.qualification`.
+- Same-model optimization comparisons require correctness and operational
+  parity before reporting performance. Baseline and candidate processes remain
+  isolated, invalid parity suppresses performance deltas, and volatile
+  available RAM remains descriptive rather than part of stable hardware
+  identity.
+- Native capability discovery no longer caches transient `/props` transport,
+  timeout, or startup failures as a permanent non-native result. Valid native,
+  confirmed non-native, and malformed successful responses retain the reviewed
+  fail-closed cache semantics, with no polling loop or checkpoint change.
+- Full-document intent recognition now accepts the qualified missing whole-read
+  wording while masking quoted, fenced, and structured inert text. Oversized
+  documents fail closed with `coverage=none` and required-context evidence;
+  fit-capable documents retain complete analysis and cleanup behavior.
+- RC30 validation: qualification tests 83/83; affected backend, document,
+  profile, and runtime tests 357/357; full discovery 1,684/1,684 with six
+  expected skips; `compileall`; and `git diff --check` PASS. Real core
+  qualification passed 4/4 for Gemma, Qwen 3.6, and Qwen3-Coder. Qwen3-Coder
+  prewarm restored `cached=768`, Qwen 3.6 route reuse restored `cached=768`,
+  Gemma final-prefix restored `cached=64`, and strict Gemma target/draft/mmproj
+  MTP passed with acceptance ratio `0.9167`.
+- Full-document qualification passed 3/3. At context 8,192 the oversized case
+  recorded `coverage=none` with 47,477 required tokens, while the fit case
+  recorded complete coverage and clean snapshot cleanup.
+- Qualification timing and RSS data remain descriptive. The harness does not
+  provide TTFT estimation, statistical significance, cross-model rankings, or
+  a universal model score.
+- See `docs/releases/v0.0.1-rc30.md`.
 
 ## RC24 Tool-Loop Convergence
 

@@ -14,9 +14,10 @@ or use exposed tools.
 Linux is the main target environment. macOS may work. Windows is not a target.
 
 The current published prerelease baseline is
-[`v0.0.1-rc29`](docs/releases/v0.0.1-rc29.md). It hardens native runtime-family
-loading and adds verified Qwen3-Coder route-prefix reuse and startup prewarm;
-`v0.0.1-rc28` remains its predecessor.
+[`v0.0.1-rc30`](docs/releases/v0.0.1-rc30.md). It adds the observer-only Orbit
+Qualification Harness v1, safe retry of transient native capability discovery,
+and fail-closed full-document intent handling; `v0.0.1-rc29` remains its
+predecessor.
 
 ## Current Scope
 
