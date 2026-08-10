@@ -15,6 +15,7 @@ CAPABILITY_REQUIREMENTS = {
     "tools": ("tools",),
     "artifacts": ("write_artifact", "verify_artifact"),
     "state_reuse": ("route_prefix_reuse",),
+    "document.full_analysis": ("full_document_analysis",),
 }
 
 LIFECYCLE_OPERATIONS = frozenset({
@@ -84,6 +85,12 @@ class LifecycleExpectation:
 
 
 @dataclass(frozen=True)
+class DocumentExpectation:
+    coverage: str | None
+    answer_contains: str | None = None
+
+
+@dataclass(frozen=True)
 class ExpectSpec:
     finish_reason: str
     max_model_calls: int
@@ -94,6 +101,7 @@ class ExpectSpec:
     artifact: ArtifactExpectation | None = None
     workflow: WorkflowExpectation | None = None
     lifecycle: LifecycleExpectation | None = None
+    document: DocumentExpectation | None = None
 
 
 @dataclass(frozen=True)
@@ -143,7 +151,7 @@ def _fixture(value: Any, version: int) -> FixtureSpec:
     required = {"name", "capability", "profiles", "request", "expect", "parity"}
     row = _object(value, "fixture", required, {"workspace"})
     name = _identifier(row["name"], "name")
-    capability = _identifier(row["capability"], "capability")
+    capability = _string(row["capability"], "capability")
     if capability not in CAPABILITY_REQUIREMENTS:
         _fail("unsupported_capability", capability)
     if not isinstance(row["profiles"], list) or not row["profiles"]:
@@ -178,7 +186,10 @@ def _request(value: Any, name: str) -> RequestSpec:
 
 def _expect(value: Any, name: str) -> ExpectSpec:
     required = {"finish_reason", "max_model_calls"}
-    optional = {"route", "tool_calls", "exact_output", "final_reports_workdir", "artifact", "workflow", "lifecycle"}
+    optional = {
+        "route", "tool_calls", "exact_output", "final_reports_workdir", "artifact",
+        "workflow", "lifecycle", "document",
+    }
     row = _object(value, f"{name}.expect", required, optional)
     raw_calls = row.get("tool_calls", [])
     if not isinstance(raw_calls, list):
@@ -196,6 +207,7 @@ def _expect(value: Any, name: str) -> ExpectSpec:
         artifact=_artifact(row["artifact"], name) if "artifact" in row else None,
         workflow=_workflow(row["workflow"], name) if "workflow" in row else None,
         lifecycle=_lifecycle(row["lifecycle"], name) if "lifecycle" in row else None,
+        document=_document(row["document"], name) if "document" in row else None,
     )
 
 
@@ -263,6 +275,18 @@ def _lifecycle(value: Any, name: str) -> LifecycleExpectation:
     if operation != "repeated_restore_rss" and min_restores:
         _fail("invalid_fixture_contract", f"{name} min_restores is only valid for RSS qualification")
     return LifecycleExpectation(operation, min_restores)
+
+
+def _document(value: Any, name: str) -> DocumentExpectation:
+    required = {"coverage"}
+    row = _object(value, f"{name}.document", required, {"answer_contains"})
+    coverage = row["coverage"]
+    if coverage is not None and coverage not in {"none", "complete"}:
+        _fail("invalid_value", f"{name}.document.coverage")
+    return DocumentExpectation(
+        coverage=coverage,
+        answer_contains=_optional_string(row.get("answer_contains"), f"{name}.document.answer_contains"),
+    )
 
 
 def _files(value: Any, path: str) -> tuple[FileSpec, ...]:
@@ -367,6 +391,23 @@ def _validate_contract(
     expect: ExpectSpec,
     workspace: WorkspaceSpec | None,
 ) -> None:
+    if capability == "document.full_analysis":
+        document = expect.document
+        if (
+            document is None or not request.tools or workspace is None
+            or len(workspace.files) != 1 or request.full_request
+            or expect.artifact is not None or expect.workflow is not None or expect.lifecycle is not None
+            or expect.tool_calls or expect.final_reports_workdir
+        ):
+            _fail("invalid_fixture_contract", f"{name} document fixture is inconsistent")
+        if document.coverage is not None:
+            if expect.route != "FILESYSTEM":
+                _fail("invalid_fixture_contract", f"{name} document route is inconsistent")
+        elif expect.route != "CHAT":
+            _fail("invalid_fixture_contract", f"{name} inert document expectation is inconsistent")
+        return
+    if expect.document is not None:
+        _fail("invalid_fixture_contract", f"{name} document expectation requires document.full_analysis")
     if capability == "state_reuse":
         if expect.lifecycle is None or expect.workflow is not None or expect.artifact is not None:
             _fail("invalid_fixture_contract", f"{name} state-reuse fixture is inconsistent")
