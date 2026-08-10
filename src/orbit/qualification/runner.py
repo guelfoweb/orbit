@@ -447,7 +447,7 @@ def _unexpected_paths(workdir: Path, allowed_paths: set[str]) -> tuple[str, ...]
         relative = path.relative_to(workdir).as_posix()
         if relative in allowed_paths or relative in allowed_parents:
             continue
-        if _is_declared_python_cache(path.relative_to(workdir), python_sources):
+        if not path.is_symlink() and _is_declared_python_cache(path.relative_to(workdir), python_sources):
             continue
         unexpected.append(relative)
     return tuple(sorted(unexpected))

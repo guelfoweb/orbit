@@ -295,6 +295,28 @@ class WorkflowRunnerTests(unittest.TestCase):
         self.assertFalse(state.regular_file)
         self.assertIsNone(state.sha256)
 
+    def test_python_cache_symlinks_are_unexpected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            external = Path(outside)
+            (root / "calculator.py").write_text("pass\n", encoding="utf-8")
+            (external / "calculator.cpython-313.pyc").write_bytes(b"cache")
+            (root / "__pycache__").symlink_to(external, target_is_directory=True)
+            self.assertEqual(_unexpected_paths(root, {"calculator.py"}), ("__pycache__",))
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            external = Path(outside)
+            (root / "calculator.py").write_text("pass\n", encoding="utf-8")
+            cache = root / "__pycache__"
+            cache.mkdir()
+            target = external / "payload"
+            target.write_bytes(b"cache")
+            (cache / "calculator.cpython-313.pyc").symlink_to(target)
+            self.assertEqual(
+                _unexpected_paths(root, {"calculator.py"}),
+                ("__pycache__/calculator.cpython-313.pyc",),
+            )
+
     def test_runtime_model_loop_bound_is_independent_from_tool_call_bound(self) -> None:
         fixture = next(
             item for item in load_fixture_set(WORKFLOW_FIXTURES).fixtures
