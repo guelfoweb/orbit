@@ -17,7 +17,13 @@ def validate_observation(
     workdir: Path | None = None,
 ) -> FixtureResult:
     failure = _first_failure(fixture, observation, workdir)
-    status = Status.FAIL if failure else Status.PASS
+    status = (
+        Status.TECHNICAL_STOP
+        if failure and failure.code in {
+            "lifecycle_evidence_missing", "lifecycle_evidence_incomplete", "lifecycle_evidence_invalid",
+        }
+        else Status.FAIL if failure else Status.PASS
+    )
     reason = failure or Reason("validated", "all deterministic expectations passed")
     return _result(fixture, observation, status, reason, applicable=True)
 
@@ -61,6 +67,7 @@ def _result(
         lifecycle=observation.lifecycle,
         tool_outcomes=observation.tool_outcomes,
         workflow=observation.workflow,
+        state_reuse=observation.state_reuse,
     )
 
 
@@ -114,7 +121,8 @@ def compare_fixture_results(
     _different(mismatches, "finish_reason", baseline.finish_reason, candidate.finish_reason)
     _different(mismatches, "artifact_state", _artifact_state(baseline.artifact), _artifact_state(candidate.artifact))
     _different(mismatches, "workflow_state", _workflow_state(baseline.workflow), _workflow_state(candidate.workflow))
-    if comparison_mode is ComparisonMode.OPTIMIZATION:
+    _different(mismatches, "state_reuse", _state_reuse_parity(baseline.state_reuse), _state_reuse_parity(candidate.state_reuse))
+    if comparison_mode is ComparisonMode.OPTIMIZATION and fixture.expect.lifecycle is None:
         _different(mismatches, "model_call_count", baseline.model_call_count, candidate.model_call_count)
         _different(mismatches, "retry_count", baseline.retry_count, candidate.retry_count)
         _different(mismatches, "call_behavior", _call_behavior(baseline), _call_behavior(candidate))
@@ -165,6 +173,8 @@ def _first_failure(
             "model_call_limit",
             f"expected at most {expect.max_model_calls}, got {observation.model_call_count}",
         )
+    if expect.lifecycle is not None:
+        return _lifecycle_failure(expect.lifecycle.operation, expect.lifecycle.min_restores, observation)
     if expect.workflow is not None:
         return _workflow_failure(fixture, observation)
     if expect.route is not None and observation.route != expect.route:
@@ -196,6 +206,107 @@ def _first_failure(
     if expect.artifact is not None:
         return _artifact_failure(expect.artifact, observation.artifact)
     return None
+
+
+def _lifecycle_failure(operation: str, min_restores: int, observation: FixtureObservation) -> Reason | None:
+    actual = observation.state_reuse
+    if actual is None:
+        return Reason("lifecycle_evidence_missing", "state-reuse evidence is unavailable")
+    if actual.operation != operation:
+        return Reason("lifecycle_operation_mismatch", "evidence belongs to a different lifecycle operation")
+    booleans, integers = {
+        "reset_invalidation": (
+            (actual.initialized_before, actual.initialized_after, actual.invalidated, actual.recapture_observed),
+            (actual.capture_count, actual.restore_count, actual.fallback_count,
+             actual.invalidation_count, actual.cached_tokens_after),
+        ),
+        "cancellation": (
+            (actual.initialized_before, actual.initialized_after, actual.cancellation_observed,
+             actual.invalidated, actual.partial_state_accepted),
+            (actual.capture_count, actual.checkpoint_size_after),
+        ),
+        "restore_failure_fallback": (
+            (actual.initialized_before, actual.initialized_after, actual.restore_rejected,
+             actual.fallback_succeeded, actual.partial_state_accepted),
+            (actual.capture_count, actual.restore_count, actual.fallback_attempts,
+             actual.fallback_count, actual.invalidation_count, actual.checkpoint_size_after),
+        ),
+        "repeated_restore_rss": (
+            (actual.initialized_before, actual.initialized_after),
+            (actual.restore_count, actual.cached_tokens_after, actual.checkpoint_size_after, actual.rss_start_bytes,
+             actual.rss_end_bytes, actual.rss_peak_bytes, actual.rss_tolerance_bytes),
+        ),
+        "teardown_cleanup": ((actual.initialized_before, actual.port_released), (actual.process_pid,)),
+    }[operation]
+    if any(item is None for item in booleans + integers):
+        return Reason("lifecycle_evidence_incomplete", "required lifecycle evidence is unavailable")
+    if any(type(item) is not bool for item in booleans) or any(type(item) is not int or item < 0 for item in integers):
+        return Reason("lifecycle_evidence_invalid", "lifecycle evidence has an invalid type or range")
+    if type(actual.residual_state) is not tuple or any(type(item) is not str or not item for item in actual.residual_state):
+        return Reason("lifecycle_evidence_invalid", "residual-state evidence is malformed")
+    if operation == "teardown_cleanup" and (
+        actual.process_pid <= 0
+        or (actual.process_exit_code is not None and type(actual.process_exit_code) is not int)
+    ):
+        return Reason("lifecycle_evidence_invalid", "process teardown evidence is malformed")
+    if actual.residual_state:
+        return Reason("lifecycle_residue", actual.residual_state[0])
+    if actual.partial_state_accepted is True:
+        code = "partial_restore_accepted" if operation == "restore_failure_fallback" else "partial_state_accepted"
+        return Reason(code, "an incomplete reusable state was accepted")
+    if operation == "reset_invalidation":
+        if not (
+            actual.initialized_before and actual.initialized_after and actual.invalidated
+            and actual.recapture_observed and actual.capture_count >= 3
+            and actual.restore_count >= 1 and actual.fallback_count == 0
+            and actual.invalidation_count >= 2 and actual.cached_tokens_after == 0
+        ):
+            return Reason("stale_state_after_reset", "reset did not force a safe cold recapture")
+    elif operation == "cancellation":
+        if actual.capture_count < 1 or not actual.initialized_before or actual.initialized_after or actual.checkpoint_size_after != 0 or not actual.cancellation_observed or not actual.invalidated:
+            return Reason("cancellation_cleanup_failed", "cancellation did not invalidate reusable state")
+    elif operation == "restore_failure_fallback":
+        if actual.capture_count < 1 or actual.restore_count != 0 or actual.invalidation_count < 1 or not actual.initialized_before or actual.initialized_after or actual.checkpoint_size_after != 0 or not actual.restore_rejected:
+            return Reason("restore_failure_not_rejected", "invalid reusable state was not rejected")
+        if actual.fallback_attempts != 1 or actual.fallback_count != 1:
+            return Reason("fallback_loop", "restore failure did not use exactly one cold fallback")
+        if not actual.fallback_succeeded:
+            return Reason("cold_fallback_failed", "cold fallback did not complete safely")
+    elif operation == "repeated_restore_rss":
+        samples = actual.rss_samples
+        if (
+            type(samples) is not tuple or len(samples) < 2
+            or any(type(item) is not int or item < 0 for item in samples)
+            or samples[0] != actual.rss_start_bytes or samples[-1] != actual.rss_end_bytes
+            or max(samples) != actual.rss_peak_bytes
+        ):
+            return Reason("lifecycle_evidence_invalid", "RSS samples are missing or inconsistent")
+        if not actual.initialized_before or not actual.initialized_after or actual.cached_tokens_after <= 0 or actual.checkpoint_size_after <= 0 or actual.restore_count < min_restores:
+            return Reason("restore_count_shortfall", "bounded restore sequence did not complete")
+        growth = actual.rss_end_bytes - actual.rss_start_bytes
+        sustained_floor = max(1024**2, actual.rss_tolerance_bytes // min_restores)
+        sustained = len(samples) >= 3 and all(right > left for left, right in zip(samples, samples[1:]))
+        if growth > actual.rss_tolerance_bytes or (sustained and growth > sustained_floor):
+            return Reason("rss_growth_unbounded", "resident growth exceeded the declared allocator tolerance")
+    elif not actual.initialized_before:
+        return Reason("teardown_state_missing", "reusable state was not established before teardown")
+    elif actual.process_exit_code is None:
+        return Reason("process_not_exited", "qualification-owned server is still running")
+    elif not actual.port_released:
+        return Reason("port_not_released", "qualification-owned server port remains bound")
+    return None
+
+
+def _state_reuse_parity(value):
+    if value is None:
+        return None
+    return (
+        value.operation, value.initialized_before, value.initialized_after, value.invalidated,
+        value.recapture_observed,
+        None if value.checkpoint_size_after is None else value.checkpoint_size_after == 0,
+        value.partial_state_accepted, value.cancellation_observed, value.restore_rejected,
+        value.fallback_succeeded, value.fallback_attempts, value.port_released, value.residual_state,
+    )
 
 
 def _workflow_failure(fixture: FixtureSpec, observation: FixtureObservation) -> Reason | None:

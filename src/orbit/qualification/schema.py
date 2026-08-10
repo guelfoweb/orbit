@@ -143,6 +143,35 @@ class WorkflowEvidence:
 
 
 @dataclass(frozen=True)
+class StateReuseEvidence:
+    operation: str
+    initialized_before: bool | None
+    initialized_after: bool | None
+    invalidated: bool | None
+    recapture_observed: bool | None
+    capture_count: int | None
+    restore_count: int | None
+    fallback_count: int | None
+    invalidation_count: int | None
+    cached_tokens_after: int | None
+    checkpoint_size_after: int | None
+    partial_state_accepted: bool | None
+    cancellation_observed: bool | None
+    restore_rejected: bool | None
+    fallback_succeeded: bool | None
+    fallback_attempts: int | None
+    rss_start_bytes: int | None
+    rss_end_bytes: int | None
+    rss_peak_bytes: int | None
+    rss_tolerance_bytes: int | None
+    rss_samples: tuple[int, ...]
+    process_pid: int | None
+    process_exit_code: int | None
+    port_released: bool | None
+    residual_state: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class FixtureObservation:
     route: str | None
     tool_calls: tuple[ToolCallRecord, ...]
@@ -159,6 +188,7 @@ class FixtureObservation:
     protocol_issue: str | None = None
     tool_outcomes: tuple[ToolOutcomeRecord, ...] = ()
     workflow: WorkflowEvidence | None = None
+    state_reuse: StateReuseEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +223,7 @@ class FixtureResult:
     lifecycle: LifecycleOutcome
     tool_outcomes: tuple[ToolOutcomeRecord, ...]
     workflow: WorkflowEvidence | None
+    state_reuse: StateReuseEvidence | None = None
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "name": "reset_invalidation",
+      "capability": "state_reuse",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "request": {"prompt": "Determine the absolute current working directory using a local capability.", "tools": true},
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 6,
+        "lifecycle": {"operation": "reset_invalidation"}
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "cancellation",
+      "capability": "state_reuse",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "request": {"prompt": "Produce a long response so active generation can be cancelled.", "tools": false},
+      "expect": {
+        "finish_reason": "cancelled",
+        "max_model_calls": 3,
+        "lifecycle": {"operation": "cancellation"}
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "restore_failure_fallback",
+      "capability": "state_reuse",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "request": {"prompt": "Determine the absolute current working directory using a local capability.", "tools": true},
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 3,
+        "lifecycle": {"operation": "restore_failure_fallback"}
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "repeated_restore_rss",
+      "capability": "state_reuse",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "request": {"prompt": "Determine the absolute current working directory using a local capability.", "tools": true},
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 21,
+        "lifecycle": {"operation": "repeated_restore_rss", "min_restores": 20}
+      },
+      "parity": {"mode": "structural"}
+    },
+    {
+      "name": "teardown_cleanup",
+      "capability": "state_reuse",
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "request": {"prompt": "Determine the absolute current working directory using a local capability.", "tools": true},
+      "expect": {
+        "finish_reason": "stop",
+        "max_model_calls": 2,
+        "lifecycle": {"operation": "teardown_cleanup"}
+      },
+      "parity": {"mode": "structural"}
+    }
+  ]
+}

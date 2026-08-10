@@ -14,7 +14,13 @@ CAPABILITY_REQUIREMENTS = {
     "chat": ("chat",),
     "tools": ("tools",),
     "artifacts": ("write_artifact", "verify_artifact"),
+    "state_reuse": ("route_prefix_reuse",),
 }
+
+LIFECYCLE_OPERATIONS = frozenset({
+    "reset_invalidation", "cancellation", "restore_failure_fallback",
+    "repeated_restore_rss", "teardown_cleanup",
+})
 
 
 class FixtureError(ValueError):
@@ -72,6 +78,12 @@ class WorkflowExpectation:
 
 
 @dataclass(frozen=True)
+class LifecycleExpectation:
+    operation: str
+    min_restores: int = 0
+
+
+@dataclass(frozen=True)
 class ExpectSpec:
     finish_reason: str
     max_model_calls: int
@@ -81,6 +93,7 @@ class ExpectSpec:
     final_reports_workdir: bool = False
     artifact: ArtifactExpectation | None = None
     workflow: WorkflowExpectation | None = None
+    lifecycle: LifecycleExpectation | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +178,7 @@ def _request(value: Any, name: str) -> RequestSpec:
 
 def _expect(value: Any, name: str) -> ExpectSpec:
     required = {"finish_reason", "max_model_calls"}
-    optional = {"route", "tool_calls", "exact_output", "final_reports_workdir", "artifact", "workflow"}
+    optional = {"route", "tool_calls", "exact_output", "final_reports_workdir", "artifact", "workflow", "lifecycle"}
     row = _object(value, f"{name}.expect", required, optional)
     raw_calls = row.get("tool_calls", [])
     if not isinstance(raw_calls, list):
@@ -182,6 +195,7 @@ def _expect(value: Any, name: str) -> ExpectSpec:
         final_reports_workdir=report_workdir,
         artifact=_artifact(row["artifact"], name) if "artifact" in row else None,
         workflow=_workflow(row["workflow"], name) if "workflow" in row else None,
+        lifecycle=_lifecycle(row["lifecycle"], name) if "lifecycle" in row else None,
     )
 
 
@@ -235,6 +249,20 @@ def _workflow(value: Any, name: str) -> WorkflowExpectation:
         test_runner=test_runner,
         require_recovery=require_recovery,
     )
+
+
+def _lifecycle(value: Any, name: str) -> LifecycleExpectation:
+    row = _object(value, f"{name}.lifecycle", {"operation"}, {"min_restores"})
+    operation = _string(row["operation"], f"{name}.lifecycle.operation")
+    if operation not in LIFECYCLE_OPERATIONS:
+        _fail("invalid_lifecycle_operation", operation)
+    min_restores = row.get("min_restores", 0)
+    min_restores = _bounded_positive(min_restores, f"{name}.lifecycle.min_restores", 50) if min_restores else 0
+    if operation == "repeated_restore_rss" and min_restores < 2:
+        _fail("invalid_fixture_contract", f"{name} requires at least two restores")
+    if operation != "repeated_restore_rss" and min_restores:
+        _fail("invalid_fixture_contract", f"{name} min_restores is only valid for RSS qualification")
+    return LifecycleExpectation(operation, min_restores)
 
 
 def _files(value: Any, path: str) -> tuple[FileSpec, ...]:
@@ -339,6 +367,14 @@ def _validate_contract(
     expect: ExpectSpec,
     workspace: WorkspaceSpec | None,
 ) -> None:
+    if capability == "state_reuse":
+        if expect.lifecycle is None or expect.workflow is not None or expect.artifact is not None:
+            _fail("invalid_fixture_contract", f"{name} state-reuse fixture is inconsistent")
+        if workspace is not None or expect.route is not None or expect.tool_calls or expect.exact_output is not None:
+            _fail("invalid_fixture_contract", f"{name} state-reuse fixture exposes unrelated behavior")
+        return
+    if expect.lifecycle is not None:
+        _fail("invalid_fixture_contract", f"{name} lifecycle expectation requires state_reuse")
     has_tool_contract = bool(expect.route or expect.tool_calls or expect.final_reports_workdir)
     if capability == "chat" and (request.tools or has_tool_contract or expect.artifact is not None):
         _fail("invalid_fixture_contract", f"{name} chat fixture exposes tool behavior")
