@@ -64,15 +64,17 @@ def evidence(operation: str, **changes) -> StateReuseEvidence:
         rss_end_bytes=10_100,
         rss_peak_bytes=10_100,
         rss_tolerance_bytes=1_000,
-        rss_samples=(10_000, 10_050, 10_100),
+        rss_samples=(10_000, 10_050, 10_100, 10_100),
         process_pid=123,
         process_exit_code=0,
         port_released=True,
         residual_state=(),
     )
     defaults = {
+        "reset_invalidation": {"checkpoint_size_after": 75_000_000},
         "restore_failure_fallback": {"initialized_after": False, "restore_count": 0, "fallback_count": 1},
         "repeated_restore_rss": {"cached_tokens_after": 768, "checkpoint_size_after": 75_000_000},
+        "teardown_cleanup": {"initialized_after": False},
     }
     return replace(replace(base, **defaults.get(operation, {})), **changes)
 
@@ -112,6 +114,10 @@ class LifecycleFixtureTests(unittest.TestCase):
         self.assertEqual(failed.reason.code, "stale_state_after_reset")
         stale = observation(evidence("reset_invalidation", cached_tokens_after=64))
         self.assertEqual(validate_observation(fixture, stale).reason.code, "stale_state_after_reset")
+        empty = observation(evidence("reset_invalidation", checkpoint_size_after=0))
+        self.assertEqual(validate_observation(fixture, empty).reason.code, "stale_state_after_reset")
+        fallback = observation(evidence("reset_invalidation", fallback_count=1))
+        self.assertEqual(validate_observation(fixture, fallback).reason.code, "stale_state_after_reset")
         incomplete = observation(evidence("reset_invalidation", restore_count=None))
         self.assertIs(validate_observation(fixture, incomplete).status, Status.TECHNICAL_STOP)
 
@@ -123,6 +129,15 @@ class LifecycleFixtureTests(unittest.TestCase):
         self.assertEqual(validate_observation(fixture, partial).reason.code, "partial_state_accepted")
         residue = replace(clean, state_reuse=evidence("cancellation", initialized_after=False, residual_state=("checkpoint.tmp",)))
         self.assertEqual(validate_observation(fixture, residue).reason.code, "lifecycle_residue")
+
+    def test_cancellation_worker_error_is_not_reported_as_model_failure(self) -> None:
+        executor = LifecycleExecutor(None, None, "http://unused", "orbit-qwen36-native-v1")
+        executor._state = mock.Mock(return_value={"initialized": True})
+        executor._reuse_call = mock.Mock(side_effect=RuntimeError("boom"))
+        executor._wait_in_flight = mock.Mock()
+        executor._cancel = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "cancellation worker failed"):
+            executor.execute(self.fixtures["cancellation"], Path("/tmp"))
 
     def test_restore_failure_requires_one_safe_fallback_without_loop(self) -> None:
         fixture = self.fixtures["restore_failure_fallback"]
@@ -136,6 +151,8 @@ class LifecycleFixtureTests(unittest.TestCase):
         self.assertEqual(validate_observation(fixture, observation(partial)).reason.code, "partial_restore_accepted")
         loop = evidence("restore_failure_fallback", fallback_attempts=2, fallback_count=2)
         self.assertEqual(validate_observation(fixture, observation(loop)).reason.code, "fallback_loop")
+        counted = evidence("restore_failure_fallback", restore_count=1)
+        self.assertEqual(validate_observation(fixture, observation(counted)).reason.code, "restore_failure_not_rejected")
         failed = evidence("restore_failure_fallback", fallback_succeeded=False)
         self.assertEqual(validate_observation(fixture, observation(failed)).reason.code, "cold_fallback_failed")
 
@@ -156,7 +173,7 @@ class LifecycleFixtureTests(unittest.TestCase):
             "repeated_restore_rss",
             rss_end_bytes=12_000,
             rss_peak_bytes=12_000,
-            rss_samples=(10_000, 11_000, 12_000),
+            rss_samples=(10_000, 11_000, 11_500, 12_000),
         )
         self.assertEqual(validate_observation(fixture, observation(growth)).reason.code, "rss_growth_unbounded")
         base, tolerance = 1_000_000_000, 64 * 1024**2
@@ -169,10 +186,27 @@ class LifecycleFixtureTests(unittest.TestCase):
             rss_samples=(base, base + 8 * 1024**2, base + 16 * 1024**2, base + 32 * 1024**2),
         )
         self.assertEqual(validate_observation(fixture, observation(monotonic)).reason.code, "rss_growth_unbounded")
+        staircase = replace(
+            monotonic,
+            rss_samples=(base, base + 16 * 1024**2, base + 16 * 1024**2, base + 32 * 1024**2),
+        )
+        self.assertEqual(validate_observation(fixture, observation(staircase)).reason.code, "rss_growth_unbounded")
         inconsistent = replace(monotonic, rss_peak_bytes=base)
         result = validate_observation(fixture, observation(inconsistent))
         self.assertIs(result.status, Status.TECHNICAL_STOP)
         self.assertEqual(result.reason.code, "lifecycle_evidence_invalid")
+        non_finite = replace(monotonic, rss_end_bytes=float("nan"))
+        self.assertIs(
+            validate_observation(fixture, observation(non_finite)).status,
+            Status.TECHNICAL_STOP,
+        )
+        incomplete = replace(monotonic, rss_end_bytes=base + 16 * 1024**2,
+                             rss_peak_bytes=base + 16 * 1024**2,
+                             rss_samples=(base, base + 16 * 1024**2))
+        self.assertIs(
+            validate_observation(fixture, observation(incomplete)).status,
+            Status.TECHNICAL_STOP,
+        )
 
     def test_teardown_requires_exit_port_release_and_no_residue(self) -> None:
         fixture = self.fixtures["teardown_cleanup"]
@@ -181,6 +215,8 @@ class LifecycleFixtureTests(unittest.TestCase):
         self.assertEqual(validate_observation(fixture, observation(running)).reason.code, "process_not_exited")
         bound = evidence("teardown_cleanup", port_released=False)
         self.assertEqual(validate_observation(fixture, observation(bound)).reason.code, "port_not_released")
+        retained = evidence("teardown_cleanup", initialized_after=True, checkpoint_size_after=1)
+        self.assertEqual(validate_observation(fixture, observation(retained)).reason.code, "teardown_state_retained")
 
     def test_missing_or_incomplete_evidence_is_technical_stop(self) -> None:
         fixture = self.fixtures["reset_invalidation"]
@@ -240,7 +276,7 @@ class LifecycleFixtureTests(unittest.TestCase):
                     rss_start_bytes=20_000,
                     rss_end_bytes=20_500,
                     rss_peak_bytes=21_000,
-                    rss_samples=(20_000, 21_000, 20_500),
+                    rss_samples=(20_000, 21_000, 20_500, 20_500),
                 )),
                 model_call_count=2,
             ),

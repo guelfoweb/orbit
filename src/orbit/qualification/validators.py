@@ -218,7 +218,7 @@ def _lifecycle_failure(operation: str, min_restores: int, observation: FixtureOb
         "reset_invalidation": (
             (actual.initialized_before, actual.initialized_after, actual.invalidated, actual.recapture_observed),
             (actual.capture_count, actual.restore_count, actual.fallback_count,
-             actual.invalidation_count, actual.cached_tokens_after),
+             actual.invalidation_count, actual.cached_tokens_after, actual.checkpoint_size_after),
         ),
         "cancellation": (
             (actual.initialized_before, actual.initialized_after, actual.cancellation_observed,
@@ -236,7 +236,10 @@ def _lifecycle_failure(operation: str, min_restores: int, observation: FixtureOb
             (actual.restore_count, actual.cached_tokens_after, actual.checkpoint_size_after, actual.rss_start_bytes,
              actual.rss_end_bytes, actual.rss_peak_bytes, actual.rss_tolerance_bytes),
         ),
-        "teardown_cleanup": ((actual.initialized_before, actual.port_released), (actual.process_pid,)),
+        "teardown_cleanup": (
+            (actual.initialized_before, actual.initialized_after, actual.port_released),
+            (actual.process_pid, actual.checkpoint_size_after),
+        ),
     }[operation]
     if any(item is None for item in booleans + integers):
         return Reason("lifecycle_evidence_incomplete", "required lifecycle evidence is unavailable")
@@ -260,6 +263,7 @@ def _lifecycle_failure(operation: str, min_restores: int, observation: FixtureOb
             and actual.recapture_observed and actual.capture_count >= 3
             and actual.restore_count >= 1 and actual.fallback_count == 0
             and actual.invalidation_count >= 2 and actual.cached_tokens_after == 0
+            and actual.checkpoint_size_after > 0
         ):
             return Reason("stale_state_after_reset", "reset did not force a safe cold recapture")
     elif operation == "cancellation":
@@ -274,8 +278,9 @@ def _lifecycle_failure(operation: str, min_restores: int, observation: FixtureOb
             return Reason("cold_fallback_failed", "cold fallback did not complete safely")
     elif operation == "repeated_restore_rss":
         samples = actual.rss_samples
+        expected_samples = 1 + len({index for index in (4, 9, min_restores - 1) if index < min_restores})
         if (
-            type(samples) is not tuple or len(samples) < 2
+            type(samples) is not tuple or len(samples) != expected_samples
             or any(type(item) is not int or item < 0 for item in samples)
             or samples[0] != actual.rss_start_bytes or samples[-1] != actual.rss_end_bytes
             or max(samples) != actual.rss_peak_bytes
@@ -285,11 +290,18 @@ def _lifecycle_failure(operation: str, min_restores: int, observation: FixtureOb
             return Reason("restore_count_shortfall", "bounded restore sequence did not complete")
         growth = actual.rss_end_bytes - actual.rss_start_bytes
         sustained_floor = max(1024**2, actual.rss_tolerance_bytes // min_restores)
-        sustained = len(samples) >= 3 and all(right > left for left, right in zip(samples, samples[1:]))
+        deltas = tuple(right - left for left, right in zip(samples, samples[1:]))
+        sustained = (
+            len(deltas) >= 2
+            and all(delta >= 0 for delta in deltas)
+            and sum(delta > 0 for delta in deltas) >= 2
+        )
         if growth > actual.rss_tolerance_bytes or (sustained and growth > sustained_floor):
             return Reason("rss_growth_unbounded", "resident growth exceeded the declared allocator tolerance")
     elif not actual.initialized_before:
         return Reason("teardown_state_missing", "reusable state was not established before teardown")
+    elif actual.initialized_after or actual.checkpoint_size_after != 0:
+        return Reason("teardown_state_retained", "reusable state survived server teardown")
     elif actual.process_exit_code is None:
         return Reason("process_not_exited", "qualification-owned server is still running")
     elif not actual.port_released:

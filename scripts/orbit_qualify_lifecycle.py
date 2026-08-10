@@ -55,15 +55,27 @@ class LifecycleExecutor:
             if not before["initialized"]:
                 calls.append(self._reuse_call())
                 before = self._state()
-            result = []
-            worker = threading.Thread(target=lambda: result.append(self._reuse_call(long=True)), daemon=True)
+            result, errors = [], []
+
+            def cancel_call():
+                try:
+                    result.append(self._reuse_call(long=True))
+                except Exception as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=cancel_call, daemon=True)
             worker.start()
             self._wait_in_flight()
             self._cancel()
             worker.join(30)
+            if errors:
+                raise RuntimeError("cancellation worker failed") from errors[0]
+            if worker.is_alive():
+                _stop(self.process)
+                raise TimeoutError("cancelled call did not terminate within 30 seconds")
             calls.extend(result)
             after = self._state()
-            evidence = self._evidence(operation, before, after, calls, cancelled=not worker.is_alive())
+            evidence = self._evidence(operation, before, after, calls, cancelled=True)
         elif operation == "restore_failure_fallback":
             evidence = self._restore_hook(operation)
         elif operation == "repeated_restore_rss":
@@ -78,6 +90,7 @@ class LifecycleExecutor:
                 if index in {4, 9, fixture.expect.lifecycle.min_restores - 1}:
                     samples.append(_rss(self.process.pid))
             after = self._state()
+            # Permit allocator settling; the validator separately rejects sustained growth.
             tolerance = max(64 * 1024**2, int(start_rss * 0.01))
             evidence = self._evidence(operation, established, after, calls, rss=samples, tolerance=tolerance)
             evidence = StateReuseEvidence(**{**evidence.__dict__, "restore_count": after["restore_count"] - restore_before})
@@ -166,7 +179,10 @@ class LifecycleExecutor:
             "orbit-qwen36-native-v1": "tests.test_qwen_route_prefix.QwenRoutePrefixClientTests.test_restore_failure_clears_state_and_uses_one_cold_fallback",
             "orbit-gemma4-native-v1": "tests.test_prefix_anchor_probe.PrefixAnchorProbeTests.test_final_prefix_restore_failure_uses_normal_prefill",
         }
-        completed = subprocess.run([sys.executable, "-m", "unittest", tests[self.profile_id]], cwd=ROOT, env={**os.environ, "PYTHONPATH": str(SRC)}, capture_output=True, text=True)
+        completed = subprocess.run(
+            [sys.executable, "-m", "unittest", tests[self.profile_id]], cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(SRC)}, capture_output=True, text=True, timeout=60,
+        )
         report = completed.stdout + completed.stderr
         if completed.returncode or "Ran 1 test" not in report or not report.rstrip().endswith("OK"):
             raise RuntimeError("native restore-failure hook failed")
