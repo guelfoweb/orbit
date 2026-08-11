@@ -6,11 +6,14 @@ from typing import Mapping
 
 
 GEMMA4_PROFILE_ID = "orbit-gemma4-native-v1"
+GEMMA4_VERIFIED_MODEL_NAME = "gemma-4-26B-A4B-it"
 QWEN36_PROFILE_ID = "orbit-qwen36-native-v1"
+QWEN36_VERIFIED_MODEL_NAME = "Qwen3.6-35B-A3B"
 QWEN36_OFFICIAL_TEMPLATE_SHA256 = "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259"
 QWEN36_VERIFIED_FILE_TYPE = "15"
 QWEN36_VERIFIED_QUANTIZATION = "Q4_K_M"
 QWEN3_CODER_PROFILE_ID = "orbit-qwen3-coder-native-v1"
+QWEN3_CODER_VERIFIED_MODEL_NAME = "Qwen3-Coder-30B-A3B-Instruct"
 QWEN3_CODER_OFFICIAL_TEMPLATE_SHA256 = "87710339d25b4e789c1d723f93c91ee861a86d305bb3d20a845536f251d6ea8a"
 QWEN3_CODER_VERIFIED_FILE_TYPE = "15"
 QWEN3_CODER_VERIFIED_QUANTIZATION = "Q4_K_M"
@@ -77,6 +80,31 @@ class NativeModelProfile:
         }
 
 
+@dataclass(frozen=True)
+class VerifiedNativeModelIdentity:
+    profile_id: str
+    model_name: str
+    architecture: str
+
+
+VERIFIED_NATIVE_MODEL_IDENTITIES = (
+    VerifiedNativeModelIdentity(GEMMA4_PROFILE_ID, GEMMA4_VERIFIED_MODEL_NAME, "gemma4"),
+    VerifiedNativeModelIdentity(QWEN36_PROFILE_ID, QWEN36_VERIFIED_MODEL_NAME, "qwen35moe"),
+    VerifiedNativeModelIdentity(
+        QWEN3_CODER_PROFILE_ID,
+        QWEN3_CODER_VERIFIED_MODEL_NAME,
+        "qwen3moe",
+    ),
+)
+
+
+def verified_native_model_identity(profile_id: str) -> VerifiedNativeModelIdentity | None:
+    return next(
+        (identity for identity in VERIFIED_NATIVE_MODEL_IDENTITIES if identity.profile_id == profile_id),
+        None,
+    )
+
+
 def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> NativeModelProfile:
     architecture = metadata.get("general.architecture", "").strip().lower()
     tokenizer_model = metadata.get("tokenizer.ggml.model", "").strip().lower()
@@ -108,7 +136,7 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
 
     qwen_identity = (
         architecture == "qwen35moe"
-        and model_name == "Qwen3.6-35B-A3B"
+        and model_name == QWEN36_VERIFIED_MODEL_NAME
         and tokenizer_model == "gpt2"
         and tokenizer_pre == "qwen35"
         and file_type == QWEN36_VERIFIED_FILE_TYPE
@@ -137,7 +165,7 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
 
     qwen3_coder_identity = (
         architecture == "qwen3moe"
-        and model_name == "Qwen3-Coder-30B-A3B-Instruct"
+        and model_name == QWEN3_CODER_VERIFIED_MODEL_NAME
         and tokenizer_model == "gpt2"
         and tokenizer_pre == "qwen2"
         and file_type == QWEN3_CODER_VERIFIED_FILE_TYPE
@@ -209,7 +237,7 @@ def _unverified_reason(
     template_hash: str,
 ) -> str:
     if architecture == "qwen35moe":
-        if model_name != "Qwen3.6-35B-A3B":
+        if model_name != QWEN36_VERIFIED_MODEL_NAME:
             return "qwen36_model_identity_mismatch"
         if tokenizer_model != "gpt2" or tokenizer_pre != "qwen35":
             return "qwen36_tokenizer_identity_mismatch"
@@ -218,7 +246,7 @@ def _unverified_reason(
         if template_hash != QWEN36_OFFICIAL_TEMPLATE_SHA256:
             return "qwen36_template_identity_mismatch"
     if architecture == "qwen3moe":
-        if model_name != "Qwen3-Coder-30B-A3B-Instruct":
+        if model_name != QWEN3_CODER_VERIFIED_MODEL_NAME:
             return "qwen3_coder_model_identity_mismatch"
         if tokenizer_model != "gpt2" or tokenizer_pre != "qwen2":
             return "qwen3_coder_tokenizer_identity_mismatch"

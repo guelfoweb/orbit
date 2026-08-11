@@ -24,8 +24,17 @@ from orbit.native_llama.client import (
     _has_open_thought_channel,
 )
 from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_context as native_kv_request_context
+from orbit.native_llama.model_discovery import discover_models, format_model_discovery
 from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
-from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
+from orbit.native_llama.model_registry import default_hf_cache, default_models_dir
+from orbit.native_llama.paths import (
+    DEFAULT_LLAMA_ROOT,
+    DEFAULT_MODEL_ID,
+    NativeLlamaPaths,
+    _resolve_native_runtime,
+    resolve_legacy_paths,
+    resolve_paths,
+)
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
 from orbit.native_llama.qwen36_shell_tool_prefix import (
@@ -704,6 +713,7 @@ def run_server(argv: list[str] | None = None) -> int:
     qwen36_shell_tool_prefix_config = resolve_qwen36_shell_tool_prefix_reuse()
     qwen3_coder_route_prefix_config = resolve_qwen3_coder_route_prefix_reuse()
 
+    paths: NativeLlamaPaths | None = None
     try:
         paths = resolve_bootstrap_paths(args)
         client = NativeLlamaClient(
@@ -757,10 +767,13 @@ def run_server(argv: list[str] | None = None) -> int:
             if prewarm_interrupted:
                 client.close()
                 return 130
-    except (FileNotFoundError, RuntimeError) as exc:
+    except (FileNotFoundError, KeyError, RuntimeError) as exc:
         print(_format_native_bootstrap_error(exc), file=sys.stderr)
+        if _is_model_bootstrap_failure(exc):
+            _print_model_discovery(args, paths)
         return 1
 
+    assert paths is not None
     model_alias = resolve_model_alias(args.alias, paths)
     httpd = ThreadingHTTPServer((args.host, args.port), OrbitNativeHandler)
     httpd.orbit_state = OrbitNativeServer(client=client, model_alias=model_alias)  # type: ignore[attr-defined]
@@ -999,6 +1012,40 @@ def _format_native_bootstrap_error(exc: Exception) -> str:
             "the required shim, or package the shim under src/orbit/native_llama/vendor/shim."
         )
     return f"error: failed to start native backend: {detail}"
+
+
+def _is_model_bootstrap_failure(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return any(
+        marker in detail
+        for marker in (
+            "model not found:",
+            "target model not found:",
+            "failed to load model:",
+            "unsupported or unverified native model compatibility",
+            "unknown native model manifest",
+        )
+    )
+
+
+def _print_model_discovery(args: argparse.Namespace, paths: NativeLlamaPaths | None) -> None:
+    build_bin = paths.build_bin if paths is not None else None
+    if build_bin is None:
+        try:
+            build_bin = _resolve_native_runtime(args.llama_root)[1]
+        except FileNotFoundError:
+            build_bin = None
+    try:
+        result = discover_models(
+            models_dir=args.models_dir or default_models_dir(),
+            hf_cache=args.hf_cache or default_hf_cache(),
+            explicit_model=args.model,
+            build_bin=build_bin,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"model discovery unavailable: {str(exc).strip() or exc.__class__.__name__}", file=sys.stderr)
+        return
+    print(format_model_discovery(result), file=sys.stderr)
 
 
 def _session_id_from_payload(payload: dict[str, Any]) -> str:

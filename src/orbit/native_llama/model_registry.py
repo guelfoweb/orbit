@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import glob
 import json
 from typing import Any
+
+from orbit.native_llama.model_profiles import verified_native_model_identity
 
 
 REGISTRY_RESOURCE = "model_registry.json"
@@ -28,6 +30,8 @@ class MtpSpec(ModelFileSpec):
 @dataclass(frozen=True)
 class ModelManifest:
     id: str
+    display_name: str
+    profile_id: str
     backend: str
     architecture: str
     target: ModelFileSpec
@@ -105,6 +109,8 @@ def _manifest(data: dict[str, Any]) -> ModelManifest:
     mtp_data = data.get("mtp")
     return ModelManifest(
         id=str(data["id"]),
+        display_name=str(data["display_name"]),
+        profile_id=str(data["profile_id"]),
         backend=str(data["backend"]),
         architecture=str(data["architecture"]),
         target=_file_spec(data["target"]),
@@ -116,10 +122,150 @@ def _manifest(data: dict[str, Any]) -> ModelManifest:
 def load_registry(path: Path | None = None) -> list[ModelManifest]:
     if path is None:
         text = resources.files(__package__).joinpath(REGISTRY_RESOURCE).read_text(encoding="utf-8")
-        data = json.loads(text)
+        data = _load_json(text)
     else:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    return [_manifest(item) for item in data.get("models", [])]
+        data = _load_json(path.read_text(encoding="utf-8"))
+    model_data = _validate_registry(data)
+    return [_manifest(item) for item in model_data]
+
+
+def _load_json(text: str) -> Any:
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate model registry key: {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite model registry value: {value}")
+
+    return json.loads(text, object_pairs_hook=object_pairs, parse_constant=reject_constant)
+
+
+def _validate_registry(data: Any) -> list[dict[str, Any]]:
+    root = _require_mapping(data, "registry")
+    _require_keys(root, required={"version", "models"}, optional=set(), label="registry")
+    if type(root["version"]) is not int or root["version"] != 1:
+        raise ValueError("unsupported model registry version")
+    if not isinstance(root["models"], list):
+        raise ValueError("model registry models must be a list")
+
+    models: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    names: set[str] = set()
+    profiles: set[str] = set()
+    downloads: set[tuple[str, str]] = set()
+    for index, value in enumerate(root["models"]):
+        label = f"models[{index}]"
+        model = _require_mapping(value, label)
+        _require_keys(
+            model,
+            required={"id", "display_name", "profile_id", "backend", "architecture", "target"},
+            optional={"mmproj", "mtp"},
+            label=label,
+        )
+        model_id = _require_string(model, "id", label)
+        display_name = _require_string(model, "display_name", label)
+        profile_id = _require_string(model, "profile_id", label)
+        backend = _require_string(model, "backend", label)
+        architecture = _require_string(model, "architecture", label)
+        if backend != "native-llama":
+            raise ValueError(f"{label}.backend must be native-llama")
+        identity = verified_native_model_identity(profile_id)
+        if identity is None or identity.architecture != architecture:
+            raise ValueError(f"{label} has an invalid profile/architecture mapping")
+        _add_unique(ids, model_id, "model id")
+        _add_unique(names, display_name, "model display name")
+        _add_unique(profiles, profile_id, "model profile")
+
+        specs = [("target", _validate_file_spec(model["target"], f"{label}.target"))]
+        if "mmproj" in model:
+            specs.append(("mmproj", _validate_file_spec(model["mmproj"], f"{label}.mmproj")))
+        if "mtp" in model:
+            specs.append(("mtp", _validate_mtp_spec(model["mtp"], f"{label}.mtp")))
+        for kind, spec in specs:
+            download = (str(spec["repo"]), str(spec["file"]))
+            if download in downloads:
+                raise ValueError(f"duplicate model registry download: {download[0]}/{download[1]}")
+            downloads.add(download)
+            if kind == "target" and not str(spec["file"]).lower().endswith(".gguf"):
+                raise ValueError(f"{label}.target.file must be a GGUF")
+        models.append(model)
+    return models
+
+
+def _validate_file_spec(value: Any, label: str) -> dict[str, Any]:
+    spec = _require_mapping(value, label)
+    _require_keys(spec, required={"repo", "file", "cache_glob"}, optional=set(), label=label)
+    repo = _require_string(spec, "repo", label)
+    file_name = _require_string(spec, "file", label)
+    cache_glob = _require_string(spec, "cache_glob", label)
+    repo_parts = repo.split("/")
+    if len(repo_parts) != 2 or any(part in {"", ".", ".."} for part in repo_parts):
+        raise ValueError(f"{label}.repo must be owner/repository")
+    _validate_relative_path(file_name, f"{label}.file", allow_wildcard=False)
+    _validate_relative_path(cache_glob, f"{label}.cache_glob", allow_wildcard=True)
+    return spec
+
+
+def _validate_mtp_spec(value: Any, label: str) -> dict[str, Any]:
+    spec = _require_mapping(value, label)
+    _require_keys(
+        spec,
+        required={"repo", "file", "cache_glob", "enabled_by_default", "required", "spec_type"},
+        optional=set(),
+        label=label,
+    )
+    _validate_file_spec(
+        {key: spec[key] for key in ("repo", "file", "cache_glob")},
+        label,
+    )
+    if type(spec["enabled_by_default"]) is not bool or type(spec["required"]) is not bool:
+        raise ValueError(f"{label} enablement fields must be booleans")
+    _require_string(spec, "spec_type", label)
+    return spec
+
+
+def _require_mapping(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def _require_keys(data: dict[str, Any], *, required: set[str], optional: set[str], label: str) -> None:
+    missing = required - data.keys()
+    unknown = data.keys() - required - optional
+    if missing:
+        raise ValueError(f"{label} missing keys: {', '.join(sorted(missing))}")
+    if unknown:
+        raise ValueError(f"{label} unknown keys: {', '.join(sorted(unknown))}")
+
+
+def _require_string(data: dict[str, Any], key: str, label: str) -> str:
+    value = data[key]
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError(f"{label}.{key} must be a non-empty string")
+    return value
+
+
+def _validate_relative_path(value: str, label: str, *, allow_wildcard: bool) -> None:
+    if "\\" in value or PurePosixPath(value).is_absolute():
+        raise ValueError(f"{label} must be a relative POSIX path")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"{label} contains an unsafe path component")
+    wildcard_count = sum(part == "*" for part in parts)
+    has_other_wildcard = any(any(char in part for char in "*?[") and part != "*" for part in parts)
+    if has_other_wildcard or (wildcard_count and not allow_wildcard) or wildcard_count > 1:
+        raise ValueError(f"{label} contains an unsupported wildcard")
+
+
+def _add_unique(seen: set[str], value: str, label: str) -> None:
+    if value in seen:
+        raise ValueError(f"duplicate {label}: {value}")
+    seen.add(value)
 
 
 def get_manifest(model_id: str, *, registry_path: Path | None = None) -> ModelManifest:

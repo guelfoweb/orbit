@@ -14,43 +14,76 @@ from orbit.native_llama.model_registry import (
 )
 
 
-def _write_registry(path: Path) -> None:
-    path.write_text(
-        json.dumps(
+def _registry_data() -> dict:
+    return {
+        "version": 1,
+        "models": [
             {
-                "version": 1,
-                "models": [
-                    {
-                        "id": "test-gemma",
-                        "backend": "native-llama",
-                        "architecture": "gemma4",
-                        "target": {
-                            "repo": "target/repo",
-                            "file": "target.gguf",
-                            "cache_glob": "target/snapshots/*/target.gguf",
-                        },
-                        "mmproj": {
-                            "repo": "target/repo",
-                            "file": "mmproj.gguf",
-                            "cache_glob": "target/snapshots/*/mmproj.gguf",
-                        },
-                        "mtp": {
-                            "enabled_by_default": True,
-                            "required": False,
-                            "spec_type": "draft-mtp",
-                            "repo": "draft/repo",
-                            "file": "MTP/draft.gguf",
-                            "cache_glob": "draft/snapshots/*/MTP/draft.gguf",
-                        },
-                    }
-                ],
+                "id": "test-gemma",
+                "display_name": "Test Gemma",
+                "profile_id": "orbit-gemma4-native-v1",
+                "backend": "native-llama",
+                "architecture": "gemma4",
+                "target": {
+                    "repo": "target/repo",
+                    "file": "target.gguf",
+                    "cache_glob": "target/snapshots/*/target.gguf",
+                },
+                "mmproj": {
+                    "repo": "target/repo",
+                    "file": "mmproj.gguf",
+                    "cache_glob": "target/snapshots/*/mmproj.gguf",
+                },
+                "mtp": {
+                    "enabled_by_default": True,
+                    "required": False,
+                    "spec_type": "draft-mtp",
+                    "repo": "draft/repo",
+                    "file": "MTP/draft.gguf",
+                    "cache_glob": "draft/snapshots/*/MTP/draft.gguf",
+                },
             }
-        ),
-        encoding="utf-8",
-    )
+        ],
+    }
+
+
+def _write_registry(path: Path, data: dict | None = None) -> None:
+    path.write_text(json.dumps(data or _registry_data()), encoding="utf-8")
 
 
 class NativeModelRegistryTests(unittest.TestCase):
+    def test_packaged_registry_contains_only_current_verified_models(self) -> None:
+        manifests = load_registry()
+
+        self.assertEqual(
+            [(item.display_name, item.profile_id) for item in manifests],
+            [
+                ("Gemma 4 26B-A4B", "orbit-gemma4-native-v1"),
+                ("Qwen 3.6 35B-A3B", "orbit-qwen36-native-v1"),
+                ("Qwen3-Coder 30B-A3B", "orbit-qwen3-coder-native-v1"),
+            ],
+        )
+        self.assertEqual(
+            [(item.profile_id, item.target.repo, item.target.file) for item in manifests],
+            [
+                (
+                    "orbit-gemma4-native-v1",
+                    "ggml-org/gemma-4-26B-A4B-it-GGUF",
+                    "gemma-4-26B-A4B-it-Q4_0.gguf",
+                ),
+                (
+                    "orbit-qwen36-native-v1",
+                    "ggml-org/Qwen3.6-35B-A3B-GGUF",
+                    "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+                ),
+                (
+                    "orbit-qwen3-coder-native-v1",
+                    "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+                    "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+                ),
+            ],
+        )
+
     def test_loads_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry_path = Path(tmp) / "registry.json"
@@ -60,9 +93,93 @@ class NativeModelRegistryTests(unittest.TestCase):
 
         self.assertEqual(len(manifests), 1)
         self.assertEqual(manifests[0].id, "test-gemma")
+        self.assertEqual(manifests[0].display_name, "Test Gemma")
+        self.assertEqual(manifests[0].profile_id, "orbit-gemma4-native-v1")
         self.assertEqual(manifests[0].backend, "native-llama")
         self.assertEqual(manifests[0].architecture, "gemma4")
         self.assertIsNotNone(manifests[0].mtp)
+
+    def test_duplicate_json_key_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            registry_path.write_text('{"version":1,"version":1,"models":[]}', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "duplicate model registry key"):
+                load_registry(registry_path)
+
+    def test_unknown_registry_key_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            data = _registry_data()
+            data["models"][0]["unexpected"] = True
+            _write_registry(registry_path, data)
+
+            with self.assertRaisesRegex(ValueError, "unknown keys"):
+                load_registry(registry_path)
+
+    def test_bad_version_missing_fields_and_wrong_types_are_rejected(self) -> None:
+        cases = []
+        bad_version = _registry_data()
+        bad_version["version"] = True
+        cases.append(bad_version)
+        missing_field = _registry_data()
+        del missing_field["models"][0]["target"]
+        cases.append(missing_field)
+        wrong_type = _registry_data()
+        wrong_type["models"] = {}
+        cases.append(wrong_type)
+        for data in cases:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as tmp:
+                registry_path = Path(tmp) / "registry.json"
+                _write_registry(registry_path, data)
+
+                with self.assertRaises(ValueError):
+                    load_registry(registry_path)
+
+    def test_duplicate_ids_names_profiles_and_downloads_are_rejected(self) -> None:
+        mutations = {
+            "model id": {},
+            "model display name": {"id": "other"},
+            "model profile": {"id": "other", "display_name": "Other"},
+            "download": {
+                "id": "other",
+                "display_name": "Other",
+                "profile_id": "orbit-qwen36-native-v1",
+                "architecture": "qwen35moe",
+            },
+        }
+        for reason, changes in mutations.items():
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                registry_path = Path(tmp) / "registry.json"
+                data = _registry_data()
+                duplicate = json.loads(json.dumps(data["models"][0]))
+                duplicate.update(changes)
+                data["models"].append(duplicate)
+                _write_registry(registry_path, data)
+
+                with self.assertRaisesRegex(ValueError, f"duplicate (model registry )?{reason}"):
+                    load_registry(registry_path)
+
+    def test_incorrect_profile_architecture_mapping_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            data = _registry_data()
+            data["models"][0]["architecture"] = "qwen35moe"
+            _write_registry(registry_path, data)
+
+            with self.assertRaisesRegex(ValueError, "invalid profile/architecture mapping"):
+                load_registry(registry_path)
+
+    def test_unsafe_download_paths_and_globs_are_rejected(self) -> None:
+        for key, value in (("file", "../model.gguf"), ("cache_glob", "../../**/model.gguf")):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                registry_path = Path(tmp) / "registry.json"
+                data = _registry_data()
+                data["models"][0]["target"][key] = value
+                _write_registry(registry_path, data)
+
+                with self.assertRaises(ValueError):
+                    load_registry(registry_path)
 
     def test_falls_back_to_no_mtp_when_optional_draft_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

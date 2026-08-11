@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from orbit.native_llama.client import NativeRoutePrefixPrefillResult
+from orbit.native_llama.model_discovery import ModelDiscoveryResult, ModelDiscoveryRow
 from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.native_names import runtime_library_filename
 from orbit.native_server.app import (
@@ -131,6 +132,25 @@ class _FakeHTTPServer:
 
 
 class NativeServerBootstrapTests(unittest.TestCase):
+    @staticmethod
+    def _missing_discovery() -> ModelDiscoveryResult:
+        return ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow(
+                    model="Qwen 3.6 35B-A3B",
+                    local="MISSING",
+                    support="VERIFIED",
+                    path_or_action=(
+                        "orbit download ggml-org/Qwen3.6-35B-A3B-GGUF/"
+                        "Qwen3.6-35B-A3B-Q4_K_M.gguf"
+                    ),
+                ),
+            ),
+            wall_ms=1.0,
+            filesystem_scans=5,
+            metadata_inspections=0,
+        )
+
     def test_bootstrap_can_use_packaged_vendor_lib_without_llama_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -450,6 +470,88 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertIn("error: native backend libraries are missing.", output)
         self.assertIn("--llama-root", output)
         self.assertIn("ORBIT_LLAMA_ROOT", output)
+
+    def test_run_server_missing_explicit_model_prints_discovery(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                side_effect=FileNotFoundError("model not found: /missing/model.gguf"),
+            ),
+            mock.patch(
+                "orbit.native_server.app.discover_models",
+                return_value=self._missing_discovery(),
+            ) as discovery,
+            redirect_stderr(stderr),
+        ):
+            code = run_server(["--model", "/missing/model.gguf"])
+
+        self.assertEqual(code, 1)
+        output = stderr.getvalue()
+        self.assertIn("model not found", output)
+        self.assertIn("Qwen 3.6 35B-A3B", output)
+        self.assertIn(
+            "orbit download ggml-org/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+            output,
+        )
+        discovery.assert_called_once()
+
+    def test_run_server_missing_default_model_prints_supported_choices(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                side_effect=FileNotFoundError("target model not found: repo:model.gguf"),
+            ),
+            mock.patch(
+                "orbit.native_server.app.discover_models",
+                return_value=self._missing_discovery(),
+            ) as discovery,
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 1)
+        self.assertIn("Models:", stderr.getvalue())
+        discovery.assert_called_once()
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_run_server_valid_explicit_model_does_not_run_discovery(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/valid.gguf")),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("orbit.native_server.app.discover_models") as discovery,
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server(["--model", "/models/valid.gguf"])
+
+        self.assertEqual(code, 0)
+        discovery.assert_not_called()
+
+    def test_unknown_model_id_fails_clearly_with_discovery(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                side_effect=KeyError("unknown native model manifest: made-up"),
+            ),
+            mock.patch(
+                "orbit.native_server.app.discover_models",
+                return_value=self._missing_discovery(),
+            ),
+            redirect_stderr(stderr),
+        ):
+            code = run_server(["--model-id", "made-up"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("unknown native model manifest", stderr.getvalue())
+        self.assertIn("Models:", stderr.getvalue())
 
     def test_run_server_reports_clear_error_when_mtp_shim_inputs_are_missing(self) -> None:
         stderr = io.StringIO()
