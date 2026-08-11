@@ -47,10 +47,10 @@ scripts/suggest-server-profile.sh
 
 ## Quick Start
 
-Start the native server:
+Start the native server and select an available verified model:
 
 ```bash
-orbit server --model path/to/model-name
+orbit server
 ```
 
 In another terminal:

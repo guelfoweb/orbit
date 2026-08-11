@@ -63,6 +63,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
         row = next(row for row in result.rows if row.model == "Qwen 3.6 35B-A3B")
         self.assertEqual((row.local, row.support), ("AVAILABLE", "VERIFIED"))
         self.assertEqual(row.path_or_action, str(model.absolute()))
+        self.assertEqual(row.model_id, manifest.id)
         self.assertEqual(result.metadata_inspections, 1)
 
     def test_multiple_verified_models_are_reported(self) -> None:
@@ -298,6 +299,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
         with mock.patch("orbit.native_llama.model_discovery.LlamaLibrary", return_value=binding):
             inspector = NativeProfileInspector(Path("/native"))
             profile = inspector(Path("/models/model.gguf"))
+            inspector.close()
 
         self.assertTrue(params.vocab_only)
         self.assertTrue(params.use_mmap)
@@ -305,6 +307,29 @@ class NativeModelDiscoveryTests(unittest.TestCase):
         self.assertFalse(profile.verified)
         lib.ggml_backend_load_all.assert_called_once_with()
         lib.llama_model_free.assert_called_once_with(native_model)
+        self.assertEqual(lib.llama_log_set.call_count, 2)
+
+    def test_discovery_restores_native_logging_after_owned_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = root / "models/model.gguf"
+            model.parent.mkdir(parents=True)
+            model.write_bytes(b"GGUF")
+            inspector = mock.Mock(
+                return_value=_profile(QWEN36_PROFILE_ID, "Qwen3.6-35B-A3B")
+            )
+            with mock.patch(
+                "orbit.native_llama.model_discovery.NativeProfileInspector",
+                return_value=inspector,
+            ):
+                discover_models(
+                    models_dir=root / "models",
+                    hf_cache=root / "hf",
+                    build_bin=Path("/native"),
+                )
+
+        inspector.assert_called_once_with(model.resolve())
+        inspector.close.assert_called_once_with()
 
 
 if __name__ == "__main__":
