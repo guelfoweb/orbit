@@ -86,7 +86,7 @@ def download_model(
         else:
             retrieve(url, str(tmp_path), _progress_hook(progress))
         tmp_path.replace(destination)
-    except Exception:
+    except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
     return DownloadResult(path=destination, downloaded=True, url=url)
