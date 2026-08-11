@@ -154,13 +154,51 @@ prefill after capture was 1.76 seconds versus 24.38 seconds OFF on the measured
 CPU host. These timings are descriptive and not a deterministic performance
 guarantee.
 
+## Shell Tool Prefix Reuse
+
+The exact verified profile also keeps one separate process-local checkpoint
+for `exec_shell_full_command` tool-selection calls. Eligibility requires tools
+on, thinking off, the exact reviewed single shell schema, and the normal
+`tool_call` phase. It does not apply to retries, `verify_artifact`,
+`final_from_tool`, other tools, or artifact-content generation.
+
+The checkpoint captures complete Qwen 3.6 hybrid sequence state at the
+unpadded 384-token boundary inside the 439-token invariant shell prefix. Its
+identity is `qwen36-shell-tool-prefix-v1` and is bound to the verified
+model/GGUF, tokenizer, template, shell schema, system policy, rendered and
+token prefix hashes, native build, context, batch, ubatch, and thread
+configuration. It is separate from the 768-token route checkpoint and is not
+prewarmed.
+
+Reuse is enabled by default for this exact qualified path. Disable only the
+shell checkpoint with:
+
+```bash
+ORBIT_QWEN36_SHELL_TOOL_PREFIX_REUSE=0 orbit server \
+  --model models/ggml-org--Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf
+```
+
+Invalid values disable safely. `/props` reports bounded shell-checkpoint
+capture, restore, fallback, invalidation, identity, token-count, and size
+diagnostics. Reset, reload, cancel, close, completion errors, identity changes,
+and restore failures invalidate the state. A failed restore performs one cold
+fallback without a retry loop.
+
+Qualification measured a 73,736,684-byte checkpoint. Cold, segmented, and
+restored logits were byte-identical with maximum absolute difference `0.0`.
+The measured `pwd` tool/final workflow fell from 51.17 to 35.47 seconds, and an
+existing-file modification workflow fell from 459.05 to 333.09 seconds. Each
+warm restore avoided 384 evaluated tokens. These CPU timings are descriptive,
+hardware-dependent qualification evidence, not a performance guarantee.
+
 ## Current Limits
 
 - Only the exact verified 35B-A3B identity and reviewed template are enabled.
 - Qwen MTP is disabled. The available Qwen draft GGUF has not been qualified
   against Orbit's target/draft lifecycle and must not be treated as supported.
 - Gemma-specific route and final-prefix checkpoints remain disabled for Qwen;
-  Qwen route reuse has its own identity, storage, eligibility, and lifecycle.
+  Qwen route and shell reuse have separate identities, storage, eligibility,
+  and lifecycle.
 - The Qwen hybrid/recurrent memory layout can reject partial KV removal. Orbit
   uses complete sequence-state capture/restore for the verified route prefix
   and falls back to a cold prefill for other incompatible cache transitions.

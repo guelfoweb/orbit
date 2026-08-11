@@ -23,6 +23,7 @@ from orbit.backend.llama_server import (
     _parse_native_stream,
     _final_prefix_experiment_requested,
     _qwen_route_prefix_anchor_requested,
+    _qwen36_shell_tool_prefix_anchor_requested,
 )
 from orbit.backend.base import ChatResult
 from orbit.backend.payloads import (
@@ -33,6 +34,7 @@ from orbit.backend.payloads import (
 )
 from orbit.backend import model_names
 from orbit.runtime.kv_diag import model_call_context
+from orbit.runtime.shell_guardrails import exec_shell_full_definition
 from urllib.error import HTTPError, URLError
 
 
@@ -689,6 +691,77 @@ class LlamaServerBackendTests(unittest.TestCase):
                 clear=True,
             ), model_call_context(phase="route", tools_mode="on"):
                 self.assertFalse(_qwen_route_prefix_anchor_requested(native_backend=True))
+
+    def test_qwen36_shell_prefix_request_has_exact_phase_mode_and_schema(self) -> None:
+        tools = [exec_shell_full_definition()]
+        with mock.patch.dict(os.environ, {"ORBIT_QWEN36_SHELL_TOOL_PREFIX_REUSE": "1"}, clear=True):
+            with model_call_context(phase="tool_call", tools_mode="on"):
+                self.assertTrue(
+                    _qwen36_shell_tool_prefix_anchor_requested(
+                        native_backend=True,
+                        tools=tools,
+                        thinking=False,
+                    )
+                )
+                self.assertFalse(
+                    _qwen36_shell_tool_prefix_anchor_requested(
+                        native_backend=True,
+                        tools=tools,
+                        thinking=True,
+                    )
+                )
+                changed = [exec_shell_full_definition()]
+                changed[0]["function"]["parameters"]["properties"]["timeout"]["maximum"] = 16
+                self.assertFalse(
+                    _qwen36_shell_tool_prefix_anchor_requested(
+                        native_backend=True,
+                        tools=changed,
+                        thinking=False,
+                    )
+                )
+            for phase in (
+                "route",
+                "tool_call_retry",
+                "artifact_content",
+                "verify_artifact",
+                "post_tool_route",
+                "final_from_tool",
+            ):
+                with self.subTest(phase=phase), model_call_context(
+                    phase=phase,
+                    tools_mode="on",
+                ):
+                    self.assertFalse(
+                        _qwen36_shell_tool_prefix_anchor_requested(
+                            native_backend=True,
+                            tools=tools,
+                            thinking=False,
+                        )
+                    )
+            with model_call_context(phase="tool_call", tools_mode="off"):
+                self.assertFalse(
+                    _qwen36_shell_tool_prefix_anchor_requested(
+                        native_backend=True,
+                        tools=tools,
+                        thinking=False,
+                    )
+                )
+
+    def test_qwen36_shell_prefix_kill_switch_disables_request(self) -> None:
+        tools = [exec_shell_full_definition()]
+        for value in ("0", "invalid"):
+            with self.subTest(value=value), mock.patch.dict(
+                os.environ,
+                {"ORBIT_QWEN36_SHELL_TOOL_PREFIX_REUSE": value},
+                clear=True,
+            ), model_call_context(phase="tool_call", tools_mode="on"):
+                self.assertFalse(
+                    _qwen36_shell_tool_prefix_anchor_requested(
+                        native_backend=True,
+                        tools=tools,
+                        thinking=False,
+                    )
+                )
 
     def test_final_prefix_experiment_payload_is_limited_to_native_final_tool_phase(self) -> None:
         class Backend(LlamaServerBackend):

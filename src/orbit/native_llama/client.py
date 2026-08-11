@@ -52,6 +52,14 @@ from .qwen_route_prefix import (
     derive_qwen_route_prefix_spec,
     hash_text,
 )
+from .qwen36_shell_tool_prefix import (
+    QWEN36_SHELL_TOOL_PREFIX_FORMAT_VERSION,
+    QWEN36_SHELL_TOOL_PREFIX_TOKEN_COUNT,
+    QWEN36_SHELL_TOOL_TOKENIZER_IDENTITY,
+    Qwen36ShellToolPrefixSpec,
+    derive_qwen36_shell_tool_prefix_spec,
+    exact_qwen36_shell_tool_schema,
+)
 from .qwen3_coder import (
     QWEN3_CODER_ARTIFACT_GRAMMAR,
     QWEN3_CODER_ARTIFACT_PROTOCOL_ID,
@@ -107,6 +115,9 @@ class NativeClientConfig:
     qwen_route_prefix_reuse_enabled: bool = False
     qwen_route_prefix_reuse_source: str = "default"
     qwen_route_prefix_reuse_config_error: str | None = None
+    qwen36_shell_tool_prefix_reuse_enabled: bool = False
+    qwen36_shell_tool_prefix_reuse_source: str = "default"
+    qwen36_shell_tool_prefix_reuse_config_error: str | None = None
     qwen3_coder_route_prefix_reuse_enabled: bool = False
     qwen3_coder_route_prefix_reuse_source: str = "default"
     qwen3_coder_route_prefix_reuse_config_error: str | None = None
@@ -139,6 +150,14 @@ class _QwenRouteAnchorRuntimePlan:
     spec: QwenRoutePrefixSpec
     metadata: dict[str, object]
     profile_id: str = QWEN36_PROFILE_ID
+
+
+@dataclass(frozen=True)
+class _Qwen36ShellToolAnchorRuntimePlan:
+    prefix_tokens: list[int]
+    prefix_hash: str
+    state_kwargs: dict[str, str | None]
+    spec: Qwen36ShellToolPrefixSpec
 
 
 @dataclass(frozen=True)
@@ -235,6 +254,11 @@ class NativeLlamaClient:
         self._qwen_route_prefix_anchor_state = PrefixAnchorState()
         self._qwen_route_prefix_spec: QwenRoutePrefixSpec | None = None
         self._qwen_route_prefix_status = QwenRoutePrefixStatus()
+        self._qwen36_shell_tool_prefix_anchor_state = PrefixAnchorState()
+        self._qwen36_shell_tool_prefix_spec: Qwen36ShellToolPrefixSpec | None = None
+        self._qwen36_shell_tool_prefix_status = QwenRoutePrefixStatus()
+        self._qwen36_shell_tool_prefix_lock = threading.RLock()
+        self._qwen36_shell_tool_prefix_epoch = 0
         self._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState()
         self._qwen3_coder_route_prefix_spec: QwenRoutePrefixSpec | None = None
         self._qwen3_coder_route_prefix_status = QwenRoutePrefixStatus()
@@ -322,6 +346,38 @@ class NativeLlamaClient:
             "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
         }
 
+    def qwen36_shell_tool_prefix_reuse_status(self) -> dict[str, object]:
+        with self._qwen36_shell_tool_prefix_lock:
+            status = self._qwen36_shell_tool_prefix_status
+            profile = getattr(self, "model_profile", None)
+            profile_eligible = (
+                getattr(profile, "profile_id", None) == QWEN36_PROFILE_ID
+                and getattr(profile, "verified", False)
+                and self._model_metadata_identity.get("general.file_type") == "15"
+            )
+            spec = self._qwen36_shell_tool_prefix_spec
+            return {
+                "enabled": self.config.qwen36_shell_tool_prefix_reuse_enabled and profile_eligible,
+                "source": self.config.qwen36_shell_tool_prefix_reuse_source,
+                "config_error": self.config.qwen36_shell_tool_prefix_reuse_config_error,
+                "initialized": status.initialized,
+                "prefix_tokens": status.prefix_tokens,
+                "capture_count": status.capture_count,
+                "restore_count": status.restore_count,
+                "fallback_count": status.fallback_count,
+                "invalidation_count": status.invalidation_count,
+                "failure_reason": status.failure_reason,
+                "last_used": status.last_used,
+                "checkpoint_size_bytes": self._qwen36_shell_tool_prefix_anchor_state.checkpoint_size,
+                "checkpoint_identity": QWEN36_SHELL_TOOL_PREFIX_FORMAT_VERSION,
+                "profile_identity": getattr(profile, "profile_id", None),
+                "template_identity": getattr(profile, "template_sha256", None),
+                "tokenizer_identity": hash_text(QWEN36_SHELL_TOOL_TOKENIZER_IDENTITY),
+                "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
+                "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
+                "tool_schema_hash": spec.tool_schema_hash if spec is not None else None,
+            }
+
     def compatibility_diagnostics(self) -> dict[str, object]:
         profile = getattr(self, "model_profile", None)
         if profile is None:
@@ -358,6 +414,7 @@ class NativeLlamaClient:
     def close(self) -> None:
         lib = self.lib.lib
         self._invalidate_qwen_route_prefix("client_closed")
+        self._invalidate_qwen36_shell_tool_prefix("client_closed")
         self._free_persistent_mtp_session()
         if self.chat_bridge is not None and self._chat_bridge_context:
             self.chat_bridge.free(self._chat_bridge_context)
@@ -381,6 +438,7 @@ class NativeLlamaClient:
     def cancel(self) -> None:
         self._invalidate_final_prefix("cancelled")
         self._invalidate_qwen_route_prefix("cancelled")
+        self._invalidate_qwen36_shell_tool_prefix("cancelled")
         self._session.cancel_requested = True
         self._session.continuation_ready = False
         self.cancel_event.set()
@@ -390,6 +448,7 @@ class NativeLlamaClient:
         self.cancel_event.clear()
 
     def load(self, on_progress=None) -> None:
+        self._invalidate_qwen36_shell_tool_prefix("model_reload")
         lib = self.lib.lib
         lib.ggml_backend_load_all()
 
@@ -610,6 +669,7 @@ class NativeLlamaClient:
         self._profile_last_parsed_content = ""
         self._invalidate_final_prefix("session_reset")
         self._invalidate_qwen_route_prefix("session_reset")
+        self._invalidate_qwen36_shell_tool_prefix("session_reset")
         if self._persistent_mtp_runtime is None:
             return
         try:
@@ -953,6 +1013,7 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
+        qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
         final_prefix_experiment: bool = False,
         on_progress=None,
@@ -998,6 +1059,12 @@ class NativeLlamaClient:
             thinking=thinking,
             prompt=prompt,
         ) if qwen_route_prefix_anchor else None
+        qwen36_shell_tool_anchor_plan = self._qwen36_shell_tool_anchor_plan_for_prompt(
+            messages,
+            tools=tools,
+            thinking=thinking,
+            prompt=prompt,
+        ) if qwen36_shell_tool_prefix_anchor else None
         route_anchor_segments = self._route_anchor_segments_for_prompt(
             messages,
             tools=tools,
@@ -1029,6 +1096,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_anchor_segments=route_anchor_segments,
             qwen_route_anchor_plan=qwen_route_anchor_plan,
+            qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
             final_prefix_segments=final_prefix_segments,
             kv_diag_messages=messages,
             on_progress=on_progress,
@@ -1046,6 +1114,7 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
+        qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
         final_prefix_experiment: bool = False,
         on_progress=None,
@@ -1061,6 +1130,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+            qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
             final_prefix_experiment=final_prefix_experiment,
             on_progress=on_progress,
@@ -1221,6 +1291,7 @@ class NativeLlamaClient:
         thinking: bool,
         route_prefix_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
+        qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
         final_prefix_experiment: bool = False,
         on_progress=None,
@@ -1237,6 +1308,7 @@ class NativeLlamaClient:
                 thinking=thinking,
                 route_prefix_anchor=route_prefix_anchor,
                 qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+                qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
                 allow_mtp_experimental=allow_mtp_experimental,
                 final_prefix_experiment=final_prefix_experiment,
                 on_progress=on_progress,
@@ -1305,6 +1377,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+            qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
             final_prefix_experiment=final_prefix_experiment,
             on_progress=on_progress,
@@ -1329,6 +1402,7 @@ class NativeLlamaClient:
         thinking: bool,
         route_prefix_anchor: bool,
         qwen_route_prefix_anchor: bool,
+        qwen36_shell_tool_prefix_anchor: bool,
         allow_mtp_experimental: bool | None,
         final_prefix_experiment: bool,
         on_progress=None,
@@ -1376,6 +1450,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+            qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
             final_prefix_experiment=final_prefix_experiment,
             on_progress=on_progress,
@@ -1675,6 +1750,7 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         route_anchor_segments: RoutePromptSegments | None = None,
         qwen_route_anchor_plan: _QwenRouteAnchorRuntimePlan | None = None,
+        qwen36_shell_tool_anchor_plan: _Qwen36ShellToolAnchorRuntimePlan | None = None,
         final_prefix_segments: RoutePromptSegments | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
@@ -1717,6 +1793,7 @@ class NativeLlamaClient:
                 max_tokens=max_tokens,
                 route_anchor_segments=route_anchor_segments,
                 qwen_route_anchor_plan=qwen_route_anchor_plan,
+                qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
                 final_prefix_segments=final_prefix_segments,
                 kv_diag_messages=kv_diag_messages,
                 on_progress=on_progress,
@@ -1737,6 +1814,8 @@ class NativeLlamaClient:
                 self._invalidate_final_prefix("completion_error")
             if qwen_route_anchor_plan is not None:
                 self._invalidate_qwen_route_prefix("completion_error", profile_id=qwen_route_anchor_plan.profile_id)
+            if qwen36_shell_tool_anchor_plan is not None:
+                self._invalidate_qwen36_shell_tool_prefix("completion_error")
             raise
         finally:
             self._session.in_flight = False
@@ -1877,6 +1956,7 @@ class NativeLlamaClient:
         max_tokens: int = 16,
         route_anchor_segments: RoutePromptSegments | None = None,
         qwen_route_anchor_plan: _QwenRouteAnchorRuntimePlan | None = None,
+        qwen36_shell_tool_anchor_plan: _Qwen36ShellToolAnchorRuntimePlan | None = None,
         final_prefix_segments: RoutePromptSegments | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
@@ -1900,6 +1980,13 @@ class NativeLlamaClient:
         if qwen_route_anchor_plan is not None and prompt_tokens[: len(qwen_route_anchor_plan.prefix_tokens)] != qwen_route_anchor_plan.prefix_tokens:
             self._record_qwen_route_prefix_fallback("production_prefix_changed")
             qwen_route_anchor_plan = None
+        if (
+            qwen36_shell_tool_anchor_plan is not None
+            and prompt_tokens[: len(qwen36_shell_tool_anchor_plan.prefix_tokens)]
+            != qwen36_shell_tool_anchor_plan.prefix_tokens
+        ):
+            self._record_qwen36_shell_tool_prefix_fallback("production_prefix_changed")
+            qwen36_shell_tool_anchor_plan = None
         final_plan = self._final_prefix_plan(prompt, prompt_tokens, final_prefix_segments)
         anchor_metadata: dict[str, object] | None = None
         processed_start = 0
@@ -1907,6 +1994,10 @@ class NativeLlamaClient:
             processed_start, reused = self._prepare_memory_with_final_prefix(final_plan, prompt_tokens)
         elif qwen_route_anchor_plan is not None:
             processed_start, reused = self._prepare_memory_with_qwen_route_anchor(qwen_route_anchor_plan)
+        elif qwen36_shell_tool_anchor_plan is not None:
+            processed_start, reused = self._prepare_memory_with_qwen36_shell_tool_anchor(
+                qwen36_shell_tool_anchor_plan
+            )
         elif anchor_plan is None:
             reused = self._prepare_memory_for_prompt(prompt_tokens)
         else:
@@ -1916,7 +2007,14 @@ class NativeLlamaClient:
                 processed_start = reused
         processed = 0
         step = max(1, min(self.config.progress_step, self.config.batch_size))
-        processed = processed_start if final_plan is not None or qwen_route_anchor_plan is not None or (anchor_plan is not None and anchor_metadata is not None) else reused
+        processed = (
+            processed_start
+            if final_plan is not None
+            or qwen_route_anchor_plan is not None
+            or qwen36_shell_tool_anchor_plan is not None
+            or (anchor_plan is not None and anchor_metadata is not None)
+            else reused
+        )
         if on_progress:
             on_progress(NativeProgress("prefill", processed, n_prompt))
         token_array = (llama_token * n_prompt)(*prompt_tokens)
@@ -2119,6 +2217,282 @@ class NativeLlamaClient:
             },
             profile_id=profile_id,
         )
+
+    def _qwen36_shell_tool_anchor_plan_for_prompt(
+        self,
+        messages: list[NativeMessage],
+        *,
+        tools: list[dict] | None,
+        thinking: bool,
+        prompt: str,
+    ) -> _Qwen36ShellToolAnchorRuntimePlan | None:
+        profile = getattr(self, "model_profile", None)
+        if getattr(profile, "profile_id", None) != QWEN36_PROFILE_ID:
+            if self._qwen36_shell_tool_prefix_anchor_state.valid:
+                self._invalidate_qwen36_shell_tool_prefix("model_profile_changed")
+            return None
+        if not self.config.qwen36_shell_tool_prefix_reuse_enabled:
+            return None
+        if not getattr(profile, "verified", False):
+            self._record_qwen36_shell_tool_prefix_fallback("model_profile_ineligible")
+            return None
+        if self._model_metadata_identity.get("general.file_type") != "15":
+            self._record_qwen36_shell_tool_prefix_fallback("qwen_quantization_unverified")
+            return None
+        if thinking:
+            self._record_qwen36_shell_tool_prefix_fallback("shell_tool_mode_ineligible")
+            return None
+        if not exact_qwen36_shell_tool_schema(tools):
+            if self._qwen36_shell_tool_prefix_anchor_state.valid:
+                self._invalidate_qwen36_shell_tool_prefix("shell_tool_schema_changed")
+            self._record_qwen36_shell_tool_prefix_fallback("shell_tool_schema_mismatch")
+            return None
+        if self.config.use_mtp_experimental or self._session.mtp_enabled:
+            self._record_qwen36_shell_tool_prefix_fallback("mtp_ineligible")
+            return None
+        if self.chat_bridge is None or not self._chat_bridge_context:
+            self._record_qwen36_shell_tool_prefix_fallback("chat_bridge_unavailable")
+            return None
+
+        prompt_tokens = self.tokenize(prompt)
+        spec = self._qwen36_shell_tool_prefix_spec
+        if spec is None:
+
+            def render_reference(user_text: str) -> str:
+                rendered = self.chat_bridge.render(
+                    self._chat_bridge_context,
+                    [{"role": "user", "content": user_text}],
+                    [dict(tool) for tool in tools or []],
+                    thinking=False,
+                )
+                value = rendered.get("prompt")
+                if not isinstance(value, str) or not value:
+                    raise RuntimeError("empty Qwen3.6 shell reference prompt")
+                return value
+
+            reason = None
+            try:
+                spec, reason = derive_qwen36_shell_tool_prefix_spec(
+                    tools=tools,
+                    full_prompt=prompt,
+                    full_tokens=prompt_tokens,
+                    render_reference=render_reference,
+                    tokenize=self.tokenize,
+                )
+            except Exception as exc:
+                spec = None
+                reason = f"shell_boundary_probe_failed:{type(exc).__name__}"
+            finally:
+                restored = self.chat_bridge.render(
+                    self._chat_bridge_context,
+                    self._serialize_profile_messages([dict(message) for message in messages]),
+                    [dict(tool) for tool in tools or []],
+                    thinking=False,
+                )
+                restored_prompt = restored.get("prompt")
+                if restored_prompt != prompt:
+                    spec = None
+                    reason = "production_render_not_repeatable"
+                else:
+                    self._active_profile_render = restored
+            if spec is None:
+                self._record_qwen36_shell_tool_prefix_fallback(
+                    reason or "shell_boundary_unavailable"
+                )
+                return None
+            self._qwen36_shell_tool_prefix_spec = spec
+
+        if list(prompt_tokens[:QWEN36_SHELL_TOOL_PREFIX_TOKEN_COUNT]) != list(spec.prefix_tokens):
+            self._invalidate_qwen36_shell_tool_prefix("production_prefix_changed")
+            self._record_qwen36_shell_tool_prefix_fallback("production_prefix_changed")
+            return None
+
+        state_kwargs = self._qwen36_shell_tool_prefix_state_kwargs(spec, messages=messages)
+        return _Qwen36ShellToolAnchorRuntimePlan(
+            prefix_tokens=list(spec.prefix_tokens),
+            prefix_hash=compute_prefix_anchor_key(**state_kwargs),
+            state_kwargs=state_kwargs,
+            spec=spec,
+        )
+
+    def _prepare_memory_with_qwen36_shell_tool_anchor(
+        self,
+        plan: _Qwen36ShellToolAnchorRuntimePlan,
+    ) -> tuple[int, int]:
+        if not self._session.ctx_tgt:
+            raise RuntimeError("native client not loaded")
+        with self._qwen36_shell_tool_prefix_lock:
+            state = self._qwen36_shell_tool_prefix_anchor_state
+            lifecycle_epoch = self._qwen36_shell_tool_prefix_epoch
+        status = self._qwen36_shell_tool_prefix_status
+        if state.valid:
+            self._clear_target_memory()
+            ok, restored, metadata = restore_prefix_anchor(
+                state,
+                lib=self.lib.lib,
+                ctx=self._session.ctx_tgt,
+                prefix_hash=plan.prefix_hash,
+                token_count=len(plan.prefix_tokens),
+                enabled=True,
+                **plan.state_kwargs,
+            )
+            if ok:
+                with self._qwen36_shell_tool_prefix_lock:
+                    if (
+                        self.cancel_event.is_set()
+                        or self._qwen36_shell_tool_prefix_epoch != lifecycle_epoch
+                    ):
+                        self._clear_target_memory()
+                        return 0, 0
+                    self._session.cached_prompt_tokens = list(plan.prefix_tokens)
+                    status.initialized = True
+                    status.prefix_tokens = len(plan.prefix_tokens)
+                    status.restore_count += 1
+                    status.failure_reason = None
+                    status.last_used = "restore"
+                    return len(plan.prefix_tokens), len(plan.prefix_tokens)
+            with self._qwen36_shell_tool_prefix_lock:
+                if (
+                    self.cancel_event.is_set()
+                    or self._qwen36_shell_tool_prefix_epoch != lifecycle_epoch
+                ):
+                    self._clear_target_memory()
+                    return 0, 0
+                self._qwen36_shell_tool_prefix_anchor_state = restored
+                self._clear_target_memory()
+                status.invalidation_count += 1
+                self._record_qwen36_shell_tool_prefix_fallback(
+                    str(metadata.get("fallback_reason") or "restore_failed")
+                )
+                return 0, 0
+
+        self._clear_target_memory()
+        token_array = (llama_token * len(plan.prefix_tokens))(*plan.prefix_tokens)
+        step = max(1, min(self.config.progress_step, self.config.batch_size))
+        processed = self._decode_prompt_range(
+            token_array,
+            processed=0,
+            end=len(plan.prefix_tokens),
+            step=step,
+            total=len(plan.prefix_tokens),
+            on_progress=None,
+            should_cancel=None,
+        )
+        if processed != len(plan.prefix_tokens) or self.cancel_event.is_set():
+            self._clear_target_memory()
+            self._invalidate_qwen36_shell_tool_prefix("cancelled")
+            return 0, 0
+        self._session.cached_prompt_tokens = list(plan.prefix_tokens)
+        state, metadata = capture_prefix_anchor(
+            lib=self.lib.lib,
+            ctx=self._session.ctx_tgt,
+            prefix_hash=plan.prefix_hash,
+            token_count=len(plan.prefix_tokens),
+            enabled=True,
+            **plan.state_kwargs,
+        )
+        with self._qwen36_shell_tool_prefix_lock:
+            if (
+                self.cancel_event.is_set()
+                or self._qwen36_shell_tool_prefix_epoch != lifecycle_epoch
+            ):
+                self._clear_target_memory()
+                return 0, 0
+            self._qwen36_shell_tool_prefix_anchor_state = state
+            if state.valid:
+                status.initialized = True
+                status.prefix_tokens = len(plan.prefix_tokens)
+                status.capture_count += 1
+                status.failure_reason = None
+                status.last_used = "capture"
+            else:
+                self._record_qwen36_shell_tool_prefix_fallback(
+                    str(metadata.get("fallback_reason") or "capture_failed")
+                )
+            return len(plan.prefix_tokens), 0
+
+    def _qwen36_shell_tool_prefix_state_kwargs(
+        self,
+        spec: Qwen36ShellToolPrefixSpec,
+        *,
+        messages: list[NativeMessage],
+    ) -> dict[str, str | None]:
+        profile = self.model_profile
+        try:
+            stat = self.paths.model.stat()
+            model_file_identity = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        except OSError:
+            model_file_identity = {"size": None, "mtime_ns": None}
+        model_identity = hash_text(
+            json.dumps(
+                {
+                    "profile": getattr(profile, "profile_id", None),
+                    "metadata": self._model_metadata_identity,
+                    "file": model_file_identity,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        system_policy_identity = hash_text(
+            json.dumps(
+                [
+                    str(message.get("content", ""))
+                    for message in messages
+                    if message.get("role") == "system"
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        return {
+            "model_id": model_identity,
+            "template_id": hash_text(
+                f"{QWEN36_SHELL_TOOL_PREFIX_FORMAT_VERSION}:"
+                f"{getattr(profile, 'template_sha256', '')}:"
+                f"{QWEN36_SHELL_TOOL_TOKENIZER_IDENTITY}:ctx={self.config.context_tokens}"
+            ),
+            "tool_schema_hash": spec.tool_schema_hash,
+            "capability_summary_hash": system_policy_identity,
+            "runtime_policy_hash": spec.invariant_text_hash,
+            "route_contract_hash": spec.prefix_token_hash,
+            "backend_version": self._qwen_backend_build_identity(),
+            "native_version": hash_text(
+                f"{runtime_library_filename('llama')}:batch={self.config.batch_size}:"
+                f"ubatch={self.config.ubatch_size}:step={self.config.progress_step}:"
+                f"threads={self.config.threads}:threads_batch={self.config.threads_batch}"
+            ),
+            "tools_mode": "qwen36-shell-tool-call-tools-on-thinking-off",
+        }
+
+    def _record_qwen36_shell_tool_prefix_fallback(self, reason: str) -> None:
+        status = self._qwen36_shell_tool_prefix_status
+        status.fallback_count += 1
+        status.failure_reason = reason
+        status.last_used = "fallback"
+        if not self._qwen36_shell_tool_prefix_anchor_state.valid:
+            status.initialized = False
+            status.prefix_tokens = 0
+
+    def _invalidate_qwen36_shell_tool_prefix(self, reason: str) -> None:
+        if not hasattr(self, "_qwen36_shell_tool_prefix_anchor_state"):
+            return
+        lock = getattr(self, "_qwen36_shell_tool_prefix_lock", None)
+        if lock is None:
+            return
+        with lock:
+            state = self._qwen36_shell_tool_prefix_anchor_state
+            had_state = state.valid or state.checkpoint_size > 0
+            self._qwen36_shell_tool_prefix_anchor_state = PrefixAnchorState()
+            self._qwen36_shell_tool_prefix_spec = None
+            self._qwen36_shell_tool_prefix_epoch += 1
+            status = self._qwen36_shell_tool_prefix_status
+            if had_state:
+                status.invalidation_count += 1
+            status.initialized = False
+            status.prefix_tokens = 0
+            status.failure_reason = reason
+            status.last_used = "invalidated"
 
     def _qwen_route_prefix_state_for_profile(self, profile_id: str) -> PrefixAnchorState:
         if profile_id == QWEN3_CODER_PROFILE_ID:

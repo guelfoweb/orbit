@@ -28,6 +28,10 @@ from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.paths import DEFAULT_LLAMA_ROOT, DEFAULT_MODEL_ID, NativeLlamaPaths, resolve_legacy_paths, resolve_paths
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
+from orbit.native_llama.qwen36_shell_tool_prefix import (
+    exact_qwen36_shell_tool_schema,
+    resolve_qwen36_shell_tool_prefix_reuse,
+)
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_server.protocol import (
     ContinueRequest,
@@ -94,6 +98,11 @@ class OrbitNativeServer:
                 and not request.tools
                 and _is_qwen_route_prompt(request.messages)
             )
+            qwen36_shell_tool_prefix_anchor = (
+                request.qwen36_shell_tool_prefix_anchor
+                and not thinking
+                and exact_qwen36_shell_tool_schema(request.tools)
+            )
             if request.artifact_content:
                 completion = self.client.complete_artifact_text(
                     request.messages,
@@ -112,6 +121,7 @@ class OrbitNativeServer:
                     thinking=thinking,
                     route_prefix_anchor=request.route_prefix_anchor,
                     qwen_route_prefix_anchor=qwen_route_prefix_anchor,
+                    qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
                     allow_mtp_experimental=request.allow_mtp_experimental,
                     final_prefix_experiment=final_prefix_experiment,
                     on_progress=on_progress,
@@ -304,6 +314,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             mtp_config = _mtp_config_payload(state.client)
             final_prefix = state.client.final_prefix_experiment_status()
             qwen_route_prefix = state.client.qwen_route_prefix_reuse_status()
+            qwen36_shell_tool_prefix = state.client.qwen36_shell_tool_prefix_reuse_status()
             qwen3_coder_route_prefix = state.client.qwen3_coder_route_prefix_reuse_status()
             final_prefix_config = _final_prefix_reuse_props(state.client)
             self._json(
@@ -373,6 +384,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "final_prefix_experiment_last_used": final_prefix["last_used"],
                     "final_prefix_experiment_checkpoint_size_bytes": final_prefix["checkpoint_size_bytes"],
                     "qwen_route_prefix_reuse": qwen_route_prefix,
+                    "qwen36_shell_tool_prefix_reuse": qwen36_shell_tool_prefix,
                     "qwen3_coder_route_prefix_reuse": qwen3_coder_route_prefix,
                     **final_prefix_config,
                     **_tool_call_healing_props(),
@@ -689,6 +701,7 @@ def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     final_prefix_config = resolve_final_prefix_reuse()
     qwen_route_prefix_config = resolve_qwen_route_prefix_reuse()
+    qwen36_shell_tool_prefix_config = resolve_qwen36_shell_tool_prefix_reuse()
     qwen3_coder_route_prefix_config = resolve_qwen3_coder_route_prefix_reuse()
 
     try:
@@ -714,6 +727,9 @@ def run_server(argv: list[str] | None = None) -> int:
                 qwen_route_prefix_reuse_enabled=qwen_route_prefix_config.enabled,
                 qwen_route_prefix_reuse_source=qwen_route_prefix_config.source,
                 qwen_route_prefix_reuse_config_error=qwen_route_prefix_config.validation_error,
+                qwen36_shell_tool_prefix_reuse_enabled=qwen36_shell_tool_prefix_config.enabled,
+                qwen36_shell_tool_prefix_reuse_source=qwen36_shell_tool_prefix_config.source,
+                qwen36_shell_tool_prefix_reuse_config_error=qwen36_shell_tool_prefix_config.validation_error,
                 qwen3_coder_route_prefix_reuse_enabled=qwen3_coder_route_prefix_config.enabled,
                 qwen3_coder_route_prefix_reuse_source=qwen3_coder_route_prefix_config.source,
                 qwen3_coder_route_prefix_reuse_config_error=qwen3_coder_route_prefix_config.validation_error,

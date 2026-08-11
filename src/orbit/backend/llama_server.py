@@ -17,6 +17,10 @@ from .payloads import (
 )
 from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.qwen_route_prefix import resolve_qwen_route_prefix_reuse
+from orbit.native_llama.qwen36_shell_tool_prefix import (
+    exact_qwen36_shell_tool_schema,
+    resolve_qwen36_shell_tool_prefix_reuse,
+)
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
@@ -65,6 +69,11 @@ class LlamaServerBackend:
                 tools=tools,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
+                qwen36_shell_tool_prefix_anchor=_qwen36_shell_tool_prefix_anchor_requested(
+                    native_backend=native_backend,
+                    tools=tools,
+                    thinking=self.thinking,
+                ),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
                 final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
             )
@@ -103,6 +112,11 @@ class LlamaServerBackend:
                 stream=True,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
+                qwen36_shell_tool_prefix_anchor=_qwen36_shell_tool_prefix_anchor_requested(
+                    native_backend=native_backend,
+                    tools=tools,
+                    thinking=self.thinking,
+                ),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
                 final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
             )
@@ -899,6 +913,19 @@ def _qwen_route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     ):
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
+
+
+def _qwen36_shell_tool_prefix_anchor_requested(
+    *,
+    native_backend: bool,
+    tools: list[dict[str, Any]] | None,
+    thinking: bool,
+) -> bool:
+    if not native_backend or thinking or not resolve_qwen36_shell_tool_prefix_reuse().enabled:
+        return False
+    if current_phase() != "tool_call" or current_tools_mode() != "on":
+        return False
+    return exact_qwen36_shell_tool_schema(tools)
 
 
 def _allow_mtp_experimental_requested(*, native_backend: bool) -> bool | None:
