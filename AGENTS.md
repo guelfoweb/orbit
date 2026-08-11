@@ -339,7 +339,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC30
 
-- Current published baseline: `v0.0.1-rc30`.
+- Published predecessor: `v0.0.1-rc30`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc30
 - Includes squash merges `b9dbd54` from #167, `286fe53` from #168,
   `dbfca70` from #169, `a09862e` from #170, `d6f9cb1` from #171,
@@ -380,6 +380,39 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   provide TTFT estimation, statistical significance, cross-model rankings, or
   a universal model score.
 - See `docs/releases/v0.0.1-rc30.md`.
+
+### RC31
+
+- Current published baseline: `v0.0.1-rc31`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc31
+- Includes squash merges `190903d` from #175 and `ff74ee3` from #176.
+- Focus: exact-profile Qwen 3.6 shell-tool prefix reuse and a concise README
+  for new users. RC30 remains the predecessor containing Qualification Harness
+  v1, transient native capability-discovery recovery, and fail-closed
+  full-document intent recognition.
+- The verified `orbit-qwen36-native-v1` profile keeps one separate process-local
+  checkpoint for the exact tools-on, thinking-off,
+  `exec_shell_full_command` tool-call path. It captures complete hybrid state
+  at the unpadded 384-token boundary inside the 439-token invariant prefix.
+- The checkpoint identity is `qwen36-shell-tool-prefix-v1`; it is separate from
+  the 768-token Qwen route checkpoint and never applies to other tools,
+  artifact verification, final generation, Qwen3-Coder, or Gemma.
+  `ORBIT_QWEN36_SHELL_TOOL_PREFIX_REUSE=0` is the dedicated kill switch.
+- RC31 validation: qualification tests 83/83; affected backend, document,
+  profile, runtime, and shell-prefix tests 422/422; full discovery 1,701/1,701
+  with six expected skips; native runtime and MTP helper rebuild; `compileall`;
+  and `git diff --check` PASS.
+- Real checks restored Qwen 3.6 route `cached=768` and shell `cached=384` per
+  warm shell call with zero fallback. Qwen3-Coder startup prewarm captured once
+  and restored `cached=768`; Gemma final-prefix restored `cached=64`; strict
+  Gemma target/draft/mmproj MTP completed with acceptance ratio `0.9167`.
+- Full-document qualification passed 3/3. At context 8,192 the oversized case
+  reported `coverage=none` with 46,982 required tokens, while the fit case
+  reported complete coverage and clean snapshot cleanup.
+- The README now contains only the project summary, supported-model benchmark
+  table, requirements, installation, and quick-start instructions. No runtime
+  or backend behavior depends on the documentation change.
+- See `docs/releases/v0.0.1-rc31.md`.
 
 ## RC24 Tool-Loop Convergence
 
