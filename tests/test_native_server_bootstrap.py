@@ -11,6 +11,7 @@ from unittest import mock
 
 from orbit.native_llama.client import NativeRoutePrefixPrefillResult
 from orbit.native_llama.model_discovery import ModelDiscoveryResult, ModelDiscoveryRow
+from orbit.native_llama.model_download import DownloadResult
 from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.native_names import runtime_library_filename
 from orbit.native_server.app import (
@@ -155,6 +156,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
                         "orbit download ggml-org/Qwen3.6-35B-A3B-GGUF/"
                         "Qwen3.6-35B-A3B-Q4_K_M.gguf"
                     ),
+                    model_id="qwen36-35b-a3b-q4-k-m",
                 ),
             ),
             wall_ms=1.0,
@@ -621,7 +623,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             mock.patch("orbit.native_server.app.resolve_bootstrap_paths", side_effect=resolve),
             mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
             mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
-            mock.patch("sys.stdin", _InteractiveInput("2\n")),
+            mock.patch("sys.stdin", _InteractiveInput("3\n")),
             mock.patch("sys.stdout", new_callable=io.StringIO),
             redirect_stderr(stderr),
         ):
@@ -634,11 +636,12 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(captured_args[0].model_id, "qwen3-coder-30b-a3b-instruct-q4-k-m")
         output = stderr.getvalue()
         self.assertIn("Models:", output)
-        self.assertIn("Available verified models:", output)
-        self.assertIn("1. Qwen 3.6 35B-A3B", output)
-        self.assertIn("2. Qwen3-Coder 30B-A3B", output)
+        self.assertIn("Verified models:", output)
+        self.assertIn("1. Gemma 4 26B-A4B [MISSING]", output)
+        self.assertIn("2. Qwen 3.6 35B-A3B [AVAILABLE]", output)
+        self.assertIn("3. Qwen3-Coder 30B-A3B [AVAILABLE]", output)
         self.assertIn("Starting Qwen3-Coder 30B-A3B...", output)
-        selectable_output = output.split("Available verified models:", 1)[1]
+        selectable_output = output.split("Verified models:", 1)[1]
         self.assertNotIn("other.gguf", selectable_output)
         self.assertNotIn("broken.gguf", selectable_output)
 
@@ -682,11 +685,76 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 0)
         discovery.assert_not_called()
 
-    def test_run_server_interactive_without_available_verified_model_fails_closed(self) -> None:
+    def test_run_server_missing_verified_model_can_be_declined_without_side_effects(self) -> None:
         stderr = io.StringIO()
         with (
             mock.patch("orbit.native_server.app._resolve_native_runtime", return_value=(None, Path("/native"), Path("/native/libllama.so"))),
-            mock.patch("orbit.native_server.app.discover_models", return_value=self._missing_discovery()),
+            mock.patch("orbit.native_server.app.discover_models", return_value=self._missing_discovery()) as discovery,
+            mock.patch("orbit.native_server.app.download_model") as download,
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+            mock.patch("sys.stdin", _InteractiveInput("1\nn\n")),
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        discovery.assert_called_once()
+        download.assert_not_called()
+        bootstrap.assert_not_called()
+        self.assertIn("Download now? [Y/n]", stderr.getvalue())
+        self.assertIn("download cancelled", stderr.getvalue())
+
+    def test_missing_model_confirmation_handles_eof_and_invalid_input(self) -> None:
+        cases = (("1\n", 0, "download cancelled"), ("1\nmaybe\n", 1, "invalid download confirmation"))
+        for input_text, expected_code, expected_message in cases:
+            with self.subTest(input_text=input_text):
+                stderr = io.StringIO()
+                with (
+                    mock.patch(
+                        "orbit.native_server.app._resolve_native_runtime",
+                        return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                    ),
+                    mock.patch("orbit.native_server.app.discover_models", return_value=self._missing_discovery()),
+                    mock.patch("orbit.native_server.app.download_model") as download,
+                    mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+                    mock.patch("sys.stdin", _InteractiveInput(input_text)),
+                    redirect_stderr(stderr),
+                ):
+                    code = run_server([])
+
+                self.assertEqual(code, expected_code)
+                download.assert_not_called()
+                bootstrap.assert_not_called()
+                self.assertIn(expected_message, stderr.getvalue())
+
+    def test_unsupported_and_unverified_models_are_not_selectable(self) -> None:
+        discovery_result = ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow(
+                    model="other.gguf",
+                    local="AVAILABLE",
+                    support="UNSUPPORTED",
+                    path_or_action="/models/other.gguf",
+                ),
+                ModelDiscoveryRow(
+                    model="broken.gguf",
+                    local="AVAILABLE",
+                    support="UNVERIFIED",
+                    path_or_action="/models/broken.gguf",
+                ),
+            ),
+            wall_ms=1.0,
+            filesystem_scans=5,
+            metadata_inspections=2,
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app._resolve_native_runtime",
+                return_value=(None, Path("/native"), Path("/native/libllama.so")),
+            ),
+            mock.patch("orbit.native_server.app.discover_models", return_value=discovery_result) as discovery,
+            mock.patch("orbit.native_server.app.download_model") as download,
             mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
             mock.patch("sys.stdin", _InteractiveInput("1\n")),
             redirect_stderr(stderr),
@@ -694,8 +762,317 @@ class NativeServerBootstrapTests(unittest.TestCase):
             code = run_server([])
 
         self.assertEqual(code, 1)
+        discovery.assert_called_once()
+        download.assert_not_called()
         bootstrap.assert_not_called()
-        self.assertIn("no verified local model is available", stderr.getvalue())
+        self.assertIn("no verified model is available or downloadable", stderr.getvalue())
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_run_server_downloads_verifies_and_starts_missing_verified_model(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            models_dir = root / "models"
+            downloaded_path = models_dir / "ggml-org--Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+            downloaded_path.parent.mkdir(parents=True)
+            downloaded_path.write_bytes(b"GGUF")
+            available = ModelDiscoveryResult(
+                rows=(
+                    ModelDiscoveryRow(
+                        model="Qwen 3.6 35B-A3B",
+                        local="AVAILABLE",
+                        support="VERIFIED",
+                        path_or_action=str(downloaded_path),
+                        model_id="qwen36-35b-a3b-q4-k-m",
+                    ),
+                ),
+                wall_ms=1.0,
+                filesystem_scans=5,
+                metadata_inspections=1,
+            )
+            captured_args = []
+
+            def resolve(args):
+                captured_args.append(args)
+                return SimpleNamespace(model=downloaded_path)
+
+            stderr = io.StringIO()
+            with (
+                mock.patch(
+                    "orbit.native_server.app._resolve_native_runtime",
+                    return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                ),
+                mock.patch(
+                    "orbit.native_server.app.discover_models",
+                    side_effect=(self._missing_discovery(), available),
+                ) as discovery,
+                mock.patch(
+                    "orbit.native_server.app.download_model",
+                    return_value=DownloadResult(
+                        path=downloaded_path,
+                        downloaded=True,
+                        url="https://example.invalid/qwen.gguf",
+                    ),
+                ) as download,
+                mock.patch("orbit.native_server.app.resolve_bootstrap_paths", side_effect=resolve),
+                mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+                mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+                mock.patch("sys.stdin", _InteractiveInput("1\n\n")),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+                redirect_stderr(stderr),
+            ):
+                code = run_server(["--models-dir", str(models_dir), "--hf-cache", str(root / "hf")])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(discovery.call_count, 2)
+        download.assert_called_once_with(
+            "ggml-org/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+            models_dir=models_dir,
+            progress=mock.ANY,
+        )
+        self.assertEqual(len(captured_args), 1)
+        self.assertEqual(captured_args[0].model, downloaded_path.resolve())
+        self.assertEqual(captured_args[0].model_id, "qwen36-35b-a3b-q4-k-m")
+        output = stderr.getvalue()
+        self.assertIn("Download: orbit download ggml-org/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf", output)
+        self.assertIn("Verified: Qwen 3.6 35B-A3B", output)
+
+    def test_missing_model_download_failure_does_not_start_or_repeat(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app._resolve_native_runtime",
+                return_value=(None, Path("/native"), Path("/native/libllama.so")),
+            ),
+            mock.patch("orbit.native_server.app.discover_models", return_value=self._missing_discovery()) as discovery,
+            mock.patch("orbit.native_server.app.download_model", side_effect=RuntimeError("network unavailable")) as download,
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+            mock.patch("sys.stdin", _InteractiveInput("1\ny\n")),
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 1)
+        discovery.assert_called_once()
+        download.assert_called_once()
+        bootstrap.assert_not_called()
+        self.assertIn("download failed: network unavailable", stderr.getvalue())
+
+    def test_interrupted_missing_model_download_exits_130_without_start(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app._resolve_native_runtime",
+                return_value=(None, Path("/native"), Path("/native/libllama.so")),
+            ),
+            mock.patch("orbit.native_server.app.discover_models", return_value=self._missing_discovery()) as discovery,
+            mock.patch("orbit.native_server.app.download_model", side_effect=KeyboardInterrupt) as download,
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+            mock.patch("sys.stdin", _InteractiveInput("1\ny\n")),
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 130)
+        discovery.assert_called_once()
+        download.assert_called_once()
+        bootstrap.assert_not_called()
+        self.assertIn("model selection cancelled", stderr.getvalue())
+
+    def test_downloaded_model_must_match_selected_verified_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            downloaded_path = root / "models/ggml-org--Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+            downloaded_path.parent.mkdir(parents=True)
+            downloaded_path.write_bytes(b"wrong model")
+            unverified = ModelDiscoveryResult(
+                rows=(
+                    self._missing_discovery().rows[0],
+                    ModelDiscoveryRow(
+                        model=downloaded_path.name,
+                        local="AVAILABLE",
+                        support="UNVERIFIED",
+                        path_or_action=str(downloaded_path),
+                    ),
+                ),
+                wall_ms=1.0,
+                filesystem_scans=5,
+                metadata_inspections=1,
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch(
+                    "orbit.native_server.app._resolve_native_runtime",
+                    return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                ),
+                mock.patch(
+                    "orbit.native_server.app.discover_models",
+                    side_effect=(self._missing_discovery(), unverified),
+                ) as discovery,
+                mock.patch(
+                    "orbit.native_server.app.download_model",
+                    return_value=DownloadResult(
+                        path=downloaded_path,
+                        downloaded=True,
+                        url="https://example.invalid/wrong.gguf",
+                    ),
+                ),
+                mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+                mock.patch("sys.stdin", _InteractiveInput("1\ny\n")),
+                redirect_stderr(stderr),
+            ):
+                code = run_server(["--models-dir", str(root / "models")])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(discovery.call_count, 2)
+        bootstrap.assert_not_called()
+        self.assertIn("not the selected verified profile", stderr.getvalue())
+
+    def test_downloaded_model_rejects_a_different_verified_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            downloaded_path = root / "models/ggml-org--Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+            wrong_profile = ModelDiscoveryResult(
+                rows=(
+                    self._missing_discovery().rows[0],
+                    ModelDiscoveryRow(
+                        model="Qwen3-Coder 30B-A3B",
+                        local="AVAILABLE",
+                        support="VERIFIED",
+                        path_or_action=str(downloaded_path),
+                        model_id="qwen3-coder-30b-a3b-instruct-q4-k-m",
+                    ),
+                ),
+                wall_ms=1.0,
+                filesystem_scans=5,
+                metadata_inspections=1,
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch(
+                    "orbit.native_server.app._resolve_native_runtime",
+                    return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                ),
+                mock.patch(
+                    "orbit.native_server.app.discover_models",
+                    side_effect=(self._missing_discovery(), wrong_profile),
+                ) as discovery,
+                mock.patch(
+                    "orbit.native_server.app.download_model",
+                    return_value=DownloadResult(
+                        path=downloaded_path,
+                        downloaded=True,
+                        url="https://example.invalid/wrong-profile.gguf",
+                    ),
+                ),
+                mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+                mock.patch("sys.stdin", _InteractiveInput("1\ny\n")),
+                redirect_stderr(stderr),
+            ):
+                code = run_server(["--models-dir", str(root / "models")])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(discovery.call_count, 2)
+        bootstrap.assert_not_called()
+        self.assertIn("not the selected verified profile", stderr.getvalue())
+
+    def test_downloaded_model_rejects_unexpected_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unexpected_path = root / "elsewhere/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+            verified = ModelDiscoveryResult(
+                rows=(
+                    ModelDiscoveryRow(
+                        model="Qwen 3.6 35B-A3B",
+                        local="AVAILABLE",
+                        support="VERIFIED",
+                        path_or_action=str(unexpected_path),
+                        model_id="qwen36-35b-a3b-q4-k-m",
+                    ),
+                ),
+                wall_ms=1.0,
+                filesystem_scans=5,
+                metadata_inspections=1,
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch(
+                    "orbit.native_server.app._resolve_native_runtime",
+                    return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                ),
+                mock.patch(
+                    "orbit.native_server.app.discover_models",
+                    side_effect=(self._missing_discovery(), verified),
+                ) as discovery,
+                mock.patch(
+                    "orbit.native_server.app.download_model",
+                    return_value=DownloadResult(
+                        path=unexpected_path,
+                        downloaded=True,
+                        url="https://example.invalid/unexpected.gguf",
+                    ),
+                ),
+                mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+                mock.patch("sys.stdin", _InteractiveInput("1\ny\n")),
+                redirect_stderr(stderr),
+            ):
+                code = run_server(["--models-dir", str(root / "models")])
+
+        self.assertEqual(code, 1)
+        discovery.assert_called_once()
+        bootstrap.assert_not_called()
+        self.assertIn("unexpected model destination", stderr.getvalue())
+
+    def test_verified_download_bootstrap_failure_does_not_repeat_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            downloaded_path = root / "models/ggml-org--Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+            available = ModelDiscoveryResult(
+                rows=(
+                    ModelDiscoveryRow(
+                        model="Qwen 3.6 35B-A3B",
+                        local="AVAILABLE",
+                        support="VERIFIED",
+                        path_or_action=str(downloaded_path),
+                        model_id="qwen36-35b-a3b-q4-k-m",
+                    ),
+                ),
+                wall_ms=1.0,
+                filesystem_scans=5,
+                metadata_inspections=1,
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch(
+                    "orbit.native_server.app._resolve_native_runtime",
+                    return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                ),
+                mock.patch(
+                    "orbit.native_server.app.discover_models",
+                    side_effect=(self._missing_discovery(), available),
+                ) as discovery,
+                mock.patch(
+                    "orbit.native_server.app.download_model",
+                    return_value=DownloadResult(
+                        path=downloaded_path,
+                        downloaded=True,
+                        url="https://example.invalid/qwen.gguf",
+                    ),
+                ),
+                mock.patch(
+                    "orbit.native_server.app.resolve_bootstrap_paths",
+                    side_effect=RuntimeError("failed to load model: synthetic bootstrap failure"),
+                ),
+                mock.patch("sys.stdin", _InteractiveInput("1\ny\n")),
+                redirect_stderr(stderr),
+            ):
+                code = run_server(["--models-dir", str(root / "models")])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(discovery.call_count, 2)
+        self.assertEqual(stderr.getvalue().count("Models:"), 1)
+        self.assertNotIn("Select model", stderr.getvalue().split("Starting", 1)[-1])
 
     def test_run_server_interactive_rejects_out_of_range_selection(self) -> None:
         available = self._available_discovery()

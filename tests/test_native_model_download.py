@@ -93,6 +93,21 @@ class NativeModelDownloadTests(unittest.TestCase):
             self.assertEqual(result.path, models_dir / "owner--repo" / "path/model.gguf")
             self.assertIn("downloaded from https://huggingface.co/owner/repo/resolve/main/path/model.gguf", result.path.read_text(encoding="utf-8"))
 
+    def test_interrupted_download_removes_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "models"
+
+            def retrieve(_url: str, dest: str) -> None:
+                Path(dest).write_text("partial", encoding="utf-8")
+                raise KeyboardInterrupt
+
+            with self.assertRaises(KeyboardInterrupt):
+                download_model("owner/repo/model.gguf", models_dir=models_dir, retrieve=retrieve)
+
+            destination = models_dir / "owner--repo" / "model.gguf"
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(destination.parent.glob(".*.tmp")), [])
+
     def test_download_reports_bounded_percentage_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             progress: list[tuple[int, int]] = []

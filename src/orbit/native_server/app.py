@@ -24,9 +24,11 @@ from orbit.native_llama.client import (
     _has_open_thought_channel,
 )
 from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_context as native_kv_request_context
-from orbit.native_llama.model_discovery import discover_models, format_model_discovery
+from orbit.native_llama.download_cli import _DownloadProgress as DownloadProgress
+from orbit.native_llama.model_discovery import ModelDiscoveryRow, discover_models, format_model_discovery
+from orbit.native_llama.model_download import download_model
 from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
-from orbit.native_llama.model_registry import default_hf_cache, default_models_dir
+from orbit.native_llama.model_registry import default_hf_cache, default_models_dir, get_manifest, local_model_path
 from orbit.native_llama.paths import (
     DEFAULT_LLAMA_ROOT,
     DEFAULT_MODEL_ID,
@@ -711,8 +713,9 @@ def run_server(argv: list[str] | None = None) -> int:
     selected_interactively = False
     if _interactive_model_selection_requested(args):
         try:
-            if not _select_startup_model(args):
-                return 1
+            selection_exit = _select_startup_model(args)
+            if selection_exit is not None:
+                return selection_exit
             selected_interactively = True
         except KeyboardInterrupt:
             print("\nmodel selection cancelled", file=sys.stderr)
@@ -1062,7 +1065,7 @@ def _interactive_model_selection_requested(args: argparse.Namespace) -> bool:
     return args.model is None and args.model_id is None and callable(isatty) and bool(isatty())
 
 
-def _select_startup_model(args: argparse.Namespace) -> bool:
+def _select_startup_model(args: argparse.Namespace) -> int | None:
     try:
         build_bin = _resolve_native_runtime(args.llama_root)[1]
         result = discover_models(
@@ -1072,40 +1075,124 @@ def _select_startup_model(args: argparse.Namespace) -> bool:
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(_format_native_bootstrap_error(exc), file=sys.stderr)
-        return False
+        return 1
 
     print(format_model_discovery(result), file=sys.stderr)
     choices = tuple(
         row
         for row in result.rows
-        if row.local == "AVAILABLE" and row.support == "VERIFIED"
+        if row.local in {"AVAILABLE", "MISSING"} and row.support == "VERIFIED"
     )
     if not choices:
-        print("error: no verified local model is available", file=sys.stderr)
-        return False
+        print("error: no verified model is available or downloadable", file=sys.stderr)
+        return 1
 
-    print("\nAvailable verified models:", file=sys.stderr)
+    print("\nVerified models:", file=sys.stderr)
     for index, row in enumerate(choices, start=1):
-        print(f"  {index}. {row.model}", file=sys.stderr)
+        print(f"  {index}. {row.model} [{row.local}]", file=sys.stderr)
     print(f"Select model [1-{len(choices)}]: ", end="", file=sys.stderr, flush=True)
     response = sys.stdin.readline()
     if not response:
         print("model selection cancelled", file=sys.stderr)
-        return False
+        return 1
     try:
         selection = int(response.strip())
     except ValueError:
         print("error: invalid model selection", file=sys.stderr)
-        return False
+        return 1
     if not 1 <= selection <= len(choices):
         print("error: invalid model selection", file=sys.stderr)
-        return False
+        return 1
     selected = choices[selection - 1]
 
+    if selected.local == "MISSING":
+        return _download_selected_model(args, selected, build_bin=build_bin)
     args.model = Path(selected.path_or_action)
     args.model_id = selected.model_id
     print(f"Starting {selected.model}...", file=sys.stderr)
-    return True
+    return None
+
+
+def _download_selected_model(
+    args: argparse.Namespace,
+    selected: ModelDiscoveryRow,
+    *,
+    build_bin: Path,
+) -> int | None:
+    if selected.model_id is None:
+        print("error: selected model has no canonical download identity", file=sys.stderr)
+        return 1
+    try:
+        manifest = get_manifest(selected.model_id)
+    except KeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    target = f"{manifest.target.repo}/{manifest.target.file}"
+    print(f"\nSelected: {manifest.display_name}", file=sys.stderr)
+    print(f"Download: orbit download {target}", file=sys.stderr)
+    print("Download now? [Y/n] ", end="", file=sys.stderr, flush=True)
+    response = sys.stdin.readline()
+    if not response:
+        print("download cancelled", file=sys.stderr)
+        return 0
+    answer = response.strip().lower()
+    if answer in {"n", "no"}:
+        print("download cancelled", file=sys.stderr)
+        return 0
+    if answer not in {"", "y", "yes"}:
+        print("error: invalid download confirmation", file=sys.stderr)
+        return 1
+
+    models_dir = args.models_dir or default_models_dir()
+    progress = DownloadProgress()
+    try:
+        try:
+            downloaded = download_model(target, models_dir=models_dir, progress=progress)
+        finally:
+            progress.finish()
+    except Exception as exc:
+        print(f"error: download failed: {str(exc).strip() or exc.__class__.__name__}", file=sys.stderr)
+        return 1
+
+    expected_path = local_model_path(manifest.target, models_dir=models_dir).expanduser().resolve()
+    downloaded_path = downloaded.path.expanduser().resolve()
+    if downloaded_path != expected_path:
+        print("error: downloader returned an unexpected model destination", file=sys.stderr)
+        return 1
+
+    action = "downloaded" if downloaded.downloaded else "already present"
+    print(f"{action}: {downloaded.path}", file=sys.stderr)
+    try:
+        verified = discover_models(
+            models_dir=models_dir,
+            hf_cache=args.hf_cache or default_hf_cache(),
+            build_bin=build_bin,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: downloaded model verification failed: {str(exc).strip() or exc.__class__.__name__}", file=sys.stderr)
+        return 1
+
+    verified_row = next(
+        (
+            row
+            for row in verified.rows
+            if row.local == "AVAILABLE"
+            and row.support == "VERIFIED"
+            and row.model_id == selected.model_id
+            and Path(row.path_or_action).expanduser().resolve() == downloaded_path
+        ),
+        None,
+    )
+    if verified_row is None:
+        print("error: downloaded model is not the selected verified profile", file=sys.stderr)
+        return 1
+
+    args.model = downloaded_path
+    args.model_id = selected.model_id
+    print(f"Verified: {manifest.display_name}", file=sys.stderr)
+    print(f"Starting {manifest.display_name}...", file=sys.stderr)
+    return None
 
 
 def _session_id_from_payload(payload: dict[str, Any]) -> str:
