@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from orbit.native_server.app import OrbitNativeHandler, OrbitNativeServer, _DisconnectWatcher
 from orbit.native_server.protocol import openai_chat_response, parse_chat_request
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
+from orbit.runtime.shell_guardrails import exec_shell_full_definition
 
 
 @dataclass
@@ -44,6 +45,7 @@ class _FakeClient:
         self.allow_mtp_calls: list[bool | None] = []
         self.final_prefix_calls: list[bool] = []
         self.qwen_route_prefix_calls: list[bool] = []
+        self.qwen36_shell_tool_prefix_calls: list[bool] = []
         self.artifact_calls = 0
 
     def complete_chat_text(
@@ -56,6 +58,7 @@ class _FakeClient:
         thinking,
         route_prefix_anchor=False,
         qwen_route_prefix_anchor=False,
+        qwen36_shell_tool_prefix_anchor=False,
         allow_mtp_experimental=None,
         final_prefix_experiment=False,
         on_progress=None,
@@ -66,6 +69,7 @@ class _FakeClient:
         self.allow_mtp_calls.append(allow_mtp_experimental)
         self.final_prefix_calls.append(final_prefix_experiment)
         self.qwen_route_prefix_calls.append(qwen_route_prefix_anchor)
+        self.qwen36_shell_tool_prefix_calls.append(qwen36_shell_tool_prefix_anchor)
         return _FakeCompletion()
 
     def complete_artifact_text(self, messages, **kwargs):
@@ -198,6 +202,42 @@ class NativeServerThinkTests(unittest.TestCase):
         )
 
         self.assertEqual(client.qwen_route_prefix_calls, [True, False, False])
+
+    def test_qwen36_shell_prefix_requires_exact_schema_and_thinking_off(self) -> None:
+        client = _FakeClient(thinking=False)
+        server = OrbitNativeServer(client=client, model_alias="fake")  # type: ignore[arg-type]
+        tools = [exec_shell_full_definition()]
+
+        server.complete(
+            parse_chat_request(
+                {
+                    "messages": [{"role": "user", "content": "run pwd"}],
+                    "tools": tools,
+                    "qwen36_shell_tool_prefix_anchor": True,
+                }
+            )
+        )
+        server.complete(
+            parse_chat_request(
+                {
+                    "messages": [{"role": "user", "content": "run pwd"}],
+                    "tools": [{"type": "function", "function": {"name": "other"}}],
+                    "qwen36_shell_tool_prefix_anchor": True,
+                }
+            )
+        )
+        server.complete(
+            parse_chat_request(
+                {
+                    "messages": [{"role": "user", "content": "run pwd"}],
+                    "tools": tools,
+                    "thinking": True,
+                    "qwen36_shell_tool_prefix_anchor": True,
+                }
+            )
+        )
+
+        self.assertEqual(client.qwen36_shell_tool_prefix_calls, [True, False, False])
 
     def test_disconnect_watcher_disarm_skips_cancel_callback(self) -> None:
         called: list[str] = []

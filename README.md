@@ -109,7 +109,9 @@ orbit server \
 
 Qwen MTP and Gemma-specific prefix checkpoints are not enabled for Qwen. The
 verified Qwen profile has its own default-on 768-token route checkpoint with
-`ORBIT_QWEN_ROUTE_PREFIX_REUSE=0` as its kill switch. See
+`ORBIT_QWEN_ROUTE_PREFIX_REUSE=0` as its kill switch. Exact shell tool calls
+also use a separate qualified 384-token checkpoint; disable only that path with
+`ORBIT_QWEN36_SHELL_TOOL_PREFIX_REUSE=0`. See
 [`docs/QWEN_3_6_COMPATIBILITY.md`](docs/QWEN_3_6_COMPATIBILITY.md) for the exact
 identity gate, thinking behavior, tool protocol, diagnostics, and limits.
 

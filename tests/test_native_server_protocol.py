@@ -66,6 +66,7 @@ class NativeServerProtocolTests(unittest.TestCase):
         self.assertEqual(request.tools, [])
         self.assertFalse(request.route_prefix_anchor)
         self.assertFalse(request.qwen_route_prefix_anchor)
+        self.assertFalse(request.qwen36_shell_tool_prefix_anchor)
         self.assertIsNone(request.allow_mtp_experimental)
         self.assertFalse(request.final_prefix_experiment)
         self.assertFalse(request.artifact_content)
@@ -110,6 +111,15 @@ class NativeServerProtocolTests(unittest.TestCase):
     def test_parse_chat_request_accepts_qwen_route_prefix_anchor_flag(self) -> None:
         request = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "qwen_route_prefix_anchor": True})
         self.assertTrue(request.qwen_route_prefix_anchor)
+
+    def test_parse_chat_request_accepts_qwen36_shell_tool_prefix_anchor_flag(self) -> None:
+        request = parse_chat_request(
+            {
+                "messages": [{"role": "user", "content": "x"}],
+                "qwen36_shell_tool_prefix_anchor": True,
+            }
+        )
+        self.assertTrue(request.qwen36_shell_tool_prefix_anchor)
 
     def test_parse_chat_request_accepts_allow_mtp_flag(self) -> None:
         disabled = parse_chat_request({"messages": [{"role": "user", "content": "x"}], "allow_mtp_experimental": False})
