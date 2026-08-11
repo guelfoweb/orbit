@@ -38,6 +38,13 @@ class NativeModelDownloadTests(unittest.TestCase):
         self.assertEqual(request.repo, "ggml-org/gemma-4-26B-A4B-it-GGUF")
         self.assertEqual(request.file, "gemma-4-26B-A4B-it-Q4_0.gguf")
 
+    def test_parse_qwen_repos_use_verified_manifest_files(self) -> None:
+        qwen36 = parse_huggingface_spec("ggml-org/Qwen3.6-35B-A3B-GGUF")
+        coder = parse_huggingface_spec("unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF")
+
+        self.assertEqual(qwen36.file, "Qwen3.6-35B-A3B-Q4_K_M.gguf")
+        self.assertEqual(coder.file, "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf")
+
     def test_parse_repo_with_mmproj_preference_uses_manifest_projector(self) -> None:
         request = parse_huggingface_spec("ggml-org/gemma-4-26B-A4B-it-GGUF", prefer="mmproj")
 
