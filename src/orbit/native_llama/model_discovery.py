@@ -55,6 +55,7 @@ class ModelDiscoveryRow:
     local: str
     support: str
     path_or_action: str
+    model_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,9 @@ class NativeProfileInspector:
             return detect_native_model_profile(metadata, template)
         finally:
             self._lib.llama_model_free(model)
+
+    def close(self) -> None:
+        self._lib.llama_log_set(GgmlLogCallback(), None)
 
     def _read_metadata(self, model) -> dict[str, str]:
         metadata: dict[str, str] = {}
@@ -137,13 +141,19 @@ def discover_models(
         explicit_model=explicit_model,
     )
 
+    owned_inspector: NativeProfileInspector | None = None
     if candidates and inspector is None and build_bin is not None:
         try:
-            inspector = NativeProfileInspector(build_bin)
+            owned_inspector = NativeProfileInspector(build_bin)
+            inspector = owned_inspector
         except (OSError, RuntimeError):
             inspector = None
 
-    inspections = tuple(_inspect(path, inspector) for path in candidates)
+    try:
+        inspections = tuple(_inspect(path, inspector) for path in candidates)
+    finally:
+        if owned_inspector is not None:
+            owned_inspector.close()
     rows = _rows(supported, inspections)
     return ModelDiscoveryResult(
         rows=rows,
@@ -270,6 +280,7 @@ def _rows(
                     local="MISSING",
                     support="VERIFIED",
                     path_or_action=f"orbit download {manifest.target.repo}/{manifest.target.file}",
+                    model_id=manifest.id,
                 )
             )
             continue
@@ -281,6 +292,7 @@ def _rows(
                     local="AVAILABLE",
                     support="VERIFIED",
                     path_or_action=str(item.path),
+                    model_id=None if manifest is None else manifest.id,
                 )
             )
 

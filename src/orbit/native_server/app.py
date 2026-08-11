@@ -708,6 +708,15 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
 
 def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    selected_interactively = False
+    if _interactive_model_selection_requested(args):
+        try:
+            if not _select_startup_model(args):
+                return 1
+            selected_interactively = True
+        except KeyboardInterrupt:
+            print("\nmodel selection cancelled", file=sys.stderr)
+            return 130
     final_prefix_config = resolve_final_prefix_reuse()
     qwen_route_prefix_config = resolve_qwen_route_prefix_reuse()
     qwen36_shell_tool_prefix_config = resolve_qwen36_shell_tool_prefix_reuse()
@@ -769,7 +778,7 @@ def run_server(argv: list[str] | None = None) -> int:
                 return 130
     except (FileNotFoundError, KeyError, RuntimeError) as exc:
         print(_format_native_bootstrap_error(exc), file=sys.stderr)
-        if _is_model_bootstrap_failure(exc):
+        if _is_model_bootstrap_failure(exc) and not selected_interactively:
             _print_model_discovery(args, paths)
         return 1
 
@@ -1046,6 +1055,57 @@ def _print_model_discovery(args: argparse.Namespace, paths: NativeLlamaPaths | N
         print(f"model discovery unavailable: {str(exc).strip() or exc.__class__.__name__}", file=sys.stderr)
         return
     print(format_model_discovery(result), file=sys.stderr)
+
+
+def _interactive_model_selection_requested(args: argparse.Namespace) -> bool:
+    isatty = getattr(sys.stdin, "isatty", None)
+    return args.model is None and args.model_id is None and callable(isatty) and bool(isatty())
+
+
+def _select_startup_model(args: argparse.Namespace) -> bool:
+    try:
+        build_bin = _resolve_native_runtime(args.llama_root)[1]
+        result = discover_models(
+            models_dir=args.models_dir or default_models_dir(),
+            hf_cache=args.hf_cache or default_hf_cache(),
+            build_bin=build_bin,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(_format_native_bootstrap_error(exc), file=sys.stderr)
+        return False
+
+    print(format_model_discovery(result), file=sys.stderr)
+    choices = tuple(
+        row
+        for row in result.rows
+        if row.local == "AVAILABLE" and row.support == "VERIFIED"
+    )
+    if not choices:
+        print("error: no verified local model is available", file=sys.stderr)
+        return False
+
+    print("\nAvailable verified models:", file=sys.stderr)
+    for index, row in enumerate(choices, start=1):
+        print(f"  {index}. {row.model}", file=sys.stderr)
+    print(f"Select model [1-{len(choices)}]: ", end="", file=sys.stderr, flush=True)
+    response = sys.stdin.readline()
+    if not response:
+        print("model selection cancelled", file=sys.stderr)
+        return False
+    try:
+        selection = int(response.strip())
+    except ValueError:
+        print("error: invalid model selection", file=sys.stderr)
+        return False
+    if not 1 <= selection <= len(choices):
+        print("error: invalid model selection", file=sys.stderr)
+        return False
+    selected = choices[selection - 1]
+
+    args.model = Path(selected.path_or_action)
+    args.model_id = selected.model_id
+    print(f"Starting {selected.model}...", file=sys.stderr)
+    return True
 
 
 def _session_id_from_payload(payload: dict[str, Any]) -> str:

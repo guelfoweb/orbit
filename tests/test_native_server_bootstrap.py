@@ -30,6 +30,7 @@ class _FakeNativeClient:
     instances: list["_FakeNativeClient"] = []
 
     def __init__(self, *_args, **_kwargs) -> None:
+        self.paths = _args[0] if _args else None
         self.config = _args[1] if len(_args) > 1 else None
         self.loaded = False
         self.closed = False
@@ -131,6 +132,16 @@ class _FakeHTTPServer:
         self.closed = True
 
 
+class _InteractiveInput(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+class _InterruptingInput(_InteractiveInput):
+    def readline(self, *_args, **_kwargs) -> str:
+        raise KeyboardInterrupt
+
+
 class NativeServerBootstrapTests(unittest.TestCase):
     @staticmethod
     def _missing_discovery() -> ModelDiscoveryResult:
@@ -149,6 +160,23 @@ class NativeServerBootstrapTests(unittest.TestCase):
             wall_ms=1.0,
             filesystem_scans=5,
             metadata_inspections=0,
+        )
+
+    @staticmethod
+    def _available_discovery() -> ModelDiscoveryResult:
+        return ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow(
+                    model="Qwen 3.6 35B-A3B",
+                    local="AVAILABLE",
+                    support="VERIFIED",
+                    path_or_action="/models/qwen36.gguf",
+                    model_id="qwen36-35b-a3b-q4-k-m",
+                ),
+            ),
+            wall_ms=1.0,
+            filesystem_scans=5,
+            metadata_inspections=1,
         )
 
     def test_bootstrap_can_use_packaged_vendor_lib_without_llama_root(self) -> None:
@@ -527,12 +555,271 @@ class NativeServerBootstrapTests(unittest.TestCase):
             mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
             mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
             mock.patch("orbit.native_server.app.discover_models") as discovery,
+            mock.patch("sys.stdin", _InteractiveInput("1\n")),
             mock.patch("sys.stdout", new_callable=io.StringIO),
         ):
             code = run_server(["--model", "/models/valid.gguf"])
 
         self.assertEqual(code, 0)
         discovery.assert_not_called()
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_run_server_without_model_prompts_and_starts_selected_verified_model(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        selected_path = Path("/models/qwen3-coder.gguf")
+        discovery_result = ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow(
+                    model="Gemma 4 26B-A4B",
+                    local="MISSING",
+                    support="VERIFIED",
+                    path_or_action="orbit download repo/gemma.gguf",
+                    model_id="gemma4-26b-a4b-it-q40",
+                ),
+                ModelDiscoveryRow(
+                    model="Qwen 3.6 35B-A3B",
+                    local="AVAILABLE",
+                    support="VERIFIED",
+                    path_or_action="/models/qwen36.gguf",
+                    model_id="qwen36-35b-a3b-q4-k-m",
+                ),
+                ModelDiscoveryRow(
+                    model="Qwen3-Coder 30B-A3B",
+                    local="AVAILABLE",
+                    support="VERIFIED",
+                    path_or_action=str(selected_path),
+                    model_id="qwen3-coder-30b-a3b-instruct-q4-k-m",
+                ),
+                ModelDiscoveryRow(
+                    model="other.gguf",
+                    local="AVAILABLE",
+                    support="UNSUPPORTED",
+                    path_or_action="/models/other.gguf",
+                ),
+                ModelDiscoveryRow(
+                    model="broken.gguf",
+                    local="AVAILABLE",
+                    support="UNVERIFIED",
+                    path_or_action="/models/broken.gguf",
+                ),
+            ),
+            wall_ms=1.0,
+            filesystem_scans=5,
+            metadata_inspections=3,
+        )
+        captured_args = []
+
+        def resolve(args):
+            captured_args.append(args)
+            return SimpleNamespace(model=selected_path)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch("orbit.native_server.app._resolve_native_runtime", return_value=(None, Path("/native"), Path("/native/libllama.so"))),
+            mock.patch("orbit.native_server.app.discover_models", return_value=discovery_result) as discovery,
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths", side_effect=resolve),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdin", _InteractiveInput("2\n")),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        discovery.assert_called_once()
+        self.assertEqual(len(captured_args), 1)
+        self.assertEqual(captured_args[0].model, selected_path)
+        self.assertEqual(captured_args[0].model_id, "qwen3-coder-30b-a3b-instruct-q4-k-m")
+        output = stderr.getvalue()
+        self.assertIn("Models:", output)
+        self.assertIn("Available verified models:", output)
+        self.assertIn("1. Qwen 3.6 35B-A3B", output)
+        self.assertIn("2. Qwen3-Coder 30B-A3B", output)
+        self.assertIn("Starting Qwen3-Coder 30B-A3B...", output)
+        selectable_output = output.split("Available verified models:", 1)[1]
+        self.assertNotIn("other.gguf", selectable_output)
+        self.assertNotIn("broken.gguf", selectable_output)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_run_server_explicit_model_id_bypasses_interactive_selection(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/qwen36.gguf")),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("orbit.native_server.app.discover_models") as discovery,
+            mock.patch("sys.stdin", _InteractiveInput("1\n")),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server(["--model-id", "qwen36-35b-a3b-q4-k-m"])
+
+        self.assertEqual(code, 0)
+        discovery.assert_not_called()
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_run_server_noninteractive_without_model_preserves_default_startup(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with (
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/default.gguf")),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("orbit.native_server.app.discover_models") as discovery,
+            mock.patch("sys.stdin", io.StringIO()),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        discovery.assert_not_called()
+
+    def test_run_server_interactive_without_available_verified_model_fails_closed(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch("orbit.native_server.app._resolve_native_runtime", return_value=(None, Path("/native"), Path("/native/libllama.so"))),
+            mock.patch("orbit.native_server.app.discover_models", return_value=self._missing_discovery()),
+            mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+            mock.patch("sys.stdin", _InteractiveInput("1\n")),
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 1)
+        bootstrap.assert_not_called()
+        self.assertIn("no verified local model is available", stderr.getvalue())
+
+    def test_run_server_interactive_rejects_out_of_range_selection(self) -> None:
+        available = self._available_discovery()
+        for value in ("0\n", "2\n", "invalid\n", "\n"):
+            with self.subTest(value=value):
+                with (
+                    mock.patch(
+                        "orbit.native_server.app._resolve_native_runtime",
+                        return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                    ),
+                    mock.patch("orbit.native_server.app.discover_models", return_value=available),
+                    mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+                    mock.patch("sys.stdin", _InteractiveInput(value)),
+                    mock.patch("sys.stderr", new_callable=io.StringIO),
+                ):
+                    code = run_server([])
+
+                self.assertEqual(code, 1)
+                bootstrap.assert_not_called()
+
+    def test_selected_model_bootstrap_failure_does_not_repeat_discovery(self) -> None:
+        available = self._available_discovery()
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app._resolve_native_runtime",
+                return_value=(None, Path("/native"), Path("/native/libllama.so")),
+            ),
+            mock.patch("orbit.native_server.app.discover_models", return_value=available) as discovery,
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                side_effect=RuntimeError("failed to load model: synthetic bootstrap failure"),
+            ),
+            mock.patch("sys.stdin", _InteractiveInput("1\n")),
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 1)
+        discovery.assert_called_once()
+        self.assertEqual(stderr.getvalue().count("Models:"), 1)
+
+    def test_interactive_model_selection_handles_eof_and_keyboard_interrupt(self) -> None:
+        available = self._available_discovery()
+        cases = ((_InteractiveInput(""), 1, "selection cancelled"), (_InterruptingInput(), 130, "selection cancelled"))
+        for stdin, expected_code, expected_message in cases:
+            with self.subTest(expected_code=expected_code):
+                stderr = io.StringIO()
+                with (
+                    mock.patch(
+                        "orbit.native_server.app._resolve_native_runtime",
+                        return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                    ),
+                    mock.patch("orbit.native_server.app.discover_models", return_value=available),
+                    mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+                    mock.patch("sys.stdin", stdin),
+                    redirect_stderr(stderr),
+                ):
+                    code = run_server([])
+
+                self.assertEqual(code, expected_code)
+                bootstrap.assert_not_called()
+                self.assertIn(expected_message, stderr.getvalue())
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_selected_gemma_preserves_manifest_mmproj_and_mtp_handoff(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            llama_root = root / "llama"
+            build_bin = llama_root / "build/bin"
+            models_dir = root / "models"
+            model_dir = models_dir / "ggml-org--gemma-4-26B-A4B-it-GGUF"
+            target = model_dir / "gemma-4-26B-A4B-it-Q4_0.gguf"
+            mmproj = model_dir / "mmproj-gemma-4-26B-A4B-it-Q8_0.gguf"
+            draft = model_dir / "mtp-gemma-4-26B-A4B-it-Q4_0.gguf"
+            build_bin.mkdir(parents=True)
+            model_dir.mkdir(parents=True)
+            (build_bin / runtime_library_filename("llama")).write_text("", encoding="utf-8")
+            for path in (target, mmproj, draft):
+                path.write_text(path.name, encoding="utf-8")
+            available = ModelDiscoveryResult(
+                rows=(
+                    ModelDiscoveryRow(
+                        model="Gemma 4 26B-A4B",
+                        local="AVAILABLE",
+                        support="VERIFIED",
+                        path_or_action=str(target),
+                        model_id="gemma4-26b-a4b-it-q40",
+                    ),
+                ),
+                wall_ms=1.0,
+                filesystem_scans=5,
+                metadata_inspections=1,
+            )
+            with (
+                mock.patch("orbit.native_server.app.discover_models", return_value=available),
+                mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+                mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+                mock.patch("sys.stdin", _InteractiveInput("1\n")),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+                mock.patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                code = run_server(
+                    [
+                        "--llama-root",
+                        str(llama_root),
+                        "--models-dir",
+                        str(models_dir),
+                        "--hf-cache",
+                        str(root / "hf"),
+                    ]
+                )
+
+            paths = _FakeNativeClient.instances[-1].paths
+
+        self.assertEqual(code, 0)
+        self.assertEqual(paths.model_id, "gemma4-26b-a4b-it-q40")
+        self.assertEqual(paths.model, target)
+        self.assertEqual(paths.mmproj_model, mmproj)
+        self.assertEqual(paths.draft_mtp_model, draft)
+        self.assertTrue(paths.multimodal_available)
+        self.assertTrue(paths.mtp_available)
 
     def test_unknown_model_id_fails_clearly_with_discovery(self) -> None:
         stderr = io.StringIO()
