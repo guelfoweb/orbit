@@ -383,7 +383,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC31
 
-- Current published baseline: `v0.0.1-rc31`.
+- Published predecessor: `v0.0.1-rc31`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc31
 - Includes squash merges `190903d` from #175 and `ff74ee3` from #176.
 - Focus: exact-profile Qwen 3.6 shell-tool prefix reuse and a concise README
@@ -413,6 +413,40 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   table, requirements, installation, and quick-start instructions. No runtime
   or backend behavior depends on the documentation change.
 - See `docs/releases/v0.0.1-rc31.md`.
+
+### RC32
+
+- Current published baseline: `v0.0.1-rc32`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc32
+- Includes squash merges `a474614` from #177, `92aae65` from #178, and
+  `0c394d8` from #179.
+- Focus: zero-setup interactive native-server startup. In a TTY, `orbit server`
+  performs one bounded discovery pass, displays verified and informational
+  local-model status, and permits selection of only available or missing
+  verified models.
+- Available verified selections retain normal exact profile authorization. A
+  missing verified selection may use the existing Orbit downloader after
+  confirmation; the canonical destination, registry identity, and exact
+  detected profile must all match before server bootstrap.
+- Unsupported and unverified local GGUFs remain informational and cannot be
+  selected. Filename and registry metadata never authorize inference. Download,
+  verification, interruption, or bootstrap failure cannot silently select or
+  start another model.
+- Explicit `--model`, explicit `--model-id`, non-TTY startup, and direct
+  `orbit download` retain their previous behavior. No inference, routing,
+  tokenizer, prompt, or backend behavior changed.
+- RC32 validation: focused discovery, selector, download, and server tests
+  105/105; native/profile tests 362/362 with three expected skips; CLI tests
+  31/31; affected download and startup tests 255/255; full discovery
+  1,747/1,747 with six expected skips; JSON validation, `compileall`, and
+  `git diff --check` PASS.
+- Real checks selected and started an available verified model, exercised the
+  missing-model download/rediscovery/verification/start lifecycle without a
+  multi-gigabyte transfer, and kept all failure paths fail-closed. Qwen 3.6
+  route and shell reuse restored `cached=768` and `cached=384`; Qwen3-Coder
+  startup prewarm restored `cached=768`; Gemma final-prefix restored
+  `cached=64`; strict Gemma target/draft/mmproj MTP remained usable.
+- See `docs/releases/v0.0.1-rc32.md`.
 
 ## RC24 Tool-Loop Convergence
 
