@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import re
+import sys
 import threading
 import time
 
 from orbit.backend.base import StreamProgress
-from orbit.terminal.theme import CYAN, DIM, RESET, dim
+from orbit.terminal.theme import CYAN, DIM, RESET, dim, is_tty, supports_ansi
 
 
-SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
 PREFILL_COMPLETION_LABEL = "waiting for model..."
 MARKDOWN_HEADING = "\033[1m" + CYAN
 MARKDOWN_BOLD = "\033[1m"
@@ -26,20 +26,22 @@ class StreamRenderer:
         prefill_estimate_tokens: int | None = None,
         thinking: bool = False,
         render_markdown_mode: str = "plain",
+        interactive: bool | None = None,
     ) -> None:
         self.interval = interval
         self._prefill_estimate_seconds = prefill_estimate_seconds
         self._prefill_estimate_tokens = prefill_estimate_tokens
         self._thinking_filter = _ThinkingDisplayFilter() if thinking else None
-        self._markdown_mode = render_markdown_mode
-        self._markdown_live = _LiveMarkdownRenderer(enabled=render_markdown_mode == "live")
+        self._interactive = is_tty(sys.stdout) if interactive is None else interactive
+        self._ansi = supports_ansi(sys.stdout) if interactive is None else interactive
+        self._markdown_mode = render_markdown_mode if self._ansi else "plain"
+        self._markdown_live = _LiveMarkdownRenderer(enabled=self._markdown_mode == "live")
         self._started = False
         self._first_delta = False
         self._timer_active = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_time = 0.0
-        self._frame_index = 0
         self._progress: StreamProgress | None = None
         self._generation_completed = 0
         self._generation_budget_completed = 0
@@ -47,11 +49,13 @@ class StreamRenderer:
         self._thinking_final_started = False
         self._thinking_dim_open = False
         self._phase_label: str | None = None
+        self._activity_kind = "model"
 
     def start(self) -> None:
         self._started = True
         self._start_time = time.monotonic()
-        self._frame_index = 0
+        if not self._interactive:
+            return
         self._timer_active = True
         self._thread = threading.Thread(target=self._run_wait_timer, daemon=True)
         self._thread.start()
@@ -70,31 +74,41 @@ class StreamRenderer:
                 continue
             self._print_thinking_fragment(fragment, dimmed=dimmed)
 
-    def event(self, text: str, *, restart_timer: bool = True, trailing_blank_line: bool = False) -> None:
+    def event(
+        self,
+        text: str,
+        *,
+        restart_timer: bool = True,
+        trailing_blank_line: bool = False,
+        next_activity: tuple[str, str | None] | None = None,
+    ) -> None:
         self._flush_markdown_buffer(interrupted=False)
         self._stop_timer(clear=True)
         print(dim(text), flush=True)
         if trailing_blank_line:
             print(flush=True)
-        if not restart_timer:
+        if next_activity is not None:
+            self.set_activity(*next_activity)
+        if not restart_timer and next_activity is None:
             return
         self._restart_timer()
 
     def _restart_timer(self) -> None:
         self._stop.clear()
         self._start_time = time.monotonic()
-        self._frame_index = 0
         self._first_delta = False
         self._progress = None
         self._generation_completed = 0
         self._generation_budget_completed = 0
+        if not self._interactive or not self._started:
+            return
         self._timer_active = True
         self._thread = threading.Thread(target=self._run_wait_timer, daemon=True)
         self._thread.start()
 
     def progress(self, update: StreamProgress) -> None:
         self._progress = self._normalize_progress(update)
-        if self._started and not self._first_delta:
+        if self._interactive and self._started and not self._first_delta:
             self._render_wait_line()
 
     def finish(self, *, interrupted: bool = False) -> None:
@@ -102,7 +116,7 @@ class StreamRenderer:
             for fragment, dimmed in self._thinking_filter.finish():
                 if fragment:
                     self._print_thinking_fragment(fragment, dimmed=dimmed)
-            if self._thinking_dim_open:
+            if self._thinking_dim_open and self._ansi:
                 print(RESET, end="", flush=True)
                 self._thinking_dim_open = False
         self._flush_markdown_buffer(interrupted=interrupted)
@@ -115,14 +129,14 @@ class StreamRenderer:
             print(dim("Thinking...\n"), end="", flush=True)
             self._thinking_started = True
         if not dimmed and self._thinking_started and not self._thinking_final_started:
-            if self._thinking_dim_open:
+            if self._thinking_dim_open and self._ansi:
                 print(RESET, end="", flush=True)
                 self._thinking_dim_open = False
             if not fragment.startswith("\n"):
                 print("\n\n", end="", flush=True)
             self._thinking_final_started = True
         if dimmed:
-            if not self._thinking_dim_open:
+            if self._ansi and not self._thinking_dim_open:
                 print(DIM, end="", flush=True)
                 self._thinking_dim_open = True
             print(fragment, end="", flush=True)
@@ -148,6 +162,9 @@ class StreamRenderer:
                 pass
 
     def _stop_timer(self, *, clear: bool) -> None:
+        if not self._interactive:
+            self._timer_active = False
+            return
         self._stop.set()
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=1)
@@ -163,9 +180,8 @@ class StreamRenderer:
 
     def _render_wait_line(self) -> None:
         elapsed = time.monotonic() - self._start_time
-        frame = SPINNER_FRAMES[self._frame_index % len(SPINNER_FRAMES)]
-        self._frame_index += 1
-        line = dim(f"{frame} Working{self._working_phase_prefix()} ({self._working_status(elapsed)} - Ctrl+C to interrupt)")
+        detail = self._phase_label or self._progress_phase_label() or "working"
+        line = dim(_fit_activity_line(self._activity_kind, detail, format_elapsed(elapsed)))
         print(f"\r{_pad_to_terminal_width(line)}", end="", flush=True)
 
     @staticmethod
@@ -178,6 +194,11 @@ class StreamRenderer:
         self._prefill_estimate_tokens = tokens
 
     def set_phase_label(self, label: str | None) -> None:
+        self._activity_kind = "model"
+        self._phase_label = label.strip() if label else None
+
+    def set_activity(self, kind: str, label: str | None = None) -> None:
+        self._activity_kind = kind.strip() or "model"
         self._phase_label = label.strip() if label else None
 
     def set_final_output_mode(self, enabled: bool) -> None:
@@ -241,12 +262,31 @@ class StreamRenderer:
             return "prefill estimate"
         return None
 
+    def _progress_phase_label(self) -> str | None:
+        if self._progress is None:
+            return None
+        if self._progress.phase == "prefill":
+            return "prefill"
+        if self._progress.phase == "generation":
+            return "generation"
+        return self._progress.phase
+
 
 def _terminal_columns() -> int:
     try:
         return max(20, int(__import__("shutil").get_terminal_size((80, 20)).columns))
     except Exception:
         return 80
+
+
+def _fit_activity_line(kind: str, detail: str, elapsed: str) -> str:
+    columns = _terminal_columns()
+    prefix = f"{kind} · "
+    suffix = f" · {elapsed}"
+    available = max(1, columns - len(prefix) - len(suffix) - 1)
+    if len(detail) > available:
+        detail = detail[: max(0, available - 1)].rstrip() + "…"
+    return f"{prefix}{detail}{suffix}"
 
 
 def _pad_to_terminal_width(text: str) -> str:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from orbit import __version__
+from orbit.native_llama.model_registry import load_registry
 from orbit.runtime.session_memory import DEFAULT_CONTEXT_TOKENS, SOFT_MEMORY_RATIO, estimate_message_tokens
 from orbit.runtime.tools import tool_names
 from orbit.terminal.config import AppConfig
@@ -79,6 +80,7 @@ class RuntimeStatus:
     mutation_failures: str
     host: HostInfo
     acceleration: AccelerationInfo
+    banner_model: str | None = None
 
 
 def collect_host_info() -> HostInfo:
@@ -130,46 +132,20 @@ def collect_runtime_status(
         mutation_failures=str(runtime.mutation_verification_failures),
         host=host_info or collect_host_info(),
         acceleration=_acceleration_info(props),
+        banner_model=_verified_model_display_name(props),
     )
 
 
 def format_startup_banner(status: RuntimeStatus) -> str:
-    cpu = _cores_short(status.host.physical_cores, status.host.logical_cores)
-    rows = [
-        ("header", "Orbit Runtime"),
-        ("Version", status.version),
-        ("Model", status.model),
-        ("Backend", status.backend),
-        ("MTP", f"{status.mtp}, mmproj {status.mmproj}"),
-        ("Tools", status.tools),
-        ("Think", status.think),
-        ("Max tokens", status.max_tokens),
-        ("Workdir", status.workdir),
-        ("separator", "Host"),
-        ("Machine", status.host.machine),
-        ("OS", status.host.os_name),
-        ("CPU", cpu),
-        ("Cores", f"{status.host.physical_cores} physical / {status.host.logical_cores} logical"),
-        ("RAM", f"{status.host.ram_total} total, {status.host.ram_available} free"),
-        ("Accel", _startup_accel_value(status.acceleration)),
-    ]
+    version = status.version if status.version.startswith("v") else f"v{status.version}"
+    backend = "native" if status.backend in {"native llama.cpp", "orbit-native"} else status.backend
     return "\n".join(
         [
-            _box(rows, width=58),
-            "Type /help for commands, /status for runtime details.",
+            f"Orbit {version} · {status.banner_model or status.model} · {backend}",
+            f"workdir {status.workdir} · tools {status.tools} · think {status.think} · ctx {status.context_window}",
+            "/help for commands · /status for details",
         ]
     )
-
-
-def _startup_accel_value(accel: AccelerationInfo) -> str:
-    parts = [accel.mode]
-    if accel.gpu != UNKNOWN:
-        parts.append(f"GPU {accel.gpu}")
-    if accel.vram_total != UNKNOWN:
-        parts.append(accel.vram_total)
-    if accel.offload != UNKNOWN:
-        parts.append(f"offload {accel.offload}")
-    return ", ".join(parts)
 
 
 def format_status_panel(status: RuntimeStatus) -> str:
@@ -419,6 +395,23 @@ def _model_name(info: object, backend: BackendLike) -> str:
     if isinstance(display, str) and display:
         return _strip_long_path(display)
     return UNKNOWN
+
+
+def _verified_model_display_name(props: dict[str, object]) -> str | None:
+    compatibility = props.get("model_compatibility")
+    if not isinstance(compatibility, dict) or compatibility.get("verified") is not True:
+        return None
+    profile_id = compatibility.get("compatibility_profile")
+    if not isinstance(profile_id, str) or not profile_id:
+        return None
+    try:
+        manifests = load_registry()
+    except (OSError, ValueError):
+        return None
+    return next(
+        (manifest.display_name for manifest in manifests if manifest.profile_id == profile_id),
+        None,
+    )
 
 
 def _model_context(info: object) -> int | None:

@@ -9,14 +9,13 @@ LARGE_TOOL_RESULT_CHARS = 10_000
 SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
 PREVIEW_LINE_LIMIT = 3
 PREVIEW_INLINE_LIMIT = 120
-COMMAND_PREVIEW_LIMIT = 96
 DISPLAY_TOOL_NAMES = {
-    "exec_shell_full_command": "exec",
-    "fetch_url": "fetch_url",
-    "list_directory": "list_directory",
-    "system_info": "system_info",
-    "write_artifact": "write_artifact",
-    "verify_artifact": "verify_artifact",
+    "exec_shell_full_command": "Exec",
+    "fetch_url": "Web",
+    "list_directory": "Read",
+    "system_info": "Read",
+    "write_artifact": "Artifact",
+    "verify_artifact": "Artifact",
 }
 
 
@@ -32,14 +31,14 @@ def format_tool_call_event(name: str, args: str) -> str:
     if name == "fetch_url":
         url = _url_from_args(args)
         if url:
-            return f"Fetch: {_truncate_inline(url, limit=COMMAND_PREVIEW_LIMIT)}"
+            return f"› Web  {_normalize_inline(url)}"
     if name == "list_directory":
         path, recursive = _list_directory_from_args(args)
         if path:
-            suffix = " recursive" if recursive else ""
-            return f"ListDir{suffix}: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}"
+            suffix = " · recursive" if recursive else ""
+            return f"› Read  {_normalize_inline(path)}{suffix}"
     if name == "system_info":
-        return "SystemInfo"
+        return "› Read  system information"
     if name == "write_artifact":
         try:
             parsed = json.loads(args)
@@ -47,7 +46,7 @@ def format_tool_call_event(name: str, args: str) -> str:
             parsed = {}
         path = parsed.get("path") if isinstance(parsed, dict) else None
         if isinstance(path, str) and path:
-            return f"Artifact: {_truncate_inline(path, limit=COMMAND_PREVIEW_LIMIT)}"
+            return f"› Artifact  {_normalize_inline(path)}"
     if name == "verify_artifact":
         try:
             parsed = json.loads(args)
@@ -55,8 +54,9 @@ def format_tool_call_event(name: str, args: str) -> str:
             parsed = {}
         check = parsed.get("check") if isinstance(parsed, dict) else None
         if isinstance(check, str):
-            return f"Verify: published artifact ({check})"
-    return f"{display_tool_name(name)} {args}"
+            return f"› Artifact  verify published artifact · {check}"
+    detail = f"  {args}" if args else ""
+    return f"› {display_tool_name(name)}{detail}"
 
 
 def format_tool_result_event(name: str, chars: int, source: str | None = None, content: str | None = None) -> str:
@@ -65,13 +65,17 @@ def format_tool_result_event(name: str, chars: int, source: str | None = None, c
     suffix_parts: list[str] = []
     if _is_rejected_contract_result(content):
         suffix_parts.append("rejected")
+    if _is_truncated_result(content):
+        suffix_parts.append("truncated")
     if chars >= LARGE_TOOL_RESULT_CHARS:
         suffix_parts.append("large context")
-    suffix = f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
+    suffix = f" · {' · '.join(suffix_parts)}" if suffix_parts else ""
     chunk = _chunk_label(content)
     prefix = f"{chunk} " if chunk else ""
-    preview_text = f"{_truncate_inline(preview, limit=PREVIEW_INLINE_LIMIT)} | " if preview else ""
-    return f" └ {prefix}{preview_text}{chars} chars -> model{suffix}"
+    preview_text = _truncate_inline(preview, limit=PREVIEW_INLINE_LIMIT) if preview else None
+    if preview_text:
+        return f"└ {prefix}{preview_text}{suffix}"
+    return f"└ {prefix}{chars} chars{suffix}"
 
 
 def _command_from_args(args: str) -> str | None:
@@ -112,7 +116,7 @@ def _list_directory_from_args(args: str) -> tuple[str | None, bool]:
 
 def _format_shell_command_call(command: str) -> str:
     category = _shell_command_category(command)
-    return f"{category}: {_truncate_inline(command, limit=COMMAND_PREVIEW_LIMIT)}"
+    return f"› {category}  {_normalize_inline(command)}"
 
 
 def _shell_command_category(command: str) -> str:
@@ -121,25 +125,25 @@ def _shell_command_category(command: str) -> str:
     if primary in {"curl", "wget", "lynx", "links"} or "orbit-web-search" in lowered or "http://" in lowered or "https://" in lowered:
         return "Web"
     if primary in {"rg", "grep", "ag", "ack"}:
-        return "Search"
+        return "Read"
     if primary == "find":
         if any(flag in tokens for flag in ("-name", "-iname", "-path", "-ipath", "-regex", "-iregex")):
-            return "Search"
-        return "List"
+            return "Read"
+        return "Read"
     if primary in {"ls", "tree", "du"}:
-        return "List"
+        return "Read"
     if primary in {"cat", "head", "tail", "sed", "awk", "python", "python3", "perl", "strings", "pdftotext"}:
         if primary in {"sed", "perl"} and "-i" in tokens:
-            return "Edit"
+            return "Exec"
         if primary in {"python", "python3", "perl"} and any(operator in command for operator in (">", ">>", ".write(", "write_text(", "write_bytes(")):
-            return "Write"
+            return "Exec"
         return "Read"
     if primary in {"tee", "cp", "mv", "mkdir", "touch", "install", "ln", "truncate"}:
-        return "Write"
+        return "Exec"
     if primary in {"rm", "rmdir"}:
-        return "Edit"
+        return "Exec"
     if any(operator in command for operator in (">", ">>")):
-        return "Write"
+        return "Exec"
     return "Exec"
 
 
@@ -217,6 +221,21 @@ def _is_rejected_contract_result(content: str | None) -> bool:
     return bool(content and content.startswith(SHELL_FULL_CONTRACT_ERROR_PREFIX))
 
 
+def _is_truncated_result(content: str | None) -> bool:
+    return bool(
+        content
+        and (
+            content.strip() == "[truncated]"
+            or "\n[truncated]" in content
+            or "text_truncated: true" in content
+            or "result_truncated: true" in content
+            or "results_truncated: true" in content
+            or "truncated=true" in content
+            or "large_file_excerpt: true" in content
+        )
+    )
+
+
 def _metadata_value(content: str, key: str) -> str | None:
     match = re.search(rf"^{re.escape(key)}:\s*(.+)$", content, flags=re.MULTILINE)
     if not match:
@@ -269,3 +288,7 @@ def _truncate_inline(text: str | None, *, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _normalize_inline(text: str) -> str:
+    return " ".join(text.split())

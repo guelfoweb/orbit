@@ -135,41 +135,46 @@ def format_turn_status(
         estimated_context_tokens=estimated_context_tokens,
         context_tokens=context_tokens,
     )
-    parts = []
-    if estimated_context_tokens is not None and context_tokens is not None and context_tokens > 0:
-        pressure = _context_pressure(estimated_context_tokens, context_tokens)
-        parts.append(f"ctx: {estimated_context_tokens}/{context_tokens} ({(estimated_context_tokens / context_tokens) * 100:.0f}%)")
-        if pressure:
-            parts.append(f"pressure: {pressure}")
-    prompt_tokens = result.prompt_tokens
-    completion_tokens = result.completion_tokens
-    cached_tokens = result.cached_tokens
-    if turn_token_usage is not None:
-        prompt_tokens = turn_token_usage.prompt_tokens
-        completion_tokens = turn_token_usage.completion_tokens
-        cached_tokens = turn_token_usage.cached_tokens
-        parts.extend(_token_usage_parts(turn_token_usage, prefix="tks"))
-    elif prompt_tokens is not None or completion_tokens is not None:
-        cached = f", cached {cached_tokens}" if cached_tokens is not None else ""
-        parts.append(f"tks: {prompt_tokens}->{completion_tokens}{cached}")
-    if turn_token_usage is None and prompt_tokens and cached_tokens is not None:
-        parts.append(f"cache: {(cached_tokens / prompt_tokens) * 100:.0f}%")
-    header = []
+    usage = turn_token_usage or _single_call_usage(result)
+    columns = max(20, terminal_columns or get_terminal_size((80, 20)).columns)
+    summary = []
     if elapsed_seconds is not None:
-        header.append(f"time elapsed: {format_elapsed(elapsed_seconds)}")
-    if result.prompt_tokens_per_second is not None:
-        header.append(f"pf {result.prompt_tokens_per_second:.1f}/s")
-    if result.generation_tokens_per_second is not None:
-        header.append(f"gen {result.generation_tokens_per_second:.1f}/s")
+        summary.append(format_elapsed(elapsed_seconds))
+    if usage is not None:
+        summary.append(f"{usage.model_calls} calls")
     if result.finish_reason:
-        parts.append(f"stop: {result.finish_reason}")
-    details = " | ".join(parts) if parts else "no metrics"
-    if not header:
-        return details
-    columns = terminal_columns or get_terminal_size((80, 20)).columns
-    heading = f"__ {' | '.join(header)} "
-    separator = heading + ("_" * max(0, columns - len(heading)))
-    return f"{separator}\n{details}"
+        summary.append(result.finish_reason)
+
+    lines = _pack_metric_parts(summary or ["no turn metrics"], columns=columns)
+    lines.extend(_token_metric_lines(usage, columns=columns))
+
+    rates = []
+    if result.prompt_tokens_per_second is not None:
+        rates.append(f"{result.prompt_tokens_per_second:.1f} tok/s prefill")
+    if result.generation_tokens_per_second is not None:
+        rates.append(f"{result.generation_tokens_per_second:.1f} tok/s decode")
+    if rates:
+        lines.extend(_pack_metric_parts(rates, columns=columns, prefix="last call: "))
+
+    if estimated_context_tokens is not None and context_tokens is not None and context_tokens > 0:
+        context = f"{estimated_context_tokens}/{context_tokens} ({_context_percentage(estimated_context_tokens, context_tokens)})"
+        pressure = _context_pressure(estimated_context_tokens, context_tokens)
+        context_parts = [context]
+        if pressure:
+            context_parts.append(f"pressure {pressure}")
+        lines.extend(_pack_metric_parts(context_parts, columns=columns, prefix="context: "))
+    if usage is not None and usage.failed_calls:
+        lines.append(f"warning: {usage.failed_calls} failed model call(s); token usage unavailable")
+    return "\n".join(lines)
+
+
+def _context_percentage(used: int, total: int) -> str:
+    if used == 0:
+        return "0%"
+    percentage = (used / total) * 100
+    if 0 < percentage < 1:
+        return "<1%"
+    return f"{percentage:.0f}%"
 
 
 def estimate_context_status_tokens(messages: list[dict[str, object]]) -> int:
@@ -199,6 +204,56 @@ def _add_optional_metric(total: int | None, value: int | None) -> int | None:
     if total is None or value is None:
         return None
     return total + value
+
+
+def _single_call_usage(result: ChatResult) -> TurnTokenUsage:
+    evaluated = None
+    cached = result.cached_tokens
+    if (
+        result.prompt_tokens is not None
+        and cached is not None
+        and 0 <= cached <= result.prompt_tokens
+    ):
+        evaluated = result.prompt_tokens - cached
+    else:
+        cached = None
+    return TurnTokenUsage(
+        model_calls=1,
+        prompt_tokens=result.prompt_tokens,
+        evaluated_tokens=evaluated,
+        cached_tokens=cached,
+        completion_tokens=result.completion_tokens,
+    )
+
+
+def _token_metric_lines(usage: TurnTokenUsage | None, *, columns: int) -> list[str]:
+    if usage is None:
+        return []
+    parts = []
+    for value, label in (
+        (usage.prompt_tokens, "in"),
+        (usage.evaluated_tokens, "eval"),
+        (usage.cached_tokens, "cache"),
+        (usage.completion_tokens, "out"),
+    ):
+        if value is not None:
+            parts.append(f"{value:,} {label}")
+    return _pack_metric_parts(parts or ["unavailable"], columns=columns, prefix="tokens: ")
+
+
+def _pack_metric_parts(parts: list[str], *, columns: int, prefix: str = "") -> list[str]:
+    lines: list[str] = []
+    current = prefix
+    for part in parts:
+        candidate = f"{current} · {part}" if current and current != prefix else f"{current}{part}"
+        if current and current != prefix and len(candidate) > columns:
+            lines.append(current)
+            current = part
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
 
 
 def _token_usage_parts(usage: TurnTokenUsage, *, prefix: str) -> list[str]:
