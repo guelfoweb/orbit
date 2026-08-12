@@ -10,7 +10,9 @@ from orbit.runtime import ChatRuntime
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
-from orbit.terminal.commands import health_text, help_text, reset_session, runtime_status, set_max_tokens, think_mode_text, tools_text
+from orbit.terminal.command_actions import CommandAction, build_list_action, build_models_action, build_read_action, build_search_action
+from orbit.terminal.command_registry import resolve_command
+from orbit.terminal.commands import health_text, help_text, props_text, reset_session, runtime_status, set_max_tokens, think_mode_text, tools_text
 from orbit.terminal.config import AppConfig
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
@@ -116,7 +118,7 @@ class Repl:
             self.prompt_gap_pending = False
         return read_prompt_input()
 
-    def _ask(self, prompt: str) -> None:
+    def _ask(self, prompt: str, *, command_action: CommandAction | None = None) -> None:
         self.turn_model_steps.clear()
         self.turn_backend_token_usage = TokenUsageAccumulator()
         tools_enabled = tools_are_enabled(self.tools_mode or "off")
@@ -135,7 +137,31 @@ class Repl:
         started = time.monotonic()
         renderer.start()
         try:
-            if tools_are_enabled(self.tools_mode or "off"):
+            if command_action is not None and command_action.full_document_path is not None:
+                result = self.runtime.answer_full_document_command(
+                    prompt,
+                    path=command_action.full_document_path,
+                    workdir=self.config.workdir,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    on_final_delta=renderer.write,
+                    on_progress=renderer.progress,
+                    on_model_step=self._record_model_step,
+                    on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
+                )
+            elif command_action is not None and command_action.evidence is not None:
+                result = self.runtime.answer_from_acquired_evidence(
+                    prompt,
+                    evidence=command_action.evidence,
+                    workdir=self.config.workdir,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    on_final_delta=renderer.write,
+                    on_progress=renderer.progress,
+                    on_model_step=self._record_model_step,
+                    on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
+                )
+            elif tools_are_enabled(self.tools_mode or "off"):
                 result = self.runtime.ask_auto(
                     prompt,
                     temperature=self.config.temperature,
@@ -252,53 +278,116 @@ class Repl:
         )
 
     def _handle_command(self, command: str) -> bool:
-        if command == "/exit":
+        invocation = resolve_command(command)
+        if invocation is None:
+            print(f"error: unknown command: {command}", file=sys.stderr)
+            return True
+        handler = invocation.spec.handler
+        arguments = invocation.arguments
+        if handler == "exit":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+                return True
             return False
-        if command == "/continue":
+        if handler == "read":
+            return self._handle_data_action(build_read_action(arguments, workdir=self.config.workdir))
+        if handler == "search":
+            return self._handle_data_action(build_search_action(arguments, workdir=self.config.workdir))
+        if handler == "list":
+            return self._handle_data_action(build_list_action(arguments, workdir=self.config.workdir))
+        if handler == "models":
+            return self._handle_data_action(build_models_action(arguments))
+        if handler == "continue":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+                return True
             self._continue_last_answer()
             return True
-        if command == "/help":
+        if handler == "help":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+                return True
             print(help_text())
             return True
-        if command == "/reset":
+        if handler == "clear":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+            elif sys.stdout.isatty():
+                print("\033[2J\033[H", end="", flush=True)
+            else:
+                print("terminal display clear unavailable in non-TTY mode")
+            return True
+        if handler == "reset":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+                return True
             print(reset_session(self.runtime, self.session))
             self._reset_token_usage()
             self.can_continue = False
             return True
-        if command == "/compact":
+        if handler == "compact" and not arguments:
             print(format_memory_compaction_report(self.runtime.compact_memory_now(temperature=self.config.temperature)))
             self._save_session()
             return True
-        if command == "/compact tools":
+        if handler == "compact" and arguments == "tools":
             print(format_tool_compaction_report(self.runtime.compact_old_tool_results(temperature=self.config.temperature)))
             self._save_session()
             return True
-        if command == "/sessions clear":
+        if handler == "compact":
+            print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+            return True
+        if handler == "sessions" and arguments == "clear":
             print(self._clear_workdir_sessions())
             return True
-        if command == "/health":
+        if handler == "sessions":
+            print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+            return True
+        if handler == "health":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+                return True
             print(health_text(self.backend, self.config))
             return True
-        if command == "/max-tokens" or command.startswith("/max-tokens "):
-            value = command.removeprefix("/max-tokens").strip()
-            self.config, message = set_max_tokens(self.config, value)
+        if handler == "max_tokens":
+            self.config, message = set_max_tokens(self.config, arguments)
             print(message)
             return True
-        if command == "/think" or command.startswith("/think "):
-            print(self._handle_think_command(command))
+        if handler == "think":
+            print(self._handle_think_command(f"/think {arguments}".rstrip()))
             return True
-        if command == "/status":
+        if handler == "status" and not arguments:
             print(runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode))
             print(format_session_token_usage(self.session_token_usage.snapshot()))
             return True
-        if command in {"/status ctx", "/status context"}:
+        if handler == "status" and arguments in {"ctx", "context"}:
             print(context_status_text(self.runtime.messages, context_tokens=self.runtime.context_tokens))
             return True
-        if command == "/tools" or command.startswith("/tools "):
-            print(self._handle_tools_command(command))
+        if handler == "status":
+            print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
             return True
-        print(f"unknown command: {command}", file=sys.stderr)
+        if handler == "props":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+            else:
+                print(props_text(self.backend))
+            return True
+        if handler == "tools":
+            print(self._handle_tools_command(f"/tools {arguments}".rstrip()))
+            return True
+        print(f"error: command handler unavailable: {invocation.spec.name}", file=sys.stderr)
         return True
+
+    def _handle_data_action(self, action: CommandAction) -> bool:
+        if action.needs_model:
+            assert action.prompt is not None
+            self._ask(action.prompt, command_action=action)
+        else:
+            print(action.output)
+        return True
+
+    @staticmethod
+    def _command_usage_error(usage: str) -> str:
+        return f"error: usage: {usage}"
 
     def _clear_workdir_sessions(self) -> str:
         if not _confirm_clear_sessions():

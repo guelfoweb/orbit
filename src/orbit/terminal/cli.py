@@ -16,12 +16,14 @@ from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.media import load_audio, load_image
 from orbit.runtime.turn_trace import ModelStepMetrics
 from orbit.terminal.config import add_config_arguments, load_app_config
+from orbit.terminal.command_actions import CommandAction, build_list_action, build_models_action, build_read_action, build_search_action
+from orbit.terminal.command_registry import resolve_command
 from orbit.terminal.context_status import context_status_text
 from orbit.terminal.history import PromptHistory
 from orbit.terminal.prefill import MIN_PREFILL_ESTIMATE_SECONDS, estimate_prefill_tokens, estimate_prefill_tokens_after_tool_result
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, TOOL_PREFILL_PROFILE, PrefillEstimator, prefill_profile_for_phase
 from orbit.terminal.repl import Repl
-from orbit.terminal.commands import health_text, help_text, runtime_status, set_max_tokens, think_mode_text, tools_text
+from orbit.terminal.commands import health_text, help_text, props_text, runtime_status, set_max_tokens, think_mode_text, tools_text
 from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import TokenUsageAccumulator, estimate_context_status_tokens, format_turn_status, summarize_turn_token_usage
 from orbit.terminal.streaming import StreamRenderer
@@ -89,8 +91,29 @@ def main(argv: list[str] | None = None) -> int:
         prompt = " ".join(args.prompt)
         command_result = _handle_one_shot_command(prompt, runtime, config, backend)
         if command_result is not None:
-            print(command_result)
-            return 0
+            if isinstance(command_result, str):
+                print(command_result)
+                return 0
+            if not command_result.needs_model:
+                print(command_result.output)
+                return 0
+            if args.image or args.audio:
+                print("error: slash-command evidence prompts do not accept --image/--audio", file=sys.stderr)
+                return 1
+            assert command_result.prompt is not None
+            return _run_one_shot(
+                runtime,
+                command_result.prompt,
+                image_paths=[],
+                audio_paths=[],
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+                workdir=config.workdir,
+                tools=config.tools,
+                thinking=config.think,
+                render_markdown_mode=config.render_markdown,
+                command_action=command_result,
+            )
         return _run_one_shot(
             runtime,
             prompt,
@@ -127,35 +150,54 @@ def _handle_one_shot_command(
     runtime: ChatRuntime,
     config,
     backend: LlamaServerBackend,
-) -> str | None:
+) -> str | CommandAction | None:
     command = prompt.strip()
     if not command.startswith("/"):
         return None
-    if command == "/status":
+    invocation = resolve_command(command)
+    if invocation is None:
+        return f"error: unknown command: {command}"
+    handler = invocation.spec.handler
+    arguments = invocation.arguments
+    if handler == "read":
+        return build_read_action(arguments, workdir=config.workdir)
+    if handler == "search":
+        return build_search_action(arguments, workdir=config.workdir)
+    if handler == "list":
+        return build_list_action(arguments, workdir=config.workdir)
+    if handler == "models":
+        return build_models_action(arguments)
+    if handler == "status" and not arguments:
         return runtime_status(runtime, config, backend, tools_mode=config.tools)
-    if command in {"/status ctx", "/status context"}:
+    if handler == "status" and arguments in {"ctx", "context"}:
         return context_status_text(runtime.messages, context_tokens=runtime.context_tokens)
-    if command == "/compact" or command == "/compact tools":
-        return "error: /compact is available only in interactive mode"
-    if command == "/tools":
+    if handler == "status":
+        return f"error: usage: {invocation.spec.usage}"
+    if handler in {"compact", "continue", "reset", "sessions", "exit"}:
+        return f"error: {invocation.spec.name} is available only in interactive mode"
+    if handler == "clear":
+        return "terminal display clear unavailable in non-TTY mode"
+    if handler == "tools" and not arguments:
         return tools_text(config.tools)
-    if command == "/think":
+    if handler == "tools":
+        return f"error: {invocation.spec.name} changes are available only in interactive mode"
+    if handler == "think" and not arguments:
         return think_mode_text(config.think)
-    if command == "/health":
+    if handler == "health" and not arguments:
         return health_text(backend, config)
-    if command == "/help":
+    if handler == "props" and not arguments:
+        return props_text(backend)
+    if handler == "help" and not arguments:
         return help_text()
-    if command == "/max-tokens" or command.startswith("/max-tokens "):
-        _, message = set_max_tokens(config, command.removeprefix("/max-tokens").strip())
+    if handler == "max_tokens":
+        _, message = set_max_tokens(config, arguments)
         return message
-    if command == "/think" or command.startswith("/think "):
-        value = command.removeprefix("/think").strip().lower()
-        if not value:
-            return think_mode_text(config.think)
+    if handler == "think":
+        value = arguments.lower()
         if value not in {"on", "off"}:
             return "error: usage: /think [off|on]"
         return f"think: {value}"
-    return f"unknown command: {command}"
+    return f"error: usage: {invocation.spec.usage}"
 
 
 def _run_one_shot(
@@ -170,6 +212,7 @@ def _run_one_shot(
     tools: str,
     thinking: bool,
     render_markdown_mode: str = "plain",
+    command_action: CommandAction | None = None,
 ) -> int:
     prefill_estimator = PrefillEstimator()
     model_steps: list[ModelStepMetrics] = []
@@ -206,7 +249,29 @@ def _run_one_shot(
     try:
         images = [load_image(path) for path in image_paths]
         audios = [load_audio(path) for path in audio_paths]
-        if images or audios:
+        if command_action is not None and command_action.full_document_path is not None:
+            result = runtime.answer_full_document_command(
+                prompt,
+                path=command_action.full_document_path,
+                workdir=workdir,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=renderer.write,
+                on_progress=renderer.progress,
+                on_model_step=record_model_step,
+            )
+        elif command_action is not None and command_action.evidence is not None:
+            result = runtime.answer_from_acquired_evidence(
+                prompt,
+                evidence=command_action.evidence,
+                workdir=workdir,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=renderer.write,
+                on_progress=renderer.progress,
+                on_model_step=record_model_step,
+            )
+        elif images or audios:
             result = runtime.ask(
                 prompt,
                 temperature=temperature,

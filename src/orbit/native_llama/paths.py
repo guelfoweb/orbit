@@ -101,6 +101,11 @@ def resolve_legacy_paths(
     )
 
 
+def resolve_native_build_bin(*, llama_root: Path | None = DEFAULT_LLAMA_ROOT) -> Path:
+    """Return the active native runtime directory without resolving a model."""
+    return _resolve_native_runtime(llama_root)[1]
+
+
 def _resolve_model(
     *,
     manifest_id: str,

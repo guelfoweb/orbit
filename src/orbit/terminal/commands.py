@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
-from orbit.backend.llama_server import LlamaServerBackend
+from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.config import AppConfig
+from orbit.terminal.command_registry import COMMANDS
 from orbit.terminal.runtime_status import collect_runtime_status, format_status_panel
 from orbit.terminal.think_mode import think_text
 from orbit.terminal.tool_mode import ToolSpec
@@ -16,21 +18,17 @@ MAX_MAX_TOKENS = 4096
 
 
 def help_text() -> str:
-    commands = [
-        ("/compact [tools]", "Compact memory; use tools for old tool results."),
-        ("/continue", "Continue the last answer if it reached max_tokens."),
-        ("/health", "Check backend health."),
-        ("/help", "Show this help."),
-        ("/max-tokens [n]", "Show or set output token limit for following turns."),
-        ("/think [off|on]", "Show or set thinking visibility."),
-        ("/reset", "Clear current conversation and saved session."),
-        ("/sessions clear", "Delete all saved sessions for this workdir."),
-        ("/status [ctx]", "Show runtime status or estimated context usage."),
-        ("/tools [off|on|status|refresh]", "Show tool access or local capabilities."),
-        ("/exit", "Exit interactive mode."),
-    ]
-    width = max(len(command) for command, _ in commands) + 2
-    return "\n".join(f"{command:<{width}}{description}" for command, description in commands)
+    width = max(len(command.usage) for command in COMMANDS) + 2
+    lines: list[str] = []
+    category = None
+    for command in COMMANDS:
+        if command.category != category:
+            if lines:
+                lines.append("")
+            category = command.category
+            lines.append(category)
+        lines.append(f"{command.usage:<{width}}{command.description}")
+    return "\n".join(lines)
 
 
 def health_text(backend: LlamaServerBackend, config: AppConfig) -> str:
@@ -86,6 +84,14 @@ def runtime_status(
 ) -> str:
     status = collect_runtime_status(runtime, config, backend, tools_mode=tools_mode)
     return format_status_panel(status)
+
+
+def props_text(backend: LlamaServerBackend) -> str:
+    try:
+        props = backend.backend_props()
+    except (LlamaServerError, OSError, ValueError) as exc:
+        return f"error: backend properties unavailable: {exc}"
+    return json.dumps(props if isinstance(props, dict) else {}, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def set_max_tokens(config: AppConfig, value: str) -> tuple[AppConfig, str]:
