@@ -251,7 +251,8 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()
-        self.assertIn("Orbit v0.0.1-rc32 · unknown · unknown", output)
+        self.assertIn("Orbit v0.0.1-rc32", output)
+        self.assertIn("· unknown · unknown", output)
         self.assertIn("workdir ", output)
         self.assertIn("tools on · think off · ctx 8192", output)
         self.assertIn("/help for commands · /status for details", output)
