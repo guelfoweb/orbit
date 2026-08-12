@@ -448,6 +448,10 @@ class NativeLlamaClient:
         self.cancel_event.clear()
 
     def load(self, on_progress=None) -> None:
+        if self._model or self._session.ctx_tgt:
+            self._invalidate_qwen_route_prefix(
+                "model_reload", profile_id=QWEN3_CODER_PROFILE_ID
+            )
         self._invalidate_qwen36_shell_tool_prefix("model_reload")
         lib = self.lib.lib
         lib.ggml_backend_load_all()
@@ -652,7 +656,9 @@ class NativeLlamaClient:
         self._session.mtp_enabled = True
         self._session.mtp_failed = False
 
-    def reset_session_state(self) -> None:
+    def reset_session_state(
+        self, *, preserve_qwen3_coder_route_checkpoint: bool = False
+    ) -> None:
         if not self._session.ctx_tgt:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
@@ -668,7 +674,13 @@ class NativeLlamaClient:
         self._profile_last_raw_output = ""
         self._profile_last_parsed_content = ""
         self._invalidate_final_prefix("session_reset")
-        self._invalidate_qwen_route_prefix("session_reset")
+        self._invalidate_qwen_route_prefix(
+            "session_reset", profile_id=QWEN36_PROFILE_ID
+        )
+        if not preserve_qwen3_coder_route_checkpoint:
+            self._invalidate_qwen_route_prefix(
+                "session_reset", profile_id=QWEN3_CODER_PROFILE_ID
+            )
         self._invalidate_qwen36_shell_tool_prefix("session_reset")
         if self._persistent_mtp_runtime is None:
             return
@@ -701,8 +713,31 @@ class NativeLlamaClient:
             return
         if current == mode:
             return
-        self.reset_session_state()
+        profile = getattr(self, "model_profile", None)
+        profile_id = getattr(profile, "profile_id", None)
+        qualified_transition = (current, mode) in (
+            ("chat:thinking=off", "tools:thinking=off"),
+            ("tools:thinking=off", "chat:thinking=off"),
+        )
+        preserve_qwen3_coder_route_checkpoint = (
+            getattr(profile, "verified", False)
+            and profile_id == QWEN3_CODER_PROFILE_ID
+            and qualified_transition
+        )
+        self.reset_session_state(
+            preserve_qwen3_coder_route_checkpoint=preserve_qwen3_coder_route_checkpoint
+        )
         self._session.prompt_cache_mode = mode
+
+    def _invalidate_coder_route_prefix_after_failed_completion(self, reason: str) -> None:
+        profile = getattr(self, "model_profile", None)
+        if (
+            getattr(profile, "verified", False)
+            and getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
+        ):
+            self._invalidate_qwen_route_prefix(
+                reason, profile_id=QWEN3_CODER_PROFILE_ID
+            )
 
     def _initialize_multimodal_context(self) -> None:
         self.supports_vision = False
@@ -1052,7 +1087,13 @@ class NativeLlamaClient:
                 return timings
             finally:
                 self._session.in_flight = False
-        prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
+        try:
+            prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
+        except Exception:
+            self._invalidate_coder_route_prefix_after_failed_completion(
+                "completion_error"
+            )
+            raise
         qwen_route_anchor_plan = self._qwen_route_anchor_plan_for_prompt(
             messages,
             tools=tools,
@@ -1808,12 +1849,18 @@ class NativeLlamaClient:
                 self._invalidate_final_prefix("cancelled")
             if qwen_route_anchor_plan is not None and timings.cancelled:
                 self._invalidate_qwen_route_prefix("cancelled", profile_id=qwen_route_anchor_plan.profile_id)
+            if qwen_route_anchor_plan is None and timings.cancelled:
+                self._invalidate_coder_route_prefix_after_failed_completion("cancelled")
             return timings
         except Exception:
             if final_prefix_segments is not None:
                 self._invalidate_final_prefix("completion_error")
             if qwen_route_anchor_plan is not None:
                 self._invalidate_qwen_route_prefix("completion_error", profile_id=qwen_route_anchor_plan.profile_id)
+            else:
+                self._invalidate_coder_route_prefix_after_failed_completion(
+                    "completion_error"
+                )
             if qwen36_shell_tool_anchor_plan is not None:
                 self._invalidate_qwen36_shell_tool_prefix("completion_error")
             raise
