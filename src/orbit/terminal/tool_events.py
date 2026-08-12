@@ -59,6 +59,17 @@ def format_tool_call_event(name: str, args: str) -> str:
     return f"› {display_tool_name(name)}{detail}"
 
 
+def format_tool_activity_label(name: str, args: str) -> str:
+    if name == "exec_shell_full_command":
+        return _command_from_args(args) or name
+    if name == "fetch_url":
+        return _url_from_args(args) or name
+    if name == "list_directory":
+        path, _recursive = _list_directory_from_args(args)
+        return path or name
+    return display_tool_name(name)
+
+
 def format_tool_result_event(name: str, chars: int, source: str | None = None, content: str | None = None) -> str:
     del source
     preview = _tool_result_preview(content)

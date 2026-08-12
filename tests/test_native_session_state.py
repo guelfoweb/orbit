@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
+from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _measured_progress
 from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.paths import NativeLlamaPaths
 from orbit.native_llama.session_state import DEFAULT_NATIVE_SESSION_ID
@@ -12,6 +12,14 @@ from orbit.native_server.app import OrbitNativeServer
 
 
 class NativeSessionStateTests(unittest.TestCase):
+    def test_measured_generation_progress_uses_generated_tokens_and_elapsed_time(self) -> None:
+        progress = _measured_progress("generation", 127, 512, elapsed_us=10_000_000)
+
+        self.assertEqual(progress.current, 127)
+        self.assertEqual(progress.total, 512)
+        self.assertEqual(progress.elapsed_seconds, 10.0)
+        self.assertEqual(progress.tokens_per_second, 12.7)
+
     def _paths(self) -> NativeLlamaPaths:
         return NativeLlamaPaths(
             llama_root=Path("/llama"),
@@ -115,7 +123,7 @@ class NativeSessionStateTests(unittest.TestCase):
     def test_complete_prompt_emits_initial_prefill_progress_from_reused_tokens(self, mocked_lib_class) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig())
         mocked_lib = mocked_lib_class.return_value.lib
-        mocked_lib.llama_time_us.side_effect = [0, 1000, 1000, 2000]
+        mocked_lib.llama_time_us.side_effect = [0, 1000, 1000, 2000, 3000]
         mocked_lib.llama_batch_get_one.return_value = object()
         mocked_lib.llama_decode.return_value = 0
 
@@ -124,16 +132,20 @@ class NativeSessionStateTests(unittest.TestCase):
         client._session.sampler = object()
         client.tokenize = mock.Mock(return_value=[1, 2, 3, 4])
         client._prepare_memory_for_prompt = mock.Mock(return_value=3)
-        progress: list[tuple[str, int, int, int]] = []
+        progress = []
 
         timings = client._complete_prompt_standard(
             "hello",
             max_tokens=0,
-            on_progress=lambda item: progress.append((item.phase, item.current, item.total, item.percent)),
+            on_progress=progress.append,
         )
 
-        self.assertEqual(progress[0], ("prefill", 3, 4, 75))
-        self.assertEqual(progress[1], ("prefill", 4, 4, 100))
+        self.assertEqual((progress[0].current, progress[0].total), (3, 4))
+        self.assertEqual((progress[0].evaluated_current, progress[0].evaluated_total), (0, 1))
+        self.assertEqual(progress[0].cached_tokens, 3)
+        self.assertEqual((progress[1].evaluated_current, progress[1].evaluated_total), (1, 1))
+        self.assertEqual(progress[1].cached_tokens, 3)
+        self.assertEqual(progress[1].tokens_per_second, 1000.0)
         self.assertEqual(timings.reused_prompt_tokens, 3)
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")

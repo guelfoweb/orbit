@@ -36,7 +36,7 @@ from orbit.terminal.repl import Repl
 from orbit.terminal.repl import _phase_progress_label, _phase_starts_final_output, _prefill_profile_for_turn
 from orbit.terminal.session_preview import format_recent_session_messages
 from orbit.terminal.streaming import StreamRenderer
-from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
+from orbit.terminal.tool_events import format_tool_activity_label, format_tool_call_event, format_tool_result_event
 from orbit.terminal.prefill_estimator import CHAT_PREFILL_PROFILE, FINAL_FROM_TOOL_PREFILL_PROFILE, TOOL_PREFILL_PROFILE
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
@@ -328,6 +328,7 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(format_tool_result_event("read_file", 10000), "└ 10000 chars · large context")
         self.assertEqual(format_tool_result_event("read_file", 5, "orbit"), "└ 5 chars")
         self.assertEqual(format_tool_call_event("exec_shell_full_command", '{"command":"ls"}'), "› Read  ls")
+        self.assertEqual(format_tool_activity_label("exec_shell_full_command", '{"command":"pytest -q"}'), "pytest -q")
         self.assertEqual(format_tool_result_event("exec_shell_full_command", 45), "└ 45 chars")
         chunk_content = "\n".join(
             [

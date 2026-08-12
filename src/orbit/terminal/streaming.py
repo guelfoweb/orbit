@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 import re
 import sys
 import threading
 import time
+from dataclasses import dataclass
 
 from orbit.backend.base import StreamProgress
 from orbit.terminal.theme import CYAN, DIM, RESET, dim, is_tty, supports_ansi
@@ -15,6 +17,14 @@ MARKDOWN_BOLD = "\033[1m"
 MARKDOWN_BOLD_OFF = "\033[22m"
 MARKDOWN_ITALIC = "\033[3m"
 MARKDOWN_ITALIC_OFF = "\033[23m"
+
+
+@dataclass(frozen=True)
+class WorkProgress:
+    phase: str
+    current: int
+    total: int
+    unit: str
 
 
 class StreamRenderer:
@@ -42,9 +52,7 @@ class StreamRenderer:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_time = 0.0
-        self._progress: StreamProgress | None = None
-        self._generation_completed = 0
-        self._generation_budget_completed = 0
+        self._progress: StreamProgress | WorkProgress | None = None
         self._thinking_started = False
         self._thinking_final_started = False
         self._thinking_dim_open = False
@@ -98,16 +106,14 @@ class StreamRenderer:
         self._start_time = time.monotonic()
         self._first_delta = False
         self._progress = None
-        self._generation_completed = 0
-        self._generation_budget_completed = 0
         if not self._interactive or not self._started:
             return
         self._timer_active = True
         self._thread = threading.Thread(target=self._run_wait_timer, daemon=True)
         self._thread.start()
 
-    def progress(self, update: StreamProgress) -> None:
-        self._progress = self._normalize_progress(update)
+    def progress(self, update: StreamProgress | WorkProgress) -> None:
+        self._progress = update
         if self._interactive and self._started and not self._first_delta:
             self._render_wait_line()
 
@@ -180,8 +186,14 @@ class StreamRenderer:
 
     def _render_wait_line(self) -> None:
         elapsed = time.monotonic() - self._start_time
-        detail = self._phase_label or self._progress_phase_label() or "working"
-        line = dim(_fit_activity_line(self._activity_kind, detail, format_elapsed(elapsed)))
+        detail = self._progress_activity_detail() or self._phase_label or "working"
+        progress_elapsed = getattr(self._progress, "elapsed_seconds", None)
+        shown_elapsed = (
+            progress_elapsed
+            if self._progress is not None and self._progress.phase == "generation" and _valid_metric(progress_elapsed)
+            else elapsed
+        )
+        line = dim(_fit_activity_line(self._activity_kind, detail, format_elapsed(shown_elapsed)))
         print(f"\r{_pad_to_terminal_width(line)}", end="", flush=True)
 
     @staticmethod
@@ -196,6 +208,7 @@ class StreamRenderer:
     def set_phase_label(self, label: str | None) -> None:
         self._activity_kind = "model"
         self._phase_label = label.strip() if label else None
+        self._progress = None
 
     def set_activity(self, kind: str, label: str | None = None) -> None:
         self._activity_kind = kind.strip() or "model"
@@ -206,29 +219,11 @@ class StreamRenderer:
             return
         self._thinking_filter.start_final_output()
 
-    def _normalize_progress(self, update: StreamProgress) -> StreamProgress:
-        if update.phase != "generation":
-            return update
-        if self._progress is not None and self._progress.phase == "generation":
-            previous_current = self._progress.current - self._generation_completed
-            previous_total = self._progress.total - self._generation_budget_completed
-            if update.current < previous_current:
-                self._generation_completed += max(0, previous_current)
-                self._generation_budget_completed += max(0, previous_total)
-        current = self._generation_completed + update.current
-        total = self._generation_budget_completed + update.total
-        percent = int((current / total) * 100) if total > 0 else 0
-        return StreamProgress(phase=update.phase, current=current, total=total, percent=percent)
-
     def _working_status(self, elapsed: float) -> str:
         parts = [format_elapsed(elapsed)]
-        if self._progress is not None:
-            if self._progress.phase == "prefill":
-                parts.append(f"{self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
-            elif self._progress.phase == "generation":
-                parts.append(f"{self._progress.current}/{self._progress.total} tk ({self._progress.percent}%)")
-            else:
-                parts.append(f"{self._progress.current}/{self._progress.total} ({self._progress.percent}%)")
+        detail = self._progress_activity_detail()
+        if detail is not None:
+            parts.append(detail)
             return ", ".join(parts)
         if self._prefill_estimate_seconds and self._prefill_estimate_seconds >= 1:
             progress = max(1, int((elapsed / self._prefill_estimate_seconds) * 100))
@@ -262,14 +257,63 @@ class StreamRenderer:
             return "prefill estimate"
         return None
 
-    def _progress_phase_label(self) -> str | None:
+    def _progress_activity_detail(self) -> str | None:
         if self._progress is None:
             return None
-        if self._progress.phase == "prefill":
-            return "prefill"
-        if self._progress.phase == "generation":
-            return "generation"
-        return self._progress.phase
+        progress = self._progress
+        if isinstance(progress, WorkProgress):
+            current = _valid_count(progress.current)
+            total = _valid_count(progress.total)
+            if current is None or total is None or total <= 0 or current > total:
+                return progress.phase
+            quantity = _format_progress_quantity(current, total, progress.unit)
+            return f"{progress.phase} · {_percent(current, total)}% · {quantity}"
+        if progress.phase == "prefill":
+            current = _valid_count(progress.evaluated_current)
+            total = _valid_count(progress.evaluated_total)
+            if current is None or total is None or total <= 0 or current > total:
+                return "prefill"
+            parts = ["prefill", f"{_percent(current, total)}%", f"{current}/{total} eval"]
+            cached = _valid_count(progress.cached_tokens)
+            if cached is not None:
+                parts.append(f"{cached} cached")
+            rate = _format_rate(progress.tokens_per_second)
+            if rate is not None:
+                parts.append(f"{rate} tok/s")
+            return " · ".join(parts)
+        if progress.phase == "generation":
+            current = _valid_count(progress.current)
+            parts = ["generating", f"{current} tok"] if current is not None else ["generating"]
+            rate = _format_rate(progress.tokens_per_second)
+            if rate is not None:
+                parts.append(f"{rate} tok/s")
+            return " · ".join(parts)
+        return progress.phase
+
+
+def _valid_count(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _valid_metric(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(float(value)) and value >= 0
+
+
+def _format_rate(value: object) -> str | None:
+    return f"{float(value):.1f}" if _valid_metric(value) else None
+
+
+def _percent(current: int, total: int) -> int:
+    return min(100, max(0, int(round((current / total) * 100)))) if total > 0 else 0
+
+
+def _format_progress_quantity(current: int, total: int, unit: str | None) -> str:
+    if unit == "bytes":
+        divisor, label = (1024 * 1024, "MB") if total >= 1024 * 1024 else (1024, "KB")
+        return f"{current / divisor:.1f}/{total / divisor:.1f} {label}"
+    if unit:
+        return f"{current}/{total} {unit}"
+    return f"{current}/{total}"
 
 
 def _terminal_columns() -> int:

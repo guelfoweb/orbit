@@ -12,7 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.terminal.streaming import StreamRenderer, _pad_to_terminal_width, _visible_len, format_elapsed
+from orbit.terminal.streaming import StreamRenderer, WorkProgress, _pad_to_terminal_width, _visible_len, format_elapsed
 from orbit.backend.base import StreamProgress
 
 
@@ -590,17 +590,28 @@ class StreamingRendererTests(unittest.TestCase):
     def test_wait_timer_includes_phase_label_in_real_progress_status(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
         renderer.set_phase_label("forced final")
-        renderer.progress(StreamProgress(phase="prefill", current=243, total=935, percent=25))
+        renderer.progress(
+            StreamProgress(
+                phase="prefill",
+                current=1011,
+                total=1703,
+                percent=59,
+                evaluated_current=243,
+                evaluated_total=935,
+                cached_tokens=768,
+                tokens_per_second=31.4,
+            )
+        )
 
         self.assertEqual(renderer._working_phase_prefix(), " [forced final prefill]")
-        self.assertEqual(renderer._working_status(5), "5s, 243/935 tk (25%)")
+        self.assertEqual(renderer._working_status(5), "5s, prefill · 26% · 243/935 eval · 768 cached · 31.4 tok/s")
 
     def test_wait_timer_omits_repeated_generation_label_from_status(self) -> None:
         renderer = StreamRenderer()
         renderer.progress(StreamProgress(phase="generation", current=51, total=256, percent=19))
 
         self.assertEqual(renderer._working_phase_prefix(), " [generation]")
-        self.assertEqual(renderer._working_status(30), "30s, 51/256 tk (19%)")
+        self.assertEqual(renderer._working_status(30), "30s, generating · 51 tok")
 
     def test_wait_timer_includes_generation_detail_in_phase_label(self) -> None:
         renderer = StreamRenderer()
@@ -611,9 +622,21 @@ class StreamingRendererTests(unittest.TestCase):
 
     def test_wait_timer_names_generation_progress_explicitly(self) -> None:
         renderer = StreamRenderer()
-        renderer.progress(StreamProgress(phase="generation", current=7, total=512, percent=1))
+        renderer.progress(
+            StreamProgress(
+                phase="generation",
+                current=7,
+                total=512,
+                percent=1,
+                elapsed_seconds=1.25,
+                tokens_per_second=5.6,
+            )
+        )
 
-        self.assertIn("7/512 tk (1%)", renderer._working_status(1))
+        status = renderer._working_status(1)
+        self.assertIn("generating · 7 tok · 5.6 tok/s", status)
+        self.assertNotIn("%", status)
+        self.assertNotIn("/512", status)
 
     def test_wait_timer_prints_prefill_finalizing_after_estimate(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10)
@@ -622,22 +645,78 @@ class StreamingRendererTests(unittest.TestCase):
 
     def test_wait_timer_prefers_real_prefill_progress_when_available(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
-        renderer.progress(StreamProgress(phase="prefill", current=243, total=935, percent=25))
+        renderer.progress(
+            StreamProgress(
+                phase="prefill",
+                current=1011,
+                total=1703,
+                percent=59,
+                evaluated_current=243,
+                evaluated_total=935,
+                cached_tokens=768,
+            )
+        )
 
-        self.assertIn("243/935 tk (25%)", renderer._working_status(5))
+        self.assertIn("prefill · 26% · 243/935 eval · 768 cached", renderer._working_status(5))
+
+    def test_prefill_progress_uses_authoritative_evaluated_work_from_zero_to_complete(self) -> None:
+        renderer = StreamRenderer()
+        for current, expected in ((0, "0%"), (512, "63%"), (813, "100%")):
+            renderer.progress(
+                StreamProgress(
+                    phase="prefill",
+                    current=768 + current,
+                    total=1581,
+                    percent=0,
+                    evaluated_current=current,
+                    evaluated_total=813,
+                    cached_tokens=768,
+                )
+            )
+            status = renderer._working_status(0)
+            self.assertIn(expected, status)
+            self.assertIn(f"{current}/813 eval", status)
+            self.assertIn("768 cached", status)
+
+    def test_prefill_progress_does_not_render_contradictory_work_as_percentage(self) -> None:
+        renderer = StreamRenderer()
+        renderer.progress(
+            StreamProgress(
+                phase="prefill",
+                current=20,
+                total=10,
+                percent=200,
+                evaluated_current=20,
+                evaluated_total=10,
+                cached_tokens=0,
+            )
+        )
+
+        self.assertEqual(renderer._working_status(0), "0s, prefill")
 
     def test_wait_timer_shows_real_generation_progress_when_available(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
         renderer.progress(StreamProgress(phase="generation", current=7, total=32, percent=21))
 
-        self.assertIn("7/32 tk (21%)", renderer._working_status(5))
+        status = renderer._working_status(5)
+        self.assertIn("generating · 7 tok", status)
+        self.assertNotIn("21%", status)
 
-    def test_wait_timer_accumulates_generation_across_continuation_passes(self) -> None:
+    def test_wait_timer_reports_current_generation_pass_without_budget_percentage(self) -> None:
         renderer = StreamRenderer()
         renderer.progress(StreamProgress(phase="generation", current=32, total=32, percent=100))
         renderer.progress(StreamProgress(phase="generation", current=1, total=128, percent=0))
 
-        self.assertIn("33/160 tk (20%)", renderer._working_status(5))
+        self.assertEqual(renderer._working_status(5), "5s, generating · 1 tok")
+
+    def test_known_tool_progress_formats_bytes_and_lines_without_estimation(self) -> None:
+        renderer = StreamRenderer()
+        renderer.set_activity("tool", "read")
+        renderer.progress(WorkProgress(phase="reading", current=7_130_317, total=10_485_760, unit="bytes"))
+        self.assertEqual(renderer._working_status(0), "0s, reading · 68% · 6.8/10.0 MB")
+
+        renderer.progress(WorkProgress(phase="scanning", current=10_770, total=14_753, unit="lines"))
+        self.assertEqual(renderer._working_status(0), "0s, scanning · 73% · 10770/14753 lines")
 
     def test_first_progress_renders_immediately_before_timer_tick(self) -> None:
         stream = io.StringIO()
@@ -732,6 +811,35 @@ class StreamingRendererTests(unittest.TestCase):
             self.assertLessEqual(_visible_len(line), columns)
             self.assertIn("exec_shell_full_command", line)
 
+    def test_progress_line_fits_40_and_60_columns(self) -> None:
+        for columns in (40, 60):
+            stream = io.StringIO()
+            original = sys.stdout
+            try:
+                sys.stdout = stream
+                renderer = StreamRenderer(interactive=True)
+                renderer.progress(
+                    StreamProgress(
+                        phase="prefill",
+                        current=1280,
+                        total=1581,
+                        percent=80,
+                        evaluated_current=512,
+                        evaluated_total=813,
+                        cached_tokens=768,
+                        tokens_per_second=31.4,
+                    )
+                )
+                renderer._start_time = time.monotonic()
+                with mock.patch("orbit.terminal.streaming._terminal_columns", return_value=columns):
+                    renderer._render_wait_line()
+            finally:
+                sys.stdout = original
+
+            line = stream.getvalue().rsplit("\r", 1)[-1]
+            self.assertLessEqual(_visible_len(line), columns)
+            self.assertIn("prefill", line)
+
     def test_non_tty_is_plain_linear_and_keeps_markdown_literal(self) -> None:
         stream = io.StringIO()
         original = sys.stdout
@@ -756,15 +864,68 @@ class StreamingRendererTests(unittest.TestCase):
         self.assertNotIn("\033", output)
         self.assertNotIn("\r", output)
 
+    def test_non_tty_progress_is_byte_identical_across_repeated_runs(self) -> None:
+        def render_once() -> str:
+            stream = io.StringIO()
+            original = sys.stdout
+            try:
+                sys.stdout = stream
+                renderer = StreamRenderer(interactive=False)
+                renderer.start()
+                renderer.progress(
+                    StreamProgress(
+                        phase="prefill",
+                        current=1280,
+                        total=1581,
+                        percent=80,
+                        evaluated_current=512,
+                        evaluated_total=813,
+                        cached_tokens=768,
+                        elapsed_seconds=16.3,
+                        tokens_per_second=31.4,
+                    )
+                )
+                renderer.progress(
+                    StreamProgress(
+                        phase="generation",
+                        current=12,
+                        total=128,
+                        percent=9,
+                        elapsed_seconds=1.0,
+                        tokens_per_second=12.0,
+                    )
+                )
+                renderer.write("answer\n")
+                renderer.finish()
+            finally:
+                sys.stdout = original
+            return stream.getvalue()
+
+        first = render_once()
+        second = render_once()
+        self.assertEqual(first, second)
+        self.assertEqual(first, "answer\n")
+        self.assertNotIn("\033", first)
+        self.assertNotIn("\r", first)
+
     def test_restart_timer_clears_previous_progress_state(self) -> None:
         renderer = StreamRenderer()
         renderer.progress(StreamProgress(phase="generation", current=6, total=32, percent=18))
 
-        self.assertIn("6/32 tk (18%)", renderer._working_status(5))
+        self.assertIn("generating · 6 tok", renderer._working_status(5))
 
         renderer._restart_timer()
 
-        self.assertNotIn("6/32 tk (18%)", renderer._working_status(0))
+        self.assertNotIn("generating · 6 tok", renderer._working_status(0))
+
+    def test_new_model_phase_clears_previous_call_progress(self) -> None:
+        renderer = StreamRenderer()
+        renderer.progress(StreamProgress(phase="generation", current=6, total=32, percent=18))
+
+        renderer.set_phase_label("final answer")
+
+        self.assertNotIn("generating", renderer._working_status(0))
+        self.assertEqual(renderer._working_phase_detail(), None)
 
     def test_restart_timer_clears_generation_accumulator(self) -> None:
         renderer = StreamRenderer()
@@ -774,7 +935,7 @@ class StreamingRendererTests(unittest.TestCase):
         renderer._restart_timer()
         renderer.progress(StreamProgress(phase="generation", current=1, total=128, percent=0))
 
-        self.assertIn("1/128 tk (0%)", renderer._working_status(0))
+        self.assertIn("generating · 1 tok", renderer._working_status(0))
 
 
 if __name__ == "__main__":

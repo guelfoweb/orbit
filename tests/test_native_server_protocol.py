@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from orbit.native_llama.events import NativeProgress
 from orbit.native_server.protocol import (
     DEFAULT_SESSION_ID,
     native_chat_response,
@@ -12,10 +13,30 @@ from orbit.native_server.protocol import (
     trim_at_stop,
     validate_session_id,
 )
-from orbit.native_server.app import _final_prefix_reuse_props, _tool_call_healing_props
+from orbit.native_server.app import _final_prefix_reuse_props, _progress_payload, _tool_call_healing_props
 
 
 class NativeServerProtocolTests(unittest.TestCase):
+    def test_progress_payload_preserves_authoritative_live_metrics(self) -> None:
+        progress = NativeProgress(
+            "prefill",
+            1280,
+            1581,
+            evaluated_current=512,
+            evaluated_total=813,
+            cached_tokens=768,
+            elapsed_seconds=16.3,
+            tokens_per_second=31.4,
+        )
+
+        payload = _progress_payload(progress, session_id="default")
+
+        self.assertEqual(payload["evaluated_current"], 512)
+        self.assertEqual(payload["evaluated_total"], 813)
+        self.assertEqual(payload["cached_tokens"], 768)
+        self.assertEqual(payload["elapsed_seconds"], 16.3)
+        self.assertEqual(payload["tokens_per_second"], 31.4)
+
     def test_tool_call_healing_props_are_bounded_and_default_enabled(self) -> None:
         props = _tool_call_healing_props()
 

@@ -28,7 +28,7 @@ from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import TokenUsageAccumulator, estimate_context_status_tokens, format_turn_status, summarize_turn_token_usage
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.theme import dim, runtime_error_text, warning_text
-from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
+from orbit.terminal.tool_events import format_tool_activity_label, format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import allowed_tool_names_for_spec, tools_are_enabled
 
 
@@ -303,7 +303,7 @@ def _run_one_shot(
                 on_model_step=record_model_step,
                 on_tool_call=lambda name, args: renderer.event(
                     format_tool_call_event(name, args),
-                    next_activity=("tool", name),
+                    next_activity=("tool", format_tool_activity_label(name, args)),
                 ),
                 on_tool_result=lambda name, chars, source, content: _show_tool_result(
                     renderer,
