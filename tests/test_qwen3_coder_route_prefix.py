@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _QwenRouteAnchorRuntimePlan
+from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.model_profiles import NativeModelProfile, QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.paths import NativeLlamaPaths
 from orbit.native_llama.prefix_anchor import PrefixAnchorState
@@ -488,6 +489,257 @@ class Qwen3CoderRoutePrefixClientTests(unittest.TestCase):
                 f"{QWEN3_CODER_ROUTE_PREFIX_FORMAT_VERSION}:{'b' * 64}:"
                 f"{QWEN3_CODER_ROUTE_TOKENIZER_IDENTITY}:ctx=8192"
             ),
+        )
+
+    def test_cache_mode_transitions_preserve_only_coder_route_checkpoint(self) -> None:
+        for current, requested in (
+            ("chat:thinking=off", "tools:thinking=off"),
+            ("tools:thinking=off", "chat:thinking=off"),
+        ):
+            with self.subTest(current=current, requested=requested):
+                client = self._client()
+                client._session.ctx_tgt = 1  # type: ignore[assignment]
+                client.lib.lib.llama_get_memory.return_value = 2
+                client._session.prompt_cache_mode = current
+                client._session.cached_prompt_tokens = [1, 2, 3]
+                client._session.continuation_ready = True
+                client._session.last_metrics = object()  # type: ignore[assignment]
+                coder_state = PrefixAnchorState(
+                    valid=True,
+                    checkpoint_data=b"coder",
+                    checkpoint_size=5,
+                    token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+                )
+                client._qwen3_coder_route_prefix_anchor_state = coder_state
+                client._qwen_route_prefix_anchor_state = PrefixAnchorState(
+                    valid=True,
+                    checkpoint_data=b"qwen36",
+                    checkpoint_size=6,
+                )
+                coder_spec = QwenRoutePrefixSpec(tuple(), "coder", "text", "system", 0, 0)
+                client._qwen3_coder_route_prefix_spec = coder_spec
+                client._qwen_route_prefix_spec = QwenRoutePrefixSpec(
+                    tuple(), "qwen36", "text", "system", 0, 0
+                )
+
+                with (
+                    mock.patch.object(client, "_invalidate_final_prefix") as final_prefix,
+                    mock.patch.object(
+                        client, "_invalidate_qwen36_shell_tool_prefix"
+                    ) as shell_prefix,
+                ):
+                    client._ensure_prompt_cache_mode(requested)
+
+                self.assertIs(client._qwen3_coder_route_prefix_anchor_state, coder_state)
+                self.assertIs(client._qwen3_coder_route_prefix_spec, coder_spec)
+                self.assertFalse(client._qwen_route_prefix_anchor_state.valid)
+                self.assertIsNone(client._qwen_route_prefix_spec)
+                self.assertEqual(client._session.cached_prompt_tokens, [])
+                self.assertFalse(client._session.continuation_ready)
+                self.assertIsNone(client._session.last_metrics)
+                self.assertEqual(client._session.prompt_cache_mode, requested)
+                client.lib.lib.llama_memory_clear.assert_called_once_with(2, True)
+                final_prefix.assert_called_once_with("session_reset")
+                shell_prefix.assert_called_once_with("session_reset")
+                self.assertEqual(
+                    client.qwen3_coder_route_prefix_reuse_status()["invalidation_count"],
+                    0,
+                )
+
+    def test_unqualified_cache_mode_transition_invalidates_coder_checkpoint(self) -> None:
+        for profile_id, verified, current, requested in (
+            (QWEN3_CODER_PROFILE_ID, True, "chat:thinking=off", "chat:thinking=on"),
+            (
+                QWEN3_CODER_PROFILE_ID,
+                True,
+                "chat:thinking=off",
+                "artifact:qwen3-coder-json-string-v1",
+            ),
+            (QWEN3_CODER_PROFILE_ID, False, "chat:thinking=off", "tools:thinking=off"),
+            ("orbit-qwen36-native-v1", True, "chat:thinking=off", "tools:thinking=off"),
+        ):
+            with self.subTest(
+                profile_id=profile_id,
+                verified=verified,
+                current=current,
+                requested=requested,
+            ):
+                client = self._client()
+                if profile_id != QWEN3_CODER_PROFILE_ID or not verified:
+                    client.model_profile = NativeModelProfile(
+                        **{
+                            **_profile().__dict__,
+                            "profile_id": profile_id,
+                            "verified": verified,
+                        }
+                    )
+                client._session.ctx_tgt = 1  # type: ignore[assignment]
+                client.lib.lib.llama_get_memory.return_value = 2
+                client._session.prompt_cache_mode = current
+                client._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState(
+                    valid=True,
+                    checkpoint_data=b"coder",
+                    checkpoint_size=5,
+                    token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+                )
+
+                client._ensure_prompt_cache_mode(requested)
+
+                self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
+                self.assertEqual(
+                    client.qwen3_coder_route_prefix_reuse_status()["failure_reason"],
+                    "session_reset",
+                )
+
+    def test_cancel_after_cache_mode_transition_invalidates_preserved_checkpoint(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client.lib.lib.llama_get_memory.return_value = 2
+        client._session.prompt_cache_mode = "chat:thinking=off"
+        client._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState(
+            valid=True,
+            checkpoint_data=b"coder",
+            checkpoint_size=5,
+            token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+        )
+
+        client._ensure_prompt_cache_mode("tools:thinking=off")
+        self.assertTrue(client._qwen3_coder_route_prefix_anchor_state.valid)
+
+        client.cancel()
+
+        self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
+        self.assertEqual(
+            client.qwen3_coder_route_prefix_reuse_status()["failure_reason"],
+            "cancelled",
+        )
+
+    def test_failed_tool_completion_invalidates_preserved_checkpoint(self) -> None:
+        for outcome in ("cancelled", "exception", "render_error"):
+            with self.subTest(outcome=outcome):
+                client = self._client()
+                client._session.ctx_tgt = 1  # type: ignore[assignment]
+                client.lib.lib.llama_get_memory.return_value = 2
+                client._session.prompt_cache_mode = "chat:thinking=off"
+                client._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState(
+                    valid=True,
+                    checkpoint_data=b"coder",
+                    checkpoint_size=5,
+                    token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+                )
+                client._ensure_prompt_cache_mode("tools:thinking=off")
+
+                if outcome == "render_error":
+                    client.apply_chat_template = mock.Mock(
+                        side_effect=RuntimeError("synthetic render failure")
+                    )  # type: ignore[method-assign]
+                    with self.assertRaisesRegex(RuntimeError, "render failure"):
+                        client.complete_chat(
+                            [{"role": "user", "content": "run pwd"}],
+                            tools=[{"type": "function"}],
+                            thinking=False,
+                        )
+                    expected_reason = "completion_error"
+                else:
+                    if outcome == "exception":
+                        client._complete_prompt_standard = mock.Mock(
+                            side_effect=RuntimeError("synthetic completion failure")
+                        )  # type: ignore[method-assign]
+                        with self.assertRaisesRegex(RuntimeError, "completion failure"):
+                            client.complete_prompt(
+                                "tool prompt", allow_mtp_experimental=False
+                            )
+                        expected_reason = "completion_error"
+                    else:
+                        client._complete_prompt_standard = mock.Mock(
+                            return_value=NativeTimings(
+                                prompt_tokens=10,
+                                output_tokens=0,
+                                reused_prompt_tokens=0,
+                                evaluated_prompt_tokens=10,
+                                prefill_ms=1.0,
+                                generation_ms=1.0,
+                                cancelled=True,
+                            )
+                        )  # type: ignore[method-assign]
+                        client.complete_prompt(
+                            "tool prompt", allow_mtp_experimental=False
+                        )
+                        expected_reason = "cancelled"
+
+                self.assertFalse(
+                    client._qwen3_coder_route_prefix_anchor_state.valid
+                )
+                status = client.qwen3_coder_route_prefix_reuse_status()
+                self.assertEqual(status["invalidation_count"], 1)
+                self.assertEqual(status["failure_reason"], expected_reason)
+
+    def test_identity_mismatch_falls_back_before_native_restore(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._clear_target_memory = mock.Mock()  # type: ignore[method-assign]
+        client._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState(
+            prefix_hash="stale",
+            token_count=QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
+            model_id="model",
+            template_id="template",
+            tool_schema_hash="schema",
+            capability_summary_hash="capabilities",
+            runtime_policy_hash="policy",
+            route_contract_hash="route",
+            backend_version="backend",
+            native_version="native",
+            tools_mode="mode",
+            checkpoint_data=b"checkpoint",
+            checkpoint_size=10,
+            valid=True,
+        )
+        plan = _QwenRouteAnchorRuntimePlan(
+            prefix_tokens=list(range(QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT)),
+            prefix_hash="current",
+            state_kwargs={
+                "model_id": "model",
+                "template_id": "template",
+                "tool_schema_hash": "schema",
+                "capability_summary_hash": "capabilities",
+                "runtime_policy_hash": "policy",
+                "route_contract_hash": "route",
+                "backend_version": "backend",
+                "native_version": "native",
+                "tools_mode": "mode",
+            },
+            spec=QwenRoutePrefixSpec(tuple(), "token", "text", "system", 0, 0),
+            metadata={},
+            profile_id=QWEN3_CODER_PROFILE_ID,
+        )
+
+        processed, reused = client._prepare_memory_with_qwen_route_anchor(plan)
+
+        self.assertEqual((processed, reused), (0, 0))
+        self.assertEqual(client._clear_target_memory.call_count, 2)
+        client.lib.lib.llama_state_seq_set_data.assert_not_called()
+        status = client.qwen3_coder_route_prefix_reuse_status()
+        self.assertEqual(status["fallback_count"], 1)
+        self.assertEqual(status["invalidation_count"], 1)
+        self.assertEqual(status["failure_reason"], "prefix_hash_changed")
+
+    def test_model_reload_invalidates_coder_checkpoint_before_loading(self) -> None:
+        client = self._client()
+        client._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState(
+            valid=True,
+            checkpoint_data=b"coder",
+            checkpoint_size=5,
+        )
+        client._model = 1  # type: ignore[assignment]
+        client.lib.lib.llama_model_default_params.side_effect = RuntimeError("stop load")
+
+        with self.assertRaisesRegex(RuntimeError, "stop load"):
+            client.load()
+
+        self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
+        self.assertEqual(
+            client.qwen3_coder_route_prefix_reuse_status()["failure_reason"],
+            "model_reload",
         )
 
     def test_cancel_reset_and_close_release_only_profile_specific_checkpoint(self) -> None:

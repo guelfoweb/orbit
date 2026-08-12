@@ -145,7 +145,9 @@ class NativeSessionStateTests(unittest.TestCase):
 
         client._ensure_prompt_cache_mode("chat:thinking=on")
 
-        client.reset_session_state.assert_called_once()
+        client.reset_session_state.assert_called_once_with(
+            preserve_qwen3_coder_route_checkpoint=False
+        )
         self.assertEqual(client._session.prompt_cache_mode, "chat:thinking=on")
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
