@@ -153,6 +153,13 @@ def fetch_url_result_has_text(content: str | None) -> bool:
     return bool(body.strip())
 
 
+def fetch_url_result_text(content: str | None) -> str | None:
+    if not fetch_url_result_has_text(content):
+        return None
+    assert content is not None
+    return content.split("text:\n", 1)[1]
+
+
 def fetch_url_result_error(content: str | None) -> str | None:
     if not content:
         return None

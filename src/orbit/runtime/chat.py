@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Callable
 import json
 import re
@@ -9,6 +10,7 @@ from orbit.backend import ChatBackend, ChatResult
 from orbit.backend.base import Message, StreamProgress
 from orbit.runtime.capabilities import LocalCapabilities, discover_local_capabilities
 from orbit.runtime.client_state import ClientState
+from orbit.runtime.command_evidence import AcquiredEvidence
 from orbit.runtime.completion_budget import resolve_max_tokens
 from orbit.runtime.environments import (
     ContinueEnvironment,
@@ -70,11 +72,13 @@ from orbit.runtime.thinking_mode import (
     contains_control_channel_markup,
     last_assistant_has_open_reasoning,
 )
+from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
 from orbit.runtime.tool_result_compaction import (
     ToolResultCompactionReport,
     compact_tool_results,
     persistent_messages as persistent_tool_result_messages,
 )
+from orbit.runtime.tools import ToolResult
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
@@ -229,6 +233,120 @@ class ChatRuntime:
             on_model_step=on_model_step,
             on_phase_start=on_phase_start,
             loop=1,
+        )
+        return self._remember_visible_result(result)
+
+    @user_request
+    def answer_from_acquired_evidence(
+        self,
+        prompt: str,
+        *,
+        evidence: AcquiredEvidence,
+        workdir: Path,
+        temperature: float,
+        max_tokens: int,
+        on_final_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
+    ) -> ChatResult:
+        """Answer once from evidence acquired explicitly by a slash command."""
+        checkpoint = len(self.messages)
+        turn_id = self._begin_user_turn()
+        self.last_memory_refresh = None
+        self.refresh_memory_if_needed(temperature=temperature)
+        if self.evidence_store is None:
+            self.evidence_store = EvidenceStore.for_workdir(workdir)
+        self.messages.append({"role": "user", "content": prompt})
+        call_id = f"slash_{turn_id}"
+        tool_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": evidence.tool_name,
+                "arguments": json.dumps(evidence.arguments, ensure_ascii=False, separators=(",", ":")),
+            },
+        }
+        self.messages.append(assistant_tool_call_message("", [tool_call]))
+        tool_message = tool_result_message(
+            tool_call,
+            ToolResult(name=evidence.tool_name, content=evidence.content),
+            evidence_store=self.evidence_store,
+            metadata={
+                **evidence.arguments,
+                "source": evidence.source,
+                "tool_call_id": call_id,
+                "user_turn_id": turn_id,
+                "produced_by_phase": "slash_command",
+            },
+        )
+        self.messages.append(tool_message)
+        evidence_id = tool_message.get("evidence_id")
+        try:
+            result = self._answer_from_tool_results(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+                loop=1,
+                use_tool_prompt=True,
+            )
+        except BaseException:
+            self._discard_acquired_evidence(evidence_id)
+            self.restore_message_count(checkpoint)
+            raise
+        if result.finish_reason in {"cancelled", "timeout"}:
+            self._discard_acquired_evidence(evidence_id)
+            self.restore_message_count(checkpoint)
+        return self._remember_visible_result(result)
+
+    def _discard_acquired_evidence(self, evidence_id: object) -> None:
+        if isinstance(evidence_id, str) and self.evidence_store is not None:
+            self.evidence_store.discard(evidence_id)
+
+    @user_request
+    def answer_full_document_command(
+        self,
+        prompt: str,
+        *,
+        path: str,
+        workdir: Path,
+        temperature: float,
+        max_tokens: int,
+        on_final_delta: Callable[[str], None] | None = None,
+        on_progress: Callable[[StreamProgress], None] | None = None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None = None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
+    ) -> ChatResult:
+        """Run the existing exact full-document admission without a route call."""
+        self._begin_user_turn()
+        self.last_memory_refresh = None
+        self.refresh_memory_if_needed(temperature=temperature)
+        self.messages.append({"role": "user", "content": prompt})
+        base = ChatResult(
+            content="",
+            model=None,
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=0,
+            completion_tokens=0,
+            cached_tokens=0,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+        result = self._full_document_preflight_environment().answer_path(
+            prompt,
+            path=path,
+            route_result=base,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            workdir=workdir,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
         )
         return self._remember_visible_result(result)
 

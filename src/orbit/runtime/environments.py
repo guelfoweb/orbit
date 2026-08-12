@@ -451,18 +451,47 @@ class FullDocumentPreflightEnvironment:
         if allowed_tool_names is not None and "exec_shell_full_command" not in allowed_tool_names:
             return None
 
-        raw = read_full_document_snapshot(request.path, workdir=workdir)
+        return self.answer_path(
+            prompt,
+            path=request.path,
+            route_result=route_result,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            workdir=workdir,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
+        )
+
+    def answer_path(
+        self,
+        prompt: str,
+        *,
+        path: str,
+        route_result: ChatResult,
+        temperature: float,
+        max_tokens: int,
+        workdir: Path,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+    ) -> ChatResult:
+        """Apply exact full-document admission to an explicitly acquired path."""
+
+        raw = read_full_document_snapshot(path, workdir=workdir)
         if raw.startswith("error:"):
             return self._blocked(
                 route_result,
-                full_document_source_blocked_notice(request.path, raw.removeprefix("error:").strip()),
+                full_document_source_blocked_notice(path, raw.removeprefix("error:").strip()),
                 on_final_delta=on_final_delta,
             )
         snapshot = parse_full_document_snapshot(raw)
         if snapshot is None:
             return self._blocked(
                 route_result,
-                full_document_source_blocked_notice(request.path, "snapshot_integrity_failure"),
+                full_document_source_blocked_notice(path, "snapshot_integrity_failure"),
                 on_final_delta=on_final_delta,
             )
 
@@ -485,7 +514,7 @@ class FullDocumentPreflightEnvironment:
                 max_tokens=max_tokens,
                 workdir=workdir,
             )
-            return self.answer_admitted_snapshot(
+            result = self.answer_admitted_snapshot(
                 admission,
                 route_result=route_result,
                 temperature=temperature,
@@ -495,6 +524,8 @@ class FullDocumentPreflightEnvironment:
                 on_model_step=on_model_step,
                 on_phase_start=on_phase_start,
             )
+            assert result is not None
+            return result
         finally:
             if record is not None and self.runtime.evidence_store is not None:
                 self.runtime.evidence_store.discard(record.evidence_id)
