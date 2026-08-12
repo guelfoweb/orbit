@@ -10,11 +10,13 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 
 | Model | Prefill | Generation | Tools-on chat | Tool + final | Peak RAM |
 |---|---:|---:|---:|---:|---:|
-| [Gemma 4 26B-A4B](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | ~28.5 tok/s | ~7.8 tok/s | ~31.7 s | ~22.1 s | ~29.4 GiB |
-| [Qwen 3.6 35B-A3B](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF) | ~30.5 tok/s | ~7.4 tok/s | ~25.1 s | ~30.5 s | ~36.4 GiB |
-| [Qwen3-Coder 30B-A3B](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct) | ~26.6 tok/s | ~7.8 tok/s | ~4.4 s | ~30.1 s | ~31.3 GiB |
+| [Gemma 4 26B-A4B](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | ~24.2 tok/s | ~7.1 tok/s | ~3.0 s | ~20.9 s | ~29.4 GiB |
+| [Qwen 3.6 35B-A3B](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF) | ~31.8 tok/s | ~7.6 tok/s | ~6.1 s | ~23.8 s | ~36.4 GiB |
+| [Qwen3-Coder 30B-A3B](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct) | ~26.0 tok/s | ~10.7 tok/s | ~3.0 s | ~18.4 s | ~31.3 GiB |
 
-Benchmarks are representative CPU-only measurements and vary by hardware, quantization, cache state, prompt, and workload.
+Measured on the author's Intel Core i7-10710U (6 cores / 12 threads) with 64 GB RAM, no GPU, Linux, llama.cpp b9551, `ctx=8192`, 6 threads, batch/ubatch 256/128, Flash Attention AUTO, thinking off, and MTP off.
+
+Chat and tool latencies are warm steady-state medians after one excluded warm-up. Prefill measures evaluated tokens only and excludes cache benefit. These are not universal performance claims; actual results vary with CPU, memory bandwidth, quantization, backend build, and workload.
 
 ## Requirements
 
