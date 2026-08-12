@@ -31,7 +31,7 @@ from orbit.terminal.status import (
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
-from orbit.terminal.theme import dim
+from orbit.terminal.theme import dim, runtime_error_text
 from orbit.runtime.thinking_mode import ThinkingMode
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
@@ -51,6 +51,7 @@ class Repl:
     turn_backend_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
     session_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
     backend_usage_observer_installed: bool = field(default=False, init=False, repr=False)
+    prompt_gap_pending: bool = field(default=True, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tools_mode is None:
@@ -86,12 +87,14 @@ class Repl:
             if prompt.startswith("/"):
                 clear_input_echo(prompt)
                 if self._handle_command(prompt):
+                    self.prompt_gap_pending = True
                     continue
                 return self._finish_interactive_session(0)
             if self.history:
                 resolution = self.history.resolve_prompt(prompt)
                 if resolution.missing_full_text:
                     print("error: full pasted text is unavailable for this history entry", file=sys.stderr)
+                    self.prompt_gap_pending = True
                     continue
                 if resolution.prompt != prompt:
                     prompt = resolution.prompt
@@ -103,10 +106,14 @@ class Repl:
                 self.history.add(prompt)
                 self.history.save()
             self._ask(prompt)
+            self.prompt_gap_pending = True
 
     def _read_next_prompt(self) -> str:
         if self.queued_prompts:
             return self.queued_prompts.pop(0)
+        if self.prompt_gap_pending:
+            print()
+            self.prompt_gap_pending = False
         return read_prompt_input()
 
     def _ask(self, prompt: str) -> None:
@@ -137,7 +144,10 @@ class Repl:
                     allowed_tool_names=allowed_tool_names_for_spec(self.tools_mode or "off"),
                     on_final_delta=renderer.write,
                     on_progress=renderer.progress,
-                    on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
+                    on_tool_call=lambda name, args: renderer.event(
+                        format_tool_call_event(name, args),
+                        next_activity=("tool", name),
+                    ),
                     on_tool_result=lambda name, chars, source, content: self._show_tool_result(renderer, name, chars, source, content),
                     on_model_step=self._record_model_step,
                     on_phase_start=lambda phase: self._record_phase_start(renderer, phase),
@@ -155,13 +165,16 @@ class Repl:
         except KeyboardInterrupt:
             renderer.finish(interrupted=True)
             self.runtime.restore_message_count(checkpoint)
-            print(dim("interrupted"), flush=True)
+            print(dim("cancelled"), flush=True)
             return
-        except LlamaServerError as exc:
+        except (LlamaServerError, TimeoutError) as exc:
             renderer.finish()
             self.runtime.restore_message_count(checkpoint)
-            print(f"error: {exc}", file=sys.stderr)
+            print(runtime_error_text(exc), file=sys.stderr)
             return
+        except Exception:
+            renderer.finish()
+            raise
         renderer.finish()
         self._save_session()
         elapsed = time.monotonic() - started
@@ -232,7 +245,11 @@ class Repl:
             tokens = estimate_prefill_tokens_after_tool_result(self.runtime.messages, content)
             seconds = self.prefill_estimator.estimate_seconds(tokens, profile=FINAL_FROM_TOOL_PREFILL_PROFILE)
             renderer.set_prefill_estimate(_visible_prefill_seconds(seconds), tokens)
-        renderer.event(format_tool_result_event(name, chars, source, content), trailing_blank_line=True)
+        renderer.event(
+            format_tool_result_event(name, chars, source, content),
+            trailing_blank_line=True,
+            next_activity=("model", "working"),
+        )
 
     def _handle_command(self, command: str) -> bool:
         if command == "/exit":
@@ -381,13 +398,16 @@ class Repl:
         except KeyboardInterrupt:
             renderer.finish(interrupted=True)
             self.runtime.restore_message_count(checkpoint)
-            print(dim("interrupted"), flush=True)
+            print(dim("cancelled"), flush=True)
             return
-        except LlamaServerError as exc:
+        except (LlamaServerError, TimeoutError) as exc:
             renderer.finish()
             self.runtime.restore_message_count(checkpoint)
-            print(f"error: {exc}", file=sys.stderr)
+            print(runtime_error_text(exc), file=sys.stderr)
             return
+        except Exception:
+            renderer.finish()
+            raise
         renderer.finish()
         self._save_session()
         elapsed = time.monotonic() - started

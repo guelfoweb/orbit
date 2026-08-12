@@ -12,11 +12,24 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.terminal.streaming import StreamRenderer, _pad_to_terminal_width, format_elapsed
+from orbit.terminal.streaming import StreamRenderer, _pad_to_terminal_width, _visible_len, format_elapsed
 from orbit.backend.base import StreamProgress
 
 
 class StreamingRendererTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tty_patches = [
+            mock.patch("orbit.terminal.streaming.is_tty", return_value=True),
+            mock.patch("orbit.terminal.streaming.supports_ansi", return_value=True),
+            mock.patch("orbit.terminal.theme.supports_ansi", return_value=True),
+        ]
+        for patcher in self._tty_patches:
+            patcher.start()
+
+    def tearDown(self) -> None:
+        for patcher in reversed(self._tty_patches):
+            patcher.stop()
+
     def test_write_prints_delta(self) -> None:
         stream = io.StringIO()
         original = sys.stdout
@@ -521,7 +534,7 @@ class StreamingRendererTests(unittest.TestCase):
         self.assertEqual(format_elapsed(59.9), "59s")
         self.assertEqual(format_elapsed(79), "1m 19s")
 
-    def test_wait_timer_prints_working_message(self) -> None:
+    def test_wait_timer_prints_compact_activity(self) -> None:
         stream = io.StringIO()
         original = sys.stdout
         try:
@@ -534,9 +547,9 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working (0s - Ctrl+C to interrupt)", output)
+        self.assertIn("model · working · 0s", output)
 
-    def test_wait_timer_prints_prefill_progress_when_estimated(self) -> None:
+    def test_wait_timer_does_not_print_speculative_prefill_estimate(self) -> None:
         stream = io.StringIO()
         original = sys.stdout
         try:
@@ -549,7 +562,8 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working [prefill estimate] (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
+        self.assertIn("model · working · 0s", output)
+        self.assertNotIn("estimate", output)
 
     def test_wait_timer_includes_phase_label_when_present(self) -> None:
         stream = io.StringIO()
@@ -565,7 +579,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working [prefill estimate] (0s, prefill estimate ~1% - Ctrl+C to interrupt)", output)
+        self.assertIn("model · final answer · 0s", output)
 
     def test_wait_timer_prints_prefill_token_progress_when_estimated(self) -> None:
         renderer = StreamRenderer(prefill_estimate_seconds=10, prefill_estimate_tokens=1000)
@@ -638,7 +652,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertIn("Working [prefill] (0s, 12/48 tk (25%) - Ctrl+C to interrupt)", output)
+        self.assertIn("model · prefill · 0s", output)
 
     def test_wait_line_is_padded_to_clear_previous_content(self) -> None:
         padded = _pad_to_terminal_width("\033[2mshort\033[0m")
@@ -660,7 +674,7 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         after_delta = stream.getvalue().split("hello", 1)[1]
-        self.assertNotIn("Working", after_delta)
+        self.assertNotIn("model ·", after_delta)
 
     def test_restarted_timer_stops_before_later_delta(self) -> None:
         stream = io.StringIO()
@@ -679,7 +693,68 @@ class StreamingRendererTests(unittest.TestCase):
             sys.stdout = original
 
         after_final = stream.getvalue().split("final answer", 1)[1]
-        self.assertNotIn("Working", after_final)
+        self.assertNotIn("model ·", after_final)
+
+    def test_tool_activity_replaces_model_activity_until_result(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(interval=0.01)
+            renderer.start()
+            renderer.event("› Exec  pwd", next_activity=("tool", "exec_shell_full_command"))
+            time.sleep(0.02)
+            renderer.event("└ /tmp", next_activity=("model", "final answer"))
+            time.sleep(0.02)
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("tool · exec_shell_full_command · 0s", output)
+        self.assertIn("model · final answer · 0s", output)
+
+    def test_activity_line_fits_40_and_60_columns(self) -> None:
+        for columns in (40, 60):
+            stream = io.StringIO()
+            original = sys.stdout
+            try:
+                sys.stdout = stream
+                renderer = StreamRenderer(interactive=True)
+                renderer.set_activity("tool", "exec_shell_full_command")
+                renderer._start_time = time.monotonic()
+                with mock.patch("orbit.terminal.streaming._terminal_columns", return_value=columns):
+                    renderer._render_wait_line()
+            finally:
+                sys.stdout = original
+
+            line = stream.getvalue().rsplit("\r", 1)[-1]
+            self.assertLessEqual(_visible_len(line), columns)
+            self.assertIn("exec_shell_full_command", line)
+
+    def test_non_tty_is_plain_linear_and_keeps_markdown_literal(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            with (
+                mock.patch("orbit.terminal.streaming.is_tty", return_value=False),
+                mock.patch("orbit.terminal.streaming.supports_ansi", return_value=False),
+                mock.patch("orbit.terminal.theme.supports_ansi", return_value=False),
+            ):
+                renderer = StreamRenderer(interval=0.01, render_markdown_mode="live")
+                renderer.start()
+                renderer.progress(StreamProgress(phase="prefill", current=1, total=2, percent=50))
+                renderer.event("› Exec  pwd", next_activity=("tool", "exec_shell_full_command"))
+                renderer.write("**answer**\n")
+                renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertEqual(output, "› Exec  pwd\n**answer**\n")
+        self.assertNotIn("\033", output)
+        self.assertNotIn("\r", output)
 
     def test_restart_timer_clears_previous_progress_state(self) -> None:
         renderer = StreamRenderer()

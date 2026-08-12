@@ -233,7 +233,7 @@ class ReplTests(unittest.TestCase):
         self.assertIs(loaded, fake_readline)
         fake_readline.parse_and_bind.assert_called_with("set enable-bracketed-paste on")
 
-    def test_run_banner_is_dim_and_existing_session_preview_is_shown(self) -> None:
+    def test_run_banner_is_compact_and_existing_session_preview_is_shown(self) -> None:
         runtime = CountingRuntime()
         runtime.messages = [
             {"role": "system", "content": "system"},
@@ -251,11 +251,12 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()
-        self.assertIn("\033[2m┌─ Orbit Runtime", output)
-        self.assertIn("Version", output)
-        self.assertIn("Tools        on", output)
-        self.assertIn("Workdir", output)
-        self.assertIn("Type /help for commands, /status for runtime details.", output)
+        self.assertIn("Orbit v0.0.1-rc32", output)
+        self.assertIn("· unknown · unknown", output)
+        self.assertIn("workdir ", output)
+        self.assertIn("tools on · think off · ctx 8192", output)
+        self.assertIn("/help for commands · /status for details", output)
+        self.assertNotIn("Machine", output)
         self.assertNotIn("warning: tools on", output)
         self.assertIn("recent session context:", output)
         self.assertIn("user: first question", output)
@@ -294,14 +295,40 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(runtime.messages, before)
         self.assertIn("partial", stdout.getvalue())
-        self.assertIn("interrupted", stdout.getvalue())
+        self.assertIn("cancelled", stdout.getvalue())
+
+    def test_timeout_uses_consistent_prefix_and_clears_renderer(self) -> None:
+        runtime = CountingRuntime()
+        runtime.ask_chat = mock.Mock(side_effect=TimeoutError("request timed out"))
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path("."), tools="off"))
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("orbit.terminal.repl.StreamRenderer") as renderer_class,
+            contextlib.redirect_stderr(stderr),
+        ):
+            repl._ask("hello")
+
+        renderer_class.return_value.finish.assert_called_once_with()
+        self.assertEqual(stderr.getvalue(), "timeout: request timed out\n")
+
+    def test_unexpected_exception_clears_renderer_before_propagating(self) -> None:
+        runtime = CountingRuntime()
+        runtime.ask_chat = mock.Mock(side_effect=RuntimeError("boom"))
+        repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path("."), tools="off"))
+
+        with mock.patch("orbit.terminal.repl.StreamRenderer") as renderer_class:
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                repl._ask("hello")
+
+        renderer_class.return_value.finish.assert_called_once_with()
 
     def test_tool_result_event_marks_large_context(self) -> None:
-        self.assertEqual(format_tool_result_event("read_file", 9999), " └ 9999 chars -> model")
-        self.assertEqual(format_tool_result_event("read_file", 10000), " └ 10000 chars -> model | large context")
-        self.assertEqual(format_tool_result_event("read_file", 5, "orbit"), " └ 5 chars -> model")
-        self.assertEqual(format_tool_call_event("exec_shell_full_command", '{"command":"ls"}'), "List: ls")
-        self.assertEqual(format_tool_result_event("exec_shell_full_command", 45), " └ 45 chars -> model")
+        self.assertEqual(format_tool_result_event("read_file", 9999), "└ 9999 chars")
+        self.assertEqual(format_tool_result_event("read_file", 10000), "└ 10000 chars · large context")
+        self.assertEqual(format_tool_result_event("read_file", 5, "orbit"), "└ 5 chars")
+        self.assertEqual(format_tool_call_event("exec_shell_full_command", '{"command":"ls"}'), "› Read  ls")
+        self.assertEqual(format_tool_result_event("exec_shell_full_command", 45), "└ 45 chars")
         chunk_content = "\n".join(
             [
                 "shell_output_read_file: true",
@@ -314,8 +341,17 @@ class ReplTests(unittest.TestCase):
         )
         self.assertEqual(
             format_tool_result_event("exec_shell_full_command", 200, content=chunk_content),
-            " └ chunk 1/3 build_native.py: #!/usr/bin/env python3 | 200 chars -> model",
+            "└ chunk 1/3 build_native.py: #!/usr/bin/env python3",
         )
+
+    def test_routine_tool_result_shows_preview_without_internal_transport_suffix(self) -> None:
+        rendered = format_tool_result_event(
+            "exec_shell_full_command",
+            8,
+            content="10:15:01",
+        )
+
+        self.assertEqual(rendered, "└ 10:15:01")
 
     def test_tool_result_event_marks_contract_rejection(self) -> None:
         content = (
@@ -325,38 +361,76 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(
             format_tool_result_event("exec_shell_full_command", len(content), content=content),
-            f" └ rejected metadata-only output | {len(content)} chars -> model | rejected",
+            "└ rejected metadata-only output · rejected",
         )
 
     def test_tool_call_event_classifies_shell_commands(self) -> None:
         self.assertEqual(
             format_tool_call_event("exec_shell_full_command", json.dumps({"command": 'rg -n "build_native" src tests'})),
-            'Search: rg -n "build_native" src tests',
+            '› Read  rg -n "build_native" src tests',
         )
         self.assertEqual(
             format_tool_call_event("exec_shell_full_command", json.dumps({"command": "cat README.md"})),
-            "Read: cat README.md",
+            "› Read  cat README.md",
         )
         self.assertEqual(
             format_tool_call_event("exec_shell_full_command", json.dumps({"command": "sed -i 's/12120/12121/' README.md"})),
-            "Edit: sed -i 's/12120/12121/' README.md",
+            "› Exec  sed -i 's/12120/12121/' README.md",
         )
         self.assertEqual(
             format_tool_call_event("exec_shell_full_command", json.dumps({"command": "tee notes.txt >/dev/null"})),
-            "Write: tee notes.txt >/dev/null",
+            "› Exec  tee notes.txt >/dev/null",
         )
         self.assertEqual(
             format_tool_call_event("exec_shell_full_command", json.dumps({"command": "curl -L https://example.com"})),
-            "Web: curl -L https://example.com",
+            "› Web  curl -L https://example.com",
         )
         self.assertEqual(
             format_tool_call_event("fetch_url", json.dumps({"url": "https://example.com"})),
-            "Fetch: https://example.com",
+            "› Web  https://example.com",
         )
         self.assertEqual(
             format_tool_call_event("verify_artifact", json.dumps({"check": "text_integrity"})),
-            "Verify: published artifact (text_integrity)",
+            "› Artifact  verify published artifact · text_integrity",
         )
+        self.assertEqual(
+            format_tool_call_event("write_artifact", json.dumps({"path": "output/result.json"})),
+            "› Artifact  output/result.json",
+        )
+
+    def test_tool_call_does_not_truncate_essential_arguments(self) -> None:
+        command = "printf '%s' " + ("x" * 140) + " END-MARKER"
+
+        rendered = format_tool_call_event("exec_shell_full_command", json.dumps({"command": command}))
+
+        self.assertTrue(rendered.startswith("› Exec  printf"))
+        self.assertTrue(rendered.endswith("END-MARKER"))
+
+    def test_tool_failure_keeps_error_prefix_and_bounded_preview(self) -> None:
+        content = "error: exit 1\nFAILED test_example.py::test_value\nmore details"
+
+        rendered = format_tool_result_event("exec_shell_full_command", len(content), content=content)
+
+        self.assertTrue(rendered.startswith("└ error: exit 1"))
+        self.assertNotIn("chars -> model", rendered)
+
+    def test_tool_result_keeps_truncation_visible_without_internal_transport_suffix(self) -> None:
+        cases = (
+            ("first line\n[truncated]", "└ first line · truncated"),
+            ("[truncated]", "└ 11 chars · truncated"),
+            (
+                "directory_listing: path=. total_seen=500 truncated=true\na\nb",
+                "└ a | b · truncated",
+            ),
+        )
+        for content, expected in cases:
+            with self.subTest(content=content):
+                rendered = format_tool_result_event(
+                    "exec_shell_full_command",
+                    len(content),
+                    content=content,
+                )
+                self.assertEqual(rendered, expected)
 
     def test_tool_result_event_previews_pdf_and_list_output(self) -> None:
         pdf_content = "\n".join(
@@ -370,13 +444,13 @@ class ReplTests(unittest.TestCase):
         )
         self.assertEqual(
             format_tool_result_event("exec_shell_full_command", len(pdf_content), content=pdf_content),
-            " └ pdf/grande.pdf: This document discusses eIDAS 2.0 and the EUDI… | 133 chars -> model",
+            "└ pdf/grande.pdf: This document discusses eIDAS 2.0 and the EUDI…",
         )
 
         list_content = ".\n./pdf\n./text\n./samples\n"
         self.assertEqual(
             format_tool_result_event("exec_shell_full_command", len(list_content), content=list_content),
-            " └ . | ./pdf | ./text | 25 chars -> model",
+            "└ . | ./pdf | ./text",
         )
 
     def test_phase_progress_label_maps_buffered_and_streamed_phases(self) -> None:
@@ -569,19 +643,22 @@ class ReplTests(unittest.TestCase):
     def test_colorize_paste_preview_highlights_only_badge(self) -> None:
         preview = "Lorem ipsum...\n[text 5108 chars #a1b2c3d4]"
 
-        colored = colorize_paste_preview(preview)
+        with mock.patch("orbit.terminal.theme.supports_ansi", return_value=True):
+            colored = colorize_paste_preview(preview)
 
         self.assertIn("Lorem ipsum...\n", colored)
         self.assertIn("\033[2m\033[33m[text 5108 chars #a1b2c3d4]\033[0m", colored)
         self.assertNotIn("\033[2m\033[33mLorem", colored)
 
     def test_colorize_user_prompt_accents_prompt_text(self) -> None:
-        colored = colorize_user_prompt("> hello")
+        with mock.patch("orbit.terminal.theme.supports_ansi", return_value=True):
+            colored = colorize_user_prompt("> hello")
 
         self.assertEqual(colored, "\033[36m> hello\033[0m")
 
     def test_colorize_user_prompt_keeps_paste_badge_yellow(self) -> None:
-        colored = colorize_user_prompt("> Lorem...\n[text 5108 chars #a1b2c3d4]")
+        with mock.patch("orbit.terminal.theme.supports_ansi", return_value=True):
+            colored = colorize_user_prompt("> Lorem...\n[text 5108 chars #a1b2c3d4]")
 
         self.assertIn("\033[36m> Lorem...\n\033[0m", colored)
         self.assertIn("\033[2m\033[33m[text 5108 chars #a1b2c3d4]\033[0m", colored)
@@ -751,6 +828,33 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(prompt, "queued prompt")
         self.assertEqual(repl.queued_prompts, [])
+
+    def test_prompt_gap_is_exactly_one_blank_line_and_does_not_accumulate(self) -> None:
+        for interactive in (False, True):
+            with self.subTest(interactive=interactive):
+                runtime = CountingRuntime()
+                repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
+                responses = iter(("", "next"))
+                stdout = io.StringIO()
+
+                def fake_read() -> str:
+                    print("> ")
+                    return next(responses)
+
+                with (
+                    mock.patch.object(stdout, "isatty", return_value=interactive),
+                    mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=fake_read),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    print("context: 970/189440 (<1%)")
+                    repl.prompt_gap_pending = True
+                    self.assertEqual(repl._read_next_prompt(), "")
+                    self.assertEqual(repl._read_next_prompt(), "next")
+
+                self.assertEqual(
+                    stdout.getvalue(),
+                    "context: 970/189440 (<1%)\n\n> \n> \n",
+                )
 
     def test_tools_command_toggles_interactive_mode(self) -> None:
         runtime = CountingRuntime()

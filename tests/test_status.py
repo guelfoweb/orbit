@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import sys
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -19,7 +20,7 @@ from orbit.terminal.status import (
     format_turn_status,
     summarize_turn_token_usage,
 )
-from orbit.terminal.theme import dim, yellow_dim
+from orbit.terminal.theme import dim, runtime_error_text, warning_text, yellow_dim
 
 
 class StatusTests(unittest.TestCase):
@@ -83,10 +84,9 @@ class StatusTests(unittest.TestCase):
 
         status = format_turn_status(result, turn_token_usage=usage)
 
-        self.assertIn("tks: 630 total (600 in + 30 out)", status)
-        self.assertIn("work: 560 (530 prefill + 30 decode)", status)
-        self.assertIn("cache: 70 (12%)", status)
-        self.assertIn("calls: 3", status)
+        self.assertIn("3 calls · stop", status)
+        self.assertIn("tokens: 600 in · 530 eval · 70 cache · 30 out", status)
+        self.assertIn("last call: 12.5 tok/s prefill · 3.4 tok/s decode", status)
 
     def test_format_turn_status_includes_stop_tokens_cache_and_speed(self) -> None:
         status = format_turn_status(
@@ -104,10 +104,9 @@ class StatusTests(unittest.TestCase):
         )
 
         self.assertNotIn("model:", status)
-        self.assertIn("stop: stop", status)
-        self.assertIn("tks: 10->3, cached 8", status)
-        self.assertIn("cache: 80%", status)
-        self.assertIn("__ pf 12.5/s | gen 3.4/s", status)
+        self.assertIn("1 calls · stop", status)
+        self.assertIn("tokens: 10 in · 2 eval · 8 cache · 3 out", status)
+        self.assertIn("last call: 12.5 tok/s prefill · 3.4 tok/s decode", status)
 
     def test_format_turn_status_includes_context_window_and_usage_percent(self) -> None:
         status = format_turn_status(
@@ -126,7 +125,35 @@ class StatusTests(unittest.TestCase):
             context_tokens=8192,
         )
 
-        self.assertIn("ctx: 2212/8192 (27%) | stop: stop", status)
+        self.assertIn("context: 2212/8192 (27%)", status)
+
+    def test_context_percentage_distinguishes_zero_sub_one_and_integer_values(self) -> None:
+        result = ChatResult(
+            content="hello",
+            model="gemma4",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            cached_tokens=None,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+        cases = (
+            (0, 10_000, "0%"),
+            (50, 10_000, "<1%"),
+            (100, 10_000, "1%"),
+            (2_500, 10_000, "25%"),
+        )
+        for used, total, expected in cases:
+            with self.subTest(used=used):
+                status = format_turn_status(
+                    result,
+                    estimated_context_tokens=used,
+                    context_tokens=total,
+                )
+                self.assertIn(f"context: {used}/{total} ({expected})", status)
 
     def test_format_turn_status_includes_context_pressure(self) -> None:
         result = ChatResult(
@@ -145,11 +172,9 @@ class StatusTests(unittest.TestCase):
         high = format_turn_status(result, estimated_context_tokens=5900, context_tokens=8192)
         refresh = format_turn_status(result, estimated_context_tokens=7000, context_tokens=8192)
 
-        self.assertIn("ctx: 4280/8192 (52%)", moderate)
-        self.assertIn("pressure: moderate", moderate)
-        self.assertIn("ctx: 5900/8192 (72%)", high)
-        self.assertIn("pressure: high | consider /compact tools", high)
-        self.assertIn("pressure: memory refresh", refresh)
+        self.assertIn("context: 4280/8192 (52%) · pressure moderate", moderate)
+        self.assertIn("context: 5900/8192 (72%) · pressure high | consider /compact tools", high)
+        self.assertIn("pressure memory refresh", refresh)
 
     def test_format_turn_status_includes_elapsed_time(self) -> None:
         result = ChatResult(
@@ -167,14 +192,54 @@ class StatusTests(unittest.TestCase):
         short = format_turn_status(result, elapsed_seconds=34, terminal_columns=72)
         long = format_turn_status(result, elapsed_seconds=79, terminal_columns=72)
 
-        self.assertIn("time elapsed: 34s", short)
-        self.assertIn("time elapsed: 1m 19s", long)
-        self.assertEqual(len(short.splitlines()[0]), 72)
-        self.assertTrue(short.endswith("stop: stop"))
+        self.assertIn("34s · 1 calls · stop", short)
+        self.assertIn("1m 19s · 1 calls · stop", long)
+        self.assertFalse(short.startswith("__"))
 
     def test_dim_wraps_text_in_ansi_escape(self) -> None:
-        self.assertEqual(dim("model: gemma4"), "\033[2mmodel: gemma4\033[0m")
-        self.assertEqual(yellow_dim("[text 10 chars #12345678]"), "\033[2m\033[33m[text 10 chars #12345678]\033[0m")
+        with mock.patch("orbit.terminal.theme.supports_ansi", return_value=True):
+            self.assertEqual(dim("model: gemma4"), "\033[2mmodel: gemma4\033[0m")
+            self.assertEqual(yellow_dim("[text 10 chars #12345678]"), "\033[2m\033[33m[text 10 chars #12345678]\033[0m")
+
+    def test_theme_emits_plain_text_when_redirected(self) -> None:
+        with mock.patch("orbit.terminal.theme.supports_ansi", return_value=False):
+            self.assertEqual(dim("model: gemma4"), "model: gemma4")
+            self.assertEqual(yellow_dim("warning"), "warning")
+
+    def test_runtime_messages_have_stable_prefixes(self) -> None:
+        self.assertEqual(runtime_error_text(RuntimeError("broken")), "error: broken")
+        self.assertEqual(runtime_error_text(TimeoutError("request timed out")), "timeout: request timed out")
+        self.assertEqual(runtime_error_text(RuntimeError("error: broken")), "error: broken")
+        self.assertEqual(warning_text("cache unavailable"), "warning: cache unavailable")
+
+    def test_turn_footer_wraps_by_metric_group_at_narrow_widths(self) -> None:
+        result = ChatResult(
+            content="ok",
+            model="qwen",
+            finish_reason="stop",
+            tool_calls=[],
+            prompt_tokens=2393,
+            completion_tokens=211,
+            cached_tokens=768,
+            prompt_tokens_per_second=29.6,
+            generation_tokens_per_second=7.3,
+        )
+        usage = TokenUsageAccumulator()
+        usage.add(ModelStepMetrics(1, "route", "stop", 2393, 211, 768, 29.6, 7.3, 0))
+
+        for columns in (40, 60):
+            rendered = format_turn_status(
+                result,
+                elapsed_seconds=30,
+                estimated_context_tokens=1334,
+                context_tokens=8192,
+                turn_token_usage=usage.snapshot(),
+                terminal_columns=columns,
+            )
+            self.assertTrue(all(len(line) <= columns for line in rendered.splitlines()))
+            self.assertIn("2,393 in", rendered)
+            self.assertIn("1,625 eval", rendered)
+            self.assertIn("last call:", rendered)
 
     def test_format_memory_refresh_includes_savings_timing_and_threshold(self) -> None:
         status = format_memory_refresh(

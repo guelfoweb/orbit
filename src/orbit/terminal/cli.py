@@ -25,7 +25,7 @@ from orbit.terminal.commands import health_text, help_text, runtime_status, set_
 from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import TokenUsageAccumulator, estimate_context_status_tokens, format_turn_status, summarize_turn_token_usage
 from orbit.terminal.streaming import StreamRenderer
-from orbit.terminal.theme import dim
+from orbit.terminal.theme import dim, runtime_error_text, warning_text
 from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import allowed_tool_names_for_spec, tools_are_enabled
 
@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     session = select_interactive_session(config.workdir)
     session_messages, session_warning = session.load_with_warning()
     if session_warning:
-        print(dim(session_warning), file=sys.stderr)
+        print(dim(warning_text(session_warning)), file=sys.stderr)
     runtime = ChatRuntime(
         backend=backend,
         system_prompt=None if config.no_system else config.system,
@@ -236,7 +236,10 @@ def _run_one_shot(
                 on_final_delta=renderer.write,
                 on_progress=renderer.progress,
                 on_model_step=record_model_step,
-                on_tool_call=lambda name, args: renderer.event(format_tool_call_event(name, args), restart_timer=False),
+                on_tool_call=lambda name, args: renderer.event(
+                    format_tool_call_event(name, args),
+                    next_activity=("tool", name),
+                ),
                 on_tool_result=lambda name, chars, source, content: _show_tool_result(
                     renderer,
                     runtime,
@@ -249,16 +252,19 @@ def _run_one_shot(
             )
     except KeyboardInterrupt:
         renderer.finish(interrupted=True)
-        print(dim("interrupted"), flush=True)
+        print(dim("cancelled"), flush=True)
         return 130
-    except ValueError as exc:
+    except (ValueError, TimeoutError) as exc:
         renderer.finish()
-        print(f"error: {exc}", file=sys.stderr)
+        print(runtime_error_text(exc), file=sys.stderr)
         return 1
     except LlamaServerError as exc:
         renderer.finish()
-        print(f"error: {exc}", file=sys.stderr)
+        print(runtime_error_text(exc), file=sys.stderr)
         return 1
+    except Exception:
+        renderer.finish()
+        raise
     renderer.finish()
     if not model_steps:
         prefill_estimator.update(
@@ -306,7 +312,11 @@ def _show_tool_result(renderer, runtime, prefill_estimator, name: str, chars: in
         tokens = estimate_prefill_tokens_after_tool_result(runtime.messages, content)
         seconds = prefill_estimator.estimate_seconds(tokens, profile=prefill_profile_for_phase("final_from_tool"))
         renderer.set_prefill_estimate(_visible_prefill_seconds(seconds), tokens)
-    renderer.event(format_tool_result_event(name, chars, source, content), trailing_blank_line=True)
+    renderer.event(
+        format_tool_result_event(name, chars, source, content),
+        trailing_blank_line=True,
+        next_activity=("model", "working"),
+    )
 
 
 if __name__ == "__main__":

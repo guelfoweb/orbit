@@ -85,10 +85,9 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertEqual(code, 0)
-        self.assertIn(
-            "tks: 420 total (400 in + 20 out) | work: 400 (380 prefill + 20 decode) | cache: 20 (5%) | calls: 2",
-            stream.getvalue(),
-        )
+        self.assertIn("2 calls · stop", stream.getvalue())
+        self.assertIn("tokens: 400 in · 380 eval · 20 cache · 20 out", stream.getvalue())
+        self.assertIn("last call: 10.0 tok/s prefill · 2.0 tok/s decode", stream.getvalue())
 
     def test_one_shot_think_on_does_not_crash(self) -> None:
         completed = _run_cli("", "--think", "on", "/think")
@@ -164,7 +163,7 @@ class CliTests(unittest.TestCase):
         completed = _run_cli("/status\n/exit\n")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("Type /help for commands, /status for runtime details.", completed.stdout)
+        self.assertIn("/help for commands · /status for details", completed.stdout)
         self.assertIn("┌─ Orbit Runtime", completed.stdout)
         self.assertIn("Messages     1", completed.stdout)
 
@@ -172,7 +171,7 @@ class CliTests(unittest.TestCase):
         completed = _run_cli("/status ctx\n/exit\n")
 
         self.assertEqual(completed.returncode, 0)
-        self.assertIn("Type /help for commands, /status for runtime details.", completed.stdout)
+        self.assertIn("/help for commands · /status for details", completed.stdout)
         self.assertIn("Context\n-------", completed.stdout)
         self.assertIn("tool_result:", completed.stdout)
 

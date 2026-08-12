@@ -31,20 +31,14 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
     def test_startup_banner_cpu_only(self) -> None:
         banner = format_startup_banner(_status())
 
-        self.assertIn("┌─ Orbit Runtime", banner)
-        self.assertIn("│ Version      0.0.1", banner)
-        self.assertIn("Gemma 4 12B", banner)
-        self.assertIn("│ MTP          on, mmproj loaded", banner)
-        self.assertIn("│ Tools        on", banner)
-        self.assertIn("│ Think        off", banner)
-        self.assertIn("│ Workdir      /tmp/orbit", banner)
-        self.assertIn("│ Machine      Test Machine", banner)
-        self.assertIn("│ OS           Linux test", banner)
-        self.assertIn("│ CPU          8C/16T", banner)
-        self.assertIn("│ Cores        8 physical / 16 logical", banner)
-        self.assertIn("│ RAM          32 GB total, 21 GB free", banner)
-        self.assertIn("│ Accel        CPU-only", banner)
-        self.assertIn("Type /help for commands, /status for runtime details.", banner)
+        self.assertEqual(
+            banner,
+            "Orbit v0.0.1 · Gemma 4 12B · native\n"
+            "workdir /tmp/orbit · tools on · think off · ctx 8192\n"
+            "/help for commands · /status for details",
+        )
+        self.assertNotIn("Machine", banner)
+        self.assertNotIn("RAM", banner)
 
     def test_startup_banner_gpu_mock(self) -> None:
         status = _status(
@@ -59,7 +53,37 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
 
         banner = format_startup_banner(status)
 
-        self.assertIn("│ Accel        CUDA, GPU RTX 4090, 24 GB, offload 41 la...", banner)
+        self.assertNotIn("RTX 4090", banner)
+        self.assertIn("RTX 4090", format_status_panel(status))
+
+    def test_verified_registry_name_is_compact_in_banner_and_full_model_remains_in_status(self) -> None:
+        full_name = "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+
+        class VerifiedBackend(_Backend):
+            def model_info(self):
+                return SimpleNamespace(id=full_name, context_length=8192)
+
+            def backend_props(self) -> dict[str, object]:
+                return {
+                    "backend": "orbit-native",
+                    "model_compatibility": {
+                        "verified": True,
+                        "compatibility_profile": "orbit-qwen3-coder-native-v1",
+                    },
+                }
+
+        manifest = SimpleNamespace(
+            profile_id="orbit-qwen3-coder-native-v1",
+            display_name="Qwen3-Coder 30B-A3B",
+        )
+        with (
+            mock.patch("orbit.terminal.runtime_status.load_registry", return_value=[manifest]),
+            mock.patch("orbit.terminal.runtime_status.subprocess.run", side_effect=OSError),
+        ):
+            status = collect_runtime_status(_Runtime(), AppConfig(workdir=ROOT), VerifiedBackend())
+
+        self.assertIn("· Qwen3-Coder 30B-A3B · native", format_startup_banner(status))
+        self.assertIn(full_name, format_status_panel(status))
 
     def test_status_panel_contains_runtime_host_and_acceleration(self) -> None:
         panel = format_status_panel(_status())
@@ -114,10 +138,12 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
 
         self.assertEqual(fallback.version, "0.0.1")
 
-    def test_startup_banner_truncates_long_workdir(self) -> None:
+    def test_startup_banner_keeps_workdir_without_fixed_width_box(self) -> None:
         banner = format_startup_banner(_status(workdir="/tmp/" + "very-long/" * 12))
 
-        self.assertIn("│ Workdir      /tmp/very-long/very-long/very-long/very-...", banner)
+        self.assertIn("workdir /tmp/very-long/very-long/", banner)
+        self.assertNotIn("┌", banner)
+        self.assertEqual(len(banner.splitlines()), 3)
 
     def test_unknown_values_do_not_fail(self) -> None:
         panel = format_status_panel(_status(host=HostInfo(), acceleration=AccelerationInfo()))
