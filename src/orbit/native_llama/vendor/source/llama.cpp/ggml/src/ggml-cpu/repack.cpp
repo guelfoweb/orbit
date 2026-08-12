@@ -4449,6 +4449,8 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
 #define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id) * ne12 + (i1)]
 
         if (ith == 0) {
+            ggml_backend_cpu_expert_usage_record(src0->name, ids);
+
             // initialize matrix_row_counts
             memset(matrix_row_counts, 0, n_as * sizeof(int64_t));
 
