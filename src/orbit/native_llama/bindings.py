@@ -15,6 +15,7 @@ from ctypes import (
     c_size_t,
     c_ubyte,
     c_uint32,
+    c_uint64,
     c_void_p,
     cast,
 )
@@ -188,8 +189,10 @@ class LlamaLibrary:
         required = _require_runtime_prefix(build_bin.resolve(), runtime_library_filename("llama"))
         self.build_bin = _claim_runtime_family(build_bin)
         self._handles: list[CDLL] = []
+        self.cpu_lib = self._load_library(runtime_library_filename("ggml-cpu"))
         self.lib = self._load_library(runtime_library_filename("llama"), required=required)
         self._configure_api()
+        self._configure_expert_usage_api()
 
     def _load_library(self, name: str, *, required: tuple[Path, ...] | None = None) -> CDLL:
         flags = native_cdll_flags()
@@ -315,6 +318,61 @@ class LlamaLibrary:
         lib.llama_sampler_reset.restype = None
         lib.llama_sampler_free.argtypes = [c_void_p]
         lib.llama_sampler_free.restype = None
+
+    def _configure_expert_usage_api(self) -> None:
+        cpu = self.cpu_lib
+        names = (
+            "ggml_backend_cpu_expert_usage_set_enabled", "ggml_backend_cpu_expert_usage_set_phase",
+            "ggml_backend_cpu_expert_usage_reset", "ggml_backend_cpu_expert_usage_copy_counts",
+            "ggml_backend_cpu_expert_usage_copy_tokens", "ggml_backend_cpu_expert_usage_storage_size",
+            "ggml_backend_cpu_expert_usage_record",
+        )
+        self.expert_usage_available = all(hasattr(cpu, name) for name in names)
+        if not self.expert_usage_available:
+            return
+        cpu.ggml_backend_cpu_expert_usage_set_enabled.argtypes = [c_bool]
+        cpu.ggml_backend_cpu_expert_usage_set_enabled.restype = None
+        cpu.ggml_backend_cpu_expert_usage_set_phase.argtypes = [c_int]
+        cpu.ggml_backend_cpu_expert_usage_set_phase.restype = None
+        cpu.ggml_backend_cpu_expert_usage_reset.argtypes = []
+        cpu.ggml_backend_cpu_expert_usage_reset.restype = None
+        cpu.ggml_backend_cpu_expert_usage_copy_counts.argtypes = [POINTER(c_uint64), c_size_t]
+        cpu.ggml_backend_cpu_expert_usage_copy_counts.restype = c_size_t
+        cpu.ggml_backend_cpu_expert_usage_copy_tokens.argtypes = [POINTER(c_uint64), c_size_t]
+        cpu.ggml_backend_cpu_expert_usage_copy_tokens.restype = c_size_t
+        cpu.ggml_backend_cpu_expert_usage_storage_size.argtypes = []
+        cpu.ggml_backend_cpu_expert_usage_storage_size.restype = c_size_t
+
+    def configure_expert_usage(self, enabled: bool) -> None:
+        if enabled and not self.expert_usage_available:
+            raise RuntimeError("MoE expert-usage telemetry is unavailable; run `orbit build-native`")
+        if not self.expert_usage_available:
+            return
+        self.cpu_lib.ggml_backend_cpu_expert_usage_set_enabled(False)
+        if enabled:
+            self.cpu_lib.ggml_backend_cpu_expert_usage_reset()
+            self.cpu_lib.ggml_backend_cpu_expert_usage_set_enabled(True)
+
+    def set_expert_usage_phase(self, phase: int) -> None:
+        if self.expert_usage_available:
+            self.cpu_lib.ggml_backend_cpu_expert_usage_set_phase(phase)
+
+    def reset_expert_usage(self) -> None:
+        self.cpu_lib.ggml_backend_cpu_expert_usage_reset()
+
+    def expert_usage_snapshot(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        if not self.expert_usage_available:
+            raise RuntimeError("MoE expert-usage telemetry is unavailable")
+        n_counts = int(self.cpu_lib.ggml_backend_cpu_expert_usage_copy_counts(None, 0))
+        n_tokens = int(self.cpu_lib.ggml_backend_cpu_expert_usage_copy_tokens(None, 0))
+        counts = (c_uint64 * n_counts)()
+        tokens = (c_uint64 * n_tokens)()
+        self.cpu_lib.ggml_backend_cpu_expert_usage_copy_counts(counts, n_counts)
+        self.cpu_lib.ggml_backend_cpu_expert_usage_copy_tokens(tokens, n_tokens)
+        return tuple(counts), tuple(tokens)
+
+    def expert_usage_storage_size(self) -> int | None:
+        return int(self.cpu_lib.ggml_backend_cpu_expert_usage_storage_size()) if self.expert_usage_available else None
 
 
 class ChatBridgeLibrary:

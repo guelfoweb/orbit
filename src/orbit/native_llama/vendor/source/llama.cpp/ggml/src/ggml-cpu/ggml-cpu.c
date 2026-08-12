@@ -5,6 +5,7 @@
 #include "ggml-backend.h"
 #include "traits.h"
 #include "ggml-cpu-impl.h"
+#include "ggml-cpu.h"
 #include "ggml-impl.h"
 #include "quants.h"
 #include "ggml-threading.h"
@@ -234,6 +235,88 @@ typedef void * thread_ret_t;
 #endif
 
 typedef pthread_t ggml_thread_t;
+
+#define GGML_CPU_EXPERT_USAGE_PHASES 2
+#define GGML_CPU_EXPERT_USAGE_MAX_LAYERS 256
+#define GGML_CPU_EXPERT_USAGE_MAX_EXPERTS 512
+
+static bool ggml_cpu_expert_usage_enabled = false;
+static int ggml_cpu_expert_usage_phase = 0;
+static uint64_t ggml_cpu_expert_usage_counts
+    [GGML_CPU_EXPERT_USAGE_PHASES][GGML_CPU_EXPERT_USAGE_MAX_LAYERS][GGML_CPU_EXPERT_USAGE_MAX_EXPERTS];
+static uint64_t ggml_cpu_expert_usage_tokens
+    [GGML_CPU_EXPERT_USAGE_PHASES][GGML_CPU_EXPERT_USAGE_MAX_LAYERS];
+
+GGML_BACKEND_API void ggml_backend_cpu_expert_usage_set_enabled(bool enabled) {
+    ggml_cpu_expert_usage_enabled = enabled;
+    if (!enabled) {
+        ggml_cpu_expert_usage_phase = 0;
+    }
+}
+
+GGML_BACKEND_API void ggml_backend_cpu_expert_usage_set_phase(int phase) {
+    ggml_cpu_expert_usage_phase = phase >= 0 && phase <= GGML_CPU_EXPERT_USAGE_PHASES ? phase : 0;
+}
+
+GGML_BACKEND_API void ggml_backend_cpu_expert_usage_reset(void) {
+    memset(ggml_cpu_expert_usage_counts, 0, sizeof(ggml_cpu_expert_usage_counts));
+    memset(ggml_cpu_expert_usage_tokens, 0, sizeof(ggml_cpu_expert_usage_tokens));
+}
+
+GGML_BACKEND_API size_t ggml_backend_cpu_expert_usage_copy_counts(uint64_t * dst, size_t count) {
+    const size_t required = sizeof(ggml_cpu_expert_usage_counts) / sizeof(uint64_t);
+    if (dst == NULL || count < required) {
+        return required;
+    }
+    memcpy(dst, ggml_cpu_expert_usage_counts, sizeof(ggml_cpu_expert_usage_counts));
+    return required;
+}
+
+GGML_BACKEND_API size_t ggml_backend_cpu_expert_usage_copy_tokens(uint64_t * dst, size_t count) {
+    const size_t required = sizeof(ggml_cpu_expert_usage_tokens) / sizeof(uint64_t);
+    if (dst == NULL || count < required) {
+        return required;
+    }
+    memcpy(dst, ggml_cpu_expert_usage_tokens, sizeof(ggml_cpu_expert_usage_tokens));
+    return required;
+}
+
+GGML_BACKEND_API size_t ggml_backend_cpu_expert_usage_storage_size(void) {
+    return sizeof(ggml_cpu_expert_usage_counts) + sizeof(ggml_cpu_expert_usage_tokens);
+}
+
+static int ggml_cpu_expert_usage_layer(const char * name) {
+    if (!ggml_cpu_expert_usage_enabled || name == NULL || strncmp(name, "blk.", 4) != 0) {
+        return -1;
+    }
+    char * end = NULL;
+    const long layer = strtol(name + 4, &end, 10);
+    if (end == name + 4 || strcmp(end, ".ffn_down_exps.weight") != 0 ||
+        layer < 0 || layer >= GGML_CPU_EXPERT_USAGE_MAX_LAYERS) {
+        return -1;
+    }
+    return (int) layer;
+}
+
+GGML_BACKEND_API void ggml_backend_cpu_expert_usage_record(
+        const char * tensor_name, const struct ggml_tensor * ids) {
+    const int layer = ggml_cpu_expert_usage_layer(tensor_name);
+    const int phase = ggml_cpu_expert_usage_phase;
+    if (layer < 0 || phase <= 0 || phase > GGML_CPU_EXPERT_USAGE_PHASES ||
+        ids == NULL || ids->type != GGML_TYPE_I32) {
+        return;
+    }
+    for (int64_t token = 0; token < ids->ne[1]; ++token) {
+        for (int64_t selected = 0; selected < ids->ne[0]; ++selected) {
+            const int32_t expert = *(const int32_t *) (
+                (const char *) ids->data + token * ids->nb[1] + selected * ids->nb[0]);
+            if (expert >= 0 && expert < GGML_CPU_EXPERT_USAGE_MAX_EXPERTS) {
+                ggml_cpu_expert_usage_counts[phase - 1][layer][expert] += 1;
+            }
+        }
+    }
+    ggml_cpu_expert_usage_tokens[phase - 1][layer] += ids->ne[1];
+}
 
 #define GGML_THREADPOOL_N_THREADS_MASK (0xffffU)
 #define GGML_THREADPOOL_N_THREADS_BITS (16)
@@ -1942,6 +2025,8 @@ static void ggml_compute_forward_mul_mat_id(
     }
 
     if (ith == 0) {
+        ggml_backend_cpu_expert_usage_record(src0->name, ids);
+
         // initialize matrix_row_counts
         memset(matrix_row_counts, 0, n_as*sizeof(int64_t));
 

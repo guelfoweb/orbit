@@ -36,7 +36,7 @@ class MtmdBridgeAbiTests(unittest.TestCase):
         self.assertEqual(provenance.upstream_tag, EXPECTED_TAG)
         self.assertEqual(provenance.source_tree_sha256, source_tree_sha256(BUNDLED_SOURCE_ROOT))
         self.assertEqual(len(provenance.patchset_sha256), 64)
-        self.assertEqual(len(provenance.patched_paths), 60)
+        self.assertEqual(len(provenance.patched_paths), 62)
 
     def test_cmake_build_metadata_uses_vendor_not_parent_git(self) -> None:
         arguments = _cmake_provenance_args(BUNDLED_SOURCE_ROOT)

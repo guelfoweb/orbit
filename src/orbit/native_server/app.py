@@ -104,6 +104,14 @@ class OrbitNativeServer:
         validate_session_id(request.session_id)
         return self.complete(request, on_token=on_token, on_progress=on_progress, should_cancel=should_cancel)
 
+    def moe_expert_usage_status(self) -> dict[str, object]:
+        with self.lock:
+            return self.client.moe_expert_usage_status()
+
+    def reset_moe_expert_usage(self) -> dict[str, object]:
+        with self.lock:
+            return self.client.reset_moe_expert_usage()
+
     def validate_request(self, request: ChatRequest) -> None:
         thinking = self.client.config.thinking if request.thinking is None else request.thinking
         if request.artifact_content and (request.tools or thinking or request.stop):
@@ -334,6 +342,9 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                 capabilities.append("multimodal")
             self._json({"object": "list", "data": [{"id": state.model_alias, "object": "model", "capabilities": capabilities}]})
             return
+        if self.path == "/diagnostics/expert-usage":
+            self._json(self._state().moe_expert_usage_status())
+            return
         if self.path == "/props":
             state = self._state()
             session = state.session_info()
@@ -432,6 +443,12 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            if self.path == "/diagnostics/expert-usage/reset":
+                try:
+                    self._json(self._state().reset_moe_expert_usage())
+                except RuntimeError as exc:
+                    self._json({"error": str(exc)}, status=409)
+                return
             payload = self._read_json()
         except ValueError as exc:
             self._json({"error": str(exc)}, status=400)
@@ -765,6 +782,7 @@ def run_server(argv: list[str] | None = None) -> int:
                 qwen3_coder_route_prefix_reuse_enabled=qwen3_coder_route_prefix_config.enabled,
                 qwen3_coder_route_prefix_reuse_source=qwen3_coder_route_prefix_config.source,
                 qwen3_coder_route_prefix_reuse_config_error=qwen3_coder_route_prefix_config.validation_error,
+                moe_expert_usage_enabled=args.moe_expert_usage,
             ),
         )
         if not args.verbose_llama_log:
@@ -989,6 +1007,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable native MTP completion path with automatic no-MTP fallback.",
     )
     parser.add_argument("--verbose-llama-log", action="store_true")
+    parser.add_argument("--moe-expert-usage", action="store_true", help="Enable opt-in CPU MoE expert-selection counters.")
     return parser
 
 

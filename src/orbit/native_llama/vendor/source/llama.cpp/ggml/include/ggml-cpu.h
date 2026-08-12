@@ -137,6 +137,15 @@ extern "C" {
 
     GGML_BACKEND_API void ggml_backend_cpu_set_use_ref(ggml_backend_t backend_cpu, bool use_ref);
 
+    // Caller-synchronized, process-local diagnostics. They never alter routing.
+    GGML_BACKEND_API void   ggml_backend_cpu_expert_usage_set_enabled (bool enabled);
+    GGML_BACKEND_API void   ggml_backend_cpu_expert_usage_set_phase   (int phase);
+    GGML_BACKEND_API void   ggml_backend_cpu_expert_usage_reset       (void);
+    GGML_BACKEND_API size_t ggml_backend_cpu_expert_usage_copy_counts (uint64_t * dst, size_t count);
+    GGML_BACKEND_API size_t ggml_backend_cpu_expert_usage_copy_tokens (uint64_t * dst, size_t count);
+    GGML_BACKEND_API size_t ggml_backend_cpu_expert_usage_storage_size(void);
+    GGML_BACKEND_API void   ggml_backend_cpu_expert_usage_record      (const char * tensor_name, const struct ggml_tensor * ids);
+
     GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cpu_reg(void);
 
     GGML_BACKEND_API void ggml_cpu_fp32_to_fp32(const float *,       float *, int64_t);

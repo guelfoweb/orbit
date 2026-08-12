@@ -26,6 +26,7 @@ from .bindings import (
 from .chat_bridge import chat_bridge_filename
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
+from .expert_usage import summarize_expert_usage
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .model_profiles import QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, NativeModelProfile, detect_native_model_profile
@@ -121,6 +122,7 @@ class NativeClientConfig:
     qwen3_coder_route_prefix_reuse_enabled: bool = False
     qwen3_coder_route_prefix_reuse_source: str = "default"
     qwen3_coder_route_prefix_reuse_config_error: str | None = None
+    moe_expert_usage_enabled: bool = False
 
 
 @dataclass
@@ -419,6 +421,42 @@ class NativeLlamaClient:
         )
         return diagnostics
 
+    def moe_expert_usage_status(self) -> dict[str, object]:
+        base = {
+            "enabled": self.config.moe_expert_usage_enabled,
+            "available": self.lib.expert_usage_available,
+            "counter_storage_bytes": self.lib.expert_usage_storage_size(),
+            "scope": "process_cpu_backend",
+        }
+        if not self.config.moe_expert_usage_enabled:
+            return base
+        shape = self._moe_expert_usage_shape()
+        if shape is None:
+            return {**base, "error": "model_moe_metadata_unavailable"}
+        counts, tokens = self.lib.expert_usage_snapshot()
+        return {
+            **base, "architecture": shape[0],
+            **summarize_expert_usage(counts, tokens, layers=shape[1], experts=shape[2], active=shape[3]),
+        }
+
+    def reset_moe_expert_usage(self) -> dict[str, object]:
+        if not self.config.moe_expert_usage_enabled:
+            raise RuntimeError("MoE expert-usage telemetry is disabled")
+        self.lib.reset_expert_usage()
+        return self.moe_expert_usage_status()
+
+    def _moe_expert_usage_shape(self) -> tuple[str, int, int, int] | None:
+        architecture = self._model_metadata_identity.get("general.architecture", "").strip().lower()
+        try:
+            return (
+                architecture,
+                int(self._model_metadata_identity[f"{architecture}.block_count"]),
+                int(self._model_metadata_identity[f"{architecture}.expert_count"]),
+                int(self._model_metadata_identity[f"{architecture}.expert_used_count"]),
+            ) if architecture in {"qwen3moe", "qwen35moe"} else None
+        except (KeyError, ValueError):
+            return None
+
     def _current_backend_mode(self) -> str:
         if not self.config.use_mtp_experimental:
             return "no-mtp"
@@ -438,6 +476,7 @@ class NativeLlamaClient:
 
     def close(self) -> None:
         lib = self.lib.lib
+        self.lib.configure_expert_usage(False)
         self._invalidate_qwen_route_prefix("client_closed")
         self._invalidate_qwen36_shell_tool_prefix("client_closed")
         self._free_persistent_mtp_session()
@@ -480,6 +519,7 @@ class NativeLlamaClient:
         self._invalidate_qwen36_shell_tool_prefix("model_reload")
         lib = self.lib.lib
         lib.ggml_backend_load_all()
+        self.lib.configure_expert_usage(self.config.moe_expert_usage_enabled)
 
         def load_cb(progress: float, _data) -> bool:
             if on_progress:
@@ -581,8 +621,12 @@ class NativeLlamaClient:
                 "tokenizer.ggml.eos_token_id",
                 "tokenizer.ggml.padding_token_id",
                 "qwen3moe.context_length",
+                "qwen3moe.block_count",
                 "qwen3moe.expert_count",
                 "qwen3moe.expert_used_count",
+                "qwen35moe.block_count",
+                "qwen35moe.expert_count",
+                "qwen35moe.expert_used_count",
             }:
                 continue
             metadata[key] = self._model_metadata_text(lib.llama_model_meta_val_str_by_index, index)
@@ -2190,6 +2234,8 @@ class NativeLlamaClient:
         if not self._session.ctx_tgt:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
+        if self.config.moe_expert_usage_enabled:
+            self.lib.set_expert_usage_phase(1)
         while processed < end and not self.cancel_event.is_set():
             if should_cancel and should_cancel():
                 self.cancel()
@@ -3228,6 +3274,8 @@ class NativeLlamaClient:
         if not self._session.ctx_tgt or not self._session.sampler or not self._vocab:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
+        if self.config.moe_expert_usage_enabled:
+            self.lib.set_expert_usage_phase(2)
         sampler = sampler_override or self._session.sampler
         lib.llama_sampler_reset(sampler)
         self.last_target_only_token_hashes = []
