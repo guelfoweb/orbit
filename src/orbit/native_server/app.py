@@ -69,6 +69,26 @@ PREFIX_PREWARM_STARTUP = "startup"
 TOOLS_ENV = "ORBIT_TOOLS"
 
 
+def _progress_payload(progress: Any, *, session_id: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "current": progress.current,
+        "total": progress.total,
+        "percent": progress.percent,
+        "session_id": session_id,
+    }
+    for field in (
+        "evaluated_current",
+        "evaluated_total",
+        "cached_tokens",
+        "elapsed_seconds",
+        "tokens_per_second",
+    ):
+        value = getattr(progress, field, None)
+        if value is not None:
+            payload[field] = value
+    return payload
+
+
 class OrbitNativeServer:
     def __init__(self, *, client: NativeLlamaClient, model_alias: str) -> None:
         self.client = client
@@ -590,12 +610,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
         def on_progress(progress) -> None:
             emit(
                 f"progress.{progress.phase}",
-                {
-                    "current": progress.current,
-                    "total": progress.total,
-                    "percent": progress.percent,
-                    "session_id": request.session_id,
-                },
+                _progress_payload(progress, session_id=request.session_id),
             )
 
         try:
@@ -655,12 +670,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
         def on_progress(progress) -> None:
             emit(
                 f"progress.{progress.phase}",
-                {
-                    "current": progress.current,
-                    "total": progress.total,
-                    "percent": progress.percent,
-                    "session_id": DEFAULT_SESSION_ID,
-                },
+                _progress_payload(progress, session_id=DEFAULT_SESSION_ID),
             )
 
         try:

@@ -27,6 +27,11 @@ class StreamProgress:
     current: int
     total: int
     percent: int
+    evaluated_current: int | None = None
+    evaluated_total: int | None = None
+    cached_tokens: int | None = None
+    elapsed_seconds: float | None = None
+    tokens_per_second: float | None = None
 
 
 @dataclass(frozen=True)

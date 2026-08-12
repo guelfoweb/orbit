@@ -1292,13 +1292,13 @@ class LlamaServerBackendTests(unittest.TestCase):
             FakeStream(
                 [
                     'event: progress.prefill\n',
-                    'data: {"current":243,"total":935,"percent":25}\n',
+                    'data: {"current":1011,"total":1703,"percent":59,"evaluated_current":243,"evaluated_total":935,"cached_tokens":768,"elapsed_seconds":7.75,"tokens_per_second":31.4}\n',
                     '\n',
                     'event: delta\n',
                     'data: {"text":"hel"}\n',
                     '\n',
                     'event: progress.generation\n',
-                    'data: {"current":1,"total":32,"percent":3}\n',
+                    'data: {"current":1,"total":32,"percent":3,"elapsed_seconds":0.2,"tokens_per_second":5.0}\n',
                     '\n',
                     'event: delta\n',
                     'data: {"text":"lo"}\n',
@@ -1312,11 +1312,16 @@ class LlamaServerBackendTests(unittest.TestCase):
                 ]
             ),
             on_delta=emitted.append,
-            on_progress=lambda item: progress.append((item.phase, item.current, item.total, item.percent)),
+            on_progress=progress.append,
         )
 
         self.assertEqual(emitted, ["hel", "lo"])
-        self.assertEqual(progress, [("prefill", 243, 935, 25), ("generation", 1, 32, 3)])
+        self.assertEqual((progress[0].evaluated_current, progress[0].evaluated_total), (243, 935))
+        self.assertEqual(progress[0].cached_tokens, 768)
+        self.assertEqual(progress[0].tokens_per_second, 31.4)
+        self.assertEqual(progress[1].current, 1)
+        self.assertEqual(progress[1].elapsed_seconds, 0.2)
+        self.assertEqual(progress[1].tokens_per_second, 5.0)
         self.assertEqual(result.content, "hello")
         self.assertEqual(result.finish_reason, "stop")
         self.assertEqual(result.prompt_tokens, 935)
@@ -1324,6 +1329,30 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(result.cached_tokens, 12)
         self.assertEqual(result.prompt_tokens_per_second, 14.7)
         self.assertEqual(result.generation_tokens_per_second, 3.2)
+
+    def test_parse_native_stream_drops_nonfinite_or_invalid_live_metrics(self) -> None:
+        progress = []
+
+        _parse_native_stream(
+            FakeStream(
+                [
+                    'event: progress.prefill\n',
+                    'data: {"current":1,"total":2,"percent":50,"evaluated_current":true,"evaluated_total":2,"cached_tokens":-1,"elapsed_seconds":NaN,"tokens_per_second":true}\n',
+                    '\n',
+                    'event: done\n',
+                    'data: {"finish_reason":"stop"}\n',
+                    '\n',
+                ]
+            ),
+            on_delta=lambda _text: None,
+            on_progress=progress.append,
+        )
+
+        self.assertIsNone(progress[0].evaluated_current)
+        self.assertEqual(progress[0].evaluated_total, 2)
+        self.assertIsNone(progress[0].cached_tokens)
+        self.assertIsNone(progress[0].elapsed_seconds)
+        self.assertIsNone(progress[0].tokens_per_second)
 
     def test_parse_native_stream_converts_raw_tool_call_and_suppresses_delta(self) -> None:
         emitted: list[str] = []

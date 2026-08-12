@@ -25,7 +25,7 @@ from .bindings import (
 )
 from .chat_bridge import chat_bridge_filename
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
-from .events import NativeCompletion, NativeProgress, NativeTimings
+from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .model_profiles import QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, NativeModelProfile, detect_native_model_profile
@@ -196,6 +196,31 @@ class NativeRoutePrefixPrefillResult:
             "session_history_touched": self.session_history_touched,
             "restore_ready": self.restore_ready,
         }
+
+
+def _measured_progress(
+    phase: NativePhase,
+    current: int,
+    total: int,
+    *,
+    elapsed_us: int,
+    evaluated_current: int | None = None,
+    evaluated_total: int | None = None,
+    cached_tokens: int | None = None,
+) -> NativeProgress:
+    elapsed_seconds = max(0.0, elapsed_us / 1_000_000.0)
+    rate_tokens = evaluated_current if evaluated_current is not None else current
+    rate = rate_tokens / elapsed_seconds if rate_tokens > 0 and elapsed_seconds > 0 else None
+    return NativeProgress(
+        phase=phase,
+        current=current,
+        total=total,
+        evaluated_current=evaluated_current,
+        evaluated_total=evaluated_total,
+        cached_tokens=cached_tokens,
+        elapsed_seconds=elapsed_seconds,
+        tokens_per_second=rate,
+    )
 
 
 def _resolve_mtmd_bridge_path(paths: NativeLlamaPaths) -> Path | None:
@@ -1697,9 +1722,19 @@ class NativeLlamaClient:
             processed_tokens = 0
             n_chunks = int(mtmd.orbit_mtmd_chunks_size(chunks))
             n_past = llama_pos(0)
-            if on_progress:
-                on_progress(NativeProgress("prefill", 0, max(1, total_tokens)))
             pf_start = lib.llama_time_us()
+            if on_progress:
+                on_progress(
+                    _measured_progress(
+                        "prefill",
+                        0,
+                        total_tokens,
+                        elapsed_us=0,
+                        evaluated_current=0,
+                        evaluated_total=total_tokens,
+                        cached_tokens=0,
+                    )
+                )
             for idx in range(n_chunks):
                 if should_cancel and should_cancel():
                     self.cancel()
@@ -1721,7 +1756,18 @@ class NativeLlamaClient:
                 n_past = new_n_past
                 processed_tokens += int(mtmd.orbit_mtmd_chunk_token_count(chunk))
                 if on_progress:
-                    on_progress(NativeProgress("prefill", min(processed_tokens, total_tokens), max(1, total_tokens)))
+                    current = min(processed_tokens, total_tokens)
+                    on_progress(
+                        _measured_progress(
+                            "prefill",
+                            current,
+                            total_tokens,
+                            elapsed_us=lib.llama_time_us() - pf_start,
+                            evaluated_current=current,
+                            evaluated_total=total_tokens,
+                            cached_tokens=0,
+                        )
+                    )
             pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
             if self.cancel_event.is_set():
                 return NativeTimings(
@@ -2063,7 +2109,18 @@ class NativeLlamaClient:
             else reused
         )
         if on_progress:
-            on_progress(NativeProgress("prefill", processed, n_prompt))
+            evaluated_current = max(0, processed - reused)
+            on_progress(
+                _measured_progress(
+                    "prefill",
+                    processed,
+                    n_prompt,
+                    elapsed_us=0,
+                    evaluated_current=evaluated_current,
+                    evaluated_total=max(0, n_prompt - reused),
+                    cached_tokens=reused,
+                )
+            )
         token_array = (llama_token * n_prompt)(*prompt_tokens)
         while processed < n_prompt and not self.cancel_event.is_set():
             processed = self._decode_prompt_range(
@@ -2074,6 +2131,8 @@ class NativeLlamaClient:
                 total=n_prompt,
                 on_progress=on_progress,
                 should_cancel=should_cancel,
+                reused=reused,
+                started_us=pf_start,
             )
         pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
         generated, gen_ms, cancelled = self._generate_from_current_context(
@@ -2125,6 +2184,8 @@ class NativeLlamaClient:
         total: int,
         on_progress=None,
         should_cancel=None,
+        reused: int = 0,
+        started_us: int | None = None,
     ) -> int:
         if not self._session.ctx_tgt:
             raise RuntimeError("native client not loaded")
@@ -2140,7 +2201,19 @@ class NativeLlamaClient:
             decode_rc = lib.llama_decode(self._session.ctx_tgt, batch)
             processed += n
             if on_progress:
-                on_progress(NativeProgress("prefill", processed, total))
+                evaluated_current = max(0, processed - reused)
+                elapsed_us = max(0, lib.llama_time_us() - started_us) if started_us is not None else 0
+                on_progress(
+                    _measured_progress(
+                        "prefill",
+                        processed,
+                        total,
+                        elapsed_us=elapsed_us,
+                        evaluated_current=evaluated_current,
+                        evaluated_total=max(0, total - reused),
+                        cached_tokens=reused,
+                    )
+                )
             if decode_rc != 0:
                 if decode_rc == 2 and self.cancel_event.is_set():
                     break
@@ -3197,7 +3270,14 @@ class NativeLlamaClient:
             decode_rc = lib.llama_decode(self._session.ctx_tgt, batch)
             generated += 1
             if on_progress:
-                on_progress(NativeProgress("generation", generated, max_tokens))
+                on_progress(
+                    _measured_progress(
+                        "generation",
+                        generated,
+                        max_tokens,
+                        elapsed_us=lib.llama_time_us() - gen_start,
+                    )
+                )
             if decode_rc != 0:
                 if decode_rc == 2 and self.cancel_event.is_set():
                     break

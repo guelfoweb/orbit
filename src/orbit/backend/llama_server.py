@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -602,6 +603,11 @@ def _parse_native_stream(
                 current=_int_or_none(data.get("current")) or 0,
                 total=_int_or_none(data.get("total")) or 0,
                 percent=_int_or_none(data.get("percent")) or 0,
+                evaluated_current=_nonnegative_int_or_none(data.get("evaluated_current")),
+                evaluated_total=_nonnegative_int_or_none(data.get("evaluated_total")),
+                cached_tokens=_nonnegative_int_or_none(data.get("cached_tokens")),
+                elapsed_seconds=_finite_nonnegative_float_or_none(data.get("elapsed_seconds")),
+                tokens_per_second=_finite_nonnegative_float_or_none(data.get("tokens_per_second")),
             )
             on_progress(progress)
         elif current_event == "tool_calls":
@@ -894,6 +900,17 @@ def _int_or_none(value: object) -> int | None:
 
 def _float_or_none(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
+
+
+def _nonnegative_int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _finite_nonnegative_float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    parsed = _float_or_none(value)
+    return parsed if parsed is not None and math.isfinite(parsed) and parsed >= 0 else None
 
 
 def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:

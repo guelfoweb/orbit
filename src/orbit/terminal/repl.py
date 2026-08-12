@@ -31,7 +31,7 @@ from orbit.terminal.status import (
     summarize_turn_token_usage,
 )
 from orbit.terminal.streaming import StreamRenderer
-from orbit.terminal.tool_events import format_tool_call_event, format_tool_result_event
+from orbit.terminal.tool_events import format_tool_activity_label, format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
 from orbit.terminal.theme import dim, runtime_error_text
 from orbit.runtime.thinking_mode import ThinkingMode
@@ -172,7 +172,7 @@ class Repl:
                     on_progress=renderer.progress,
                     on_tool_call=lambda name, args: renderer.event(
                         format_tool_call_event(name, args),
-                        next_activity=("tool", name),
+                        next_activity=("tool", format_tool_activity_label(name, args)),
                     ),
                     on_tool_result=lambda name, chars, source, content: self._show_tool_result(renderer, name, chars, source, content),
                     on_model_step=self._record_model_step,
