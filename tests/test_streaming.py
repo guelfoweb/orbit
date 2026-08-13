@@ -266,6 +266,138 @@ class StreamingRendererTests(unittest.TestCase):
         self.assertIn("\033[3mitalic\033[23m", output)
         self.assertIn(" word", output)
 
+    def test_live_markdown_rendering_styles_complete_inline_code(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("Use `text/summary.txt` now")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertEqual(output, "Use \033[36mtext/summary.txt\033[39m now")
+        self.assertNotIn("`", output)
+
+    def test_live_markdown_rendering_handles_split_inline_code(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("Use `")
+            renderer.write("python")
+            renderer.write("` now")
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "Use \033[36mpython\033[39m now")
+
+    def test_live_markdown_rendering_handles_multiple_mixed_inline_spans(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("**bold** uses `foo bar`, `--low-memory`, and *italic*")
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("\033[1mbold\033[22m", output)
+        self.assertIn("\033[36mfoo bar\033[39m", output)
+        self.assertIn("\033[36m--low-memory\033[39m", output)
+        self.assertIn("\033[3mitalic\033[23m", output)
+        self.assertNotIn("`foo bar`", output)
+
+    def test_live_markdown_rendering_preserves_unmatched_inline_code(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("Use `python")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "Use `python")
+
+    def test_live_markdown_rendering_preserves_escaped_backticks(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write(r"Use \`python\` literally")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), r"Use \`python\` literally")
+
+    def test_live_markdown_rendering_distinguishes_even_backslash_escape(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("Use \\\\`python` now")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "Use \\\\" + "\033[36mpython\033[39m now")
+
+    def test_live_markdown_rendering_preserves_code_span_spaces(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("Use ` foo bar ` now")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        self.assertEqual(stream.getvalue(), "Use \033[36m foo bar \033[39m now")
+
+    def test_live_markdown_rendering_keeps_inline_code_out_of_fences(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("`before`\n```python\nvalue = `literal`\n```\n`after`")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("\033[36mbefore\033[39m", output)
+        self.assertIn("value = `literal`", output)
+        self.assertIn("\033[36mafter\033[39m", output)
+        self.assertNotIn("```python", output)
+
+    def test_live_markdown_rendering_does_not_cross_tool_event_boundaries(self) -> None:
+        stream = io.StringIO()
+        original = sys.stdout
+        try:
+            sys.stdout = stream
+            renderer = StreamRenderer(render_markdown_mode="live")
+            renderer.write("Use `python` ending \\")
+            renderer.event("Exec: echo `literal`", restart_timer=False)
+            renderer.write("Then `done`")
+            renderer.finish()
+        finally:
+            sys.stdout = original
+
+        output = stream.getvalue()
+        self.assertIn("\033[36mpython\033[39m", output)
+        self.assertIn("Exec: echo `literal`", output)
+        self.assertIn("\033[36mdone\033[39m", output)
+
     def test_live_markdown_rendering_does_not_style_snake_case_as_italic(self) -> None:
         stream = io.StringIO()
         original = sys.stdout
@@ -854,13 +986,13 @@ class StreamingRendererTests(unittest.TestCase):
                 renderer.start()
                 renderer.progress(StreamProgress(phase="prefill", current=1, total=2, percent=50))
                 renderer.event("› Exec  pwd", next_activity=("tool", "exec_shell_full_command"))
-                renderer.write("**answer**\n")
+                renderer.write("**answer** with `inline code`\n")
                 renderer.finish()
         finally:
             sys.stdout = original
 
         output = stream.getvalue()
-        self.assertEqual(output, "› Exec  pwd\n**answer**\n")
+        self.assertEqual(output, "› Exec  pwd\n**answer** with `inline code`\n")
         self.assertNotIn("\033", output)
         self.assertNotIn("\r", output)
 

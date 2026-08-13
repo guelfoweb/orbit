@@ -17,6 +17,8 @@ MARKDOWN_BOLD = "\033[1m"
 MARKDOWN_BOLD_OFF = "\033[22m"
 MARKDOWN_ITALIC = "\033[3m"
 MARKDOWN_ITALIC_OFF = "\033[23m"
+MARKDOWN_INLINE_CODE = CYAN
+MARKDOWN_INLINE_CODE_OFF = "\033[39m"
 
 
 @dataclass(frozen=True)
@@ -518,6 +520,7 @@ class _LiveMarkdownRenderer:
         self._inline_buffer = ""
         self._discard_fence_line = False
         self._last_visible_char = ""
+        self._trailing_backslashes = 0
 
     def write(self, text: str) -> list[str]:
         if not text:
@@ -542,6 +545,8 @@ class _LiveMarkdownRenderer:
         if self._style_open:
             tail.append(RESET)
             self._style_open = False
+        self._last_visible_char = ""
+        self._trailing_backslashes = 0
         return tail
 
     def _write_char(self, ch: str) -> list[str]:
@@ -583,7 +588,7 @@ class _LiveMarkdownRenderer:
         self._start_of_line = keep_start
         if visible_prefix is None:
             visible_prefix = prefix
-        if visible_prefix.startswith("**"):
+        if visible_prefix.startswith(("**", "`")):
             return self._write_inline_text(visible_prefix)
         if not visible_prefix:
             return []
@@ -658,7 +663,7 @@ class _LiveMarkdownRenderer:
                 emitted.append(self._emit(self._inline_buffer[:start]))
                 self._inline_buffer = self._inline_buffer[start:]
                 continue
-            end = self._inline_buffer.find(marker, len(marker))
+            end = self._find_closing_inline_marker(marker)
             if end < 0:
                 if len(self._inline_buffer) > self._INLINE_BUFFER_LIMIT:
                     emitted.append(self._emit(self._inline_buffer))
@@ -679,7 +684,7 @@ class _LiveMarkdownRenderer:
 
     def _next_inline_marker(self) -> tuple[int, str]:
         candidates: list[tuple[int, str]] = []
-        for marker in ("**", "*", "_"):
+        for marker in ("**", "*", "_", "`"):
             idx = self._find_inline_marker(marker)
             if idx >= 0:
                 candidates.append((idx, marker))
@@ -694,7 +699,10 @@ class _LiveMarkdownRenderer:
             if idx < 0:
                 return -1
             next_idx = idx + len(marker)
-            if marker != "**" and next_idx < len(self._inline_buffer) and self._inline_buffer[next_idx].isspace():
+            if marker == "`" and self._backtick_is_escaped(idx):
+                start = idx + 1
+                continue
+            if marker in {"*", "_"} and next_idx < len(self._inline_buffer) and self._inline_buffer[next_idx].isspace():
                 start = idx + 1
                 continue
             if marker == "_" and self._marker_inside_word(idx=idx, marker=marker):
@@ -706,12 +714,37 @@ class _LiveMarkdownRenderer:
         if marker == "**":
             open_style = MARKDOWN_BOLD
             close_style = MARKDOWN_BOLD_OFF
+        elif marker == "`":
+            open_style = MARKDOWN_INLINE_CODE
+            close_style = MARKDOWN_INLINE_CODE_OFF
         else:
             open_style = MARKDOWN_ITALIC
             close_style = MARKDOWN_ITALIC_OFF
         if self._line_style and self._style_open:
             close_style = RESET + self._line_style
         return f"{open_style}{text}{close_style}"
+
+    def _find_closing_inline_marker(self, marker: str) -> int:
+        start = len(marker)
+        while True:
+            idx = self._inline_buffer.find(marker, start)
+            if idx < 0:
+                return -1
+            if marker != "`" or not self._backtick_is_escaped(idx):
+                return idx
+            start = idx + 1
+
+    def _backtick_is_escaped(self, idx: int) -> bool:
+        if idx == 0:
+            return self._trailing_backslashes % 2 == 1
+        backslashes = 0
+        cursor = idx - 1
+        while cursor >= 0 and self._inline_buffer[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if cursor < 0:
+            backslashes += self._trailing_backslashes
+        return backslashes % 2 == 1
 
     def _marker_inside_word(self, *, idx: int, marker: str) -> bool:
         previous = self._inline_buffer[idx - 1] if idx > 0 else self._last_visible_char
@@ -723,3 +756,7 @@ class _LiveMarkdownRenderer:
         visible = re.sub(r"\x1b\[[0-9;]*m", "", text)
         if visible:
             self._last_visible_char = visible[-1]
+            trailing = len(visible) - len(visible.rstrip("\\"))
+            self._trailing_backslashes = (
+                self._trailing_backslashes + trailing if trailing == len(visible) else trailing
+            )
