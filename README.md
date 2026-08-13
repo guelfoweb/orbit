@@ -19,6 +19,8 @@ Linux, llama.cpp b9551, ctx=8192, 6 threads, batch/ubatch 256/128, Flash Attenti
 
 Chat and tool latencies are warm steady-state medians after one excluded warm-up. Prefill measures evaluated tokens only and excludes cache benefit. These are not universal performance claims; actual results vary with CPU, memory bandwidth, quantization, backend build, and workload.
 
+`orbit server --low-memory` is an opt-in mode supported only for the verified Qwen3-Coder 30B-A3B profile. Default behavior is unchanged and CPU repacking remains enabled unless this flag is specified. On the documented NUC10, peak RSS was approximately 31.3 GiB by default and 18.3 GiB in low-memory mode, a 41.6% reduction, with weighted prefill approximately 13.9% slower and decode approximately 1% slower. 24 GB RAM is the recommended practical minimum for a complete host; 20 GiB was qualified only as a process-memory limit and is not a general host recommendation.
+
 ## Requirements
 
 - Python 3.11 or newer
