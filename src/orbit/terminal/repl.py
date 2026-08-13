@@ -114,7 +114,7 @@ class Repl:
         if self.queued_prompts:
             return self.queued_prompts.pop(0)
         if self.prompt_gap_pending:
-            print()
+            print(flush=True)
             self.prompt_gap_pending = False
         return read_prompt_input()
 
