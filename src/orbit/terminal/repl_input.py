@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import select
 import sys
+from collections.abc import Callable
 from shutil import get_terminal_size
 
 from orbit.terminal.prompt_preview import compact_prompt_preview, is_long_text_prompt
@@ -16,9 +17,43 @@ READLINE_IGNORE_START = "\001"
 READLINE_IGNORE_END = "\002"
 
 
-def read_prompt_input() -> str:
-    first_line = input(input_prompt())
+def read_prompt_input(*, redisplay: bool = False) -> str:
+    clear_redisplay_hook = _install_redisplay_hook() if redisplay else None
+    try:
+        first_line = input(input_prompt())
+    finally:
+        if clear_redisplay_hook is not None:
+            clear_redisplay_hook()
     return read_available_paste_tail(first_line)
+
+
+def _install_redisplay_hook() -> Callable[[], None] | None:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    readline = sys.modules.get("readline")
+    set_pre_input_hook = getattr(readline, "set_pre_input_hook", None)
+    redisplay = getattr(readline, "redisplay", None)
+    if not callable(set_pre_input_hook) or not callable(redisplay):
+        return None
+
+    def clear_hook() -> None:
+        try:
+            set_pre_input_hook(None)
+        except Exception:
+            pass
+
+    def redisplay_once() -> None:
+        clear_hook()
+        try:
+            redisplay()
+        except Exception:
+            pass
+
+    try:
+        set_pre_input_hook(redisplay_once)
+    except Exception:
+        return None
+    return clear_hook
 
 
 def input_prompt() -> str:

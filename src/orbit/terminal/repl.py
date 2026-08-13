@@ -54,6 +54,7 @@ class Repl:
     session_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
     backend_usage_observer_installed: bool = field(default=False, init=False, repr=False)
     prompt_gap_pending: bool = field(default=True, init=False, repr=False)
+    prompt_redisplay_pending: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tools_mode is None:
@@ -88,6 +89,7 @@ class Repl:
                 continue
             if prompt.startswith("/"):
                 clear_input_echo(prompt)
+                self.prompt_redisplay_pending = True
                 if self._handle_command(prompt):
                     self.prompt_gap_pending = True
                     continue
@@ -116,6 +118,9 @@ class Repl:
         if self.prompt_gap_pending:
             print(flush=True)
             self.prompt_gap_pending = False
+        if self.prompt_redisplay_pending:
+            self.prompt_redisplay_pending = False
+            return read_prompt_input(redisplay=True)
         return read_prompt_input()
 
     def _ask(self, prompt: str, *, command_action: CommandAction | None = None) -> None:

@@ -27,6 +27,7 @@ from orbit.terminal.repl_input import (
     colorize_user_prompt,
     input_prompt,
     read_available_paste_tail,
+    read_prompt_input,
     replace_input_echo,
     should_replace_input_echo,
     strip_bracketed_paste_markers,
@@ -677,6 +678,63 @@ class ReplTests(unittest.TestCase):
         self.assertIn("\033[36m", prompt)
         self.assertIn("> ", prompt)
 
+    def test_prompt_redisplay_hook_is_tty_only_and_one_shot(self) -> None:
+        readline = mock.Mock()
+        active_hook = None
+
+        def set_hook(hook) -> None:
+            nonlocal active_hook
+            active_hook = hook
+
+        def fake_input(prompt: str) -> str:
+            self.assertIn("> ", prompt)
+            self.assertIsNotNone(active_hook)
+            active_hook()
+            return "hello"
+
+        readline.set_pre_input_hook.side_effect = set_hook
+        with (
+            mock.patch.dict(sys.modules, {"readline": readline}),
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("sys.stdout.isatty", return_value=True),
+            mock.patch("builtins.input", side_effect=fake_input),
+            mock.patch("orbit.terminal.repl_input.read_available_paste_tail", side_effect=lambda value: value),
+        ):
+            self.assertEqual(read_prompt_input(redisplay=True), "hello")
+
+        readline.redisplay.assert_called_once_with()
+        self.assertIsNone(active_hook)
+
+    def test_prompt_redisplay_is_disabled_outside_tty(self) -> None:
+        readline = mock.Mock()
+        with (
+            mock.patch.dict(sys.modules, {"readline": readline}),
+            mock.patch("sys.stdin.isatty", return_value=False),
+            mock.patch("sys.stdout.isatty", return_value=False),
+            mock.patch("builtins.input", return_value="hello") as input_mock,
+            mock.patch("orbit.terminal.repl_input.read_available_paste_tail", side_effect=lambda value: value),
+        ):
+            self.assertEqual(read_prompt_input(redisplay=True), "hello")
+
+        input_mock.assert_called_once_with("> ")
+        readline.set_pre_input_hook.assert_not_called()
+        readline.redisplay.assert_not_called()
+
+    def test_prompt_redisplay_hook_is_cleared_on_input_exit(self) -> None:
+        for error in (EOFError, KeyboardInterrupt):
+            with self.subTest(error=error):
+                readline = mock.Mock()
+                with (
+                    mock.patch.dict(sys.modules, {"readline": readline}),
+                    mock.patch("sys.stdin.isatty", return_value=True),
+                    mock.patch("sys.stdout.isatty", return_value=True),
+                    mock.patch("builtins.input", side_effect=error),
+                ):
+                    with self.assertRaises(error):
+                        read_prompt_input(redisplay=True)
+
+                self.assertIsNone(readline.set_pre_input_hook.call_args_list[-1].args[0])
+
     def test_length_footer_suggests_continue_and_max_tokens(self) -> None:
         runtime = CountingRuntime()
         repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=Path(".")))
@@ -875,9 +933,12 @@ class ReplTests(unittest.TestCase):
             stream = TrackingStream()
             reads = 0
 
-            def fake_read() -> str:
+            redisplays: list[bool] = []
+
+            def fake_read(*, redisplay: bool = False) -> str:
                 nonlocal reads
                 reads += 1
+                redisplays.append(redisplay)
                 if reads == 1:
                     stream.flushes = 0
                     return "/read note.txt"
@@ -893,6 +954,75 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("content:\nalpha", stream.getvalue())
         self.assertEqual(runtime.ask_calls, 0)
+        self.assertEqual(redisplays, [False, True])
+
+    def test_optional_slash_answers_redisplay_prompt_without_changing_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("alpha\n", encoding="utf-8")
+            runtime = CountingRuntime()
+            repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=workdir))
+            prompts = iter(
+                (
+                    "/read note.txt summarize",
+                    '/search "alpha" note.txt summarize',
+                    "hello",
+                )
+            )
+            redisplays: list[bool] = []
+
+            def fake_read(*, redisplay: bool = False) -> str:
+                redisplays.append(redisplay)
+                try:
+                    return next(prompts)
+                except StopIteration:
+                    raise EOFError from None
+
+            def answer(prompt: str, **kwargs) -> ChatResult:
+                runtime.ask_calls += 1
+                on_final_delta = kwargs.get("on_final_delta")
+                if on_final_delta:
+                    on_final_delta(f"answer for `{prompt}`")
+                return ChatResult("answer", "fake", "stop", [], 10, 2, 4, 5.0, 2.0)
+
+            with (
+                mock.patch.object(runtime, "answer_full_document_command", side_effect=answer),
+                mock.patch.object(runtime, "answer_from_acquired_evidence", side_effect=answer),
+                mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=fake_read),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = repl.run()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(runtime.ask_calls, 3)
+        self.assertEqual(redisplays, [False, True, True, False])
+
+    def test_optional_slash_error_still_redisplays_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("alpha\n", encoding="utf-8")
+            runtime = CountingRuntime()
+            repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=workdir))
+            prompts = iter(("/read note.txt summarize",))
+            redisplays: list[bool] = []
+
+            def fake_read(*, redisplay: bool = False) -> str:
+                redisplays.append(redisplay)
+                try:
+                    return next(prompts)
+                except StopIteration:
+                    raise EOFError from None
+
+            with (
+                mock.patch.object(runtime, "answer_full_document_command", side_effect=TimeoutError("timed out")),
+                mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=fake_read),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = repl.run()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(redisplays, [False, True])
 
     def test_tools_command_toggles_interactive_mode(self) -> None:
         runtime = CountingRuntime()
