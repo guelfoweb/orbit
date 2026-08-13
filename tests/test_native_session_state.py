@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _measured_progress
+from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _RequestTiming, _measured_progress
 from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.paths import NativeLlamaPaths
 from orbit.native_llama.session_state import DEFAULT_NATIVE_SESSION_ID
@@ -12,6 +12,34 @@ from orbit.native_server.app import OrbitNativeServer
 
 
 class NativeSessionStateTests(unittest.TestCase):
+    @mock.patch("orbit.native_llama.client.time.monotonic_ns", side_effect=[1_000_000_000, 1_250_000_000])
+    def test_request_timing_latches_first_generated_token_once(self, monotonic_ns) -> None:
+        timing = _RequestTiming.start()
+
+        timing.mark_first_generated()
+        timing.mark_first_generated()
+
+        self.assertEqual(timing.backend_ttft_ms(), 250.0)
+        self.assertEqual(monotonic_ns.call_count, 2)
+
+    def test_request_timing_is_null_without_generated_token(self) -> None:
+        timing = _RequestTiming(started_ns=1_000_000_000)
+
+        self.assertIsNone(timing.backend_ttft_ms())
+
+    @mock.patch("orbit.native_llama.client.time.monotonic_ns", return_value=1_150_000_000)
+    def test_mtp_generation_progress_latches_exact_first_output(self, monotonic_ns) -> None:
+        timing = _RequestTiming(started_ns=1_000_000_000)
+        progress = []
+
+        NativeLlamaClient._handle_mtp_progress(0, 10, 10, request_timing=timing, on_progress=progress.append)
+        NativeLlamaClient._handle_mtp_progress(1, 1, 8, request_timing=timing, on_progress=progress.append)
+        NativeLlamaClient._handle_mtp_progress(1, 2, 8, request_timing=timing, on_progress=progress.append)
+
+        self.assertEqual(timing.backend_ttft_ms(), 150.0)
+        self.assertEqual([item.phase for item in progress], ["prefill", "generation", "generation"])
+        monotonic_ns.assert_called_once_with()
+
     def test_measured_generation_progress_uses_generated_tokens_and_elapsed_time(self) -> None:
         progress = _measured_progress("generation", 127, 512, elapsed_us=10_000_000)
 
@@ -147,6 +175,7 @@ class NativeSessionStateTests(unittest.TestCase):
         self.assertEqual(progress[1].cached_tokens, 3)
         self.assertEqual(progress[1].tokens_per_second, 1000.0)
         self.assertEqual(timings.reused_prompt_tokens, 3)
+        self.assertIsNone(timings.backend_ttft_ms)
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_prompt_cache_mode_change_resets_session_state(self, _mocked_lib) -> None:

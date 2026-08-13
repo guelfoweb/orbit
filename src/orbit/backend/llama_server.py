@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from dataclasses import replace
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -374,9 +375,14 @@ class LlamaServerBackend:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        request_started_ns = time.monotonic_ns()
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                return _parse_chat_stream(response, on_delta=on_delta)
+                return _parse_chat_stream(
+                    response,
+                    on_delta=on_delta,
+                    request_started_ns=request_started_ns,
+                )
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise LlamaServerError(f"backend server HTTP {exc.code}: {detail}") from exc
@@ -401,6 +407,7 @@ class LlamaServerBackend:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        request_started_ns = time.monotonic_ns()
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 return _parse_native_stream(
@@ -408,6 +415,7 @@ class LlamaServerBackend:
                     on_delta=on_delta,
                     on_progress=on_progress,
                     literal_content=literal_content,
+                    request_started_ns=request_started_ns,
                 )
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -474,10 +482,16 @@ def _parse_chat_result(data: dict[str, Any]) -> ChatResult:
         prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
         generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
         reasoning_content=reasoning_content,
+        backend_ttft_ms=_finite_nonnegative_float_or_none(timings.get("backend_ttft_ms")),
     )
 
 
-def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> ChatResult:
+def _parse_chat_stream(
+    response: Any,
+    *,
+    on_delta: Callable[[str], None],
+    request_started_ns: int | None = None,
+) -> ChatResult:
     content_parts: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
     content_filter = _ContentStreamFilter(on_delta)
@@ -486,6 +500,7 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
     usage: dict[str, Any] = {}
     timings: dict[str, Any] = {}
     reasoning_parts: list[str] = []
+    first_output_ns: int | None = None
 
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="replace").strip()
@@ -515,6 +530,16 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
         delta = first.get("delta")
         if not isinstance(delta, dict):
             continue
+        has_output = any(
+            (
+                isinstance(delta.get(key), str) and bool(delta.get(key))
+                if key != "tool_calls"
+                else isinstance(delta.get(key), list) and bool(delta.get(key))
+            )
+            for key in ("content", "reasoning_content", "tool_calls")
+        )
+        if has_output and first_output_ns is None:
+            first_output_ns = time.monotonic_ns()
         text = delta.get("content")
         if isinstance(text, str) and text:
             content_parts.append(text)
@@ -544,6 +569,8 @@ def _parse_chat_stream(response: Any, *, on_delta: Callable[[str], None]) -> Cha
         prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
         generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
         reasoning_content="".join(reasoning_parts),
+        backend_ttft_ms=_finite_nonnegative_float_or_none(timings.get("backend_ttft_ms")),
+        stream_ttft_ms=_elapsed_ms(request_started_ns, first_output_ns),
     )
 
 
@@ -553,6 +580,7 @@ def _parse_native_stream(
     on_delta: Callable[[str], None],
     on_progress: Callable[[StreamProgress], None] | None,
     literal_content: bool = False,
+    request_started_ns: int | None = None,
 ) -> ChatResult:
     content_parts: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -565,9 +593,10 @@ def _parse_native_stream(
     current_event: str | None = None
     current_data_lines: list[str] = []
     stream_done = False
+    first_output_ns: int | None = None
 
     def flush_event() -> None:
-        nonlocal current_event, current_data_lines, model, finish_reason, usage, timings, stream_done
+        nonlocal current_event, current_data_lines, model, finish_reason, usage, timings, stream_done, first_output_ns
         if not current_event:
             current_data_lines = []
             return
@@ -587,6 +616,8 @@ def _parse_native_stream(
         if current_event == "delta":
             text = data.get("text")
             if isinstance(text, str) and text:
+                if first_output_ns is None:
+                    first_output_ns = time.monotonic_ns()
                 content_parts.append(text)
                 if content_filter is None:
                     on_delta(text)
@@ -595,6 +626,8 @@ def _parse_native_stream(
         elif current_event == "reasoning":
             text = data.get("text")
             if isinstance(text, str) and text:
+                if first_output_ns is None:
+                    first_output_ns = time.monotonic_ns()
                 reasoning_parts.append(text)
         elif current_event.startswith("progress.") and on_progress:
             phase = current_event.split(".", maxsplit=1)[1]
@@ -611,6 +644,8 @@ def _parse_native_stream(
             )
             on_progress(progress)
         elif current_event == "tool_calls":
+            if isinstance(data.get("tool_calls"), list) and data["tool_calls"] and first_output_ns is None:
+                first_output_ns = time.monotonic_ns()
             _merge_stream_tool_calls(tool_calls_by_index, data.get("tool_calls"))
         elif current_event == "metrics":
             if isinstance(data.get("usage"), dict):
@@ -662,7 +697,15 @@ def _parse_native_stream(
         prompt_tokens_per_second=_float_or_none(timings.get("prompt_per_second")),
         generation_tokens_per_second=_float_or_none(timings.get("predicted_per_second")),
         reasoning_content="".join(reasoning_parts),
+        backend_ttft_ms=_finite_nonnegative_float_or_none(timings.get("backend_ttft_ms")),
+        stream_ttft_ms=_elapsed_ms(request_started_ns, first_output_ns),
     )
+
+
+def _elapsed_ms(started_ns: int | None, ended_ns: int | None) -> float | None:
+    if started_ns is None or ended_ns is None:
+        return None
+    return max(0.0, (ended_ns - started_ns) / 1_000_000.0)
 
 
 def _merge_stream_tool_calls(tool_calls_by_index: dict[int, dict[str, Any]], raw_tool_calls: object) -> None:

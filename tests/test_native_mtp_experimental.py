@@ -404,6 +404,42 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertTrue(client.last_mtp_completion.success)
         self.assertIsNone(client.mtp_fallback_reason)
 
+    @mock.patch("orbit.native_llama.client.time.monotonic_ns", side_effect=[1_000_000_000, 1_200_000_000])
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_mtp_ttft_is_latched_without_external_progress_subscriber(
+        self,
+        _mocked_lib,
+        mocked_reset,
+        mocked_run,
+        monotonic_ns,
+    ) -> None:
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
+        client.tokenize = lambda prompt: [1, 2, 3]
+
+        def complete(**kwargs):
+            kwargs["on_progress"](0, 3, 3)
+            kwargs["on_progress"](1, 1, 8)
+            kwargs["on_progress"](1, 2, 8)
+            return MtpCompletionResult(
+                enabled=True,
+                success=True,
+                error=None,
+                content="ok",
+                output_tokens=2,
+                elapsed_ms=12.5,
+            )
+
+        mocked_run.side_effect = complete
+
+        timings = client.complete_prompt("hello", max_tokens=8)
+
+        self.assertEqual(timings.backend_ttft_ms, 200.0)
+        self.assertEqual(monotonic_ns.call_count, 2)
+
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_complete_chat_keeps_mtp_enabled_for_final_from_tool_history(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))

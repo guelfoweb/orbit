@@ -19,6 +19,8 @@ class ChatResult:
     prompt_tokens_per_second: float | None
     generation_tokens_per_second: float | None
     reasoning_content: str = ""
+    backend_ttft_ms: float | None = None
+    stream_ttft_ms: float | None = None
 
 
 @dataclass(frozen=True)
