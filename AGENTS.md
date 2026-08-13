@@ -416,7 +416,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC32
 
-- Current published baseline: `v0.0.1-rc32`.
+- Published predecessor: `v0.0.1-rc32`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc32
 - Includes squash merges `a474614` from #177, `92aae65` from #178, and
   `0c394d8` from #179.
@@ -447,6 +447,37 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   startup prewarm restored `cached=768`; Gemma final-prefix restored
   `cached=64`; strict Gemma target/draft/mmproj MTP remained usable.
 - See `docs/releases/v0.0.1-rc32.md`.
+
+### RC33
+
+- Current published baseline: `v0.0.1-rc33`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc33
+- Includes squash merges `c9bc5fa` from #180, `3ec480d` from #181,
+  `c671b29` from #182, `1184f7b` from #183, `ba5c580` from #184,
+  `bc5f36a` from #185, `bfced71` from #186, `9b26da2` from #187,
+  `71f7cc1` from #188, `a128bed` from #189, and `369829a` from #190.
+- Focus: a compact inline CLI, deterministic slash commands, authoritative
+  live progress and TTFT metrics, and qualified Qwen3-Coder memory/cache
+  behavior.
+- The CLI adds `/read`, `/search`, `/ls`, and `/models`, keeps non-TTY output
+  deterministic, and reports live prefill/decode progress without estimates or
+  extra model work. Exact `backend_ttft_ms` and `stream_ttft_ms` remain separate
+  authoritative metrics.
+- Qwen3-Coder route-prefix state now survives only the qualified internal
+  chat/tools cache-mode transition while explicit reset, cancel, reload, close,
+  identity mismatch, and restore errors remain invalidating.
+- Verified Qwen3-Coder supports opt-in `--low-memory`; on the qualified NUC10 it
+  reduced peak RSS from about 31.3 GiB to 18.3 GiB. Standard remains the default,
+  and interactive startup offers the choice only for the exact verified profile.
+- Opt-in backend-owned MoE expert-usage diagnostics are observational and
+  disabled by default. The README benchmark table was refreshed from repeated
+  measured runs on the documented host.
+- RC33 validation: Qualification Harness 83/83; full unit discovery 1,839/1,839;
+  vendor provenance, `compileall`, and `git diff --check` PASS. Real checks
+  retained Gemma final-prefix `cached=64` and strict MTP/mmproj, Qwen 3.6 route
+  `cached=768` and shell `cached=384`, and Qwen3-Coder route `cached=768` in
+  standard and qualified low-memory operation.
+- See `docs/releases/v0.0.1-rc33.md`.
 
 ## RC24 Tool-Loop Convergence
 
