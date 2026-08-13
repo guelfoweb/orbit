@@ -30,6 +30,7 @@ from .expert_usage import summarize_expert_usage
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .model_profiles import QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, NativeModelProfile, detect_native_model_profile
+from .model_discovery import inspect_native_model_profile
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
 from .mtp_accept_probe import MtpAcceptProbeResult, run_mtp_accept_probe
@@ -123,6 +124,7 @@ class NativeClientConfig:
     qwen3_coder_route_prefix_reuse_source: str = "default"
     qwen3_coder_route_prefix_reuse_config_error: str | None = None
     moe_expert_usage_enabled: bool = False
+    low_memory: bool = False
 
 
 @dataclass
@@ -249,6 +251,7 @@ class NativeLlamaClient:
         self.cancel_event = threading.Event()
         self._callbacks: list[object] = []
         self._model: c_void_p | None = None
+        self._cpu_repack_enabled: bool | None = None
         self._vocab: c_void_p | None = None
         self.model_profile: NativeModelProfile | None = None
         self.chat_bridge: ChatBridgeLibrary | None = None
@@ -421,6 +424,12 @@ class NativeLlamaClient:
         )
         return diagnostics
 
+    def model_load_status(self) -> dict[str, bool | None]:
+        return {
+            "low_memory": self.config.low_memory,
+            "cpu_repack": self._cpu_repack_enabled,
+        }
+
     def moe_expert_usage_status(self) -> dict[str, object]:
         base = {
             "enabled": self.config.moe_expert_usage_enabled,
@@ -530,10 +539,8 @@ class NativeLlamaClient:
         abort_cb = GgmlAbortCallback(lambda _data: self.cancel_event.is_set())
         self._callbacks.extend([progress_cb, abort_cb])
 
-        model_params = lib.llama_model_default_params()
+        model_params = self._model_load_params(progress_cb)
         model_params.n_gpu_layers = self.config.gpu_layers
-        model_params.progress_callback = progress_cb
-        model_params.progress_callback_user_data = None
 
         self._model = lib.llama_model_load_from_file(str(self.paths.model).encode(), model_params)
         if not self._model:
@@ -541,6 +548,7 @@ class NativeLlamaClient:
 
         try:
             self._initialize_model_profile()
+            self._validate_loaded_low_memory_profile()
         except Exception:
             lib.llama_model_free(self._model)
             self._model = None
@@ -572,6 +580,39 @@ class NativeLlamaClient:
         self._initialize_mtp_accept_probe()
         self._initialize_mtp_decode_probe()
         self._initialize_persistent_mtp_session()
+
+    def _model_load_params(self, progress_cb):
+        if self.config.low_memory:
+            try:
+                profile = inspect_native_model_profile(self.lib, self.paths.model)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"--low-memory model verification failed: {str(exc).strip() or exc.__class__.__name__}"
+                ) from exc
+            if not profile.verified or profile.profile_id != QWEN3_CODER_PROFILE_ID:
+                raise RuntimeError(
+                    "--low-memory requires verified native profile "
+                    f"{QWEN3_CODER_PROFILE_ID}; detected={profile.profile_id}"
+                )
+        params = self.lib.lib.llama_model_default_params()
+        self._cpu_repack_enabled = bool(params.use_extra_bufts)
+        if self.config.low_memory:
+            params.use_extra_bufts = False
+            self._cpu_repack_enabled = False
+        params.progress_callback = progress_cb
+        params.progress_callback_user_data = None
+        return params
+
+    def _validate_loaded_low_memory_profile(self) -> None:
+        if not self.config.low_memory:
+            return
+        profile = self.model_profile
+        if profile is None or not profile.verified or profile.profile_id != QWEN3_CODER_PROFILE_ID:
+            detected = profile.profile_id if profile is not None else "uninitialized"
+            raise RuntimeError(
+                "--low-memory model identity changed during load; "
+                f"required={QWEN3_CODER_PROFILE_ID}; detected={detected}"
+            )
 
     def _initialize_model_profile(self) -> None:
         if not self._model:

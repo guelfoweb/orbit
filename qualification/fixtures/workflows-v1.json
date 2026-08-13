@@ -45,7 +45,7 @@
         ]
       },
       "request": {
-        "prompt": "Inspect settings.ini, then change mode to production and retries to 5. Limit the change scope to those two values in settings.ini while preserving its section, ordering, newline, and every other byte. notes.txt is a reference input whose hash is checked by qualification. Verify the resulting file before answering.",
+        "prompt": "Inspect settings.ini, then change mode to production and retries to 5. Limit the change scope to those two values in settings.ini while preserving its section, ordering, newline, and every other byte. notes.txt is a reference input whose hash is checked by qualification. Verify the resulting file before answering. No backup file may remain when you answer.",
         "tools": true
       },
       "expect": {
@@ -56,7 +56,7 @@
             {"path": "settings.ini", "content": "[service]\nmode=production\nretries=5\n"}
           ],
           "unchanged_files": ["notes.txt"],
-          "max_tool_calls": 7,
+          "max_tool_calls": 8,
           "timeout_seconds": 900
         }
       },

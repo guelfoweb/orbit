@@ -82,43 +82,51 @@ class NativeProfileInspector:
         self._lib.ggml_backend_load_all()
 
     def __call__(self, path: Path) -> NativeModelProfile:
-        params = self._lib.llama_model_default_params()
-        params.vocab_only = True
-        params.use_mmap = True
-        params.check_tensors = True
-        model = self._lib.llama_model_load_from_file(str(path).encode(), params)
-        if not model:
-            raise RuntimeError("vocab-only GGUF inspection failed")
-        try:
-            metadata = self._read_metadata(model)
-            template_ptr = self._lib.llama_model_chat_template(model, None)
-            template = template_ptr.decode("utf-8", errors="replace") if template_ptr else ""
-            return detect_native_model_profile(metadata, template)
-        finally:
-            self._lib.llama_model_free(model)
+        return inspect_native_model_profile(self._binding, path)
 
     def close(self) -> None:
         self._lib.llama_log_set(GgmlLogCallback(), None)
 
-    def _read_metadata(self, model) -> dict[str, str]:
-        metadata: dict[str, str] = {}
-        count = max(0, int(self._lib.llama_model_meta_count(model)))
-        for index in range(count):
-            key = self._metadata_text(self._lib.llama_model_meta_key_by_index, model, index)
-            if key in PROFILE_METADATA_KEYS:
-                metadata[key] = self._metadata_text(self._lib.llama_model_meta_val_str_by_index, model, index)
-        return metadata
 
-    @staticmethod
-    def _metadata_text(function, model, index: int) -> str:
-        needed = int(function(model, index, None, 0))
-        if needed < 0:
-            return ""
-        buffer = create_string_buffer(needed + 1)
-        written = int(function(model, index, buffer, len(buffer)))
-        if written < 0:
-            return ""
-        return bytes(buffer[:written]).decode("utf-8", errors="replace")
+
+def inspect_native_model_profile(binding: LlamaLibrary, path: Path) -> NativeModelProfile:
+    """Verify one GGUF profile without allocating its weight tensors."""
+    lib = binding.lib
+    params = lib.llama_model_default_params()
+    params.vocab_only = True
+    params.use_mmap = True
+    params.check_tensors = True
+    model = lib.llama_model_load_from_file(str(path).encode(), params)
+    if not model:
+        raise RuntimeError("vocab-only GGUF inspection failed")
+    try:
+        metadata = _read_profile_metadata(lib, model)
+        template_ptr = lib.llama_model_chat_template(model, None)
+        template = template_ptr.decode("utf-8", errors="replace") if template_ptr else ""
+        return detect_native_model_profile(metadata, template)
+    finally:
+        lib.llama_model_free(model)
+
+
+def _read_profile_metadata(lib, model) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    count = max(0, int(lib.llama_model_meta_count(model)))
+    for index in range(count):
+        key = _metadata_text(lib.llama_model_meta_key_by_index, model, index)
+        if key in PROFILE_METADATA_KEYS:
+            metadata[key] = _metadata_text(lib.llama_model_meta_val_str_by_index, model, index)
+    return metadata
+
+
+def _metadata_text(function, model, index: int) -> str:
+    needed = int(function(model, index, None, 0))
+    if needed < 0:
+        return ""
+    buffer = create_string_buffer(needed + 1)
+    written = int(function(model, index, buffer, len(buffer)))
+    if written < 0:
+        return ""
+    return bytes(buffer[:written]).decode("utf-8", errors="replace")
 
 
 def discover_models(
