@@ -92,12 +92,36 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
         self.assertIn("Version", panel)
         self.assertIn("Model", panel)
         self.assertIn("MTP", panel)
+        self.assertIn("Low memory", panel)
+        self.assertIn("CPU repack", panel)
         self.assertIn("Host", panel)
         self.assertIn("Machine", panel)
         self.assertIn("Linux test", panel)
         self.assertIn("Acceleration", panel)
         self.assertIn("CPU-only", panel)
         self.assertIn("Mutations", panel)
+
+    def test_status_panel_reports_low_memory_and_cpu_repack(self) -> None:
+        class LowMemoryBackend(_Backend):
+            def backend_props(self) -> dict[str, object]:
+                return {
+                    "backend": "orbit-native",
+                    "low_memory": True,
+                    "cpu_repack": False,
+                }
+
+        status = collect_runtime_status(
+            _Runtime(),
+            AppConfig(workdir=ROOT),
+            LowMemoryBackend(),
+            host_info=HostInfo(),
+        )
+        panel = format_status_panel(status)
+
+        self.assertEqual(status.low_memory, "on")
+        self.assertEqual(status.cpu_repack, "off")
+        self.assertIn("│ Low memory   on", panel)
+        self.assertIn("│ CPU repack   off", panel)
 
     def test_status_panel_shows_package_when_git_version_differs(self) -> None:
         panel = format_status_panel(_status(version="v0.0.1-rc11", package_version="0.0.1"))
@@ -229,6 +253,8 @@ def _status(
         model="Gemma 4 12B",
         backend="native",
         server="ok",
+        low_memory="off",
+        cpu_repack="on",
         mtp="on",
         mmproj="loaded",
         tools="on",

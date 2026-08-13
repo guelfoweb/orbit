@@ -63,6 +63,8 @@ class RuntimeStatus:
     model: str
     backend: str
     server: str
+    low_memory: str
+    cpu_repack: str
     mtp: str
     mmproj: str
     tools: str
@@ -115,6 +117,8 @@ def collect_runtime_status(
         model=display_model,
         backend=_backend_name(props),
         server="ok" if bool(_safe_call(getattr(backend, "health", None))) else "unavailable",
+        low_memory=_on_off(props.get("low_memory")),
+        cpu_repack=_on_off(props.get("cpu_repack")),
         mtp=_on_off(props.get("mtp_enabled")),
         mmproj=_loaded_missing(props.get("multimodal_available")),
         tools=_tools_mode(tools_mode if tools_mode is not None else config.tools),
@@ -155,6 +159,8 @@ def format_status_panel(status: RuntimeStatus) -> str:
         *([("Package", status.package_version)] if status.version != status.package_version else []),
         ("Model", status.model),
         ("Backend", f"{status.backend}, server {status.server}"),
+        ("Low memory", status.low_memory),
+        ("CPU repack", status.cpu_repack),
         ("MTP", f"{status.mtp}, mmproj {status.mmproj}"),
         ("Tools", status.tools),
         ("Think", status.think),

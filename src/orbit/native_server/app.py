@@ -428,6 +428,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "qwen_route_prefix_reuse": qwen_route_prefix,
                     "qwen36_shell_tool_prefix_reuse": qwen36_shell_tool_prefix,
                     "qwen3_coder_route_prefix_reuse": qwen3_coder_route_prefix,
+                    **_model_load_props(state.client),
                     **final_prefix_config,
                     **_tool_call_healing_props(),
                 }
@@ -783,6 +784,7 @@ def run_server(argv: list[str] | None = None) -> int:
                 qwen3_coder_route_prefix_reuse_source=qwen3_coder_route_prefix_config.source,
                 qwen3_coder_route_prefix_reuse_config_error=qwen3_coder_route_prefix_config.validation_error,
                 moe_expert_usage_enabled=args.moe_expert_usage,
+                low_memory=args.low_memory,
             ),
         )
         if not args.verbose_llama_log:
@@ -856,6 +858,10 @@ def _final_prefix_reuse_props(client: NativeLlamaClient) -> dict[str, object]:
         "final_prefix_reuse_config_error": client.config.final_prefix_reuse_config_error,
         "final_prefix_reuse_legacy_detected": client.config.final_prefix_reuse_legacy_detected,
     }
+
+
+def _model_load_props(client: NativeLlamaClient) -> dict[str, object]:
+    return client.model_load_status()
 
 
 def _tool_call_healing_props() -> dict[str, object]:
@@ -1008,6 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--verbose-llama-log", action="store_true")
     parser.add_argument("--moe-expert-usage", action="store_true", help="Enable opt-in CPU MoE expert-selection counters.")
+    parser.add_argument(
+        "--low-memory",
+        action="store_true",
+        help="Disable CPU weight repacking for the verified Qwen3-Coder profile.",
+    )
     return parser
 
 

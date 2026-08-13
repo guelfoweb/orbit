@@ -262,6 +262,11 @@ class NativeServerBootstrapTests(unittest.TestCase):
 
         self.assertEqual(args.think, "on")
 
+    def test_parser_accepts_low_memory_flag(self) -> None:
+        args = build_parser().parse_args(["--low-memory"])
+
+        self.assertTrue(args.low_memory)
+
     def test_parser_defaults_to_new_user_port(self) -> None:
         args = build_parser().parse_args([])
 
@@ -564,6 +569,27 @@ class NativeServerBootstrapTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         discovery.assert_not_called()
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_run_server_passes_low_memory_only_when_requested(self) -> None:
+        for argv, expected in ((["--model", "/models/valid.gguf"], False), (["--model", "/models/valid.gguf", "--low-memory"], True)):
+            with self.subTest(argv=argv):
+                _FakeNativeClient.instances.clear()
+                _FakeHTTPServer.instances.clear()
+                with (
+                    mock.patch(
+                        "orbit.native_server.app.resolve_bootstrap_paths",
+                        return_value=SimpleNamespace(model=Path("/models/valid.gguf")),
+                    ),
+                    mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+                    mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+                    mock.patch("sys.stdout", new_callable=io.StringIO),
+                ):
+                    code = run_server(argv)
+
+                self.assertEqual(code, 0)
+                self.assertEqual(len(_FakeNativeClient.instances), 1)
+                self.assertIs(_FakeNativeClient.instances[0].config.low_memory, expected)
 
     @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
     def test_run_server_without_model_prompts_and_starts_selected_verified_model(self) -> None:
