@@ -251,7 +251,7 @@ class ReplTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()
-        self.assertIn("Orbit v0.0.1-rc32", output)
+        self.assertIn("Orbit v0.0.1", output)
         self.assertIn("· unknown · unknown", output)
         self.assertIn("workdir ", output)
         self.assertIn("tools on · think off · ctx 8192", output)
@@ -856,6 +856,43 @@ class ReplTests(unittest.TestCase):
                     stdout.getvalue(),
                     "context: 970/189440 (<1%)\n\n> \n> \n",
                 )
+
+    def test_direct_slash_flushes_output_boundary_before_next_prompt(self) -> None:
+        class TrackingStream(io.StringIO):
+            def __init__(self) -> None:
+                super().__init__()
+                self.flushes = 0
+
+            def flush(self) -> None:
+                self.flushes += 1
+                super().flush()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("alpha\n", encoding="utf-8")
+            runtime = CountingRuntime()
+            repl = Repl(runtime=runtime, backend=runtime.backend, config=AppConfig(workdir=workdir))
+            stream = TrackingStream()
+            reads = 0
+
+            def fake_read() -> str:
+                nonlocal reads
+                reads += 1
+                if reads == 1:
+                    stream.flushes = 0
+                    return "/read note.txt"
+                self.assertGreater(stream.flushes, 0)
+                raise EOFError
+
+            with (
+                mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=fake_read),
+                contextlib.redirect_stdout(stream),
+            ):
+                code = repl.run()
+
+        self.assertEqual(code, 0)
+        self.assertIn("content:\nalpha", stream.getvalue())
+        self.assertEqual(runtime.ask_calls, 0)
 
     def test_tools_command_toggles_interactive_mode(self) -> None:
         runtime = CountingRuntime()
