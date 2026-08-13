@@ -1231,6 +1231,41 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(result.finish_reason, "stop")
         self.assertEqual(result.prompt_tokens, 2)
 
+    @mock.patch("orbit.backend.llama_server.time.monotonic_ns", return_value=1_250_000_000)
+    def test_parse_chat_stream_records_first_output_event_once(self, monotonic_ns) -> None:
+        result = _parse_chat_stream(
+            FakeStream(
+                [
+                    'data: {"choices":[{"delta":{"content":"first"},"finish_reason":null}]}\n',
+                    'data: {"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}],"timings":{"backend_ttft_ms":200.0}}\n',
+                    "data: [DONE]\n",
+                ]
+            ),
+            on_delta=lambda _text: None,
+            request_started_ns=1_000_000_000,
+        )
+
+        self.assertEqual(result.backend_ttft_ms, 200.0)
+        self.assertEqual(result.stream_ttft_ms, 250.0)
+        monotonic_ns.assert_called_once_with()
+
+    @mock.patch("orbit.backend.llama_server.time.monotonic_ns")
+    def test_parse_chat_stream_keeps_ttft_null_without_output(self, monotonic_ns) -> None:
+        result = _parse_chat_stream(
+            FakeStream(
+                [
+                    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"timings":{"backend_ttft_ms":null}}\n',
+                    "data: [DONE]\n",
+                ]
+            ),
+            on_delta=lambda _text: None,
+            request_started_ns=1_000_000_000,
+        )
+
+        self.assertIsNone(result.backend_ttft_ms)
+        self.assertIsNone(result.stream_ttft_ms)
+        monotonic_ns.assert_not_called()
+
     def test_parse_chat_stream_accumulates_tool_call_deltas(self) -> None:
         result = _parse_chat_stream(
             FakeStream(
@@ -1329,6 +1364,47 @@ class LlamaServerBackendTests(unittest.TestCase):
         self.assertEqual(result.cached_tokens, 12)
         self.assertEqual(result.prompt_tokens_per_second, 14.7)
         self.assertEqual(result.generation_tokens_per_second, 3.2)
+
+    @mock.patch("orbit.backend.llama_server.time.monotonic_ns", return_value=1_400_000_000)
+    def test_parse_native_stream_keeps_backend_and_stream_ttft_distinct(self, monotonic_ns) -> None:
+        result = _parse_native_stream(
+            FakeStream(
+                [
+                    'event: progress.prefill\n',
+                    'data: {"current":1,"total":2,"percent":50}\n',
+                    '\n',
+                    'event: delta\n',
+                    'data: {"text":"first"}\n',
+                    '\n',
+                    'event: delta\n',
+                    'data: {"text":"second"}\n',
+                    '\n',
+                    'event: metrics\n',
+                    'data: {"usage":{},"timings":{"backend_ttft_ms":350.0}}\n',
+                    '\n',
+                    'event: done\n',
+                    'data: {"finish_reason":"stop"}\n',
+                    '\n',
+                ]
+            ),
+            on_delta=lambda _text: None,
+            on_progress=lambda _progress: None,
+            request_started_ns=1_000_000_000,
+        )
+
+        self.assertEqual(result.backend_ttft_ms, 350.0)
+        self.assertEqual(result.stream_ttft_ms, 400.0)
+        monotonic_ns.assert_called_once_with()
+
+    def test_parse_chat_result_rejects_invalid_ttft_metrics(self) -> None:
+        result = _parse_chat_result(
+            {
+                "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+                "timings": {"backend_ttft_ms": float("nan")},
+            }
+        )
+
+        self.assertIsNone(result.backend_ttft_ms)
 
     def test_parse_native_stream_drops_nonfinite_or_invalid_live_metrics(self) -> None:
         progress = []

@@ -34,6 +34,7 @@ class NativeTimings:
     prefill_ms: float
     generation_ms: float
     cancelled: bool = False
+    backend_ttft_ms: float | None = None
 
 
 @dataclass(frozen=True)

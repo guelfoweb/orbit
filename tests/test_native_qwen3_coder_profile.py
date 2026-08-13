@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
+from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient, _RequestTiming
 from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.model_profiles import NativeModelProfile, QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.paths import NativeLlamaPaths
@@ -313,6 +313,93 @@ class NativeQwen3CoderProfileTests(unittest.TestCase):
         self.assertEqual(generated, 1)
         self.assertFalse(cancelled)
         self.assertEqual(emitted, ["\ufffd"])
+
+    @mock.patch("orbit.native_llama.client.time.monotonic_ns", return_value=1_300_000_000)
+    def test_generation_marks_exact_first_non_eog_token(self, monotonic_ns) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1
+        client._session.sampler = 11
+        client._token_to_bytes = mock.Mock(return_value=b"x")  # type: ignore[method-assign]
+        lib = client.lib.lib
+        lib.llama_sampler_sample.return_value = 94
+        lib.llama_vocab_is_eog.return_value = False
+        lib.llama_decode.return_value = 0
+        lib.llama_time_us.side_effect = [0, 1000]
+        timing = _RequestTiming(started_ns=1_000_000_000)
+
+        generated, _elapsed, cancelled = client._generate_from_current_context(
+            max_tokens=1,
+            request_timing=timing,
+        )
+
+        self.assertEqual(generated, 1)
+        self.assertFalse(cancelled)
+        self.assertEqual(timing.backend_ttft_ms(), 300.0)
+        monotonic_ns.assert_called_once_with()
+
+    @mock.patch("orbit.native_llama.client.time.monotonic_ns")
+    def test_generation_does_not_mark_eog_as_first_output(self, monotonic_ns) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1
+        client._session.sampler = 11
+        lib = client.lib.lib
+        lib.llama_sampler_sample.return_value = 151645
+        lib.llama_vocab_is_eog.return_value = True
+        lib.llama_time_us.side_effect = [0, 1000]
+        timing = _RequestTiming(started_ns=1_000_000_000)
+
+        generated, _elapsed, cancelled = client._generate_from_current_context(
+            max_tokens=1,
+            request_timing=timing,
+        )
+
+        self.assertEqual(generated, 0)
+        self.assertFalse(cancelled)
+        self.assertIsNone(timing.backend_ttft_ms())
+        monotonic_ns.assert_not_called()
+
+    @mock.patch("orbit.native_llama.client.time.monotonic_ns")
+    def test_cancellation_before_first_token_keeps_ttft_null(self, monotonic_ns) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1
+        client._session.sampler = 11
+        client.cancel()
+        lib = client.lib.lib
+        lib.llama_time_us.side_effect = [0, 1000]
+        timing = _RequestTiming(started_ns=1_000_000_000)
+
+        generated, _elapsed, cancelled = client._generate_from_current_context(
+            max_tokens=1,
+            request_timing=timing,
+        )
+
+        self.assertEqual(generated, 0)
+        self.assertTrue(cancelled)
+        self.assertIsNone(timing.backend_ttft_ms())
+        monotonic_ns.assert_not_called()
+
+    @mock.patch("orbit.native_llama.client.time.monotonic_ns", return_value=1_200_000_000)
+    def test_cancellation_after_first_token_keeps_latched_ttft(self, _monotonic_ns) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1
+        client._session.sampler = 11
+        client._token_to_bytes = mock.Mock(return_value=b"x")  # type: ignore[method-assign]
+        lib = client.lib.lib
+        lib.llama_sampler_sample.return_value = 94
+        lib.llama_vocab_is_eog.return_value = False
+        lib.llama_decode.return_value = 0
+        lib.llama_time_us.side_effect = [0, 1000]
+        timing = _RequestTiming(started_ns=1_000_000_000)
+
+        generated, _elapsed, cancelled = client._generate_from_current_context(
+            max_tokens=2,
+            on_token=lambda _text: client.cancel(),
+            request_timing=timing,
+        )
+
+        self.assertEqual(generated, 1)
+        self.assertTrue(cancelled)
+        self.assertEqual(timing.backend_ttft_ms(), 200.0)
 
     def test_unexpected_message_sequence_fails_closed(self) -> None:
         client = self._client()

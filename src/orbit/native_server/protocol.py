@@ -75,6 +75,7 @@ def native_chat_response(
     prefill_ms: float,
     generation_ms: float,
     cancelled: bool,
+    backend_ttft_ms: float | None = None,
     reasoning_content: str = "",
     reasoning_tokens: int = 0,
     tool_calls: tuple[dict[str, Any], ...] = (),
@@ -100,6 +101,7 @@ def native_chat_response(
             "predicted_ms": generation_ms,
             "prompt_per_second": _rate(evaluated_prompt_tokens, prefill_ms),
             "predicted_per_second": _rate(completion_tokens, generation_ms),
+            "backend_ttft_ms": backend_ttft_ms,
         },
         "native": {
             "prompt_tokens": prompt_tokens,
@@ -109,6 +111,7 @@ def native_chat_response(
             "prefill_ms": prefill_ms,
             "generation_ms": generation_ms,
             "cancelled": cancelled,
+            "backend_ttft_ms": backend_ttft_ms,
             "reasoning_tokens": reasoning_tokens,
         },
     }

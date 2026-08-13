@@ -208,6 +208,7 @@ class NativeServerProtocolTests(unittest.TestCase):
             prefill_ms=300.0,
             generation_ms=100.0,
             cancelled=False,
+            backend_ttft_ms=325.5,
         )
 
         details = response["usage"]["prompt_tokens_details"]
@@ -215,6 +216,26 @@ class NativeServerProtocolTests(unittest.TestCase):
         self.assertEqual(details["reused_tokens"], 7)
         self.assertEqual(details["evaluated_tokens"], 3)
         self.assertEqual(response["timings"]["prompt_per_second"], 10.0)
+        self.assertEqual(response["timings"]["backend_ttft_ms"], 325.5)
+        self.assertEqual(response["native"]["backend_ttft_ms"], 325.5)
+
+    def test_native_response_keeps_ttft_null_without_output(self) -> None:
+        response = native_chat_response(
+            content="",
+            model="m",
+            finish_reason="cancelled",
+            session_id=DEFAULT_SESSION_ID,
+            prompt_tokens=10,
+            completion_tokens=0,
+            reused_prompt_tokens=0,
+            evaluated_prompt_tokens=10,
+            prefill_ms=300.0,
+            generation_ms=0.0,
+            cancelled=True,
+        )
+
+        self.assertIsNone(response["timings"]["backend_ttft_ms"])
+        self.assertIsNone(response["native"]["backend_ttft_ms"])
 
     def test_openai_response_keeps_expected_shape(self) -> None:
         native = native_chat_response(

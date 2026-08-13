@@ -200,6 +200,7 @@ class OrbitNativeServer:
             prefill_ms=timings.prefill_ms,
             generation_ms=timings.generation_ms,
             cancelled=timings.cancelled and not stopped,
+            backend_ttft_ms=getattr(timings, "backend_ttft_ms", None),
             reasoning_content=getattr(completion, "reasoning_content", ""),
             reasoning_tokens=getattr(completion, "reasoning_tokens", 0),
             tool_calls=tool_calls,
@@ -241,6 +242,7 @@ class OrbitNativeServer:
             prefill_ms=timings.prefill_ms,
             generation_ms=timings.generation_ms,
             cancelled=timings.cancelled and not stopped,
+            backend_ttft_ms=getattr(timings, "backend_ttft_ms", None),
         )
 
     def cancel(self, session_id: str = DEFAULT_SESSION_ID) -> dict[str, Any]:

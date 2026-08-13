@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import threading
+import time
 
 from orbit.final_prefix_config import FINAL_PREFIX_TOKEN_COUNT
 
@@ -99,6 +100,25 @@ class _ProfileParsedOutput:
     content: str
     reasoning_content: str
     tool_calls: tuple[dict[str, object], ...]
+
+
+@dataclass
+class _RequestTiming:
+    started_ns: int
+    first_generated_ns: int | None = None
+
+    @classmethod
+    def start(cls) -> _RequestTiming:
+        return cls(started_ns=time.monotonic_ns())
+
+    def mark_first_generated(self) -> None:
+        if self.first_generated_ns is None:
+            self.first_generated_ns = time.monotonic_ns()
+
+    def backend_ttft_ms(self) -> float | None:
+        if self.first_generated_ns is None:
+            return None
+        return max(0.0, (self.first_generated_ns - self.started_ns) / 1_000_000.0)
 
 
 @dataclass(frozen=True)
@@ -1171,6 +1191,7 @@ class NativeLlamaClient:
         on_token=None,
         should_cancel=None,
     ) -> NativeTimings:
+        request_timing = _RequestTiming.start()
         self._final_prefix_status.last_used = False
         thinking = self._thinking_enabled(thinking)
         prepared_multimodal = prepare_multimodal_messages(messages, media_marker=self._media_marker)
@@ -1197,6 +1218,7 @@ class NativeLlamaClient:
                     on_progress=on_progress,
                     on_token=on_token,
                     should_cancel=should_cancel,
+                    request_timing=request_timing,
                 )
                 self._session.last_metrics = timings
                 self._session.continuation_ready = _can_continue_from_timings(timings)
@@ -1259,6 +1281,7 @@ class NativeLlamaClient:
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
+            request_timing=request_timing,
         )
 
     def complete_chat_text(
@@ -1381,6 +1404,7 @@ class NativeLlamaClient:
         on_token=None,
         should_cancel=None,
     ) -> NativeCompletion:
+        request_timing = _RequestTiming.start()
         if stop:
             raise RuntimeError("Qwen3-Coder artifact generation does not accept stop sequences")
         framed_messages = qwen3_coder_artifact_messages(messages)
@@ -1402,6 +1426,7 @@ class NativeLlamaClient:
                 should_cancel=should_cancel,
                 sampler_override=sampler,
                 utf8_errors="strict",
+                request_timing=request_timing,
             )
         finally:
             self.lib.lib.llama_sampler_free(sampler)
@@ -1765,7 +1790,9 @@ class NativeLlamaClient:
         on_progress=None,
         on_token=None,
         should_cancel=None,
+        request_timing: _RequestTiming | None = None,
     ) -> NativeTimings:
+        request_timing = request_timing or _RequestTiming.start()
         thinking = self._thinking_enabled(thinking)
         if not self._session.ctx_tgt or not self._session.sampler or not self._mtmd_ctx or self.mtmd is None:
             raise RuntimeError("native multimodal client not loaded")
@@ -1876,6 +1903,7 @@ class NativeLlamaClient:
                 on_progress=on_progress,
                 on_token=on_token,
                 should_cancel=should_cancel,
+                request_timing=request_timing,
             )
             return NativeTimings(
                 prompt_tokens=total_tokens,
@@ -1885,6 +1913,7 @@ class NativeLlamaClient:
                 prefill_ms=pf_ms,
                 generation_ms=gen_ms,
                 cancelled=cancelled,
+                backend_ttft_ms=request_timing.backend_ttft_ms(),
             )
         finally:
             mtmd.orbit_mtmd_chunks_free(chunks)
@@ -1936,7 +1965,9 @@ class NativeLlamaClient:
         should_cancel=None,
         sampler_override=None,
         utf8_errors: str = "replace",
+        request_timing: _RequestTiming | None = None,
     ) -> NativeTimings:
+        request_timing = request_timing or _RequestTiming.start()
         thinking = self._thinking_enabled(thinking)
         self.reset_cancel()
         self._session.in_flight = True
@@ -1958,6 +1989,7 @@ class NativeLlamaClient:
                         thinking=thinking,
                         on_progress=on_progress,
                         on_token=on_token,
+                        request_timing=request_timing,
                     )
                     if mtp_result is not None:
                         self._last_completion_used_mtp = True
@@ -1979,6 +2011,7 @@ class NativeLlamaClient:
                 should_cancel=should_cancel,
                 sampler_override=sampler_override,
                 utf8_errors=utf8_errors,
+                request_timing=request_timing,
             )
             self._session.last_metrics = timings
             self._session.continuation_ready = _can_continue_from_timings(timings)
@@ -2012,7 +2045,9 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         on_progress=None,
         on_token=None,
+        request_timing: _RequestTiming | None = None,
     ) -> NativeTimings | None:
+        request_timing = request_timing or _RequestTiming.start()
         thinking = self._thinking_enabled(thinking)
         profile = getattr(self, "model_profile", None)
         if profile is not None and not profile.mtp_supported:
@@ -2063,6 +2098,14 @@ class NativeLlamaClient:
         streamed_parts: list[str] = []
         generation_cap = max(1, max_tokens)
         self._last_completion_generation_cap = generation_cap
+
+        def collect_mtp_token(text: str) -> None:
+            if request_timing.first_generated_ns is None:
+                request_timing.mark_first_generated()
+            streamed_parts.append(text)
+            if on_token is not None:
+                on_token(text)
+
         result = run_persistent_mtp_completion(
             llama_root=self.paths.llama_root,
             paths=self.paths,
@@ -2070,12 +2113,14 @@ class NativeLlamaClient:
             ctx_tgt=self._session.ctx_tgt,
             prompt=mtp_prompt,
             max_tokens=generation_cap,
-            on_token=(lambda text: (streamed_parts.append(text), on_token(text))[1]) if on_token else None,
-            on_progress=(
-                lambda phase, current, total: on_progress(
-                    NativeProgress("prefill" if phase == 0 else "generation", current, total)
-                )
-            ) if on_progress else None,
+            on_token=collect_mtp_token if on_token is not None else None,
+            on_progress=lambda phase, current, total: self._handle_mtp_progress(
+                phase,
+                current,
+                total,
+                request_timing=request_timing,
+                on_progress=on_progress,
+            ),
         )
         if result.success and result.content and not thinking:
             result = replace(result, content=_strip_control_channels(result.content))
@@ -2131,7 +2176,22 @@ class NativeLlamaClient:
             prefill_ms=0.0,
             generation_ms=result.elapsed_ms or 0.0,
             cancelled=False,
+            backend_ttft_ms=request_timing.backend_ttft_ms(),
         )
+
+    @staticmethod
+    def _handle_mtp_progress(
+        phase: int,
+        current: int,
+        total: int,
+        *,
+        request_timing: _RequestTiming,
+        on_progress=None,
+    ) -> None:
+        if phase == 1 and current > 0 and request_timing.first_generated_ns is None:
+            request_timing.mark_first_generated()
+        if on_progress is not None:
+            on_progress(NativeProgress("prefill" if phase == 0 else "generation", current, total))
 
     def _complete_prompt_standard(
         self,
@@ -2148,7 +2208,9 @@ class NativeLlamaClient:
         should_cancel=None,
         sampler_override=None,
         utf8_errors: str = "replace",
+        request_timing: _RequestTiming | None = None,
     ) -> NativeTimings:
+        request_timing = request_timing or _RequestTiming.start()
         if not self._session.ctx_tgt or not self._vocab or not self._session.sampler:
             raise RuntimeError("native client not loaded")
 
@@ -2233,6 +2295,7 @@ class NativeLlamaClient:
             should_cancel=should_cancel,
             sampler_override=sampler_override,
             utf8_errors=utf8_errors,
+            request_timing=request_timing,
         )
         component_tokens = None
         if kv_diag_enabled() and kv_diag_messages is not None:
@@ -2263,6 +2326,7 @@ class NativeLlamaClient:
             prefill_ms=pf_ms,
             generation_ms=gen_ms,
             cancelled=cancelled,
+            backend_ttft_ms=request_timing.backend_ttft_ms(),
         )
 
     def _decode_prompt_range(
@@ -3289,11 +3353,13 @@ class NativeLlamaClient:
         self.reset_cancel()
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = max_tokens
+        request_timing = _RequestTiming.start()
         generated, gen_ms, cancelled = self._generate_from_current_context(
             max_tokens=max_tokens,
             on_progress=on_progress,
             on_token=on_token,
             should_cancel=should_cancel,
+            request_timing=request_timing,
         )
         timings = NativeTimings(
             prompt_tokens=0,
@@ -3303,6 +3369,7 @@ class NativeLlamaClient:
             prefill_ms=0.0,
             generation_ms=gen_ms,
             cancelled=cancelled,
+            backend_ttft_ms=request_timing.backend_ttft_ms(),
         )
         self._session.last_metrics = timings
         self._session.continuation_ready = _can_continue_from_timings(timings)
@@ -3317,6 +3384,7 @@ class NativeLlamaClient:
         should_cancel=None,
         sampler_override=None,
         utf8_errors: str = "replace",
+        request_timing: _RequestTiming | None = None,
     ) -> tuple[int, float, bool]:
         if not self._session.ctx_tgt or not self._session.sampler or not self._vocab:
             raise RuntimeError("native client not loaded")
@@ -3345,6 +3413,8 @@ class NativeLlamaClient:
                 lib.llama_sampler_accept(sampler, token)
             if lib.llama_vocab_is_eog(self._vocab, token):
                 break
+            if request_timing is not None and request_timing.first_generated_ns is None:
+                request_timing.mark_first_generated()
             self.last_target_only_token_hashes.append(_stable_token_hash(int(token)))
             if first_sample_before is not None:
                 first_sample_after = self._target_only_first_sample_metadata(path_name="target_only", generated_count=generated + 1)
@@ -3816,6 +3886,7 @@ def _merge_completions(first: NativeCompletion, second: NativeCompletion) -> Nat
             prefill_ms=first.timings.prefill_ms,
             generation_ms=first.timings.generation_ms + second.timings.generation_ms,
             cancelled=first.timings.cancelled or second.timings.cancelled,
+            backend_ttft_ms=first.timings.backend_ttft_ms,
         ),
         stopped_by_stop=first.stopped_by_stop or second.stopped_by_stop,
         completed_after_thought=_has_closed_thought_with_final(merged_content),
