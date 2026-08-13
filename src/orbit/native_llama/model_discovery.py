@@ -12,6 +12,7 @@ from orbit.native_llama.model_profiles import (
     VERIFIED_NATIVE_MODEL_IDENTITIES,
     NativeModelProfile,
     detect_native_model_profile,
+    supports_low_memory_mode,
     verified_native_model_identity,
 )
 from orbit.native_llama.model_registry import (
@@ -56,6 +57,7 @@ class ModelDiscoveryRow:
     support: str
     path_or_action: str
     model_id: str | None = None
+    low_memory_supported: bool = False
 
 
 @dataclass(frozen=True)
@@ -301,6 +303,7 @@ def _rows(
                     support="VERIFIED",
                     path_or_action=str(item.path),
                     model_id=None if manifest is None else manifest.id,
+                    low_memory_supported=supports_low_memory_mode(item.profile),
                 )
             )
 

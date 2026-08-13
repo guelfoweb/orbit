@@ -1017,7 +1017,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--low-memory",
         action="store_true",
-        help="Disable CPU weight repacking for the verified Qwen3-Coder profile.",
+        help="Use a qualified low-memory profile when supported by the selected model.",
     )
     return parser
 
@@ -1149,8 +1149,33 @@ def _select_startup_model(args: argparse.Namespace) -> int | None:
         return _download_selected_model(args, selected, build_bin=build_bin)
     args.model = Path(selected.path_or_action)
     args.model_id = selected.model_id
+    memory_exit = _select_memory_mode(args, selected)
+    if memory_exit is not None:
+        return memory_exit
     print(f"Starting {selected.model}...", file=sys.stderr)
     return None
+
+
+def _select_memory_mode(args: argparse.Namespace, selected: ModelDiscoveryRow) -> int | None:
+    if args.low_memory or not selected.low_memory_supported:
+        return None
+    print("\nMemory mode:", file=sys.stderr)
+    print("  1. Standard (~31.3 GiB peak RSS)", file=sys.stderr)
+    print("  2. Low memory (~18.3 GiB peak RSS)", file=sys.stderr)
+    print("Low memory is recommended for hosts with >=24 GB RAM.", file=sys.stderr)
+    print("Select memory mode [1-2] (default 1): ", end="", file=sys.stderr, flush=True)
+    response = sys.stdin.readline()
+    if not response:
+        print("memory mode selection cancelled", file=sys.stderr)
+        return 1
+    answer = response.strip()
+    if answer in {"", "1"}:
+        return None
+    if answer == "2":
+        args.low_memory = True
+        return None
+    print("error: invalid memory mode selection", file=sys.stderr)
+    return 1
 
 
 def _download_selected_model(
@@ -1231,6 +1256,9 @@ def _download_selected_model(
     args.model = downloaded_path
     args.model_id = selected.model_id
     print(f"Verified: {manifest.display_name}", file=sys.stderr)
+    memory_exit = _select_memory_mode(args, verified_row)
+    if memory_exit is not None:
+        return memory_exit
     print(f"Starting {manifest.display_name}...", file=sys.stderr)
     return None
 

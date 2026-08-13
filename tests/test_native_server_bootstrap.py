@@ -618,6 +618,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
                     support="VERIFIED",
                     path_or_action=str(selected_path),
                     model_id="qwen3-coder-30b-a3b-instruct-q4-k-m",
+                    low_memory_supported=True,
                 ),
                 ModelDiscoveryRow(
                     model="other.gguf",
@@ -649,7 +650,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             mock.patch("orbit.native_server.app.resolve_bootstrap_paths", side_effect=resolve),
             mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
             mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
-            mock.patch("sys.stdin", _InteractiveInput("3\n")),
+            mock.patch("sys.stdin", _InteractiveInput("3\n\n")),
             mock.patch("sys.stdout", new_callable=io.StringIO),
             redirect_stderr(stderr),
         ):
@@ -660,16 +661,106 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(len(captured_args), 1)
         self.assertEqual(captured_args[0].model, selected_path)
         self.assertEqual(captured_args[0].model_id, "qwen3-coder-30b-a3b-instruct-q4-k-m")
+        self.assertFalse(captured_args[0].low_memory)
         output = stderr.getvalue()
         self.assertIn("Models:", output)
         self.assertIn("Verified models:", output)
         self.assertIn("1. Gemma 4 26B-A4B [MISSING]", output)
         self.assertIn("2. Qwen 3.6 35B-A3B [AVAILABLE]", output)
         self.assertIn("3. Qwen3-Coder 30B-A3B [AVAILABLE]", output)
+        self.assertIn("Memory mode:", output)
+        self.assertIn("1. Standard (~31.3 GiB peak RSS)", output)
+        self.assertIn("2. Low memory (~18.3 GiB peak RSS)", output)
+        self.assertIn("recommended for hosts with >=24 GB RAM", output)
         self.assertIn("Starting Qwen3-Coder 30B-A3B...", output)
         selectable_output = output.split("Verified models:", 1)[1]
         self.assertNotIn("other.gguf", selectable_output)
         self.assertNotIn("broken.gguf", selectable_output)
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_interactive_qwen3_coder_low_memory_selection_reaches_backend_config(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        selected_path = Path("/models/qwen3-coder.gguf")
+        available = ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow(
+                    model="Qwen3-Coder 30B-A3B",
+                    local="AVAILABLE",
+                    support="VERIFIED",
+                    path_or_action=str(selected_path),
+                    model_id="qwen3-coder-30b-a3b-instruct-q4-k-m",
+                    low_memory_supported=True,
+                ),
+            ),
+            wall_ms=1.0,
+            filesystem_scans=5,
+            metadata_inspections=1,
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app._resolve_native_runtime",
+                return_value=(None, Path("/native"), Path("/native/libllama.so")),
+            ),
+            mock.patch("orbit.native_server.app.discover_models", return_value=available),
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=selected_path),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdin", _InteractiveInput("1\n2\n")),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            redirect_stderr(stderr),
+        ):
+            code = run_server([])
+
+        self.assertEqual(code, 0)
+        self.assertTrue(_FakeNativeClient.instances[-1].config.low_memory)
+        self.assertIn("Memory mode:", stderr.getvalue())
+
+    @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
+    def test_explicit_low_memory_skips_interactive_memory_prompt(self) -> None:
+        _FakeNativeClient.instances.clear()
+        _FakeHTTPServer.instances.clear()
+        available = ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow(
+                    model="Qwen3-Coder 30B-A3B",
+                    local="AVAILABLE",
+                    support="VERIFIED",
+                    path_or_action="/models/qwen3-coder.gguf",
+                    model_id="qwen3-coder-30b-a3b-instruct-q4-k-m",
+                    low_memory_supported=True,
+                ),
+            ),
+            wall_ms=1.0,
+            filesystem_scans=5,
+            metadata_inspections=1,
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "orbit.native_server.app._resolve_native_runtime",
+                return_value=(None, Path("/native"), Path("/native/libllama.so")),
+            ),
+            mock.patch("orbit.native_server.app.discover_models", return_value=available),
+            mock.patch(
+                "orbit.native_server.app.resolve_bootstrap_paths",
+                return_value=SimpleNamespace(model=Path("/models/qwen3-coder.gguf")),
+            ),
+            mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
+            mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
+            mock.patch("sys.stdin", _InteractiveInput("1\n")),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            redirect_stderr(stderr),
+        ):
+            code = run_server(["--low-memory"])
+
+        self.assertEqual(code, 0)
+        self.assertTrue(_FakeNativeClient.instances[-1].config.low_memory)
+        self.assertNotIn("Memory mode:", stderr.getvalue())
 
     @mock.patch.dict("os.environ", {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=True)
     def test_run_server_explicit_model_id_bypasses_interactive_selection(self) -> None:
@@ -1140,6 +1231,43 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(code, 1)
         discovery.assert_called_once()
         self.assertEqual(stderr.getvalue().count("Models:"), 1)
+        self.assertNotIn("Memory mode:", stderr.getvalue())
+
+    def test_qwen3_coder_memory_mode_rejects_eof_and_invalid_input(self) -> None:
+        available = ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow(
+                    model="Qwen3-Coder 30B-A3B",
+                    local="AVAILABLE",
+                    support="VERIFIED",
+                    path_or_action="/models/qwen3-coder.gguf",
+                    model_id="qwen3-coder-30b-a3b-instruct-q4-k-m",
+                    low_memory_supported=True,
+                ),
+            ),
+            wall_ms=1.0,
+            filesystem_scans=5,
+            metadata_inspections=1,
+        )
+        cases = (("1\n", "memory mode selection cancelled"), ("1\n3\n", "invalid memory mode selection"))
+        for input_text, expected_message in cases:
+            with self.subTest(input_text=input_text):
+                stderr = io.StringIO()
+                with (
+                    mock.patch(
+                        "orbit.native_server.app._resolve_native_runtime",
+                        return_value=(None, Path("/native"), Path("/native/libllama.so")),
+                    ),
+                    mock.patch("orbit.native_server.app.discover_models", return_value=available),
+                    mock.patch("orbit.native_server.app.resolve_bootstrap_paths") as bootstrap,
+                    mock.patch("sys.stdin", _InteractiveInput(input_text)),
+                    redirect_stderr(stderr),
+                ):
+                    code = run_server([])
+
+                self.assertEqual(code, 1)
+                bootstrap.assert_not_called()
+                self.assertIn(expected_message, stderr.getvalue())
 
     def test_interactive_model_selection_handles_eof_and_keyboard_interrupt(self) -> None:
         available = self._available_discovery()
@@ -1195,13 +1323,14 @@ class NativeServerBootstrapTests(unittest.TestCase):
                 filesystem_scans=5,
                 metadata_inspections=1,
             )
+            stderr = io.StringIO()
             with (
                 mock.patch("orbit.native_server.app.discover_models", return_value=available),
                 mock.patch("orbit.native_server.app.NativeLlamaClient", _FakeNativeClient),
                 mock.patch("orbit.native_server.app.ThreadingHTTPServer", _FakeHTTPServer),
                 mock.patch("sys.stdin", _InteractiveInput("1\n")),
                 mock.patch("sys.stdout", new_callable=io.StringIO),
-                mock.patch("sys.stderr", new_callable=io.StringIO),
+                redirect_stderr(stderr),
             ):
                 code = run_server(
                     [
@@ -1223,6 +1352,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
         self.assertEqual(paths.draft_mtp_model, draft)
         self.assertTrue(paths.multimodal_available)
         self.assertTrue(paths.mtp_available)
+        self.assertNotIn("Memory mode:", stderr.getvalue())
 
     def test_unknown_model_id_fails_clearly_with_discovery(self) -> None:
         stderr = io.StringIO()
