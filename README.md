@@ -50,6 +50,10 @@ Inspect the host and review the recommended server configuration:
 scripts/suggest-server-profile.sh
 ```
 
+<p align="center">
+  <img src="docs/orbit-cli.png" alt="Orbit CLI" width="900">
+</p>
+
 ## Quick Start
 
 Start the native server and select an available verified model:
@@ -57,6 +61,36 @@ Start the native server and select an available verified model:
 ```bash
 orbit server
 ```
+
+The default context is 8192 tokens, equivalent to:
+
+```bash
+orbit server --ctx 8192
+```
+
+`--ctx` controls the server context window and the maximum input that can fit
+in one model call. To use a larger context:
+
+```bash
+orbit server --ctx 19456
+```
+
+For Qwen3-Coder with low-memory mode and a larger context:
+
+```bash
+orbit server --ctx 19456 --low-memory
+```
+
+To select a model explicitly:
+
+```bash
+orbit server --model /path/to/model.gguf --ctx 19456
+```
+
+`/max-tokens` controls maximum response length only; it does not enlarge the
+context. If a full document does not fit, Orbit reports the minimum required
+context and suggests a suitable `--ctx`. Larger contexts require additional
+memory, mainly for the KV cache.
 
 In another terminal:
 
