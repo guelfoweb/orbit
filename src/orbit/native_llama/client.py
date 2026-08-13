@@ -29,7 +29,13 @@ from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
-from .model_profiles import QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, NativeModelProfile, detect_native_model_profile
+from .model_profiles import (
+    QWEN36_PROFILE_ID,
+    QWEN3_CODER_PROFILE_ID,
+    NativeModelProfile,
+    detect_native_model_profile,
+    supports_low_memory_mode,
+)
 from .model_discovery import inspect_native_model_profile
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
@@ -589,7 +595,7 @@ class NativeLlamaClient:
                 raise RuntimeError(
                     f"--low-memory model verification failed: {str(exc).strip() or exc.__class__.__name__}"
                 ) from exc
-            if not profile.verified or profile.profile_id != QWEN3_CODER_PROFILE_ID:
+            if not supports_low_memory_mode(profile):
                 raise RuntimeError(
                     "--low-memory requires verified native profile "
                     f"{QWEN3_CODER_PROFILE_ID}; detected={profile.profile_id}"
@@ -607,7 +613,7 @@ class NativeLlamaClient:
         if not self.config.low_memory:
             return
         profile = self.model_profile
-        if profile is None or not profile.verified or profile.profile_id != QWEN3_CODER_PROFILE_ID:
+        if not supports_low_memory_mode(profile):
             detected = profile.profile_id if profile is not None else "uninitialized"
             raise RuntimeError(
                 "--low-memory model identity changed during load; "

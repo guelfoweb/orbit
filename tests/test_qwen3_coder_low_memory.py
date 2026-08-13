@@ -40,7 +40,12 @@ class Qwen3CoderLowMemoryTests(unittest.TestCase):
 
         self.assertFalse(parser.parse_args([]).low_memory)
         self.assertTrue(parser.parse_args(["--low-memory"]).low_memory)
-        self.assertIn("--low-memory", parser.format_help())
+        help_text = parser.format_help()
+        self.assertIn("--low-memory", help_text)
+        self.assertIn(
+            "Use a qualified low-memory profile when supported by the selected model.",
+            " ".join(help_text.split()),
+        )
 
     def test_default_preserves_backend_cpu_repack_setting(self) -> None:
         client = self._client(low_memory=False)

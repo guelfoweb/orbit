@@ -12,6 +12,7 @@ from orbit.native_llama.model_profiles import (
     QWEN3_CODER_PROFILE_ID,
     NativeModelProfile,
     detect_native_model_profile,
+    supports_low_memory_mode,
 )
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT
 
@@ -55,6 +56,7 @@ class NativeModelProfileTests(unittest.TestCase):
         self.assertFalse(profile.mtp_supported)
         self.assertFalse(profile.gemma_prefix_reuse_supported)
         self.assertEqual(profile.verified_quantization, "Q4_K_M")
+        self.assertFalse(supports_low_memory_mode(profile))
         self.assertTrue(profile.diagnostics(thinking_enabled=False)["capabilities"]["full_document_analysis"])
 
     def test_qwen_template_drift_fails_closed(self) -> None:
@@ -97,6 +99,7 @@ class NativeModelProfileTests(unittest.TestCase):
         self.assertEqual(profile.renderer, "orbit-gemma4")
         self.assertTrue(profile.mtp_supported)
         self.assertTrue(profile.gemma_prefix_reuse_supported)
+        self.assertFalse(supports_low_memory_mode(profile))
         self.assertTrue(profile.diagnostics(thinking_enabled=False)["capabilities"]["full_document_analysis"])
 
     def test_detects_verified_qwen3_coder_only_from_complete_identity(self) -> None:
@@ -118,6 +121,7 @@ class NativeModelProfileTests(unittest.TestCase):
         self.assertTrue(profile.route_prefix_reuse_supported)
         self.assertFalse(profile.multimodal_supported)
         self.assertEqual(profile.verified_quantization, "Q4_K_M")
+        self.assertTrue(supports_low_memory_mode(profile))
         self.assertTrue(profile.diagnostics(thinking_enabled=False)["capabilities"]["full_document_analysis"])
 
     def test_qwen3_coder_template_drift_fails_closed(self) -> None:
@@ -125,6 +129,7 @@ class NativeModelProfileTests(unittest.TestCase):
 
         self.assertFalse(profile.verified)
         self.assertEqual(profile.failure_reason, "qwen3_coder_template_identity_mismatch")
+        self.assertFalse(supports_low_memory_mode(profile))
 
     def test_qwen3_coder_architecture_drift_fails_closed(self) -> None:
         metadata = {**QWEN3_CODER_METADATA, "general.architecture": "qwen3"}

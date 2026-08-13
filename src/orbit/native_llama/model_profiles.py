@@ -80,6 +80,14 @@ class NativeModelProfile:
         }
 
 
+def supports_low_memory_mode(profile: NativeModelProfile | None) -> bool:
+    return bool(
+        profile is not None
+        and profile.verified
+        and profile.profile_id == QWEN3_CODER_PROFILE_ID
+    )
+
+
 @dataclass(frozen=True)
 class VerifiedNativeModelIdentity:
     profile_id: str

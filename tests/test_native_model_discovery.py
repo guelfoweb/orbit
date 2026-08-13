@@ -64,6 +64,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
         self.assertEqual((row.local, row.support), ("AVAILABLE", "VERIFIED"))
         self.assertEqual(row.path_or_action, str(model.absolute()))
         self.assertEqual(row.model_id, manifest.id)
+        self.assertFalse(row.low_memory_supported)
         self.assertEqual(result.metadata_inspections, 1)
 
     def test_multiple_verified_models_are_reported(self) -> None:
@@ -89,6 +90,9 @@ class NativeModelDiscoveryTests(unittest.TestCase):
 
         available = [row.model for row in result.rows if row.local == "AVAILABLE"]
         self.assertEqual(available, ["Gemma 4 26B-A4B", "Qwen3-Coder 30B-A3B"])
+        by_model = {row.model: row for row in result.rows if row.local == "AVAILABLE"}
+        self.assertFalse(by_model["Gemma 4 26B-A4B"].low_memory_supported)
+        self.assertTrue(by_model["Qwen3-Coder 30B-A3B"].low_memory_supported)
 
     def test_unsupported_gguf_is_never_presented_as_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,6 +140,8 @@ class NativeModelDiscoveryTests(unittest.TestCase):
         spoof = next(row for row in result.rows if row.model == manifest.target.file)
         self.assertEqual((supported.local, supported.support), ("MISSING", "VERIFIED"))
         self.assertEqual((spoof.local, spoof.support), ("AVAILABLE", "UNSUPPORTED"))
+        self.assertFalse(supported.low_memory_supported)
+        self.assertFalse(spoof.low_memory_supported)
 
     def test_verified_profile_with_different_model_identity_is_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,8 +178,15 @@ class NativeModelDiscoveryTests(unittest.TestCase):
     def test_incorrect_injected_registry_mapping_fails_closed(self) -> None:
         bad_manifest = replace(self.manifests[0], architecture="qwen35moe")
 
-        with self.assertRaisesRegex(ValueError, "profile mapping is not supported"):
-            discover_models(manifests=(bad_manifest,), inspector=lambda _path: self.fail("no model"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "profile mapping is not supported"):
+                discover_models(
+                    models_dir=root / "models",
+                    hf_cache=root / "hf",
+                    manifests=(bad_manifest,),
+                    inspector=lambda _path: self.fail("no model"),
+                )
 
     def test_malformed_or_unreadable_gguf_is_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
