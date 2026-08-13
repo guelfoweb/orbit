@@ -6,6 +6,10 @@ Orbit stays model-driven. The runtime enforces safety, size, timeout, context, a
 
 Linux is the main target environment. macOS may work. Windows is not a target.
 
+<p align="center">
+  <img src="docs/orbit-cli.png" alt="Orbit CLI" width="900">
+</p>
+
 ## Supported Models
 
 | Model | Prefill | Generation | Tools-on chat | Tool + final | Peak RAM |
@@ -49,10 +53,6 @@ Inspect the host and review the recommended server configuration:
 ```bash
 scripts/suggest-server-profile.sh
 ```
-
-<p align="center">
-  <img src="docs/orbit-cli.png" alt="Orbit CLI" width="900">
-</p>
 
 ## Quick Start
 
