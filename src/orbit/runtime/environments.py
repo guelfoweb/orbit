@@ -41,6 +41,7 @@ from orbit.runtime.final_policy import (
 )
 from orbit.runtime.full_document import (
     FullDocumentAdmission,
+    FullDocumentSnapshot,
     assess_full_document_admission,
     attest_full_document_snapshot,
     exact_coverage_notice,
@@ -51,6 +52,7 @@ from orbit.runtime.full_document import (
     full_document_messages,
     full_document_source_blocked_notice,
     identify_full_document_request,
+    parse_complete_file_display,
     parse_full_document_snapshot,
     required_full_document_context,
     targeted_search_coverage_notice,
@@ -495,6 +497,89 @@ class FullDocumentPreflightEnvironment:
                 on_final_delta=on_final_delta,
             )
 
+        return self._answer_snapshot(
+            prompt,
+            snapshot=snapshot,
+            raw=raw,
+            route_result=route_result,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            workdir=workdir,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
+        )
+
+    def answer_complete_display(
+        self,
+        prompt: str,
+        *,
+        raw: str,
+        route_result: ChatResult,
+        temperature: float,
+        max_tokens: int,
+        workdir: Path,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+    ) -> ChatResult | None:
+        display = parse_complete_file_display(raw)
+        if display is None:
+            return None
+        snapshot_raw = read_full_document_snapshot(display.path, workdir=workdir)
+        if snapshot_raw.startswith("error:"):
+            return self._blocked(
+                route_result,
+                full_document_source_blocked_notice(
+                    display.path,
+                    snapshot_raw.removeprefix("error:").strip(),
+                ),
+                on_final_delta=on_final_delta,
+            )
+        snapshot = parse_full_document_snapshot(snapshot_raw)
+        if snapshot is None or (
+            snapshot.path != display.path
+            or snapshot.byte_count != display.byte_count
+            or snapshot.line_count != display.line_count
+            or snapshot.sha256 != display.sha256
+            or snapshot.content != display.content
+        ):
+            return self._blocked(
+                route_result,
+                full_document_source_blocked_notice(display.path, "display_snapshot_mismatch"),
+                on_final_delta=on_final_delta,
+            )
+        return self._answer_snapshot(
+            prompt,
+            snapshot=snapshot,
+            raw=snapshot_raw,
+            route_result=route_result,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            workdir=workdir,
+            on_final_delta=on_final_delta,
+            on_progress=on_progress,
+            on_model_step=on_model_step,
+            on_phase_start=on_phase_start,
+        )
+
+    def _answer_snapshot(
+        self,
+        prompt: str,
+        *,
+        snapshot: FullDocumentSnapshot,
+        raw: str,
+        route_result: ChatResult,
+        temperature: float,
+        max_tokens: int,
+        workdir: Path,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+    ) -> ChatResult:
         record = None
         if self.runtime.evidence_store is not None:
             record = self.runtime.evidence_store.add(
@@ -1100,10 +1185,31 @@ class FinalFromToolEnvironment:
         loop: int,
         use_tool_prompt: bool,
         compact_window: bool = False,
+        workdir: Path | None = None,
     ) -> FinalAnswerResult:
         evidence_kind, evidence_chars = self._latest_evidence_budget_metadata()
         targeted_prefix = self._targeted_search_prefix()
-        display_prefix = self._file_display_prefix()
+        complete_display_raw = self._complete_file_display_raw()
+        if complete_display_raw is not None and workdir is not None:
+            prompt = last_user_text(self.runtime.messages) or ""
+            complete_result = FullDocumentPreflightEnvironment(
+                runtime=self.runtime,
+                transport=self.transport,
+            ).answer_complete_display(
+                prompt,
+                raw=complete_display_raw,
+                route_result=_runtime_result(""),
+                temperature=temperature,
+                max_tokens=max_tokens,
+                workdir=workdir,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+            )
+            if complete_result is not None:
+                return FinalAnswerResult(result=complete_result, used_retry_or_repair_pass=False)
+        display_prefix = "" if complete_display_raw is not None else self._file_display_prefix()
         targeted_no_match = self._targeted_search_no_match()
         if targeted_no_match is not None:
             result = ChatResult(
@@ -1411,6 +1517,17 @@ class FinalFromToolEnvironment:
         except (FileNotFoundError, OSError, UnicodeDecodeError):
             return ""
         return file_display_coverage_notice(raw) or ""
+
+    def _complete_file_display_raw(self) -> str | None:
+        store = self.runtime.evidence_store
+        record = next(iter(store.recent_records(1)), None) if store is not None else None
+        if record is None or record.kind != "read":
+            return None
+        try:
+            raw = store.load_raw(record.evidence_id) if store is not None else ""
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
+            return None
+        return raw if parse_complete_file_display(raw) is not None else None
 
 @dataclass(frozen=True)
 class ContinueEnvironment:

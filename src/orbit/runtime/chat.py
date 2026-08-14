@@ -292,6 +292,7 @@ class ChatRuntime:
                 on_phase_start=on_phase_start,
                 loop=1,
                 use_tool_prompt=True,
+                workdir=workdir,
             )
         except BaseException:
             self._discard_acquired_evidence(evidence_id)
@@ -983,6 +984,7 @@ class ChatRuntime:
         loop: int,
         use_tool_prompt: bool,
         compact_window: bool = False,
+        workdir: Path | None = None,
     ) -> ChatResult:
         return self._final_from_tool_environment().answer(
             temperature=temperature,
@@ -994,6 +996,7 @@ class ChatRuntime:
             loop=loop,
             use_tool_prompt=use_tool_prompt,
             compact_window=compact_window,
+            workdir=workdir,
         ).result
 
     def _chat_final(

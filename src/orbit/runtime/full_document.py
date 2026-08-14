@@ -97,6 +97,15 @@ class FullDocumentAdmission:
         return self.reason is None and self.messages is not None
 
 
+@dataclass(frozen=True)
+class CompleteFileDisplay:
+    path: str
+    byte_count: int
+    line_count: int
+    sha256: str
+    content: str
+
+
 def identify_full_document_request(prompt: str) -> FullDocumentRequest | None:
     """Recognize only explicit full-read forms with one syntactic local path."""
     if not isinstance(prompt, str) or not prompt or len(prompt) > FULL_DOCUMENT_REQUEST_MAX_CHARS:
@@ -393,6 +402,8 @@ def file_display_coverage_notice(raw: str) -> str | None:
         or not line_range
     ):
         return None
+    if coverage == "complete" and parse_complete_file_display(raw) is None:
+        return None
     suffix = (
         "The entire verified file was returned."
         if coverage == "complete"
@@ -401,6 +412,53 @@ def file_display_coverage_notice(raw: str) -> str | None:
     return (
         f"Document coverage: {coverage} exact display; `{path}`; bytes 0-{byte_count}; "
         f"lines 1-{line_count}; returned lines {line_range}; SHA-256 {digest}. {suffix}\n\n"
+    )
+
+
+def parse_complete_file_display(raw: str) -> CompleteFileDisplay | None:
+    """Parse only a self-consistent exact display of an entire UTF-8 file."""
+    marker_start = raw.find(f"{FILE_DISPLAY_MARKER}\n")
+    if marker_start < 0:
+        return None
+    display = raw[marker_start:]
+    if _CONTENT_SEPARATOR not in display:
+        return None
+    header, content = display.split(_CONTENT_SEPARATOR, 1)
+    values: dict[str, str] = {}
+    for line in header.splitlines()[1:]:
+        key, separator, value = line.partition(":")
+        key = key.strip()
+        if not separator or not key or key in values:
+            return None
+        values[key] = value.strip()
+    try:
+        path = values["path"]
+        byte_count = int(values["bytes"])
+        line_count = int(values["lines"])
+        digest = values["sha256"]
+        coverage = values["coverage"]
+        line_range = values["line_range"]
+        next_cursor = values["next_cursor"]
+    except (KeyError, ValueError):
+        return None
+    expected_range = "none" if line_count == 0 else f"1-{line_count}"
+    encoded = content.encode("utf-8")
+    if (
+        not path
+        or byte_count != len(encoded)
+        or line_count != len(content.splitlines())
+        or hashlib.sha256(encoded).hexdigest() != digest
+        or coverage != "complete"
+        or line_range != expected_range
+        or next_cursor != "none"
+    ):
+        return None
+    return CompleteFileDisplay(
+        path=path,
+        byte_count=byte_count,
+        line_count=line_count,
+        sha256=digest,
+        content=content,
     )
 
 

@@ -399,6 +399,8 @@ class SlashCommandTests(unittest.TestCase):
         self.assertEqual(backend.calls, 1)
         self.assertIn("Document coverage: complete", result.content)
         self.assertIn("complete answer", result.content)
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[0])
+        self.assertEqual(rendered.count("alpha\nbeta\n"), 1)
 
 
 if __name__ == "__main__":
