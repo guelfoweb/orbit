@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.backend.base import ChatResult, Message
+from orbit.backend.base import ChatResult, Message, TokenCount
 from orbit.runtime import ChatRuntime
 from orbit.runtime.evidence import (
     EvidenceStore,
@@ -83,6 +83,29 @@ class SequenceBackend:
         if not self.results:
             raise AssertionError("unexpected model call")
         return self.results.pop(0)
+
+
+class ExactTokenCountingBackend:
+    context_tokens = 8192
+
+    def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+        rendered = json.dumps(messages, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+        return TokenCount(
+            tokens=max(1, len(rendered.encode("utf-8")) // 4),
+            context_tokens=self.context_tokens,
+            rendered_hash=digest,
+            token_hash=digest,
+        )
+
+    def count_text_tokens(self, text):
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return TokenCount(
+            tokens=max(1, len(text.encode("utf-8")) // 4),
+            context_tokens=self.context_tokens,
+            rendered_hash=digest,
+            token_hash=digest,
+        )
 
 
 class RuntimeTests(unittest.TestCase):
@@ -2594,6 +2617,178 @@ def _last_tool_message(runtime: ChatRuntime) -> Message:
 
 
 class ToolRuntimeTests(unittest.TestCase):
+    def test_complete_file_display_handoff_sends_one_exact_twenty_kb_document(self) -> None:
+        class CompleteDisplayBackend(ExactTokenCountingBackend):
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_by_call: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_by_call.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat sample.js"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=789,
+                        completion_tokens=8,
+                        cached_tokens=768,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The complete source includes END_OF_VERIFIED_SAMPLE.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=self.count_chat_tokens(messages).tokens,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        lines = [f"const benign_{index:03d} = '{index:03d}-" + ("x" * 185) + "';\n" for index in range(90)]
+        lines.append("// END_OF_VERIFIED_SAMPLE\n")
+        content = "".join(lines)
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "sample.js").write_text(content, encoding="utf-8")
+            backend = CompleteDisplayBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+            phases: list[str] = []
+
+            result = runtime.ask_with_tools(
+                "analyze and decode sample.js and report its indicators",
+                temperature=0,
+                max_tokens=256,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+                on_phase_start=lambda event: phases.append(event.phase),
+            )
+
+        self.assertGreater(len(content.encode("utf-8")), 19_000)
+        self.assertEqual(len(content.splitlines()), 91)
+        self.assertEqual(backend.calls, 2)
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[1])
+        self.assertIn("full_document_evidence: true", rendered)
+        self.assertEqual(rendered.count(content), 1)
+        self.assertIn("END_OF_VERIFIED_SAMPLE", rendered)
+        self.assertIn("Document coverage: complete; mode exact single context", result.content)
+        self.assertIn("full_document", phases)
+
+    def test_complete_file_display_handoff_fails_closed_when_document_does_not_fit(self) -> None:
+        class OversizedDisplayBackend(ExactTokenCountingBackend):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls > 1:
+                    raise AssertionError("oversized document reached the answering model")
+                return ChatResult(
+                    content="",
+                    model="fake",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_shell_full_command",
+                                "arguments": json.dumps({"command": "sed -n '1,200p' oversized.txt"}),
+                            },
+                        }
+                    ],
+                    prompt_tokens=789,
+                    completion_tokens=8,
+                    cached_tokens=768,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        content = "".join(f"line {index:03d} " + ("z" * 290) + "\n" for index in range(180))
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "oversized.txt").write_text(content, encoding="utf-8")
+            backend = OversizedDisplayBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_with_tools(
+                "analyze oversized.txt",
+                temperature=0,
+                max_tokens=512,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertEqual(backend.calls, 1)
+        self.assertIn("Document coverage: none", result.content)
+        self.assertIn("requires at least", result.content)
+        self.assertNotIn("line 179", result.content)
+
+    def test_complete_file_display_handoff_rejects_source_change_before_model_call(self) -> None:
+        class ChangedDisplayBackend(ExactTokenCountingBackend):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                if self.calls > 1:
+                    raise AssertionError("changed document reached the answering model")
+                return ChatResult(
+                    content="",
+                    model="fake",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_shell_full_command",
+                                "arguments": json.dumps({"command": "cat sample.js"}),
+                            },
+                        }
+                    ],
+                    prompt_tokens=789,
+                    completion_tokens=8,
+                    cached_tokens=768,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        content = "const verified = true;\n" + (("// filler " + "x" * 110 + "\n") * 80)
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            target = workdir / "sample.js"
+            target.write_text(content, encoding="utf-8")
+            backend = ChangedDisplayBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_with_tools(
+                "analyze sample.js",
+                temperature=0,
+                max_tokens=256,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+                on_tool_result=lambda *_args: target.write_text("changed\n", encoding="utf-8"),
+            )
+
+        self.assertEqual(backend.calls, 1)
+        self.assertIn("Document coverage: none", result.content)
+        self.assertIn("display_snapshot_mismatch", result.content)
+
     def setUp(self) -> None:
         # Keep legacy-path fixtures explicit; default-on behavior is covered by
         # the dedicated post-tool final reuse tests and live matrix.
@@ -3877,7 +4072,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn("ignore older tool results", backend.retry_messages[-1]["content"])
 
     def test_shell_full_analysis_metadata_observation_gets_one_model_continuation(self) -> None:
-        class ShellFullAnalysisBackend:
+        class ShellFullAnalysisBackend(ExactTokenCountingBackend):
             def __init__(self) -> None:
                 self.calls = 0
                 self.tools_seen: list[object] = []
@@ -3962,7 +4157,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-        self.assertIn("Document coverage: complete exact display", result.content)
+        self.assertIn("Document coverage: complete; mode exact single context", result.content)
         self.assertTrue(result.content.endswith("vulnerability found from source evidence"))
         self.assertEqual(backend.calls, 3)
         self.assertEqual(backend.tools_seen[0], None)
@@ -4043,7 +4238,10 @@ class ToolRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            (workdir / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            (workdir / "vulnerable_service.py").write_text(
+                "subprocess.run(cmd, shell=True)\n" + "safe filler\n" * 100,
+                encoding="utf-8",
+            )
             backend = AnalysisCompletionBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="route system")
 
@@ -4059,7 +4257,8 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertIn(backend.calls, {3, 4})
         tool_messages = [message for message in runtime.messages if message.get("role") == "tool"]
         self.assertEqual(len(tool_messages), 1)
-        self.assertIn("shell=True", tool_messages[0]["content"])
+        assert runtime.evidence_store is not None
+        self.assertIn("shell=True", runtime.evidence_store.load_raw(tool_messages[0]["evidence_id"]))
 
     def test_analysis_completion_guard_does_not_block_followup_content_read(self) -> None:
         class FollowupContentBackend:
@@ -4207,7 +4406,10 @@ class ToolRuntimeTests(unittest.TestCase):
             workdir = Path(tmp)
             samples = workdir / "samples"
             samples.mkdir()
-            (samples / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            (samples / "vulnerable_service.py").write_text(
+                "subprocess.run(cmd, shell=True)\n" + "safe filler\n" * 100,
+                encoding="utf-8",
+            )
             backend = FileRecoveryBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="route system")
 
@@ -4224,7 +4426,8 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(len(tool_messages), 3)
         self.assertIn("No such file or directory", tool_messages[0]["content"])
         self.assertIn("./samples/vulnerable_service.py", tool_messages[1]["content"])
-        self.assertIn("shell=True", tool_messages[2]["content"])
+        assert runtime.evidence_store is not None
+        self.assertIn("shell=True", runtime.evidence_store.load_raw(tool_messages[2]["evidence_id"]))
         self.assertIsNotNone(backend.guard_messages)
         self.assertEqual(backend.guard_max_tokens, 64)
         self.assertIn("Requested file not read yet.", backend.guard_messages[-1]["content"])
@@ -4442,7 +4645,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(len(tool_messages), 1)
 
     def test_direct_content_read_handoffs_immediately_to_final_from_tool(self) -> None:
-        class DirectContentHandoffBackend:
+        class DirectContentHandoffBackend(ExactTokenCountingBackend):
             def __init__(self) -> None:
                 self.calls = 0
                 self.final_messages: list[Message] | None = None
@@ -4472,7 +4675,8 @@ class ToolRuntimeTests(unittest.TestCase):
                     )
                 self.final_messages = messages
                 assert tools is None
-                assert "shell-full output" in str(messages[-1].get("content"))
+                assert "full_document_evidence: true" in str(messages[-1].get("content"))
+                assert "subprocess.run(cmd, shell=True)" in str(messages[-1].get("content"))
                 return ChatResult(
                     content="The file is vulnerable because it uses shell=True in subprocess.run.",
                     model="fake",
@@ -4578,7 +4782,9 @@ class ToolRuntimeTests(unittest.TestCase):
                         generation_tokens_per_second=None,
                     )
                 assert tools is None
-                assert "shell-full output" in str(messages[-1].get("content"))
+                assert "tool_evidence_card: true" in "\n".join(
+                    str(message.get("content", "")) for message in messages
+                )
                 return ChatResult(
                     content="The file is vulnerable because it uses shell=True in subprocess.run.",
                     model="fake",
@@ -4595,7 +4801,10 @@ class ToolRuntimeTests(unittest.TestCase):
             workdir = Path(tmp)
             samples = workdir / "samples"
             samples.mkdir()
-            (samples / "vulnerable_service.py").write_text("subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+            (samples / "vulnerable_service.py").write_text(
+                "subprocess.run(cmd, shell=True)\n" + "safe filler\n" * 100,
+                encoding="utf-8",
+            )
             backend = CandidatePathBackend()
             runtime = ChatRuntime(backend=backend, system_prompt="route system")
 

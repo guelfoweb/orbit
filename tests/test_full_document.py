@@ -30,6 +30,7 @@ from orbit.runtime.full_document import (
     full_document_control_marker,
     full_document_messages,
     identify_full_document_request,
+    parse_complete_file_display,
     parse_full_document_snapshot,
     required_full_document_context,
     round_context_requirement,
@@ -237,6 +238,19 @@ class FullDocumentTests(unittest.TestCase):
         self.assertIn("Document coverage: partial exact display", notice or "")
         self.assertIn("returned lines 1-100", notice or "")
         self.assertIn("does not represent the complete file", notice or "")
+
+    def test_complete_display_parser_requires_exact_content_identity(self) -> None:
+        workdir, _ = self._snapshot("alpha\nbeta\n")
+        raw = execute_read_file({"path": "note.txt"}, workdir=workdir)
+
+        display = parse_complete_file_display(raw)
+
+        self.assertIsNotNone(display)
+        assert display is not None
+        self.assertEqual(display.content, "alpha\nbeta\n")
+        self.assertEqual(display.byte_count, 11)
+        self.assertIsNone(parse_complete_file_display(raw.replace("beta", "zeta")))
+        self.assertIsNone(file_display_coverage_notice(raw.replace("beta", "zeta")))
 
     def test_zero_match_notice_refuses_definitive_negative(self) -> None:
         raw = "\n".join(

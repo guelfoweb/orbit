@@ -167,7 +167,7 @@ def run_tool_loop(
     # The state objects only store turn-local facts; they do not decide tasks.
 
     def answer_from_tool_results(**kwargs) -> ChatResult:
-        return runtime._answer_from_tool_results(**kwargs)
+        return runtime._answer_from_tool_results(workdir=Path(workdir), **kwargs)
 
     def write_artifact(arguments: dict[str, object]) -> ToolExecution:
         nonlocal artifact_path_pending_verification, artifact_pending_verification
