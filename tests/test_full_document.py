@@ -345,7 +345,7 @@ class FullDocumentTests(unittest.TestCase):
             workdir = Path(tmp)
             content = "begin\nmiddle\nend\n"
             (workdir / "note.txt").write_text(content, encoding="utf-8")
-            backend = PreflightBackend(prompt_tokens=7680, context_tokens=8192)
+            backend = PreflightBackend(prompt_tokens=7424, context_tokens=8192)
             runtime = ChatRuntime(
                 backend=backend,
                 system_prompt=None,
@@ -374,7 +374,7 @@ class FullDocumentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("complete evidence\n", encoding="utf-8")
-            backend = PreflightBackend(prompt_tokens=7681, context_tokens=8192)
+            backend = PreflightBackend(prompt_tokens=7425, context_tokens=8192)
             runtime = ChatRuntime(
                 backend=backend,
                 system_prompt=None,
@@ -399,7 +399,7 @@ class FullDocumentTests(unittest.TestCase):
             workdir = Path(tmp)
             target = workdir / "note.txt"
             target.write_text("beginning\nmiddle\nend\n", encoding="utf-8")
-            backend = PreflightBackend(prompt_tokens=7681, context_tokens=8192)
+            backend = PreflightBackend(prompt_tokens=7425, context_tokens=8192)
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_auto(
@@ -415,6 +415,26 @@ class FullDocumentTests(unittest.TestCase):
         self.assertIn("requires at least 8,193 tokens", result.content)
         self.assertNotIn("beginning", result.content)
         self.assertNotIn("central thesis", result.content.lower())
+
+    def test_full_document_1024_budget_is_used_for_context_admission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("complete evidence\n", encoding="utf-8")
+            backend = PreflightBackend(prompt_tokens=6913, context_tokens=8192)
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+
+            result = runtime.ask_auto(
+                "Analyze note.txt completely.",
+                temperature=0,
+                max_tokens=1024,
+                workdir=workdir,
+            )
+
+        self.assertEqual(backend.calls, 1)
+        self.assertIn("Document coverage: none", result.content)
+        self.assertIn("requires at least 8,193 tokens", result.content)
+        self.assertIn("1024-token output reserve", result.content)
+        self.assertNotIn("complete evidence", result.content)
 
     def test_preflight_rejects_changed_file_before_inference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,6 +17,7 @@ FINAL_SYSTEM_INFO_MAX_TOKENS = 160
 FINAL_MEDIUM_MAX_TOKENS = 192
 FINAL_WEB_SEARCH_MAX_TOKENS = 192
 FINAL_READ_MAX_TOKENS = 256
+FULL_DOCUMENT_FINAL_MAX_TOKENS = 1024
 
 CHAT_FINAL_RETRY_MAX_TOKENS = 128
 CHAT_FINAL_RETRY_AFTER_LENGTH_MAX_TOKENS = 192
@@ -65,6 +66,8 @@ def resolve_max_tokens(
         return _floor_and_cap(requested, 64, CHAT_USER_MAX_TOKENS)
     if kind == "final_from_tool":
         return _final_from_tool_tokens(requested, evidence, evidence_chars)
+    if kind == "full_document":
+        return _internal(requested, FULL_DOCUMENT_FINAL_MAX_TOKENS)
     if kind == "chat_final_retry":
         target = CHAT_FINAL_RETRY_AFTER_LENGTH_MAX_TOKENS if previous == "length" else CHAT_FINAL_RETRY_MAX_TOKENS
         return _floor_and_cap(requested, target, target)
