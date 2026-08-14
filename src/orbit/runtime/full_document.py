@@ -186,10 +186,8 @@ def assess_full_document_admission(
     workdir: Path,
 ) -> FullDocumentAdmission:
     output_reserve = resolve_max_tokens(
-        "final_from_tool",
+        "full_document",
         max_tokens,
-        evidence_kind="read",
-        evidence_chars=snapshot.char_count,
     )
     reason = full_document_control_marker(snapshot)
     reason = f"unsafe_model_control_markup:{reason}" if reason is not None else None
