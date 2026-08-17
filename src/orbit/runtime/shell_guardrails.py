@@ -19,7 +19,7 @@ from orbit.runtime.file_tools import (
     read_file,
     read_pdf,
 )
-from orbit.runtime.document_tool import execute_read_file
+from orbit.runtime.document_tool import FILE_DISPLAY_MARKER, execute_read_file
 from orbit.runtime.path_guardrails import resolve_inside_workdir
 from orbit.runtime.web import html_to_text, search_web
 
@@ -1174,11 +1174,12 @@ def _read_exact_cat_target(raw_command: str, *, workdir: Path) -> str | None:
     if not target.is_file():
         return None
     try:
-        if target.stat().st_size <= FULL_DOCUMENT_SNAPSHOT_MIN_BYTES:
-            return None
+        target_size = target.stat().st_size
     except OSError:
         return None
     result = execute_read_file({"path": path}, workdir=workdir)
+    if target_size <= FULL_DOCUMENT_SNAPSHOT_MIN_BYTES and not result.startswith(f"{FILE_DISPLAY_MARKER}\n"):
+        return None
     return "\n".join(
         [
             "shell_output_read_file: true",
