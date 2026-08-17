@@ -112,6 +112,25 @@ class OrbitNativeServer:
         with self.lock:
             return self.client.reset_moe_expert_usage()
 
+    def reset_session(self) -> dict[str, object]:
+        with self.lock:
+            profile = getattr(self.client, "model_profile", None)
+            preserve_coder_checkpoint = bool(
+                getattr(profile, "verified", False)
+                and getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
+            )
+            self.client.reset_session_state(
+                preserve_qwen3_coder_route_checkpoint=preserve_coder_checkpoint
+            )
+            snapshot = self.client.session_snapshot(DEFAULT_SESSION_ID)
+            return {
+                "status": "reset",
+                "session_id": snapshot.session_id,
+                "cached_tokens": snapshot.cached_tokens,
+                "in_flight": snapshot.in_flight,
+                "qwen3_coder_checkpoint_preserved": preserve_coder_checkpoint,
+            }
+
     def validate_request(self, request: ChatRequest) -> None:
         thinking = self.client.config.thinking if request.thinking is None else request.thinking
         if request.artifact_content and (request.tools or thinking or request.stop):
@@ -451,6 +470,9 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     self._json(self._state().reset_moe_expert_usage())
                 except RuntimeError as exc:
                     self._json({"error": str(exc)}, status=409)
+                return
+            if self.path == "/session/reset":
+                self._json(self._state().reset_session())
                 return
             payload = self._read_json()
         except ValueError as exc:

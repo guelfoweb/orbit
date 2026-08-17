@@ -309,6 +309,21 @@ class LlamaServerBackend:
             return None
         return _parse_token_count(data)
 
+    def reset_static_analysis_session(self) -> str | None:
+        if not self._is_orbit_native_backend():
+            return "error: static analysis requires native session reset support"
+        try:
+            data = self._post_json("/session/reset", {})
+        except LlamaServerError:
+            return "error: static analysis native session reset failed"
+        if not (
+            data.get("status") == "reset"
+            and data.get("cached_tokens") == 0
+            and data.get("in_flight") is False
+        ):
+            return "error: static analysis native session reset was not confirmed"
+        return None
+
     def _get_json(self, path: str) -> Any:
         request = Request(f"{self.base_url}{path}", method="GET")
         return self._send(request)

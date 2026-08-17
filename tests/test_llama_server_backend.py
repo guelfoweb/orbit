@@ -62,6 +62,42 @@ class FakeNativeStreamWithTrailingNoise:
 
 
 class LlamaServerBackendTests(unittest.TestCase):
+    def test_static_analysis_session_reset_requires_confirmed_empty_native_state(self) -> None:
+        backend = LlamaServerBackend(base_url="http://localhost", model="fake", timeout=1)
+        backend._props_cache = {"backend": "orbit-native"}
+        with mock.patch.object(
+            backend,
+            "_post_json",
+            return_value={"status": "reset", "cached_tokens": 0, "in_flight": False},
+        ) as post:
+            error = backend.reset_static_analysis_session()
+
+        self.assertIsNone(error)
+        post.assert_called_once_with("/session/reset", {})
+
+        for response in (
+            {"status": "reset", "cached_tokens": 1, "in_flight": False},
+            {"status": "reset", "cached_tokens": 0, "in_flight": True},
+            {"status": "not-reset", "cached_tokens": 0, "in_flight": False},
+        ):
+            with self.subTest(response=response), mock.patch.object(
+                backend, "_post_json", return_value=response
+            ):
+                self.assertIn(
+                    "was not confirmed", backend.reset_static_analysis_session() or ""
+                )
+
+    def test_static_analysis_session_reset_fails_closed_without_native_support(self) -> None:
+        backend = LlamaServerBackend(base_url="http://localhost", model="fake", timeout=1)
+        backend._props_cache = {"backend": "other"}
+        self.assertIn("requires native", backend.reset_static_analysis_session() or "")
+
+        backend._props_cache = {"backend": "orbit-native"}
+        with mock.patch.object(
+            backend, "_post_json", side_effect=LlamaServerError("offline")
+        ):
+            self.assertIn("reset failed", backend.reset_static_analysis_session() or "")
+
     def test_artifact_content_stream_is_native_content_only(self) -> None:
         class Backend(LlamaServerBackend):
             def __init__(self) -> None:
