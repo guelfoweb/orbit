@@ -3567,13 +3567,14 @@ class NativeLlamaClient:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
         common = 0
-        max_common = min(len(prompt_tokens), len(self._session.cached_prompt_tokens))
-        while common < max_common and prompt_tokens[common] == self._session.cached_prompt_tokens[common]:
-            common += 1
-        if prompt_tokens:
-            # The final prompt token must be evaluated to produce fresh logits
-            # for the next sampled token.
-            common = min(common, len(prompt_tokens) - 1)
+        if not self._qwen3_coder_native_protocol():
+            max_common = min(len(prompt_tokens), len(self._session.cached_prompt_tokens))
+            while common < max_common and prompt_tokens[common] == self._session.cached_prompt_tokens[common]:
+                common += 1
+            if prompt_tokens:
+                # The final prompt token must be evaluated to produce fresh logits
+                # for the next sampled token.
+                common = min(common, len(prompt_tokens) - 1)
 
         mem = lib.llama_get_memory(self._session.ctx_tgt)
         if mem:
@@ -3588,6 +3589,13 @@ class NativeLlamaClient:
                     common = 0
         self._session.cached_prompt_tokens = list(prompt_tokens)
         return common
+
+    def _qwen3_coder_native_protocol(self) -> bool:
+        profile = getattr(self, "model_profile", None)
+        return bool(
+            getattr(profile, "verified", False)
+            and getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
+        )
 
     def apply_chat_template(
         self,

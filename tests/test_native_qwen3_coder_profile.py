@@ -94,6 +94,43 @@ class NativeQwen3CoderProfileTests(unittest.TestCase):
     def _wire(content: str) -> str:
         return json.dumps(content, ensure_ascii=False)[1:]
 
+    def test_regular_prompt_prefix_reuse_falls_back_to_cold_prefill(self) -> None:
+        client = self._client()
+        client._session.ctx_tgt = 1  # type: ignore[assignment]
+        client._session.cached_prompt_tokens = [1, 2, 3, 4]
+        native = client.lib.lib
+        native.llama_get_memory.return_value = 2
+        native.llama_memory_seq_rm.return_value = True
+
+        reused = client._prepare_memory_for_prompt([1, 2, 9])
+
+        self.assertEqual(reused, 0)
+        self.assertEqual(client._session.cached_prompt_tokens, [1, 2, 9])
+        native.llama_memory_seq_rm.assert_not_called()
+        native.llama_memory_clear.assert_called_once_with(2, True)
+
+    def test_arbitrary_lcp_fallback_is_limited_to_exact_verified_profile(self) -> None:
+        for verified, profile_id in (
+            (False, QWEN3_CODER_PROFILE_ID),
+            (True, "orbit-gemma4-native-v1"),
+        ):
+            with self.subTest(verified=verified, profile_id=profile_id):
+                client = self._client()
+                client.model_profile = mock.Mock(
+                    verified=verified, profile_id=profile_id
+                )
+                client._session.ctx_tgt = 1  # type: ignore[assignment]
+                client._session.cached_prompt_tokens = [1, 2, 3, 4]
+                native = client.lib.lib
+                native.llama_get_memory.return_value = 2
+                native.llama_memory_seq_rm.return_value = True
+
+                reused = client._prepare_memory_for_prompt([1, 2, 9])
+
+                self.assertEqual(reused, 2)
+                native.llama_memory_seq_rm.assert_called_once_with(2, 0, 2, -1)
+                native.llama_memory_clear.assert_not_called()
+
     def test_generative_text_formats_preserve_content_without_outer_fence(self) -> None:
         fixtures = (
             "<!doctype html>\n<script>const x = 1;</script>",
