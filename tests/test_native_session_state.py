@@ -12,6 +12,48 @@ from orbit.native_server.app import OrbitNativeServer
 
 
 class NativeSessionStateTests(unittest.TestCase):
+    def test_server_reset_clears_session_and_preserves_verified_coder_checkpoint(self) -> None:
+        client = mock.Mock()
+        client.model_profile = mock.Mock(
+            verified=True, profile_id="orbit-qwen3-coder-native-v1"
+        )
+        client.session_snapshot.return_value = mock.Mock(
+            session_id="default", cached_tokens=0, in_flight=False
+        )
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        result = server.reset_session()
+
+        client.reset_session_state.assert_called_once_with(
+            preserve_qwen3_coder_route_checkpoint=True
+        )
+        self.assertEqual(result["status"], "reset")
+        self.assertEqual(result["cached_tokens"], 0)
+        self.assertFalse(result["in_flight"])
+        self.assertTrue(result["qwen3_coder_checkpoint_preserved"])
+
+    def test_server_reset_does_not_preserve_unverified_or_other_profile_checkpoint(self) -> None:
+        for verified, profile_id in (
+            (False, "orbit-qwen3-coder-native-v1"),
+            (True, "orbit-qwen36-native-v1"),
+        ):
+            with self.subTest(verified=verified, profile_id=profile_id):
+                client = mock.Mock()
+                client.model_profile = mock.Mock(
+                    verified=verified, profile_id=profile_id
+                )
+                client.session_snapshot.return_value = mock.Mock(
+                    session_id="default", cached_tokens=0, in_flight=False
+                )
+                server = OrbitNativeServer(client=client, model_alias="m")
+
+                result = server.reset_session()
+
+                client.reset_session_state.assert_called_once_with(
+                    preserve_qwen3_coder_route_checkpoint=False
+                )
+                self.assertFalse(result["qwen3_coder_checkpoint_preserved"])
+
     @mock.patch("orbit.native_llama.client.time.monotonic_ns", side_effect=[1_000_000_000, 1_250_000_000])
     def test_request_timing_latches_first_generated_token_once(self, monotonic_ns) -> None:
         timing = _RequestTiming.start()
