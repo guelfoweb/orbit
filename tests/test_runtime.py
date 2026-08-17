@@ -4772,6 +4772,94 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.calls, 2)
         self.assertIsNotNone(backend.final_messages)
 
+    def test_analysis_description_does_not_cause_duplicate_content_read(self) -> None:
+        class AnalysisReadBackend(ExactTokenCountingBackend):
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tools_by_call: list[object] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.tools_by_call.append(tools)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat sample.js"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                if tools is not None:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat sample.js"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=6,
+                        completion_tokens=1,
+                        cached_tokens=0,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="analysis complete",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=self.count_chat_tokens(messages).tokens,
+                    completion_tokens=2,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        prompt = """Analyze the provided JavaScript file sample.js as a potentially malicious artifact.
+
+Perform a complete static analysis using the available tools when useful. You may write and run small offline Python scripts to inspect or transform data.
+
+Determine which files or artifacts it creates, modifies, executes, downloads, or removes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "sample.js").write_text("const value = 1;\n", encoding="utf-8")
+            backend = AnalysisReadBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_with_tools(
+                prompt,
+                temperature=0,
+                max_tokens=64,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertTrue(result.content.endswith("analysis complete"))
+        self.assertIn("Document coverage: complete; mode exact single context", result.content)
+        self.assertEqual(backend.calls, 2)
+        self.assertIsNotNone(backend.tools_by_call[0])
+        self.assertIsNone(backend.tools_by_call[1])
+
     def test_candidate_paths_without_direct_content_do_not_handoff_to_final_from_tool(self) -> None:
         class CandidatePathBackend:
             def __init__(self) -> None:
