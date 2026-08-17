@@ -19,6 +19,8 @@ from orbit.runtime.context_manager import ContextAdmissionError, ContextBudget, 
 from orbit.runtime.evidence import EvidenceStore, tool_evidence_ref
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.session_memory import estimate_message_tokens
+from orbit.runtime.tool_message import assistant_tool_call_message, tool_result_message
+from orbit.runtime.tools import ToolResult
 
 
 def _tool_turn(number: int, *, payload_chars: int = 1200) -> list[dict[str, object]]:
@@ -306,6 +308,65 @@ class ContextManagerTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertTrue(plan.reason.startswith("invalid-message-structure:"))
 
+    def test_qwen36_single_call_without_native_id_has_ordered_stable_history(self) -> None:
+        raw_call = {
+            "id": "",
+            "type": "function",
+            "function": {
+                "name": "exec_shell_full_command",
+                "arguments": '{"command":"cat samples/example.js"}',
+            },
+        }
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "read the file"},
+        ]
+        for number in (1, 2):
+            messages.append(assistant_tool_call_message("", [raw_call]))
+            messages.append(
+                tool_result_message(
+                    raw_call,
+                    ToolResult(name="exec_shell_full_command", content=f"result {number}"),
+                )
+            )
+        messages.append({"role": "assistant", "content": "complete"})
+
+        plan = plan_context(
+            messages,
+            budget=ContextBudget(4096, 256),
+            count_tokens=estimate_message_tokens,
+        )
+
+        self.assertEqual(plan.status, "unchanged")
+        assistant_ids = [
+            message["tool_calls"][0]["id"]
+            for message in messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        ]
+        result_ids = [message["tool_call_id"] for message in messages if message.get("role") == "tool"]
+        self.assertEqual(assistant_ids, ["tool-call", "tool-call"])
+        self.assertEqual(result_ids, ["tool-call", "tool-call"])
+
+    def test_missing_assistant_tool_call_id_still_fails_closed(self) -> None:
+        messages = [
+            {"role": "user", "content": "request"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "", "function": {"name": "read_file", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "tool-call", "name": "read_file", "content": "result"},
+        ]
+
+        plan = plan_context(
+            messages,
+            budget=ContextBudget(4096, 256),
+            count_tokens=estimate_message_tokens,
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.reason, "invalid-message-structure:missing-tool-call-id")
+
     def test_parallel_tool_results_keep_declared_order(self) -> None:
         messages = [
             {"role": "user", "content": "request"},
@@ -480,6 +541,62 @@ class ContextManagerTests(unittest.TestCase):
             rehydrated = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[-1])
             self.assertIn("EXACT_VALUE_123", rehydrated)
             self.assertIn(store.records[first_id].raw_sha256, rehydrated)
+
+    def test_qwen36_repeated_idless_calls_compact_and_rehydrate_exact_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence")
+            raw_call = {
+                "id": "",
+                "type": "function",
+                "function": {
+                    "name": "exec_shell_full_command",
+                    "arguments": '{"command":"cat samples/example.js"}',
+                },
+            }
+            messages: list[dict[str, object]] = [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "read the file twice"},
+            ]
+            evidence_ids: list[str] = []
+            for number in (1, 2):
+                messages.append(assistant_tool_call_message("", [raw_call]))
+                result = tool_result_message(
+                    raw_call,
+                    ToolResult(
+                        name="exec_shell_full_command",
+                        content=("EXACT_VALUE_123\n" if number == 1 else "second result\n") + ("x" * 1400),
+                    ),
+                    evidence_store=store,
+                    metadata={"user_turn_id": "turn-qwen36", "produced_by_phase": "tool_call"},
+                )
+                messages.append(result)
+                evidence_ids.append(str(result["evidence_id"]))
+            messages.append({"role": "assistant", "content": "visible completed answer"})
+            backend = _ExactBackend(context_tokens=650)
+            runtime = ChatRuntime(
+                backend=backend,
+                messages=messages,
+                context_tokens=650,
+                evidence_store=store,
+            )
+            runtime.completed_evidence_ids.update(evidence_ids)
+
+            runtime.ask_chat("continue", temperature=0, max_tokens=64)
+
+            assert runtime.last_context_plan is not None
+            self.assertEqual(runtime.last_context_plan.status, "compacted")
+            self.assertEqual(runtime.last_context_plan.externalized_evidence_ids, tuple(evidence_ids))
+
+            backend.context_tokens = 4096
+            runtime.context_tokens = 4096
+            result = runtime.ask_chat(
+                f"Return the exact value from evidence:{evidence_ids[0]}",
+                temperature=0,
+                max_tokens=64,
+            )
+
+            self.assertEqual(result.content, "EXACT_VALUE_123")
+            self.assertEqual(runtime.last_context_rehydrated_ids, (evidence_ids[0],))
 
     def test_runtime_rejects_protocol_markers_before_exact_rehydration(self) -> None:
         markers = (
