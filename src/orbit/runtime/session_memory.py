@@ -71,12 +71,6 @@ def maybe_refresh_memory(
     )
 
 
-def should_refresh_for_append(messages: list[Message], content: str, *, context_tokens: int | None) -> bool:
-    window = context_tokens or DEFAULT_CONTEXT_TOKENS
-    projected = estimate_message_tokens(messages) + estimate_text_tokens(content)
-    return projected >= int(window * SOFT_MEMORY_RATIO)
-
-
 def rebuild_with_memory(messages: list[Message], *, summary: str, context_tokens: int) -> list[Message]:
     system = _first_system_message(messages)
     tail = _recent_tail(messages, context_tokens=context_tokens)

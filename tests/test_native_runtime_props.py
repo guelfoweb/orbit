@@ -66,6 +66,7 @@ class NativeRuntimePropsTests(unittest.TestCase):
         client = NativeLlamaClient(self._paths(), NativeClientConfig(context_tokens=16384))
         client.count_text_tokens = mock.Mock(return_value=17)
         client.inspect_chat_tokens = mock.Mock(return_value=(29, "a" * 64, "b" * 64))
+        client.inspect_artifact_content_tokens = mock.Mock(return_value=(31, "c" * 64, "d" * 64))
         server = OrbitNativeServer(client=client, model_alias="m")
 
         text = server.count_text_tokens("hello")
@@ -73,6 +74,9 @@ class NativeRuntimePropsTests(unittest.TestCase):
             [{"role": "user", "content": "hello"}],
             tools=[],
             thinking=False,
+        )
+        artifact = server.count_artifact_content_tokens(
+            [{"role": "user", "content": "artifact"}],
         )
 
         self.assertEqual(text, {"tokens": 17, "context_tokens": 16384})
@@ -85,11 +89,23 @@ class NativeRuntimePropsTests(unittest.TestCase):
                 "token_hash": "b" * 64,
             },
         )
+        self.assertEqual(
+            artifact,
+            {
+                "tokens": 31,
+                "context_tokens": 16384,
+                "rendered_hash": "c" * 64,
+                "token_hash": "d" * 64,
+            },
+        )
         client.count_text_tokens.assert_called_once_with("hello")
         client.inspect_chat_tokens.assert_called_once_with(
             [{"role": "user", "content": "hello"}],
             tools=[],
             thinking=False,
+        )
+        client.inspect_artifact_content_tokens.assert_called_once_with(
+            [{"role": "user", "content": "artifact"}],
         )
 
     @mock.patch("orbit.native_server.app.safe_native_capability_manifest")

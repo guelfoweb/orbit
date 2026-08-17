@@ -25,18 +25,21 @@ def tool_result_message(
 ) -> Message:
     content = tool_result.content
     evidence_id = None
+    evidence_user_turn_id = None
     if evidence_store is not None and tool_result.content:
         evidence_metadata = dict(metadata or _tool_call_metadata(tool_call))
         evidence_metadata.setdefault("tool_call_id", tool_call_id(tool_call))
         record = evidence_store.add(tool_result.name, tool_result.content, metadata=evidence_metadata)
         content = tool_evidence_ref(record)
         evidence_id = record.evidence_id
+        evidence_user_turn_id = record.user_turn_id
     return {
         "role": "tool",
         "tool_call_id": tool_call_id(tool_call),
         "name": tool_result.name,
         "content": content,
         **({"evidence_id": evidence_id} if evidence_id else {}),
+        **({"user_turn_id": evidence_user_turn_id} if evidence_user_turn_id else {}),
     }
 
 

@@ -43,6 +43,7 @@ class LlamaServerBackend:
         self._display_model_name: str | None = None
         self._server_tools_cache: list[dict[str, Any]] | None = None
         self._props_cache: dict[str, Any] | None = None
+        self._props_discovery_status: str | None = None
         self._result_observer: Callable[[ChatResult], None] | None = None
         self._failure_observer: Callable[[], None] | None = None
 
@@ -300,6 +301,32 @@ class LlamaServerBackend:
             return None
         return _parse_token_count(data)
 
+    def supports_exact_context_admission(self) -> bool | None:
+        """Report whether this endpoint exposes Orbit's attested render/token count."""
+        backend = _str_or_none(self._props_or_empty().get("backend"))
+        if backend == "orbit-native":
+            return True
+        if backend is not None or self._props_discovery_status == "confirmed_non_native":
+            return False
+        return None
+
+    def count_artifact_content_tokens(self, messages: list[Message], *, tools=None, thinking=False) -> TokenCount | None:
+        if not self._is_orbit_native_backend() or tools or thinking:
+            return None
+        try:
+            data = self._post_json(
+                "/tokens/count",
+                {
+                    "mode": "artifact_content",
+                    "messages": messages,
+                    "tools": [],
+                    "thinking": False,
+                },
+            )
+        except LlamaServerError:
+            return None
+        return _parse_token_count(data)
+
     def count_text_tokens(self, text: str) -> TokenCount | None:
         if not self._is_orbit_native_backend():
             return None
@@ -341,10 +368,24 @@ class LlamaServerBackend:
                 or (isinstance(cause, HTTPError) and 500 <= cause.code < 600)
             )
             if transient:
+                self._props_discovery_status = "unknown"
                 return {}
+            self._props_discovery_status = (
+                "confirmed_non_native"
+                if isinstance(cause, HTTPError) and cause.code == 404
+                else "unknown"
+            )
             self._props_cache = {}
             return self._props_cache
         self._props_cache = data if isinstance(data, dict) else {}
+        backend = _str_or_none(self._props_cache.get("backend"))
+        self._props_discovery_status = (
+            "native"
+            if backend == "orbit-native"
+            else "confirmed_non_native"
+            if backend is not None
+            else "unknown"
+        )
         return self._props_cache
 
     def _is_orbit_native_backend(self) -> bool:

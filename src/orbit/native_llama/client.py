@@ -3545,6 +3545,27 @@ class NativeLlamaClient:
             token_digest.hexdigest(),
         )
 
+    def inspect_artifact_content_tokens(
+        self,
+        messages: list[NativeMessage],
+    ) -> tuple[int, str, str]:
+        profile = getattr(self, "model_profile", None)
+        if getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID:
+            framed_messages = qwen3_coder_artifact_messages(messages)
+            rendered = self.apply_chat_template(framed_messages, tools=None, thinking=False)
+            prompt = qwen3_coder_artifact_prompt(rendered)
+        else:
+            prompt = self.apply_chat_template(messages, tools=None, thinking=False)
+        token_ids = self.tokenize(prompt)
+        token_digest = hashlib.sha256()
+        for token in token_ids:
+            token_digest.update(int(token).to_bytes(4, byteorder="little", signed=True))
+        return (
+            len(token_ids),
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            token_digest.hexdigest(),
+        )
+
     def _content_token_count(self, text: str) -> int:
         if not text:
             return 0

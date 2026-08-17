@@ -28,7 +28,6 @@ from orbit.runtime.messages import (
     with_tool_call_system_prompt,
 )
 from orbit.runtime.post_tool_final_reuse import evaluate_post_tool_final_reuse
-from orbit.runtime.session_memory import should_refresh_for_append
 from orbit.runtime.shell_guardrails import (
     SHELL_FULL_COMPLETION_GUARD_PROMPT,
     SHELL_FULL_ANALYSIS_COMPLETION_GUARD_PROMPT,
@@ -1793,8 +1792,6 @@ def run_tool_loop(
                 state.advance_after_mutation(tool_call)
             if on_tool_result:
                 on_tool_result(tool_result.name, len(tool_result.content), execution.source, tool_result.content)
-            if should_refresh_for_append(runtime.messages, tool_result.content, context_tokens=runtime.context_tokens):
-                runtime.refresh_memory_if_needed(temperature=temperature, force=True)
             history_message = tool_result_message(
                 tool_call,
                 tool_result,

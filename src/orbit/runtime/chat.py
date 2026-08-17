@@ -12,6 +12,13 @@ from orbit.runtime.capabilities import LocalCapabilities, discover_local_capabil
 from orbit.runtime.client_state import ClientState
 from orbit.runtime.command_evidence import AcquiredEvidence
 from orbit.runtime.completion_budget import resolve_max_tokens
+from orbit.runtime.context_manager import (
+    ContextAdmissionError,
+    ContextManagedBackend,
+    ContextPlan,
+    DEFAULT_NEXT_ACTION_RESERVE,
+    plan_exact_context,
+)
 from orbit.runtime.environments import (
     ContinueEnvironment,
     DocumentSearchEnvironment,
@@ -41,7 +48,14 @@ from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
 )
 from orbit.runtime.file_input_resolver import FileInputResolver
-from orbit.runtime.kv_diag import emit_evidence_lineage, emit_route_outcome, instrument_backend, model_call_context, user_request
+from orbit.runtime.kv_diag import (
+    current_phase,
+    emit_evidence_lineage,
+    emit_route_outcome,
+    instrument_backend,
+    model_call_context,
+    user_request,
+)
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import (
     TOOL_CALL_JSON_RETRY_PROMPT,
@@ -113,7 +127,6 @@ class ChatRuntime:
     context_tokens: int | None = None
     last_memory_refresh: MemoryRefresh | None = None
     last_memory_refresh_message_count: int | None = None
-    memory_refresh_cooldown_messages: int = 4
     memory_refreshes: int = 0
     total_memory_tokens_saved: int = 0
     last_memory_refresh_attempt: MemoryRefresh | None = None
@@ -151,9 +164,13 @@ class ChatRuntime:
     post_tool_final_reuse_fallback_count: int = 0
     post_tool_final_reuse_avoided_model_calls: int = 0
     post_tool_final_reuse_last_reason: str | None = None
+    last_context_plan: ContextPlan | None = field(default=None, repr=False)
+    last_context_rehydrated_ids: tuple[str, ...] = field(default=(), repr=False)
+    context_compactions: int = 0
+    context_tokens_saved: int = 0
 
     def __post_init__(self) -> None:
-        self.backend = instrument_backend(self.backend)
+        self.backend = ContextManagedBackend(instrument_backend(self.backend), self._prepare_model_context)
         if hasattr(self.backend, "thinking"):
             self.thinking_mode = bool(getattr(self.backend, "thinking"))
         if not self.messages and self.system_prompt:
@@ -221,7 +238,6 @@ class ChatRuntime:
     ) -> ChatResult:
         self._begin_user_turn()
         self.last_memory_refresh = None
-        self.refresh_memory_if_needed(temperature=temperature)
         call_messages = with_chat_system_prompt([*self.messages, {"role": "user", "content": prompt}])
         result = self._pure_chat_environment().ask_user_content(
             prompt,
@@ -254,7 +270,6 @@ class ChatRuntime:
         checkpoint = len(self.messages)
         turn_id = self._begin_user_turn()
         self.last_memory_refresh = None
-        self.refresh_memory_if_needed(temperature=temperature)
         if self.evidence_store is None:
             self.evidence_store = EvidenceStore.for_workdir(workdir)
         self.messages.append({"role": "user", "content": prompt})
@@ -324,7 +339,6 @@ class ChatRuntime:
         """Run the existing exact full-document admission without a route call."""
         self._begin_user_turn()
         self.last_memory_refresh = None
-        self.refresh_memory_if_needed(temperature=temperature)
         self.messages.append({"role": "user", "content": prompt})
         base = ChatResult(
             content="",
@@ -391,7 +405,6 @@ class ChatRuntime:
     ) -> ChatResult:
         self._begin_user_turn()
         self.last_memory_refresh = None
-        self.refresh_memory_if_needed(temperature=temperature)
         self.messages.append({"role": "user", "content": prompt})
         self._stream_tool_thinking_plan(
             temperature=temperature,
@@ -439,7 +452,6 @@ class ChatRuntime:
     ) -> ChatResult:
         self._begin_user_turn()
         self.last_memory_refresh = None
-        self.refresh_memory_if_needed(temperature=temperature)
         resolution = self._file_input_environment(workdir).resolve(
             prompt,
             allowed_tool_names=allowed_tool_names,
@@ -1075,6 +1087,10 @@ class ChatRuntime:
         self.post_tool_final_reuse_fallback_count = 0
         self.post_tool_final_reuse_avoided_model_calls = 0
         self.post_tool_final_reuse_last_reason = None
+        self.last_context_plan = None
+        self.last_context_rehydrated_ids = ()
+        self.context_compactions = 0
+        self.context_tokens_saved = 0
         self.last_memory_refresh = None
         self.last_memory_refresh_message_count = None
         self.last_memory_refresh_attempt = None
@@ -1082,17 +1098,19 @@ class ChatRuntime:
             self.messages.append({"role": "system", "content": self.system_prompt})
 
     def compact_old_tool_results(self, *, temperature: float) -> ToolResultCompactionReport:
-        return compact_tool_results(self.messages, backend=self.backend, temperature=temperature)
+        with model_call_context(phase="explicit_tool_compact", tools_mode="off"):
+            return compact_tool_results(self.messages, backend=self.backend, temperature=temperature)
 
     def compact_memory_now(self, *, temperature: float) -> MemoryRefresh:
         before_count = len(self.messages)
-        result = maybe_refresh_memory(
-            self.messages,
-            backend=self.backend,
-            context_tokens=self.context_tokens,
-            temperature=temperature,
-            force=True,
-        )
+        with model_call_context(phase="explicit_memory_compact", tools_mode="off"):
+            result = maybe_refresh_memory(
+                self.messages,
+                backend=self.backend,
+                context_tokens=self.context_tokens,
+                temperature=temperature,
+                force=True,
+            )
         if result.changed:
             self.last_memory_refresh = result
             self.last_memory_refresh_message_count = len(self.messages)
@@ -1429,29 +1447,111 @@ class ChatRuntime:
             )
         return max_tokens
 
-    def refresh_memory_if_needed(self, *, temperature: float, force: bool = False) -> bool:
-        if not force and self._memory_refresh_in_cooldown():
-            return False
-        result = maybe_refresh_memory(
-            self.messages,
+    def _prepare_model_context(
+        self,
+        messages: list[Message],
+        max_tokens: int,
+        tools: list[dict[str, object]] | None,
+        thinking: bool,
+        artifact_content: bool,
+    ) -> list[Message]:
+        if current_phase() in {"full_document", "explicit_memory_compact", "explicit_tool_compact"} or self.context_tokens is None:
+            return messages
+        exact_admission = getattr(self.backend, "supports_exact_context_admission", None)
+        if callable(exact_admission):
+            exact_admission_status = exact_admission()
+            if exact_admission_status is False:
+                return messages
+            if exact_admission_status is not True:
+                raise ContextAdmissionError("context admission failed: exact-token-capability-unavailable")
+        candidate, rehydrated_ids = self._with_explicit_evidence_rehydration(messages)
+        available, covered = self._context_evidence_sets(messages)
+        next_action_reserve = DEFAULT_NEXT_ACTION_RESERVE if _phase_may_require_next_action(current_phase()) else 0
+        artifact_counter = getattr(self.backend, "count_artifact_content_tokens", None) if artifact_content else None
+        if artifact_content and not callable(artifact_counter):
+            raise ContextAdmissionError("context admission failed: exact-artifact-token-count-unavailable")
+        plan = plan_exact_context(
+            candidate,
             backend=self.backend,
-            context_tokens=self.context_tokens,
-            temperature=temperature,
-            force=force,
+            output_reserve=max_tokens,
+            next_action_reserve=next_action_reserve,
+            configured_context_tokens=self.context_tokens,
+            tools=tools,
+            thinking=thinking,
+            available_evidence_ids=available,
+            covered_evidence_ids=covered,
+            count_chat_override=artifact_counter,
         )
-        if result.changed:
-            self.last_memory_refresh = result
-            self.last_memory_refresh_message_count = len(self.messages)
-            self.memory_refreshes += 1
-            self.total_memory_tokens_saved += max(0, result.estimated_tokens_before - result.estimated_tokens_after)
-        self.last_memory_refresh_attempt = result
-        return result.changed
+        self.last_context_plan = plan
+        self.last_context_rehydrated_ids = rehydrated_ids
+        if not plan.admitted:
+            raise ContextAdmissionError(f"context admission failed: {plan.reason or 'required-context-does-not-fit'}")
+        if plan.status == "compacted":
+            self.context_compactions += 1
+            if plan.tokens_before is not None and plan.tokens_after is not None:
+                self.context_tokens_saved += max(0, plan.tokens_before - plan.tokens_after)
+        return [dict(message) for message in plan.messages]
 
-    def _memory_refresh_in_cooldown(self) -> bool:
-        if self.last_memory_refresh_message_count is None:
-            return False
-        return len(self.messages) - self.last_memory_refresh_message_count < self.memory_refresh_cooldown_messages
+    def _context_evidence_sets(self, messages: list[Message]) -> tuple[set[str], set[str]]:
+        if self.evidence_store is None:
+            return set(), set()
+        available: set[str] = set()
+        covered: set[str] = set()
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            evidence_id = message.get("evidence_id")
+            reference = message.get("content")
+            if not isinstance(evidence_id, str) or not isinstance(reference, str):
+                continue
+            record = self.evidence_store.records.get(evidence_id)
+            if record is None:
+                continue
+            if (
+                record.tool_call_id != message.get("tool_call_id")
+                or record.tool_name != message.get("name")
+                or record.user_turn_id != message.get("user_turn_id")
+            ):
+                continue
+            if self.evidence_store.reattest_exact(evidence_id, expected_reference=reference) is None:
+                continue
+            available.add(evidence_id)
+            if evidence_id in self.completed_evidence_ids and _evidence_has_visible_final(messages, evidence_id):
+                covered.add(evidence_id)
+        return available, covered
 
+    def _with_explicit_evidence_rehydration(
+        self,
+        messages: list[Message],
+    ) -> tuple[list[Message], tuple[str, ...]]:
+        if self.evidence_store is None:
+            return messages, ()
+        latest_user = _latest_user_message(messages)
+        content = latest_user.get("content") if latest_user is not None else None
+        if not isinstance(content, str):
+            return messages, ()
+        evidence_ids = tuple(dict.fromkeys(re.findall(r"\bevidence:(ev_[0-9a-f]{12}_[0-9a-f]{16})\b", content)))
+        if not evidence_ids:
+            return messages, ()
+        parts = ["deterministic_evidence_rehydration: exact archived tool output"]
+        rehydrated: list[str] = []
+        for evidence_id in evidence_ids:
+            raw = self.evidence_store.reattest_exact(evidence_id)
+            record = self.evidence_store.records.get(evidence_id)
+            if raw is None or record is None or _unsafe_rehydrated_evidence(raw):
+                raise ContextAdmissionError(f"context admission failed: evidence-rehydration-unavailable:{evidence_id}")
+            delimiter = f"orbit-evidence-{record.raw_sha256}"
+            parts.extend(
+                [
+                    f"evidence_id: {evidence_id}",
+                    f"sha256: {record.raw_sha256}",
+                    f"exact_content_begin: {delimiter}",
+                    raw,
+                    f"exact_content_end: {delimiter}",
+                ]
+            )
+            rehydrated.append(evidence_id)
+        return [*messages, {"role": "system", "content": "\n".join(parts)}], tuple(rehydrated)
 
 class _ThoughtOnlyDeltaFilter:
     _THOUGHT_START = "<|channel>thought\n"
@@ -1720,6 +1820,61 @@ def _evidence_has_visible_final(messages: list[Message], evidence_id: str) -> bo
         if isinstance(content, str) and content.strip():
             return True
     return False
+
+
+def _phase_may_require_next_action(phase: str | None) -> bool:
+    return phase in {
+        "route",
+        "route_retry",
+        "tool_plan",
+        "tool_call",
+        "tool_call_json_retry",
+        "tool_call_retry",
+        "chat_thinking",
+        "document_search_plan",
+        "artifact_content",
+    }
+
+
+def _unsafe_rehydrated_evidence(content: str) -> bool:
+    lowered = content.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "<bos>",
+            "<eos>",
+            "<start_of_turn>",
+            "<end_of_turn>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<|eot_id|>",
+            "<|im_start|>",
+            "<|im_end|>",
+            "</s>",
+            "<|endoftext|>",
+            "<|fim_pad|>",
+            "<|repo_name|>",
+            "<|file_sep|>",
+            "<|fim_prefix|>",
+            "<|fim_middle|>",
+            "<|fim_suffix|>",
+            "<|turn>",
+            "<turn|>",
+            "<|channel>",
+            "<channel|>",
+            "<|tool_call>",
+            "<tool_call|>",
+            "<tool_call>",
+            "</tool_call>",
+            "<|tool_response>",
+            "<tool_response|>",
+            "<tool_response>",
+            "</tool_response>",
+            "<|think|>",
+            "<think>",
+            "</think>",
+        )
+    )
 
 
 def _tool_has_associated_user(messages: list[Message]) -> bool:
