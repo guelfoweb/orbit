@@ -186,15 +186,21 @@ class LlamaServerBackendTests(unittest.TestCase):
 
         backend = Backend()
         chat = backend.count_chat_tokens([{"role": "user", "content": "hello"}], thinking=False)
+        artifact = backend.count_artifact_content_tokens([{"role": "user", "content": "artifact"}])
         text_count = backend.count_text_tokens("hello")
 
-        assert chat is not None and text_count is not None
+        assert chat is not None and artifact is not None and text_count is not None
         self.assertEqual((chat.tokens, chat.context_tokens), (123, 8192))
         self.assertEqual((chat.rendered_hash, chat.token_hash), ("a" * 64, "b" * 64))
         self.assertEqual((text_count.tokens, text_count.context_tokens), (123, 8192))
-        self.assertEqual([request[0] for request in backend.requests], ["/tokens/count", "/tokens/count"])
+        self.assertEqual((artifact.tokens, artifact.context_tokens), (123, 8192))
+        self.assertEqual(
+            [request[0] for request in backend.requests],
+            ["/tokens/count", "/tokens/count", "/tokens/count"],
+        )
         self.assertEqual(backend.requests[0][1]["mode"], "chat")
-        self.assertEqual(backend.requests[1][1], {"mode": "text", "text": "hello"})
+        self.assertEqual(backend.requests[1][1]["mode"], "artifact_content")
+        self.assertEqual(backend.requests[2][1], {"mode": "text", "text": "hello"})
 
     def test_external_backend_does_not_attempt_native_token_count(self) -> None:
         class Backend(LlamaServerBackend):
@@ -206,6 +212,7 @@ class LlamaServerBackendTests(unittest.TestCase):
 
         backend = Backend(base_url="http://localhost", timeout=1)
         self.assertIsNone(backend.count_chat_tokens([{"role": "user", "content": "hello"}]))
+        self.assertIsNone(backend.count_artifact_content_tokens([{"role": "user", "content": "artifact"}]))
         self.assertIsNone(backend.count_text_tokens("hello"))
 
     def test_result_observer_receives_every_completed_backend_result(self) -> None:
@@ -377,17 +384,18 @@ class LlamaServerBackendTests(unittest.TestCase):
                 return self.response
 
         cases = (
-            ({"backend": "orbit-native"}, True, {"backend": "orbit-native"}),
-            ({"backend": "external"}, False, {"backend": "external"}),
-            (["malformed"], False, {}),
+            ({"backend": "orbit-native"}, True, {"backend": "orbit-native"}, True),
+            ({"backend": "external"}, False, {"backend": "external"}, False),
+            (["malformed"], False, {}, None),
         )
-        for response, expected_native, expected_cache in cases:
+        for response, expected_native, expected_cache, expected_admission in cases:
             with self.subTest(response=response):
                 backend = Backend(response)
                 self.assertEqual(backend._is_orbit_native_backend(), expected_native)
                 self.assertEqual(backend._is_orbit_native_backend(), expected_native)
                 self.assertEqual(backend.props_calls, 1)
                 self.assertEqual(backend._props_cache, expected_cache)
+                self.assertEqual(backend.supports_exact_context_admission(), expected_admission)
 
     def test_permanent_props_failure_is_cached_and_fails_closed(self) -> None:
         class Backend(LlamaServerBackend):
@@ -416,6 +424,10 @@ class LlamaServerBackendTests(unittest.TestCase):
                 self.assertFalse(backend._is_orbit_native_backend())
                 self.assertEqual(backend.props_calls, 1)
                 self.assertEqual(backend._props_cache, {})
+                self.assertEqual(
+                    backend.supports_exact_context_admission(),
+                    False if isinstance(cause, HTTPError) else None,
+                )
 
     def test_native_separated_reasoning_requires_verified_qwen_profile(self) -> None:
         class Backend(LlamaServerBackend):

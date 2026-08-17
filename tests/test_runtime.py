@@ -8727,25 +8727,13 @@ EOF"""
         self.assertIn("does not prove", result.content)
         self.assertNotIn("The requested fact is absent", result.content)
 
-    def test_ask_with_tools_records_memory_refresh_event(self) -> None:
-        class MemoryThenAnswerBackend:
+    def test_ask_with_tools_does_not_generate_hidden_memory_refresh(self) -> None:
+        class MemoryThenAnswerBackend(ExactTokenCountingBackend):
             def __init__(self) -> None:
                 self.calls = 0
 
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
-                if tools is None:
-                    return ChatResult(
-                        content="Durable memory.",
-                        model="fake",
-                        finish_reason="stop",
-                        tool_calls=[],
-                        prompt_tokens=None,
-                        completion_tokens=None,
-                        cached_tokens=None,
-                        prompt_tokens_per_second=None,
-                        generation_tokens_per_second=None,
-                    )
                 return ChatResult(
                     content="done",
                     model="fake",
@@ -8759,7 +8747,7 @@ EOF"""
                 )
 
         backend = MemoryThenAnswerBackend()
-        runtime = ChatRuntime(backend=backend, system_prompt="system", context_tokens=100)
+        runtime = ChatRuntime(backend=backend, system_prompt="system", context_tokens=8192)
         for index in range(20):
             runtime.messages.append({"role": "user", "content": f"question {index} " + ("x" * 60)})
             runtime.messages.append({"role": "assistant", "content": f"answer {index} " + ("y" * 60)})
@@ -8767,54 +8755,10 @@ EOF"""
         result = runtime.ask_with_tools("continue", temperature=0, max_tokens=32, workdir=Path("."))
 
         self.assertEqual(result.content, "done")
-        self.assertIsNotNone(runtime.last_memory_refresh)
-        self.assertTrue(runtime.last_memory_refresh.changed)
-        self.assertIs(runtime.last_memory_refresh_attempt, runtime.last_memory_refresh)
-        self.assertEqual(runtime.memory_refreshes, 1)
-        self.assertGreater(runtime.total_memory_tokens_saved, 0)
-
-    def test_memory_refresh_cooldown_avoids_back_to_back_refresh(self) -> None:
-        class MemoryThenAnswerBackend:
-            def __init__(self) -> None:
-                self.memory_calls = 0
-
-            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
-                if tools is None:
-                    self.memory_calls += 1
-                    return ChatResult(
-                        content="Durable memory.",
-                        model="fake",
-                        finish_reason="stop",
-                        tool_calls=[],
-                        prompt_tokens=None,
-                        completion_tokens=None,
-                        cached_tokens=None,
-                        prompt_tokens_per_second=None,
-                        generation_tokens_per_second=None,
-                    )
-                return ChatResult(
-                    content="done",
-                    model="fake",
-                    finish_reason="stop",
-                    tool_calls=[],
-                    prompt_tokens=None,
-                    completion_tokens=None,
-                    cached_tokens=None,
-                    prompt_tokens_per_second=None,
-                    generation_tokens_per_second=None,
-                )
-
-        backend = MemoryThenAnswerBackend()
-        runtime = ChatRuntime(backend=backend, system_prompt="system", context_tokens=100)
-        for index in range(20):
-            runtime.messages.append({"role": "user", "content": f"question {index} " + ("x" * 60)})
-            runtime.messages.append({"role": "assistant", "content": f"answer {index} " + ("y" * 60)})
-
-        runtime.ask_with_tools("continue", temperature=0, max_tokens=32, workdir=Path("."))
-        runtime.ask_with_tools("continue again", temperature=0, max_tokens=32, workdir=Path("."))
-
-        self.assertEqual(backend.memory_calls, 1)
-        self.assertEqual(runtime.memory_refreshes, 1)
+        self.assertEqual(backend.calls, 1)
+        self.assertIsNone(runtime.last_memory_refresh)
+        self.assertEqual(runtime.memory_refreshes, 0)
+        self.assertEqual(runtime.total_memory_tokens_saved, 0)
 
     def test_ask_with_tools_streams_final_text(self) -> None:
         class StreamingBackend:

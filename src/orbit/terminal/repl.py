@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from orbit.backend.base import ChatResult
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
+from orbit.runtime.context_manager import ContextAdmissionError
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.sessions import SessionStore
 from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
@@ -198,7 +199,7 @@ class Repl:
             self.runtime.restore_message_count(checkpoint)
             print(dim("cancelled"), flush=True)
             return
-        except (LlamaServerError, TimeoutError) as exc:
+        except (ContextAdmissionError, LlamaServerError, TimeoutError) as exc:
             renderer.finish()
             self.runtime.restore_message_count(checkpoint)
             print(runtime_error_text(exc), file=sys.stderr)
@@ -494,7 +495,7 @@ class Repl:
             self.runtime.restore_message_count(checkpoint)
             print(dim("cancelled"), flush=True)
             return
-        except (LlamaServerError, TimeoutError) as exc:
+        except (ContextAdmissionError, LlamaServerError, TimeoutError) as exc:
             renderer.finish()
             self.runtime.restore_message_count(checkpoint)
             print(runtime_error_text(exc), file=sys.stderr)

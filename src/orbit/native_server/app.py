@@ -325,6 +325,16 @@ class OrbitNativeServer:
             "token_hash": token_hash,
         }
 
+    def count_artifact_content_tokens(self, messages: list[dict[str, Any]]) -> dict[str, int | str]:
+        with self.lock:
+            tokens, rendered_hash, token_hash = self.client.inspect_artifact_content_tokens(messages)
+        return {
+            "tokens": tokens,
+            "context_tokens": self.client.config.context_tokens,
+            "rendered_hash": rendered_hash,
+            "token_hash": token_hash,
+        }
+
     def error_result(self, message: str, payload: dict[str, Any]) -> dict[str, Any]:
         session_id = DEFAULT_SESSION_ID
         try:
@@ -500,7 +510,13 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                         )
                     )
                     return
-                raise ValueError("token count mode must be text or chat")
+                if mode == "artifact_content":
+                    request = parse_chat_request(payload)
+                    if request.tools or request.thinking:
+                        raise ValueError("artifact content token count does not accept tools or thinking")
+                    self._json(self._state().count_artifact_content_tokens(request.messages))
+                    return
+                raise ValueError("token count mode must be text, chat, or artifact_content")
             if self.path == "/chat":
                 try:
                     with native_kv_request_context(endpoint="/chat", payload=payload):

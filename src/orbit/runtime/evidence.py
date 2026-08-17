@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import os
 import re
 import shlex
+import stat
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -114,6 +116,54 @@ class EvidenceStore:
         content = path.read_bytes().decode("utf-8")
         if len(content) <= RAW_MEMORY_CACHE_MAX_CHARS:
             self.raw_cache[evidence_id] = content
+        return content
+
+    def reattest_exact(self, evidence_id: str, *, expected_reference: str | None = None) -> str | None:
+        """Return durable exact evidence only after identity and provenance checks."""
+        record = self.records.get(evidence_id)
+        if record is None or not _valid_evidence_id(evidence_id):
+            return None
+        if record.raw_ref != f"{RAW_REF_PREFIX}{evidence_id}":
+            return None
+        if expected_reference is not None and expected_reference != tool_evidence_ref(record):
+            return None
+        if not record.tool_call_id or not record.user_turn_id or not record.produced_by_phase:
+            return None
+        if record.metadata.get("sidecar_status") is not None:
+            return None
+        if record.metadata.get("ephemeral") == "full_document_snapshot":
+            return None
+        path = self.root / f"{evidence_id}.txt"
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            return None
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                return None
+            raw = bytearray()
+            while True:
+                chunk = os.read(fd, 64 * 1024)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            after = os.fstat(fd)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+        if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
+            return None
+        try:
+            content = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if hashlib.sha256(bytes(raw)).hexdigest() != record.raw_sha256:
+            return None
+        if len(content) != record.raw_chars or len(content.splitlines()) != record.raw_lines:
+            return None
         return content
 
     def discard(self, evidence_id: str) -> bool:
@@ -299,6 +349,10 @@ def tool_evidence_ref(record: EvidenceRecord) -> str:
         lines.append("compat_excerpt:")
         lines.append(compat)
     return "\n".join(lines)
+
+
+def _valid_evidence_id(value: str) -> bool:
+    return re.fullmatch(r"ev_[0-9a-f]{12}_[0-9a-f]{16}", value) is not None
 
 
 def build_route_evidence_context(store: EvidenceStore | None, *, limit: int = RECENT_EVIDENCE_LIMIT) -> str | None:

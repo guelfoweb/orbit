@@ -80,6 +80,7 @@ class ToolMessageTests(unittest.TestCase):
             self.assertEqual(message["role"], "tool")
             self.assertEqual(message["tool_call_id"], "call-1")
             self.assertEqual(message["name"], "exec_shell_full_command")
+            self.assertEqual(message["user_turn_id"], "turn_1")
             self.assertIn("tool_evidence_ref: true", message["content"])
             self.assertIn("raw_ref:", message["content"])
             self.assertNotIn("evidence_excerpt:", message["content"])

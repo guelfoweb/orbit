@@ -99,6 +99,10 @@ class _FakeClient:
         del messages, tools, thinking
         return 7, "rendered", "tokens"
 
+    def inspect_artifact_content_tokens(self, messages):
+        del messages
+        return 9, "artifact-rendered", "artifact-tokens"
+
 
 class NativeServerThinkTests(unittest.TestCase):
     def test_artifact_content_uses_literal_path_without_tool_parsing(self) -> None:
@@ -457,6 +461,17 @@ class NativeServerThinkTests(unittest.TestCase):
         )
 
         self.assertEqual(result["tokens"], 7)
+
+    def test_artifact_token_inspection_uses_exact_artifact_renderer(self) -> None:
+        client = _FakeClient(thinking=False)
+        server = OrbitNativeServer(client=client, model_alias="m")
+
+        result = server.count_artifact_content_tokens(
+            [{"role": "user", "content": "content only"}],
+        )
+
+        self.assertEqual(result["tokens"], 9)
+        self.assertEqual(result["rendered_hash"], "artifact-rendered")
 
     def test_error_result_handles_continue_payload_without_messages(self) -> None:
         server = OrbitNativeServer(client=_FakeClient(thinking=False), model_alias="m")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -89,6 +90,26 @@ class NativeQwen3CoderProfileTests(unittest.TestCase):
         self.assertEqual(rendered_messages[0]["content"], QWEN3_CODER_ARTIFACT_SYSTEM_PROMPT)
         self.assertEqual(messages[0]["content"], "generic artifact instruction")
         return result, emitted
+
+    def test_artifact_token_inspection_matches_verified_framing_path(self) -> None:
+        client = self._client()
+        client.apply_chat_template = mock.Mock(return_value="<|im_start|>assistant\n")  # type: ignore[method-assign]
+        client.tokenize = mock.Mock(return_value=[11, 12, 13])  # type: ignore[method-assign]
+        messages = [
+            {"role": "system", "content": "generic artifact instruction"},
+            {"role": "user", "content": "write content"},
+        ]
+
+        count, rendered_hash, token_hash = client.inspect_artifact_content_tokens(messages)
+
+        self.assertEqual(count, 3)
+        framed = client.apply_chat_template.call_args.args[0]
+        self.assertEqual(framed[0]["content"], QWEN3_CODER_ARTIFACT_SYSTEM_PROMPT)
+        prompt = client.tokenize.call_args.args[0]
+        self.assertTrue(prompt.endswith('<|im_start|>assistant\n"'))
+        self.assertEqual(rendered_hash, hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+        expected_tokens = b"".join(value.to_bytes(4, "little", signed=True) for value in [11, 12, 13])
+        self.assertEqual(token_hash, hashlib.sha256(expected_tokens).hexdigest())
 
     @staticmethod
     def _wire(content: str) -> str:
