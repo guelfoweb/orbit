@@ -12,7 +12,7 @@ from orbit.runtime.tools import ToolResult
 def assistant_tool_call_message(content: str, tool_calls: list[dict[str, object]]) -> Message:
     message: Message = {"role": "assistant", "content": content}
     if tool_calls:
-        message["tool_calls"] = [_safe_tool_call_for_history(tool_call) for tool_call in tool_calls]
+        message["tool_calls"] = _safe_tool_calls_for_history(tool_calls)
     return message
 
 
@@ -43,8 +43,23 @@ def tool_result_message(
     }
 
 
-def _safe_tool_call_for_history(tool_call: dict[str, object]) -> dict[str, Any]:
+def _safe_tool_calls_for_history(tool_calls: list[dict[str, object]]) -> list[dict[str, Any]]:
+    correlation_ids = [tool_call_id(tool_call) for tool_call in tool_calls]
+    if len(tool_calls) > 1:
+        explicit_ids = [tool_call.get("id") for tool_call in tool_calls]
+        if any(not isinstance(value, str) or not value for value in explicit_ids):
+            raise ValueError("multiple tool calls require explicit identifiers")
+        if len(set(correlation_ids)) != len(correlation_ids):
+            raise ValueError("multiple tool calls require unique identifiers")
+    return [
+        _safe_tool_call_for_history(tool_call, correlation_id=correlation_id)
+        for tool_call, correlation_id in zip(tool_calls, correlation_ids, strict=True)
+    ]
+
+
+def _safe_tool_call_for_history(tool_call: dict[str, object], *, correlation_id: str) -> dict[str, Any]:
     sanitized = dict(tool_call)
+    sanitized["id"] = correlation_id
     function = sanitized.get("function")
     if not isinstance(function, dict):
         return sanitized

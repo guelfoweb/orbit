@@ -204,6 +204,7 @@ class NativeQwenProfileTests(unittest.TestCase):
 
         self.assertEqual(parsed.content, "")
         self.assertEqual(len(parsed.tool_calls), 1)
+        self.assertEqual(parsed.tool_calls[0]["id"], "")
         function = parsed.tool_calls[0]["function"]
         self.assertEqual(function["name"], "exec_shell_full_command")
         self.assertEqual(json.loads(function["arguments"]), {"command": "pwd"})

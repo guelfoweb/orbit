@@ -39,6 +39,47 @@ class ToolMessageTests(unittest.TestCase):
         self.assertIn("invalid_arguments", arguments)
         self.assertTrue(arguments.startswith("{"))
 
+    def test_single_tool_call_without_protocol_id_uses_existing_stable_correlation(self) -> None:
+        tool_call = {
+            "id": "",
+            "type": "function",
+            "function": {"name": "exec_shell_full_command", "arguments": '{"command":"pwd"}'},
+        }
+
+        assistant = assistant_tool_call_message("", [tool_call])
+        result = tool_result_message(tool_call, ToolResult(name="exec_shell_full_command", content="ok"))
+
+        self.assertEqual(assistant["tool_calls"][0]["id"], "tool-call")  # type: ignore[index]
+        self.assertEqual(result["tool_call_id"], "tool-call")
+
+    def test_multiple_tool_calls_without_protocol_ids_fail_closed(self) -> None:
+        calls = [
+            {"id": "", "function": {"name": "one", "arguments": "{}"}},
+            {"id": "", "function": {"name": "two", "arguments": "{}"}},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "explicit identifiers"):
+            assistant_tool_call_message("", calls)
+
+    def test_multiple_tool_calls_require_unique_protocol_ids(self) -> None:
+        calls = [
+            {"id": "same", "function": {"name": "one", "arguments": "{}"}},
+            {"id": "same", "function": {"name": "two", "arguments": "{}"}},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "unique identifiers"):
+            assistant_tool_call_message("", calls)
+
+    def test_multiple_tool_calls_preserve_unique_protocol_ids(self) -> None:
+        calls = [
+            {"id": "one-id", "function": {"name": "one", "arguments": "{}"}},
+            {"id": "two-id", "function": {"name": "two", "arguments": "{}"}},
+        ]
+
+        message = assistant_tool_call_message("", calls)
+
+        self.assertEqual([call["id"] for call in message["tool_calls"]], ["one-id", "two-id"])
+
     def test_assistant_tool_call_message_omits_empty_tool_calls(self) -> None:
         message = assistant_tool_call_message("done", [])
 
