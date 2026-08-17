@@ -2617,6 +2617,71 @@ def _last_tool_message(runtime: ChatRuntime) -> Message:
 
 
 class ToolRuntimeTests(unittest.TestCase):
+    def test_complete_file_display_handoff_sends_one_exact_sub_eight_kb_document(self) -> None:
+        class CompleteDisplayBackend(ExactTokenCountingBackend):
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_by_call: list[list[Message]] = []
+
+            def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
+                self.calls += 1
+                self.messages_by_call.append(messages)
+                if self.calls == 1:
+                    return ChatResult(
+                        content="",
+                        model="fake",
+                        finish_reason="tool_calls",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_shell_full_command",
+                                    "arguments": json.dumps({"command": "cat clean.js"}),
+                                },
+                            }
+                        ],
+                        prompt_tokens=789,
+                        completion_tokens=8,
+                        cached_tokens=768,
+                        prompt_tokens_per_second=None,
+                        generation_tokens_per_second=None,
+                    )
+                return ChatResult(
+                    content="The complete source includes END_OF_CLEAN_SAMPLE.",
+                    model="fake",
+                    finish_reason="stop",
+                    tool_calls=[],
+                    prompt_tokens=self.count_chat_tokens(messages).tokens,
+                    completion_tokens=8,
+                    cached_tokens=0,
+                    prompt_tokens_per_second=None,
+                    generation_tokens_per_second=None,
+                )
+
+        content = "const clean = '" + ("x" * 7_000) + "';\n// END_OF_CLEAN_SAMPLE\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "clean.js").write_text(content, encoding="utf-8")
+            backend = CompleteDisplayBackend()
+            runtime = ChatRuntime(backend=backend, system_prompt="route system")
+
+            result = runtime.ask_with_tools(
+                "read clean.js completely",
+                temperature=0,
+                max_tokens=256,
+                workdir=workdir,
+                tool_names=("exec_shell_full_command",),
+            )
+
+        self.assertLess(len(content.encode("utf-8")), 8_192)
+        self.assertEqual(backend.calls, 2)
+        rendered = "\n".join(str(message.get("content", "")) for message in backend.messages_by_call[1])
+        self.assertIn("full_document_evidence: true", rendered)
+        self.assertEqual(rendered.count(content), 1)
+        self.assertIn("END_OF_CLEAN_SAMPLE", rendered)
+        self.assertIn("Document coverage: complete; mode exact single context", result.content)
+
     def test_complete_file_display_handoff_sends_one_exact_twenty_kb_document(self) -> None:
         class CompleteDisplayBackend(ExactTokenCountingBackend):
             def __init__(self) -> None:
@@ -2818,7 +2883,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=None,
@@ -3948,7 +4013,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 if self.calls == 2:
                     self.retry_messages = messages
                     return ChatResult(
-                        content='{"command":"cat note.txt"}',
+                        content='{"command":"command cat note.txt"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -4863,7 +4928,7 @@ class ToolRuntimeTests(unittest.TestCase):
                                 "type": "function",
                                 "function": {
                                     "name": "exec_shell_full_command",
-                                    "arguments": json.dumps({"command": "cat note.txt"}),
+                                    "arguments": json.dumps({"command": "command cat note.txt"}),
                                 },
                             }
                         ],
@@ -5187,7 +5252,7 @@ class ToolRuntimeTests(unittest.TestCase):
                                 "type": "function",
                                 "function": {
                                     "name": "exec_shell_full_command",
-                                    "arguments": json.dumps({"command": "cat note.txt"}),
+                                    "arguments": json.dumps({"command": "command cat note.txt"}),
                                 },
                             }
                         ],
@@ -5416,7 +5481,7 @@ class ToolRuntimeTests(unittest.TestCase):
                     content = json.dumps({"command": "printf beta > second.txt"})
                 elif self.calls == 4:
                     self.assert_prompt(messages, SHELL_FULL_EMPTY_RESULT_CHECK_PROMPT)
-                    content = json.dumps({"command": "cat second.txt"})
+                    content = json.dumps({"command": "command cat second.txt"})
                 else:
                     content = "done"
                 return ChatResult(
@@ -5606,7 +5671,7 @@ class ToolRuntimeTests(unittest.TestCase):
                 commands = {
                     1: "printf alpha > note.txt",
                     2: "grep '[' note.txt",
-                    3: "cat note.txt",
+                    3: "command cat note.txt",
                 }
                 if self.calls in commands:
                     return ChatResult(
@@ -5924,7 +5989,7 @@ class ToolRuntimeTests(unittest.TestCase):
                             "type": "function",
                             "function": {
                                 "name": "exec_shell_full_command",
-                                "arguments": "{\"command\":\"cat agent-demo/report.txt\"}",
+                                "arguments": "{\"command\":\"command cat agent-demo/report.txt\"}",
                             },
                         }
                     ]
@@ -6164,7 +6229,7 @@ class ToolRuntimeTests(unittest.TestCase):
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
                 self.calls += 1
                 if self.calls == 1:
-                    content = json.dumps({"command": "cat config.json"})
+                    content = json.dumps({"command": "command cat config.json"})
                 elif self.calls == 2:
                     return ChatResult(
                         content="config.json has timeout 10",
@@ -6600,7 +6665,7 @@ EOF"""
                     tool_call = {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat sample.txt\"}"},
+                        "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat sample.txt\"}"},
                     }
                     return ChatResult(
                         content="",
@@ -6687,7 +6752,7 @@ EOF"""
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=5,
@@ -6997,7 +7062,7 @@ EOF"""
                 self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"command":"cat note.txt"}',
+                        content='{"command":"command cat note.txt"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -7016,7 +7081,7 @@ EOF"""
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=6,
@@ -7060,7 +7125,7 @@ EOF"""
                 self.tool_names_seen.append(tuple(tool["function"]["name"] for tool in tools or []))
                 if self.calls == 1:
                     return ChatResult(
-                        content='{"command":"cat note.txt"}',
+                        content='{"command":"command cat note.txt"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -7141,7 +7206,7 @@ EOF"""
                                 "type": "function",
                                 "function": {
                                     "name": "exec_shell_full_command",
-                                    "arguments": "{\"command\":\"cat README.md\"}",
+                                    "arguments": "{\"command\":\"command cat README.md\"}",
                                 },
                             }
                         ],
@@ -7221,7 +7286,7 @@ EOF"""
                     if "specific file's contents" not in messages[-1]["content"]:
                         raise AssertionError(messages[-1]["content"])
                     return ChatResult(
-                        content='{"command":"cat README.md"}',
+                        content='{"command":"command cat README.md"}',
                         model="fake",
                         finish_reason="stop",
                         tool_calls=[],
@@ -7315,7 +7380,7 @@ EOF"""
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat README.md\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat README.md\"}"},
                             }
                         ],
                         prompt_tokens=8,
@@ -7985,7 +8050,7 @@ EOF"""
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello from file", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"command cat note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             result = runtime.ask_with_tools("read note.txt", temperature=0, max_tokens=32, workdir=workdir)
@@ -8214,7 +8279,7 @@ EOF"""
     def test_final_from_tool_uses_final_prompt_not_tool_call_prompt(self) -> None:
         class PromptCaptureBackend(ToolCallingBackend):
             def __init__(self) -> None:
-                super().__init__(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
+                super().__init__(tool_name="exec_shell_full_command", arguments="{\"command\":\"command cat note.txt\"}")
                 self.system_prompts: list[str] = []
 
             def chat(self, messages: list[Message], *, temperature: float, max_tokens: int, tools=None) -> ChatResult:
@@ -8602,7 +8667,7 @@ EOF"""
                             {
                                 "id": "call-2",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=12,
@@ -8809,7 +8874,7 @@ EOF"""
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=None,
@@ -8861,7 +8926,7 @@ EOF"""
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                            "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat note.txt\"}"},
                         }
                     ],
                     prompt_tokens=None,
@@ -8882,7 +8947,7 @@ EOF"""
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"cat note.txt\"}"},
+                                "function": {"name": "exec_shell_full_command", "arguments": "{\"command\":\"command cat note.txt\"}"},
                             }
                         ],
                         prompt_tokens=None,
@@ -9071,7 +9136,7 @@ EOF"""
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"command cat note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             runtime.ask_with_tools(
@@ -9083,7 +9148,7 @@ EOF"""
                 on_tool_result=lambda name, chars, source, content: results.append((name, chars, source, content)),
             )
 
-        self.assertEqual(events, [("exec_shell_full_command", "{\"command\":\"cat note.txt\"}")])
+        self.assertEqual(events, [("exec_shell_full_command", "{\"command\":\"command cat note.txt\"}")])
         self.assertEqual(results, [("exec_shell_full_command", 5, "orbit", "hello")])
 
     def test_ask_with_tools_emits_model_step_metrics(self) -> None:
@@ -9091,7 +9156,7 @@ EOF"""
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "note.txt").write_text("hello", encoding="utf-8")
-            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"cat note.txt\"}")
+            backend = ToolCallingBackend(tool_name="exec_shell_full_command", arguments="{\"command\":\"command cat note.txt\"}")
             runtime = ChatRuntime(backend=backend, system_prompt=None)
 
             runtime.ask_with_tools(

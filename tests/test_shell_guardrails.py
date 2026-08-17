@@ -235,6 +235,7 @@ class ShellGuardrailsTests(unittest.TestCase):
                 with self.subTest(command=command):
                     result = execute_exec_shell_full_command({"command": command}, workdir=workdir)
                     self.assertNotIn("full_document_snapshot: true", result)
+                    self.assertNotIn("shell_output_read_file: true", result)
 
     def test_invalid_utf8_search_result_is_not_enriched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import io
 import subprocess
@@ -702,21 +703,63 @@ class HybridToolExecutorTests(unittest.TestCase):
         self.assertIn("sha256:", execution.result.content)
         self.assertTrue(execution.result.content.endswith("alpha\n" * 100))
 
-    def test_exec_shell_full_cat_small_text_preserves_normal_shell_path(self) -> None:
+    def test_exec_shell_full_cat_text_at_size_boundary_uses_structured_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            (workdir / "small.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+            executor = HybridToolExecutor(
+                backend=FakeServerTools(),
+                workdir=workdir,
+                allowed_tool_names=("exec_shell_full_command",),
+            )
+            for size in (8191, 8192, 8193):
+                with self.subTest(size=size):
+                    target = workdir / f"size-{size}.txt"
+                    raw = (b"a" * (size - 1)) + b"\n"
+                    target.write_bytes(raw)
+                    with patch("orbit.runtime.shell_guardrails._run_shell_command") as run_shell:
+                        execution = executor.execute(
+                            "exec_shell_full_command",
+                            {"command": f"cat {target.name}"},
+                            chunk_budget={},
+                        )
+
+                    run_shell.assert_not_called()
+                    self.assertEqual(execution.source, "orbit")
+                    self.assertIn("shell_output_read_file: true", execution.result.content)
+                    self.assertIn("file_display_result: true", execution.result.content)
+                    self.assertIn(f"path: {target.name}", execution.result.content)
+                    self.assertIn(f"bytes: {size}", execution.result.content)
+                    self.assertIn("lines: 1", execution.result.content)
+                    self.assertIn(f"sha256: {hashlib.sha256(raw).hexdigest()}", execution.result.content)
+                    self.assertIn("coverage: complete", execution.result.content)
+                    self.assertIn("line_range: 1-1", execution.result.content)
+
+    def test_exec_shell_full_cat_small_invalid_utf8_preserves_shell_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "binary.txt").write_bytes(b"alpha\n\xff\n")
             executor = HybridToolExecutor(
                 backend=FakeServerTools(),
                 workdir=workdir,
                 allowed_tool_names=("exec_shell_full_command",),
             )
 
-            execution = executor.execute("exec_shell_full_command", {"command": "cat small.txt"}, chunk_budget={})
+            with patch("orbit.runtime.shell_guardrails._run_shell_command") as run_shell:
+                run_shell.return_value = subprocess.CompletedProcess(
+                    "cat binary.txt",
+                    0,
+                    "alpha\n�\n",
+                    "",
+                )
+                execution = executor.execute(
+                    "exec_shell_full_command",
+                    {"command": "cat binary.txt"},
+                    chunk_budget={},
+                )
 
-        self.assertEqual(execution.source, "orbit")
-        self.assertEqual(execution.result.content, "alpha\nbeta")
-        self.assertNotIn("full_document_snapshot: true", execution.result.content)
+        run_shell.assert_called_once()
+        self.assertEqual(execution.result.content, "alpha\n�")
+        self.assertNotIn("shell_output_read_file: true", execution.result.content)
 
     def test_exec_shell_full_bounds_large_search_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
