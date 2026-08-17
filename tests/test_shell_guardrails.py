@@ -254,6 +254,43 @@ class ShellGuardrailsTests(unittest.TestCase):
         self.assertTrue(is_mutative_user_request("Enable the service in settings.ini."))
         self.assertTrue(is_mutative_user_request("Disable debug mode in service.yaml."))
 
+    def test_analysis_descriptions_and_optional_helpers_are_not_mutative_requests(self) -> None:
+        prompts = (
+            "Identify which files the artifact creates, writes, modifies, or removes.",
+            "Explain what the script writes or removes during execution.",
+            "Analyze sample.js. You may write and run small offline Python scripts to inspect transformed data.",
+        )
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertFalse(is_mutative_user_request(prompt))
+
+    def test_analysis_with_requested_or_ambiguous_mutation_remains_mutative(self) -> None:
+        prompts = (
+            "Analyze sample.js and write report.md.",
+            "Inspect config.json, then modify the file.",
+            "Determine what sample.js changes; then remove old.txt.",
+            "Determine which files it creates, then remove old.txt.",
+            "Determine which files it creates, then write report.md.",
+            "Determine which files it creates, and remove old.txt.",
+            "Identify what the script writes, and delete old.txt.",
+            "Report what the artifact changes, then edit config.json.",
+            "Determine which files it creates, modify report.md.",
+            "Determine which files it creates and write a report to report.md.",
+            "Explain which files it modifies, afterwards delete old.txt.",
+            "Analyze what the program creates, but remove old.txt.",
+            "Explain which files the artifact may remove, and write report.md.",
+            "Identify which files the script may create, and remove old.txt.",
+            "Report what the program may modify, and create summary.txt.",
+            "Determine which files the artifact may remove and modify config.json.",
+            "You may write the final report and create temporary files to analyze data.",
+            "You may write a report while using scratch files to analyze data.",
+        )
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertTrue(is_mutative_user_request(prompt))
+
     def test_suggest_fixes_remains_read_only_when_negated(self) -> None:
         self.assertFalse(is_mutative_user_request("Suggest fixes for service.py but do not modify files."))
 

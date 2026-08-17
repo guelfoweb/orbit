@@ -195,6 +195,14 @@ _MUTATION_PROMPT_RE = re.compile(
     r"\b(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
 )
+_ANALYSIS_HELPER_PERMISSION_RE = re.compile(
+    r"\byou\s+may\s+(?P<helper_verb>write|create)\s+"
+    r"(?:(?:and|then)\s+run\s+)?(?:a\s+)?"
+    r"(?:(?:small|offline|local|temporary|disposable)\s+){0,3}"
+    r"(?:python\s+)?(?:scripts?|scratch\s+files?|temporary\s+files?)\s+"
+    r"(?:to|for)\s+(?:inspect|analy[sz]e|transform|process|decode|verify)\b",
+    re.IGNORECASE,
+)
 _NEGATED_MUTATION_PROMPT_RE = re.compile(
     r"\b(?:do\s+not|don't|without)\s+(?:add|change|create|fix|harden|improve|write|edit|modify|replace|append|delete|remove|rename|refactor|move|copy|install|commit|update|insert|drop|alter|set|enable|disable|configure)\b",
     re.IGNORECASE,
@@ -739,18 +747,26 @@ def is_mutative_user_request(user_prompt: str | None) -> bool:
     if not user_prompt:
         return False
     active_text = without_inert_user_text(user_prompt)
-    intent_text = _without_user_paths_and_urls(active_text)
+    required_intent_text = _without_user_paths_and_urls(_without_analytical_mutation_mentions(active_text))
     if classify_explicit_no_mutation_constraint(user_prompt) != _NO_MUTATION_NONE:
         return False
     if _NEGATED_MUTATION_PROMPT_RE.search(active_text) and not re.search(
         r"\b(?:fix|update|change|create|write|rename|refactor|edit)\b.*\b(?:file|code|implementation|config|test)\b",
-        intent_text,
+        required_intent_text,
         re.IGNORECASE,
     ):
         return False
-    if _READ_ONLY_PROMPT_RE.search(active_text) and not _MUTATION_PROMPT_RE.search(intent_text):
+    if _READ_ONLY_PROMPT_RE.search(active_text) and not _MUTATION_PROMPT_RE.search(required_intent_text):
         return False
-    return _MUTATION_PROMPT_RE.search(intent_text) is not None
+    return _MUTATION_PROMPT_RE.search(required_intent_text) is not None
+
+
+def _without_analytical_mutation_mentions(intent_text: str) -> str:
+    chars = list(intent_text)
+    for match in _ANALYSIS_HELPER_PERMISSION_RE.finditer(intent_text):
+        start, end = match.span("helper_verb")
+        chars[start:end] = " " * (end - start)
+    return "".join(chars)
 
 
 def classify_explicit_no_mutation_constraint(text: str | None) -> str:
