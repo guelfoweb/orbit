@@ -16,6 +16,7 @@ from orbit.runtime.file_tools import (
     extract_pdf_text,
     format_pdf_result,
     load_text_file,
+    load_text_snapshot,
     read_file,
     read_pdf,
 )
@@ -299,6 +300,7 @@ _INERT_USER_TEXT_RE = re.compile(
 )
 _NO_MUTATION_NONE = "none"
 _NO_MUTATION_GLOBAL = "global"
+_NO_MUTATION_NEGATIVE = "negative"
 _NO_MUTATION_MIXED = "mixed"
 
 
@@ -349,6 +351,8 @@ def execute_exec_shell_full_command(arguments: dict[str, Any], *, workdir: Path,
     exact_text_result = _read_exact_cat_target(raw_command, workdir=workdir)
     if exact_text_result is not None:
         return exact_text_result
+    if _requires_attested_single_file_cat(raw_command, user_prompt=user_prompt):
+        return "error: read-only structured cat target could not be re-attested; command rejected"
     exact_range_result = _read_exact_sed_range_target(raw_command, workdir=workdir)
     if exact_range_result is not None:
         return exact_range_result
@@ -468,12 +472,22 @@ def validate_shell_full_contract(arguments: dict[str, Any], *, user_prompt: str 
     return None
 
 
-def validate_read_only_shell_mutation(arguments: dict[str, Any], *, user_prompt: str | None) -> str | None:
+def validate_read_only_shell_mutation(
+    arguments: dict[str, Any],
+    *,
+    user_prompt: str | None,
+    workdir: Path | None = None,
+) -> str | None:
     raw_command = arguments.get("command")
     if not isinstance(raw_command, str) or not raw_command.strip():
         return None
     explicit_mode = classify_explicit_no_mutation_constraint(user_prompt)
     if explicit_mode != _NO_MUTATION_NONE:
+        if explicit_mode in {_NO_MUTATION_GLOBAL, _NO_MUTATION_NEGATIVE} and _is_attested_single_file_cat(
+            raw_command,
+            workdir=workdir,
+        ):
+            return None
         return read_only_mutation_policy_error(user_prompt, action="unrestricted shell command")
     if not is_read_only_user_request(user_prompt):
         return None
@@ -482,14 +496,44 @@ def validate_read_only_shell_mutation(arguments: dict[str, Any], *, user_prompt:
     return read_only_mutation_policy_error(user_prompt, action="mutating shell command")
 
 
+def _literal_single_file_cat_path(command: str) -> str | None:
+    if re.search(r"[\n\r;&|<>$`(){}\[\]*?~]", command):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if len(tokens) != 2 or tokens[0] != "cat" or not tokens[1] or tokens[1].startswith("-"):
+        return None
+    return tokens[1]
+
+
+def _is_attested_single_file_cat(command: str, *, workdir: Path | None) -> bool:
+    path = _literal_single_file_cat_path(command)
+    if path is None or workdir is None:
+        return False
+    return not isinstance(
+        load_text_snapshot(path, workdir=workdir, max_bytes=MAX_FULL_DOCUMENT_BYTES),
+        str,
+    )
+
+
+def _requires_attested_single_file_cat(command: str, *, user_prompt: str | None) -> bool:
+    return (
+        classify_explicit_no_mutation_constraint(user_prompt) in {_NO_MUTATION_GLOBAL, _NO_MUTATION_NEGATIVE}
+        and _literal_single_file_cat_path(command) is not None
+    )
+
+
 def validate_tool_no_mutation_policy(
     name: str,
     arguments: dict[str, Any],
     *,
     user_prompt: str | None,
+    workdir: Path | None = None,
 ) -> str | None:
     if name == "exec_shell_full_command":
-        return validate_read_only_shell_mutation(arguments, user_prompt=user_prompt)
+        return validate_read_only_shell_mutation(arguments, user_prompt=user_prompt, workdir=workdir)
     if name == "write_artifact" and classify_explicit_no_mutation_constraint(user_prompt) != _NO_MUTATION_NONE:
         return read_only_mutation_policy_error(user_prompt, action="artifact creation")
     return None
@@ -793,6 +837,8 @@ def classify_explicit_no_mutation_constraint(text: str | None) -> str:
         return _NO_MUTATION_MIXED
     if constraint is global_match:
         return _NO_MUTATION_GLOBAL
+    if constraint is scoped_match:
+        return _NO_MUTATION_NEGATIVE
     return _NO_MUTATION_MIXED
 
 

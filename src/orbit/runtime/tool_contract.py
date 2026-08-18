@@ -199,7 +199,7 @@ def _policy_and_operational(
             shlex.split(command)
         except ValueError:
             return neutral, ContractStageOutcome(False, "invalid_shell_syntax", "arguments.command")
-        policy_error = validate_tool_no_mutation_policy(name, arguments, user_prompt=user_prompt)
+        policy_error = validate_tool_no_mutation_policy(name, arguments, user_prompt=user_prompt, workdir=workdir)
         if policy_error:
             return ContractStageOutcome(
                 False,
@@ -252,7 +252,7 @@ def _policy_and_operational(
                     "arguments.path",
                     path_error,
                 )
-            policy_error = validate_tool_no_mutation_policy(name, arguments, user_prompt=user_prompt)
+            policy_error = validate_tool_no_mutation_policy(name, arguments, user_prompt=user_prompt, workdir=workdir)
             if policy_error:
                 return ContractStageOutcome(
                     False,

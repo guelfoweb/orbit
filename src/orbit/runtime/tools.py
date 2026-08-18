@@ -73,7 +73,7 @@ def execute_tool(
     parsed = parse_tool_arguments(arguments)
     if isinstance(parsed, str):
         return ToolResult(name=name, content=parsed)
-    policy_error = validate_tool_no_mutation_policy(name, parsed, user_prompt=user_prompt)
+    policy_error = validate_tool_no_mutation_policy(name, parsed, user_prompt=user_prompt, workdir=workdir)
     if policy_error:
         return ToolResult(name=name, content=policy_error)
     if name == "fetch_url":
