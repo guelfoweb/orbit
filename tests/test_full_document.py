@@ -22,7 +22,10 @@ from orbit.runtime.document_tool import (
 from orbit.runtime.file_tools import read_full_document_snapshot
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.tools import tool_definitions
+from orbit.runtime.completion_budget import FULL_DOCUMENT_FINAL_MAX_TOKENS
 from orbit.runtime.full_document import (
+    FULL_DOCUMENT_SAFETY_MARGIN_TOKENS,
+    assess_full_document_admission,
     attest_full_document_snapshot,
     exact_coverage_notice,
     file_display_coverage_notice,
@@ -479,6 +482,67 @@ class FullDocumentTests(unittest.TestCase):
         self.assertIn("Document coverage: none for the current file", result.content)
         self.assertNotIn("complete analysis", result.content)
         self.assertNotIn("complete analysis", "".join(deltas))
+
+    def test_admission_honors_explicit_budget_and_fails_closed_when_it_does_not_fit(self) -> None:
+        workdir, snapshot = self._snapshot("original\n")
+        prompt = "Read note.txt completely."
+        margin = FULL_DOCUMENT_SAFETY_MARGIN_TOKENS
+
+        # Real Qwen3.6 shape: 6702 prompt tokens inside an 11264 context.
+        backend = PreflightBackend(prompt_tokens=6702, context_tokens=11264)
+        for requested, expected_reserve in ((256, 256), (1024, 1024), (2048, 2048)):
+            with self.subTest(requested=requested):
+                admission = assess_full_document_admission(
+                    backend, prompt, snapshot, max_tokens=requested, workdir=workdir
+                )
+                self.assertTrue(admission.compatible)
+                self.assertIsNone(admission.reason)
+                self.assertEqual(admission.output_reserve, expected_reserve)
+                self.assertEqual(admission.required_context, 6702 + expected_reserve + margin)
+                self.assertLessEqual(admission.required_context, admission.active_context)
+
+        # An unspecified budget keeps the dedicated full-document default.
+        default_admission = assess_full_document_admission(
+            backend, prompt, snapshot, max_tokens=None, workdir=workdir
+        )
+        self.assertTrue(default_admission.compatible)
+        self.assertEqual(default_admission.output_reserve, FULL_DOCUMENT_FINAL_MAX_TOKENS)
+
+        # An oversized explicit budget fails closed. It is never clamped down to
+        # the available headroom.
+        oversized = 11264 - 6702 - margin + 1
+        blocked = assess_full_document_admission(
+            backend, prompt, snapshot, max_tokens=oversized, workdir=workdir
+        )
+        self.assertFalse(blocked.compatible)
+        self.assertEqual(blocked.reason, "context_too_small")
+        self.assertEqual(blocked.output_reserve, oversized)
+        self.assertGreater(blocked.required_context, blocked.active_context)
+
+    def test_admitted_reserve_is_the_backend_max_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "note.txt").write_text("original\n", encoding="utf-8")
+            backend = PreflightBackend(prompt_tokens=6702, context_tokens=11264)
+            observed: list[int] = []
+            original_chat = backend.chat
+
+            def recording_chat(messages, *, temperature, max_tokens, tools=None):
+                observed.append(max_tokens)
+                return original_chat(messages, temperature=temperature, max_tokens=max_tokens, tools=tools)
+
+            backend.chat = recording_chat
+            runtime = ChatRuntime(backend=backend, system_prompt=None)
+            runtime.ask_auto(
+                "Read note.txt completely.",
+                temperature=0,
+                max_tokens=2048,
+                workdir=workdir,
+            )
+
+        self.assertEqual(backend.calls, 2)
+        # The full-document call receives exactly the admitted reserve.
+        self.assertEqual(observed[-1], 2048)
 
     def test_preflight_rejects_tokenizer_template_identity_change(self) -> None:
         class ChangingIdentityBackend(PreflightBackend):

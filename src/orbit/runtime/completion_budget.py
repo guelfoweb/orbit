@@ -67,7 +67,13 @@ def resolve_max_tokens(
     if kind == "final_from_tool":
         return _final_from_tool_tokens(requested, evidence, evidence_chars)
     if kind == "full_document":
-        return _internal(requested, FULL_DOCUMENT_FINAL_MAX_TOKENS)
+        # Full-document output is user-visible: an explicit CLI/REPL limit stays
+        # authoritative and is never silently reduced. Exact full-document
+        # admission fails closed when the requested budget does not fit the
+        # active context, so the cap here is only the unspecified default.
+        if requested is None:
+            return FULL_DOCUMENT_FINAL_MAX_TOKENS
+        return requested
     if kind == "chat_final_retry":
         target = CHAT_FINAL_RETRY_AFTER_LENGTH_MAX_TOKENS if previous == "length" else CHAT_FINAL_RETRY_MAX_TOKENS
         return _floor_and_cap(requested, target, target)

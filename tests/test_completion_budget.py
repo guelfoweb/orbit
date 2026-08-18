@@ -41,12 +41,15 @@ class CompletionBudgetPolicyTests(unittest.TestCase):
         self.assertEqual(resolve_max_tokens("final_from_tool", 32, evidence_kind="read", evidence_chars=8000), 256)
         self.assertEqual(resolve_max_tokens("final_from_tool", 1024, evidence_kind="fetch", evidence_chars=8000), 256)
 
-    def test_full_document_budget_respects_user_limit_up_to_dedicated_cap(self) -> None:
+    def test_full_document_budget_defaults_to_dedicated_cap_and_honors_explicit_limit(self) -> None:
         self.assertEqual(resolve_max_tokens("full_document"), 1024)
         self.assertEqual(resolve_max_tokens("full_document", 256), 256)
         self.assertEqual(resolve_max_tokens("full_document", 512), 512)
         self.assertEqual(resolve_max_tokens("full_document", 1024), 1024)
-        self.assertEqual(resolve_max_tokens("full_document", 2048), 1024)
+        # An explicit budget above the default is honored verbatim. Exact
+        # full-document admission, not this budget, decides whether it fits.
+        self.assertEqual(resolve_max_tokens("full_document", 2048), 2048)
+        self.assertEqual(resolve_max_tokens("full_document", 8192), 8192)
 
     def test_retry_and_repair_budgets(self) -> None:
         self.assertEqual(resolve_max_tokens("chat_final_retry", 32), 128)
