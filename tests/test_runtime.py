@@ -4772,7 +4772,7 @@ class ToolRuntimeTests(unittest.TestCase):
         self.assertEqual(backend.calls, 2)
         self.assertIsNotNone(backend.final_messages)
 
-    def test_analysis_description_does_not_cause_duplicate_content_read(self) -> None:
+    def test_analysis_safety_constraints_do_not_cause_duplicate_content_read(self) -> None:
         class AnalysisReadBackend(ExactTokenCountingBackend):
             def __init__(self) -> None:
                 self.calls = 0
@@ -4837,9 +4837,11 @@ class ToolRuntimeTests(unittest.TestCase):
 
         prompt = """Analyze the provided JavaScript file sample.js as a potentially malicious artifact.
 
-Perform a complete static analysis using the available tools when useful. You may write and run small offline Python scripts to inspect or transform data.
+Perform a complete static analysis using the available tools when useful. You may write and run small offline Python scripts to inspect or transform data, but do not execute the sample itself and do not access the network.
 
-Determine which files or artifacts it creates, modifies, executes, downloads, or removes."""
+Determine which files or artifacts it creates, modifies, executes, downloads, or removes.
+
+Do not modify the analyzed file."""
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
             (workdir / "sample.js").write_text("const value = 1;\n", encoding="utf-8")

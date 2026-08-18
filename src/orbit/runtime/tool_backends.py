@@ -116,7 +116,12 @@ class HybridToolExecutor:
         if isinstance(parsed, str):
             return ToolExecution(ToolResult(name=name, content=parsed), "orbit", "rejected_parse", "invalid_arguments")
         if not canonical_validated:
-            policy_error = validate_tool_no_mutation_policy(name, parsed, user_prompt=self.user_prompt)
+            policy_error = validate_tool_no_mutation_policy(
+                name,
+                parsed,
+                user_prompt=self.user_prompt,
+                workdir=self.workdir,
+            )
             if policy_error:
                 return ToolExecution(
                     ToolResult(name=name, content=policy_error),

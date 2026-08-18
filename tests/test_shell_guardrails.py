@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 import subprocess
 
+from orbit.runtime.file_tools import MAX_FULL_DOCUMENT_BYTES
 from orbit.runtime.shell_guardrails import (
     classify_explicit_no_mutation_constraint,
     execute_exec_shell_full_command,
@@ -329,6 +330,120 @@ class ShellGuardrailsTests(unittest.TestCase):
             user_prompt=prompt,
         )
         self.assertIn("mixed or scoped mutation constraint", error or "")
+
+    def test_negative_safety_clauses_allow_only_attested_single_file_cat(self) -> None:
+        base = "Analyze sample.js. You may write and run small offline Python scripts to inspect transformed data."
+        variants = (
+            (base, "none"),
+            (f"{base} Do not modify the analyzed file.", "negative"),
+            (f"{base} Do not modify any files.", "global"),
+            (f"{base} Do not execute the sample itself.", "none"),
+            (f"{base} Do not access the network.", "none"),
+            (
+                f"{base} Do not execute the sample itself and do not access the network. "
+                "Do not modify the analyzed file.",
+                "negative",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "work"
+            workdir.mkdir()
+            (workdir / "sample.js").write_text("const value = 1;\n", encoding="utf-8")
+            for prompt, expected_constraint in variants:
+                with self.subTest(prompt=prompt):
+                    self.assertFalse(is_mutative_user_request(prompt))
+                    self.assertEqual(classify_explicit_no_mutation_constraint(prompt), expected_constraint)
+                    self.assertIsNone(
+                        validate_read_only_shell_mutation(
+                            {"command": "cat sample.js"},
+                            user_prompt=prompt,
+                            workdir=workdir,
+                        )
+                    )
+
+            constrained = f"{base} Do not modify the analyzed file."
+            rejected_commands = (
+                "cat sample.js > copy.js",
+                "cat sample.js | tee copy.js",
+                "cat $(touch marker.txt)",
+                'cat "$(touch marker.txt)"',
+                "cat sample.js other.js",
+                "env cat sample.js",
+                "sed -i 's/a/b/' sample.js",
+                "rm -f sample.js",
+            )
+            for command in rejected_commands:
+                with self.subTest(command=command):
+                    self.assertIsNotNone(
+                        validate_read_only_shell_mutation(
+                            {"command": command},
+                            user_prompt=constrained,
+                            workdir=workdir,
+                        )
+                    )
+
+            outside = root / "outside.txt"
+            outside.write_text("outside", encoding="utf-8")
+            (workdir / "escape.txt").symlink_to(outside)
+            for command in ("cat ../outside.txt", "cat escape.txt"):
+                with self.subTest(command=command):
+                    self.assertIsNotNone(
+                        validate_read_only_shell_mutation(
+                            {"command": command},
+                            user_prompt=constrained,
+                            workdir=workdir,
+                        )
+                    )
+
+            (workdir / "binary.js").write_bytes(b"\xff\xfe")
+            self.assertIsNotNone(
+                validate_read_only_shell_mutation(
+                    {"command": "cat binary.js"},
+                    user_prompt=constrained,
+                    workdir=workdir,
+                )
+            )
+            (workdir / "oversized.js").write_bytes(b"a" * (MAX_FULL_DOCUMENT_BYTES + 1))
+            self.assertIsNotNone(
+                validate_read_only_shell_mutation(
+                    {"command": "cat oversized.js"},
+                    user_prompt=constrained,
+                    workdir=workdir,
+                )
+            )
+
+    def test_scoped_mutation_constraint_remains_fail_closed(self) -> None:
+        prompt = "Do not modify files except report.txt."
+
+        self.assertEqual(classify_explicit_no_mutation_constraint(prompt), "mixed")
+        self.assertIsNotNone(
+            validate_read_only_shell_mutation(
+                {"command": "touch report.txt"},
+                user_prompt=prompt,
+            )
+        )
+
+    def test_attested_cat_never_falls_back_to_generic_shell_after_revalidation_failure(self) -> None:
+        prompt = "Analyze sample.js. Do not modify the analyzed file."
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            (workdir / "sample.js").write_text("const value = 1;\n", encoding="utf-8")
+            with (
+                patch("orbit.runtime.shell_guardrails._read_exact_cat_target", return_value=None),
+                patch("orbit.runtime.shell_guardrails._run_shell_command") as run_shell,
+            ):
+                result = execute_exec_shell_full_command(
+                    {"command": "cat sample.js"},
+                    workdir=workdir,
+                    user_prompt=prompt,
+                )
+
+        self.assertEqual(
+            result,
+            "error: read-only structured cat target could not be re-attested; command rejected",
+        )
+        run_shell.assert_not_called()
 
     def test_global_no_mutation_constraint_overrides_positive_mutation_verb(self) -> None:
         prompt = "Update config.json, but do so without making any changes."
