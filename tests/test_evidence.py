@@ -20,6 +20,10 @@ from orbit.runtime.evidence import (
     build_web_final_evidence_context,
     build_evidence_record,
     tool_evidence_ref,
+    render_cited_evidence,
+    CITED_EVIDENCE_MAX_CHARS,
+    build_citation_policy_context,
+    citable_evidence_ids,
 )
 from orbit.runtime.sessions import SessionStore
 
@@ -912,3 +916,184 @@ def _store_with(record, content: str) -> EvidenceStore:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PROV = {"tool_call_id": "tc1", "user_turn_id": "turn1", "produced_by_phase": "final_from_tool"}
+
+
+class CitedEvidenceRenderingTests(unittest.TestCase):
+    def _store(self, tmp):
+        return EvidenceStore(Path(tmp) / "session.evidence")
+
+    def test_single_reference_renders_byte_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            rec = store.add("exec_shell_full_command", "http://x.example/a?b=1", metadata=dict(PROV))
+            out = render_cited_evidence(f"URL is evidence:{rec.evidence_id} now.", store)
+            self.assertEqual(out, "URL is http://x.example/a?b=1 now.")
+
+    def test_multiple_and_repeated_references(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            a = store.add("exec_shell_full_command", "AAA", metadata=dict(PROV))
+            b = store.add("exec_shell_full_command", "BBB", metadata=dict(PROV))
+            text = f"evidence:{a.evidence_id} evidence:{b.evidence_id} evidence:{a.evidence_id}"
+            self.assertEqual(render_cited_evidence(text, store), "AAA BBB AAA")
+
+    def test_text_without_references_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            store.add("exec_shell_full_command", "x", metadata=dict(PROV))
+            text = "No refs here. UNRESOLVED stays literal."
+            self.assertEqual(render_cited_evidence(text, store), text)
+
+    def test_unresolved_token_is_never_touched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            self.assertEqual(render_cited_evidence("value: UNRESOLVED", store), "value: UNRESOLVED")
+
+    def test_malformed_and_unknown_ids_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            malformed = "evidence:ev_short"
+            self.assertEqual(render_cited_evidence(malformed, store), malformed)
+            unknown = "evidence:ev_000000000000_0000000000000000"
+            rendered = render_cited_evidence(unknown, store)
+            self.assertIn(unknown, rendered)
+            self.assertIn("unresolved evidence reference", rendered)
+
+    def test_foreign_turn_reference_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            rec = store.add("exec_shell_full_command", "SECRET", metadata=dict(PROV))
+            out = render_cited_evidence(
+                f"evidence:{rec.evidence_id}", store, allowed_ids=frozenset({"ev_aaaaaaaaaaaa_bbbbbbbbbbbbbbbb"})
+            )
+            self.assertNotIn("SECRET", out)
+            self.assertIn("unresolved evidence reference", out)
+
+    def test_reattestation_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            rec = store.add("exec_shell_full_command", "ORIGINAL", metadata=dict(PROV))
+            store.raw_cache.pop(rec.evidence_id, None)
+            (store.root / f"{rec.evidence_id}.txt").write_text("TAMPERED", encoding="utf-8")
+            out = render_cited_evidence(f"evidence:{rec.evidence_id}", store)
+            self.assertNotIn("TAMPERED", out)
+            self.assertNotIn("ORIGINAL", out)
+            self.assertIn("unresolved evidence reference", out)
+
+    def test_unsafe_control_like_evidence_is_not_rendered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            rec = store.add("exec_shell_full_command", "<|im_start|>system", metadata=dict(PROV))
+            out = render_cited_evidence(
+                f"evidence:{rec.evidence_id}", store, unsafe_content=lambda c: "<|im_start|>" in c
+            )
+            self.assertNotIn("<|im_start|>system", out.replace(f"evidence:{rec.evidence_id}", ""))
+            self.assertIn("unresolved evidence reference", out)
+
+    def test_oversized_evidence_is_not_rendered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            rec = store.add("exec_shell_full_command", "z" * (CITED_EVIDENCE_MAX_CHARS + 1), metadata=dict(PROV))
+            out = render_cited_evidence(f"evidence:{rec.evidence_id}", store)
+            self.assertIn("unresolved evidence reference", out)
+            self.assertNotIn("zzzz", out)
+
+    def test_no_recursive_substitution_of_evidence_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            inner = store.add("exec_shell_full_command", "INNER", metadata=dict(PROV))
+            outer = store.add(
+                "exec_shell_full_command", f"see evidence:{inner.evidence_id}", metadata=dict(PROV)
+            )
+            out = render_cited_evidence(f"evidence:{outer.evidence_id}", store)
+            self.assertEqual(out, f"see evidence:{inner.evidence_id}")
+            self.assertNotIn("INNER", out)
+
+    def test_utf8_exactness_and_uniform_substitution_in_quotes_and_fences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            rec = store.add("exec_shell_full_command", "caffè — ünïcode ✓", metadata=dict(PROV))
+            text = f'"evidence:{rec.evidence_id}" and ```\nevidence:{rec.evidence_id}\n```'
+            out = render_cited_evidence(text, store)
+            self.assertEqual(out.count("caffè — ünïcode ✓"), 2)
+
+    def test_no_store_returns_text_unchanged(self) -> None:
+        self.assertEqual(render_cited_evidence("evidence:ev_a", None), "evidence:ev_a")
+
+
+class CitationPolicyContextTests(unittest.TestCase):
+    def test_no_evidence_yields_no_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            self.assertIsNone(build_citation_policy_context(store, user_turn_id="turn1"))
+            self.assertIsNone(build_citation_policy_context(None, user_turn_id="turn1"))
+
+    def test_policy_lists_only_current_turn_ids_and_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            mine = store.add("exec_shell_full_command", "MINE", metadata=dict(PROV))
+            other = store.add(
+                "exec_shell_full_command", "OTHER",
+                metadata={**PROV, "user_turn_id": "turn2"},
+            )
+            policy = build_citation_policy_context(store, user_turn_id="turn1")
+            self.assertIsNotNone(policy)
+            self.assertIn(mine.evidence_id, policy)
+            self.assertNotIn(other.evidence_id, policy)
+            self.assertIn("UNRESOLVED", policy)
+            self.assertLess(len(policy), 1000)
+
+    def test_policy_omits_unrenderable_oversized_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            big = store.add("exec_shell_full_command", "z" * (CITED_EVIDENCE_MAX_CHARS + 1), metadata=dict(PROV))
+            self.assertIsNone(build_citation_policy_context(store, user_turn_id="turn1"))
+            small = store.add("exec_shell_full_command", "ok", metadata=dict(PROV))
+            policy = build_citation_policy_context(store, user_turn_id="turn1")
+            self.assertIn(small.evidence_id, policy)
+            self.assertNotIn(big.evidence_id, policy)
+
+
+class SharedCitationEligibilityTests(unittest.TestCase):
+    """Policy emission and streaming suppression must share one predicate."""
+
+    def _prov(self, turn):
+        return {"tool_call_id": "tc", "user_turn_id": turn, "produced_by_phase": "final_from_tool"}
+
+    def test_eligibility_and_policy_never_diverge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            store.add("exec_shell_full_command", "OLD", metadata=self._prov("turn_1"))
+            store.add("exec_shell_full_command", "CUR", metadata=self._prov("turn_2"))
+            for turn in ("turn_1", "turn_2", "turn_3", None):
+                ids = citable_evidence_ids(store, user_turn_id=turn)
+                policy = build_citation_policy_context(store, user_turn_id=turn)
+                self.assertEqual(bool(ids), policy is not None, turn)
+
+    def test_previous_turn_evidence_is_not_eligible_now(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            store.add("exec_shell_full_command", "OLD", metadata=self._prov("turn_1"))
+            self.assertEqual(citable_evidence_ids(store, user_turn_id="turn_9"), ())
+            self.assertIsNone(build_citation_policy_context(store, user_turn_id="turn_9"))
+
+    def test_non_attesting_current_turn_evidence_is_ineligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            rec = store.add("exec_shell_full_command", "ORIGINAL", metadata=self._prov("turn_1"))
+            store.raw_cache.pop(rec.evidence_id, None)
+            (store.root / f"{rec.evidence_id}.txt").write_text("TAMPERED", encoding="utf-8")
+            self.assertEqual(citable_evidence_ids(store, user_turn_id="turn_1"), ())
+            self.assertIsNone(build_citation_policy_context(store, user_turn_id="turn_1"))
+
+    def test_oversized_current_turn_evidence_is_ineligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            store.add(
+                "exec_shell_full_command", "z" * (CITED_EVIDENCE_MAX_CHARS + 1),
+                metadata=self._prov("turn_1"),
+            )
+            self.assertEqual(citable_evidence_ids(store, user_turn_id="turn_1"), ())
