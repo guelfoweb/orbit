@@ -61,6 +61,7 @@ class NativeModelRegistryTests(unittest.TestCase):
                 ("Gemma 4 26B-A4B", "orbit-gemma4-native-v1"),
                 ("Qwen 3.6 35B-A3B", "orbit-qwen36-native-v1"),
                 ("Qwen 3.8 27B", "orbit-qwen38-native-v1"),
+                ("Ornith 1.5 35B-A3B", "orbit-ornith15-native-v1"),
                 ("Qwen3-Coder 30B-A3B", "orbit-qwen3-coder-native-v1"),
             ],
         )
@@ -81,6 +82,11 @@ class NativeModelRegistryTests(unittest.TestCase):
                     "orbit-qwen38-native-v1",
                     "unsloth/Qwen3.8-27B-GGUF",
                     "Qwen3.8-27B-Q4_K_M.gguf",
+                ),
+                (
+                    "orbit-ornith15-native-v1",
+                    "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+                    "Ornith-1.5-35B-Q4_K_M.gguf",
                 ),
                 (
                     "orbit-qwen3-coder-native-v1",
@@ -256,6 +262,18 @@ if __name__ == "__main__":
 
 
 class Qwen38RegistryTests(unittest.TestCase):
+    def test_ornith15_entry_resolves_with_isolated_profile(self) -> None:
+        manifest = get_manifest("ornith15-35b-a3b-q4-k-m")
+        self.assertEqual(manifest.profile_id, "orbit-ornith15-native-v1")
+        self.assertEqual(manifest.architecture, "qwen35moe")
+        # Shares Qwen3.6's architecture but must never share its identity.
+        self.assertNotEqual(manifest.profile_id, "orbit-qwen36-native-v1")
+
+    def test_ornith15_entry_declares_no_mtp_or_mmproj(self) -> None:
+        manifest = get_manifest("ornith15-35b-a3b-q4-k-m")
+        self.assertIsNone(manifest.mtp)
+        self.assertIsNone(manifest.mmproj)
+
     def test_qwen38_entry_resolves_with_isolated_profile(self) -> None:
         manifest = get_manifest("qwen38-27b-q4-k-m")
         self.assertEqual(manifest.profile_id, "orbit-qwen38-native-v1")

@@ -51,6 +51,18 @@
       }
     },
     {
+      "id": "ornith15-35b-a3b-q4-k-m",
+      "display_name": "Ornith 1.5 35B-A3B",
+      "profile_id": "orbit-ornith15-native-v1",
+      "backend": "native-llama",
+      "architecture": "qwen35moe",
+      "target": {
+        "repo": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+        "file": "Ornith-1.5-35B-Q4_K_M.gguf",
+        "cache_glob": "models--ornith-ai--Ornith-1.5-35B-A3B-GGUF/snapshots/*/Ornith-1.5-35B-Q4_K_M.gguf"
+      }
+    },
+    {
       "id": "qwen3-coder-30b-a3b-instruct-q4-k-m",
       "display_name": "Qwen3-Coder 30B-A3B",
       "profile_id": "orbit-qwen3-coder-native-v1",

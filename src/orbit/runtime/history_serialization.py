@@ -16,6 +16,12 @@ from typing import Any
 
 LEADING_SYSTEM_ONLY = "qwen-leading-system-only"
 
+# Roles the contract confines to the leading position. Orbit's context manager
+# and session memory treat `developer` as a peer of `system`, so a contract
+# that demoted only `system` would let a trailing developer message reach a
+# template that discards it.
+PREFIX_ONLY_ROLES = frozenset({"system", "developer"})
+
 
 def serialize_profile_messages(
     messages: Any,
@@ -35,9 +41,10 @@ def serialize_profile_messages(
         return messages
     items = [dict(message) for message in messages]
     for index, item in enumerate(items):
-        if item.get("role") == "system" and index != 0:
-            # The reviewed template accepts a system role only at the
-            # beginning. Preserve later Orbit evidence cards in place as a
-            # normal input turn instead of reordering or dropping content.
+        if item.get("role") in PREFIX_ONLY_ROLES and index != 0:
+            # The reviewed templates accept these roles only at the beginning:
+            # one raises on a later occurrence, another drops it silently.
+            # Preserve later Orbit evidence cards in place as a normal input
+            # turn instead of reordering or dropping content.
             item["role"] = "user"
     return items
