@@ -39,6 +39,18 @@
       }
     },
     {
+      "id": "qwen38-27b-q4-k-m",
+      "display_name": "Qwen 3.8 27B",
+      "profile_id": "orbit-qwen38-native-v1",
+      "backend": "native-llama",
+      "architecture": "qwen35",
+      "target": {
+        "repo": "unsloth/Qwen3.8-27B-GGUF",
+        "file": "Qwen3.8-27B-Q4_K_M.gguf",
+        "cache_glob": "models--unsloth--Qwen3.8-27B-GGUF/snapshots/*/Qwen3.8-27B-Q4_K_M.gguf"
+      }
+    },
+    {
       "id": "qwen3-coder-30b-a3b-instruct-q4-k-m",
       "display_name": "Qwen3-Coder 30B-A3B",
       "profile_id": "orbit-qwen3-coder-native-v1",

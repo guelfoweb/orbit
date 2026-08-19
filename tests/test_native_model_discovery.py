@@ -35,7 +35,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
                 inspector=lambda _path: self.fail("no file should be inspected"),
             )
 
-        self.assertEqual(len(result.rows), 3)
+        self.assertEqual(len(result.rows), 4)
         self.assertTrue(all(row.local == "MISSING" for row in result.rows))
         self.assertTrue(all(row.support == "VERIFIED" for row in result.rows))
         self.assertEqual(
@@ -43,6 +43,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
             {
                 "orbit download ggml-org/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_0.gguf",
                 "orbit download ggml-org/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+                "orbit download unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf",
                 "orbit download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
             },
         )
@@ -225,7 +226,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(result.metadata_inspections, 1)
         self.assertFalse(any(row.model == "other.gguf" for row in result.rows))
-        self.assertEqual(result.filesystem_scans, 5)
+        self.assertEqual(result.filesystem_scans, 6)
 
     def test_symlink_escape_is_not_inspected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

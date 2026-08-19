@@ -10,6 +10,7 @@ from orbit.native_llama.model_profiles import (
     GEMMA4_PROFILE_ID,
     QWEN36_PROFILE_ID,
     QWEN3_CODER_PROFILE_ID,
+    QWEN38_PROFILE_ID,
     NativeModelProfile,
     detect_native_model_profile,
     supports_low_memory_mode,
@@ -39,6 +40,117 @@ QWEN3_CODER_METADATA = {
     "qwen3moe.expert_count": "128",
     "qwen3moe.expert_used_count": "8",
 }
+
+
+QWEN38_METADATA = {
+    "general.architecture": "qwen35",
+    "general.name": "Qwen3.8-27B",
+    "general.file_type": "15",
+    "tokenizer.ggml.model": "gpt2",
+    "tokenizer.ggml.pre": "qwen35",
+    "tokenizer.ggml.bos_token_id": "248044",
+    "tokenizer.ggml.eos_token_id": "248046",
+    "qwen35.context_length": "262144",
+    "qwen35.block_count": "65",
+}
+
+
+class Qwen38ProfileTests(unittest.TestCase):
+    """Qwen3.8 is a distinct dense `qwen35` identity, isolated from Qwen3.6."""
+
+    def _detect(self, metadata=None, template="official-qwen38-template"):
+        digest = hashlib.sha256(template.encode()).hexdigest()
+        with mock.patch(
+            "orbit.native_llama.model_profiles.QWEN38_OFFICIAL_TEMPLATE_SHA256", digest
+        ):
+            return detect_native_model_profile(metadata or QWEN38_METADATA, template)
+
+    def test_exact_identity_is_verified_and_isolated(self) -> None:
+        profile = self._detect()
+        self.assertEqual(profile.profile_id, QWEN38_PROFILE_ID)
+        self.assertNotEqual(profile.profile_id, QWEN36_PROFILE_ID)
+        self.assertTrue(profile.verified)
+        self.assertEqual(profile.family, "qwen3.8")
+        self.assertEqual(profile.architecture, "qwen35")
+        self.assertEqual(profile.renderer, "llama.cpp-jinja")
+        self.assertEqual(profile.verified_quantization, "Q4_K_M")
+
+    def test_tool_protocol_matches_verified_wire_format(self) -> None:
+        # Envelope proven byte-identical to Qwen3.6 in the GGUF template.
+        profile = self._detect()
+        self.assertEqual(profile.tool_call_protocol, "qwen3.6-xml")
+        self.assertEqual(profile.history_serialization, "qwen-leading-system-only")
+
+    def test_mtp_and_gemma_prefix_reuse_stay_disabled(self) -> None:
+        profile = self._detect()
+        self.assertFalse(profile.mtp_supported)
+        self.assertFalse(profile.gemma_prefix_reuse_supported)
+
+    def test_thinking_supported(self) -> None:
+        self.assertTrue(self._detect().thinking_supported)
+
+    def test_template_drift_fails_closed(self) -> None:
+        profile = detect_native_model_profile(QWEN38_METADATA, "unreviewed-template")
+        self.assertFalse(profile.verified)
+        self.assertEqual(profile.failure_reason, "qwen38_template_identity_mismatch")
+
+    def test_model_name_drift_fails_closed(self) -> None:
+        profile = self._detect({**QWEN38_METADATA, "general.name": "Qwen3.8-9B"})
+        self.assertFalse(profile.verified)
+        self.assertEqual(profile.failure_reason, "qwen38_model_identity_mismatch")
+
+    def test_tokenizer_drift_fails_closed(self) -> None:
+        profile = self._detect({**QWEN38_METADATA, "tokenizer.ggml.pre": "qwen2"})
+        self.assertFalse(profile.verified)
+        self.assertEqual(profile.failure_reason, "qwen38_tokenizer_identity_mismatch")
+
+    def test_quantization_drift_fails_closed(self) -> None:
+        profile = self._detect({**QWEN38_METADATA, "general.file_type": "7"})
+        self.assertFalse(profile.verified)
+        self.assertEqual(profile.failure_reason, "qwen38_quantization_identity_mismatch")
+
+    def test_near_match_metadata_fails_closed(self) -> None:
+        for key, value in (
+            ("tokenizer.ggml.bos_token_id", "1"),
+            ("tokenizer.ggml.eos_token_id", "2"),
+            ("qwen35.context_length", "32768"),
+            ("qwen35.block_count", "64"),
+        ):
+            with self.subTest(key=key):
+                profile = self._detect({**QWEN38_METADATA, key: value})
+                self.assertFalse(profile.verified)
+                self.assertEqual(profile.failure_reason, "qwen38_metadata_identity_mismatch")
+
+    def test_trailing_system_messages_are_demoted_like_qwen36(self) -> None:
+        """The Qwen3.8 template rejects a non-leading system role, so the
+        declared history contract must actually be enforced."""
+        from orbit.native_llama.client import NativeLlamaClient
+
+        messages = [
+            {"role": "system", "content": "lead"},
+            {"role": "user", "content": "q"},
+            {"role": "system", "content": "evidence card"},
+        ]
+        client = object.__new__(NativeLlamaClient)
+        client.model_profile = self._detect()
+        serialized = NativeLlamaClient._serialize_profile_messages(client, messages)
+        self.assertEqual([m["role"] for m in serialized], ["system", "user", "user"])
+
+    def test_capability_manifest_does_not_report_unsupported(self) -> None:
+        """A verified profile must not self-report as unsupported."""
+        profile = self._detect()
+        client = SimpleNamespace(model_profile=profile)
+        manifest = safe_native_capability_manifest(
+            client, final_system_prompt=FINAL_FROM_TOOL_SYSTEM_PROMPT
+        )
+        self.assertNotEqual(manifest["profile_id"], "unsupported")
+        self.assertEqual(manifest["profile_id"], profile.profile_id)
+
+    def test_qwen36_metadata_does_not_resolve_to_qwen38(self) -> None:
+        digest = hashlib.sha256("official-qwen-template".encode()).hexdigest()
+        with mock.patch("orbit.native_llama.model_profiles.QWEN36_OFFICIAL_TEMPLATE_SHA256", digest):
+            profile = detect_native_model_profile(QWEN_METADATA, "official-qwen-template")
+        self.assertEqual(profile.profile_id, QWEN36_PROFILE_ID)
 
 
 class NativeModelProfileTests(unittest.TestCase):

@@ -60,6 +60,7 @@ class NativeModelRegistryTests(unittest.TestCase):
             [
                 ("Gemma 4 26B-A4B", "orbit-gemma4-native-v1"),
                 ("Qwen 3.6 35B-A3B", "orbit-qwen36-native-v1"),
+                ("Qwen 3.8 27B", "orbit-qwen38-native-v1"),
                 ("Qwen3-Coder 30B-A3B", "orbit-qwen3-coder-native-v1"),
             ],
         )
@@ -75,6 +76,11 @@ class NativeModelRegistryTests(unittest.TestCase):
                     "orbit-qwen36-native-v1",
                     "ggml-org/Qwen3.6-35B-A3B-GGUF",
                     "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+                ),
+                (
+                    "orbit-qwen38-native-v1",
+                    "unsloth/Qwen3.8-27B-GGUF",
+                    "Qwen3.8-27B-Q4_K_M.gguf",
                 ),
                 (
                     "orbit-qwen3-coder-native-v1",
@@ -247,3 +253,24 @@ class NativeModelRegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Qwen38RegistryTests(unittest.TestCase):
+    def test_qwen38_entry_resolves_with_isolated_profile(self) -> None:
+        manifest = get_manifest("qwen38-27b-q4-k-m")
+        self.assertEqual(manifest.profile_id, "orbit-qwen38-native-v1")
+        self.assertEqual(manifest.architecture, "qwen35")
+
+    def test_qwen38_entry_declares_no_mtp_or_mmproj(self) -> None:
+        manifest = get_manifest("qwen38-27b-q4-k-m")
+        self.assertIsNone(getattr(manifest, "mtp", None))
+        self.assertIsNone(getattr(manifest, "mmproj", None))
+
+    def test_existing_model_ids_still_resolve(self) -> None:
+        for model_id, profile_id in (
+            ("qwen36-35b-a3b-q4-k-m", "orbit-qwen36-native-v1"),
+            ("qwen3-coder-30b-a3b-instruct-q4-k-m", "orbit-qwen3-coder-native-v1"),
+            ("gemma4-26b-a4b-it-q40", "orbit-gemma4-native-v1"),
+        ):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(get_manifest(model_id).profile_id, profile_id)
