@@ -17,6 +17,11 @@ QWEN38_VERIFIED_MODEL_NAME = "Qwen3.8-27B"
 QWEN38_OFFICIAL_TEMPLATE_SHA256 = "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
 QWEN38_VERIFIED_FILE_TYPE = "15"
 QWEN38_VERIFIED_QUANTIZATION = "Q4_K_M"
+ORNITH15_PROFILE_ID = "orbit-ornith15-native-v1"
+ORNITH15_VERIFIED_MODEL_NAME = "Ornith-1.5-35B"
+ORNITH15_OFFICIAL_TEMPLATE_SHA256 = "f55f52930aa8bf44ab5cb85f99370fcc3c56e9a85640b812086d5330bce5d86b"
+ORNITH15_VERIFIED_FILE_TYPE = "15"
+ORNITH15_VERIFIED_QUANTIZATION = "Q4_K_M"
 QWEN3_CODER_PROFILE_ID = "orbit-qwen3-coder-native-v1"
 QWEN3_CODER_VERIFIED_MODEL_NAME = "Qwen3-Coder-30B-A3B-Instruct"
 QWEN3_CODER_OFFICIAL_TEMPLATE_SHA256 = "87710339d25b4e789c1d723f93c91ee861a86d305bb3d20a845536f251d6ea8a"
@@ -96,6 +101,7 @@ def supports_low_memory_mode(profile: NativeModelProfile | None) -> bool:
 _VERIFIED_TEMPLATE_HISTORY_SERIALIZATION = {
     QWEN36_OFFICIAL_TEMPLATE_SHA256: "qwen-leading-system-only",
     QWEN38_OFFICIAL_TEMPLATE_SHA256: "qwen-leading-system-only",
+    ORNITH15_OFFICIAL_TEMPLATE_SHA256: "qwen-leading-system-only",
 }
 
 
@@ -109,6 +115,7 @@ class VerifiedNativeModelIdentity:
 VERIFIED_NATIVE_MODEL_IDENTITIES = (
     VerifiedNativeModelIdentity(GEMMA4_PROFILE_ID, GEMMA4_VERIFIED_MODEL_NAME, "gemma4"),
     VerifiedNativeModelIdentity(QWEN36_PROFILE_ID, QWEN36_VERIFIED_MODEL_NAME, "qwen35moe"),
+    VerifiedNativeModelIdentity(ORNITH15_PROFILE_ID, ORNITH15_VERIFIED_MODEL_NAME, "qwen35moe"),
     VerifiedNativeModelIdentity(QWEN38_PROFILE_ID, QWEN38_VERIFIED_MODEL_NAME, "qwen35"),
     VerifiedNativeModelIdentity(
         QWEN3_CODER_PROFILE_ID,
@@ -180,6 +187,47 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             mtp_supported=False,
             gemma_prefix_reuse_supported=False,
             verified_quantization=QWEN36_VERIFIED_QUANTIZATION,
+            route_prefix_reuse_supported=True,
+        )
+
+    ornith15_identity = (
+        architecture == "qwen35moe"
+        and model_name == ORNITH15_VERIFIED_MODEL_NAME
+        and tokenizer_model == "gpt2"
+        and tokenizer_pre == "qwen35"
+        and file_type == ORNITH15_VERIFIED_FILE_TYPE
+        and metadata.get("tokenizer.ggml.bos_token_id", "").strip() == "248044"
+        and metadata.get("tokenizer.ggml.eos_token_id", "").strip() == "248046"
+        and metadata.get("qwen35moe.context_length", "").strip() == "262144"
+        and metadata.get("qwen35moe.block_count", "").strip() == "41"
+        and metadata.get("qwen35moe.expert_count", "").strip() == "256"
+        and metadata.get("qwen35moe.expert_used_count", "").strip() == "8"
+        and template_hash == ORNITH15_OFFICIAL_TEMPLATE_SHA256
+    )
+    if ornith15_identity:
+        return NativeModelProfile(
+            profile_id=ORNITH15_PROFILE_ID,
+            family="ornith1.5",
+            model_name=model_name,
+            architecture=architecture,
+            renderer="llama.cpp-jinja",
+            reasoning_protocol="qwen-think",
+            # Tool envelope verified byte-identical to the reviewed Qwen3.6
+            # template: same <tool_call>/<function=>/<parameter=> form and
+            # <tool_response> results.
+            tool_call_protocol="qwen3.6-xml",
+            # This template silently DROPS a system message past the leading
+            # run instead of raising, so Orbit evidence and citation cards
+            # would vanish without the leading-system-only contract.
+            history_serialization="qwen-leading-system-only",
+            verified=True,
+            failure_reason=None,
+            template_source="gguf-embedded-official",
+            template_sha256=template_hash,
+            thinking_supported=True,
+            mtp_supported=False,
+            gemma_prefix_reuse_supported=False,
+            verified_quantization=ORNITH15_VERIFIED_QUANTIZATION,
             route_prefix_reuse_supported=True,
         )
 
@@ -294,6 +342,14 @@ def _unverified_reason(
     template_hash: str,
 ) -> str:
     if architecture == "qwen35moe":
+        if model_name == ORNITH15_VERIFIED_MODEL_NAME:
+            if tokenizer_model != "gpt2" or tokenizer_pre != "qwen35":
+                return "ornith15_tokenizer_identity_mismatch"
+            if file_type != ORNITH15_VERIFIED_FILE_TYPE:
+                return "ornith15_quantization_identity_mismatch"
+            if template_hash != ORNITH15_OFFICIAL_TEMPLATE_SHA256:
+                return "ornith15_template_identity_mismatch"
+            return "ornith15_metadata_identity_mismatch"
         if model_name != QWEN36_VERIFIED_MODEL_NAME:
             return "qwen36_model_identity_mismatch"
         if tokenizer_model != "gpt2" or tokenizer_pre != "qwen35":

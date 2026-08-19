@@ -694,6 +694,7 @@ class NativeLlamaClient:
                 "qwen3moe.expert_used_count",
                 "qwen35.context_length",
                 "qwen35.block_count",
+                "qwen35moe.context_length",
                 "qwen35moe.block_count",
                 "qwen35moe.expert_count",
                 "qwen35moe.expert_used_count",
