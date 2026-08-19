@@ -12,6 +12,11 @@ QWEN36_VERIFIED_MODEL_NAME = "Qwen3.6-35B-A3B"
 QWEN36_OFFICIAL_TEMPLATE_SHA256 = "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259"
 QWEN36_VERIFIED_FILE_TYPE = "15"
 QWEN36_VERIFIED_QUANTIZATION = "Q4_K_M"
+QWEN38_PROFILE_ID = "orbit-qwen38-native-v1"
+QWEN38_VERIFIED_MODEL_NAME = "Qwen3.8-27B"
+QWEN38_OFFICIAL_TEMPLATE_SHA256 = "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
+QWEN38_VERIFIED_FILE_TYPE = "15"
+QWEN38_VERIFIED_QUANTIZATION = "Q4_K_M"
 QWEN3_CODER_PROFILE_ID = "orbit-qwen3-coder-native-v1"
 QWEN3_CODER_VERIFIED_MODEL_NAME = "Qwen3-Coder-30B-A3B-Instruct"
 QWEN3_CODER_OFFICIAL_TEMPLATE_SHA256 = "87710339d25b4e789c1d723f93c91ee861a86d305bb3d20a845536f251d6ea8a"
@@ -98,6 +103,7 @@ class VerifiedNativeModelIdentity:
 VERIFIED_NATIVE_MODEL_IDENTITIES = (
     VerifiedNativeModelIdentity(GEMMA4_PROFILE_ID, GEMMA4_VERIFIED_MODEL_NAME, "gemma4"),
     VerifiedNativeModelIdentity(QWEN36_PROFILE_ID, QWEN36_VERIFIED_MODEL_NAME, "qwen35moe"),
+    VerifiedNativeModelIdentity(QWEN38_PROFILE_ID, QWEN38_VERIFIED_MODEL_NAME, "qwen35"),
     VerifiedNativeModelIdentity(
         QWEN3_CODER_PROFILE_ID,
         QWEN3_CODER_VERIFIED_MODEL_NAME,
@@ -168,6 +174,43 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             mtp_supported=False,
             gemma_prefix_reuse_supported=False,
             verified_quantization=QWEN36_VERIFIED_QUANTIZATION,
+            route_prefix_reuse_supported=True,
+        )
+
+    qwen38_identity = (
+        architecture == "qwen35"
+        and model_name == QWEN38_VERIFIED_MODEL_NAME
+        and tokenizer_model == "gpt2"
+        and tokenizer_pre == "qwen35"
+        and file_type == QWEN38_VERIFIED_FILE_TYPE
+        and metadata.get("tokenizer.ggml.bos_token_id", "").strip() == "248044"
+        and metadata.get("tokenizer.ggml.eos_token_id", "").strip() == "248046"
+        and metadata.get("qwen35.context_length", "").strip() == "262144"
+        and metadata.get("qwen35.block_count", "").strip() == "65"
+        and template_hash == QWEN38_OFFICIAL_TEMPLATE_SHA256
+    )
+    if qwen38_identity:
+        return NativeModelProfile(
+            profile_id=QWEN38_PROFILE_ID,
+            family="qwen3.8",
+            model_name=model_name,
+            architecture=architecture,
+            renderer="llama.cpp-jinja",
+            reasoning_protocol="qwen-think",
+            # Wire protocol verified byte-identical to Qwen3.6: same
+            # <tool_call>/<function=>/<parameter=> envelope, same
+            # <tool_response> result form. Qwen3.8 only adds template-side
+            # argument validation, which does not change the emitted format.
+            tool_call_protocol="qwen3.6-xml",
+            history_serialization="qwen-leading-system-only",
+            verified=True,
+            failure_reason=None,
+            template_source="gguf-embedded-official",
+            template_sha256=template_hash,
+            thinking_supported=True,
+            mtp_supported=False,
+            gemma_prefix_reuse_supported=False,
+            verified_quantization=QWEN38_VERIFIED_QUANTIZATION,
             route_prefix_reuse_supported=True,
         )
 
@@ -253,6 +296,16 @@ def _unverified_reason(
             return "qwen36_quantization_identity_mismatch"
         if template_hash != QWEN36_OFFICIAL_TEMPLATE_SHA256:
             return "qwen36_template_identity_mismatch"
+    if architecture == "qwen35":
+        if model_name != QWEN38_VERIFIED_MODEL_NAME:
+            return "qwen38_model_identity_mismatch"
+        if tokenizer_model != "gpt2" or tokenizer_pre != "qwen35":
+            return "qwen38_tokenizer_identity_mismatch"
+        if file_type != QWEN38_VERIFIED_FILE_TYPE:
+            return "qwen38_quantization_identity_mismatch"
+        if template_hash != QWEN38_OFFICIAL_TEMPLATE_SHA256:
+            return "qwen38_template_identity_mismatch"
+        return "qwen38_metadata_identity_mismatch"
     if architecture == "qwen3moe":
         if model_name != QWEN3_CODER_VERIFIED_MODEL_NAME:
             return "qwen3_coder_model_identity_mismatch"

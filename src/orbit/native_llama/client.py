@@ -691,6 +691,8 @@ class NativeLlamaClient:
                 "qwen3moe.block_count",
                 "qwen3moe.expert_count",
                 "qwen3moe.expert_used_count",
+                "qwen35.context_length",
+                "qwen35.block_count",
                 "qwen35moe.block_count",
                 "qwen35moe.expert_count",
                 "qwen35moe.expert_used_count",
@@ -3675,7 +3677,7 @@ class NativeLlamaClient:
 
     def _serialize_profile_messages(self, messages: list[NativeMessage]) -> list[NativeMessage]:
         profile = getattr(self, "model_profile", None)
-        if profile is None or profile.family != "qwen3.6":
+        if profile is None or getattr(profile, "history_serialization", None) != "qwen-leading-system-only":
             return messages
         serialized: list[NativeMessage] = []
         for index, message in enumerate(messages):
