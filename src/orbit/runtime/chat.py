@@ -43,6 +43,10 @@ from orbit.runtime.evidence import (
     build_post_tool_route_evidence_context,
     build_route_evidence_context,
     build_web_final_evidence_context,
+    render_cited_evidence,
+    build_citation_policy_context,
+    DeferredCitationSink,
+    citable_evidence_ids,
 )
 from orbit.runtime.final_policy import (
     has_list_like_tool_result as _has_list_like_tool_result,
@@ -115,6 +119,15 @@ _FILE_LIKE_REFERENCE_RE = re.compile(
     r"(?:[\"'`])[^\"'`\n]+?\.[A-Za-z0-9]{1,8}(?:[\"'`])|(?:^|[\s(])[A-Za-z0-9_./-]+?\.[A-Za-z0-9]{1,8}(?=$|[\s),:;])",
     re.IGNORECASE,
 )
+
+
+def _delta_was_buffered(visible_delta, effective_delta) -> bool:
+    """True when raw deltas were withheld and a rendered emit is still owed."""
+    if visible_delta is None:
+        return False
+    if effective_delta is None:
+        return True
+    return bool(getattr(effective_delta, "buffering", False))
 
 
 @dataclass
@@ -210,6 +223,12 @@ class ChatRuntime:
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
         self._begin_user_turn()
+        _visible_delta = on_final_delta
+        _delta_sink = self._suppress_final_delta_for_citations(on_final_delta)
+        on_final_delta = (
+            _delta_sink.write if isinstance(_delta_sink, DeferredCitationSink) else _delta_sink
+        )
+
         user_content = message_content(prompt, images or [], audios or [])
         result = self._pure_chat_environment().ask_user_content(
             user_content,
@@ -222,7 +241,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
             loop=1,
         )
-        return self._remember_visible_result(result)
+        return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result)
 
     @user_request
     def ask_chat(
@@ -237,6 +256,12 @@ class ChatRuntime:
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
         self._begin_user_turn()
+        _visible_delta = on_final_delta
+        _delta_sink = self._suppress_final_delta_for_citations(on_final_delta)
+        on_final_delta = (
+            _delta_sink.write if isinstance(_delta_sink, DeferredCitationSink) else _delta_sink
+        )
+
         self.last_memory_refresh = None
         call_messages = with_chat_system_prompt([*self.messages, {"role": "user", "content": prompt}])
         result = self._pure_chat_environment().ask_user_content(
@@ -250,7 +275,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
             loop=1,
         )
-        return self._remember_visible_result(result)
+        return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result)
 
     @user_request
     def answer_from_acquired_evidence(
@@ -269,6 +294,12 @@ class ChatRuntime:
         """Answer once from evidence acquired explicitly by a slash command."""
         checkpoint = len(self.messages)
         turn_id = self._begin_user_turn()
+        _visible_delta = on_final_delta
+        _delta_sink = self._suppress_final_delta_for_citations(on_final_delta)
+        on_final_delta = (
+            _delta_sink.write if isinstance(_delta_sink, DeferredCitationSink) else _delta_sink
+        )
+
         self.last_memory_refresh = None
         if self.evidence_store is None:
             self.evidence_store = EvidenceStore.for_workdir(workdir)
@@ -316,7 +347,7 @@ class ChatRuntime:
         if result.finish_reason in {"cancelled", "timeout"}:
             self._discard_acquired_evidence(evidence_id)
             self.restore_message_count(checkpoint)
-        return self._remember_visible_result(result)
+        return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result)
 
     def _discard_acquired_evidence(self, evidence_id: object) -> None:
         if isinstance(evidence_id, str) and self.evidence_store is not None:
@@ -338,6 +369,12 @@ class ChatRuntime:
     ) -> ChatResult:
         """Run the existing exact full-document admission without a route call."""
         self._begin_user_turn()
+        _visible_delta = on_final_delta
+        _delta_sink = self._suppress_final_delta_for_citations(on_final_delta)
+        on_final_delta = (
+            _delta_sink.write if isinstance(_delta_sink, DeferredCitationSink) else _delta_sink
+        )
+
         self.last_memory_refresh = None
         self.messages.append({"role": "user", "content": prompt})
         base = ChatResult(
@@ -363,7 +400,7 @@ class ChatRuntime:
             on_model_step=on_model_step,
             on_phase_start=on_phase_start,
         )
-        return self._remember_visible_result(result)
+        return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result)
 
     @user_request
     def continue_last_response(
@@ -376,6 +413,11 @@ class ChatRuntime:
         on_model_step: Callable[[ModelStepMetrics], None] | None = None,
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
     ) -> ChatResult:
+        _visible_delta = on_final_delta
+        _delta_sink = self._suppress_final_delta_for_citations(on_final_delta)
+        on_final_delta = (
+            _delta_sink.write if isinstance(_delta_sink, DeferredCitationSink) else _delta_sink
+        )
         result = self._continue_environment().continue_last_response(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -384,7 +426,7 @@ class ChatRuntime:
             on_model_step=on_model_step,
             on_phase_start=on_phase_start,
         )
-        return self._remember_visible_result(_tool_loop_result_value(result))
+        return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(result))
 
     @user_request
     def ask_with_tools(
@@ -404,6 +446,11 @@ class ChatRuntime:
         tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
         self._begin_user_turn()
+        _visible_delta = on_final_delta
+        _delta_sink = self._suppress_final_delta_for_citations(on_final_delta)
+        on_final_delta = (
+            _delta_sink.write if isinstance(_delta_sink, DeferredCitationSink) else _delta_sink
+        )
         self.last_memory_refresh = None
         self.messages.append({"role": "user", "content": prompt})
         self._stream_tool_thinking_plan(
@@ -428,7 +475,7 @@ class ChatRuntime:
                 on_phase_start=on_phase_start,
                 tool_names=tool_names,
             )
-            return self._remember_visible_result(result.result)
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result.result)
         finally:
             if self.evidence_store is not None:
                 self.evidence_store.cleanup_ephemeral()
@@ -451,6 +498,12 @@ class ChatRuntime:
         allowed_tool_names: tuple[str, ...] | None = None,
     ) -> ChatResult:
         self._begin_user_turn()
+        _visible_delta = on_final_delta
+        _delta_sink = self._suppress_final_delta_for_citations(on_final_delta)
+        on_final_delta = (
+            _delta_sink.write if isinstance(_delta_sink, DeferredCitationSink) else _delta_sink
+        )
+
         self.last_memory_refresh = None
         resolution = self._file_input_environment(workdir).resolve(
             prompt,
@@ -467,7 +520,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
         )
         if media_result is not None:
-            return self._remember_visible_result(media_result)
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, media_result)
         self.messages.append({"role": "user", "content": prompt})
         document_search = self._document_search_environment().answer_if_eligible(
             prompt,
@@ -481,7 +534,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
         )
         if document_search is not None:
-            return self._remember_visible_result(document_search)
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, document_search)
         self._stream_tool_thinking_plan(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -504,7 +557,7 @@ class ChatRuntime:
                 on_phase_start=on_phase_start,
                 tool_names=("exec_shell_full_command",),
             )
-            return self._remember_visible_result(_tool_loop_result_value(bundle))
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(bundle))
         command_max_tokens = resolve_max_tokens("route", max_tokens)
         streamed_final_retry = False
         retried_empty_final = False
@@ -633,7 +686,7 @@ class ChatRuntime:
                         on_phase_start=on_phase_start,
                         tool_names=("exec_shell_full_command",),
                     )
-                    return self._remember_visible_result(_tool_loop_result_value(bundle))
+                    return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(bundle))
                 initial_shell_tool_call = command_tool_call_from_tool_calls(first.tool_calls, ("exec_shell_full_command",)) or command_tool_call_from_content(command_content, ("exec_shell_full_command",))
                 route_requires_chat_final = contains_control_channel_markup(first.content)
                 if route_requires_chat_final and first.finish_reason != "length":
@@ -729,7 +782,7 @@ class ChatRuntime:
                 self.messages.append({"role": "assistant", "content": first.content})
                 if on_final_delta and not streamed_final_retry and not retried_empty_final:
                     on_final_delta(first.content)
-                return self._remember_visible_result(first)
+                return self._remember_visible_result_streamed(_visible_delta, _delta_sink, first)
         if decision.route == ToolRoute.CHAT:
             chat_messages = self._chat_final_messages()
             with model_call_context(phase="chat_final", tools_mode="on"):
@@ -744,15 +797,15 @@ class ChatRuntime:
                     loop=2,
                 )
             self.messages.append({"role": "assistant", "content": result.content})
-            return self._remember_visible_result(result)
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result)
         if decision.route == ToolRoute.MEDIA:
             if allowed_tool_names is not None:
                 result = _unsupported_tool_mode_result(first)
                 self.messages.append({"role": "assistant", "content": result.content})
                 if on_final_delta:
                     on_final_delta(result.content)
-                return self._remember_visible_result(result)
-            return self._ask_referenced_media(
+                return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result)
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, self._ask_referenced_media(
                 prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -762,7 +815,7 @@ class ChatRuntime:
                 on_model_step=on_model_step,
                 on_phase_start=on_phase_start,
                 command_result=first,
-            )
+            ))
         if decision.route == ToolRoute.FILESYSTEM:
             preflight = self._full_document_preflight_environment().answer_if_eligible(
                 prompt,
@@ -777,7 +830,7 @@ class ChatRuntime:
                 on_phase_start=on_phase_start,
             )
             if preflight is not None:
-                return self._remember_visible_result(preflight)
+                return self._remember_visible_result_streamed(_visible_delta, _delta_sink, preflight)
         tools = decision_tool_names(decision, prompt)
         if allowed_tool_names is not None:
             allowed = set(allowed_tool_names)
@@ -800,7 +853,7 @@ class ChatRuntime:
             self.messages.append({"role": "assistant", "content": result.content})
             if on_final_delta:
                 on_final_delta(result.content)
-            return self._remember_visible_result(result)
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, result)
         bundle = self._run_tool_loop_for_request(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -818,9 +871,57 @@ class ChatRuntime:
                 or command_tool_call_from_content(command_content, tools)
             ),
         )
-        return self._remember_visible_result(_tool_loop_result_value(bundle))
+        return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(bundle))
 
-    def _remember_visible_result(self, result: ChatResult) -> ChatResult:
+
+    def _render_cited_evidence(self, result: ChatResult) -> ChatResult:
+        """Render `evidence:<id>` citations in a visible final as exact bytes."""
+        if self.evidence_store is None or not isinstance(result.content, str):
+            return result
+        turn_id = self.current_user_turn_id
+        allowed = (
+            frozenset(
+                record.evidence_id
+                for record in self.evidence_store.records.values()
+                if record.user_turn_id == turn_id
+            )
+            if turn_id
+            else frozenset()
+        )
+        rendered = render_cited_evidence(
+            result.content,
+            self.evidence_store,
+            allowed_ids=allowed,
+            unsafe_content=_unsafe_rehydrated_evidence,
+        )
+        if rendered == result.content:
+            return result
+        return replace(result, content=rendered)
+
+    def _remember_visible_result_streamed(
+        self,
+        visible_delta: "Callable[[str], None] | None",
+        effective_delta: "Callable[[str], None] | None",
+        result: ChatResult,
+    ) -> ChatResult:
+        finalize = getattr(effective_delta, "finalize", None)
+        if callable(finalize):
+            finalize()
+        return self._remember_visible_result(
+            result,
+            visible_delta=visible_delta,
+            suppressed=_delta_was_buffered(visible_delta, effective_delta),
+        )
+
+    def _remember_visible_result(
+        self,
+        result: ChatResult,
+        visible_delta: "Callable[[str], None] | None" = None,
+        suppressed: bool = False,
+    ) -> ChatResult:
+        result = self._render_cited_evidence(result)
+        if suppressed and visible_delta is not None and result.content:
+            visible_delta(result.content)
         self.client_state.update_from_result(result, thinking=self._thinking())
         turn_id = self.current_user_turn_id
         if turn_id and self.evidence_store is not None:
@@ -1188,8 +1289,36 @@ class ChatRuntime:
     def _file_input_environment(self, workdir) -> FileInputEnvironment:
         return FileInputEnvironment(FileInputResolver(workdir=workdir))
 
+    def _suppress_final_delta_for_citations(
+        self, on_final_delta: "Callable[[str], None] | None"
+    ) -> "Callable[[str], None] | None":
+        """Withhold raw streaming whenever citations are possible this session.
+
+        Evidence is usually produced mid-turn, after this decision point, so a
+        narrower entry-time predicate would leave a window in which a raw
+        `evidence:<id>` streams to the user. Withholding whenever an evidence
+        store is present keeps `displayed == returned`; the rendered final is
+        emitted exactly once by `_remember_visible_result`. No cross-turn state.
+        """
+        if on_final_delta is None or self.evidence_store is None:
+            return on_final_delta
+        return DeferredCitationSink(
+            on_final_delta,
+            lambda: citable_evidence_ids(
+                self.evidence_store, user_turn_id=self.current_user_turn_id
+            ),
+        )
+
+    def _with_citation_policy(self, messages: list[Message]) -> list[Message]:
+        policy = build_citation_policy_context(
+            self.evidence_store, user_turn_id=self.current_user_turn_id
+        )
+        if not policy:
+            return messages
+        return [*messages, {"role": "system", "content": policy}]
+
     def _with_final_tool_prompt(self) -> list[Message]:
-        return with_final_tool_system_prompt(self.messages)
+        return self._with_citation_policy(with_final_tool_system_prompt(self.messages))
 
     def _compact_final_from_tool_messages(self) -> list[Message]:
         messages: list[Message] = []
@@ -1200,8 +1329,8 @@ class ChatRuntime:
         self._emit_evidence_lineage_context(context_kind="compact_final", consumer_phase="final_from_tool", limit=1)
         final_messages = with_final_tool_system_prompt(messages)
         if not context:
-            return final_messages
-        return [*final_messages, {"role": "system", "content": context}]
+            return self._with_citation_policy(final_messages)
+        return self._with_citation_policy([*final_messages, {"role": "system", "content": context}])
 
     def _web_final_from_tool_messages(self) -> list[Message]:
         messages: list[Message] = []
@@ -1211,8 +1340,8 @@ class ChatRuntime:
         final_messages = with_final_tool_system_prompt(messages)
         context = build_web_final_evidence_context(self.evidence_store)
         if not context:
-            return final_messages
-        return [*final_messages, {"role": "system", "content": context}]
+            return self._with_citation_policy(final_messages)
+        return self._with_citation_policy([*final_messages, {"role": "system", "content": context}])
 
     def _should_use_web_final_view(self, *, use_tool_prompt: bool) -> bool:
         if self.evidence_store is None:

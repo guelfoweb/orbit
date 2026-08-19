@@ -9316,3 +9316,415 @@ EOF"""
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CitationBufferingVisibilityTests(unittest.TestCase):
+    """Design B: citation-enabled finals buffer, render, and emit exactly once."""
+
+    class _EchoBackend:
+        def __init__(self, text: str, finish: str = "stop") -> None:
+            self.text = text
+            self.finish = finish
+
+        def _result(self) -> ChatResult:
+            return ChatResult(
+                content=self.text, model="fake", finish_reason=self.finish, tool_calls=[],
+                prompt_tokens=1, completion_tokens=1, cached_tokens=0,
+                prompt_tokens_per_second=None, generation_tokens_per_second=None,
+            )
+
+        def chat(self, messages, *, temperature, max_tokens, tools=None) -> ChatResult:
+            return self._result()
+
+        def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                        on_delta=None, on_progress=None) -> ChatResult:
+            if on_delta is not None:
+                for piece in (self.text[:3], self.text[3:]):
+                    if piece:
+                        on_delta(piece)
+            return self._result()
+
+    def _runtime(self, tmp, text, finish="stop"):
+        store = EvidenceStore(Path(tmp) / "session.evidence")
+        runtime = ChatRuntime(
+            backend=self._EchoBackend(text, finish), system_prompt=None, evidence_store=store
+        )
+        return runtime, store
+
+    def _turn_evidence(self, runtime, store, content):
+        # ask_* calls _begin_user_turn(), which will mint the NEXT turn id; bind
+        # this evidence to that upcoming turn so it is citable during the call.
+        next_turn = f"turn_{runtime.user_turn_counter + 1}"
+        record = store.add(
+            "exec_shell_full_command",
+            content,
+            metadata={
+                "tool_call_id": "tc1",
+                "user_turn_id": next_turn,
+                "produced_by_phase": "final_from_tool",
+            },
+        )
+        return record
+
+    def test_citation_free_streaming_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _ = self._runtime(tmp, "plain answer")
+            seen: list[str] = []
+            result = runtime.ask_chat(
+                "hi", temperature=0, max_tokens=32, on_final_delta=seen.append
+            )
+            self.assertEqual("".join(seen), "plain answer")
+            self.assertEqual(result.content, "plain answer")
+
+    def test_citation_final_emits_rendered_exactly_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, store = self._runtime(tmp, "x")
+            rec = self._turn_evidence(runtime, store, "http://x.example/exact")
+            runtime.backend.text = f"URL is evidence:{rec.evidence_id} end"
+            seen: list[str] = []
+            result = runtime.ask_chat(
+                "q", temperature=0, max_tokens=32, on_final_delta=seen.append
+            )
+            visible = "".join(seen)
+            self.assertNotIn("evidence:ev_", visible)
+            self.assertEqual(visible.count("http://x.example/exact"), 1)
+            self.assertEqual(visible, result.content)
+            self.assertEqual(result.content, "URL is http://x.example/exact end")
+
+    def test_multiple_and_repeated_refs_render_once_each(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, store = self._runtime(tmp, "x")
+            rec = self._turn_evidence(runtime, store, "VALUE")
+            runtime.backend.text = f"evidence:{rec.evidence_id} / evidence:{rec.evidence_id}"
+            seen: list[str] = []
+            result = runtime.ask_chat("q", temperature=0, max_tokens=32, on_final_delta=seen.append)
+            self.assertEqual("".join(seen), result.content)
+            self.assertEqual(result.content, "VALUE / VALUE")
+
+    def test_unknown_reference_stays_visible_and_unrendered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, store = self._runtime(tmp, "x")
+            self._turn_evidence(runtime, store, "real")
+            runtime.backend.text = "value evidence:ev_000000000000_0000000000000000"
+            seen: list[str] = []
+            result = runtime.ask_chat("q", temperature=0, max_tokens=32, on_final_delta=seen.append)
+            self.assertEqual("".join(seen), result.content)
+            self.assertIn("unresolved evidence reference", result.content)
+
+    def test_length_finish_reason_still_renders_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, store = self._runtime(tmp, "x", finish="length")
+            rec = self._turn_evidence(runtime, store, "TRUNCVAL")
+            runtime.backend.text = f"partial evidence:{rec.evidence_id}"
+            seen: list[str] = []
+            result = runtime.ask_chat("q", temperature=0, max_tokens=32, on_final_delta=seen.append)
+            self.assertEqual("".join(seen), result.content)
+            self.assertNotIn("evidence:ev_", "".join(seen))
+
+    def test_empty_final_emits_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, store = self._runtime(tmp, "")
+            self._turn_evidence(runtime, store, "V")
+            seen: list[str] = []
+            result = runtime.ask_chat("q", temperature=0, max_tokens=32, on_final_delta=seen.append)
+            self.assertNotIn("evidence:", "".join(seen))
+            self.assertEqual("".join(seen), result.content)
+
+    def test_backend_exception_exposes_no_partial_reference(self) -> None:
+        class Boom:
+            def chat(self, *a, **k):
+                raise RuntimeError("backend down")
+
+            def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                            on_delta=None, on_progress=None):
+                if on_delta is not None:
+                    on_delta("partial evidence:ev_0000")
+                raise RuntimeError("backend down")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            runtime = ChatRuntime(backend=Boom(), system_prompt=None, evidence_store=store)
+            self._turn_evidence(runtime, store, "V")
+            seen: list[str] = []
+            with self.assertRaises(RuntimeError):
+                runtime.ask_chat("q", temperature=0, max_tokens=32, on_final_delta=seen.append)
+            self.assertNotIn("evidence:", "".join(seen))
+
+    def test_history_retains_compact_raw_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, store = self._runtime(tmp, "x")
+            rec = self._turn_evidence(runtime, store, "SECRETVALUE")
+            runtime.backend.text = f"see evidence:{rec.evidence_id}"
+            runtime.ask_chat("q", temperature=0, max_tokens=32, on_final_delta=lambda _t: None)
+            assistant = [m for m in runtime.messages if m.get("role") == "assistant"]
+            self.assertTrue(assistant)
+            self.assertIn(f"evidence:{rec.evidence_id}", assistant[-1]["content"])
+            self.assertNotIn("SECRETVALUE", assistant[-1]["content"])
+
+    def test_no_cross_turn_contamination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, store = self._runtime(tmp, "x")
+            rec = self._turn_evidence(runtime, store, "FIRSTVAL")
+            runtime.backend.text = f"evidence:{rec.evidence_id}"
+            first: list[str] = []
+            runtime.ask_chat("q1", temperature=0, max_tokens=32, on_final_delta=first.append)
+            runtime.backend.text = "second plain answer"
+            second: list[str] = []
+            runtime.ask_chat("q2", temperature=0, max_tokens=32, on_final_delta=second.append)
+            self.assertEqual("".join(first), "FIRSTVAL")
+            self.assertEqual("".join(second), "second plain answer")
+            self.assertNotIn("second", "".join(first))
+
+
+class CitationMidTurnEvidenceTests(unittest.TestCase):
+    """Evidence created mid-turn must not leak a raw reference to the user."""
+
+    def test_evidence_created_during_turn_is_still_rendered_once(self) -> None:
+        holder: dict = {}
+
+        class MidTurnBackend:
+            def _result(self, text: str) -> ChatResult:
+                return ChatResult(
+                    content=text, model="fake", finish_reason="stop", tool_calls=[],
+                    prompt_tokens=1, completion_tokens=1, cached_tokens=0,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                )
+
+            def _text(self) -> str:
+                if "rec" not in holder:
+                    holder["rec"] = holder["store"].add(
+                        "exec_shell_full_command",
+                        "MIDTURNVALUE",
+                        metadata={
+                            "tool_call_id": "tc",
+                            "user_turn_id": holder["runtime"].current_user_turn_id,
+                            "produced_by_phase": "final_from_tool",
+                        },
+                    )
+                return f"value evidence:{holder['rec'].evidence_id}"
+
+            def chat(self, messages, *, temperature, max_tokens, tools=None) -> ChatResult:
+                return self._result(self._text())
+
+            def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                            on_delta=None, on_progress=None) -> ChatResult:
+                text = self._text()
+                if on_delta is not None:
+                    on_delta(text)
+                return self._result(text)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            runtime = ChatRuntime(
+                backend=MidTurnBackend(), system_prompt=None, evidence_store=store
+            )
+            holder["store"] = store
+            holder["runtime"] = runtime
+            seen: list[str] = []
+            result = runtime.ask_chat(
+                "q", temperature=0, max_tokens=16, on_final_delta=seen.append
+            )
+            visible = "".join(seen)
+            self.assertNotIn("evidence:ev_", visible)
+            self.assertEqual(visible, result.content)
+            self.assertEqual(result.content, "value MIDTURNVALUE")
+
+
+class CitationSuppressionCoverageTests(unittest.TestCase):
+    """Chunk-level and ask_with_tools coverage for citation buffering."""
+
+    class _TwoChunkBackend:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def _result(self) -> ChatResult:
+            return ChatResult(
+                content=self.text, model="fake", finish_reason="stop", tool_calls=[],
+                prompt_tokens=1, completion_tokens=1, cached_tokens=0,
+                prompt_tokens_per_second=None, generation_tokens_per_second=None,
+            )
+
+        def chat(self, messages, *, temperature, max_tokens, tools=None) -> ChatResult:
+            return self._result()
+
+        def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                        on_delta=None, on_progress=None) -> ChatResult:
+            if on_delta is not None:
+                half = len(self.text) // 2 or 1
+                for piece in (self.text[:half], self.text[half:]):
+                    if piece:
+                        on_delta(piece)
+            return self._result()
+
+    def test_no_evidence_store_streams_multiple_chunks(self) -> None:
+        runtime = ChatRuntime(
+            backend=self._TwoChunkBackend("streamed answer"), system_prompt=None
+        )
+        chunks: list[str] = []
+        result = runtime.ask_chat(
+            "q", temperature=0, max_tokens=16, on_final_delta=chunks.append
+        )
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunks), result.content)
+
+    def test_ask_with_tools_citation_emits_rendered_exactly_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            backend = self._TwoChunkBackend("x")
+            runtime = ChatRuntime(
+                backend=backend, system_prompt=None, evidence_store=store
+            )
+            next_turn = f"turn_{runtime.user_turn_counter + 1}"
+            rec = store.add(
+                "exec_shell_full_command",
+                "TOOLVALUE",
+                metadata={
+                    "tool_call_id": "tc",
+                    "user_turn_id": next_turn,
+                    "produced_by_phase": "final_from_tool",
+                },
+            )
+            backend.text = f"result evidence:{rec.evidence_id}"
+            chunks: list[str] = []
+            result = runtime.ask_with_tools(
+                "q", temperature=0, max_tokens=16, workdir=Path(tmp),
+                on_final_delta=chunks.append,
+            )
+            visible = "".join(chunks)
+            self.assertNotIn("evidence:ev_", visible)
+            self.assertEqual(visible, result.content)
+            self.assertEqual(visible.count("TOOLVALUE"), 1)
+
+
+class CitationDeferredStreamingTests(unittest.TestCase):
+    """Buffering is decided at first delta, so streaming survives non-citable turns."""
+
+    class _TwoChunk:
+        def __init__(self, text_fn) -> None:
+            self._text_fn = text_fn
+
+        def _result(self, text: str) -> ChatResult:
+            return ChatResult(
+                content=text, model="fake", finish_reason="stop", tool_calls=[],
+                prompt_tokens=1, completion_tokens=1, cached_tokens=0,
+                prompt_tokens_per_second=None, generation_tokens_per_second=None,
+            )
+
+        def chat(self, messages, *, temperature, max_tokens, tools=None) -> ChatResult:
+            return self._result(self._text_fn())
+
+        def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                        on_delta=None, on_progress=None) -> ChatResult:
+            text = self._text_fn()
+            if on_delta is not None:
+                half = len(text) // 2 or 1
+                for piece in (text[:half], text[half:]):
+                    if piece:
+                        on_delta(piece)
+            return self._result(text)
+
+    def _prov(self, turn):
+        return {"tool_call_id": "tc", "user_turn_id": turn, "produced_by_phase": "final_from_tool"}
+
+    def test_previous_turn_evidence_does_not_disable_streaming(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            runtime = ChatRuntime(
+                backend=self._TwoChunk(lambda: "ordinary answer"),
+                system_prompt=None, evidence_store=store,
+            )
+            runtime._begin_user_turn()
+            store.add("exec_shell_full_command", "OLD",
+                      metadata=self._prov(runtime.current_user_turn_id))
+            chunks: list[str] = []
+            result = runtime.ask_chat(
+                "q", temperature=0, max_tokens=16, on_final_delta=chunks.append
+            )
+            # Previous-turn evidence must not corrupt or suppress the answer.
+            # Delivery is one block: text is held until proven citation-free.
+            self.assertEqual("".join(chunks), result.content)
+            self.assertEqual(result.content, "ordinary answer")
+
+    def test_mid_turn_evidence_still_buffers_and_renders_once(self) -> None:
+        holder: dict = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+
+            def text() -> str:
+                if "rec" not in holder:
+                    holder["rec"] = store.add(
+                        "exec_shell_full_command", "MIDVAL",
+                        metadata=self._prov(holder["runtime"].current_user_turn_id),
+                    )
+                return f"v evidence:{holder['rec'].evidence_id}"
+
+            runtime = ChatRuntime(
+                backend=self._TwoChunk(text), system_prompt=None, evidence_store=store
+            )
+            holder["runtime"] = runtime
+            chunks: list[str] = []
+            result = runtime.ask_chat(
+                "q", temperature=0, max_tokens=16, on_final_delta=chunks.append
+            )
+            visible = "".join(chunks)
+            self.assertNotIn("evidence:ev_", visible)
+            self.assertEqual(visible, result.content)
+            self.assertEqual(result.content, "v MIDVAL")
+
+
+class CitationPreEvidenceDeltaTests(unittest.TestCase):
+    """A delta emitted BEFORE evidence exists must not leak a raw reference."""
+
+    def test_first_delta_before_evidence_creation_does_not_leak(self) -> None:
+        holder: dict = {}
+
+        class PreambleBackend:
+            def _result(self, text: str) -> ChatResult:
+                return ChatResult(
+                    content=text, model="fake", finish_reason="stop", tool_calls=[],
+                    prompt_tokens=1, completion_tokens=1, cached_tokens=0,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                )
+
+            def _cited(self) -> str:
+                if "rec" not in holder:
+                    holder["rec"] = holder["store"].add(
+                        "exec_shell_full_command",
+                        "SECRETVAL",
+                        metadata={
+                            "tool_call_id": "tc",
+                            "user_turn_id": holder["runtime"].current_user_turn_id,
+                            "produced_by_phase": "final_from_tool",
+                        },
+                    )
+                return f"answer evidence:{holder['rec'].evidence_id}"
+
+            def chat(self, messages, *, temperature, max_tokens, tools=None) -> ChatResult:
+                return self._result(self._cited())
+
+            def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                            on_delta=None, on_progress=None) -> ChatResult:
+                # Preamble streams BEFORE any evidence exists.
+                if on_delta is not None:
+                    on_delta("preamble ")
+                cited = self._cited()
+                if on_delta is not None:
+                    on_delta(cited)
+                return self._result("preamble " + cited)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "session.evidence")
+            runtime = ChatRuntime(
+                backend=PreambleBackend(), system_prompt=None, evidence_store=store
+            )
+            holder["store"] = store
+            holder["runtime"] = runtime
+            seen: list[str] = []
+            result = runtime.ask_chat(
+                "q", temperature=0, max_tokens=16, on_final_delta=seen.append
+            )
+            visible = "".join(seen)
+            self.assertNotIn("evidence:ev_", visible)
+            self.assertEqual(visible, result.content)
+            self.assertEqual(result.content, "preamble answer SECRETVAL")
+            self.assertEqual(visible.count("preamble"), 1)

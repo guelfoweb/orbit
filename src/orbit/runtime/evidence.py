@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import stat
+from typing import Callable
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -349,6 +350,107 @@ def tool_evidence_ref(record: EvidenceRecord) -> str:
         lines.append("compat_excerpt:")
         lines.append(compat)
     return "\n".join(lines)
+
+
+# Rendering bound reuses COMPAT_INLINE_CHARS (1200): the existing convention for
+# how much evidence text Orbit is willing to inline verbatim. A cited value is an
+# inline evidence excerpt by another name, so the same ceiling applies.
+CITED_EVIDENCE_MAX_CHARS = COMPAT_INLINE_CHARS
+CITATION_POLICY_MAX_IDS = 8
+
+
+def citable_evidence_ids(
+    store: "EvidenceStore | None",
+    *,
+    user_turn_id: str | None,
+) -> tuple[str, ...]:
+    """Current-turn evidence ids that would actually render.
+
+    Single source of truth for both the trailing citation policy and
+    citation-aware streaming suppression, so the two cannot diverge.
+    Eligibility requires successful re-attestation under existing safety
+    rules; stored metadata alone is never sufficient.
+    """
+
+    if store is None or not user_turn_id:
+        return ()
+    eligible: list[str] = []
+    for record in store.records.values():
+        if record.user_turn_id != user_turn_id:
+            continue
+        raw = store.reattest_exact(record.evidence_id)
+        if raw is None or len(raw) > CITED_EVIDENCE_MAX_CHARS:
+            continue
+        eligible.append(record.evidence_id)
+    return tuple(sorted(eligible))
+
+
+def build_citation_policy_context(
+    store: "EvidenceStore | None",
+    *,
+    user_turn_id: str | None,
+) -> str | None:
+    """Trailing policy for evidence-backed finals; None when nothing is citable.
+
+    Emitted outside the pinned final prefix, so the capability prefix hash and
+    its cache semantics are untouched.
+    """
+
+    ids = citable_evidence_ids(store, user_turn_id=user_turn_id)
+    if not ids:
+        return None
+    listed = list(ids)[:CITATION_POLICY_MAX_IDS]
+    return "\n".join(
+        [
+            "exact_value_citation_policy: true",
+            "Cite an exact evidence-backed value as evidence:<id> instead of retyping it.",
+            "Write UNRESOLVED when an exact value is not available from the evidence.",
+            "Do not invent or retype an exact value that the evidence does not support.",
+            "citable_evidence_ids:",
+            *(f"- {value}" for value in listed),
+        ]
+    )
+
+_CITED_EVIDENCE_RE = re.compile(r"\bevidence:(ev_[0-9a-f]{12}_[0-9a-f]{16})\b")
+UNRENDERABLE_CITATION_SUFFIX = " [unresolved evidence reference]"
+
+
+def render_cited_evidence(
+    text: str,
+    store: "EvidenceStore | None",
+    *,
+    allowed_ids: frozenset[str] | None = None,
+    unsafe_content: Callable[[str], bool] | None = None,
+) -> str:
+    """Replace `evidence:<id>` citations with re-attested exact bytes.
+
+    Single pass, left to right. Substituted bytes are never rescanned, so
+    evidence content cannot inject further citations. Any reference that does
+    not re-attest, is not allowed for this turn, is unsafe, or exceeds the
+    render bound is left literal and flagged. No value is ever invented.
+    """
+
+    if not text or store is None or "evidence:" not in text:
+        return text
+
+    out: list[str] = []
+    cursor = 0
+    for match in _CITED_EVIDENCE_RE.finditer(text):
+        out.append(text[cursor : match.start()])
+        cursor = match.end()
+        evidence_id = match.group(1)
+        rendered: str | None = None
+        if allowed_ids is None or evidence_id in allowed_ids:
+            raw = store.reattest_exact(evidence_id)
+            if (
+                raw is not None
+                and len(raw) <= CITED_EVIDENCE_MAX_CHARS
+                and not (unsafe_content is not None and unsafe_content(raw))
+            ):
+                rendered = raw
+        out.append(rendered if rendered is not None else match.group(0) + UNRENDERABLE_CITATION_SUFFIX)
+    out.append(text[cursor:])
+    return "".join(out)
 
 
 def _valid_evidence_id(value: str) -> bool:
@@ -1070,3 +1172,42 @@ def _enrich_excerpts(content: str, metadata: dict[str, object]) -> dict[str, obj
     enriched = dict(metadata)
     enriched.update(_text_excerpts(content))
     return enriched
+
+class DeferredCitationSink:
+    """Hold streamed final text until it is provably citation-free.
+
+    Evidence is usually produced mid-turn, so eligibility cannot be decided at
+    entry: a raw `evidence:<id>` could stream before the tool ran. Text is
+    accumulated and released only by `finalize()`, once no citation became
+    possible. If a citation did become possible the caller emits the rendered
+    final instead, so `displayed == returned` always holds. Per call; no
+    cross-turn state. Cost: sessions with an evidence store see the final as one
+    block rather than token-by-token.
+    """
+
+    def __init__(self, sink, eligible) -> None:
+        self._sink = sink
+        self._eligible = eligible
+        self._buffering: bool = False
+        self._pending = ""
+
+    @property
+    def buffering(self) -> bool:
+        return bool(self._buffering)
+
+    def write(self, text: str) -> None:
+        if self._buffering:
+            return
+        self._pending += text
+        if self._eligible() or RAW_REF_PREFIX in self._pending:
+            self._buffering = True
+
+    def finalize(self) -> None:
+        """Emit the accumulated text when no citation ever became possible."""
+        if self._buffering or not self._pending:
+            return
+        if self._eligible() or RAW_REF_PREFIX in self._pending:
+            self._buffering = True
+            return
+        self._sink(self._pending)
+        self._pending = ""
