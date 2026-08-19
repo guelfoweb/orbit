@@ -25,6 +25,7 @@ from orbit.native_llama.qwen36_shell_tool_prefix import (
 )
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
+from orbit.runtime.history_serialization import serialize_profile_messages
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 from orbit.runtime.tool_healing import tool_call_healing_status
 
@@ -65,7 +66,7 @@ class LlamaServerBackend:
         payload = build_chat_payload(
             ChatPayloadOptions(
                 model=self.request_model_name(),
-                messages=messages,
+                messages=self._serialize_for_profile(messages),
                 temperature=temperature,
                 max_tokens=max_tokens,
                 thinking=self.thinking,
@@ -107,7 +108,7 @@ class LlamaServerBackend:
         payload = build_chat_payload(
             ChatPayloadOptions(
                 model=self.request_model_name(),
-                messages=messages,
+                messages=self._serialize_for_profile(messages),
                 temperature=temperature,
                 max_tokens=max_tokens,
                 thinking=self.thinking,
@@ -160,7 +161,7 @@ class LlamaServerBackend:
         payload = build_chat_payload(
             ChatPayloadOptions(
                 model=self.request_model_name(),
-                messages=messages,
+                messages=self._serialize_for_profile(messages),
                 temperature=temperature,
                 max_tokens=max_tokens,
                 thinking=False,
@@ -387,6 +388,33 @@ class LlamaServerBackend:
             else "unknown"
         )
         return self._props_cache
+
+    def _verified_history_serialization(self) -> str | None:
+        """History-serialization contract of the verified profile, if identifiable.
+
+        Orbit-native servers publish `model_compatibility`. A plain upstream
+        llama-server does not, but it does publish the exact `chat_template`,
+        which verified Orbit profiles already pin by SHA-256. Matching that
+        digest identifies the profile cryptographically, with no model-name
+        heuristic. Anything unrecognised returns None, so no model-specific
+        normalization is applied speculatively.
+        """
+        props = self._props_or_empty()
+        compatibility = props.get("model_compatibility")
+        if isinstance(compatibility, dict) and compatibility.get("verified") is True:
+            value = compatibility.get("history_serialization")
+            return value if isinstance(value, str) else None
+        template = props.get("chat_template")
+        if not isinstance(template, str) or not template:
+            return None
+        from orbit.native_llama.model_profiles import history_serialization_for_template
+
+        return history_serialization_for_template(template)
+
+    def _serialize_for_profile(self, messages: list[Message]) -> list[Message]:
+        return serialize_profile_messages(
+            messages, history_serialization=self._verified_history_serialization()
+        )
 
     def _is_orbit_native_backend(self) -> bool:
         return _str_or_none(self._props_or_empty().get("backend")) == "orbit-native"

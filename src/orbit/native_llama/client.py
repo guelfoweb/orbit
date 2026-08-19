@@ -12,6 +12,7 @@ import threading
 import time
 
 from orbit.final_prefix_config import FINAL_PREFIX_TOKEN_COUNT
+from orbit.runtime.history_serialization import serialize_profile_messages
 
 from .bindings import (
     ChatBridgeLibrary,
@@ -3677,18 +3678,12 @@ class NativeLlamaClient:
 
     def _serialize_profile_messages(self, messages: list[NativeMessage]) -> list[NativeMessage]:
         profile = getattr(self, "model_profile", None)
-        if profile is None or getattr(profile, "history_serialization", None) != "qwen-leading-system-only":
+        if profile is None:
             return messages
-        serialized: list[NativeMessage] = []
-        for index, message in enumerate(messages):
-            item = dict(message)
-            if item.get("role") == "system" and index != 0:
-                # The reviewed Qwen template accepts a system role only at the
-                # beginning. Preserve later Orbit evidence cards in place as a
-                # normal input turn instead of reordering or dropping content.
-                item["role"] = "user"
-            serialized.append(item)
-        return serialized
+        return serialize_profile_messages(
+            messages,
+            history_serialization=getattr(profile, "history_serialization", None),
+        )
 
     def _parse_profile_output(self, generated_text: str, *, partial: bool) -> _ProfileParsedOutput:
         if self.chat_bridge is None or not self._chat_bridge_context:

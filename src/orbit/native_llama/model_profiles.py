@@ -93,6 +93,12 @@ def supports_low_memory_mode(profile: NativeModelProfile | None) -> bool:
     )
 
 
+_VERIFIED_TEMPLATE_HISTORY_SERIALIZATION = {
+    QWEN36_OFFICIAL_TEMPLATE_SHA256: "qwen-leading-system-only",
+    QWEN38_OFFICIAL_TEMPLATE_SHA256: "qwen-leading-system-only",
+}
+
+
 @dataclass(frozen=True)
 class VerifiedNativeModelIdentity:
     profile_id: str
@@ -317,3 +323,17 @@ def _unverified_reason(
             return "qwen3_coder_template_identity_mismatch"
         return "qwen3_coder_metadata_identity_mismatch"
     return "unsupported_model_profile"
+
+
+def history_serialization_for_template(template: str) -> str | None:
+    """History-serialization contract for a template that matches a verified pin.
+
+    Matches the exact template text against the digests of verified profile
+    templates, so a backend without Orbit-native metadata can still honour the
+    profile's message-shape contract. Returns None when the template matches no
+    verified profile, which keeps unverified models free of model-specific
+    handling.
+    """
+
+    digest = hashlib.sha256(template.encode("utf-8")).hexdigest()
+    return _VERIFIED_TEMPLATE_HISTORY_SERIALIZATION.get(digest)
