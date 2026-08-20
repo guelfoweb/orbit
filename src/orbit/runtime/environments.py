@@ -1234,7 +1234,10 @@ class FinalFromToolEnvironment:
             self.runtime.messages.append({"role": "assistant", "content": result.content})
             return FinalAnswerResult(result=result, used_retry_or_repair_pass=False)
         response_prefix = targeted_prefix or display_prefix
-        if self.runtime._should_use_web_final_view(use_tool_prompt=use_tool_prompt):
+        uses_web_final_view = self.runtime._should_use_web_final_view(
+            use_tool_prompt=use_tool_prompt
+        )
+        if uses_web_final_view:
             call_messages = self.runtime._web_final_from_tool_messages()
         elif (
             compact_window
@@ -1268,7 +1271,11 @@ class FinalFromToolEnvironment:
                     attempt=1,
                 )
             )
-        grounded = self._grounded_finalization(
+        # The web-final view is its own answer shaping: when a search returned
+        # nothing or only snippets, that curated framing is what makes the
+        # reply honest about what was found. Rebuilding from raw evidence bytes
+        # would discard it, so that path keeps its own final call.
+        grounded = None if uses_web_final_view else self._grounded_finalization(
             temperature=temperature,
             on_final_delta=on_final_delta,
             on_progress=on_progress,
@@ -1599,7 +1606,14 @@ class FinalFromToolEnvironment:
             None,
         )
         if callable(reset):
-            reset()
+            try:
+                reset()
+            except Exception:
+                # Resetting is what makes the session fresh; if it cannot be
+                # done there is no clean state to finalize in, so decline and
+                # let the ordinary path answer instead of proceeding on a
+                # session whose contents are unknown.
+                return None
         if response_prefix and on_final_delta is not None:
             on_final_delta(response_prefix)
         # Call the inference backend directly, beneath the investigation's
@@ -1610,22 +1624,31 @@ class FinalFromToolEnvironment:
         # No `tools=` argument: FINAL_ONLY is enforced structurally, so no tool
         # can be requested rather than merely being discouraged by the prompt.
         backend = getattr(self.runtime.backend, "_backend", self.runtime.backend)
-        with self.transport.backend_thinking(False):
-            with model_call_context(phase="grounded_finalization", tools_mode="off"):
-                if on_final_delta is None:
-                    result = backend.chat(
-                        bundle_messages,
-                        temperature=temperature,
-                        max_tokens=admission.output_budget,
-                    )
-                else:
-                    result = backend.chat_stream(
-                        bundle_messages,
-                        temperature=temperature,
-                        max_tokens=admission.output_budget,
-                        on_delta=on_final_delta,
-                        on_progress=on_progress,
-                    )
+        try:
+            with self.transport.backend_thinking(False):
+                with model_call_context(phase="grounded_finalization", tools_mode="off"):
+                    if on_final_delta is None:
+                        result = backend.chat(
+                            bundle_messages,
+                            temperature=temperature,
+                            max_tokens=admission.output_budget,
+                        )
+                    else:
+                        result = backend.chat_stream(
+                            bundle_messages,
+                            temperature=temperature,
+                            max_tokens=admission.output_budget,
+                            on_delta=on_final_delta,
+                            on_progress=on_progress,
+                        )
+        except Exception:
+            # The session was already reset, so the ordinary path will prefill
+            # from scratch rather than continue -- slower, but it still answers.
+            # Declining here keeps a backend failure in this phase from costing
+            # the turn, which matters now that every evidence-backed workflow
+            # comes through here rather than only saturated ones. The durable
+            # evidence is untouched either way.
+            return None
         if on_model_step:
             on_model_step(
                 ModelStepMetrics.from_result(

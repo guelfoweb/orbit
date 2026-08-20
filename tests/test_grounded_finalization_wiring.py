@@ -456,6 +456,139 @@ class LiveCallPathReachabilityTests(unittest.TestCase):
             self.assertEqual(backend.resets, 1)
 
 
+class ScopeAndResilienceTests(unittest.TestCase):
+    """Paths with their own answer shaping keep it; failures stay recoverable."""
+
+    def _web_search_store(self, tmp):
+        store = EvidenceStore(Path(tmp) / "evidence")
+        store.add(
+            "exec_shell_full_command",
+            "web_search_results: true\nresults: none",
+            metadata={
+                "tool_call_id": "call-1",
+                "user_turn_id": "turn-1",
+                "produced_by_phase": "tool_call",
+            },
+        )
+        return store
+
+    def test_web_final_view_keeps_its_curated_framing(self) -> None:
+        """A search that found nothing must not be answered from raw bytes.
+
+        The web-final view exists to say honestly what the search returned.
+        Rebuilding the answer from evidence would discard that shaping, so this
+        path keeps its own final call.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._web_search_store(tmp)
+            backend = RecordingBackend(
+                context_tokens=100_000, tokens_for={"": 200, "Verified evidence": 300}
+            )
+            messages = [
+                {"role": "user", "content": "search for something"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_shell_full_command",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "no results"},
+            ]
+            env, runtime = _environment(
+                backend, store, messages=messages, context_tokens=100_000
+            )
+            self.assertTrue(
+                runtime._should_use_web_final_view(use_tool_prompt=False),
+                "fixture no longer selects the web-final view",
+            )
+            env.answer(
+                temperature=0.0,
+                max_tokens=2048,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                use_tool_prompt=False,
+                workdir=None,
+            )
+            sent = backend.chat_calls[-1]["messages"]
+            self.assertGreater(
+                len(sent), 1, "web-final curated view was replaced by the bundle"
+            )
+            self.assertEqual(backend.resets, 0, "web-final path reset the session")
+
+    def test_backend_failure_does_not_cost_the_turn(self) -> None:
+        """A failure inside finalization must fall back, not propagate.
+
+        The session has already been reset by this point, so propagating would
+        leave the caller with neither an answer nor a usable session.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+
+            class Failing(RecordingBackend):
+                def chat(self, messages, *, temperature, max_tokens, tools=None):
+                    raise RuntimeError("backend exploded")
+
+            backend = Failing(
+                context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
+            )
+            env, _ = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            out = env._grounded_finalization(
+                temperature=0.0,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="",
+            )
+            self.assertIsNone(out, "backend failure propagated instead of declining")
+
+    def test_failed_reset_declines_rather_than_finalizing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+
+            class BadReset(RecordingBackend):
+                def reset_session_state(self):
+                    raise RuntimeError("native client not loaded")
+
+            backend = BadReset(
+                context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
+            )
+            env, _ = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            out = env._grounded_finalization(
+                temperature=0.0,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="",
+            )
+            self.assertIsNone(out)
+            self.assertEqual(backend.chat_calls, [], "generated after a failed reset")
+
+
 class CoverageNoticeTests(unittest.TestCase):
     """Coverage caveats must survive the grounded path, streaming or not.
 
@@ -550,9 +683,18 @@ class ProductionTrustBoundaryTests(unittest.TestCase):
         )
 
     def test_tampered_evidence_never_reaches_the_prompt(self) -> None:
-        """Bytes edited on disk after attestation must not be cited."""
+        """Bytes edited on disk after attestation must not be cited.
+
+        A second, intact record is seeded deliberately: with only the tampered
+        one the finalizer would decline for lack of evidence and the assertion
+        would pass without a prompt ever being built. Keeping one good record
+        forces a real bundle, so the tampered bytes have somewhere to leak into.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            store, ids = _store_with(tmp, ["genuine payload " + "g" * 200])
+            store, ids = _store_with(
+                tmp,
+                ["genuine payload " + "g" * 200, "second intact record " + "s" * 200],
+            )
             (store.root / f"{ids[0]}.txt").write_text(
                 "TAMPERED payload " + "x" * 200, encoding="utf-8"
             )
@@ -575,12 +717,13 @@ class ProductionTrustBoundaryTests(unittest.TestCase):
                 loop=1,
                 response_prefix="",
             )
+            self.assertIsNotNone(out, "no bundle was built, so nothing was proven")
+            self.assertTrue(backend.chat_calls, "finalization never called the model")
             sent = "".join(
                 str(m.get("content", "")) for m in backend.chat_calls[-1]["messages"]
-            ) if backend.chat_calls else ""
+            )
+            self.assertIn("second intact record", sent, "intact evidence missing")
             self.assertNotIn("TAMPERED", sent, "tampered bytes reached the model")
-            if out is not None:
-                self.assertNotIn("TAMPERED", out.result.content)
 
     def test_duplicate_evidence_is_collapsed_in_the_prompt(self) -> None:
         """Byte-identical records must appear once, via the library's dedup."""
