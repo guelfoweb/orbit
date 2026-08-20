@@ -18,6 +18,11 @@ FINAL_MEDIUM_MAX_TOKENS = 192
 FINAL_WEB_SEARCH_MAX_TOKENS = 192
 FINAL_READ_MAX_TOKENS = 256
 FULL_DOCUMENT_FINAL_MAX_TOKENS = 1024
+# Finalization answers from frozen evidence in a session of its own, so the
+# per-call limits of the investigation that produced that evidence do not
+# apply: inheriting one truncated a report mid-section while thousands of
+# context tokens went unused.
+FINALIZATION_FINAL_MAX_TOKENS = 4096
 
 CHAT_FINAL_RETRY_MAX_TOKENS = 128
 CHAT_FINAL_RETRY_AFTER_LENGTH_MAX_TOKENS = 192
@@ -66,6 +71,12 @@ def resolve_max_tokens(
         return _floor_and_cap(requested, 64, CHAT_USER_MAX_TOKENS)
     if kind == "final_from_tool":
         return _final_from_tool_tokens(requested, evidence, evidence_chars)
+    if kind == "finalization":
+        # An explicit caller limit stays authoritative, as it does for
+        # full_document; exact admission, not this cap, decides what fits.
+        if requested is None:
+            return FINALIZATION_FINAL_MAX_TOKENS
+        return requested
     if kind == "full_document":
         # Full-document output is user-visible: an explicit CLI/REPL limit stays
         # authoritative and is never silently reduced. Exact full-document

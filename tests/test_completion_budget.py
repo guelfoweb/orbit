@@ -51,6 +51,15 @@ class CompletionBudgetPolicyTests(unittest.TestCase):
         self.assertEqual(resolve_max_tokens("full_document", 2048), 2048)
         self.assertEqual(resolve_max_tokens("full_document", 8192), 8192)
 
+    def test_finalization_budget_is_independent_of_investigation_limits(self) -> None:
+        # Finalization answers from frozen evidence in its own session, so the
+        # investigation's per-call limit must not decide how long a report can be.
+        self.assertEqual(resolve_max_tokens("finalization"), 4096)
+        self.assertNotEqual(resolve_max_tokens("finalization"), resolve_max_tokens("chat"))
+        # An explicit caller limit stays authoritative, as for full_document.
+        self.assertEqual(resolve_max_tokens("finalization", 512), 512)
+        self.assertEqual(resolve_max_tokens("finalization", 8192), 8192)
+
     def test_retry_and_repair_budgets(self) -> None:
         self.assertEqual(resolve_max_tokens("chat_final_retry", 32), 128)
         self.assertEqual(resolve_max_tokens("chat_final_retry", 32, previous_finish_reason="length"), 192)
