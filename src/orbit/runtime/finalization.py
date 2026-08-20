@@ -85,7 +85,8 @@ def deduplicate_evidence(entries) -> list[BundleEntry]:
     unique: list[BundleEntry] = []
     for entry in entries:
         digest = content_digest(entry.content)
-        if entry.sha256 and entry.sha256 != digest:
+        declared = entry.sha256.strip().lower().removeprefix("sha256:") if entry.sha256 else ""
+        if declared and declared != digest:
             continue
         if digest in seen:
             continue
@@ -122,15 +123,42 @@ def entries_from_store(store, evidence_ids) -> list[BundleEntry]:
     return entries
 
 
+def bundle_nonce(entries: list[BundleEntry]) -> str:
+    """Frame marker derived from the evidence, extended until unique.
+
+    A fixed marker is guessable: content that embeds one could still close its
+    own record and open another. Deriving the marker from the digests of the
+    evidence and lengthening it until no entry contains it makes the frame
+    unforgeable by that same evidence, while keeping rendering deterministic.
+    """
+    seed = content_digest("".join(entry.sha256 for entry in entries))
+    for length in range(8, len(seed) + 1):
+        candidate = seed[:length]
+        if not any(candidate in entry.content for entry in entries):
+            return candidate
+    return seed
+
+
 def render_bundle(task: str, entries: list[BundleEntry]) -> str:
-    """Render the finalization request. Exact bytes, no summarisation."""
+    """Render the finalization request. Exact bytes, no summarisation.
+
+    Each record is framed by an explicit begin/end pair carrying its evidence
+    id. Evidence content is frequently derived from the artifact under
+    investigation, so it must be assumed to contain anything, including text
+    shaped like a record header; without framing, such content could present
+    itself as a second record and mint an evidence id the store never issued.
+    The end marker repeats the id, so a claim can only cite an identifier that
+    a real record opened.
+    """
+    nonce = bundle_nonce(entries)
     lines = [task.strip(), "", FINAL_ONLY_INSTRUCTION, "", "Verified evidence:"]
     for entry in entries:
         lines.append(
-            f"[{entry.evidence_id}] {entry.kind}, {entry.chars} chars, "
-            f"sha256={entry.sha256[:16]}"
+            f"<<<{nonce} BEGIN {entry.evidence_id} {entry.kind} "
+            f"{entry.chars} chars sha256={entry.sha256[:16]}>>>"
         )
         lines.append(entry.content)
+        lines.append(f"<<<{nonce} END {entry.evidence_id}>>>")
         lines.append("")
     return "\n".join(lines)
 
