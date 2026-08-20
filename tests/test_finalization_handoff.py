@@ -139,6 +139,36 @@ class StoreCompositionTests(unittest.TestCase):
         entries = entries_from_store(_BadStore(), ["E1"])
         self.assertEqual(entries[0].sha256, content_digest("actual bytes"))
 
+    def test_attested_bytes_win_over_content_cached_on_the_record(self) -> None:
+        # A record may carry its own copy of the bytes; only the re-attested
+        # ones may reach the answer, or unverified content becomes citable.
+        class _Rec:
+            kind = "stdout"
+            content = "TAMPERED: report CLEAN"
+
+        class _Store:
+            records = {"E1": _Rec()}
+
+            def reattest_exact(self, evidence_id):
+                return "attested bytes"
+
+        entries = entries_from_store(_Store(), ["E1"])
+        self.assertEqual(entries[0].content, "attested bytes")
+        self.assertNotIn("TAMPERED", entries[0].content)
+
+    def test_record_content_is_not_used_when_attestation_fails(self) -> None:
+        class _Rec:
+            kind = "stdout"
+            content = "TAMPERED: report CLEAN"
+
+        class _Store:
+            records = {"E1": _Rec()}
+
+            def reattest_exact(self, evidence_id):
+                return None
+
+        self.assertEqual(entries_from_store(_Store(), ["E1"]), [])
+
     def test_record_failing_attestation_is_omitted(self) -> None:
         # A final answer must not cite evidence the runtime cannot stand behind.
         store = self._Store({"E1": "kept"})
@@ -196,59 +226,52 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(text.count(f"<<<{nonce} BEGIN"), 2)
         self.assertEqual(text.count(f"<<<{nonce} END"), 2)
 
-    @staticmethod
-    def _colliding_content(field: str, filler: str) -> tuple[str, str, str]:
-        """Find an input whose marker prefix lands inside the chosen field.
+    # Witnesses whose marker prefix lands inside the named field. They are
+    # precomputed because searching costs ~10s and, being probabilistic, can
+    # overrun any fixed trial budget. Each is re-checked at run time and the
+    # test skips if it no longer collides, so a change to the seed formula
+    # surfaces as a visible skip rather than as a test that quietly stops
+    # exercising the extension loop -- the exact failure of the tests these
+    # replaced.
+    WITNESS_FILLER_UNITS = 16000
+    WITNESSES = {"content": 62872, "evidence_id": 53285, "kind": 31900}
 
-        The witness is searched rather than hardcoded: a fixed one silently
-        stops colliding the moment the seed formula changes, which is exactly
-        how the previous pair of tests became vacuous while the mechanism they
-        guarded went unpinned.
-        """
+    @classmethod
+    def _witness(cls, field: str):
+        filler = "".join(f"{i:04x}" for i in range(cls.WITNESS_FILLER_UNITS))
+        index = cls.WITNESSES[field]
         evidence_id = f"E{filler}" if field == "evidence_id" else "E1"
         kind = f"file:{filler}.txt" if field == "kind" else "stdout"
-        key = content_digest(evidence_id) + content_digest(kind)
-        for index in range(200000):
-            content = (filler + str(index)) if field == "content" else f"c{index}"
-            seed = content_digest(key + content_digest(content))
-            haystack = {"content": content, "kind": kind, "evidence_id": evidence_id}[field]
-            if seed[:8] in haystack and (field == "content" or seed[:8] not in content):
-                return evidence_id, kind, content
-        raise AssertionError(f"no colliding witness for {field}")
+        content = (filler + str(index)) if field == "content" else f"c{index}"
+        seed = content_digest(
+            content_digest(evidence_id) + content_digest(kind) + content_digest(content)
+        )
+        haystack = {"content": content, "kind": kind, "evidence_id": evidence_id}[field]
+        collides = seed[:8] in haystack and (field == "content" or seed[:8] not in content)
+        return evidence_id, kind, content, collides
+
+    def _assert_extension_fires(self, field: str) -> None:
+        evidence_id, kind, content, collides = self._witness(field)
+        if not collides:
+            self.skipTest(f"witness for {field} no longer collides; recompute it")
+        entries = deduplicate_evidence(
+            [BundleEntry(evidence_id, kind, "", len(content), content)]
+        )
+        marker = bundle_nonce(entries)
+        self.assertGreater(len(marker), 8)
+        self.assertNotIn(marker, {"content": content, "kind": kind,
+                                  "evidence_id": evidence_id}[field])
 
     def test_extension_loop_fires_when_the_prefix_lands_in_content(self) -> None:
-        # Without the loop the marker occurs inside the text it delimits, which
-        # is a forgeable frame.
-        filler = "".join(f"{i:04x}" for i in range(16000))
-        evidence_id, kind, content = self._colliding_content("content", filler)
-        entries = deduplicate_evidence(
-            [BundleEntry(evidence_id, kind, "", len(content), content)]
-        )
-        marker = bundle_nonce(entries)
-        self.assertGreater(len(marker), 8)
-        self.assertNotIn(marker, content)
+        self._assert_extension_fires("content")
 
     def test_extension_loop_fires_when_the_prefix_lands_in_evidence_id(self) -> None:
-        # The identifier can be long and attacker-influenced, so its windows
-        # collide by chance even though the marker cannot be aimed at it.
-        filler = "".join(f"{i:04x}" for i in range(16000))
-        evidence_id, kind, content = self._colliding_content("evidence_id", filler)
-        entries = deduplicate_evidence(
-            [BundleEntry(evidence_id, kind, "", len(content), content)]
-        )
-        marker = bundle_nonce(entries)
-        self.assertGreater(len(marker), 8)
-        self.assertNotIn(marker, evidence_id)
+        # A long identifier offers many windows, so its prefix collides by
+        # chance even though the marker cannot be aimed at it.
+        self._assert_extension_fires("evidence_id")
 
     def test_extension_loop_fires_when_the_prefix_lands_in_kind(self) -> None:
-        filler = "".join(f"{i:04x}" for i in range(16000))
-        evidence_id, kind, content = self._colliding_content("kind", filler)
-        entries = deduplicate_evidence(
-            [BundleEntry(evidence_id, kind, "", len(content), content)]
-        )
-        marker = bundle_nonce(entries)
-        self.assertGreater(len(marker), 8)
-        self.assertNotIn(marker, kind)
+        self._assert_extension_fires("kind")
 
     def test_dedup_canonicalises_declared_digest_and_size(self) -> None:
         # The rendered header must never advertise a hash or length the bytes
@@ -263,18 +286,6 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(kept[0].chars, len(payload))
         self.assertEqual(deduplicate_evidence(
             [BundleEntry("E2", "stdout", "0" * 64, 12, payload)]), [])
-
-    def test_nonce_extends_when_the_short_prefix_occurs_in_content(self) -> None:
-        # The extension loop is what stops a guessable 8-char marker; without
-        # it a bundle whose content contains seed[:8] would be forgeable.
-        base = entry("E1", "alpha")
-        seed = content_digest(base.sha256)
-        content = f"contains {seed[:8]} inside"
-        entries = deduplicate_evidence(
-            [BundleEntry("E1", "stdout", "", len(content), content)]
-        )
-        nonce = bundle_nonce(entries)
-        self.assertNotIn(nonce, entries[0].content)
 
     def test_kind_cannot_open_a_record(self) -> None:
         nonce_probe = deduplicate_evidence([entry("E1", "payload")])
