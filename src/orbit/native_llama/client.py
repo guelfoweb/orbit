@@ -304,6 +304,7 @@ class NativeLlamaClient:
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = 0
         self.last_target_only_token_hashes: list[int] = []
+        self.last_committed_generated_tokens: list[int] = []
         self.last_target_only_first_sample_trace: dict[str, object] | None = None
         self._last_prompt_decode_batch_n_tokens = 0
         self._route_prefix_anchor_state = PrefixAnchorState()
@@ -553,6 +554,9 @@ class NativeLlamaClient:
                 "model_reload", profile_id=QWEN3_CODER_PROFILE_ID
             )
         self._invalidate_qwen36_shell_tool_prefix("model_reload")
+        # A reload installs a brand-new context: any recorded sequence refers
+        # to memory that no longer exists, possibly from a different model.
+        self._invalidate_committed_sequence()
         lib = self.lib.lib
         lib.ggml_backend_load_all()
         self.lib.configure_expert_usage(self.config.moe_expert_usage_enabled)
@@ -807,6 +811,7 @@ class NativeLlamaClient:
         if mem:
             lib.llama_memory_clear(mem, True)
         self._session.cached_prompt_tokens.clear()
+        self._invalidate_committed_sequence()
         self._session.prompt_cache_mode = None
         self._session.continuation_ready = False
         self._session.last_metrics = None
@@ -1804,6 +1809,9 @@ class NativeLlamaClient:
         lib = self.lib.lib
         mtmd = self.mtmd.lib
         self._session.cached_prompt_tokens.clear()
+        # The multimodal path wipes KV and prefills image chunks, for which no
+        # token-id-exact record exists. Identity stays empty for this turn.
+        self._invalidate_committed_sequence()
         mem = lib.llama_get_memory(self._session.ctx_tgt)
         if mem:
             lib.llama_memory_clear(mem, True)
@@ -2027,6 +2035,9 @@ class NativeLlamaClient:
                 self._invalidate_coder_route_prefix_after_failed_completion("cancelled")
             return timings
         except Exception:
+            # KV may hold a partially decoded prompt matching neither the
+            # previous nor the new sequence: identity is no longer provable.
+            self._invalidate_committed_sequence()
             if final_prefix_segments is not None:
                 self._invalidate_final_prefix("completion_error")
             if qwen_route_anchor_plan is not None:
@@ -2051,6 +2062,10 @@ class NativeLlamaClient:
         on_token=None,
         request_timing: _RequestTiming | None = None,
     ) -> NativeTimings | None:
+        # MTP rewrites the shared target KV (llama_memory_clear / seq_rm in the
+        # persistent MTP shim) and returns before the standard commit point, so
+        # the recorded identity can no longer describe resident memory.
+        self._invalidate_committed_sequence()
         request_timing = request_timing or _RequestTiming.start()
         thinking = self._thinking_enabled(thinking)
         profile = getattr(self, "model_profile", None)
@@ -2090,6 +2105,9 @@ class NativeLlamaClient:
                 ctx_tgt=self._session.ctx_tgt,
             )
         except Exception as exc:
+            # KV may hold a partially decoded prompt that matches neither the
+            # previous nor the new sequence.
+            self._invalidate_committed_sequence()
             self.mtp_fallback_reason = str(exc) or "persistent-mtp-reset-failed"
             self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
             self._session.mtp_failed = True
@@ -2292,6 +2310,7 @@ class NativeLlamaClient:
                 started_us=pf_start,
             )
         pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
+        self.last_committed_generated_tokens = []
         generated, gen_ms, cancelled = self._generate_from_current_context(
             max_tokens=max_tokens,
             on_progress=on_progress,
@@ -2308,6 +2327,15 @@ class NativeLlamaClient:
                 prompt_tokens_total=n_prompt,
                 token_count=self._content_token_count,
             )
+        # Record the sequence now resident in KV: the prefilled prompt plus the
+        # tokens actually decoded into it. A cancelled generation cannot be
+        # proven complete, so identity is dropped and the next call falls back.
+        # Commit only when the whole prompt was prefilled AND generation was not
+        # cancelled: a partial prefill leaves a tail that is not in KV.
+        if cancelled or processed < n_prompt:
+            self._invalidate_committed_sequence()
+        else:
+            self._commit_sequence(prompt_tokens, self.last_committed_generated_tokens)
         emit_prompt_cache_event(
             prompt_tokens=prompt_tokens,
             previous_prompt_tokens=previous_prompt_tokens,
@@ -3091,6 +3119,7 @@ class NativeLlamaClient:
             self.lib.lib.llama_memory_clear(mem, True)
         self._session.cached_prompt_tokens.clear()
 
+        self._invalidate_committed_sequence()
     def _route_anchor_state_kwargs(self, plan: _RouteAnchorRuntimePlan) -> dict[str, str | None]:
         return {
             "model_id": str(self.paths.model),
@@ -3398,6 +3427,9 @@ class NativeLlamaClient:
         sampler = sampler_override or self._session.sampler
         lib.llama_sampler_reset(sampler)
         self.last_target_only_token_hashes = []
+        # Exact ids decoded into KV during this generation. An EOG token breaks
+        # before llama_decode, so it never joins the resident sequence.
+        self.last_committed_generated_tokens = []
         self.last_target_only_first_sample_trace = None
         generated = 0
         gen_start = lib.llama_time_us()
@@ -3437,6 +3469,8 @@ class NativeLlamaClient:
             one_token = (llama_token * 1)(token)
             batch = lib.llama_batch_get_one(one_token, 1)
             decode_rc = lib.llama_decode(self._session.ctx_tgt, batch)
+            if decode_rc == 0:
+                self.last_committed_generated_tokens.append(int(token))
             generated += 1
             if on_progress:
                 on_progress(
@@ -3592,6 +3626,21 @@ class NativeLlamaClient:
             raise RuntimeError("native client not loaded")
         lib = self.lib.lib
         common = 0
+        # Strict append-only continuation. When the resident KV sequence is a
+        # token-exact prefix of this prompt, the sequence stays intact and only
+        # the new suffix is prefilled. No partial seq_rm is attempted, which is
+        # what makes this safe on hybrid/iSWA caches that legitimately refuse
+        # to discard an arbitrary prefix. Anything less than exact identity
+        # falls through to the existing behaviour.
+        committed = getattr(self._session, "committed_sequence_tokens", None)
+        if (
+            committed
+            and not self._qwen3_coder_native_protocol()
+            and len(prompt_tokens) > len(committed)
+            and prompt_tokens[: len(committed)] == committed
+        ):
+            self._session.cached_prompt_tokens = list(prompt_tokens)
+            return len(committed)
         if not self._qwen3_coder_native_protocol():
             max_common = min(len(prompt_tokens), len(self._session.cached_prompt_tokens))
             while common < max_common and prompt_tokens[common] == self._session.cached_prompt_tokens[common]:
@@ -3613,7 +3662,26 @@ class NativeLlamaClient:
                     lib.llama_memory_clear(mem, True)
                     common = 0
         self._session.cached_prompt_tokens = list(prompt_tokens)
+        # The fallback path just rewrote KV. Identity is re-established only
+        # after a successful generation, so drop it now.
+        self._invalidate_committed_sequence()
         return common
+
+    def _invalidate_committed_sequence(self) -> None:
+        """Drop committed-sequence identity whenever backend KV may diverge.
+
+        Strict append-only continuation is only safe while the recorded tokens
+        are exactly the ones resident in KV. Every path that clears, rewrites
+        or replaces that memory must call this; a stale identity would produce
+        a false cache hit, which is a correctness bug rather than a slow path.
+        """
+        self._session.committed_sequence_tokens.clear()
+
+    def _commit_sequence(self, prompt_tokens, generated_tokens) -> None:
+        """Record the exact sequence now resident in KV."""
+        self._session.committed_sequence_tokens = (
+            list(prompt_tokens) + list(generated_tokens)
+        )
 
     def _qwen3_coder_native_protocol(self) -> bool:
         profile = getattr(self, "model_profile", None)
