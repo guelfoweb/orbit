@@ -140,6 +140,7 @@ def _prefill_hook_client(segments, *, lib=None) -> NativeLlamaClient:
     client._session = SimpleNamespace(
         ctx_tgt=object(),
         cached_prompt_tokens=[],
+        committed_sequence_tokens=[],
         continuation_ready=False,
         in_flight=False,
         cancel_requested=False,
