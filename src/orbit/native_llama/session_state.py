@@ -28,6 +28,10 @@ class NativeSessionState:
     ctx_tgt: c_void_p | None = None
     sampler: c_void_p | None = None
     cached_prompt_tokens: list[int] = field(default_factory=list)
+    # Exact tokens currently resident in the backend KV sequence: the prompt
+    # that was prefilled plus every generated token that was successfully
+    # decoded into it. Empty whenever that identity cannot be proven.
+    committed_sequence_tokens: list[int] = field(default_factory=list)
     prompt_cache_mode: str | None = None
     in_flight: bool = False
     cancel_requested: bool = False
