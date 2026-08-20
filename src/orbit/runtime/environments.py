@@ -1521,16 +1521,18 @@ class FinalFromToolEnvironment:
         loop: int,
         response_prefix: str,
     ) -> FinalAnswerResult | None:
-        """Answer from verified evidence when the session cannot answer at all.
+        """Answer an evidence-backed workflow from its verified evidence.
 
-        A saturated investigation leaves no room to generate: the normal final
-        call would be admitted by the backend and then fail mid-decode, and the
-        user would get nothing despite the evidence having been collected. This
-        checks first, and only when the ordinary path provably cannot fit does
-        it rebuild the answer from durable evidence in a fresh context.
+        Reaching this environment already means a tool workflow is producing
+        its final answer, so this is the normal path for such a turn rather
+        than a rescue: the report is rebuilt from durable evidence in a fresh
+        session, and no longer depends on how much context the investigation
+        happened to leave. Gating it on context pressure instead would
+        reintroduce exactly that dependency.
 
-        Returning ``None`` means the ordinary path is fine and must be used --
-        this is a fallback for an otherwise-terminal state, not a new default.
+        Returning ``None`` means there is nothing to finalize from -- no
+        evidence, nothing that survives re-attestation, or a bundle that will
+        not fit -- and the ordinary path runs instead.
         """
         store = getattr(self.runtime, "evidence_store", None)
         if store is None or not store.records:
@@ -1585,7 +1587,7 @@ class FinalFromToolEnvironment:
                     "grounded_finalization",
                     streamed=on_final_delta is not None,
                     attempt=1,
-                    reason="investigation_context_exhausted",
+                    reason="evidence_backed_finalization",
                 )
             )
         # Fresh state: the saturated investigation KV is exactly what must not
@@ -1630,6 +1632,13 @@ class FinalFromToolEnvironment:
                     loop=loop, result=result, phase="grounded_finalization"
                 )
             )
+        # The prefix carries coverage notices -- that a file was shown in part,
+        # or a search matched only some of it. Streaming it is not enough: the
+        # ordinary path also prepends it to the content so it reaches history
+        # and non-streaming callers, and a caveat that silently disappears in
+        # one mode is worse than none.
+        if response_prefix:
+            result = replace(result, content=response_prefix + result.content)
         self.runtime.messages.append({"role": "assistant", "content": result.content})
         return FinalAnswerResult(result=result, used_retry_or_repair_pass=False)
 

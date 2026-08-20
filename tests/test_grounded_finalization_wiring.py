@@ -456,6 +456,159 @@ class LiveCallPathReachabilityTests(unittest.TestCase):
             self.assertEqual(backend.resets, 1)
 
 
+class CoverageNoticeTests(unittest.TestCase):
+    """Coverage caveats must survive the grounded path, streaming or not.
+
+    The prefix carries notices such as "only part of this file was shown". The
+    ordinary path prepends it to the content so it reaches history and
+    non-streaming callers; the grounded path must do the same, or a warning
+    about incomplete coverage silently disappears in one mode.
+    """
+
+    def _run(self, *, streaming: bool):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+            backend = RecordingBackend(
+                context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
+            )
+            env, runtime = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            streamed: list[str] = []
+            out = env._grounded_finalization(
+                temperature=0.0,
+                on_final_delta=streamed.append if streaming else None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="NOTE: partial coverage.\n",
+            )
+            self.assertIsNotNone(out)
+            assert out is not None
+            return out.result.content, "".join(streamed), runtime.messages
+
+    def test_prefix_survives_without_streaming(self) -> None:
+        content, _streamed, messages = self._run(streaming=False)
+        self.assertIn("NOTE: partial coverage.", content)
+        self.assertIn("NOTE: partial coverage.", str(messages[-1]["content"]))
+
+    def test_prefix_survives_with_streaming(self) -> None:
+        content, streamed, messages = self._run(streaming=True)
+        self.assertIn("NOTE: partial coverage.", streamed)
+        self.assertIn("NOTE: partial coverage.", content)
+        self.assertIn("NOTE: partial coverage.", str(messages[-1]["content"]))
+
+
+class ProductionTrustBoundaryTests(unittest.TestCase):
+    """The bundle the model sees must come from re-attested evidence.
+
+    Testing `entries_from_store` in isolation proves the helper works; it does
+    not prove the production path calls it. These assert on what actually
+    reaches the prompt, so bypassing re-attestation or deduplication in the
+    wiring fails here even though the library itself is still correct.
+    """
+
+    def _finalize(self, backend, store, *, context_tokens=1000):
+        messages = [
+            {"role": "user", "content": "analyse"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "output"},
+        ]
+        env, _ = _environment(
+            backend, store, messages=messages, context_tokens=context_tokens
+        )
+        env.answer(
+            temperature=0.0,
+            max_tokens=2048,
+            on_final_delta=None,
+            on_progress=None,
+            on_model_step=None,
+            on_phase_start=None,
+            loop=1,
+            use_tool_prompt=False,
+            workdir=None,
+        )
+        return "".join(
+            str(m.get("content", "")) for m in backend.chat_calls[-1]["messages"]
+        )
+
+    def test_tampered_evidence_never_reaches_the_prompt(self) -> None:
+        """Bytes edited on disk after attestation must not be cited."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ids = _store_with(tmp, ["genuine payload " + "g" * 200])
+            (store.root / f"{ids[0]}.txt").write_text(
+                "TAMPERED payload " + "x" * 200, encoding="utf-8"
+            )
+            store.raw_cache.pop(ids[0], None)
+            backend = RecordingBackend(
+                context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
+            )
+            env, _ = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            out = env._grounded_finalization(
+                temperature=0.0,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="",
+            )
+            sent = "".join(
+                str(m.get("content", "")) for m in backend.chat_calls[-1]["messages"]
+            ) if backend.chat_calls else ""
+            self.assertNotIn("TAMPERED", sent, "tampered bytes reached the model")
+            if out is not None:
+                self.assertNotIn("TAMPERED", out.result.content)
+
+    def test_duplicate_evidence_is_collapsed_in_the_prompt(self) -> None:
+        """Byte-identical records must appear once, via the library's dedup."""
+        payload = "repeated finding " + "r" * 200
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, [payload, payload, payload])
+            backend = RecordingBackend(
+                context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
+            )
+            sent = self._finalize(backend, store)
+            self.assertEqual(
+                sent.count("repeated finding"), 1, "duplicates were not collapsed"
+            )
+
+    def test_prompt_carries_recomputed_digests(self) -> None:
+        """The header hash must be of the bytes actually sent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store, ids = _store_with(tmp, ["payload " + "p" * 200])
+            backend = RecordingBackend(
+                context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
+            )
+            sent = self._finalize(backend, store)
+            expected = hashlib.sha256(
+                ("payload " + "p" * 200).encode("utf-8")
+            ).hexdigest()
+            self.assertIn(expected[:16], sent)
+
+
 class EvidenceTrustChainTests(unittest.TestCase):
     def test_bundle_sources_only_reattested_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
