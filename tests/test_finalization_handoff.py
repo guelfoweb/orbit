@@ -123,6 +123,9 @@ class StoreCompositionTests(unittest.TestCase):
         self.assertEqual([e.evidence_id for e in entries], ["E1", "E2"])
         self.assertEqual(entries[0].content, "alpha bytes")
         self.assertEqual(entries[0].sha256, content_digest("alpha bytes"))
+        # Provenance must survive: the header tells the model where the
+        # evidence came from.
+        self.assertEqual(entries[0].kind, "stdout")
 
     def test_store_entries_recompute_the_digest(self) -> None:
         # entries_from_store must not trust a digest carried by the record.
@@ -191,7 +194,8 @@ class RenderTests(unittest.TestCase):
     def test_large_payload_is_neither_stripped_nor_truncated(self) -> None:
         # A short clean payload cannot detect strip() or a 200-char cut.
         payload = "  \n" + ("X" * 5000) + "\t  \n"
-        text = render_bundle(TASK, [entry("E1", payload)])
+        kept = deduplicate_evidence([BundleEntry("E1", "stdout", "", 0, payload)])
+        text = render_bundle(TASK, kept)
         self.assertIn(payload, text)
         self.assertIn("X" * 5000, text)
 
@@ -229,10 +233,9 @@ class RenderTests(unittest.TestCase):
     # Witnesses whose marker prefix lands inside the named field. They are
     # precomputed because searching costs ~10s and, being probabilistic, can
     # overrun any fixed trial budget. Each is re-checked at run time and the
-    # test skips if it no longer collides, so a change to the seed formula
-    # surfaces as a visible skip rather than as a test that quietly stops
-    # exercising the extension loop -- the exact failure of the tests these
-    # replaced.
+    # test skips if it no longer collides. A skip still loses coverage, so the
+    # marker-length floor above is asserted unconditionally: that is the part
+    # which must never go unchecked.
     WITNESS_FILLER_UNITS = 16000
     WITNESSES = {"content": 62872, "evidence_id": 53285, "kind": 31900}
 
@@ -261,6 +264,15 @@ class RenderTests(unittest.TestCase):
         self.assertGreater(len(marker), 8)
         self.assertNotIn(marker, {"content": content, "kind": kind,
                                   "evidence_id": evidence_id}[field])
+
+    def test_marker_is_never_shorter_than_the_minimum(self) -> None:
+        # Not skippable: a marker below the floor is guessable, so this must
+        # hold even if every witness stops colliding.
+        for entries in (
+            deduplicate_evidence([entry("E1", "alpha")]),
+            deduplicate_evidence([entry("E1", "a"), entry("E2", "b")]),
+        ):
+            self.assertGreaterEqual(len(bundle_nonce(entries)), 8)
 
     def test_extension_loop_fires_when_the_prefix_lands_in_content(self) -> None:
         self._assert_extension_fires("content")
