@@ -92,9 +92,10 @@ class DigestTrustTests(unittest.TestCase):
         self.assertEqual(len(deduplicate_evidence([e])), 1)
 
     def test_chars_field_reflects_untrimmed_content(self) -> None:
+        # Exercise the module, not the test helper: chars must come from dedup.
         payload = "  padded  "
-        store_entry = entry("E1", payload)
-        self.assertEqual(store_entry.chars, len(payload))
+        kept = deduplicate_evidence([BundleEntry("E1", "stdout", "", 0, payload)])
+        self.assertEqual(kept[0].chars, len(payload))
 
     def test_content_digest_matches_hashlib(self) -> None:
         self.assertEqual(
@@ -122,6 +123,21 @@ class StoreCompositionTests(unittest.TestCase):
         self.assertEqual([e.evidence_id for e in entries], ["E1", "E2"])
         self.assertEqual(entries[0].content, "alpha bytes")
         self.assertEqual(entries[0].sha256, content_digest("alpha bytes"))
+
+    def test_store_entries_recompute_the_digest(self) -> None:
+        # entries_from_store must not trust a digest carried by the record.
+        class _BadRec:
+            kind = "stdout"
+            sha256 = "0" * 64
+
+        class _BadStore:
+            records = {"E1": _BadRec()}
+
+            def reattest_exact(self, evidence_id):
+                return "actual bytes"
+
+        entries = entries_from_store(_BadStore(), ["E1"])
+        self.assertEqual(entries[0].sha256, content_digest("actual bytes"))
 
     def test_record_failing_attestation_is_omitted(self) -> None:
         # A final answer must not cite evidence the runtime cannot stand behind.
@@ -230,6 +246,59 @@ class RenderTests(unittest.TestCase):
         text = render_bundle(TASK, entries)
         real = bundle_nonce(entries)
         self.assertEqual(text.count(f"<<<{real} BEGIN"), 1)
+
+    def test_hostile_kind_cannot_force_a_refusal(self) -> None:
+        # Seeding from digests alone while scanning the kind let an attacker
+        # compute the seed offline and embed it, exhausting the search and
+        # denying finalization entirely via a hostile filename.
+        content = "benign evidence"
+        seed = content_digest(content_digest(content))
+        entries = deduplicate_evidence(
+            [BundleEntry("E1", f"file:report_{seed}.txt", "", len(content), content)]
+        )
+        nonce = bundle_nonce(entries)
+        self.assertEqual(render_bundle(TASK, entries).count(f"<<<{nonce} BEGIN"), 1)
+
+    def test_hostile_evidence_id_cannot_force_a_refusal(self) -> None:
+        content = "benign evidence"
+        seed = content_digest(content_digest(content))
+        entries = deduplicate_evidence(
+            [BundleEntry(f"E{seed}", "stdout", "", len(content), content)]
+        )
+        nonce = bundle_nonce(entries)
+        self.assertEqual(render_bundle(TASK, entries).count(f"<<<{nonce} BEGIN"), 1)
+
+    def test_marker_never_appears_in_the_text_it_delimits(self) -> None:
+        # The property that matters, stated directly: whatever the search
+        # returns must not occur in any field the frame wraps. Seeding from all
+        # three fields means an identifier or kind cannot collide by
+        # construction, so this asserts the invariant rather than one branch.
+        for eid, kind, content in (
+            ("E1", "stdout", "alpha"),
+            ("E" + "f" * 40, "file:report.txt", "beta"),
+            ("E2", "file:" + "a" * 40 + ".txt", "gamma"),
+        ):
+            with self.subTest(eid=eid):
+                entries = deduplicate_evidence(
+                    [BundleEntry(eid, kind, "", len(content), content)]
+                )
+                marker = bundle_nonce(entries)
+                self.assertNotIn(marker, entries[0].content)
+                self.assertNotIn(marker, entries[0].kind)
+                self.assertNotIn(marker, entries[0].evidence_id)
+
+    def test_frame_is_refused_rather_than_emitted_forgeable(self) -> None:
+        # The backstop must refuse, never fall back to a marker present in the
+        # text it delimits.
+        # Content that contains every prefix of its own seed leaves no usable
+        # marker; refusing beats emitting one the content can imitate.
+        import unittest.mock as _mock
+
+        with _mock.patch(
+            "orbit.runtime.finalization.content_digest", return_value="a" * 64
+        ):
+            with self.assertRaises(ValueError):
+                bundle_nonce([BundleEntry("E1", "stdout", "a" * 64, 64, "a" * 64)])
 
     def test_header_carries_provenance_fields(self) -> None:
         text = render_bundle(TASK, [entry("E1", "payload")])

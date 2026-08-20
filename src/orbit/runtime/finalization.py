@@ -142,7 +142,18 @@ def bundle_nonce(entries: list[BundleEntry]) -> str:
     evidence and lengthening it until no entry contains it makes the frame
     unforgeable by that same evidence, while keeping rendering deterministic.
     """
-    seed = content_digest("".join(entry.sha256 for entry in entries))
+    # Seed from every field the marker must avoid. Seeding from digests alone
+    # while scanning the identifier and kind left those two attacker-influenced
+    # and offline-computable: embedding the resulting seed exhausted the search
+    # and forced a refusal. Folding them in makes the embed self-defeating,
+    # because changing them changes the seed.
+    seed = content_digest(
+        "".join(
+            f"{content_digest(entry.evidence_id)}"
+            f"{content_digest(entry.kind)}{entry.sha256}"
+            for entry in entries
+        )
+    )
     for length in range(8, len(seed) + 1):
         candidate = seed[:length]
         if not any(
