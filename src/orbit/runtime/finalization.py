@@ -20,13 +20,14 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from orbit.runtime.completion_budget import FINALIZATION_FINAL_MAX_TOKENS
+
 
 
 # Reserve for template framing and tokenizer drift between counting and
 # generation. Small: admission is exact, this only absorbs rendering overhead.
 FINALIZATION_SAFETY_TOKENS = 256
 
-from orbit.runtime.completion_budget import FINALIZATION_FINAL_MAX_TOKENS
 
 FINAL_ONLY_INSTRUCTION = (
     "Produce the final answer using only the verified evidence supplied below. "
@@ -88,7 +89,20 @@ def deduplicate_evidence(entries) -> list[BundleEntry]:
         if digest in seen:
             continue
         seen.add(digest)
-        unique.append(entry)
+        # Canonicalise: downstream framing derives its marker from these
+        # digests, so an entry carrying an empty or differently-spelled one
+        # would make the marker predictable and forgeable. Recomputed values
+        # also stop the rendered header advertising a size or hash that the
+        # bytes do not have.
+        unique.append(
+            BundleEntry(
+                evidence_id=entry.evidence_id,
+                kind=entry.kind,
+                sha256=digest,
+                chars=len(entry.content),
+                content=entry.content,
+            )
+        )
     return unique
 
 
@@ -131,9 +145,15 @@ def bundle_nonce(entries: list[BundleEntry]) -> str:
     seed = content_digest("".join(entry.sha256 for entry in entries))
     for length in range(8, len(seed) + 1):
         candidate = seed[:length]
-        if not any(candidate in entry.content for entry in entries):
+        if not any(
+            candidate in entry.content or candidate in entry.kind
+            or candidate in entry.evidence_id
+            for entry in entries
+        ):
             return candidate
-    return seed
+    # Every prefix occurs in the framed text, so no marker built from this seed
+    # can delimit it. Refuse rather than emit a forgeable frame.
+    raise ValueError("finalization_bundle_frame_unavailable")
 
 
 def render_bundle(task: str, entries: list[BundleEntry]) -> str:
