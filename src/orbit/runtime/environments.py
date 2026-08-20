@@ -58,6 +58,7 @@ from orbit.runtime.full_document import (
     targeted_search_coverage_notice,
     targeted_search_no_match_notice,
 )
+from orbit.runtime.context_manager import ContextAdmissionError
 from orbit.runtime.finalization import (
     admit_finalization,
     deduplicate_evidence,
@@ -1271,35 +1272,40 @@ class FinalFromToolEnvironment:
                     attempt=1,
                 )
             )
-        # The web-final view is its own answer shaping: when a search returned
-        # nothing or only snippets, that curated framing is what makes the
-        # reply honest about what was found. Rebuilding from raw evidence bytes
-        # would discard it, so that path keeps its own final call.
-        grounded = None if uses_web_final_view else self._grounded_finalization(
-            temperature=temperature,
-            on_final_delta=on_final_delta,
-            on_progress=on_progress,
-            on_model_step=on_model_step,
-            on_phase_start=on_phase_start,
-            loop=loop,
-            response_prefix=response_prefix,
-        )
-        if grounded is not None:
-            return grounded
         if response_prefix and on_final_delta is not None:
             on_final_delta(response_prefix)
-        with self.transport.backend_thinking(False):
-            with model_call_context(phase="final_from_tool", tools_mode="on"):
-                if on_final_delta is None:
-                    result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
-                else:
-                    result = self.runtime.backend.chat_stream(
-                        policy.messages,
-                        temperature=temperature,
-                        max_tokens=policy.max_tokens,
-                        on_delta=final_delta,
-                        on_progress=on_progress,
-                    )
+        try:
+            with self.transport.backend_thinking(False):
+                with model_call_context(phase="final_from_tool", tools_mode="on"):
+                    if on_final_delta is None:
+                        result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
+                    else:
+                        result = self.runtime.backend.chat_stream(
+                            policy.messages,
+                            temperature=temperature,
+                            max_tokens=policy.max_tokens,
+                            on_delta=final_delta,
+                            on_progress=on_progress,
+                        )
+        except ContextAdmissionError:
+            # Admission is enforced inside the managed backend, so a window that
+            # cannot be completed surfaces here rather than during assembly.
+            # Nothing has been generated yet, so the rescue can still run; if it
+            # cannot, the original error is the honest outcome.
+            grounded = self._grounded_finalization(
+                policy.messages,
+                temperature=temperature,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+                loop=loop,
+                response_prefix=response_prefix,
+                same_session_unavailable=True,
+            )
+            if grounded is not None:
+                return grounded
+            raise
         best_non_empty_result = result if result.content.strip() else None
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
@@ -1519,6 +1525,7 @@ class FinalFromToolEnvironment:
 
     def _grounded_finalization(
         self,
+        messages: list[Message],
         *,
         temperature: float,
         on_final_delta: Callable[[str], None] | None,
@@ -1527,19 +1534,22 @@ class FinalFromToolEnvironment:
         on_phase_start: Callable[[ModelPhaseStart], None] | None,
         loop: int,
         response_prefix: str,
+        same_session_unavailable: bool = False,
     ) -> FinalAnswerResult | None:
-        """Answer an evidence-backed workflow from its verified evidence.
+        """Answer from verified evidence when same-session completion cannot run.
 
-        Reaching this environment already means a tool workflow is producing
-        its final answer, so this is the normal path for such a turn rather
-        than a rescue: the report is rebuilt from durable evidence in a fresh
-        session, and no longer depends on how much context the investigation
-        happened to leave. Gating it on context pressure instead would
-        reintroduce exactly that dependency.
+        This is a rescue, not the normal route. The ordinary final path owns
+        retry, repair, compact retry, streaming buffering and the non-empty
+        fallback, and a healthy turn must keep all of it; routing every
+        evidence-backed workflow through here instead traded that machinery for
+        a second, thinner completion controller and regressed the healthy case.
 
-        Returning ``None`` means there is nothing to finalize from -- no
-        evidence, nothing that survives re-attestation, or a bundle that will
-        not fit -- and the ordinary path runs instead.
+        So the question asked here is narrow: can the ordinary window actually
+        be completed? It is answered by exact token count before anything is
+        generated, never by waiting for a decode failure. Only when the answer
+        is no is the report rebuilt from durable evidence in a fresh session.
+
+        Returning ``None`` means the ordinary path can and should run.
         """
         store = getattr(self.runtime, "evidence_store", None)
         if store is None or not store.records:
@@ -1551,19 +1561,27 @@ class FinalFromToolEnvironment:
         if not callable(count_chat):
             return None
 
-        # Reaching this environment already means an evidence-backed tool
-        # workflow is producing its final answer, and verified evidence exists.
-        # That -- not context pressure -- is the trigger: an earlier version
-        # diverted only when the ordinary window provably could not fit, which
-        # made grounded finalization a rescue for saturated sessions instead of
-        # the normal way an investigation reports. The point of the separate
-        # phase is that the answer no longer depends on how much room the
-        # investigation happened to leave, so the same handoff applies whether
-        # the session is nearly empty or nearly full.
+        # Can the ordinary path complete this turn? Counted exactly, before any
+        # generation: waiting for the backend to fail mid-decode yields no
+        # answer at all, and guessing either strands a usable turn or walks into
+        # that failure. Only a window that provably cannot be completed is
+        # rescued here; everything else keeps the ordinary path and the mature
+        # retry, repair and non-empty-fallback behaviour that comes with it.
         #
         # Pure chat and full-document never arrive here: chat completes through
         # the transport environment, and the full-document path returns before
         # this point.
+        if not same_session_unavailable:
+            try:
+                current_tokens = self._exact_token_total(
+                    count_chat(messages, tools=None, thinking=False)
+                )
+            except Exception:
+                return None
+            if current_tokens is None:
+                return None
+            if admit_finalization(current_tokens, context_tokens).admitted:
+                return None
 
         entries = deduplicate_evidence(
             entries_from_store(store, list(store.records.keys()))

@@ -164,6 +164,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -191,6 +192,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=100_000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -215,6 +217,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -241,6 +244,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -266,6 +270,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=32_000,
             )
             env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -291,6 +296,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -326,6 +332,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -352,6 +359,7 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -435,14 +443,35 @@ class LiveCallPathReachabilityTests(unittest.TestCase):
             self.assertIsNone(backend.chat_calls[-1]["tools"])
             self.assertEqual(backend.resets, 1)
 
-    def test_roomy_session_still_finalizes_from_evidence(self) -> None:
-        """The trigger is the evidence-backed boundary, not context pressure.
+    def test_saturated_session_is_rescued_before_any_decode(self) -> None:
+        """A window that cannot be completed is rescued, not decoded into.
 
-        An earlier version diverted only when the ordinary window could not
-        fit, which made grounded finalization a rescue for saturated sessions
-        rather than how an investigation normally reports. With plenty of
-        context left the same handoff must still apply, because the answer is
-        not supposed to depend on what the investigation happened to leave.
+        This is the failure the phase exists for: the investigation filled the
+        context, so the ordinary final call has no room to generate and would
+        fail mid-decode. The rescue must fire from the real answer() path, and
+        must fire on the exact count rather than on a backend error.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["verified payload " + "p" * 200])
+            backend = RecordingBackend(
+                context_tokens=1000,
+                tokens_for={"": 5000, "Verified evidence": 300},
+            )
+            result = self._answer(backend, store, context_tokens=1000)
+            self.assertEqual(result.result.finish_reason, "stop")
+            sent = backend.chat_calls[-1]["messages"]
+            self.assertEqual(len(sent), 1, "did not answer from the bundle")
+            self.assertIn("Verified evidence", str(sent[0]["content"]))
+            self.assertIsNone(backend.chat_calls[-1]["tools"])
+            self.assertEqual(backend.resets, 1, "session was not made fresh")
+
+    def test_healthy_workflow_stays_on_the_ordinary_path(self) -> None:
+        """A turn the ordinary path can complete must keep it.
+
+        The ordinary path owns retry, repair, compact retry and the non-empty
+        fallback. Diverting a healthy turn to the bundle would hand it to a
+        thinner controller that has none of that, so the rescue must stay a
+        rescue: with room to answer normally, nothing here should fire.
         """
         with tempfile.TemporaryDirectory() as tmp:
             store, _ids = _store_with(tmp, ["payload " + "p" * 200])
@@ -450,10 +479,10 @@ class LiveCallPathReachabilityTests(unittest.TestCase):
             self._answer(backend, store, context_tokens=100_000)
             self.assertTrue(backend.chat_calls)
             sent = backend.chat_calls[-1]["messages"]
-            self.assertEqual(len(sent), 1, "did not finalize from the bundle")
-            self.assertIn("Verified evidence", str(sent[0]["content"]))
-            self.assertIsNone(backend.chat_calls[-1]["tools"])
-            self.assertEqual(backend.resets, 1)
+            self.assertGreater(
+                len(sent), 1, "healthy turn was diverted to the evidence bundle"
+            )
+            self.assertEqual(backend.resets, 0, "healthy turn reset the session")
 
 
 class ScopeAndResilienceTests(unittest.TestCase):
@@ -473,11 +502,13 @@ class ScopeAndResilienceTests(unittest.TestCase):
         return store
 
     def test_web_final_view_keeps_its_curated_framing(self) -> None:
-        """A search that found nothing must not be answered from raw bytes.
+        """A search that found nothing keeps its curated framing.
 
-        The web-final view exists to say honestly what the search returned.
-        Rebuilding the answer from evidence would discard that shaping, so this
-        path keeps its own final call.
+        The web-final view exists to say honestly what the search returned, and
+        the bundle cannot reproduce that shaping. Because the rescue only fires
+        when the ordinary window cannot be completed, a healthy web-final turn
+        keeps its own final call; if that window genuinely will not fit, the
+        rescue still runs, since the alternative there is no answer at all.
         """
         with tempfile.TemporaryDirectory() as tmp:
             store = self._web_search_store(tmp)
@@ -549,6 +580,7 @@ class ScopeAndResilienceTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -558,6 +590,44 @@ class ScopeAndResilienceTests(unittest.TestCase):
                 response_prefix="",
             )
             self.assertIsNone(out, "backend failure propagated instead of declining")
+
+    def test_streaming_backend_failure_does_not_cost_the_turn(self) -> None:
+        """The streaming half of the guard needs its own test.
+
+        Only overriding `chat` leaves `chat_stream` unguarded: the guard around
+        it could be deleted and every test would still pass.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+
+            class FailingStream(RecordingBackend):
+                def chat_stream(
+                    self, messages, *, temperature, max_tokens, on_delta,
+                    on_progress, tools=None,
+                ):
+                    raise RuntimeError("stream exploded")
+
+            backend = FailingStream(
+                context_tokens=1000,
+                tokens_for={"saturated": 990, "Verified evidence": 300},
+            )
+            env, _ = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
+                temperature=0.0,
+                on_final_delta=lambda _chunk: None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="",
+            )
+            self.assertIsNone(out, "streaming failure propagated instead of declining")
 
     def test_failed_reset_declines_rather_than_finalizing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -577,6 +647,7 @@ class ScopeAndResilienceTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -612,6 +683,7 @@ class CoverageNoticeTests(unittest.TestCase):
             )
             streamed: list[str] = []
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=streamed.append if streaming else None,
                 on_progress=None,
@@ -709,6 +781,7 @@ class ProductionTrustBoundaryTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
+                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
