@@ -266,6 +266,31 @@ class InvalidationCoverageTests(unittest.TestCase):
     def test_reset_session_state_invalidates_at_top_level(self) -> None:
         self.assertIsNotNone(self._top_level_invalidation_line("reset_session_state"))
 
+    def test_continuation_invalidates_before_extending_kv(self) -> None:
+        # continue_chat_text_current_context is public and server-reachable
+        # (native_server/app.py). It decodes further tokens into the SAME
+        # sequence, so the recorded identity must be dropped first: otherwise a
+        # later prompt takes the fast path against a longer KV and the suffix
+        # is written at auto-assigned positions past the real end.
+        fn = self._function("_continue_generation_from_current_context")
+        body = self._body_after_docstring(fn)
+        invalidation = next(
+            (i for i, stmt in enumerate(body) if self._is_invalidation(stmt)), None
+        )
+        self.assertIsNotNone(invalidation, "continuation must invalidate identity")
+        decodes = [
+            node.lineno
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", None) == "_generate_from_current_context"
+        ]
+        self.assertTrue(decodes)
+        self.assertLess(body[invalidation].lineno, min(decodes))
+
+    def test_close_invalidates_identity(self) -> None:
+        # Freeing the context destroys the KV the identity describes.
+        self.assertIsNotNone(self._top_level_invalidation_line("close"))
+
     def test_complete_prompt_exception_handler_invalidates(self) -> None:
         fn = self._function("complete_prompt")
         handlers = [h for node in ast.walk(fn) if isinstance(node, ast.Try) for h in node.handlers]

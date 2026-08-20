@@ -512,6 +512,8 @@ class NativeLlamaClient:
         self.lib.lib.llama_log_set(cb, None)
 
     def close(self) -> None:
+        # Freeing the context destroys the KV the identity describes.
+        self._invalidate_committed_sequence()
         lib = self.lib.lib
         self.lib.configure_expert_usage(False)
         self._invalidate_qwen_route_prefix("client_closed")
@@ -2105,9 +2107,6 @@ class NativeLlamaClient:
                 ctx_tgt=self._session.ctx_tgt,
             )
         except Exception as exc:
-            # KV may hold a partially decoded prompt that matches neither the
-            # previous nor the new sequence.
-            self._invalidate_committed_sequence()
             self.mtp_fallback_reason = str(exc) or "persistent-mtp-reset-failed"
             self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
             self._session.mtp_failed = True
@@ -3120,6 +3119,7 @@ class NativeLlamaClient:
         self._session.cached_prompt_tokens.clear()
 
         self._invalidate_committed_sequence()
+
     def _route_anchor_state_kwargs(self, plan: _RouteAnchorRuntimePlan) -> dict[str, str | None]:
         return {
             "model_id": str(self.paths.model),
@@ -3383,6 +3383,11 @@ class NativeLlamaClient:
     ) -> NativeTimings:
         if not self._session.continuation_ready:
             raise RuntimeError("no active continuation state")
+        # Continuation decodes further tokens into the SAME sequence, extending
+        # KV past the recorded identity. The extension cannot be committed
+        # either, because this path may raise after a partial decode, so the
+        # only provable state is "identity unknown".
+        self._invalidate_committed_sequence()
         self.reset_cancel()
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = max_tokens
