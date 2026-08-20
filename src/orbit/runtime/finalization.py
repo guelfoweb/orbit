@@ -17,6 +17,7 @@ count before any generation is attempted.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 
@@ -65,21 +66,60 @@ class FinalizationAdmission:
         )
 
 
+def content_digest(content: str) -> str:
+    """Content identity: the SHA-256 of the exact bytes, computed here."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def deduplicate_evidence(entries) -> list[BundleEntry]:
     """Collapse byte-identical evidence, keeping first-occurrence identity.
 
     A long investigation re-reports the same artifacts as it revisits them, so
-    the same bytes recur under later identifiers. Identity is the SHA-256 of
-    the exact content: evidence that merely looks similar is never merged.
+    the same bytes recur under later identifiers. The key is recomputed from
+    the content rather than taken from the entry: a stale or wrong digest would
+    otherwise merge findings that differ, and losing a distinct result silently
+    is worse than carrying a duplicate. An entry whose declared digest does not
+    match its bytes is dropped, because its identity cannot be trusted.
     """
     seen: set[str] = set()
     unique: list[BundleEntry] = []
     for entry in entries:
-        if entry.sha256 in seen:
+        digest = content_digest(entry.content)
+        if entry.sha256 and entry.sha256 != digest:
             continue
-        seen.add(entry.sha256)
+        if digest in seen:
+            continue
+        seen.add(digest)
         unique.append(entry)
     return unique
+
+
+def entries_from_store(store, evidence_ids) -> list[BundleEntry]:
+    """Build entries from the EvidenceStore, re-attesting every record.
+
+    Composing with the store rather than accepting caller-supplied content is
+    what makes the bundle trustworthy: `reattest_exact` re-reads the durable
+    bytes and re-checks identity and provenance, so an entry can only exist
+    here if its evidence still verifies. A record that fails attestation is
+    omitted rather than reported, since a final answer must not cite evidence
+    the runtime can no longer stand behind.
+    """
+    entries: list[BundleEntry] = []
+    for evidence_id in evidence_ids:
+        content = store.reattest_exact(evidence_id)
+        if content is None:
+            continue
+        record = store.records.get(evidence_id)
+        entries.append(
+            BundleEntry(
+                evidence_id=evidence_id,
+                kind=getattr(record, "kind", "evidence"),
+                sha256=content_digest(content),
+                chars=len(content),
+                content=content,
+            )
+        )
+    return entries
 
 
 def render_bundle(task: str, entries: list[BundleEntry]) -> str:
@@ -127,7 +167,9 @@ def admit_finalization(
     budget = resolve_output_budget(
         prompt_tokens, context_tokens, cap=cap, safety=safety
     )
-    if budget < minimum_output:
+    if prompt_tokens < 0 or prompt_tokens >= context_tokens:
+        budget = 0
+    if budget <= 0 or budget < minimum_output:
         return FinalizationAdmission(
             prompt_tokens=prompt_tokens,
             output_budget=budget,

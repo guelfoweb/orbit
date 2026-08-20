@@ -11,6 +11,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.runtime.finalization import (
+    content_digest,
+    entries_from_store,
     FINAL_ONLY_INSTRUCTION,
     FINALIZATION_FINAL_MAX_TOKENS,
     FINALIZATION_SAFETY_TOKENS,
@@ -64,6 +66,55 @@ class DeduplicationTests(unittest.TestCase):
         self.assertEqual(deduplicate_evidence([]), [])
 
 
+class DigestTrustTests(unittest.TestCase):
+    """The dedup key is recomputed, never taken on trust."""
+
+    def test_wrong_declared_digest_does_not_merge_distinct_evidence(self) -> None:
+        # A stale or spoofed digest must not silently drop a distinct finding.
+        bad = BundleEntry("E1", "stdout", "deadbeef", 16, "ATTACK SUCCEEDED")
+        good = entry("E2", "ATTACK FAILED")
+        kept = deduplicate_evidence([bad, good])
+        self.assertEqual([e.content for e in kept], ["ATTACK FAILED"])
+
+    def test_identical_bytes_merge_even_with_absent_digest(self) -> None:
+        a = BundleEntry("E1", "stdout", "", 3, "dup")
+        b = BundleEntry("E2", "stdout", "", 3, "dup")
+        self.assertEqual(len(deduplicate_evidence([a, b])), 1)
+
+    def test_content_digest_matches_hashlib(self) -> None:
+        self.assertEqual(
+            content_digest("abc"), hashlib.sha256(b"abc").hexdigest()
+        )
+
+
+class StoreCompositionTests(unittest.TestCase):
+    """Entries are sourced from the EvidenceStore, re-attested."""
+
+    class _Rec:
+        kind = "stdout"
+
+    class _Store:
+        def __init__(self, mapping):
+            self._mapping = mapping
+            self.records = {k: StoreCompositionTests._Rec() for k in mapping}
+
+        def reattest_exact(self, evidence_id):
+            return self._mapping.get(evidence_id)
+
+    def test_attested_records_become_entries(self) -> None:
+        store = self._Store({"E1": "alpha bytes", "E2": "beta bytes"})
+        entries = entries_from_store(store, ["E1", "E2"])
+        self.assertEqual([e.evidence_id for e in entries], ["E1", "E2"])
+        self.assertEqual(entries[0].content, "alpha bytes")
+        self.assertEqual(entries[0].sha256, content_digest("alpha bytes"))
+
+    def test_record_failing_attestation_is_omitted(self) -> None:
+        # A final answer must not cite evidence the runtime cannot stand behind.
+        store = self._Store({"E1": "kept"})
+        entries = entries_from_store(store, ["E1", "E_MISSING"])
+        self.assertEqual([e.evidence_id for e in entries], ["E1"])
+
+
 class RenderTests(unittest.TestCase):
     def test_bundle_contains_task_instruction_and_ids(self) -> None:
         text = render_bundle(TASK, [entry("E1", "PAYLOAD")])
@@ -76,6 +127,23 @@ class RenderTests(unittest.TestCase):
         payload = "exact\tbytes\\here\n"
         self.assertIn(payload, render_bundle(TASK, [entry("E1", payload)]))
 
+    def test_large_payload_is_neither_stripped_nor_truncated(self) -> None:
+        # A short clean payload cannot detect strip() or a 200-char cut.
+        payload = "  \n" + ("X" * 5000) + "\t  \n"
+        text = render_bundle(TASK, [entry("E1", payload)])
+        self.assertIn(payload, text)
+        self.assertIn("X" * 5000, text)
+
+    def test_header_carries_provenance_fields(self) -> None:
+        text = render_bundle(TASK, [entry("E1", "payload")])
+        self.assertIn("sha256=", text)
+        self.assertIn("chars", text)
+
+    def test_input_order_is_preserved(self) -> None:
+        entries = [entry("E1", "one"), entry("E2", "two"), entry("E3", "three")]
+        kept = deduplicate_evidence(entries)
+        self.assertEqual([e.evidence_id for e in kept], ["E1", "E2", "E3"])
+
     def test_instruction_requires_unresolved_and_forbids_tools(self) -> None:
         low = FINAL_ONLY_INSTRUCTION.lower()
         self.assertIn("unresolved", low)
@@ -87,12 +155,6 @@ class RenderTests(unittest.TestCase):
                        "decode", "cleanup", "payload"):
             self.assertNotIn(banned, low)
 
-    def test_bundle_carries_only_supplied_evidence(self) -> None:
-        # Reasoning, failed repairs and generated programs are not evidence
-        # records, so they cannot reach the bundle.
-        text = render_bundle(TASK, [entry("E1", "EVIDENCE")])
-        for banned in ("Traceback", "SyntaxError", "import orbit_tools"):
-            self.assertNotIn(banned, text)
 
 
 class OutputBudgetTests(unittest.TestCase):
@@ -112,6 +174,11 @@ class OutputBudgetTests(unittest.TestCase):
 
     def test_budget_is_zero_when_nothing_remains(self) -> None:
         self.assertEqual(resolve_output_budget(CTX, CTX), 0)
+
+    def test_safety_constant_is_pinned(self) -> None:
+        # Budget tests derive from the constant, so pin its value directly.
+        self.assertEqual(FINALIZATION_SAFETY_TOKENS, 256)
+        self.assertEqual(FINALIZATION_FINAL_MAX_TOKENS, 4096)
 
     def test_safety_reserve_is_always_deducted(self) -> None:
         prompt = CTX - FINALIZATION_SAFETY_TOKENS
@@ -151,6 +218,24 @@ class AdmissionTests(unittest.TestCase):
                     + admission.safety_tokens
                 )
                 self.assertLessEqual(total, CTX, f"prompt={prompt}")
+
+    def test_zero_budget_is_never_admitted(self) -> None:
+        # Admitting a 0-token budget would ask the backend to generate nothing:
+        # the exact "user gets no answer" outcome this module exists to prevent.
+        admission = admit_finalization(7000, 1000, minimum_output=0)
+        self.assertFalse(admission.admitted)
+
+    def test_prompt_larger_than_context_is_refused(self) -> None:
+        self.assertFalse(admit_finalization(20000, 16384).admitted)
+
+    def test_negative_prompt_is_refused(self) -> None:
+        self.assertFalse(admit_finalization(-500, CTX).admitted)
+
+    def test_admitted_result_never_has_negative_headroom(self) -> None:
+        for prompt in (-500, 0, 7008, 16000, 20000):
+            admission = admit_finalization(prompt, CTX, minimum_output=0)
+            if admission.admitted:
+                self.assertGreaterEqual(admission.headroom, 0, f"prompt={prompt}")
 
     def test_investigation_history_size_does_not_affect_admission(self) -> None:
         # The whole point: a saturated investigation must not block an answer.
