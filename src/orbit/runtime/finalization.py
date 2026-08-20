@@ -21,15 +21,12 @@ import hashlib
 from dataclasses import dataclass
 
 
+
 # Reserve for template framing and tokenizer drift between counting and
 # generation. Small: admission is exact, this only absorbs rendering overhead.
 FINALIZATION_SAFETY_TOKENS = 256
 
-# Upper bound on a final answer. The investigation's own per-call budget is
-# unrelated to how much room a report needs, so it is never inherited: a
-# 2,048-token cap truncated a report mid-section while 7,072 tokens of context
-# sat unused.
-FINALIZATION_FINAL_MAX_TOKENS = 4096
+from orbit.runtime.completion_budget import FINALIZATION_FINAL_MAX_TOKENS
 
 FINAL_ONLY_INSTRUCTION = (
     "Produce the final answer using only the verified evidence supplied below. "
