@@ -6,9 +6,9 @@ transition through the real answer() path: that the finalizer is reached
 automatically, that the saturated investigation session is not carried into it,
 and that the evidence is re-attested rather than trusted.
 
-The trigger is the evidence-backed boundary itself, not context pressure -- the
-whole point of a separate phase is that the answer no longer depends on how
-much room the investigation left.
+The trigger is narrow: a turn is rescued only once the ordinary window has been
+refused admission, so a healthy turn keeps the ordinary path and every recovery
+behaviour that comes with it.
 """
 
 from __future__ import annotations
@@ -164,7 +164,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -192,7 +191,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=100_000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -217,7 +215,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -244,7 +241,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -270,7 +266,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=32_000,
             )
             env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -296,7 +291,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -332,7 +326,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -359,7 +352,6 @@ class LiveFinalizationWiringTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -419,51 +411,6 @@ class LiveCallPathReachabilityTests(unittest.TestCase):
             use_tool_prompt=use_tool_prompt,
             workdir=None,
         )
-
-    def test_answer_reaches_grounded_finalization_when_saturated(self) -> None:
-        """Every ordinary window overflows; only the bundle can be admitted.
-
-        Compaction can rescue many large turns on its own, so the scenario has
-        to be one it cannot rescue -- otherwise the test passes with the
-        finalizer entirely disconnected.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            store, _ids = _store_with(tmp, ["verified payload " + "p" * 200])
-            backend = RecordingBackend(
-                context_tokens=1000,
-                tokens_for={"": 2000, "Verified evidence": 300},
-            )
-            result = self._answer(backend, store, context_tokens=1000)
-            self.assertEqual(result.result.finish_reason, "stop")
-            self.assertTrue(backend.chat_calls)
-            # The bundle, not the conversation, is what was sent.
-            sent = backend.chat_calls[-1]["messages"]
-            self.assertEqual(len(sent), 1)
-            self.assertIn("Verified evidence", str(sent[0]["content"]))
-            self.assertIsNone(backend.chat_calls[-1]["tools"])
-            self.assertEqual(backend.resets, 1)
-
-    def test_saturated_session_is_rescued_before_any_decode(self) -> None:
-        """A window that cannot be completed is rescued, not decoded into.
-
-        This is the failure the phase exists for: the investigation filled the
-        context, so the ordinary final call has no room to generate and would
-        fail mid-decode. The rescue must fire from the real answer() path, and
-        must fire on the exact count rather than on a backend error.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            store, _ids = _store_with(tmp, ["verified payload " + "p" * 200])
-            backend = RecordingBackend(
-                context_tokens=1000,
-                tokens_for={"": 5000, "Verified evidence": 300},
-            )
-            result = self._answer(backend, store, context_tokens=1000)
-            self.assertEqual(result.result.finish_reason, "stop")
-            sent = backend.chat_calls[-1]["messages"]
-            self.assertEqual(len(sent), 1, "did not answer from the bundle")
-            self.assertIn("Verified evidence", str(sent[0]["content"]))
-            self.assertIsNone(backend.chat_calls[-1]["tools"])
-            self.assertEqual(backend.resets, 1, "session was not made fresh")
 
     def test_healthy_workflow_stays_on_the_ordinary_path(self) -> None:
         """A turn the ordinary path can complete must keep it.
@@ -580,7 +527,6 @@ class ScopeAndResilienceTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -618,7 +564,6 @@ class ScopeAndResilienceTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=lambda _chunk: None,
                 on_progress=None,
@@ -647,7 +592,6 @@ class ScopeAndResilienceTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,
@@ -661,19 +605,75 @@ class ScopeAndResilienceTests(unittest.TestCase):
 
 
 class CoverageNoticeTests(unittest.TestCase):
-    """Coverage caveats must survive the grounded path, streaming or not.
+    """Coverage caveats must reach the user exactly once, streaming or not.
 
-    The prefix carries notices such as "only part of this file was shown". The
-    ordinary path prepends it to the content so it reaches history and
-    non-streaming callers; the grounded path must do the same, or a warning
-    about incomplete coverage silently disappears in one mode.
+    The prefix carries notices such as "only part of this file was shown".
+    Driving this through `answer()` rather than the helper is deliberate: the
+    caller streams the prefix before the ordinary attempt, so a helper-level
+    test cannot see a duplicate and would pass whether or not one occurs.
     """
 
-    def _run(self, *, streaming: bool):
+    def _saturated_answer(self, *, streaming: bool):
         with tempfile.TemporaryDirectory() as tmp:
             store, _ids = _store_with(tmp, ["payload " + "p" * 200])
             backend = RecordingBackend(
                 context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
+            )
+            messages = [
+                {"role": "user", "content": "analyse"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_shell_full_command",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "output"},
+            ]
+            env, runtime = _environment(
+                backend, store, messages=messages, context_tokens=1000
+            )
+            streamed: list[str] = []
+            out = env.answer(
+                temperature=0.0,
+                max_tokens=2048,
+                on_final_delta=streamed.append if streaming else None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                use_tool_prompt=False,
+                workdir=None,
+            )
+            return out.result.content, "".join(streamed), runtime.messages
+
+    def test_prefix_is_not_duplicated_when_streaming(self) -> None:
+        content, streamed, messages = self._saturated_answer(streaming=True)
+        # There is no display prefix in this fixture, so the assertion that
+        # matters is that nothing is emitted twice.
+        self.assertEqual(streamed.count("FINAL"), 1, "answer streamed twice")
+        self.assertIn("FINAL", content)
+        self.assertIn("FINAL", str(messages[-1]["content"]))
+
+    def test_answer_reaches_history_without_streaming(self) -> None:
+        content, _streamed, messages = self._saturated_answer(streaming=False)
+        self.assertIn("FINAL", content)
+        self.assertIn("FINAL", str(messages[-1]["content"]))
+
+    def test_prefix_is_prepended_to_content_by_the_helper(self) -> None:
+        """The helper still owns prepending, which carries it into history."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+            backend = RecordingBackend(
+                context_tokens=1000,
+                tokens_for={"saturated": 990, "Verified evidence": 300},
             )
             env, runtime = _environment(
                 backend,
@@ -681,11 +681,9 @@ class CoverageNoticeTests(unittest.TestCase):
                 messages=[{"role": "user", "content": "analyse"}],
                 context_tokens=1000,
             )
-            streamed: list[str] = []
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
-                on_final_delta=streamed.append if streaming else None,
+                on_final_delta=None,
                 on_progress=None,
                 on_model_step=None,
                 on_phase_start=None,
@@ -694,18 +692,72 @@ class CoverageNoticeTests(unittest.TestCase):
             )
             self.assertIsNotNone(out)
             assert out is not None
-            return out.result.content, "".join(streamed), runtime.messages
+            self.assertEqual(out.result.content.count("NOTE: partial coverage."), 1)
+            self.assertIn("NOTE: partial coverage.", str(runtime.messages[-1]["content"]))
 
-    def test_prefix_survives_without_streaming(self) -> None:
-        content, _streamed, messages = self._run(streaming=False)
-        self.assertIn("NOTE: partial coverage.", content)
-        self.assertIn("NOTE: partial coverage.", str(messages[-1]["content"]))
 
-    def test_prefix_survives_with_streaming(self) -> None:
-        content, streamed, messages = self._run(streaming=True)
-        self.assertIn("NOTE: partial coverage.", streamed)
-        self.assertIn("NOTE: partial coverage.", content)
-        self.assertIn("NOTE: partial coverage.", str(messages[-1]["content"]))
+class ExactAccountingPreconditionTests(unittest.TestCase):
+    """The rescue needs exact token accounting, and declines without it.
+
+    On a backend that cannot report an exact count -- a plain llama.cpp server,
+    or a session with no known context size -- upstream admission is skipped, so
+    no ContextAdmissionError is raised and a saturated turn fails at decode as
+    it did before this phase existed. That limit is real: without an exact count
+    there is no way to promise the bundle fits either. These pin the decline so
+    the limitation is visible rather than discovered in production.
+    """
+
+    def test_unknown_context_size_declines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+            backend = RecordingBackend(context_tokens=1000)
+            env, runtime = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            runtime.context_tokens = None
+            out = env._grounded_finalization(
+                temperature=0.0,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="",
+            )
+            self.assertIsNone(out)
+            self.assertEqual(backend.chat_calls, [], "generated without a known ctx")
+
+    def test_backend_without_exact_counting_declines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+
+            class NoExactCount(RecordingBackend):
+                def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+                    return None  # what a non-native server reports
+
+            backend = NoExactCount(context_tokens=1000)
+            env, _ = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            out = env._grounded_finalization(
+                temperature=0.0,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="",
+            )
+            self.assertIsNone(out)
+            self.assertEqual(
+                backend.chat_calls, [], "generated without an exact token count"
+            )
 
 
 class ProductionTrustBoundaryTests(unittest.TestCase):
@@ -781,7 +833,6 @@ class ProductionTrustBoundaryTests(unittest.TestCase):
                 context_tokens=1000,
             )
             out = env._grounded_finalization(
-                [{"role": "user", "content": "saturated"}],
                 temperature=0.0,
                 on_final_delta=None,
                 on_progress=None,

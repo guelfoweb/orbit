@@ -1293,7 +1293,6 @@ class FinalFromToolEnvironment:
             # Nothing has been generated yet, so the rescue can still run; if it
             # cannot, the original error is the honest outcome.
             grounded = self._grounded_finalization(
-                policy.messages,
                 temperature=temperature,
                 on_final_delta=on_final_delta,
                 on_progress=on_progress,
@@ -1301,7 +1300,6 @@ class FinalFromToolEnvironment:
                 on_phase_start=on_phase_start,
                 loop=loop,
                 response_prefix=response_prefix,
-                same_session_unavailable=True,
             )
             if grounded is not None:
                 return grounded
@@ -1525,7 +1523,6 @@ class FinalFromToolEnvironment:
 
     def _grounded_finalization(
         self,
-        messages: list[Message],
         *,
         temperature: float,
         on_final_delta: Callable[[str], None] | None,
@@ -1534,7 +1531,6 @@ class FinalFromToolEnvironment:
         on_phase_start: Callable[[ModelPhaseStart], None] | None,
         loop: int,
         response_prefix: str,
-        same_session_unavailable: bool = False,
     ) -> FinalAnswerResult | None:
         """Answer from verified evidence when same-session completion cannot run.
 
@@ -1550,6 +1546,16 @@ class FinalFromToolEnvironment:
         is no is the report rebuilt from durable evidence in a fresh session.
 
         Returning ``None`` means the ordinary path can and should run.
+
+        This rescue requires exact token accounting: a known context size and a
+        backend that can count a rendered prompt. Both hold on the orbit-native
+        path and neither holds on a plain llama.cpp server, which reports no
+        exact count -- so on such a backend admission is skipped upstream, no
+        `ContextAdmissionError` is raised, and a saturated turn fails at decode
+        as it did before this phase existed. That is a real limit rather than an
+        oversight: without an exact count there is no way to promise the bundle
+        fits either, so catching the decode failure would only trade one
+        overflow for another.
         """
         store = getattr(self.runtime, "evidence_store", None)
         if store is None or not store.records:
@@ -1561,27 +1567,10 @@ class FinalFromToolEnvironment:
         if not callable(count_chat):
             return None
 
-        # Can the ordinary path complete this turn? Counted exactly, before any
-        # generation: waiting for the backend to fail mid-decode yields no
-        # answer at all, and guessing either strands a usable turn or walks into
-        # that failure. Only a window that provably cannot be completed is
-        # rescued here; everything else keeps the ordinary path and the mature
-        # retry, repair and non-empty-fallback behaviour that comes with it.
-        #
-        # Pure chat and full-document never arrive here: chat completes through
-        # the transport environment, and the full-document path returns before
-        # this point.
-        if not same_session_unavailable:
-            try:
-                current_tokens = self._exact_token_total(
-                    count_chat(messages, tools=None, thinking=False)
-                )
-            except Exception:
-                return None
-            if current_tokens is None:
-                return None
-            if admit_finalization(current_tokens, context_tokens).admitted:
-                return None
+        # Reached only once the ordinary path has been refused admission, so
+        # there is no viable same-session answer left to protect. Pure chat and
+        # full-document never arrive here: chat completes through the transport
+        # environment, and the full-document path returns earlier.
 
         entries = deduplicate_evidence(
             entries_from_store(store, list(store.records.keys()))
@@ -1612,7 +1601,7 @@ class FinalFromToolEnvironment:
                     "grounded_finalization",
                     streamed=on_final_delta is not None,
                     attempt=1,
-                    reason="evidence_backed_finalization",
+                    reason="same_session_window_unavailable",
                 )
             )
         # Fresh state: the saturated investigation KV is exactly what must not
@@ -1632,8 +1621,10 @@ class FinalFromToolEnvironment:
                 # let the ordinary path answer instead of proceeding on a
                 # session whose contents are unknown.
                 return None
-        if response_prefix and on_final_delta is not None:
-            on_final_delta(response_prefix)
+        # The prefix has already been streamed by the caller before the
+        # ordinary attempt, so re-emitting it here would show the caveat twice.
+        # It is still prepended to the content below, which is what carries it
+        # into history and to non-streaming callers.
         # Call the inference backend directly, beneath the investigation's
         # admission wrapper. That wrapper plans against the conversation this
         # phase deliberately abandoned, so re-admitting the bundle through it
