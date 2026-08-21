@@ -487,6 +487,116 @@ def _joined_token_count(lines: list[str], *, token_count: Callable[[str], int]) 
     return token_count("\n".join(lines))
 
 
+# Bounded window of token IDs recorded either side of a mismatch. Small on
+# purpose: enough to recognise what diverged, never enough to reconstruct the
+# prompt. Token IDs, not text, so nothing readable leaks by default.
+STRICT_APPEND_WINDOW_TOKENS = 8
+
+
+def strict_append_miss(
+    *,
+    committed: list[int],
+    prompt: list[int],
+    session_id: object = None,
+    profile_id: object = None,
+    lifecycle: object = None,
+    window: int = STRICT_APPEND_WINDOW_TOKENS,
+) -> dict[str, Any] | None:
+    """Describe why strict append-only continuation could not be used.
+
+    Strict append requires the resident sequence to be a token-exact prefix of
+    the new prompt. When that fails the runtime falls back to a cold prefill,
+    and the whole cost of the turn hinges on a single divergence the logs
+    currently do not name. This reports where it happened and what was on each
+    side, and nothing else.
+
+    Returns None when strict append applies, so a caller can log only misses.
+    Purely observational: it inspects the two sequences and changes neither.
+    """
+    committed = list(committed or [])
+    prompt = list(prompt or [])
+    if not committed:
+        return {
+            "reason": "no_committed_sequence",
+            "committed_tokens": 0,
+            "prompt_tokens": len(prompt),
+        }
+
+    index = _longest_common_prefix(committed, prompt)
+    payload: dict[str, Any] = {
+        "committed_tokens": len(committed),
+        "prompt_tokens": len(prompt),
+        "committed_hash": _hash_tokens(committed),
+        "prompt_hash": _hash_tokens(prompt),
+        "first_mismatch_index": index if index < len(committed) else None,
+        "session_id": _safe_str(session_id),
+        "profile_id": _safe_str(profile_id),
+        "lifecycle": _safe_str(lifecycle),
+    }
+
+    if index >= len(prompt) and index < len(committed):
+        # The prompt ran out before diverging: it is a prefix of the committed
+        # sequence rather than an extension of it. Nothing diverged, so naming
+        # a mismatch index here would point at a token that matches.
+        payload["reason"] = "prompt_not_longer_than_committed"
+        payload["first_mismatch_index"] = None
+        return payload
+
+    if index >= len(committed):
+        # The committed sequence is a prefix. Strict append then depends only
+        # on the prompt being strictly longer; an equal-length prompt has no
+        # new tokens to evaluate, which is a distinct case worth naming.
+        if len(prompt) > len(committed):
+            return None
+        payload["reason"] = "prompt_not_longer_than_committed"
+        payload["first_mismatch_index"] = None
+        return payload
+
+    payload["reason"] = f"prefix_mismatch_at_token_{index}"
+    payload["expected_token"] = committed[index]
+    payload["actual_token"] = prompt[index] if index < len(prompt) else None
+    low = max(0, index - window)
+    payload["window_start"] = low
+    payload["committed_window"] = committed[low : index + window]
+    payload["prompt_window"] = prompt[low : index + window]
+    return payload
+
+
+def emit_strict_append_miss(
+    *,
+    committed: list[int],
+    prompt: list[int],
+    session_id: object = None,
+    profile_id: object = None,
+    lifecycle: object = None,
+    seq_rm_result: object = None,
+    memory_cleared: object = None,
+    reused_prompt_tokens: object = None,
+    evaluated_prompt_tokens: object = None,
+) -> dict[str, Any] | None:
+    """Emit a strict-append miss, if there was one. No-op when diagnostics are off."""
+    if not enabled():
+        return None
+    payload = strict_append_miss(
+        committed=committed,
+        prompt=prompt,
+        session_id=session_id,
+        profile_id=profile_id,
+        lifecycle=lifecycle,
+    )
+    if payload is None:
+        return None
+    payload["event"] = "kv_diag_strict_append_miss"
+    payload["seq_rm_result"] = seq_rm_result
+    payload["memory_cleared"] = memory_cleared
+    # The authoritative counters, so a trace can be checked against what the
+    # backend actually reported rather than against a recomputed guess.
+    payload["reused_prompt_tokens"] = _safe_int(reused_prompt_tokens)
+    payload["evaluated_prompt_tokens"] = _safe_int(evaluated_prompt_tokens)
+    _emit(payload)
+    return payload
+
+
 def _cache_miss_reason(
     *,
     cache_prompt: bool | None,

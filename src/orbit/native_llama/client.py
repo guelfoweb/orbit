@@ -29,7 +29,7 @@ from .chat_bridge import chat_bridge_filename
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
-from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
+from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_strict_append_miss, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .model_profiles import (
     QWEN36_PROFILE_ID,
@@ -3656,16 +3656,35 @@ class NativeLlamaClient:
                 common = min(common, len(prompt_tokens) - 1)
 
         mem = lib.llama_get_memory(self._session.ctx_tgt)
+        seq_rm_result: object = None
+        memory_cleared = False
         if mem:
             if common == 0:
                 lib.llama_memory_clear(mem, True)
+                memory_cleared = True
             else:
                 removed = lib.llama_memory_seq_rm(mem, 0, common, -1)
+                seq_rm_result = bool(removed)
                 if not removed:
                     # Hybrid/recurrent models may reject partial state removal.
                     # A cold prefill is the only safe fallback for a new prompt.
                     lib.llama_memory_clear(mem, True)
+                    memory_cleared = True
                     common = 0
+        # Observational only: reaching here means strict append did not apply,
+        # and the whole cost of this turn follows from that. Reported after the
+        # decision so nothing about it can be influenced by the reporting.
+        emit_strict_append_miss(
+            committed=list(committed or []),
+            prompt=list(prompt_tokens),
+            session_id=getattr(self._session, "session_id", None),
+            profile_id=getattr(getattr(self, "model_profile", None), "profile_id", None),
+            lifecycle="prepare_memory_for_prompt",
+            seq_rm_result=seq_rm_result,
+            memory_cleared=memory_cleared,
+            reused_prompt_tokens=common,
+            evaluated_prompt_tokens=max(0, len(prompt_tokens) - common),
+        )
         self._session.cached_prompt_tokens = list(prompt_tokens)
         # The fallback path just rewrote KV. Identity is re-established only
         # after a successful generation, so drop it now.
