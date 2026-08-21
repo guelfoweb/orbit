@@ -32,6 +32,7 @@ from .expert_usage import summarize_expert_usage
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_strict_append_miss, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .model_profiles import (
+    ORNITH15_PROFILE_ID,
     PROFILE_METADATA_KEYS,
     QWEN36_PROFILE_ID,
     QWEN3_CODER_PROFILE_ID,
@@ -47,6 +48,16 @@ from .mtp_dry_run import MtpDryRunResult, run_mtp_dry_run
 from .mtp_probe import MtpProbeResult, run_mtp_probe
 from .native_names import mtmd_bridge_filename, runtime_library_filename
 from .paths import NativeLlamaPaths
+from .rolling_route_anchor import (
+    ROLLING_ROUTE_STRATEGY_ID,
+    RollingRouteAnchorState,
+    RollingRouteIdentity,
+    capture_rolling_route_anchor,
+    invalidate_rolling_route_anchor,
+    restore_rolling_route_anchor,
+    rolling_route_reuse_start,
+    rolling_route_should_replace,
+)
 from .prefix_anchor import (
     PrefixAnchorState,
     capture_prefix_anchor,
@@ -310,6 +321,10 @@ class NativeLlamaClient:
         self._last_prompt_decode_batch_n_tokens = 0
         self._route_prefix_anchor_state = PrefixAnchorState()
         self._route_prefix_prefill_lock = threading.Lock()
+        # Exactly one rolling route checkpoint per client, replaced in place.
+        self._rolling_route_anchor_state = RollingRouteAnchorState()
+        self._rolling_route_identity_cache: RollingRouteIdentity | None = None
+        self._reset_generation = 0
         self._qwen_route_prefix_anchor_state = PrefixAnchorState()
         self._qwen_route_prefix_spec: QwenRoutePrefixSpec | None = None
         self._qwen_route_prefix_status = QwenRoutePrefixStatus()
@@ -783,7 +798,10 @@ class NativeLlamaClient:
         self._session.mtp_failed = False
 
     def reset_session_state(
-        self, *, preserve_qwen3_coder_route_checkpoint: bool = False
+        self,
+        *,
+        preserve_qwen3_coder_route_checkpoint: bool = False,
+        preserve_ornith_rolling_route_checkpoint: bool = False,
     ) -> None:
         if not self._session.ctx_tgt:
             raise RuntimeError("native client not loaded")
@@ -800,6 +818,9 @@ class NativeLlamaClient:
         self._active_profile_render = None
         self._profile_last_raw_output = ""
         self._profile_last_parsed_content = ""
+        if not preserve_ornith_rolling_route_checkpoint:
+            self._reset_generation += 1
+            self._invalidate_rolling_route_anchor("session_reset")
         self._invalidate_final_prefix("session_reset")
         self._invalidate_qwen_route_prefix(
             "session_reset", profile_id=QWEN36_PROFILE_ID
@@ -851,8 +872,18 @@ class NativeLlamaClient:
             and profile_id == QWEN3_CODER_PROFILE_ID
             and qualified_transition
         )
+        # The route and final phases of one turn differ only by this internal
+        # mode, so the switch is not a lifecycle event and must not discard the
+        # route checkpoint. Every genuinely destructive reset still does: this
+        # state holds the conversation's own tokens.
+        preserve_ornith_rolling_route_checkpoint = (
+            getattr(profile, "verified", False)
+            and profile_id == ORNITH15_PROFILE_ID
+            and qualified_transition
+        )
         self.reset_session_state(
-            preserve_qwen3_coder_route_checkpoint=preserve_qwen3_coder_route_checkpoint
+            preserve_qwen3_coder_route_checkpoint=preserve_qwen3_coder_route_checkpoint,
+            preserve_ornith_rolling_route_checkpoint=preserve_ornith_rolling_route_checkpoint,
         )
         self._session.prompt_cache_mode = mode
 
@@ -1259,11 +1290,19 @@ class NativeLlamaClient:
             allow_mtp = False
         if allow_mtp_experimental is False:
             allow_mtp = False
+        rolling_route_eligible = self._ornith_rolling_route_eligible(
+            route_prefix_anchor=route_prefix_anchor, tools=tools, thinking=thinking
+        )
+        rolling_route_identity = (
+            self._rolling_route_identity(tools=tools) if rolling_route_eligible else None
+        )
         return self.complete_prompt(
             prompt,
             max_tokens=max_tokens,
             allow_mtp_experimental=allow_mtp,
             thinking=thinking,
+            rolling_route_eligible=rolling_route_eligible,
+            rolling_route_identity=rolling_route_identity,
             route_anchor_segments=route_anchor_segments,
             qwen_route_anchor_plan=qwen_route_anchor_plan,
             qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -1953,6 +1992,8 @@ class NativeLlamaClient:
         qwen_route_anchor_plan: _QwenRouteAnchorRuntimePlan | None = None,
         qwen36_shell_tool_anchor_plan: _Qwen36ShellToolAnchorRuntimePlan | None = None,
         final_prefix_segments: RoutePromptSegments | None = None,
+        rolling_route_eligible: bool = False,
+        rolling_route_identity: RollingRouteIdentity | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -1995,6 +2036,8 @@ class NativeLlamaClient:
             timings = self._complete_prompt_standard(
                 prompt,
                 max_tokens=max_tokens,
+                rolling_route_eligible=rolling_route_eligible,
+                rolling_route_identity=rolling_route_identity,
                 route_anchor_segments=route_anchor_segments,
                 qwen_route_anchor_plan=qwen_route_anchor_plan,
                 qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -2203,6 +2246,8 @@ class NativeLlamaClient:
         qwen_route_anchor_plan: _QwenRouteAnchorRuntimePlan | None = None,
         qwen36_shell_tool_anchor_plan: _Qwen36ShellToolAnchorRuntimePlan | None = None,
         final_prefix_segments: RoutePromptSegments | None = None,
+        rolling_route_eligible: bool = False,
+        rolling_route_identity: RollingRouteIdentity | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -2245,6 +2290,9 @@ class NativeLlamaClient:
             processed_start, reused = self._prepare_memory_with_qwen36_shell_tool_anchor(
                 qwen36_shell_tool_anchor_plan
             )
+        elif rolling_route_eligible and rolling_route_identity is not None:
+            self._rolling_route_identity_cache = rolling_route_identity
+            reused = self._prepare_memory_with_ornith_rolling_route_anchor(prompt_tokens)
         elif anchor_plan is None:
             reused = self._prepare_memory_for_prompt(prompt_tokens)
         else:
@@ -2289,6 +2337,26 @@ class NativeLlamaClient:
                 started_us=pf_start,
             )
         pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
+        if (
+            rolling_route_eligible
+            and rolling_route_identity is not None
+            and processed == n_prompt
+            and not self.cancel_event.is_set()
+        ):
+            # Prefill completed exactly through the prompt and nothing has been
+            # generated yet, so the snapshot is the prompt and only the prompt.
+            if rolling_route_should_replace(
+                self._rolling_route_anchor_state, prompt_tokens, rolling_route_identity
+            ):
+                captured, _capture_meta = capture_rolling_route_anchor(
+                    lib,
+                    self._session.ctx_tgt,
+                    prompt_tokens=prompt_tokens,
+                    identity=rolling_route_identity,
+                )
+                # A failed capture must not discard a still-usable checkpoint.
+                if captured.valid:
+                    self._rolling_route_anchor_state = captured
         self.last_committed_generated_tokens = []
         generated, gen_ms, cancelled = self._generate_from_current_context(
             max_tokens=max_tokens,
@@ -3035,6 +3103,82 @@ class NativeLlamaClient:
             prefix_hash=prefix_hash,
             metadata=metadata,
         )
+
+
+    def _ornith_rolling_route_eligible(self, *, route_prefix_anchor: bool, tools: list[dict] | None, thinking: bool) -> bool:
+        """Only verified Ornith route calls take the rolling strategy.
+
+        The route signal is the anchor flag the runtime already sets from its
+        own phase; the backend never infers phase from the prompt.
+        """
+        if not route_prefix_anchor:
+            return False
+        profile = getattr(self, "model_profile", None)
+        if not getattr(profile, "verified", False):
+            return False
+        if getattr(profile, "profile_id", None) != ORNITH15_PROFILE_ID:
+            return False
+        if thinking:
+            return False
+        if self.config.use_mtp_experimental or self._session.mtp_enabled:
+            return False
+        return True
+
+    def _rolling_route_identity(self, *, tools: list[dict] | None) -> RollingRouteIdentity:
+        profile = getattr(self, "model_profile", None)
+        return RollingRouteIdentity(
+            strategy_id=ROLLING_ROUTE_STRATEGY_ID,
+            session_id=str(self._session.session_id),
+            profile_id=str(getattr(profile, "profile_id", "")),
+            model_id=str(self.paths.model),
+            template_id=str(getattr(profile, "template_sha256", "")),
+            tool_schema_hash=hash_text(json.dumps(tools or [], sort_keys=True)),
+            capability_summary_hash=hash_text(
+                json.dumps(sorted(self._model_metadata_identity.items()), sort_keys=True)
+            ),
+            runtime_policy_hash=hash_text(
+                json.dumps(
+                    {"ctx": self.config.context_tokens, "thinking": bool(self.config.thinking)},
+                    sort_keys=True,
+                )
+            ),
+            native_version=runtime_library_filename("llama"),
+            tools_mode="on",
+            reset_generation=self._reset_generation,
+        )
+
+    def _invalidate_rolling_route_anchor(self, reason: str) -> None:
+        if self._rolling_route_anchor_state.valid or self._rolling_route_anchor_state.identity is not None:
+            self._rolling_route_anchor_state = invalidate_rolling_route_anchor(
+                self._rolling_route_anchor_state, reason
+            )
+
+    def _prepare_memory_with_ornith_rolling_route_anchor(self, prompt_tokens: list[int]) -> int:
+        """Restore the rolling route checkpoint, then defer to strict append.
+
+        The checkpoint only supplies candidate state and the committed-sequence
+        bookkeeping; `_prepare_memory_for_prompt` still decides whether reuse is
+        authorized, so PR #210's exact-prefix rule stays the single authority.
+        """
+        identity = self._rolling_route_identity_cache
+        state = self._rolling_route_anchor_state
+        reuse_start = rolling_route_reuse_start(state, prompt_tokens, identity)
+        if reuse_start is None:
+            return self._prepare_memory_for_prompt(prompt_tokens)
+        ok, restored, _meta = restore_rolling_route_anchor(
+            self.lib.lib, self._session.ctx_tgt, state
+        )
+        self._rolling_route_anchor_state = restored
+        if not ok:
+            # A partial restore leaves KV unknown; clear before falling cold.
+            self._clear_target_memory()
+            self._session.cached_prompt_tokens.clear()
+            self._invalidate_committed_sequence()
+            return self._prepare_memory_for_prompt(prompt_tokens)
+        # Hand strict append the exact tokens now resident so it can authorize.
+        self._session.committed_sequence_tokens = list(state.tokens)
+        self._session.cached_prompt_tokens = list(state.tokens)
+        return self._prepare_memory_for_prompt(prompt_tokens)
 
     def _prepare_memory_with_route_anchor(self, plan: _RouteAnchorRuntimePlan) -> tuple[int, int, dict[str, object]]:
         if not self._session.ctx_tgt:
