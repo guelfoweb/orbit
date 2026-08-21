@@ -450,7 +450,7 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC33
 
-- Current published baseline: `v0.0.1-rc33`.
+- Published predecessor: `v0.0.1-rc33`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc33
 - Includes squash merges `c9bc5fa` from #180, `3ec480d` from #181,
   `c671b29` from #182, `1184f7b` from #183, `ba5c580` from #184,
@@ -478,6 +478,40 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   `cached=768` and shell `cached=384`, and Qwen3-Coder route `cached=768` in
   standard and qualified low-memory operation.
 - See `docs/releases/v0.0.1-rc33.md`.
+
+### RC34
+
+- Current published baseline: `v0.0.1-rc34`.
+- Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc34
+- Qualified production code: `dbc63cbc638ea6ea3a9d4ce4020547eea78050b0`; the
+  release commit adds only `docs/releases/v0.0.1-rc34.md` and this entry.
+- Includes squash merges from #191 through #218, ending with `dbc63cb` from
+  #218, `4da9b4c` from #213, `775062e` from #217, `ef330d9` from #216,
+  `f386e50` from #215, `12671fe` from #214, `6fcf2f5` from #212, `6f9040a`
+  from #211, `06c4c84` from #210, `ad08147` from #209, and `d351a7f` from #207.
+- Focus: deterministic context management, evidence-grounded finalization, two
+  more verified native models, and exact multi-turn chat correctness.
+- Admission is decided before every model call, and a session that cannot carry
+  the conversation answers from verified evidence instead of a truncated window.
+- Ornith 1.5 35B-A3B and Qwen3.8-27B are verified native profiles. Strict
+  append-only KV continuation reuses a token-exact resident prefix and never
+  attempts partial cache removal; bounded diagnostics report the first refusal
+  without logging prompt text.
+- Multi-turn windows keep the user turn ahead of the assistant, stored sessions
+  are checked for resumability before becoming the active chat, and recovered
+  attempts keep their measured tokens and report totals as partial.
+- A deliberate route stop is no longer counted as a failed backend call, so
+  ordinary conversational turns stop reporting a failure that never happened.
+- RC34 validation: full unit discovery 2,172/2,172; `compileall` and
+  `git diff --check` PASS; model discovery 5/5 VERIFIED and AVAILABLE with no
+  duplicate rows; Qualification Harness PASS; Ornith multi-turn, tools,
+  invalid-session rejection, `/reset`, and `/clear` PASS; one real Ornith
+  native-stream smoke reported 2 calls, zero failed attempts, finish `stop`.
+- Known limit carried into RC34: ordinary conversational chat does not reuse
+  route KV between turns, because route and final prompts are different prompt
+  families sharing only a few leading tokens. Expected under the current prompt
+  topology, not a cache defect.
+- See `docs/releases/v0.0.1-rc34.md`.
 
 ## RC24 Tool-Loop Convergence
 
