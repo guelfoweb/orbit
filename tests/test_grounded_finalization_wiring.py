@@ -21,6 +21,7 @@ from pathlib import Path
 from orbit.runtime.chat import ChatRuntime
 from orbit.runtime.completion_budget import FINALIZATION_FINAL_MAX_TOKENS
 from orbit.runtime.environments import FinalFromToolEnvironment, TransportEnvironment
+from orbit.runtime.context_manager import ContextAdmissionError
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.full_document import FILE_DISPLAY_MARKER
 from orbit.runtime.finalization import (
@@ -692,6 +693,207 @@ class CoverageNoticeTests(unittest.TestCase):
         self.assertEqual(streamed, "")
         self.assertEqual(content.count(prefix), 1, "coverage notice lost")
         self.assertEqual(str(messages[-1]["content"]).count(prefix), 1)
+
+
+class AdmissionWrapperBypassTests(unittest.TestCase):
+    """The rescue must call beneath the investigation's admission wrapper.
+
+    That wrapper plans against the conversation this phase abandons, so routing
+    the bundle back through it would re-raise the very refusal being recovered
+    from and turn the rescue into a second failure.
+    """
+
+    def test_bundle_does_not_go_back_through_the_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+            backend = RecordingBackend(
+                context_tokens=1000,
+                tokens_for={"saturated": 990, "Verified evidence": 300},
+            )
+            seen: list[str] = []
+
+            class Wrapper:
+                """Stands in for ContextManagedBackend: refuses everything."""
+
+                _backend = backend
+
+                def __getattr__(self, name):
+                    return getattr(backend, name)
+
+                def chat(self, *args, **kwargs):
+                    seen.append("wrapper")
+                    raise ContextAdmissionError("context admission failed")
+
+            env, runtime = _environment(
+                backend,
+                store,
+                messages=[{"role": "user", "content": "analyse"}],
+                context_tokens=1000,
+            )
+            runtime.backend = Wrapper()
+            out = env._grounded_finalization(
+                temperature=0.0,
+                on_final_delta=None,
+                on_progress=None,
+                on_model_step=None,
+                on_phase_start=None,
+                loop=1,
+                response_prefix="",
+            )
+            self.assertIsNotNone(out, "rescue was refused by the admission wrapper")
+            self.assertEqual(seen, [], "bundle was routed back through the wrapper")
+
+
+class RescueTriggerNarrownessTests(unittest.TestCase):
+    """Only an admission refusal may divert; every other failure propagates.
+
+    The guard's narrowness is the whole design. Widening it would send ordinary
+    backend failures -- a timeout, a dropped connection, a mid-decode error --
+    into the thin rescue controller, abandoning retry, repair, compact retry
+    and the non-empty fallback, possibly after tokens have already reached the
+    user. Without this test that widening passes unnoticed.
+    """
+
+    def _answer_with(self, backend, store):
+        messages = [
+            {"role": "user", "content": "analyse"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_shell_full_command",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "output"},
+        ]
+        env, _ = _environment(
+            backend, store, messages=messages, context_tokens=100_000
+        )
+        return env.answer(
+            temperature=0.0,
+            max_tokens=2048,
+            on_final_delta=None,
+            on_progress=None,
+            on_model_step=None,
+            on_phase_start=None,
+            loop=1,
+            use_tool_prompt=False,
+            workdir=None,
+        )
+
+    def test_ordinary_backend_error_is_not_rescued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+
+            class Exploding(RecordingBackend):
+                def chat(self, messages, *, temperature, max_tokens, tools=None):
+                    raise RuntimeError("connection reset by peer")
+
+            backend = Exploding(context_tokens=100_000)
+            with self.assertRaises(RuntimeError):
+                self._answer_with(backend, store)
+            self.assertEqual(
+                backend.resets, 0, "an ordinary failure was diverted to the rescue"
+            )
+
+    def test_value_error_is_not_rescued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+
+            class Bad(RecordingBackend):
+                def chat(self, messages, *, temperature, max_tokens, tools=None):
+                    raise ValueError("malformed response")
+
+            backend = Bad(context_tokens=100_000)
+            with self.assertRaises(ValueError):
+                self._answer_with(backend, store)
+            self.assertEqual(backend.resets, 0)
+
+
+class ProductionSessionResetTests(unittest.TestCase):
+    """The session must actually be made fresh on a server-backed run.
+
+    The in-process native client exposes `reset_session_state`, but production
+    talks to it over HTTP through `reset_static_analysis_session`, which
+    reports failure by returning a message instead of raising. Reading only the
+    first shape meant the reset silently never ran, and the rescue finalized on
+    the saturated session it exists to abandon -- with the guarding test
+    passing because its fake backend had a method no real backend has.
+    """
+
+    class ServedBackend(RecordingBackend):
+        """Shaped like LlamaServerBackend: no in-process reset method."""
+
+        def __init__(self, *, context_tokens, tokens_for=None, reset_error=None):
+            super().__init__(context_tokens=context_tokens, tokens_for=tokens_for)
+            self.reset_error = reset_error
+            self.served_resets = 0
+
+        reset_session_state = None  # the production backend has no such method
+
+        def reset_static_analysis_session(self):
+            self.served_resets += 1
+            return self.reset_error
+
+    def _env(self, backend):
+        tmp = tempfile.mkdtemp()
+        store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+        env, _ = _environment(
+            backend,
+            store,
+            messages=[{"role": "user", "content": "analyse"}],
+            context_tokens=1000,
+        )
+        return env
+
+    def _finalize(self, backend):
+        return self._env(backend)._grounded_finalization(
+            temperature=0.0,
+            on_final_delta=None,
+            on_progress=None,
+            on_model_step=None,
+            on_phase_start=None,
+            loop=1,
+            response_prefix="",
+        )
+
+    def test_served_backend_session_is_reset(self) -> None:
+        backend = self.ServedBackend(
+            context_tokens=1000,
+            tokens_for={"saturated": 990, "Verified evidence": 300},
+        )
+        out = self._finalize(backend)
+        self.assertIsNotNone(out, "rescue declined on a production-shaped backend")
+        self.assertEqual(backend.served_resets, 1, "session was never made fresh")
+
+    def test_served_reset_failure_declines(self) -> None:
+        backend = self.ServedBackend(
+            context_tokens=1000,
+            tokens_for={"saturated": 990, "Verified evidence": 300},
+            reset_error="error: native session reset failed",
+        )
+        out = self._finalize(backend)
+        self.assertIsNone(out, "finalized despite a failed session reset")
+        self.assertEqual(backend.chat_calls, [], "generated on an unreset session")
+
+    def test_backend_with_no_reset_at_all_declines(self) -> None:
+        class NoReset(RecordingBackend):
+            reset_session_state = None
+
+        backend = NoReset(
+            context_tokens=1000,
+            tokens_for={"saturated": 990, "Verified evidence": 300},
+        )
+        out = self._finalize(backend)
+        self.assertIsNone(out, "finalized without any way to reset the session")
+        self.assertEqual(backend.chat_calls, [])
 
 
 class ExactAccountingPreconditionTests(unittest.TestCase):

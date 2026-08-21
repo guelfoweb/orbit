@@ -1604,20 +1604,34 @@ class FinalFromToolEnvironment:
         # Fresh state: the saturated investigation KV is exactly what must not
         # be continued from, and finalization must not depend on how long the
         # investigation ran.
-        reset = getattr(
-            getattr(self.runtime.backend, "_backend", self.runtime.backend),
-            "reset_session_state",
-            None,
-        )
-        if callable(reset):
+        # Two shapes exist for the same operation: the in-process native client
+        # exposes reset_session_state, while a server-backed run reaches the
+        # same code over HTTP through reset_static_analysis_session, which
+        # reports failure by returning a message rather than raising. Only the
+        # second occurs in production, so reading only the first meant the
+        # reset silently never happened and the rescue finalized on the very
+        # session it exists to abandon.
+        #
+        # A session that cannot be made fresh is not one to finalize in, so any
+        # failure declines and lets the ordinary path answer instead.
+        target = getattr(self.runtime.backend, "_backend", self.runtime.backend)
+        in_process_reset = getattr(target, "reset_session_state", None)
+        served_reset = getattr(target, "reset_static_analysis_session", None)
+        if callable(in_process_reset):
             try:
-                reset()
+                in_process_reset()
             except Exception:
-                # Resetting is what makes the session fresh; if it cannot be
-                # done there is no clean state to finalize in, so decline and
-                # let the ordinary path answer instead of proceeding on a
-                # session whose contents are unknown.
                 return None
+        elif callable(served_reset):
+            try:
+                if served_reset() is not None:
+                    return None
+            except Exception:
+                return None
+        else:
+            # No way to establish a fresh session, so the defining property of
+            # this phase cannot be met.
+            return None
         # The prefix has already been streamed by the caller before the
         # ordinary attempt, so re-emitting it here would show the caveat twice.
         # It is still prepended to the content below, which is what carries it
