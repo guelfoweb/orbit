@@ -58,6 +58,13 @@ from orbit.runtime.full_document import (
     targeted_search_coverage_notice,
     targeted_search_no_match_notice,
 )
+from orbit.runtime.context_manager import ContextAdmissionError
+from orbit.runtime.finalization import (
+    admit_finalization,
+    deduplicate_evidence,
+    entries_from_store,
+    render_bundle,
+)
 from orbit.runtime.kv_diag import current_tools_mode, emit_document_search, model_call_context
 from orbit.runtime.media import AudioInput, ImageInput
 from orbit.runtime.messages import TOOL_CALL_JSON_RETRY_PROMPT
@@ -1264,18 +1271,36 @@ class FinalFromToolEnvironment:
             )
         if response_prefix and on_final_delta is not None:
             on_final_delta(response_prefix)
-        with self.transport.backend_thinking(False):
-            with model_call_context(phase="final_from_tool", tools_mode="on"):
-                if on_final_delta is None:
-                    result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
-                else:
-                    result = self.runtime.backend.chat_stream(
-                        policy.messages,
-                        temperature=temperature,
-                        max_tokens=policy.max_tokens,
-                        on_delta=final_delta,
-                        on_progress=on_progress,
-                    )
+        try:
+            with self.transport.backend_thinking(False):
+                with model_call_context(phase="final_from_tool", tools_mode="on"):
+                    if on_final_delta is None:
+                        result = self.runtime.backend.chat(policy.messages, temperature=temperature, max_tokens=policy.max_tokens)
+                    else:
+                        result = self.runtime.backend.chat_stream(
+                            policy.messages,
+                            temperature=temperature,
+                            max_tokens=policy.max_tokens,
+                            on_delta=final_delta,
+                            on_progress=on_progress,
+                        )
+        except ContextAdmissionError:
+            # Admission is enforced inside the managed backend, so a window that
+            # cannot be completed surfaces here rather than during assembly.
+            # Nothing has been generated yet, so the rescue can still run; if it
+            # cannot, the original error is the honest outcome.
+            grounded = self._grounded_finalization(
+                temperature=temperature,
+                on_final_delta=on_final_delta,
+                on_progress=on_progress,
+                on_model_step=on_model_step,
+                on_phase_start=on_phase_start,
+                loop=loop,
+                response_prefix=response_prefix,
+            )
+            if grounded is not None:
+                return grounded
+            raise
         best_non_empty_result = result if result.content.strip() else None
         if on_model_step:
             on_model_step(ModelStepMetrics.from_result(loop=loop, result=result, phase="final_from_tool"))
@@ -1469,6 +1494,196 @@ class FinalFromToolEnvironment:
             compact_retry_attempted=compact_retry_attempted,
             compact_retry_failed=compact_retry_failed,
         )
+
+    @staticmethod
+    def _exact_token_total(counted: object) -> int | None:
+        """Normalise the backends' differing exact-count return shapes.
+
+        The native client returns an int, the server backend a TokenCount (or
+        None when it cannot count), and the app a dict. Reading only one shape
+        would leave the fallback silently disconnected on the others, so the
+        supported shapes are handled explicitly and anything unrecognised is
+        treated as "cannot count" rather than guessed at.
+        """
+        if isinstance(counted, bool):
+            return None
+        if isinstance(counted, int):
+            return counted
+        tokens = getattr(counted, "tokens", None)
+        if isinstance(tokens, int) and not isinstance(tokens, bool):
+            return tokens
+        if isinstance(counted, dict):
+            value = counted.get("tokens")
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+        return None
+
+    def _grounded_finalization(
+        self,
+        *,
+        temperature: float,
+        on_final_delta: Callable[[str], None] | None,
+        on_progress: Callable[[StreamProgress], None] | None,
+        on_model_step: Callable[[ModelStepMetrics], None] | None,
+        on_phase_start: Callable[[ModelPhaseStart], None] | None,
+        loop: int,
+        response_prefix: str,
+    ) -> FinalAnswerResult | None:
+        """Answer from verified evidence when same-session completion cannot run.
+
+        This is a rescue, not the normal route. The ordinary final path owns
+        retry, repair, compact retry, streaming buffering and the non-empty
+        fallback, and a healthy turn must keep all of it; routing every
+        evidence-backed workflow through here instead traded that machinery for
+        a second, thinner completion controller and regressed the healthy case.
+
+        So the question asked here is narrow: can the ordinary window actually
+        be completed? It is answered by exact token count before anything is
+        generated, never by waiting for a decode failure. Only when the answer
+        is no is the report rebuilt from durable evidence in a fresh session.
+
+        Returning ``None`` means the ordinary path can and should run.
+
+        This rescue requires exact token accounting: a known context size and a
+        backend that can count a rendered prompt. Both hold on the orbit-native
+        path and neither holds on a plain llama.cpp server, which reports no
+        exact count -- so on such a backend admission is skipped upstream, no
+        `ContextAdmissionError` is raised, and a saturated turn fails at decode
+        as it did before this phase existed. That is a real limit rather than an
+        oversight: without an exact count there is no way to promise the bundle
+        fits either, so catching the decode failure would only trade one
+        overflow for another.
+        """
+        store = getattr(self.runtime, "evidence_store", None)
+        if store is None or not store.records:
+            return None
+        context_tokens = self.runtime.context_tokens
+        if not isinstance(context_tokens, int) or context_tokens <= 0:
+            return None
+        count_chat = getattr(self.runtime.backend, "count_chat_tokens", None)
+        if not callable(count_chat):
+            return None
+
+        # Reached only once the ordinary path has been refused admission, so
+        # there is no viable same-session answer left to protect. Pure chat and
+        # full-document never arrive here: chat completes through the transport
+        # environment, and the full-document path returns earlier.
+
+        entries = deduplicate_evidence(
+            entries_from_store(store, list(store.records.keys()))
+        )
+        if not entries:
+            return None
+        task = last_user_text(self.runtime.messages) or ""
+        try:
+            bundle = render_bundle(task, entries)
+        except ValueError:
+            return None
+        bundle_messages: list[Message] = [{"role": "user", "content": bundle}]
+        try:
+            bundle_tokens = self._exact_token_total(
+                count_chat(bundle_messages, tools=None, thinking=False)
+            )
+        except Exception:
+            return None
+        if bundle_tokens is None:
+            return None
+        admission = admit_finalization(bundle_tokens, context_tokens)
+        if not admission.admitted:
+            return None
+
+        if on_phase_start:
+            on_phase_start(
+                ModelPhaseStart(
+                    "grounded_finalization",
+                    streamed=on_final_delta is not None,
+                    attempt=1,
+                    reason="same_session_window_unavailable",
+                )
+            )
+        # Fresh state: the saturated investigation KV is exactly what must not
+        # be continued from, and finalization must not depend on how long the
+        # investigation ran.
+        # Two shapes exist for the same operation: the in-process native client
+        # exposes reset_session_state, while a server-backed run reaches the
+        # same code over HTTP through reset_static_analysis_session, which
+        # reports failure by returning a message rather than raising. Only the
+        # second occurs in production, so reading only the first meant the
+        # reset silently never happened and the rescue finalized on the very
+        # session it exists to abandon.
+        #
+        # A session that cannot be made fresh is not one to finalize in, so any
+        # failure declines and lets the ordinary path answer instead.
+        target = getattr(self.runtime.backend, "_backend", self.runtime.backend)
+        in_process_reset = getattr(target, "reset_session_state", None)
+        served_reset = getattr(target, "reset_static_analysis_session", None)
+        if callable(in_process_reset):
+            try:
+                in_process_reset()
+            except Exception:
+                return None
+        elif callable(served_reset):
+            try:
+                if served_reset() is not None:
+                    return None
+            except Exception:
+                return None
+        else:
+            # No way to establish a fresh session, so the defining property of
+            # this phase cannot be met.
+            return None
+        # The prefix has already been streamed by the caller before the
+        # ordinary attempt, so re-emitting it here would show the caveat twice.
+        # It is still prepended to the content below, which is what carries it
+        # into history and to non-streaming callers.
+        # Call the inference backend directly, beneath the investigation's
+        # admission wrapper. That wrapper plans against the conversation this
+        # phase deliberately abandoned, so re-admitting the bundle through it
+        # would re-raise the very saturation being recovered from. Admission for
+        # this prompt has already been decided exactly, just above.
+        # No `tools=` argument: FINAL_ONLY is enforced structurally, so no tool
+        # can be requested rather than merely being discouraged by the prompt.
+        backend = getattr(self.runtime.backend, "_backend", self.runtime.backend)
+        try:
+            with self.transport.backend_thinking(False):
+                with model_call_context(phase="grounded_finalization", tools_mode="off"):
+                    if on_final_delta is None:
+                        result = backend.chat(
+                            bundle_messages,
+                            temperature=temperature,
+                            max_tokens=admission.output_budget,
+                        )
+                    else:
+                        result = backend.chat_stream(
+                            bundle_messages,
+                            temperature=temperature,
+                            max_tokens=admission.output_budget,
+                            on_delta=on_final_delta,
+                            on_progress=on_progress,
+                        )
+        except Exception:
+            # The session was already reset, so the ordinary path will prefill
+            # from scratch rather than continue -- slower, but it still answers.
+            # Declining here keeps a backend failure in this phase from costing
+            # the turn, which matters now that every evidence-backed workflow
+            # comes through here rather than only saturated ones. The durable
+            # evidence is untouched either way.
+            return None
+        if on_model_step:
+            on_model_step(
+                ModelStepMetrics.from_result(
+                    loop=loop, result=result, phase="grounded_finalization"
+                )
+            )
+        # The prefix carries coverage notices -- that a file was shown in part,
+        # or a search matched only some of it. Streaming it is not enough: the
+        # ordinary path also prepends it to the content so it reaches history
+        # and non-streaming callers, and a caveat that silently disappears in
+        # one mode is worse than none.
+        if response_prefix:
+            result = replace(result, content=response_prefix + result.content)
+        self.runtime.messages.append({"role": "assistant", "content": result.content})
+        return FinalAnswerResult(result=result, used_retry_or_repair_pass=False)
 
     def _latest_evidence_budget_metadata(self) -> tuple[str | None, int | None]:
         store = self.runtime.evidence_store
