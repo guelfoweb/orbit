@@ -291,6 +291,22 @@ class ContextManagedBackend:
         )
 
 
+def conversation_structure_error(messages: list[Message]) -> str | None:
+    """Why this history cannot be consumed as a conversation, or None if it can.
+
+    Admission parses history into turns before every model call, so a sequence
+    it rejects is unusable no matter how well-formed each message looks on its
+    own. Persistence needs the same answer at load time -- a stored history
+    that cannot be parsed is not resumable -- and asking here keeps one
+    grammar rather than a second copy that drifts out of step with this one.
+    """
+    try:
+        _parse_turns(messages)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def _parse_turns(messages: list[Message]) -> list[_Turn]:
     prefix_done = False
     starts: list[int] = []
