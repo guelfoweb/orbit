@@ -34,16 +34,24 @@ class StatusTests(unittest.TestCase):
             "session tks: 420 total (400 in + 20 out) | work: 400 (380 prefill + 20 decode) | cache: 20 (5%) | calls: 2",
         )
 
-    def test_failed_call_makes_token_total_unavailable_without_hiding_attempt(self) -> None:
+    def test_failed_attempt_is_reported_without_discarding_known_usage(self) -> None:
+        """A failed attempt is counted; measured tokens are still reported.
+
+        This previously asserted the totals became "unavailable". That was the
+        defect: one recovered failure erased usage that had already been
+        measured. The attempt is still surfaced, and the total now says it is
+        partial rather than claiming to know nothing.
+        """
         usage = TokenUsageAccumulator()
         usage.add(ModelStepMetrics(1, "route", "stop", 100, 5, 20, 10.0, 2.0, 0))
         usage.add_failed_call()
 
         rendered = format_session_token_usage(usage.snapshot())
 
-        self.assertIn("session tks: unavailable", rendered)
+        self.assertIn("105 total (100 in + 5 out)", rendered)
         self.assertIn("calls: 2", rendered)
-        self.assertIn("failed: 1 (token usage unavailable)", rendered)
+        self.assertIn("failed attempts: 1", rendered)
+        self.assertIn("totals: partial", rendered)
 
     def test_turn_token_usage_sums_every_model_call_and_real_evaluated_tokens(self) -> None:
         steps = [

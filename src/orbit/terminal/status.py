@@ -19,6 +19,11 @@ class TurnTokenUsage:
     cached_tokens: int | None
     completion_tokens: int | None
     failed_calls: int = 0
+    # True when an attempt was made whose token metrics never reached us, so
+    # the sums below are real but not the whole story. Kept separate from the
+    # counters themselves: a number we do know stays knowable even when the
+    # total it belongs to is incomplete.
+    usage_incomplete: bool = False
 
 
 @dataclass
@@ -29,6 +34,7 @@ class TokenUsageAccumulator:
     evaluated_tokens: int | None = 0
     cached_tokens: int | None = 0
     completion_tokens: int | None = 0
+    usage_incomplete: bool = False
 
     def add(self, step: ModelStepMetrics) -> None:
         self._add_metrics(
@@ -45,12 +51,18 @@ class TokenUsageAccumulator:
         )
 
     def add_failed_call(self) -> None:
+        """Record an attempt that raised, without discarding what is known.
+
+        The attempt reached the backend, so it counts; but its token metrics
+        never arrived, so the running totals are now short by an unknown
+        amount. Zeroing them would invent a number, and clearing them threw
+        away figures that had already been measured -- a recovered failure
+        used to erase an entire session's accounting. The totals are kept and
+        marked incomplete instead, which is the only honest description.
+        """
         self.model_calls += 1
         self.failed_calls += 1
-        self.prompt_tokens = None
-        self.evaluated_tokens = None
-        self.cached_tokens = None
-        self.completion_tokens = None
+        self.usage_incomplete = True
 
     def _add_metrics(
         self,
@@ -83,6 +95,7 @@ class TokenUsageAccumulator:
             cached_tokens=self.cached_tokens,
             completion_tokens=self.completion_tokens,
             failed_calls=self.failed_calls,
+            usage_incomplete=self.usage_incomplete,
         )
 
 
@@ -164,7 +177,9 @@ def format_turn_status(
             context_parts.append(f"pressure {pressure}")
         lines.extend(_pack_metric_parts(context_parts, columns=columns, prefix="context: "))
     if usage is not None and usage.failed_calls:
-        lines.append(f"warning: {usage.failed_calls} failed model call(s); token usage unavailable")
+        lines.append(
+            f"warning: {usage.failed_calls} failed attempt(s); token totals exclude them"
+        )
     return "\n".join(lines)
 
 
@@ -238,6 +253,9 @@ def _token_metric_lines(usage: TurnTokenUsage | None, *, columns: int) -> list[s
     ):
         if value is not None:
             parts.append(f"{value:,} {label}")
+    if parts and usage.usage_incomplete:
+        # The figures are real; they just are not the whole turn.
+        parts.append("(partial)")
     return _pack_metric_parts(parts or ["unavailable"], columns=columns, prefix="tokens: ")
 
 
@@ -267,6 +285,8 @@ def _token_usage_parts(usage: TurnTokenUsage, *, prefix: str) -> list[str]:
         parts.append(f"{prefix}: output {usage.completion_tokens}")
     else:
         parts.append(f"{prefix}: unavailable")
+    if usage.usage_incomplete:
+        parts.append("totals: partial")
     if usage.evaluated_tokens is not None and usage.completion_tokens is not None:
         work = usage.evaluated_tokens + usage.completion_tokens
         parts.append(f"work: {work} ({usage.evaluated_tokens} prefill + {usage.completion_tokens} decode)")
@@ -275,7 +295,7 @@ def _token_usage_parts(usage: TurnTokenUsage, *, prefix: str) -> list[str]:
         parts.append(f"cache: {usage.cached_tokens} ({ratio:.0f}%)")
     parts.append(f"calls: {usage.model_calls}")
     if usage.failed_calls:
-        parts.append(f"failed: {usage.failed_calls} (token usage unavailable)")
+        parts.append(f"failed attempts: {usage.failed_calls}")
     return parts
 
 
