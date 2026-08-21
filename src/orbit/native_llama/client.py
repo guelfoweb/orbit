@@ -32,6 +32,7 @@ from .expert_usage import summarize_expert_usage
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .model_profiles import (
+    PROFILE_METADATA_KEYS,
     QWEN36_PROFILE_ID,
     QWEN3_CODER_PROFILE_ID,
     NativeModelProfile,
@@ -683,28 +684,7 @@ class NativeLlamaClient:
         count = max(0, int(lib.llama_model_meta_count(self._model)))
         for index in range(count):
             key = self._model_metadata_text(lib.llama_model_meta_key_by_index, index)
-            if key not in {
-                "general.architecture",
-                "general.name",
-                "general.file_type",
-                "general.quantization_version",
-                "tokenizer.ggml.model",
-                "tokenizer.ggml.pre",
-                "tokenizer.ggml.add_bos_token",
-                "tokenizer.ggml.bos_token_id",
-                "tokenizer.ggml.eos_token_id",
-                "tokenizer.ggml.padding_token_id",
-                "qwen3moe.context_length",
-                "qwen3moe.block_count",
-                "qwen3moe.expert_count",
-                "qwen3moe.expert_used_count",
-                "qwen35.context_length",
-                "qwen35.block_count",
-                "qwen35moe.context_length",
-                "qwen35moe.block_count",
-                "qwen35moe.expert_count",
-                "qwen35moe.expert_used_count",
-            }:
+            if key not in PROFILE_METADATA_KEYS:
                 continue
             metadata[key] = self._model_metadata_text(lib.llama_model_meta_val_str_by_index, index)
         return metadata
