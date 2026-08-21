@@ -228,8 +228,15 @@ class NativeSessionStateTests(unittest.TestCase):
 
         client._ensure_prompt_cache_mode("chat:thinking=on")
 
-        client.reset_session_state.assert_called_once_with(
-            preserve_qwen3_coder_route_checkpoint=False
+        # An unqualified transition preserves nothing: assert every preserve
+        # option is off rather than pinning the exact argument list, so adding
+        # a new qualified-preservation option cannot silently pass here.
+        client.reset_session_state.assert_called_once()
+        _args, kwargs = client.reset_session_state.call_args
+        self.assertTrue(kwargs, "reset must be called with explicit preserve options")
+        self.assertFalse(
+            any(kwargs.values()),
+            f"no checkpoint may be preserved across an unqualified transition: {kwargs}",
         )
         self.assertEqual(client._session.prompt_cache_mode, "chat:thinking=on")
 
