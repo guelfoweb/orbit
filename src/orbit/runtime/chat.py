@@ -1424,11 +1424,12 @@ class ChatRuntime:
             return self._with_final_evidence_context(with_chat_system_prompt(self.messages))
         messages: list[Message] = []
         assistant = _latest_operational_assistant_message(self.messages)
-        if assistant is not None:
-            messages.append(assistant)
         latest_user = _latest_user_message(self.messages)
+        # User before assistant: see _chat_final_retry_messages.
         if latest_user is not None:
             messages.append(latest_user)
+        if assistant is not None:
+            messages.append(assistant)
         visible_messages = self._covered_visible_chat_messages()
         if visible_messages is not None:
             candidate = with_visible_chat_system_prompt(visible_messages)
@@ -1543,10 +1544,13 @@ class ChatRuntime:
             assistant = _latest_operational_assistant_message(self.messages)
         else:
             assistant = _latest_short_assistant_message(self.messages)
-        if assistant is not None:
-            messages.append(assistant)
+        # The user turn comes first: a rebuilt window that opens with the
+        # assistant is not a conversation the admission validator can parse,
+        # and the turn fails before inference with no answer at all.
         if latest_user is not None:
             messages.append(latest_user)
+        if assistant is not None:
+            messages.append(assistant)
         return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages), consumer_phase="chat_final_retry")
 
     def chat_final_completion_repair_messages(self, repair_instruction: str) -> list[Message] | None:
@@ -1557,9 +1561,10 @@ class ChatRuntime:
             return None
         window: list[Message] = []
         assistant = _latest_assistant_excerpt_message(self.messages)
+        # User before assistant: see _chat_final_retry_messages.
+        window.append(latest_user)
         if assistant is not None:
             window.append(assistant)
-        window.append(latest_user)
         messages = with_chat_system_prompt(window)
         context = build_compact_final_evidence_context(self.evidence_store)
         if context:
