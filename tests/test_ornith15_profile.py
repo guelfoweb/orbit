@@ -263,21 +263,16 @@ class Ornith15RuntimeMetadataAllowlistTests(Ornith15DetectionFixture):
     """
 
     def _allowlisted_keys(self) -> set[str]:
-        import ast
+        """The keys metadata extraction actually keeps.
 
-        source = (SRC / "orbit" / "native_llama" / "client.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) or node.name != "_read_model_metadata":
-                continue
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.Set):
-                    return {
-                        element.value
-                        for element in inner.elts
-                        if isinstance(element, ast.Constant) and isinstance(element.value, str)
-                    }
-        self.fail("could not locate the metadata allowlist in _read_model_metadata")
+        Read from the canonical constant rather than parsed out of a literal in
+        one consumer: the allowlist used to be duplicated in the client and in
+        discovery, they drifted, and Ornith was reported unsupported because
+        only one copy learned the qwen35moe keys.
+        """
+        from orbit.native_llama.model_profiles import PROFILE_METADATA_KEYS
+
+        return set(PROFILE_METADATA_KEYS)
 
     def test_every_pinned_metadata_key_is_allowlisted(self) -> None:
         allowlisted = self._allowlisted_keys()

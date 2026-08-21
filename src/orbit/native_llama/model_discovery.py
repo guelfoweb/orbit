@@ -9,6 +9,7 @@ from typing import Callable, Iterable
 
 from orbit.native_llama.bindings import GgmlLogCallback, LlamaLibrary
 from orbit.native_llama.model_profiles import (
+    PROFILE_METADATA_KEYS,
     VERIFIED_NATIVE_MODEL_IDENTITIES,
     NativeModelProfile,
     detect_native_model_profile,
@@ -31,23 +32,6 @@ def _discard_native_log(_level: int, _text: bytes, _data) -> None:
 
 
 _QUIET_LOG_CALLBACK = GgmlLogCallback(_discard_native_log)
-PROFILE_METADATA_KEYS = frozenset(
-    {
-        "general.architecture",
-        "general.name",
-        "general.file_type",
-        "general.quantization_version",
-        "tokenizer.ggml.model",
-        "tokenizer.ggml.pre",
-        "tokenizer.ggml.add_bos_token",
-        "tokenizer.ggml.bos_token_id",
-        "tokenizer.ggml.eos_token_id",
-        "tokenizer.ggml.padding_token_id",
-        "qwen3moe.context_length",
-        "qwen3moe.expert_count",
-        "qwen3moe.expert_used_count",
-    }
-)
 
 
 @dataclass(frozen=True)

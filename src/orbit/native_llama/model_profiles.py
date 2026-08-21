@@ -17,6 +17,37 @@ QWEN38_VERIFIED_MODEL_NAME = "Qwen3.8-27B"
 QWEN38_OFFICIAL_TEMPLATE_SHA256 = "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
 QWEN38_VERIFIED_FILE_TYPE = "15"
 QWEN38_VERIFIED_QUANTIZATION = "Q4_K_M"
+# Metadata keys read when identifying a model profile. Every key any pinned
+# identity below compares must appear here: a key absent from this set is read
+# as the empty string, which silently fails the comparison and reports a
+# verified model as unsupported. Callers that extract GGUF metadata filter
+# through this one set, so adding a key to an identity and forgetting the
+# extraction cannot happen twice in two places.
+PROFILE_METADATA_KEYS = frozenset(
+    {
+        "general.architecture",
+        "general.name",
+        "general.file_type",
+        "general.quantization_version",
+        "tokenizer.ggml.model",
+        "tokenizer.ggml.pre",
+        "tokenizer.ggml.add_bos_token",
+        "tokenizer.ggml.bos_token_id",
+        "tokenizer.ggml.eos_token_id",
+        "tokenizer.ggml.padding_token_id",
+        "qwen3moe.context_length",
+        "qwen3moe.block_count",
+        "qwen3moe.expert_count",
+        "qwen3moe.expert_used_count",
+        "qwen35.context_length",
+        "qwen35.block_count",
+        "qwen35moe.context_length",
+        "qwen35moe.block_count",
+        "qwen35moe.expert_count",
+        "qwen35moe.expert_used_count",
+    }
+)
+
 ORNITH15_PROFILE_ID = "orbit-ornith15-native-v1"
 ORNITH15_VERIFIED_MODEL_NAME = "Ornith-1.5-35B"
 ORNITH15_OFFICIAL_TEMPLATE_SHA256 = "f55f52930aa8bf44ab5cb85f99370fcc3c56e9a85640b812086d5330bce5d86b"
