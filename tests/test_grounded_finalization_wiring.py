@@ -22,6 +22,7 @@ from orbit.runtime.chat import ChatRuntime
 from orbit.runtime.completion_budget import FINALIZATION_FINAL_MAX_TOKENS
 from orbit.runtime.environments import FinalFromToolEnvironment, TransportEnvironment
 from orbit.runtime.evidence import EvidenceStore
+from orbit.runtime.full_document import FILE_DISPLAY_MARKER
 from orbit.runtime.finalization import (
     BundleEntry,
     admit_finalization,
@@ -605,22 +606,49 @@ class ScopeAndResilienceTests(unittest.TestCase):
 
 
 class CoverageNoticeTests(unittest.TestCase):
-    """Coverage caveats must reach the user exactly once, streaming or not.
+    """The coverage caveat must reach the user exactly once.
 
-    The prefix carries notices such as "only part of this file was shown".
-    Driving this through `answer()` rather than the helper is deliberate: the
-    caller streams the prefix before the ordinary attempt, so a helper-level
-    test cannot see a duplicate and would pass whether or not one occurs.
+    The fixture builds a genuine partial-coverage `read` record, so
+    `response_prefix` is really non-empty: with an empty prefix the guard under
+    test never executes and the assertions measure the answer instead of the
+    caveat, which is how an earlier version of this test passed while the
+    prefix was being emitted twice.
     """
+
+    def _partial_read_store(self, tmp):
+        body = "alpha\nbeta\ngamma\n"
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        raw = (
+            f"{FILE_DISPLAY_MARKER}\n"
+            "path: /workspace/a.txt\n"
+            f"bytes: {len(body)}\n"
+            "lines: 3\n"
+            f"sha256: {digest}\n"
+            "coverage: partial\n"
+            "line_range: 1-2\n"
+            "content:\n"
+            "alpha\nbeta\n"
+        )
+        store = EvidenceStore(Path(tmp) / "evidence")
+        store.add(
+            "read_file",
+            raw,
+            metadata={
+                "tool_call_id": "call-1",
+                "user_turn_id": "turn-1",
+                "produced_by_phase": "tool_call",
+            },
+        )
+        return store
 
     def _saturated_answer(self, *, streaming: bool):
         with tempfile.TemporaryDirectory() as tmp:
-            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
+            store = self._partial_read_store(tmp)
             backend = RecordingBackend(
                 context_tokens=1000, tokens_for={"": 5000, "Verified evidence": 300}
             )
             messages = [
-                {"role": "user", "content": "analyse"},
+                {"role": "user", "content": "show me the file"},
                 {
                     "role": "assistant",
                     "content": "",
@@ -628,18 +656,17 @@ class CoverageNoticeTests(unittest.TestCase):
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {
-                                "name": "exec_shell_full_command",
-                                "arguments": "{}",
-                            },
+                            "function": {"name": "read_file", "arguments": "{}"},
                         }
                     ],
                 },
-                {"role": "tool", "tool_call_id": "call-1", "content": "output"},
+                {"role": "tool", "tool_call_id": "call-1", "content": "read"},
             ]
             env, runtime = _environment(
                 backend, store, messages=messages, context_tokens=1000
             )
+            prefix = env._file_display_prefix()
+            self.assertTrue(prefix, "fixture no longer produces a coverage notice")
             streamed: list[str] = []
             out = env.answer(
                 temperature=0.0,
@@ -652,48 +679,19 @@ class CoverageNoticeTests(unittest.TestCase):
                 use_tool_prompt=False,
                 workdir=None,
             )
-            return out.result.content, "".join(streamed), runtime.messages
+            return prefix, out.result.content, "".join(streamed), runtime.messages
 
-    def test_prefix_is_not_duplicated_when_streaming(self) -> None:
-        content, streamed, messages = self._saturated_answer(streaming=True)
-        # There is no display prefix in this fixture, so the assertion that
-        # matters is that nothing is emitted twice.
-        self.assertEqual(streamed.count("FINAL"), 1, "answer streamed twice")
-        self.assertIn("FINAL", content)
-        self.assertIn("FINAL", str(messages[-1]["content"]))
+    def test_notice_is_streamed_exactly_once(self) -> None:
+        prefix, content, streamed, messages = self._saturated_answer(streaming=True)
+        self.assertEqual(streamed.count(prefix), 1, "coverage notice was duplicated")
+        self.assertEqual(content.count(prefix), 1)
+        self.assertEqual(str(messages[-1]["content"]).count(prefix), 1)
 
-    def test_answer_reaches_history_without_streaming(self) -> None:
-        content, _streamed, messages = self._saturated_answer(streaming=False)
-        self.assertIn("FINAL", content)
-        self.assertIn("FINAL", str(messages[-1]["content"]))
-
-    def test_prefix_is_prepended_to_content_by_the_helper(self) -> None:
-        """The helper still owns prepending, which carries it into history."""
-        with tempfile.TemporaryDirectory() as tmp:
-            store, _ids = _store_with(tmp, ["payload " + "p" * 200])
-            backend = RecordingBackend(
-                context_tokens=1000,
-                tokens_for={"saturated": 990, "Verified evidence": 300},
-            )
-            env, runtime = _environment(
-                backend,
-                store,
-                messages=[{"role": "user", "content": "analyse"}],
-                context_tokens=1000,
-            )
-            out = env._grounded_finalization(
-                temperature=0.0,
-                on_final_delta=None,
-                on_progress=None,
-                on_model_step=None,
-                on_phase_start=None,
-                loop=1,
-                response_prefix="NOTE: partial coverage.\n",
-            )
-            self.assertIsNotNone(out)
-            assert out is not None
-            self.assertEqual(out.result.content.count("NOTE: partial coverage."), 1)
-            self.assertIn("NOTE: partial coverage.", str(runtime.messages[-1]["content"]))
+    def test_notice_reaches_content_without_streaming(self) -> None:
+        prefix, content, streamed, messages = self._saturated_answer(streaming=False)
+        self.assertEqual(streamed, "")
+        self.assertEqual(content.count(prefix), 1, "coverage notice lost")
+        self.assertEqual(str(messages[-1]["content"]).count(prefix), 1)
 
 
 class ExactAccountingPreconditionTests(unittest.TestCase):

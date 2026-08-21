@@ -1235,10 +1235,7 @@ class FinalFromToolEnvironment:
             self.runtime.messages.append({"role": "assistant", "content": result.content})
             return FinalAnswerResult(result=result, used_retry_or_repair_pass=False)
         response_prefix = targeted_prefix or display_prefix
-        uses_web_final_view = self.runtime._should_use_web_final_view(
-            use_tool_prompt=use_tool_prompt
-        )
-        if uses_web_final_view:
+        if self.runtime._should_use_web_final_view(use_tool_prompt=use_tool_prompt):
             call_messages = self.runtime._web_final_from_tool_messages()
         elif (
             compact_window
