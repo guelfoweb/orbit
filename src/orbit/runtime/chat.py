@@ -7,7 +7,7 @@ import json
 import re
 
 from orbit.backend import ChatBackend, ChatResult
-from orbit.backend.base import Message, StreamProgress
+from orbit.backend.base import Message, StreamConsumerAbort, StreamProgress
 from orbit.runtime.capabilities import LocalCapabilities, discover_local_capabilities
 from orbit.runtime.client_state import ClientState
 from orbit.runtime.command_evidence import AcquiredEvidence
@@ -1731,7 +1731,7 @@ class _ThoughtOnlyDeltaFilter:
             self._in_thought = True
 
 
-class _RouteNotCommandAbort(Exception):
+class _RouteNotCommandAbort(StreamConsumerAbort):
     def __init__(self, content: str, *, chunks: int) -> None:
         super().__init__("route stream produced non-command prose")
         self.content = content

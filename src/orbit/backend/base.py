@@ -7,6 +7,18 @@ from typing import Any, Callable, Protocol
 Message = dict[str, Any]
 
 
+class StreamConsumerAbort(Exception):
+    """A stream consumer stopped its own call on purpose; the backend is fine.
+
+    A delta callback may decide mid-stream that it has seen enough and raise to
+    stop generating early. That exception travels out through the backend call
+    exactly like a transport error, but it means the opposite thing: the
+    request reached the model and the model was answering. Backends recognise
+    this marker so they do not report a healthy call as a failed attempt. The
+    exception still propagates -- only the accounting treats it differently.
+    """
+
+
 @dataclass(frozen=True)
 class ChatResult:
     content: str
