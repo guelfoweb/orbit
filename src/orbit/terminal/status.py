@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from shutil import get_terminal_size
 from typing import Sequence
 
-from orbit.backend.base import ChatResult
+from orbit.backend.base import ChatResult, StreamPromptMetrics
 from orbit.runtime.kv_diag import emit_footer_metrics
 from orbit.runtime.session_memory import MemoryRefresh, estimate_message_tokens
 from orbit.runtime.turn_trace import ModelStepMetrics
@@ -64,18 +64,39 @@ class TokenUsageAccumulator:
         self.failed_calls += 1
         self.usage_incomplete = True
 
-    def add_aborted_call(self) -> None:
+    def add_aborted_call(self, prompt_metrics: StreamPromptMetrics | None = None) -> None:
         """Record an attempt the client stopped on purpose.
 
         The request reached the model and real work happened, so it counts as
-        a model call, but the usage event only arrives at the end of a stream
-        that was cut short -- so the totals are short by an unknown amount and
-        must say so. What this must not do is claim a failure: nothing went
+        a model call. What this must not do is claim a failure: nothing went
         wrong, and reporting one sends a reader looking for a fault that does
         not exist.
+
+        Prefill finishes before the first token, so when the stream carried
+        those counts they are final and get accumulated here. Decode never
+        reported, so the totals stay marked incomplete either way -- known
+        numbers are worth keeping even when the whole picture is not.
         """
         self.model_calls += 1
         self.usage_incomplete = True
+        if prompt_metrics is None:
+            return
+        prompt = getattr(prompt_metrics, "prompt_tokens", None)
+        cached = getattr(prompt_metrics, "cached_tokens", None)
+        if prompt is None:
+            return
+        self.prompt_tokens = _add_optional_metric(self.prompt_tokens, prompt)
+        if (
+            self.cached_tokens is None
+            or self.evaluated_tokens is None
+            or cached is None
+            or not 0 <= cached <= prompt
+        ):
+            self.cached_tokens = None
+            self.evaluated_tokens = None
+        else:
+            self.cached_tokens += cached
+            self.evaluated_tokens += prompt - cached
 
     def _add_metrics(
         self,

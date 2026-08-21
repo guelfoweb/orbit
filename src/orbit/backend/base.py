@@ -7,6 +7,15 @@ from typing import Any, Callable, Protocol
 Message = dict[str, Any]
 
 
+@dataclass(frozen=True)
+class StreamPromptMetrics:
+    """What prefill measured, known before any token is generated."""
+
+    prompt_tokens: int | None = None
+    evaluated_tokens: int | None = None
+    cached_tokens: int | None = None
+
+
 class StreamConsumerAbort(Exception):
     """A stream consumer stopped its own call on purpose; the backend is fine.
 
@@ -16,7 +25,15 @@ class StreamConsumerAbort(Exception):
     request reached the model and the model was answering. Backends recognise
     this marker so they do not report a healthy call as a failed attempt. The
     exception still propagates -- only the accounting treats it differently.
+
+    `prompt_metrics` carries whatever prefill had already measured when the
+    consumer stopped. Prefill finishes before the first token, so its token
+    counts are final by then and are simply lost if the terminal metrics event
+    is never read. The streaming layer attaches them on the way out; nothing
+    reads them for control flow.
     """
+
+    prompt_metrics: "StreamPromptMetrics | None" = None
 
 
 @dataclass(frozen=True)

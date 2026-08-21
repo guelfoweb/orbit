@@ -4,7 +4,7 @@ import sys
 import time
 from dataclasses import dataclass, field, replace
 
-from orbit.backend.base import ChatResult
+from orbit.backend.base import ChatResult, StreamPromptMetrics
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
 from orbit.runtime.context_manager import ContextAdmissionError
@@ -266,9 +266,11 @@ class Repl:
         self.turn_backend_token_usage.add_failed_call()
         self.session_token_usage.add_failed_call()
 
-    def _record_backend_abort(self) -> None:
-        self.turn_backend_token_usage.add_aborted_call()
-        self.session_token_usage.add_aborted_call()
+    def _record_backend_abort(self, prompt_metrics: StreamPromptMetrics | None) -> None:
+        # The same snapshot goes to both ledgers: whatever prefill measured
+        # before the stream was stopped, or nothing at all if it got no further.
+        self.turn_backend_token_usage.add_aborted_call(prompt_metrics)
+        self.session_token_usage.add_aborted_call(prompt_metrics)
 
     def _turn_token_usage(self) -> TurnTokenUsage | None:
         if self.backend_usage_observer_installed:

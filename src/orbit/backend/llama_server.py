@@ -9,7 +9,15 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .base import ChatResult, Message, ModelInfo, StreamConsumerAbort, StreamProgress, TokenCount
+from .base import (
+    ChatResult,
+    Message,
+    ModelInfo,
+    StreamConsumerAbort,
+    StreamProgress,
+    StreamPromptMetrics,
+    TokenCount,
+)
 from .model_names import resolve_model_display_name
 from .payloads import (
     ARTIFACT_CONTENT_PROTOCOL_ID,
@@ -47,7 +55,7 @@ class LlamaServerBackend:
         self._props_discovery_status: str | None = None
         self._result_observer: Callable[[ChatResult], None] | None = None
         self._failure_observer: Callable[[], None] | None = None
-        self._aborted_observer: Callable[[], None] | None = None
+        self._aborted_observer: Callable[[StreamPromptMetrics | None], None] | None = None
 
     def set_result_observer(self, observer: Callable[[ChatResult], None] | None) -> None:
         self._result_observer = observer
@@ -55,7 +63,9 @@ class LlamaServerBackend:
     def set_failure_observer(self, observer: Callable[[], None] | None) -> None:
         self._failure_observer = observer
 
-    def set_aborted_observer(self, observer: Callable[[], None] | None) -> None:
+    def set_aborted_observer(
+        self, observer: Callable[[StreamPromptMetrics | None], None] | None
+    ) -> None:
         self._aborted_observer = observer
 
     def chat(
@@ -436,14 +446,11 @@ class LlamaServerBackend:
     def _observe_call(self, call: Callable[[], ChatResult]) -> ChatResult:
         try:
             result = call()
-        except StreamConsumerAbort:
+        except StreamConsumerAbort as abort:
             # The consumer stopped this stream deliberately, so nothing failed:
-            # report an attempt whose usage never arrived rather than a failure.
+            # report an attempt, along with whatever prefill already measured.
             if self._aborted_observer is not None:
-                try:
-                    self._aborted_observer()
-                except Exception:
-                    pass
+                self._aborted_observer(abort.prompt_metrics)
             raise
         except BaseException:
             if self._failure_observer is not None:
@@ -682,6 +689,7 @@ def _parse_native_stream(
     content_parts: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
     content_filter = None if literal_content else _ContentStreamFilter(on_delta)
+    _prefill_holder: list[StreamPromptMetrics | None] = [None]
     model: str | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] = {}
@@ -726,7 +734,7 @@ def _parse_native_stream(
                 if first_output_ns is None:
                     first_output_ns = time.monotonic_ns()
                 reasoning_parts.append(text)
-        elif current_event.startswith("progress.") and on_progress:
+        elif current_event.startswith("progress."):
             phase = current_event.split(".", maxsplit=1)[1]
             progress = StreamProgress(
                 phase=phase,
@@ -739,7 +747,17 @@ def _parse_native_stream(
                 elapsed_seconds=_finite_nonnegative_float_or_none(data.get("elapsed_seconds")),
                 tokens_per_second=_finite_nonnegative_float_or_none(data.get("tokens_per_second")),
             )
-            on_progress(progress)
+            if phase == "prefill":
+                # Prefill totals are final before the first token, so keep the
+                # newest snapshot: it is all that survives an aborted stream.
+                nonlocal_prefill = StreamPromptMetrics(
+                    prompt_tokens=progress.total or None,
+                    evaluated_tokens=progress.evaluated_total,
+                    cached_tokens=progress.cached_tokens,
+                )
+                _prefill_holder[0] = nonlocal_prefill
+            if on_progress:
+                on_progress(progress)
         elif current_event == "tool_calls":
             if isinstance(data.get("tool_calls"), list) and data["tool_calls"] and first_output_ns is None:
                 first_output_ns = time.monotonic_ns()
@@ -758,18 +776,25 @@ def _parse_native_stream(
         model = _str_or_none(data.get("model")) or model
         current_event = None
 
-    for raw_line in response:
-        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-        if not line:
-            flush_event()
-            if stream_done:
-                break
-            continue
-        if line.startswith("event:"):
-            current_event = line.removeprefix("event:").strip()
-            continue
-        if line.startswith("data:"):
-            current_data_lines.append(line.removeprefix("data:").strip())
+    try:
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line:
+                flush_event()
+                if stream_done:
+                    break
+                continue
+            if line.startswith("event:"):
+                current_event = line.removeprefix("event:").strip()
+                continue
+            if line.startswith("data:"):
+                current_data_lines.append(line.removeprefix("data:").strip())
+    except StreamConsumerAbort as abort:
+        # The consumer stopped reading on purpose. Prefill had already finished
+        # and its counts are final, so hand them out rather than lose them.
+        if abort.prompt_metrics is None:
+            abort.prompt_metrics = _prefill_holder[0]
+        raise
 
     if not stream_done:
         flush_event()
