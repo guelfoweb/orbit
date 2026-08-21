@@ -68,6 +68,9 @@ class Repl:
         set_failure_observer = getattr(self.backend, "set_failure_observer", None)
         if callable(set_failure_observer):
             set_failure_observer(self._record_backend_failure)
+        set_aborted_observer = getattr(self.backend, "set_aborted_observer", None)
+        if callable(set_aborted_observer):
+            set_aborted_observer(self._record_backend_abort)
 
     def run(self) -> int:
         if self.history:
@@ -262,6 +265,10 @@ class Repl:
     def _record_backend_failure(self) -> None:
         self.turn_backend_token_usage.add_failed_call()
         self.session_token_usage.add_failed_call()
+
+    def _record_backend_abort(self) -> None:
+        self.turn_backend_token_usage.add_aborted_call()
+        self.session_token_usage.add_aborted_call()
 
     def _turn_token_usage(self) -> TurnTokenUsage | None:
         if self.backend_usage_observer_installed:

@@ -9,7 +9,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .base import ChatResult, Message, ModelInfo, StreamProgress, TokenCount
+from .base import ChatResult, Message, ModelInfo, StreamConsumerAbort, StreamProgress, TokenCount
 from .model_names import resolve_model_display_name
 from .payloads import (
     ARTIFACT_CONTENT_PROTOCOL_ID,
@@ -47,12 +47,16 @@ class LlamaServerBackend:
         self._props_discovery_status: str | None = None
         self._result_observer: Callable[[ChatResult], None] | None = None
         self._failure_observer: Callable[[], None] | None = None
+        self._aborted_observer: Callable[[], None] | None = None
 
     def set_result_observer(self, observer: Callable[[ChatResult], None] | None) -> None:
         self._result_observer = observer
 
     def set_failure_observer(self, observer: Callable[[], None] | None) -> None:
         self._failure_observer = observer
+
+    def set_aborted_observer(self, observer: Callable[[], None] | None) -> None:
+        self._aborted_observer = observer
 
     def chat(
         self,
@@ -432,6 +436,15 @@ class LlamaServerBackend:
     def _observe_call(self, call: Callable[[], ChatResult]) -> ChatResult:
         try:
             result = call()
+        except StreamConsumerAbort:
+            # The consumer stopped this stream deliberately, so nothing failed:
+            # report an attempt whose usage never arrived rather than a failure.
+            if self._aborted_observer is not None:
+                try:
+                    self._aborted_observer()
+                except Exception:
+                    pass
+            raise
         except BaseException:
             if self._failure_observer is not None:
                 try:

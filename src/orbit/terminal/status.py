@@ -64,6 +64,19 @@ class TokenUsageAccumulator:
         self.failed_calls += 1
         self.usage_incomplete = True
 
+    def add_aborted_call(self) -> None:
+        """Record an attempt the client stopped on purpose.
+
+        The request reached the model and real work happened, so it counts as
+        a model call, but the usage event only arrives at the end of a stream
+        that was cut short -- so the totals are short by an unknown amount and
+        must say so. What this must not do is claim a failure: nothing went
+        wrong, and reporting one sends a reader looking for a fault that does
+        not exist.
+        """
+        self.model_calls += 1
+        self.usage_incomplete = True
+
     def _add_metrics(
         self,
         *,
