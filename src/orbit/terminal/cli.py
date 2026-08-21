@@ -131,7 +131,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     session = select_interactive_session(config.workdir)
-    session_messages, session_warning = session.load_with_warning()
+    # Resuming, not merely reading: a stored history that cannot be parsed as a
+    # conversation must not become the live one. On refusal the warning is
+    # shown and the turn starts from empty history, leaving the file untouched.
+    session_messages, session_warning = session.load_resumable()
     if session_warning:
         print(dim(warning_text(session_warning)), file=sys.stderr)
     runtime = ChatRuntime(
