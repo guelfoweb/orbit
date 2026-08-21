@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from orbit.backend.base import Message
+from orbit.runtime.context_manager import conversation_structure_error
 
 
 DEFAULT_SESSION_ROOT = Path.home() / ".orbit" / "sessions"
@@ -67,6 +68,34 @@ class SessionStore:
         messages, _warning = self.load_with_warning()
         return messages
 
+    def load_resumable(self) -> tuple[list[Message] | None, str | None]:
+        """Load this session for use as active conversation history.
+
+        Persisting something and being able to resume it are different
+        questions. A session may legitimately hold state that is not a
+        conversation at all -- a single attested tool result kept so an
+        evidence card stays promptable -- and that must still load through the
+        ordinary API. What cannot happen is such a history, or a genuinely
+        malformed one, silently becoming the live conversation: admission
+        parses history into turns before every call, so a sequence it rejects
+        fails on the user's next prompt rather than at the point it was read.
+
+        Structure is therefore checked here, on the path where persisted state
+        becomes conversational, and not in `load_with_warning`. The stored file
+        is never altered: it is the user's data, and rewriting a history so it
+        parses would hide the problem instead of reporting it.
+        """
+        messages, warning = self.load_with_warning()
+        if warning is not None or not messages:
+            return messages, warning
+        structure_error = conversation_structure_error(messages)
+        if structure_error is not None:
+            return None, (
+                f"warning: session {self.path} cannot be resumed: "
+                f"{structure_error}"
+            )
+        return messages, None
+
     def load_with_warning(self) -> tuple[list[Message] | None, str | None]:
         if not self.path.exists():
             return None, None
@@ -104,7 +133,11 @@ class SessionStore:
             return
 
     def _summary(self) -> SessionSummary | None:
-        messages, warning = self.load_with_warning()
+        # The picker offers sessions to resume, so it asks the resumability
+        # question rather than the persistence one: a stored object Orbit
+        # already knows cannot become a conversation must not be presented as
+        # one. The file stays where it is; only the offer is withheld.
+        messages, warning = self.load_resumable()
         if warning or not messages:
             return None
         try:
