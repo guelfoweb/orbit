@@ -53,6 +53,14 @@ COMMANDS = (
         "Show tool access or local capabilities.",
         "tools",
     ),
+    CommandSpec(
+        "/analysis",
+        "Session",
+        "/analysis <path>",
+        "Analyse one local artifact in an isolated workspace.",
+        "analysis",
+    ),
+    CommandSpec("/chat", "Session", "/chat", "Return to normal chat mode.", "chat"),
     CommandSpec("/help", "Help", "/help", "Show command help.", "help"),
 )
 

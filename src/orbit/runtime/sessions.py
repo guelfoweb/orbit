@@ -112,7 +112,22 @@ class SessionStore:
             return None, f"warning: ignoring invalid session {self.path}: malformed message"
         return messages, None
 
-    def save(self, *, messages: list[Message], workdir: Path, model: str, base_url: str) -> None:
+    def save(
+        self,
+        *,
+        messages: list[Message],
+        workdir: Path,
+        model: str,
+        base_url: str,
+        workflow_mode: str | None = None,
+    ) -> None:
+        """Persist this session. `workflow_mode` records the mode it ended in.
+
+        Recording a mode is not a promise that it can be resumed: what a mode
+        needs in order to continue is decided when the file is read, by
+        `load_workflow_mode`, and an ANALYSIS session has no durable workspace
+        to come back to. Omitting the key keeps older files loadable.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
@@ -122,6 +137,8 @@ class SessionStore:
             "base_url": base_url,
             "messages": messages,
         }
+        if workflow_mode is not None:
+            payload["workflow_mode"] = workflow_mode
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -131,6 +148,22 @@ class SessionStore:
             self.path.unlink()
         except FileNotFoundError:
             return
+
+    def load_workflow_mode(self) -> object | None:
+        """Return the mode recorded in this file, unvalidated, or None.
+
+        Interpreting it is the caller's job: this only reports what is stored,
+        so a missing file and an unusable value stay distinguishable.
+        """
+        if not self.path.exists():
+            return None
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data.get("workflow_mode")
 
     def _summary(self) -> SessionSummary | None:
         # The picker offers sessions to resume, so it asks the resumability

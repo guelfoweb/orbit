@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 from dataclasses import dataclass, field, replace
 
 from orbit.backend.base import ChatResult, StreamPromptMetrics
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
+from orbit.runtime.analysis_runtime import AnalysisRuntime
 from orbit.runtime.context_manager import ContextAdmissionError
+from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.sessions import SessionStore
+from orbit.runtime.workflow_mode import DEFAULT_WORKFLOW_MODE, WorkflowMode
+from orbit.terminal.analysis_mode import (
+    AnalysisModeError,
+    format_analysis_step,
+    open_analysis_session,
+)
 from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
 from orbit.terminal.command_actions import CommandAction, build_list_action, build_models_action, build_read_action, build_search_action
 from orbit.terminal.command_registry import resolve_command
@@ -49,6 +58,8 @@ class Repl:
     prefill_estimator: PrefillEstimator = field(default_factory=PrefillEstimator)
     can_continue: bool = False
     tools_mode: ToolSpec | None = None
+    workflow_mode: WorkflowMode = DEFAULT_WORKFLOW_MODE
+    analysis: AnalysisRuntime | None = field(default=None, repr=False)
     queued_prompts: list[str] = field(default_factory=list)
     turn_model_steps: list[ModelStepMetrics] = field(default_factory=list, repr=False)
     turn_backend_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
@@ -128,6 +139,18 @@ class Repl:
         return read_prompt_input()
 
     def _ask(self, prompt: str, *, command_action: CommandAction | None = None) -> None:
+        # The mode decides which runtime owns this line before anything else
+        # happens. ANALYSIS returns here, so no CHAT machinery -- route,
+        # tools, finalization -- is reached while a session is open.
+        if self.workflow_mode is WorkflowMode.ANALYSIS:
+            if self.analysis is None:
+                # The two are set together everywhere; if they ever diverge,
+                # say so rather than quietly answering as CHAT.
+                print("error: analysis session unavailable: returning to CHAT", file=sys.stderr)
+                self.workflow_mode = DEFAULT_WORKFLOW_MODE
+                return
+            self._ask_analysis(prompt)
+            return
         self.turn_model_steps.clear()
         self.turn_backend_token_usage = TokenUsageAccumulator()
         tools_enabled = tools_are_enabled(self.tools_mode or "off")
@@ -215,6 +238,68 @@ class Repl:
         elapsed = time.monotonic() - started
         print("\n\n", end="", flush=True)
         self._print_turn_footer(result, elapsed_seconds=elapsed)
+
+    def _ask_analysis(self, analyst_message: str) -> None:
+        """One analyst line -> exactly one `AnalysisRuntime.step()`.
+
+        There is no loop and no retry: whatever the step returns is printed
+        and control is back with the analyst. Steering, `continue`, and any
+        other text are all just the next analyst message, passed verbatim.
+        """
+        assert self.analysis is not None
+        print()
+        started = time.monotonic()
+        # `step()` appends the analyst line before it calls the model, so a
+        # cancelled or failed step would otherwise leave an unanswered user
+        # turn in the history. CHAT rewinds to a checkpoint for the same
+        # reason; ANALYSIS has more at stake, because that history is the
+        # append-only record a later exact-prefix strategy depends on.
+        checkpoint = self._analysis_checkpoint()
+        try:
+            result = self.analysis.step(analyst_message)
+        except KeyboardInterrupt:
+            self._restore_analysis_checkpoint(checkpoint)
+            print(dim("cancelled"), flush=True)
+            return
+        except (ContextAdmissionError, LlamaServerError, TimeoutError) as exc:
+            # Recoverable: the analyst keeps the session and can steer again.
+            self._restore_analysis_checkpoint(checkpoint)
+            print(runtime_error_text(exc), file=sys.stderr)
+            return
+        except BaseException:
+            # Anything else ends the process, as it does in CHAT. CHAT leaves
+            # nothing behind when it does; an analysis session would leave a
+            # temporary workspace, so release it before the exception goes up.
+            self._close_analysis()
+            raise
+        print(format_analysis_step(result), flush=True)
+        elapsed = time.monotonic() - started
+        print(
+            dim(
+                f"analysis | mode: ANALYSIS | model calls: {result.model_calls} | "
+                f"actions: {1 if result.action_executed else 0} | {elapsed:.1f}s"
+            ),
+            flush=True,
+        )
+
+    def _analysis_checkpoint(self) -> tuple[int, int]:
+        """History length and analyst-turn count before a step is attempted."""
+        assert self.analysis is not None
+        return len(self.analysis.messages), self.analysis.analyst_turns
+
+    def _restore_analysis_checkpoint(self, checkpoint: tuple[int, int]) -> None:
+        """Undo a step that produced nothing, so the record stays truthful.
+
+        A step that never reached the model must not leave a turn behind: the
+        `turn_N` in evidence provenance counts analyst turns, and a counter
+        that advances on failed attempts would name turns that produced no
+        evidence at all.
+        """
+        if self.analysis is None:
+            return
+        message_count, analyst_turns = checkpoint
+        del self.analysis.messages[message_count:]
+        self.analysis.analyst_turns = analyst_turns
 
     def _print_turn_footer(self, result, *, elapsed_seconds: float) -> None:
         self.can_continue = self.runtime.can_continue_last_response() or (
@@ -337,6 +422,8 @@ class Repl:
                 print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
                 return True
             print(reset_session(self.runtime, self.session))
+            self._close_analysis()
+            self.workflow_mode = DEFAULT_WORKFLOW_MODE
             self._reset_token_usage()
             self.can_continue = False
             return True
@@ -389,6 +476,15 @@ class Repl:
         if handler == "tools":
             print(self._handle_tools_command(f"/tools {arguments}".rstrip()))
             return True
+        if handler == "analysis":
+            print(self._handle_analysis_command(arguments))
+            return True
+        if handler == "chat":
+            if arguments:
+                print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
+                return True
+            print(self._handle_chat_command())
+            return True
         print(f"error: command handler unavailable: {invocation.spec.name}", file=sys.stderr)
         return True
 
@@ -409,6 +505,8 @@ class Repl:
             return "sessions clear cancelled"
         removed = SessionStore.clear_for_workdir(self.config.workdir)
         self.runtime.reset()
+        self._close_analysis()
+        self.workflow_mode = DEFAULT_WORKFLOW_MODE
         self._reset_token_usage()
         self.can_continue = False
         self.session = SessionStore.new_for_workdir(self.config.workdir)
@@ -447,6 +545,68 @@ class Repl:
         self.runtime.thinking_mode = self.config.think
         return f"think: {value}"
 
+    def _handle_analysis_command(self, arguments: str) -> str:
+        """Enter ANALYSIS on one artifact. No model call happens here."""
+        try:
+            runtime = open_analysis_session(
+                arguments,
+                backend=self.backend,
+                workdir=self.config.workdir,
+                evidence_store_factory=self._analysis_evidence_store,
+            )
+        except AnalysisModeError as exc:
+            # A refused session leaves the current mode untouched: a typo must
+            # not silently drop the analyst out of the session they were in.
+            return f"error: {exc}"
+        self._close_analysis()
+        self.analysis = runtime
+        self.workflow_mode = WorkflowMode.ANALYSIS
+        self.can_continue = False
+        source = runtime.source
+        return (
+            f"mode: ANALYSIS | {source.original_path} "
+            f"({source.size_bytes} bytes, sha256 {source.sha256})"
+        )
+
+    def _handle_chat_command(self) -> str:
+        """Return to CHAT. No model call, and the analysis is kept.
+
+        Closing the workspace here would destroy artifacts the analyst may
+        still want to come back to within this process, and nothing about
+        answering a chat question requires that. The session is released by
+        the ordinary lifecycle instead: `/reset`, `/analysis` on another
+        artifact, or leaving the REPL.
+        """
+        if self.workflow_mode is WorkflowMode.CHAT:
+            return "mode: CHAT"
+        self.workflow_mode = WorkflowMode.CHAT
+        self.can_continue = False
+        if self.analysis is not None:
+            return "mode: CHAT | analysis session kept (/analysis <path> starts a new one)"
+        return "mode: CHAT"
+
+    def _analysis_evidence_store(self, workspace_root: Path) -> EvidenceStore:
+        """A store of its own, per analysis session.
+
+        Sharing CHAT's store looks economical and is not: CHAT reads that
+        store to decide which route window to build and which evidence ids a
+        final answer may cite, both keyed on the most recent record and on a
+        `turn_N` string that each runtime mints from its own counter. An
+        analysis record landing there truncates the next CHAT route window,
+        advertises `execute_analysis` inside it, and can be authorised for
+        citation by a CHAT turn that never produced it. The two evidence
+        spaces are therefore kept apart, which is also what lets `/reset`
+        clear CHAT without reaching into a live analysis session.
+        """
+        return EvidenceStore(root=workspace_root / "evidence")
+
+    def _close_analysis(self) -> None:
+        """Release the analysis workspace, if one is open. Idempotent."""
+        if self.analysis is None:
+            return
+        self.analysis.close()
+        self.analysis = None
+
     def _continue_last_answer(self) -> None:
         self.can_continue = self.can_continue or self.runtime.can_continue_last_response()
         if not self.can_continue:
@@ -462,6 +622,7 @@ class Repl:
             workdir=self.config.workdir,
             model=self.backend.display_model_name() or "unknown",
             base_url=self.config.base_url,
+            workflow_mode=str(self.workflow_mode),
         )
 
     def _save_history(self) -> None:
@@ -469,6 +630,7 @@ class Repl:
             self.history.save()
 
     def _finish_interactive_session(self, code: int, *, leading_newline: bool = False) -> int:
+        self._close_analysis()
         self._save_history()
         if leading_newline:
             print()
