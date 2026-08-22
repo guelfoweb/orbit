@@ -34,6 +34,7 @@ from orbit.native_llama.qwen36_shell_tool_prefix import (
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.history_serialization import serialize_profile_messages
+from orbit.runtime.analysis_runtime import ANALYSIS_STEP_PHASE
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 from orbit.runtime.tool_healing import tool_call_healing_status
 
@@ -86,6 +87,7 @@ class LlamaServerBackend:
                 thinking=self.thinking,
                 tools=tools,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
+                analysis_rolling_anchor=_analysis_rolling_anchor_requested(native_backend=native_backend),
                 qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
                 qwen36_shell_tool_prefix_anchor=_qwen36_shell_tool_prefix_anchor_requested(
                     native_backend=native_backend,
@@ -129,6 +131,7 @@ class LlamaServerBackend:
                 tools=tools,
                 stream=True,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
+                analysis_rolling_anchor=_analysis_rolling_anchor_requested(native_backend=native_backend),
                 qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
                 qwen36_shell_tool_prefix_anchor=_qwen36_shell_tool_prefix_anchor_requested(
                     native_backend=native_backend,
@@ -1084,6 +1087,19 @@ def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     if not prefix_anchor_enabled():
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
+
+
+def _analysis_rolling_anchor_requested(*, native_backend: bool) -> bool:
+    """Whether this call is an analysis step eligible for rolling reuse.
+
+    Read from the phase the runtime already declares for its own call, the
+    same way the route anchor is: the backend is told, never infers.
+    """
+    if not native_backend:
+        return False
+    if not prefix_anchor_enabled():
+        return False
+    return current_phase() == ANALYSIS_STEP_PHASE
 
 
 def _qwen_route_prefix_anchor_requested(*, native_backend: bool) -> bool:
