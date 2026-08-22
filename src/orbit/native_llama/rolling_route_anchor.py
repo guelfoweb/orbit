@@ -27,6 +27,15 @@ from typing import Any
 
 ROLLING_ROUTE_STRATEGY_ID = "ornith15-rolling-route-v1"
 
+# The analysis lineage reuses every primitive below unchanged -- the checkpoint
+# format, the exact-prefix rule, the capture precondition -- and differs only in
+# which conversation the saved tokens belong to. Keeping that difference in the
+# identity's `strategy_id` is what makes a CHAT checkpoint and an ANALYSIS
+# checkpoint mutually unusable: identities are compared whole, so neither can
+# ever satisfy the other's reuse check, without a second cache or a mode flag
+# reaching the backend.
+ROLLING_ANALYSIS_STRATEGY_ID = "ornith15-rolling-analysis-v1"
+
 
 @dataclass(frozen=True)
 class RollingRouteIdentity:

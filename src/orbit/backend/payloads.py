@@ -23,6 +23,7 @@ class ChatPayloadOptions:
     route_prefix_anchor: bool = False
     qwen_route_prefix_anchor: bool = False
     qwen36_shell_tool_prefix_anchor: bool = False
+    analysis_rolling_anchor: bool = False
     allow_mtp_experimental: bool | None = None
     final_prefix_experiment: bool = False
     artifact_content: bool = False
@@ -46,6 +47,8 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
         payload["qwen_route_prefix_anchor"] = True
     if options.qwen36_shell_tool_prefix_anchor:
         payload["qwen36_shell_tool_prefix_anchor"] = True
+    if options.analysis_rolling_anchor:
+        payload["analysis_rolling_anchor"] = True
     if options.allow_mtp_experimental is not None:
         payload["allow_mtp_experimental"] = options.allow_mtp_experimental
     if options.final_prefix_experiment:
