@@ -236,6 +236,28 @@ def acquire_analysis_source(original: Path | str, workspace: Path | str) -> Anal
     )
 
 
+def _unencodable(value: object) -> bool:
+    """Whether this would fail the exact serialization the bridge performs."""
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except (UnicodeEncodeError, TypeError, ValueError):
+        return True
+    return False
+
+
+def _rejected_action_text(assistant_text: str, rejection: str) -> str:
+    """The assistant turn for a step whose tool call was refused.
+
+    The refused call is deliberately not carried here in any form. It is
+    described, so the next step's prompt tells the model plainly what was
+    wrong, without re-serialising output that could not be parsed in the
+    first place.
+    """
+    note = f"[action refused: {rejection}]"
+    text = assistant_text.strip()
+    return f"{text}\n\n{note}" if text else note
+
+
 def _raw_action_output(result: AnalysisResult) -> str:
     """The complete output of one action, for durable retention.
 
@@ -362,7 +384,36 @@ class AnalysisRuntime:
         self.model_calls += 1
 
         calls = list(response.tool_calls or [])
-        assistant: Message = {"role": "assistant", "content": response.content or ""}
+        content = response.content or ""
+        if _unencodable(content):
+            # Decoding makes this practically unreachable, but the cost of
+            # being wrong is the same permanently unrenderable history, and
+            # the check is one comparison.
+            content = content.encode("utf-8", "replace").decode("utf-8")
+        assistant: Message = {"role": "assistant", "content": content}
+
+        # Structure is judged before the turn is committed, not after. A tool
+        # call the model got wrong -- truncated mid-JSON by an output budget,
+        # say -- still has to be told to the analyst, but it must never enter
+        # the history: this history is append-only and is re-rendered whole on
+        # every later step, so one unparseable `tool_calls` entry makes every
+        # subsequent step fail to render and ends the session. Recording the
+        # rejection as prose keeps the turn truthful and the history usable.
+        rejection = self._structural_rejection(calls) if calls else None
+        if rejection is not None:
+            assistant["content"] = _rejected_action_text(content, rejection)
+            self.messages.append(assistant)
+            # No repair call: repairing would mean a second model invocation
+            # before the analyst has seen anything, which is the boundary this
+            # runtime exists to hold.
+            return AnalysisStepResult(
+                model_calls=1,
+                action_attempted=True,
+                action_executed=False,
+                assistant_text=response.content or "",
+                rejection=rejection,
+            )
+
         if calls:
             assistant["tool_calls"] = calls
         self.messages.append(assistant)
@@ -373,20 +424,6 @@ class AnalysisRuntime:
                 action_attempted=False,
                 action_executed=False,
                 assistant_text=response.content or "",
-            )
-
-        rejection = self._structural_rejection(calls)
-        if rejection is not None:
-            # No repair call: repairing would mean a second model invocation
-            # before the analyst has seen anything, which is the boundary this
-            # runtime exists to hold.
-            self._append_tool_result(calls[0], f"rejected: {rejection}")
-            return AnalysisStepResult(
-                model_calls=1,
-                action_attempted=True,
-                action_executed=False,
-                assistant_text=response.content or "",
-                rejection=rejection,
             )
 
         capacity_error = self._session_capacity_error()
@@ -536,10 +573,29 @@ class AnalysisRuntime:
         return digests
 
     def _structural_rejection(self, calls: list[dict[str, Any]]) -> str | None:
+        """Why this tool call cannot be committed, or None if it can.
+
+        The bar is not just "did the model mean something sensible" but "can
+        this turn survive being written into the history and rendered again".
+        The template renders the whole history on every later step and
+        serializes it with `ensure_ascii=False`, so a call that cannot be
+        encoded is refused here rather than left to fail a future step.
+        """
         if len(calls) > 1:
             return f"{len(calls)} tool calls in one response; at most one action per step"
         call = calls[0]
-        function = call.get("function") or {}
+        if not isinstance(call, dict):
+            return f"tool call is not an object: {type(call).__name__}"
+        # The template requires these too (common/chat.cpp: "Missing tool call
+        # type" / "Unsupported tool call type" / "Missing tool call function").
+        # Producers normalise the shape today, so this is defence in depth --
+        # cheap, against a failure whose cost is an unusable session.
+        call_type = call.get("type")
+        if call_type is not None and call_type != "function":
+            return f"unsupported tool call type: {call_type!r}"
+        function = call.get("function")
+        if not isinstance(function, dict):
+            return "tool call has no function object"
         name = function.get("name")
         if name != ANALYSIS_TOOL_NAME:
             return f"unsupported tool: {name!r}"
@@ -549,6 +605,10 @@ class AnalysisRuntime:
             return "tool arguments are not valid JSON"
         if not isinstance(arguments, dict) or not isinstance(arguments.get("code"), str):
             return "tool arguments must supply a 'code' string"
+        if _unencodable(call):
+            # Lone surrogates survive json.loads but not the UTF-8 encode the
+            # bridge performs, so committing one would break every later step.
+            return "tool call contains characters that cannot be encoded"
         return None
 
     def _append_tool_result(self, call: dict[str, Any], content: str) -> None:
