@@ -40,6 +40,8 @@ If the latest request is only a recap, repeat, summary, explanation, comparison,
 Call tools for fresh/current data, verification, changed files/state, new information, or missing/stale/ambiguous/insufficient prior context.
 Web/search/latest/current/online and URL fetch/read/open/explain/summarize/analyze requests are tool tasks; return a compact tool decision, not a direct answer.
 Specific file read/explain/summarize/analyze requests require file content evidence; return a content-reading command decision, not a directory listing.
+Reading, summarizing, explaining or answering questions about a file is a content-reading command, never ANALYSIS.
+Use ANALYSIS only when the request asks to investigate one named local artifact as an artifact: derive findings, extract indicators, decode or reconstruct transformations, or determine behaviour. It runs isolated code against that file across several steps.
 If the target is a file path or filename, use a content-reading command; do not inspect it with list_directory.
 Use directory listing only when the user asks to list files or inspect directory structure; never use {{"path":"..."}} to answer about a file's contents.
 The one-sentence direct-answer exception below is only for requests that are not tool tasks and need no external evidence.
@@ -66,6 +68,9 @@ For URL fetch/read page:
 For normal no-tool final answer pass:
 {{"route":"CHAT"}}
 
+For isolated artifact analysis of one local file:
+{{"route":"ANALYSIS","artifact":"samples/foo.js"}}
+
 For compact directory listing only:
 {{"path":".","recursive":false}}
 
@@ -84,7 +89,7 @@ Create/save one bounded UTF-8 text file ->
 {{"tool":"write_artifact","arguments":{{"path":"x","overwrite":false,"create_parents":true}}}}
 Use model-selected values; never emit file content in this route pass.
 
-For analysis, prefer content, source, binaries, strings, logs, archives, or fetched data, not metadata."""
+When gathering evidence with a command, prefer content, source, binaries, strings, logs, archives, or fetched data, not metadata."""
 ROUTE_SYSTEM_PROMPT = _COMMAND_SYSTEM_TEMPLATE.format(os_name=_detect_os(), shell_name=_detect_shell())
 TOOL_CALL_SYSTEM_PROMPT = (
     "Call exactly one available tool and output no prose. "

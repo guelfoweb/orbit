@@ -216,7 +216,21 @@ class AnalysisStepResult:
 def acquire_analysis_source(original: Path | str, workspace: Path | str) -> AnalysisSource:
     """Copy the artifact into Orbit-owned storage and identify it by content."""
     source = Path(original)
-    data = source.read_bytes()
+    return snapshot_analysis_bytes(
+        source.read_bytes(), workspace=workspace, original_path=str(source)
+    )
+
+
+def snapshot_analysis_bytes(
+    data: bytes, *, workspace: Path | str, original_path: str
+) -> AnalysisSource:
+    """Store already-acquired bytes as the session's immutable source.
+
+    The caller has the bytes because it opened the file itself; handing them
+    here rather than a path is what stops the file being opened a second time,
+    when it might no longer be the same file. `original_path` is carried for
+    the analyst to read and is never reopened.
+    """
     digest = hashlib.sha256(data).hexdigest()
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
@@ -232,7 +246,7 @@ def acquire_analysis_source(original: Path | str, workspace: Path | str) -> Anal
         snapshot_path=snapshot,
         sha256=digest,
         size_bytes=len(data),
-        original_path=str(source),
+        original_path=original_path,
     )
 
 

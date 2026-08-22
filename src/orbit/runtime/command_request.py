@@ -25,12 +25,18 @@ class ToolRoute(StrEnum):
     FILE_EDIT = "FILE_EDIT"
     WEB = "WEB"
     MEDIA = "MEDIA"
+    ANALYSIS = "ANALYSIS"
 
 
 @dataclass(frozen=True)
 class RouteDecision:
     route: ToolRoute
     tool_names: tuple[str, ...] = ()
+    # The artifact an ANALYSIS decision names. Every other route leaves this
+    # empty; the runtime needs it because an analysis session is bound to one
+    # file at construction, and re-deriving it from prose is exactly the
+    # guesswork this route form exists to avoid.
+    artifact: str | None = None
 
 
 class RouteOutputClass(StrEnum):
@@ -304,6 +310,8 @@ def parse_command_decision(content: str) -> RouteDecision | None:
         return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",))
     if _has_system_info_args(value):
         return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",))
+    if _has_analysis_route(value):
+        return _analysis_decision(value)
     if _has_chat_route(value):
         return RouteDecision(ToolRoute.CHAT)
     if _has_command(_extract_loose_command_object(text)):
@@ -320,6 +328,8 @@ def parse_command_decision(content: str) -> RouteDecision | None:
             return RouteDecision(ToolRoute.FILESYSTEM, ("list_directory",))
         if _has_system_info_args(value):
             return RouteDecision(ToolRoute.FILESYSTEM, ("system_info",))
+        if _has_analysis_route(value):
+            return _analysis_decision(value)
         if _has_chat_route(value):
             return RouteDecision(ToolRoute.CHAT)
     return None
@@ -611,6 +621,27 @@ def _artifact_args(value: dict[str, Any]) -> dict[str, Any]:
         for key in ("path", "overwrite", "create_parents")
         if key in value
     }
+
+
+def _has_analysis_route(value: dict[str, Any] | None) -> bool:
+    """`{"route":"ANALYSIS","artifact":"..."}` and nothing looser.
+
+    The artifact is required: an ANALYSIS decision without one cannot open a
+    session, and treating it as a bare route would silently drop the request
+    into a mode that has nothing to analyse. `artifact` rather than `path`
+    because a bare `path` key already means "list this directory" here.
+    """
+    if not isinstance(value, dict):
+        return False
+    route = value.get("route")
+    if not isinstance(route, str) or route.strip().upper() != ToolRoute.ANALYSIS.value:
+        return False
+    artifact = value.get("artifact")
+    return isinstance(artifact, str) and bool(artifact.strip())
+
+
+def _analysis_decision(value: dict[str, Any]) -> RouteDecision:
+    return RouteDecision(ToolRoute.ANALYSIS, (), str(value["artifact"]).strip())
 
 
 def _has_chat_route(value: dict[str, Any] | None) -> bool:

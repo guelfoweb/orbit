@@ -4,6 +4,7 @@ import sys
 import time
 from pathlib import Path
 from dataclasses import dataclass, field, replace
+from typing import Callable
 
 from orbit.backend.base import ChatResult, StreamPromptMetrics
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
@@ -18,6 +19,7 @@ from orbit.terminal.analysis_mode import (
     AnalysisModeError,
     format_analysis_step,
     open_analysis_session,
+    open_confined_analysis_session,
 )
 from orbit.terminal.compact_reports import format_memory_compaction_report, format_tool_compaction_report
 from orbit.terminal.command_actions import CommandAction, build_list_action, build_models_action, build_read_action, build_search_action
@@ -59,6 +61,10 @@ class Repl:
     can_continue: bool = False
     tools_mode: ToolSpec | None = None
     workflow_mode: WorkflowMode = DEFAULT_WORKFLOW_MODE
+    # Runs between acquiring the artifact's bytes and storing them. Only a
+    # test sets this; it exists so the swap window can be exercised
+    # deterministically instead of raced for.
+    _analysis_acquired_hook: Callable[[], None] | None = field(default=None, repr=False)
     analysis: AnalysisRuntime | None = field(default=None, repr=False)
     queued_prompts: list[str] = field(default_factory=list)
     turn_model_steps: list[ModelStepMetrics] = field(default_factory=list, repr=False)
@@ -234,6 +240,18 @@ class Repl:
             renderer.finish()
             raise
         renderer.finish()
+        if self.workflow_mode is WorkflowMode.CHAT and self.runtime.last_analysis_request:
+            # The route asked for artifact analysis. Nothing was answered and
+            # no tool ran, so the analyst's original request is still owed a
+            # reply -- it becomes the first analyst step of the new session.
+            if self._enter_analysis_from_route(self.runtime.last_analysis_request):
+                self._ask_analysis(prompt)
+                return
+            # Refused: the route turn answered nothing, so rewinding leaves no
+            # unanswered user turn behind for every later prompt to carry.
+            self.runtime.restore_message_count(checkpoint)
+            self.runtime.last_analysis_request = None
+            return
         self._save_session()
         elapsed = time.monotonic() - started
         print("\n\n", end="", flush=True)
@@ -544,6 +562,45 @@ class Repl:
         self.backend.thinking = self.config.think
         self.runtime.thinking_mode = self.config.think
         return f"think: {value}"
+
+    def _enter_analysis_from_route(self, artifact: str) -> bool:
+        """Open an analysis session the route asked for. True if it opened.
+
+        The path came from the model, not the analyst, so it is acquired
+        rather than merely checked: opened once under the workdir, following
+        no symlink on any component, with the bytes read from that same
+        descriptor. An earlier version validated the name and let the session
+        reopen it, which left a window in which the name could be pointed at
+        an outside file between the two -- reproducibly, on a few racing turns
+        in a hundred. Nothing here hands a pathname on to be opened again.
+
+        Explicit `/analysis` keeps its own, wider policy: the analyst typed
+        that path and may legitimately name anything on the machine.
+        """
+        try:
+            runtime = open_confined_analysis_session(
+                artifact,
+                backend=self.backend,
+                workdir=self.config.workdir,
+                evidence_store_factory=self._analysis_evidence_store,
+                on_acquired=self._analysis_acquired_hook,
+            )
+        except AnalysisModeError as exc:
+            print(f"error: refusing analysis: {exc}", file=sys.stderr)
+            return False
+        self._close_analysis()
+        self.analysis = runtime
+        self.workflow_mode = WorkflowMode.ANALYSIS
+        self.can_continue = False
+        source = runtime.source
+        print(
+            dim(
+                f"mode: ANALYSIS | {source.original_path} "
+                f"({source.size_bytes} bytes, sha256 {source.sha256})"
+            ),
+            flush=True,
+        )
+        return True
 
     def _handle_analysis_command(self, arguments: str) -> str:
         """Enter ANALYSIS on one artifact. No model call happens here."""

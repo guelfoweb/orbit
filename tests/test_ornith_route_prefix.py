@@ -245,8 +245,8 @@ class OrnithPrefixHeadroomTests(unittest.TestCase):
 
     `ROUTE_SYSTEM_PROMPT` interpolates the detected OS and shell, so the prompt
     is not one fixed string. Measured on the real Ornith tokenizer the
-    invariant region is 828-830 tokens across every variant, leaving at least
-    60 tokens of headroom over the fixed 768. This test pins the property that
+    invariant region is 925-927 tokens across every variant, leaving at least
+    157 tokens of headroom over the fixed 768. This test pins the property that
     matters -- the variation is far from the boundary -- without needing the
     model, by checking the character spread the interpolation can introduce.
     """
@@ -719,7 +719,7 @@ class OrnithStartupPrewarmWiringTests(unittest.TestCase):
 
         self.assertEqual(
             hashlib.sha256(ROUTE_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
-            "e7d5234d50700746d315004af1430871442c4eefcc61b6e420cc24d29bcaae28",
+            "d38e293a1d8fc0efb5371cff08bb5870ffc4faa6b96b889ff2af54ba2b66a38d",
         )
 
 

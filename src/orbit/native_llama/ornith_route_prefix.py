@@ -29,10 +29,11 @@ from .qwen_route_prefix import (
 
 ORNITH_ROUTE_PREFIX_ENV = "ORBIT_ORNITH_ROUTE_PREFIX_REUSE"
 
-# 768, as for the other profiles. Measured headroom on this template: the
-# rendered route system turn ends at token 825, and the two reference renders
-# share 828, so the captured prefix stops well inside the invariant region and
-# never reaches the user turn.
+# 768, as for the other profiles. Re-measured after the route language gained
+# its ANALYSIS form: the two reference renders now share 925 tokens, so the
+# captured prefix stops 157 tokens short of anything that varies and never
+# reaches the user turn. Derivation is fail-closed -- a prompt that ever
+# shrank below this count would be refused, not silently shortened.
 ORNITH_ROUTE_PREFIX_TOKEN_COUNT = 768
 ORNITH_ROUTE_PREFIX_FORMAT_VERSION = "ornith15-route-prefix-v1"
 ORNITH_ROUTE_TOKENIZER_IDENTITY = "gpt2:qwen35"
