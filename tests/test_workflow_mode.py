@@ -31,8 +31,10 @@ from orbit.terminal.analysis_mode import AnalysisModeError, open_analysis_sessio
 from orbit.terminal.config import AppConfig
 from orbit.terminal.repl import Repl
 
-# Pinned literal: the route language must not change in this mission.
-ROUTE_PROMPT_SHA256 = "e7d5234d50700746d315004af1430871442c4eefcc61b6e420cc24d29bcaae28"
+# Pinned literal. The route language gained an ANALYSIS form in the
+# automatic-recognition mission; the pin is updated only alongside the
+# prewarm requalification that a changed route prompt forces.
+ROUTE_PROMPT_SHA256 = "d38e293a1d8fc0efb5371cff08bb5870ffc4faa6b96b889ff2af54ba2b66a38d"
 
 
 class ScriptedBackend:
@@ -874,7 +876,7 @@ class StrictPrefixTest(ModeTestBase):
 
 
 class ChatNonRegressionTest(ModeTestBase):
-    def test_route_prompt_is_untouched_by_this_mission(self) -> None:
+    def test_route_prompt_matches_the_qualified_pin(self) -> None:
         import hashlib
 
         from orbit.runtime.messages import ROUTE_SYSTEM_PROMPT

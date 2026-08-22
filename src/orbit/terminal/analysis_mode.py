@@ -22,7 +22,9 @@ from orbit.runtime.analysis_runtime import (
     AnalysisStepResult,
     AnalysisWorkspace,
     acquire_analysis_source,
+    snapshot_analysis_bytes,
 )
+from orbit.runtime.confined_acquire import ConfinedAcquireError, acquire_confined_bytes
 from orbit.runtime.evidence import EvidenceStore
 
 
@@ -52,6 +54,52 @@ def open_analysis_session(
     except OSError as exc:
         workspace.close()
         raise AnalysisModeError(f"cannot read artifact: {exc}") from exc
+    except Exception:
+        workspace.close()
+        raise
+    return AnalysisRuntime(
+        backend=backend,
+        source=source,
+        evidence_store=evidence_store,
+        workspace=workspace,
+    )
+
+
+def open_confined_analysis_session(
+    raw_path: str,
+    *,
+    backend: ChatBackend,
+    workdir: Path,
+    evidence_store_factory: Callable[[Path], EvidenceStore],
+    on_acquired: Callable[[], None] | None = None,
+) -> AnalysisRuntime:
+    """Open a session on a path the model chose, acquiring it safely.
+
+    The difference from `open_analysis_session` is that the file is opened
+    once, under the workdir, following no symlinks, and the bytes come from
+    that same descriptor. Nothing downstream reopens the name, so there is no
+    window in which it can be pointed elsewhere.
+
+    `on_acquired` is a test seam: it runs after the bytes are held and before
+    the snapshot exists, which is exactly the interval an attacker would want.
+    """
+    try:
+        acquired = acquire_confined_bytes(raw_path, workdir=workdir)
+    except ConfinedAcquireError as exc:
+        raise AnalysisModeError(str(exc)) from exc
+    if on_acquired is not None:
+        on_acquired()
+    workspace = AnalysisWorkspace.create()
+    try:
+        source = snapshot_analysis_bytes(
+            acquired.data,
+            workspace=workspace.source_root,
+            original_path=acquired.resolved_path,
+        )
+        evidence_store = evidence_store_factory(workspace.root)
+    except OSError as exc:
+        workspace.close()
+        raise AnalysisModeError(f"cannot store artifact: {exc}") from exc
     except Exception:
         workspace.close()
         raise
