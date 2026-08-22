@@ -404,7 +404,13 @@ class AnalysisRuntime:
                 scratch_baseline_sizes=baseline_sizes,
                 scratch_baseline_digests=baseline_digests,
             )
-        except (SandboxUnavailable, ValueError) as exc:
+        except (RuntimeError, OSError, ValueError) as exc:
+            # The sandbox refuses fail-closed for a tampered scratch entry or
+            # a changed read-only input, and it signals that with a plain
+            # RuntimeError. Those are refusals about this action, not reasons
+            # to end an investigation, so they are reported the same way an
+            # unavailable sandbox is. `SandboxUnavailable` is a RuntimeError
+            # and is covered here too.
             detail = f"{type(exc).__name__}: {exc}"
             self._append_tool_result(calls[0], f"action not executed: {detail}")
             return AnalysisStepResult(

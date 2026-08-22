@@ -15,6 +15,7 @@ from orbit.runtime.artifacts import cleanup_stale_artifact_entries
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.media import load_audio, load_image
 from orbit.runtime.turn_trace import ModelStepMetrics
+from orbit.runtime.workflow_mode import restored_workflow_mode
 from orbit.terminal.config import add_config_arguments, load_app_config
 from orbit.terminal.command_actions import CommandAction, build_list_action, build_models_action, build_read_action, build_search_action
 from orbit.terminal.command_registry import resolve_command
@@ -137,6 +138,11 @@ def main(argv: list[str] | None = None) -> int:
     session_messages, session_warning = session.load_resumable()
     if session_warning:
         print(dim(warning_text(session_warning)), file=sys.stderr)
+    # A recorded mode is honoured only where this process can actually
+    # rebuild what it needs; anything else starts in CHAT and says why.
+    workflow_mode, mode_warning = restored_workflow_mode(session.load_workflow_mode())
+    if mode_warning:
+        print(dim(warning_text(mode_warning)), file=sys.stderr)
     runtime = ChatRuntime(
         backend=backend,
         system_prompt=None if config.no_system else config.system,
@@ -145,7 +151,14 @@ def main(argv: list[str] | None = None) -> int:
         diagnostic_session_id=str(config.workdir),
     )
     history = PromptHistory.for_workdir(config.workdir)
-    return Repl(runtime=runtime, backend=backend, config=config, session=session, history=history).run()
+    return Repl(
+        runtime=runtime,
+        backend=backend,
+        config=config,
+        session=session,
+        history=history,
+        workflow_mode=workflow_mode,
+    ).run()
 
 
 def _handle_one_shot_command(
