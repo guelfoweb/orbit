@@ -244,8 +244,13 @@ class StructuralRejectionTest(AnalysisRuntimeTestBase):
         backend = ScriptedBackend(tool_response("print('x')", count=2))
         runtime = self.runtime(backend)
         runtime.step("do two things")
-        self.assertEqual(runtime.messages[-1]["role"], "tool")
-        self.assertIn("rejected", runtime.messages[-1]["content"])
+        # Recorded in the assistant turn rather than a tool turn: a tool turn
+        # would have to answer a `tool_calls` entry, and committing the refused
+        # call is exactly what makes the history unrenderable afterwards.
+        last = runtime.messages[-1]
+        self.assertEqual(last["role"], "assistant")
+        self.assertIn("refused", last["content"])
+        self.assertNotIn("tool_calls", last)
 
 
 class SourceOwnershipTest(AnalysisRuntimeTestBase):
