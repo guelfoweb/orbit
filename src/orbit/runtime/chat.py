@@ -168,6 +168,10 @@ class ChatRuntime:
     current_user_turn_id: str | None = None
     current_turn_evidence_sequence_start: int = 0
     completed_evidence_ids: set[str] = field(default_factory=set, repr=False)
+    # Set when the route asked for artifact analysis. The caller owns the
+    # transition: this runtime has no analysis session and must not start one,
+    # so it reports the request and answers nothing.
+    last_analysis_request: str | None = None
     last_chat_projection_used: bool = False
     last_chat_projection_fallback_reason: str | None = None
     last_chat_projection_omitted_evidence_count: int = 0
@@ -194,6 +198,7 @@ class ChatRuntime:
         return self.local_capabilities
 
     def _begin_user_turn(self) -> str:
+        self.last_analysis_request = None
         self.user_turn_counter += 1
         self.current_user_turn_id = f"turn_{self.user_turn_counter}"
         sequences = (
@@ -783,6 +788,12 @@ class ChatRuntime:
                 if on_final_delta and not streamed_final_retry and not retried_empty_final:
                     on_final_delta(first.content)
                 return self._remember_visible_result_streamed(_visible_delta, _delta_sink, first)
+        if decision.route == ToolRoute.ANALYSIS and decision.artifact:
+            # Reported, not acted on: opening a session is the caller's job,
+            # and running a filesystem tool first would both answer the wrong
+            # question and spend a model call the analysis step needs.
+            self.last_analysis_request = decision.artifact
+            return self._remember_visible_result_streamed(_visible_delta, _delta_sink, first)
         if decision.route == ToolRoute.CHAT:
             chat_messages = self._chat_final_messages()
             with model_call_context(phase="chat_final", tools_mode="on"):
