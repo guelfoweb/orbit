@@ -90,6 +90,12 @@ from .qwen3_coder import (
     qwen3_coder_artifact_messages,
     qwen3_coder_artifact_prompt,
 )
+from .ornith_route_prefix import (
+    ORNITH_ROUTE_PREFIX_FORMAT_VERSION,
+    ORNITH_ROUTE_PREFIX_TOKEN_COUNT,
+    ORNITH_ROUTE_TOKENIZER_IDENTITY,
+    derive_ornith_route_prefix_spec,
+)
 from .qwen3_coder_route_prefix import (
     QWEN3_CODER_ROUTE_PREFIX_FORMAT_VERSION,
     QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT,
@@ -163,6 +169,9 @@ class NativeClientConfig:
     qwen3_coder_route_prefix_reuse_enabled: bool = False
     qwen3_coder_route_prefix_reuse_source: str = "default"
     qwen3_coder_route_prefix_reuse_config_error: str | None = None
+    ornith_route_prefix_reuse_enabled: bool = False
+    ornith_route_prefix_reuse_source: str = "default"
+    ornith_route_prefix_reuse_config_error: str | None = None
     moe_expert_usage_enabled: bool = False
     low_memory: bool = False
 
@@ -340,8 +349,14 @@ class NativeLlamaClient:
         self._qwen36_shell_tool_prefix_lock = threading.RLock()
         self._qwen36_shell_tool_prefix_epoch = 0
         self._qwen3_coder_route_prefix_anchor_state = PrefixAnchorState()
+        # Ornith renders through its own template, so its captured prefix is a
+        # different token sequence and needs its own slot; it reuses the same
+        # PrefixAnchorState type and the same restore path.
+        self._ornith_route_prefix_anchor_state = PrefixAnchorState()
         self._qwen3_coder_route_prefix_spec: QwenRoutePrefixSpec | None = None
+        self._ornith_route_prefix_spec: QwenRoutePrefixSpec | None = None
         self._qwen3_coder_route_prefix_status = QwenRoutePrefixStatus()
+        self._ornith_route_prefix_status = QwenRoutePrefixStatus()
         self._model_metadata_identity: dict[str, str] = {}
         self._qwen_native_build_identity: str | None = None
         self._final_prefix_anchor_state = PrefixAnchorState()
@@ -835,6 +850,11 @@ class NativeLlamaClient:
             self._invalidate_qwen_route_prefix(
                 "session_reset", profile_id=QWEN3_CODER_PROFILE_ID
             )
+        # The Ornith prewarm is a checkpoint like the others: a reset that
+        # destroys the conversation must not leave it standing.
+        self._invalidate_qwen_route_prefix(
+            "session_reset", profile_id=ORNITH15_PROFILE_ID
+        )
         self._invalidate_qwen36_shell_tool_prefix("session_reset")
         if self._persistent_mtp_runtime is None:
             return
@@ -894,14 +914,16 @@ class NativeLlamaClient:
         self._session.prompt_cache_mode = mode
 
     def _invalidate_coder_route_prefix_after_failed_completion(self, reason: str) -> None:
+        # A completion that failed may have left the sequence in a state the
+        # checkpoint no longer describes. Both ChatML-family profiles keep a
+        # prewarm, so both have to be dropped on their own failures.
         profile = getattr(self, "model_profile", None)
-        if (
-            getattr(profile, "verified", False)
-            and getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
+        profile_id = getattr(profile, "profile_id", None)
+        if getattr(profile, "verified", False) and profile_id in (
+            QWEN3_CODER_PROFILE_ID,
+            ORNITH15_PROFILE_ID,
         ):
-            self._invalidate_qwen_route_prefix(
-                reason, profile_id=QWEN3_CODER_PROFILE_ID
-            )
+            self._invalidate_qwen_route_prefix(reason, profile_id=profile_id)
 
     def _initialize_multimodal_context(self) -> None:
         self.supports_vision = False
@@ -1095,13 +1117,21 @@ class NativeLlamaClient:
         tools_mode: str = "on",
     ) -> NativeRoutePrefixPrefillResult:
         profile = getattr(self, "model_profile", None)
+        profile_id = getattr(profile, "profile_id", None)
+        # Both ChatML-family route-prefix profiles capture identically; only
+        # the rendered tokens and the config switch differ.
         if (
-            getattr(profile, "profile_id", None) != QWEN3_CODER_PROFILE_ID
+            profile_id not in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID)
             or not getattr(profile, "verified", False)
             or not getattr(profile, "route_prefix_reuse_supported", False)
         ):
             return _route_prefix_prefill_skipped("model_profile_ineligible")
-        if not self.config.qwen3_coder_route_prefix_reuse_enabled:
+        reuse_enabled = (
+            self.config.ornith_route_prefix_reuse_enabled
+            if profile_id == ORNITH15_PROFILE_ID
+            else self.config.qwen3_coder_route_prefix_reuse_enabled
+        )
+        if not reuse_enabled:
             return _route_prefix_prefill_skipped("route_prefix_reuse_disabled")
         if tools_mode != "on":
             return _route_prefix_prefill_skipped("tools_mode_ineligible")
@@ -1113,7 +1143,7 @@ class NativeLlamaClient:
             return _route_prefix_prefill_skipped("native_request_in_flight")
         if self._session.continuation_ready or self._session.cached_prompt_tokens:
             return _route_prefix_prefill_skipped("active_context_present")
-        if self._qwen3_coder_route_prefix_anchor_state.valid:
+        if self._qwen_route_prefix_state_for_profile(profile_id).valid:
             return _route_prefix_prefill_skipped("checkpoint_already_initialized")
         if not self._route_prefix_prefill_lock.acquire(blocking=False):
             return _route_prefix_prefill_skipped("prefill_in_flight")
@@ -1126,7 +1156,7 @@ class NativeLlamaClient:
                 return _route_prefix_prefill_skipped("native_request_in_flight")
             if self._session.continuation_ready or self._session.cached_prompt_tokens:
                 return _route_prefix_prefill_skipped("active_context_present")
-            if self._qwen3_coder_route_prefix_anchor_state.valid:
+            if self._qwen_route_prefix_state_for_profile(profile_id).valid:
                 return _route_prefix_prefill_skipped("checkpoint_already_initialized")
 
             # This boundary fixture is rendered but its dynamic suffix is never
@@ -1143,7 +1173,7 @@ class NativeLlamaClient:
                 thinking=False,
                 prompt=prompt,
             )
-            if plan is None or plan.profile_id != QWEN3_CODER_PROFILE_ID:
+            if plan is None or plan.profile_id != profile_id:
                 return _route_prefix_prefill_failed("route_anchor_plan_unavailable")
 
             prefix_hash = plan.prefix_hash
@@ -1154,7 +1184,7 @@ class NativeLlamaClient:
             processed, reused = self._prepare_memory_with_qwen_route_anchor(plan)
             ended_us = int(lib.llama_time_us()) if hasattr(lib, "llama_time_us") else started_us
             prefill_ms = max(0.0, (ended_us - started_us) / 1000.0)
-            state = self._qwen3_coder_route_prefix_anchor_state
+            state = self._qwen_route_prefix_state_for_profile(profile_id)
             if processed != prefix_token_count or reused != 0 or not state.valid:
                 self._clear_target_memory()
                 return _route_prefix_prefill_failed(
@@ -1184,7 +1214,7 @@ class NativeLlamaClient:
                 self._clear_target_memory()
             self._invalidate_qwen_route_prefix(
                 f"startup_prewarm_failed:{type(exc).__name__}",
-                profile_id=QWEN3_CODER_PROFILE_ID,
+                profile_id=profile_id,
             )
             ended_us = (
                 int(self.lib.lib.llama_time_us())
@@ -2311,6 +2341,13 @@ class NativeLlamaClient:
         final_plan = self._final_prefix_plan(prompt, prompt_tokens, final_prefix_segments)
         anchor_metadata: dict[str, object] | None = None
         processed_start = 0
+        if qwen_route_anchor_plan is not None and self._rolling_outranks_route_prefix(
+            prompt_tokens,
+            rolling_route_eligible=rolling_route_eligible,
+            rolling_route_identity=rolling_route_identity,
+        ):
+            qwen_route_anchor_plan = None
+
         if final_plan is not None:
             processed_start, reused = self._prepare_memory_with_final_prefix(final_plan, prompt_tokens)
         elif qwen_route_anchor_plan is not None:
@@ -2504,6 +2541,10 @@ class NativeLlamaClient:
             enabled = self.config.qwen3_coder_route_prefix_reuse_enabled
             prefix_token_count = QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT
             derive_spec = derive_qwen3_coder_route_prefix_spec
+        elif profile_id == ORNITH15_PROFILE_ID:
+            enabled = self.config.ornith_route_prefix_reuse_enabled
+            prefix_token_count = ORNITH_ROUTE_PREFIX_TOKEN_COUNT
+            derive_spec = derive_ornith_route_prefix_spec
         else:
             return None
         if not enabled:
@@ -2880,31 +2921,68 @@ class NativeLlamaClient:
             status.failure_reason = reason
             status.last_used = "invalidated"
 
+    def _rolling_outranks_route_prefix(
+        self,
+        prompt_tokens: list[int],
+        *,
+        rolling_route_eligible: bool,
+        rolling_route_identity: RollingRouteIdentity | None,
+    ) -> bool:
+        """Whether a rolling checkpoint should be used instead of the prewarm.
+
+        The prewarm is a fixed head of the route prompt; a rolling checkpoint
+        holds this conversation's own tokens and is never shorter. So when the
+        rolling state can actually serve this prompt -- same identity, exact
+        prefix -- it is strictly the better restore and the prewarm stands
+        down. When it cannot, the prewarm still runs, which is the cold-start
+        case it exists for.
+        """
+        if not rolling_route_eligible or rolling_route_identity is None:
+            return False
+        return (
+            rolling_route_reuse_start(
+                self._rolling_anchor_state_for(rolling_route_identity),
+                prompt_tokens,
+                rolling_route_identity,
+            )
+            is not None
+        )
+
     def _qwen_route_prefix_state_for_profile(self, profile_id: str) -> PrefixAnchorState:
         if profile_id == QWEN3_CODER_PROFILE_ID:
             return self._qwen3_coder_route_prefix_anchor_state
+        if profile_id == ORNITH15_PROFILE_ID:
+            return self._ornith_route_prefix_anchor_state
         return self._qwen_route_prefix_anchor_state
 
     def _set_qwen_route_prefix_state(self, profile_id: str, state: PrefixAnchorState) -> None:
         if profile_id == QWEN3_CODER_PROFILE_ID:
             self._qwen3_coder_route_prefix_anchor_state = state
+        elif profile_id == ORNITH15_PROFILE_ID:
+            self._ornith_route_prefix_anchor_state = state
         else:
             self._qwen_route_prefix_anchor_state = state
 
     def _qwen_route_prefix_spec_for_profile(self, profile_id: str) -> QwenRoutePrefixSpec | None:
         if profile_id == QWEN3_CODER_PROFILE_ID:
             return self._qwen3_coder_route_prefix_spec
+        if profile_id == ORNITH15_PROFILE_ID:
+            return self._ornith_route_prefix_spec
         return self._qwen_route_prefix_spec
 
     def _set_qwen_route_prefix_spec(self, profile_id: str, spec: QwenRoutePrefixSpec | None) -> None:
         if profile_id == QWEN3_CODER_PROFILE_ID:
             self._qwen3_coder_route_prefix_spec = spec
+        elif profile_id == ORNITH15_PROFILE_ID:
+            self._ornith_route_prefix_spec = spec
         else:
             self._qwen_route_prefix_spec = spec
 
     def _qwen_route_prefix_status_for_profile(self, profile_id: str) -> QwenRoutePrefixStatus:
         if profile_id == QWEN3_CODER_PROFILE_ID:
             return self._qwen3_coder_route_prefix_status
+        if profile_id == ORNITH15_PROFILE_ID:
+            return self._ornith_route_prefix_status
         return self._qwen_route_prefix_status
 
     def _prepare_memory_with_qwen_route_anchor(self, plan: _QwenRouteAnchorRuntimePlan) -> tuple[int, int]:
@@ -3005,6 +3083,12 @@ class NativeLlamaClient:
             format_version = QWEN3_CODER_ROUTE_PREFIX_FORMAT_VERSION
             tokenizer_identity = QWEN3_CODER_ROUTE_TOKENIZER_IDENTITY
             tools_mode = "qwen3-coder-route-tools-on-thinking-off"
+        elif profile_id == ORNITH15_PROFILE_ID:
+            # Its own format and tokenizer identity: sharing Qwen3.6's would
+            # leave `model_id` as the only thing telling the two apart.
+            format_version = ORNITH_ROUTE_PREFIX_FORMAT_VERSION
+            tokenizer_identity = ORNITH_ROUTE_TOKENIZER_IDENTITY
+            tools_mode = "ornith-route-tools-on-thinking-off"
         else:
             format_version = QWEN_ROUTE_PREFIX_FORMAT_VERSION
             tokenizer_identity = QWEN_ROUTE_TOKENIZER_IDENTITY
@@ -3078,7 +3162,11 @@ class NativeLlamaClient:
     def _invalidate_qwen_route_prefix(self, reason: str, *, profile_id: str | None = None) -> None:
         if not hasattr(self, "_qwen_route_prefix_anchor_state"):
             return
-        profile_ids = (profile_id,) if profile_id is not None else (QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID)
+        profile_ids = (
+            (profile_id,)
+            if profile_id is not None
+            else (QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID)
+        )
         for selected_profile_id in profile_ids:
             state = self._qwen_route_prefix_state_for_profile(selected_profile_id)
             had_state = state.valid or state.checkpoint_size > 0

@@ -735,6 +735,7 @@ class LlamaServerBackendTests(unittest.TestCase):
                 {
                     "ORBIT_QWEN_ROUTE_PREFIX_REUSE": value,
                     "ORBIT_QWEN3_CODER_ROUTE_PREFIX_REUSE": value,
+                    "ORBIT_ORNITH_ROUTE_PREFIX_REUSE": value,
                 },
                 clear=True,
             ), model_call_context(phase="route", tools_mode="on"):

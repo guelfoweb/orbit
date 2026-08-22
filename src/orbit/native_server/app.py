@@ -27,7 +27,7 @@ from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_
 from orbit.native_llama.download_cli import _DownloadProgress as DownloadProgress
 from orbit.native_llama.model_discovery import ModelDiscoveryRow, discover_models, format_model_discovery
 from orbit.native_llama.model_download import download_model
-from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
+from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.model_registry import default_hf_cache, default_models_dir, get_manifest, local_model_path
 from orbit.native_llama.paths import (
     DEFAULT_LLAMA_ROOT,
@@ -43,6 +43,7 @@ from orbit.native_llama.qwen36_shell_tool_prefix import (
     exact_qwen36_shell_tool_schema,
     resolve_qwen36_shell_tool_prefix_reuse,
 )
+from orbit.native_llama.ornith_route_prefix import resolve_ornith_route_prefix_reuse
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_server.protocol import (
     ContinueRequest,
@@ -793,6 +794,7 @@ def run_server(argv: list[str] | None = None) -> int:
     qwen_route_prefix_config = resolve_qwen_route_prefix_reuse()
     qwen36_shell_tool_prefix_config = resolve_qwen36_shell_tool_prefix_reuse()
     qwen3_coder_route_prefix_config = resolve_qwen3_coder_route_prefix_reuse()
+    ornith_route_prefix_config = resolve_ornith_route_prefix_reuse()
 
     paths: NativeLlamaPaths | None = None
     try:
@@ -824,6 +826,9 @@ def run_server(argv: list[str] | None = None) -> int:
                 qwen3_coder_route_prefix_reuse_enabled=qwen3_coder_route_prefix_config.enabled,
                 qwen3_coder_route_prefix_reuse_source=qwen3_coder_route_prefix_config.source,
                 qwen3_coder_route_prefix_reuse_config_error=qwen3_coder_route_prefix_config.validation_error,
+                ornith_route_prefix_reuse_enabled=ornith_route_prefix_config.enabled,
+                ornith_route_prefix_reuse_source=ornith_route_prefix_config.source,
+                ornith_route_prefix_reuse_config_error=ornith_route_prefix_config.validation_error,
                 moe_expert_usage_enabled=args.moe_expert_usage,
                 low_memory=args.low_memory,
             ),
@@ -831,7 +836,10 @@ def run_server(argv: list[str] | None = None) -> int:
         if not args.verbose_llama_log:
             client.set_quiet_logging()
         client.load()
-        if getattr(getattr(client, "model_profile", None), "profile_id", None) != QWEN3_CODER_PROFILE_ID:
+        if getattr(getattr(client, "model_profile", None), "profile_id", None) not in (
+            QWEN3_CODER_PROFILE_ID,
+            ORNITH15_PROFILE_ID,
+        ):
             prewarm_startup_route_prefix(client)
         else:
             prewarm_interrupted = False
@@ -941,7 +949,7 @@ def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefix
         _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
         return result
     profile = getattr(client, "model_profile", None)
-    if getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID:
+    if getattr(profile, "profile_id", None) in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID):
         try:
             result = client.capture_qwen3_coder_route_prefix_prefill_only(
                 system_prompt=ROUTE_SYSTEM_PROMPT,

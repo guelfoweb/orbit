@@ -31,6 +31,7 @@ from orbit.native_llama.qwen36_shell_tool_prefix import (
     exact_qwen36_shell_tool_schema,
     resolve_qwen36_shell_tool_prefix_reuse,
 )
+from orbit.native_llama.ornith_route_prefix import resolve_ornith_route_prefix_reuse
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.history_serialization import serialize_profile_messages
@@ -1108,6 +1109,7 @@ def _qwen_route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     if not (
         resolve_qwen_route_prefix_reuse().enabled
         or resolve_qwen3_coder_route_prefix_reuse().enabled
+        or resolve_ornith_route_prefix_reuse().enabled
     ):
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
