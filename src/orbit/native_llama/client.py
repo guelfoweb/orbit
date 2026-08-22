@@ -49,6 +49,7 @@ from .mtp_probe import MtpProbeResult, run_mtp_probe
 from .native_names import mtmd_bridge_filename, runtime_library_filename
 from .paths import NativeLlamaPaths
 from .rolling_route_anchor import (
+    ROLLING_ANALYSIS_STRATEGY_ID,
     ROLLING_ROUTE_STRATEGY_ID,
     RollingRouteAnchorState,
     RollingRouteIdentity,
@@ -324,6 +325,11 @@ class NativeLlamaClient:
         # Exactly one rolling route checkpoint per client, replaced in place.
         self._rolling_route_anchor_state = RollingRouteAnchorState()
         self._rolling_route_identity_cache: RollingRouteIdentity | None = None
+        # A second slot, not a second mechanism: same state type, same
+        # primitives. Two slots exist because the route chain and an analysis
+        # chain are different conversations that interleave, and one slot
+        # would make each switch evict the other's still-valid checkpoint.
+        self._rolling_analysis_anchor_state = RollingRouteAnchorState()
         self._reset_generation = 0
         self._qwen_route_prefix_anchor_state = PrefixAnchorState()
         self._qwen_route_prefix_spec: QwenRoutePrefixSpec | None = None
@@ -1205,6 +1211,7 @@ class NativeLlamaClient:
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
+        analysis_rolling_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
         qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
@@ -1290,12 +1297,27 @@ class NativeLlamaClient:
             allow_mtp = False
         if allow_mtp_experimental is False:
             allow_mtp = False
+        # One strategy, two lineages. Which one this call belongs to is decided
+        # by the anchor the caller asked for, and the strategy id it produces is
+        # what keeps the two checkpoints from ever standing in for each other.
         rolling_route_eligible = self._ornith_rolling_route_eligible(
             route_prefix_anchor=route_prefix_anchor, tools=tools, thinking=thinking
         )
-        rolling_route_identity = (
-            self._rolling_route_identity(tools=tools) if rolling_route_eligible else None
+        rolling_analysis_eligible = (
+            not rolling_route_eligible
+            and self._ornith_rolling_analysis_eligible(
+                analysis_rolling_anchor=analysis_rolling_anchor, thinking=thinking
+            )
         )
+        if rolling_route_eligible:
+            rolling_route_identity = self._rolling_route_identity(tools=tools)
+        elif rolling_analysis_eligible:
+            rolling_route_identity = self._rolling_route_identity(
+                tools=tools, strategy_id=ROLLING_ANALYSIS_STRATEGY_ID
+            )
+        else:
+            rolling_route_identity = None
+        rolling_route_eligible = rolling_route_eligible or rolling_analysis_eligible
         return self.complete_prompt(
             prompt,
             max_tokens=max_tokens,
@@ -1323,6 +1345,7 @@ class NativeLlamaClient:
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
+        analysis_rolling_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
         qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
@@ -1339,6 +1362,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
+            analysis_rolling_anchor=analysis_rolling_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
@@ -1502,6 +1526,7 @@ class NativeLlamaClient:
         tools: list[dict] | None,
         thinking: bool,
         route_prefix_anchor: bool = False,
+        analysis_rolling_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
         qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
@@ -1519,6 +1544,7 @@ class NativeLlamaClient:
                 tools=tools,
                 thinking=thinking,
                 route_prefix_anchor=route_prefix_anchor,
+                analysis_rolling_anchor=analysis_rolling_anchor,
                 qwen_route_prefix_anchor=qwen_route_prefix_anchor,
                 qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
                 allow_mtp_experimental=allow_mtp_experimental,
@@ -1588,6 +1614,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
+            analysis_rolling_anchor=analysis_rolling_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
@@ -1617,6 +1644,7 @@ class NativeLlamaClient:
         qwen36_shell_tool_prefix_anchor: bool,
         allow_mtp_experimental: bool | None,
         final_prefix_experiment: bool,
+        analysis_rolling_anchor: bool = False,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -1661,6 +1689,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
+            analysis_rolling_anchor=analysis_rolling_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
@@ -2345,8 +2374,9 @@ class NativeLlamaClient:
         ):
             # Prefill completed exactly through the prompt and nothing has been
             # generated yet, so the snapshot is the prompt and only the prompt.
+            slot_state = self._rolling_anchor_state_for(rolling_route_identity)
             if rolling_route_should_replace(
-                self._rolling_route_anchor_state, prompt_tokens, rolling_route_identity
+                slot_state, prompt_tokens, rolling_route_identity
             ):
                 captured, _capture_meta = capture_rolling_route_anchor(
                     lib,
@@ -2356,7 +2386,7 @@ class NativeLlamaClient:
                 )
                 # A failed capture must not discard a still-usable checkpoint.
                 if captured.valid:
-                    self._rolling_route_anchor_state = captured
+                    self._store_rolling_anchor_state(rolling_route_identity, captured)
         self.last_committed_generated_tokens = []
         generated, gen_ms, cancelled = self._generate_from_current_context(
             max_tokens=max_tokens,
@@ -3124,10 +3154,32 @@ class NativeLlamaClient:
             return False
         return True
 
-    def _rolling_route_identity(self, *, tools: list[dict] | None) -> RollingRouteIdentity:
+    def _ornith_rolling_analysis_eligible(self, *, analysis_rolling_anchor: bool, thinking: bool) -> bool:
+        """Same gate as the route lineage, asked about an analysis step.
+
+        The prerequisites are identical because the risk is: only a verified
+        Ornith profile, never with thinking or MTP, and only when the caller
+        declared this call is part of an analysis chain.
+        """
+        if not analysis_rolling_anchor:
+            return False
+        profile = getattr(self, "model_profile", None)
+        if not getattr(profile, "verified", False):
+            return False
+        if getattr(profile, "profile_id", None) != ORNITH15_PROFILE_ID:
+            return False
+        if thinking:
+            return False
+        if self.config.use_mtp_experimental or self._session.mtp_enabled:
+            return False
+        return True
+
+    def _rolling_route_identity(
+        self, *, tools: list[dict] | None, strategy_id: str = ROLLING_ROUTE_STRATEGY_ID
+    ) -> RollingRouteIdentity:
         profile = getattr(self, "model_profile", None)
         return RollingRouteIdentity(
-            strategy_id=ROLLING_ROUTE_STRATEGY_ID,
+            strategy_id=strategy_id,
             session_id=str(self._session.session_id),
             profile_id=str(getattr(profile, "profile_id", "")),
             model_id=str(self.paths.model),
@@ -3147,10 +3199,45 @@ class NativeLlamaClient:
             reset_generation=self._reset_generation,
         )
 
+    def _rolling_anchor_slot(self, identity: RollingRouteIdentity | None) -> str:
+        """Which checkpoint an identity addresses, decided by its own strategy.
+
+        The backend still knows nothing about CHAT or ANALYSIS: it reads the
+        strategy the caller already put in the identity it supplied.
+        """
+        if identity is not None and identity.strategy_id == ROLLING_ANALYSIS_STRATEGY_ID:
+            return "analysis"
+        return "route"
+
+    def _rolling_anchor_state_for(self, identity: RollingRouteIdentity | None) -> RollingRouteAnchorState:
+        # An absent slot reads as empty rather than raising: a checkpoint that
+        # is not there must fall cold, never fail the call.
+        if self._rolling_anchor_slot(identity) == "analysis":
+            return getattr(self, "_rolling_analysis_anchor_state", None) or RollingRouteAnchorState()
+        return self._rolling_route_anchor_state
+
+    def _store_rolling_anchor_state(
+        self, identity: RollingRouteIdentity | None, state: RollingRouteAnchorState
+    ) -> None:
+        if self._rolling_anchor_slot(identity) == "analysis":
+            self._rolling_analysis_anchor_state = state
+        else:
+            self._rolling_route_anchor_state = state
+
     def _invalidate_rolling_route_anchor(self, reason: str) -> None:
+        # Both lineages: a reset destroys the conversation whose tokens these
+        # are, and an analysis checkpoint surviving it would be exactly the
+        # stale-state reuse the identity check exists to prevent.
         if self._rolling_route_anchor_state.valid or self._rolling_route_anchor_state.identity is not None:
             self._rolling_route_anchor_state = invalidate_rolling_route_anchor(
                 self._rolling_route_anchor_state, reason
+            )
+        analysis_state = getattr(self, "_rolling_analysis_anchor_state", None)
+        if analysis_state is not None and (
+            analysis_state.valid or analysis_state.identity is not None
+        ):
+            self._rolling_analysis_anchor_state = invalidate_rolling_route_anchor(
+                analysis_state, reason
             )
 
     def _prepare_memory_with_ornith_rolling_route_anchor(self, prompt_tokens: list[int]) -> int:
@@ -3161,14 +3248,18 @@ class NativeLlamaClient:
         authorized, so PR #210's exact-prefix rule stays the single authority.
         """
         identity = self._rolling_route_identity_cache
-        state = self._rolling_route_anchor_state
+        # The slot follows the staged identity, so a route prompt can only ever
+        # meet a route checkpoint and an analysis prompt an analysis one. The
+        # identity comparison inside `rolling_route_reuse_start` then still has
+        # to pass, which is what rejects a stale checkpoint within a lineage.
+        state = self._rolling_anchor_state_for(identity)
         reuse_start = rolling_route_reuse_start(state, prompt_tokens, identity)
         if reuse_start is None:
             return self._prepare_memory_for_prompt(prompt_tokens)
         ok, restored, _meta = restore_rolling_route_anchor(
             self.lib.lib, self._session.ctx_tgt, state
         )
-        self._rolling_route_anchor_state = restored
+        self._store_rolling_anchor_state(identity, restored)
         if not ok:
             # A partial restore leaves KV unknown; clear before falling cold.
             self._clear_target_memory()

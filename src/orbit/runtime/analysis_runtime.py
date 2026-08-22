@@ -44,9 +44,16 @@ from orbit.runtime.analysis_sandbox import (
     scratch_baseline,
 )
 from orbit.runtime.evidence import EvidenceRecord, EvidenceStore
+from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.tool_calls import tool_call_id
 
 ANALYSIS_TOOL_NAME = "execute_analysis"
+
+# The phase this runtime declares around its one model call. It names a kind of
+# call, not a mode: the backend uses it the way it already uses "route", to know
+# which rolling checkpoint this prompt continues, and learns nothing about CHAT
+# or ANALYSIS from it.
+ANALYSIS_STEP_PHASE = "analysis_step"
 
 # Stable prefix. Everything here is identical for every step of every
 # analysis on a given profile, which is what makes a future exact-prefix
@@ -341,13 +348,17 @@ class AnalysisRuntime:
         self.messages.append({"role": "user", "content": analyst_message})
 
         deltas: list[str] = []
-        response = self.backend.chat_stream(
-            list(self.messages),
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            tools=[ANALYSIS_TOOL_SCHEMA],
-            on_delta=deltas.append,
-        )
+        # Declaring the phase adds no call: it only labels the one call this
+        # step already makes, so the backend can continue the analysis chain's
+        # own KV instead of prefilling it again.
+        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
+            response = self.backend.chat_stream(
+                list(self.messages),
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                tools=[ANALYSIS_TOOL_SCHEMA],
+                on_delta=deltas.append,
+            )
         self.model_calls += 1
 
         calls = list(response.tool_calls or [])
