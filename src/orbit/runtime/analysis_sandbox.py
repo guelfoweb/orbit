@@ -39,6 +39,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orbit.runtime.analysis_tools_shim import ORBIT_TOOLS_SOURCE
+
 BWRAP = "/usr/bin/bwrap"
 SOURCE_MOUNT = "/workspace/input"
 WORK_MOUNT = "/workspace/work"
@@ -170,6 +172,25 @@ def validate_code(code: object) -> str:
     return code
 
 
+def _program_with_tools(code: str) -> str:
+    """Make `orbit_tools` importable without relaxing interpreter isolation.
+
+    The sandbox runs Python with `-I`, which keeps the script's directory off
+    `sys.path`; a mounted `orbit_tools.py` therefore would not import, and
+    dropping `-I` to fix that would trade real isolation for convenience. So
+    the module is registered in `sys.modules` ahead of the analysis code,
+    which runs afterwards byte-for-byte as written.
+    """
+    prelude = (
+        "import sys as _orbit_sys, types as _orbit_types\n"
+        "_orbit_mod = _orbit_types.ModuleType('orbit_tools')\n"
+        "exec(compile(_ORBIT_TOOLS_SRC, 'orbit_tools.py', 'exec'), _orbit_mod.__dict__)\n"
+        "_orbit_sys.modules['orbit_tools'] = _orbit_mod\n"
+        "del _orbit_sys, _orbit_types, _orbit_mod, _ORBIT_TOOLS_SRC\n"
+    )
+    return f"_ORBIT_TOOLS_SRC = {ORBIT_TOOLS_SOURCE!r}\n{prelude}\n{code}"
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -282,8 +303,48 @@ def _sandbox_command(source: Path, scratch: Path, program: Path, python: str) ->
     return args
 
 
-def _scratch_bound_error(root: Path) -> str | None:
-    """Reject anything the capture step could not read safely."""
+def scratch_baseline(root: Path) -> dict[str, int]:
+    """Record every entry already in `root`, keyed by relative path.
+
+    A persistent workspace carries earlier steps' output into the next action.
+    Charging an action for those is what wedges a session, so the caller
+    snapshots first and the bound below is measured against the difference.
+    An empty mapping (the default) reproduces the original whole-directory
+    accounting, which is correct for a scratch directory that starts empty.
+
+    Directories are recorded too, with size -1 to mark them as non-files.
+    Counting them here but not there would recharge every directory an earlier
+    step created to every later action, which is the same wedge one level up:
+    the sandbox itself creates `work/tmp`, so it would start on the first run.
+    """
+    baseline: dict[str, int] = {}
+    try:
+        for base, dirs, files in os.walk(root, followlinks=False):
+            for name in dirs:
+                path = Path(base) / name
+                if stat.S_ISDIR(path.lstat().st_mode):
+                    baseline[str(path.relative_to(root))] = -1
+            for name in files:
+                path = Path(base) / name
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode):
+                    baseline[str(path.relative_to(root))] = info.st_size
+    except OSError:
+        return {}
+    return baseline
+
+
+def _scratch_bound_error(root: Path, baseline: dict[str, int] | None = None) -> str | None:
+    """Reject anything the capture step could not read safely.
+
+    `total` and `count` measure THIS action's footprint: bytes it added and
+    files it created. Growth of an existing file counts, because appending is
+    writing; shrinking counts as zero rather than a credit, so deleting an old
+    file cannot buy room for a new one. Unsafe entries are rejected wherever
+    they sit -- a symlink left behind by an earlier step is still a symlink,
+    and the capture step must never follow it.
+    """
+    prior = baseline or {}
     total = 0
     count = 0
     try:
@@ -291,14 +352,44 @@ def _scratch_bound_error(root: Path) -> str | None:
             if len(Path(base).relative_to(root).parts) > MAX_SCRATCH_DEPTH:
                 return "scratch depth exceeded"
             for name in dirs + files:
-                info = (Path(base) / name).lstat()
+                path = Path(base) / name
+                info = path.lstat()
                 if stat.S_ISLNK(info.st_mode):
                     return "scratch contains a symlink"
                 if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                     return "scratch contains an unsupported entry"
-                count += 1
+                # Rejected here rather than at capture: an extra hard link means
+                # the bytes hashed need not be the bytes written, and a session
+                # workspace keeps the file, so raising during capture would
+                # brick every later step instead of bounding this one.
+                if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                    return "scratch contains a hard link"
+                # Checked while bounding, for the same reason as the hard link:
+                # a file the capture step cannot open would otherwise raise out
+                # of `step()` and, because the workspace persists, keep raising.
+                # Directories are checked too: os.walk cannot descend into an
+                # unreadable one, so its contents would go uncharged and
+                # uncaptured, then be attributed to whichever later action
+                # happens to unlock it.
+                readable = os.R_OK | (os.X_OK if stat.S_ISDIR(info.st_mode) else 0)
+                if not os.access(path, readable):
+                    return "scratch contains an unreadable entry"
+                # A name the filesystem accepts but UTF-8 cannot represent
+                # arrives as surrogates, which cannot be encoded again. It
+                # would fail later while being written to evidence, by which
+                # point the file is in the persistent workspace and every
+                # later step would fail the same way.
+                relative = str(path.relative_to(root))
+                if any("\ud800" <= ch <= "\udfff" for ch in relative):
+                    return "scratch contains an undecodable name"
                 if stat.S_ISREG(info.st_mode):
-                    total += info.st_size
+                    if relative in prior and prior[relative] >= 0:
+                        total += max(0, info.st_size - prior[relative])
+                    else:
+                        count += 1
+                        total += info.st_size
+                elif relative not in prior:
+                    count += 1
                 if count > MAX_SCRATCH_FILES or total > MAX_SCRATCH_BYTES:
                     return "scratch bound exceeded"
     except OSError:
@@ -306,7 +397,18 @@ def _scratch_bound_error(root: Path) -> str | None:
     return None
 
 
-def _capture_artifacts(root: Path) -> tuple[DerivedArtifact, ...]:
+def _capture_artifacts(
+    root: Path, baseline: dict[str, str] | None = None
+) -> tuple[DerivedArtifact, ...]:
+    """Hash the files this action produced.
+
+    `baseline` maps relative path to the SHA the file had before the action.
+    A file whose bytes are unchanged belongs to the step that made it and is
+    not re-reported here; a file whose bytes differ is a new version and is
+    reported with its new hash. Reporting the whole directory instead would
+    credit every action with every artifact ever written.
+    """
+    prior = baseline or {}
     captured: list[DerivedArtifact] = []
     for path in sorted(root.rglob("*")):
         info = path.lstat()
@@ -316,7 +418,13 @@ def _capture_artifacts(root: Path) -> tuple[DerivedArtifact, ...]:
         # would mean the bytes hashed are not the bytes that were written.
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise RuntimeError("unsafe scratch entry")
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            # The bound check already rejects unreadable entries, so reaching
+            # here means the state changed underneath us. Fail the capture
+            # loudly rather than reporting a partial artifact set.
+            raise RuntimeError("unsafe scratch entry") from exc
         try:
             data = b""
             while len(data) <= MAX_SCRATCH_BYTES:
@@ -326,12 +434,12 @@ def _capture_artifacts(root: Path) -> tuple[DerivedArtifact, ...]:
                 data += chunk
         finally:
             os.close(descriptor)
+        relative = str(path.relative_to(root))
+        digest = _sha256_bytes(data)
+        if prior.get(relative) == digest:
+            continue
         captured.append(
-            DerivedArtifact(
-                name=str(path.relative_to(root)),
-                size_bytes=len(data),
-                sha256=_sha256_bytes(data),
-            )
+            DerivedArtifact(name=relative, size_bytes=len(data), sha256=digest)
         )
     return tuple(captured)
 
@@ -342,6 +450,8 @@ def execute_analysis(
     code: str,
     scratch_dir: Path | str | None = None,
     python_executable: str | None = None,
+    scratch_baseline_sizes: dict[str, int] | None = None,
+    scratch_baseline_digests: dict[str, str] | None = None,
 ) -> AnalysisResult:
     """Run `code` with `source_path` mounted read-only, and report what happened.
 
@@ -373,8 +483,9 @@ def execute_analysis(
         scratch.mkdir(parents=True, exist_ok=True)
 
     program = Path(program_owner.name) / "main.py"
-    program.write_text(validated, encoding="utf-8")
+    program.write_text(_program_with_tools(validated), encoding="utf-8")
     os.chmod(program, 0o400)
+
 
     started = time.monotonic()
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -426,11 +537,11 @@ def execute_analysis(
         if source.read_bytes() != source_before:
             raise RuntimeError("read-only input changed during analysis")
 
-        scratch_error = _scratch_bound_error(scratch)
+        scratch_error = _scratch_bound_error(scratch, scratch_baseline_sizes)
         bound_error = bound_error or scratch_error
         artifacts: tuple[DerivedArtifact, ...] = ()
         if scratch_error is None:
-            artifacts = _capture_artifacts(scratch)
+            artifacts = _capture_artifacts(scratch, scratch_baseline_digests)
 
         stdout_raw = bytes(buffers["stdout"])
         stderr_raw = bytes(buffers["stderr"])
