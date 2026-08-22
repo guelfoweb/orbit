@@ -43,6 +43,7 @@ from orbit.native_llama.qwen36_shell_tool_prefix import (
     exact_qwen36_shell_tool_schema,
     resolve_qwen36_shell_tool_prefix_reuse,
 )
+from orbit.native_llama.ornith_analysis_prefix import resolve_ornith_analysis_prefix_reuse
 from orbit.native_llama.ornith_route_prefix import resolve_ornith_route_prefix_reuse
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_server.protocol import (
@@ -795,6 +796,7 @@ def run_server(argv: list[str] | None = None) -> int:
     qwen36_shell_tool_prefix_config = resolve_qwen36_shell_tool_prefix_reuse()
     qwen3_coder_route_prefix_config = resolve_qwen3_coder_route_prefix_reuse()
     ornith_route_prefix_config = resolve_ornith_route_prefix_reuse()
+    ornith_analysis_prefix_config = resolve_ornith_analysis_prefix_reuse()
 
     paths: NativeLlamaPaths | None = None
     try:
@@ -829,6 +831,9 @@ def run_server(argv: list[str] | None = None) -> int:
                 ornith_route_prefix_reuse_enabled=ornith_route_prefix_config.enabled,
                 ornith_route_prefix_reuse_source=ornith_route_prefix_config.source,
                 ornith_route_prefix_reuse_config_error=ornith_route_prefix_config.validation_error,
+                ornith_analysis_prefix_reuse_enabled=ornith_analysis_prefix_config.enabled,
+                ornith_analysis_prefix_reuse_source=ornith_analysis_prefix_config.source,
+                ornith_analysis_prefix_reuse_config_error=ornith_analysis_prefix_config.validation_error,
                 moe_expert_usage_enabled=args.moe_expert_usage,
                 low_memory=args.low_memory,
             ),

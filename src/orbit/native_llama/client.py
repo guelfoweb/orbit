@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import copy
 import ctypes
 import hashlib
 import json
@@ -90,6 +91,13 @@ from .qwen3_coder import (
     qwen3_coder_artifact_messages,
     qwen3_coder_artifact_prompt,
 )
+from .ornith_analysis_prefix import (
+    ORNITH_ANALYSIS_LINEAGE_ID,
+    ORNITH_ANALYSIS_PREFIX_FORMAT_VERSION,
+    ORNITH_ANALYSIS_PREFIX_TOKEN_COUNT,
+    ORNITH_ANALYSIS_TOKENIZER_IDENTITY,
+    derive_ornith_analysis_prefix_spec,
+)
 from .ornith_route_prefix import (
     ORNITH_ROUTE_PREFIX_FORMAT_VERSION,
     ORNITH_ROUTE_PREFIX_TOKEN_COUNT,
@@ -172,6 +180,9 @@ class NativeClientConfig:
     ornith_route_prefix_reuse_enabled: bool = False
     ornith_route_prefix_reuse_source: str = "default"
     ornith_route_prefix_reuse_config_error: str | None = None
+    ornith_analysis_prefix_reuse_enabled: bool = False
+    ornith_analysis_prefix_reuse_source: str = "default"
+    ornith_analysis_prefix_reuse_config_error: str | None = None
     moe_expert_usage_enabled: bool = False
     low_memory: bool = False
 
@@ -353,10 +364,16 @@ class NativeLlamaClient:
         # different token sequence and needs its own slot; it reuses the same
         # PrefixAnchorState type and the same restore path.
         self._ornith_route_prefix_anchor_state = PrefixAnchorState()
+        # A separate lineage: the ANALYSIS opening is a different token
+        # sequence from the route opening, so it gets its own slot rather
+        # than competing for Ornith's route one.
+        self._ornith_analysis_prefix_anchor_state = PrefixAnchorState()
         self._qwen3_coder_route_prefix_spec: QwenRoutePrefixSpec | None = None
         self._ornith_route_prefix_spec: QwenRoutePrefixSpec | None = None
+        self._ornith_analysis_prefix_spec: QwenRoutePrefixSpec | None = None
         self._qwen3_coder_route_prefix_status = QwenRoutePrefixStatus()
         self._ornith_route_prefix_status = QwenRoutePrefixStatus()
+        self._ornith_analysis_prefix_status = QwenRoutePrefixStatus()
         self._model_metadata_identity: dict[str, str] = {}
         self._qwen_native_build_identity: str | None = None
         self._final_prefix_anchor_state = PrefixAnchorState()
@@ -855,6 +872,9 @@ class NativeLlamaClient:
         self._invalidate_qwen_route_prefix(
             "session_reset", profile_id=ORNITH15_PROFILE_ID
         )
+        self._invalidate_qwen_route_prefix(
+            "session_reset", profile_id=ORNITH_ANALYSIS_LINEAGE_ID
+        )
         self._invalidate_qwen36_shell_tool_prefix("session_reset")
         if self._persistent_mtp_runtime is None:
             return
@@ -1115,6 +1135,8 @@ class NativeLlamaClient:
         *,
         system_prompt: str,
         tools_mode: str = "on",
+        tools: list[dict] | None = None,
+        analysis_lineage: bool = False,
     ) -> NativeRoutePrefixPrefillResult:
         profile = getattr(self, "model_profile", None)
         profile_id = getattr(profile, "profile_id", None)
@@ -1126,11 +1148,19 @@ class NativeLlamaClient:
             or not getattr(profile, "route_prefix_reuse_supported", False)
         ):
             return _route_prefix_prefill_skipped("model_profile_ineligible")
-        reuse_enabled = (
-            self.config.ornith_route_prefix_reuse_enabled
-            if profile_id == ORNITH15_PROFILE_ID
-            else self.config.qwen3_coder_route_prefix_reuse_enabled
-        )
+        if analysis_lineage:
+            if profile_id != ORNITH15_PROFILE_ID:
+                return _route_prefix_prefill_skipped("model_profile_ineligible")
+            # The capture is bookkept under the lineage it belongs to, so the
+            # analysis prefix lands in its own slot rather than the route one.
+            profile_id = ORNITH_ANALYSIS_LINEAGE_ID
+            reuse_enabled = self.config.ornith_analysis_prefix_reuse_enabled
+        else:
+            reuse_enabled = (
+                self.config.ornith_route_prefix_reuse_enabled
+                if profile_id == ORNITH15_PROFILE_ID
+                else self.config.qwen3_coder_route_prefix_reuse_enabled
+            )
         if not reuse_enabled:
             return _route_prefix_prefill_skipped("route_prefix_reuse_disabled")
         if tools_mode != "on":
@@ -1166,12 +1196,14 @@ class NativeLlamaClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "A-orbit-qwen-route-boundary"},
             ]
-            prompt = self.apply_chat_template(messages, tools=None, thinking=False)
+            capture_tools = [dict(tool) for tool in (tools or [])] if analysis_lineage else None
+            prompt = self.apply_chat_template(messages, tools=capture_tools, thinking=False)
             plan = self._qwen_route_anchor_plan_for_prompt(
                 messages,
-                tools=None,
+                tools=capture_tools,
                 thinking=False,
                 prompt=prompt,
+                analysis_lineage=analysis_lineage,
             )
             if plan is None or plan.profile_id != profile_id:
                 return _route_prefix_prefill_failed("route_anchor_plan_unavailable")
@@ -1291,12 +1323,20 @@ class NativeLlamaClient:
                 "completion_error"
             )
             raise
-        qwen_route_anchor_plan = self._qwen_route_anchor_plan_for_prompt(
-            messages,
-            tools=tools,
-            thinking=thinking,
-            prompt=prompt,
-        ) if qwen_route_prefix_anchor else None
+        # The analysis step already declares itself for the rolling anchor;
+        # the same signal selects the analysis prefix lineage, so no second
+        # flag is introduced and the backend still just reads what it is told.
+        qwen_route_anchor_plan = (
+            self._qwen_route_anchor_plan_for_prompt(
+                messages,
+                tools=tools,
+                thinking=thinking,
+                prompt=prompt,
+                analysis_lineage=analysis_rolling_anchor,
+            )
+            if (qwen_route_prefix_anchor or analysis_rolling_anchor)
+            else None
+        )
         qwen36_shell_tool_anchor_plan = self._qwen36_shell_tool_anchor_plan_for_prompt(
             messages,
             tools=tools,
@@ -2329,7 +2369,12 @@ class NativeLlamaClient:
         pf_start = lib.llama_time_us()
         anchor_plan = self._route_anchor_plan(prompt, prompt_tokens, route_anchor_segments)
         if qwen_route_anchor_plan is not None and prompt_tokens[: len(qwen_route_anchor_plan.prefix_tokens)] != qwen_route_anchor_plan.prefix_tokens:
-            self._record_qwen_route_prefix_fallback("production_prefix_changed")
+            # The plan knows which lineage it belongs to; without this the
+            # counter lands on whichever profile the model happens to be,
+            # which is the CHAT lineage even for an analysis call.
+            self._record_qwen_route_prefix_fallback(
+                "production_prefix_changed", profile_id=qwen_route_anchor_plan.profile_id
+            )
             qwen_route_anchor_plan = None
         if (
             qwen36_shell_tool_anchor_plan is not None
@@ -2530,10 +2575,20 @@ class NativeLlamaClient:
         tools: list[dict] | None,
         thinking: bool,
         prompt: str,
+        analysis_lineage: bool = False,
     ) -> _QwenRouteAnchorRuntimePlan | None:
         profile = getattr(self, "model_profile", None)
         profile_id = getattr(profile, "profile_id", None)
-        if profile_id == QWEN36_PROFILE_ID:
+        if analysis_lineage:
+            # Same model, different opening: the caller says which chain this
+            # prompt belongs to, exactly as it does for the rolling anchors.
+            if profile_id != ORNITH15_PROFILE_ID:
+                return None
+            profile_id = ORNITH_ANALYSIS_LINEAGE_ID
+            enabled = self.config.ornith_analysis_prefix_reuse_enabled
+            prefix_token_count = ORNITH_ANALYSIS_PREFIX_TOKEN_COUNT
+            derive_spec = derive_ornith_analysis_prefix_spec
+        elif profile_id == QWEN36_PROFILE_ID:
             enabled = self.config.qwen_route_prefix_reuse_enabled
             prefix_token_count = QWEN_ROUTE_PREFIX_TOKEN_COUNT
             derive_spec = derive_qwen_route_prefix_spec
@@ -2555,7 +2610,23 @@ class NativeLlamaClient:
         if self._model_metadata_identity.get("general.file_type") != "15":
             self._record_qwen_route_prefix_fallback("qwen_quantization_unverified", profile_id=profile_id)
             return None
-        if tools or thinking:
+        if thinking:
+            self._record_qwen_route_prefix_fallback("structured_route_mode_ineligible", profile_id=profile_id)
+            return None
+        if analysis_lineage:
+            # An analysis step always carries exactly one tool, and that schema
+            # is part of the prefix being captured, so a different tool surface
+            # is a different prefix and must not reuse this one.
+            if len(tools or []) != 1:
+                # The schema itself is inside the captured prefix, and the
+                # derivation re-verifies those tokens against the prompt being
+                # served, so a changed schema fails the exact-prefix check
+                # rather than needing the backend to recognise it by name.
+                self._record_qwen_route_prefix_fallback(
+                    "analysis_tool_surface_ineligible", profile_id=profile_id
+                )
+                return None
+        elif tools:
             self._record_qwen_route_prefix_fallback("structured_route_mode_ineligible", profile_id=profile_id)
             return None
         if self.config.use_mtp_experimental or self._session.mtp_enabled:
@@ -2576,11 +2647,19 @@ class NativeLlamaClient:
             if self._qwen_route_prefix_state_for_profile(profile_id).valid:
                 self._invalidate_qwen_route_prefix("route_identity_changed", profile_id=profile_id)
 
+            # The analysis prefix contains the tool schema, so the reference
+            # and restore renders must carry the same tools the production
+            # render did; rendering them bare would produce a different prompt
+            # and, for the restore, look like an unrepeatable render.
+            probe_tools = (
+                copy.deepcopy([dict(tool) for tool in (tools or [])]) if analysis_lineage else []
+            )
+
             def render_reference(user_text: str) -> str:
                 rendered = self.chat_bridge.render(
                     self._chat_bridge_context,
                     [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}],
-                    [],
+                    probe_tools,
                     thinking=False,
                 )
                 value = rendered.get("prompt")
@@ -2606,7 +2685,7 @@ class NativeLlamaClient:
                 restored = self.chat_bridge.render(
                     self._chat_bridge_context,
                     self._serialize_profile_messages([dict(message) for message in messages]),
-                    [],
+                    probe_tools,
                     thinking=False,
                 )
                 restored_prompt = restored.get("prompt")
@@ -2953,6 +3032,8 @@ class NativeLlamaClient:
             return self._qwen3_coder_route_prefix_anchor_state
         if profile_id == ORNITH15_PROFILE_ID:
             return self._ornith_route_prefix_anchor_state
+        if profile_id == ORNITH_ANALYSIS_LINEAGE_ID:
+            return getattr(self, "_ornith_analysis_prefix_anchor_state", None) or PrefixAnchorState()
         return self._qwen_route_prefix_anchor_state
 
     def _set_qwen_route_prefix_state(self, profile_id: str, state: PrefixAnchorState) -> None:
@@ -2960,6 +3041,8 @@ class NativeLlamaClient:
             self._qwen3_coder_route_prefix_anchor_state = state
         elif profile_id == ORNITH15_PROFILE_ID:
             self._ornith_route_prefix_anchor_state = state
+        elif profile_id == ORNITH_ANALYSIS_LINEAGE_ID:
+            self._ornith_analysis_prefix_anchor_state = state
         else:
             self._qwen_route_prefix_anchor_state = state
 
@@ -2968,6 +3051,8 @@ class NativeLlamaClient:
             return self._qwen3_coder_route_prefix_spec
         if profile_id == ORNITH15_PROFILE_ID:
             return self._ornith_route_prefix_spec
+        if profile_id == ORNITH_ANALYSIS_LINEAGE_ID:
+            return getattr(self, "_ornith_analysis_prefix_spec", None)
         return self._qwen_route_prefix_spec
 
     def _set_qwen_route_prefix_spec(self, profile_id: str, spec: QwenRoutePrefixSpec | None) -> None:
@@ -2975,6 +3060,8 @@ class NativeLlamaClient:
             self._qwen3_coder_route_prefix_spec = spec
         elif profile_id == ORNITH15_PROFILE_ID:
             self._ornith_route_prefix_spec = spec
+        elif profile_id == ORNITH_ANALYSIS_LINEAGE_ID:
+            self._ornith_analysis_prefix_spec = spec
         else:
             self._qwen_route_prefix_spec = spec
 
@@ -2983,6 +3070,8 @@ class NativeLlamaClient:
             return self._qwen3_coder_route_prefix_status
         if profile_id == ORNITH15_PROFILE_ID:
             return self._ornith_route_prefix_status
+        if profile_id == ORNITH_ANALYSIS_LINEAGE_ID:
+            return self._ornith_analysis_prefix_status
         return self._qwen_route_prefix_status
 
     def _prepare_memory_with_qwen_route_anchor(self, plan: _QwenRouteAnchorRuntimePlan) -> tuple[int, int]:
@@ -3089,6 +3178,12 @@ class NativeLlamaClient:
             format_version = ORNITH_ROUTE_PREFIX_FORMAT_VERSION
             tokenizer_identity = ORNITH_ROUTE_TOKENIZER_IDENTITY
             tools_mode = "ornith-route-tools-on-thinking-off"
+        elif profile_id == ORNITH_ANALYSIS_LINEAGE_ID:
+            # Same model, entirely different opening tokens, so the identity
+            # has to say so or a CHAT checkpoint could look valid here.
+            format_version = ORNITH_ANALYSIS_PREFIX_FORMAT_VERSION
+            tokenizer_identity = ORNITH_ANALYSIS_TOKENIZER_IDENTITY
+            tools_mode = "ornith-analysis-tools-on-thinking-off"
         else:
             format_version = QWEN_ROUTE_PREFIX_FORMAT_VERSION
             tokenizer_identity = QWEN_ROUTE_TOKENIZER_IDENTITY
@@ -3165,7 +3260,12 @@ class NativeLlamaClient:
         profile_ids = (
             (profile_id,)
             if profile_id is not None
-            else (QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID)
+            else (
+                QWEN36_PROFILE_ID,
+                QWEN3_CODER_PROFILE_ID,
+                ORNITH15_PROFILE_ID,
+                ORNITH_ANALYSIS_LINEAGE_ID,
+            )
         )
         for selected_profile_id in profile_ids:
             state = self._qwen_route_prefix_state_for_profile(selected_profile_id)
