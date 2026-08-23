@@ -30,7 +30,7 @@ from orbit.terminal.commands import health_text, help_text, props_text, runtime_
 from orbit.terminal.session_selection import select_interactive_session
 from orbit.terminal.status import TokenUsageAccumulator, estimate_context_status_tokens, format_turn_status, summarize_turn_token_usage
 from orbit.terminal.streaming import StreamRenderer
-from orbit.terminal.theme import dim, runtime_error_text, warning_text
+from orbit.terminal.theme import dim, runtime_error_text, sanitize_terminal_text, warning_text
 from orbit.terminal.tool_events import format_tool_activity_label, format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import allowed_tool_names_for_spec, tools_are_enabled
 
@@ -98,7 +98,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(command_result)
                 return 0
             if not command_result.needs_model:
-                print(command_result.output)
+                # Same boundary as the interactive REPL: command output holds
+                # file content and filenames Orbit did not author.
+                print(sanitize_terminal_text(command_result.output, allow_newlines=True))
                 return 0
             if args.image or args.audio:
                 print("error: slash-command evidence prompts do not accept --image/--audio", file=sys.stderr)
