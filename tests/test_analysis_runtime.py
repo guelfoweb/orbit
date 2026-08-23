@@ -1460,3 +1460,233 @@ class StepDiagnosticsTest(AnalysisRuntimeTestBase):
         self.assertTrue(recovered.action_executed)
         self.assertEqual(backend.calls, 2)
         json.dumps(runtime.messages, default=str)
+
+
+class EvidenceProjectionBudgetTest(AnalysisRuntimeTestBase):
+    """Raw evidence stays whole; only a bounded projection reaches the model.
+
+    A real failing turn carried a 7767-char observation that the old 8192 cap
+    never truncated. It tokenised to 6226 tokens -- 98.3% of that step's
+    prefill. The bound exists to keep the prompt proportionate, not to reduce
+    what is recorded.
+    """
+
+    def _big_result(self, size: int = 7767):
+        from orbit.runtime.analysis_sandbox import AnalysisResult
+
+        return AnalysisResult(
+            status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+            stdout="X" * size, stderr="", exit_status=0, duration_seconds=1.0,
+        )
+
+    def test_the_budget_is_the_measured_one(self) -> None:
+        from orbit.runtime.analysis_runtime import MAX_EVIDENCE_CHARS
+
+        # Derived: every preserved successful observation (max 2435 chars)
+        # fits untruncated, and the densest observed content (1.123
+        # chars/token) is bounded near 2850 tokens.
+        self.assertEqual(MAX_EVIDENCE_CHARS, 3200)
+        self.assertGreater(MAX_EVIDENCE_CHARS, 2435)
+
+    def test_every_preserved_successful_observation_still_fits(self) -> None:
+        from orbit.runtime.analysis_runtime import MAX_EVIDENCE_CHARS, _bounded_observation
+
+        # The eight model-authored actions of the successful trajectory.
+        for size in (1197, 1293, 1308, 1391, 2146, 2164, 2295, 2435):
+            with self.subTest(size=size):
+                # 19 = len("status: ok\nstdout:\n"), so the reconstructed
+                # observation is exactly the historical size.
+                text, truncated, full = _bounded_observation(self._big_result(size - 19))
+                self.assertFalse(truncated, "a successful observation must not be cut")
+                self.assertLessEqual(len(text), MAX_EVIDENCE_CHARS)
+
+    def test_an_observation_exactly_at_the_cap_is_not_truncated(self) -> None:
+        from orbit.runtime.analysis_runtime import MAX_EVIDENCE_CHARS, _bounded_observation
+
+        exact = self._big_result(MAX_EVIDENCE_CHARS - 19)
+        text, truncated, full = _bounded_observation(exact)
+        self.assertFalse(truncated, "at the cap is within the cap")
+        self.assertEqual(len(text), MAX_EVIDENCE_CHARS)
+
+        over, over_trunc, _ = _bounded_observation(self._big_result(MAX_EVIDENCE_CHARS - 18))
+        self.assertTrue(over_trunc, "one char past the cap must truncate")
+
+    def test_a_large_observation_is_bounded_for_the_prompt(self) -> None:
+        from orbit.runtime.analysis_runtime import MAX_EVIDENCE_CHARS, _bounded_observation
+
+        text, truncated, full = _bounded_observation(self._big_result())
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(text), MAX_EVIDENCE_CHARS)
+        self.assertEqual(full, len("status: ok\nstdout:\n") + 7767)
+
+    def test_truncation_states_what_was_dropped(self) -> None:
+        from orbit.runtime.analysis_runtime import _bounded_observation
+
+        text, _, full = _bounded_observation(self._big_result())
+        self.assertIn(str(full), text, "the full size must be stated")
+        self.assertIn("truncated for prompt", text)
+        self.assertIn("stored in evidence", text)
+
+    def test_raw_evidence_stays_complete_and_reattestable(self) -> None:
+        """The bound is a projection, not a deletion."""
+        import hashlib
+
+        backend = ScriptedBackend(
+            tool_response("import orbit_tools\nprint('Z' * 40000, end='')")
+        )
+        runtime = self.runtime(backend)
+        result = runtime.step("produce a lot")
+
+        assert result.raw_output_evidence_id is not None
+        raw = runtime.evidence_store.reattest_exact(result.raw_output_evidence_id)
+        self.assertIsNotNone(raw, "raw evidence must remain re-attestable")
+        assert raw is not None
+        self.assertGreater(len(raw), 3200, "raw evidence must not be truncated")
+        record = runtime.evidence_store.records[result.raw_output_evidence_id]
+        self.assertEqual(record.raw_sha256, hashlib.sha256(raw.encode()).hexdigest())
+
+    def test_the_unique_tail_of_raw_evidence_never_reaches_the_prompt(self) -> None:
+        """The dropped tail exists in evidence and nowhere the model can read.
+
+        Checked on the tool RESULT message specifically: the assistant's own
+        tool call legitimately contains the code that produced the output, so
+        scanning the whole history would match the model's own text.
+        """
+        marker = "TAIL_SENTINEL_9f3a"
+        code = "import orbit_tools\nprint('P' * 9000 + chr(84) + %r, end='')" % marker[1:]
+        backend = ScriptedBackend(tool_response(code))
+        runtime = self.runtime(backend)
+        result = runtime.step("produce a lot")
+
+        observations = [
+            str(m.get("content") or "")
+            for m in runtime.messages
+            if m.get("role") == "tool"
+        ]
+        self.assertTrue(observations)
+        for text in observations:
+            self.assertNotIn(marker, text, "the dropped tail must not enter context")
+            self.assertLessEqual(len(text), 3200)
+
+        assert result.raw_output_evidence_id is not None
+        raw = runtime.evidence_store.reattest_exact(result.raw_output_evidence_id)
+        self.assertIsNotNone(raw, "raw evidence must remain re-attestable")
+        assert raw is not None
+        self.assertIn(marker, raw, "but it must still be recorded in full")
+
+
+class AnalysisGenerationBudgetTest(AnalysisRuntimeTestBase):
+    """One step's output is bounded by what successful actions actually needed.
+
+    The preserved trajectory's nine calls produced 60-1953 tokens. The former
+    1024 default would have truncated two of them -- and truncation is exactly
+    what broke the failing turn.
+    """
+
+    def test_the_limit_is_derived_from_the_successful_envelope(self) -> None:
+        from orbit.runtime.analysis_runtime import QUALIFIED_ANALYSIS_MAX_TOKENS
+
+        largest_successful_action = 1953
+        self.assertEqual(QUALIFIED_ANALYSIS_MAX_TOKENS, 2048)
+        self.assertGreater(QUALIFIED_ANALYSIS_MAX_TOKENS, largest_successful_action)
+        # Smallest value that cuts none of the nine, because headroom costs
+        # decode time a refused step has to spend before it can refuse.
+        self.assertLess(QUALIFIED_ANALYSIS_MAX_TOKENS, 2560)
+
+    def test_a_smaller_configured_limit_wins(self) -> None:
+        backend = ScriptedBackend(prose_response("ok"))
+        runtime = self.runtime(backend)
+        runtime.max_tokens = 256
+        self.assertEqual(runtime.effective_max_tokens, 256)
+
+    def test_a_larger_configured_limit_is_capped(self) -> None:
+        from orbit.runtime.analysis_runtime import QUALIFIED_ANALYSIS_MAX_TOKENS
+
+        backend = ScriptedBackend(prose_response("ok"))
+        runtime = self.runtime(backend)
+        runtime.max_tokens = 32000
+        self.assertEqual(runtime.effective_max_tokens, QUALIFIED_ANALYSIS_MAX_TOKENS)
+
+    def test_the_effective_limit_is_what_reaches_the_backend(self) -> None:
+        class Recording(ScriptedBackend):
+            seen_max = None
+
+            def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                            on_delta, on_progress=None):
+                Recording.seen_max = max_tokens
+                return super().chat_stream(
+                    messages, temperature=temperature, max_tokens=max_tokens,
+                    tools=tools, on_delta=on_delta, on_progress=on_progress)
+
+        backend = Recording(prose_response("ok"))
+        runtime = self.runtime(backend)
+        runtime.max_tokens = 99999
+        runtime.step("look")
+        self.assertEqual(Recording.seen_max, 2048)
+
+    def test_chat_max_tokens_is_untouched(self) -> None:
+        from orbit.terminal.config import AppConfig
+
+        self.assertEqual(AppConfig().max_tokens, 512)
+
+
+class GenerationLimitRefusalTest(AnalysisRuntimeTestBase):
+    """Hitting the limit mid-call is refused specifically, and cheaply."""
+
+    def _truncated_call(self):
+        response = tool_response("x")
+        response.tool_calls[0]["function"]["arguments"] = '{"code": "import orbit'
+        return ChatResult(
+            content="", model="m", finish_reason="length",
+            tool_calls=response.tool_calls, prompt_tokens=6926,
+            completion_tokens=2048, cached_tokens=595,
+            prompt_tokens_per_second=27.3, generation_tokens_per_second=7.1,
+        )
+
+    def test_the_refusal_names_the_generation_limit(self) -> None:
+        result = self.runtime(ScriptedBackend(self._truncated_call())).step("look")
+
+        assert result.rejection is not None
+        self.assertIn("generation limit", result.rejection)
+        self.assertNotIn("not valid JSON", result.rejection)
+
+    def test_no_action_runs_and_history_stays_renderable(self) -> None:
+        runtime = self.runtime(ScriptedBackend(self._truncated_call()))
+        result = runtime.step("look")
+
+        self.assertFalse(result.action_executed)
+        self.assertEqual(runtime.actions_executed, 0)
+        self.assertEqual(result.model_calls, 1)
+        json.dumps(runtime.messages, default=str)
+        for message in runtime.messages:
+            self.assertNotIn("tool_calls", message)
+
+    def test_diagnostics_survive_the_bounded_refusal(self) -> None:
+        result = self.runtime(ScriptedBackend(self._truncated_call())).step("look")
+
+        diag = result.diagnostics
+        assert diag is not None
+        self.assertEqual(diag.finish_reason, "length")
+        self.assertEqual(diag.output_tokens, 2048)
+        self.assertEqual(diag.refusal, result.rejection)
+
+    def test_the_next_step_still_works(self) -> None:
+        backend = ScriptedBackend(
+            self._truncated_call(),
+            tool_response("import orbit_tools\nprint('ok')"),
+        )
+        runtime = self.runtime(backend)
+        runtime.step("first")
+        recovered = runtime.step("second")
+
+        self.assertTrue(recovered.action_executed)
+        self.assertEqual(backend.calls, 2, "no automatic repair call")
+
+    def test_an_ordinary_malformed_call_keeps_its_own_reason(self) -> None:
+        response = tool_response("x")
+        response.tool_calls[0]["function"]["arguments"] = "{not json"
+        result = self.runtime(ScriptedBackend(response)).step("look")
+
+        assert result.rejection is not None
+        self.assertIn("not valid JSON", result.rejection)
+        self.assertNotIn("generation limit", result.rejection)
