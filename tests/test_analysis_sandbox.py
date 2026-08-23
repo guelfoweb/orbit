@@ -272,16 +272,84 @@ class SandboxBehaviourTest(SandboxTestBase):
         # itself via a GC finalizer, so removing the explicit call is not
         # observable from outside. What is worth pinning is the property that
         # matters -- actions leave nothing behind on the host.
+        #
+        # Only the prefixes an action actually creates are counted. The old
+        # assertion globbed `orbit-analysis-*` in the shared temp root, which
+        # also matches `orbit-analysis-session-*` -- the name `AnalysisWorkspace`
+        # gives a session. A workspace another module held open while this ran
+        # therefore landed in the delta and failed this test for a directory it
+        # never created. Redirecting TMPDIR does not fix that either: the root
+        # is process-global, so a concurrent workspace lands inside it too.
+        #
+        # `execute_analysis` creates exactly these two, both owned by a
+        # `TemporaryDirectory` it closes before returning.
         import tempfile
 
         root = Path(tempfile.gettempdir())
-        pattern = "orbit-analysis-*"
-        before = {p.name for p in root.glob(pattern)}
+        owned = ("orbit-analysis-program-", "orbit-analysis-work-")
+
+        def owned_dirs() -> set[str]:
+            return {
+                entry.name
+                for prefix in owned
+                for entry in root.glob(f"{prefix}*")
+            }
+
+        before = owned_dirs()
         for _ in range(3):
             self.run_code("print('tick')")
-        after = {p.name for p in root.glob(pattern)}
         self.assertEqual(
-            after - before, set(), "each action must remove its temporary directories"
+            owned_dirs() - before,
+            set(),
+            "each action must remove its temporary directories",
+        )
+
+    def test_an_unrelated_matching_directory_is_ignored(self) -> None:
+        """A session workspace is not this test's to account for.
+
+        This is the exact shape that made the old assertion flaky: the name
+        matches `orbit-analysis-*`, it appears between the two samples, and no
+        action here created it.
+        """
+        from orbit.runtime.analysis_runtime import AnalysisWorkspace
+
+        import tempfile
+
+        root = Path(tempfile.gettempdir())
+        owned = ("orbit-analysis-program-", "orbit-analysis-work-")
+
+        def owned_dirs() -> set[str]:
+            return {e.name for prefix in owned for e in root.glob(f"{prefix}*")}
+
+        before = owned_dirs()
+        unrelated = AnalysisWorkspace.create()
+        self.addCleanup(unrelated.close)
+        # Created after the baseline and still present at the second sample.
+        self.assertTrue(unrelated.root.exists())
+        self.assertTrue(unrelated.root.name.startswith("orbit-analysis-"))
+        for _ in range(3):
+            self.run_code("print('tick')")
+        self.assertEqual(owned_dirs() - before, set())
+
+    def test_a_leaked_owned_directory_still_fails(self) -> None:
+        """The assertion must still catch a real leak with an owned prefix.
+
+        Narrowing the prefixes must not have narrowed away the property. A
+        directory named as one an action owns, left behind, has to be seen.
+        """
+        import tempfile
+
+        root = Path(tempfile.gettempdir())
+        owned = ("orbit-analysis-program-", "orbit-analysis-work-")
+
+        def owned_dirs() -> set[str]:
+            return {e.name for prefix in owned for e in root.glob(f"{prefix}*")}
+
+        before = owned_dirs()
+        leaked = Path(tempfile.mkdtemp(prefix="orbit-analysis-work-"))
+        self.addCleanup(shutil.rmtree, leaked, True)
+        self.assertNotEqual(
+            owned_dirs() - before, set(), "a leak under an owned prefix must be visible"
         )
 
     def test_nonzero_exit_is_classified_as_error(self) -> None:
