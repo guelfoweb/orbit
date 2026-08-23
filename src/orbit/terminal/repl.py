@@ -349,7 +349,18 @@ class Repl:
             self._close_analysis()
             raise
         renderer.finish()
-        print(format_analysis_step(result), flush=True)
+        # The renderer already showed the prose if the backend streamed it;
+        # the final block then carries only what streaming could not: action
+        # status, evidence preview, artifacts.
+        prose_already_shown = renderer.rendered_visible_text
+        step_block = format_analysis_step(result, prose_already_shown=prose_already_shown)
+        if prose_already_shown:
+            # Streamed deltas leave the cursor mid-line; close that line so the
+            # block below starts on its own. Previously the reprinted copy of
+            # the prose supplied this break.
+            print(flush=True)
+        if step_block:
+            print(step_block, flush=True)
         elapsed = time.monotonic() - started
         summary = (
             f"analysis | mode: ANALYSIS | model calls: {result.model_calls} | "
