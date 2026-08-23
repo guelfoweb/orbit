@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -919,3 +920,279 @@ class ChatNonRegressionTest(ModeTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PromptMarkerTest(ModeTestBase):
+    """The marker names the runtime that owns the next line.
+
+    It is display only. These pin both halves of that: the text follows
+    `workflow_mode`, and it never becomes something the model can read.
+    """
+
+    def test_chat_is_the_default_marker(self) -> None:
+        self.assertEqual(self.repl()._prompt_label(), "chat")
+
+    def test_explicit_analysis_switches_the_marker(self) -> None:
+        repl = self.repl()
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.assertIs(repl.workflow_mode, WorkflowMode.ANALYSIS)
+        self.assertEqual(repl._prompt_label(), "analysis")
+
+    def test_slash_chat_restores_the_marker(self) -> None:
+        repl = self.repl()
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.run_command(repl, "/chat")
+        self.assertIs(repl.workflow_mode, WorkflowMode.CHAT)
+        self.assertEqual(repl._prompt_label(), "chat")
+
+    def test_the_marker_follows_the_mode_rather_than_being_stored(self) -> None:
+        # No second variable to drift: setting the authoritative state is
+        # enough to change what is displayed.
+        repl = self.repl()
+        repl.workflow_mode = WorkflowMode.ANALYSIS
+        self.assertEqual(repl._prompt_label(), "analysis")
+        repl.workflow_mode = WorkflowMode.CHAT
+        self.assertEqual(repl._prompt_label(), "chat")
+
+    def test_switching_mode_costs_no_model_call(self) -> None:
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        before = backend.calls
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.assertEqual(repl._prompt_label(), "analysis")
+        self.run_command(repl, "/chat")
+        self.assertEqual(repl._prompt_label(), "chat")
+        self.assertEqual(backend.calls, before)
+
+    def test_the_marker_never_reaches_the_backend(self) -> None:
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.run_command(repl, "/chat")
+        self.run_prompt(repl, "hello")
+        sent = json.dumps(backend.messages_seen, default=str)
+        for marker in ("chat> ", "analysis> "):
+            self.assertNotIn(marker, sent)
+        for message in repl.runtime.messages:
+            self.assertNotIn("analysis> ", str(message.get("content") or ""))
+
+    def test_rendered_prompt_carries_the_label(self) -> None:
+        from orbit.terminal.repl_input import input_prompt
+
+        with mock.patch("orbit.terminal.repl_input.sys.stdout") as stdout:
+            stdout.isatty.return_value = False
+            self.assertEqual(input_prompt("chat"), "chat> ")
+            self.assertEqual(input_prompt("analysis"), "analysis> ")
+        with mock.patch("orbit.terminal.repl_input.sys.stdout") as stdout:
+            stdout.isatty.return_value = True
+            self.assertIn("analysis> ", input_prompt("analysis"))
+
+
+class ActionCauseRenderingTest(unittest.TestCase):
+    """A failed action has to say what went wrong, not only where to look.
+
+    The cause is read from what the sandbox already reported. Nothing is
+    inferred, no model is asked, and the full text stays in evidence.
+    """
+
+    def _result(self, **overrides):
+        from orbit.runtime.analysis_sandbox import AnalysisResult
+
+        base = dict(
+            status="error",
+            code_sha256="c" * 64,
+            input_sha256="i" * 64,
+            stdout="",
+            stderr="",
+            exit_status=1,
+            duration_seconds=0.4,
+        )
+        base.update(overrides)
+        return AnalysisResult(**base)
+
+    def test_the_real_recorded_failure_renders_its_exception(self) -> None:
+        # Verbatim stderr from the observed run whose summary showed only ids.
+        stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "/program/main.py", line 10, in <module>\n'
+            '    data = orbit_tools.read_file("/workspace/input/samples/x.js")\n'
+            "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+            '  File "orbit_tools.py", line 29, in read_file\n'
+            '  File "orbit_tools.py", line 19, in _safe_path\n'
+            "PermissionError: path is outside the analyst workspace\n"
+        )
+        from orbit.terminal.analysis_mode import _action_cause
+
+        self.assertEqual(
+            _action_cause(self._result(stderr=stderr)),
+            "PermissionError: path is outside the analyst workspace",
+        )
+
+    def test_a_timeout_says_so(self) -> None:
+        from orbit.terminal.analysis_mode import _action_cause
+
+        cause = _action_cause(self._result(status="timeout", duration_seconds=30.0))
+        self.assertEqual(cause, "sandbox timeout after 30.0s")
+
+    def test_a_bare_nonzero_exit_is_reported(self) -> None:
+        from orbit.terminal.analysis_mode import _action_cause
+
+        self.assertEqual(
+            _action_cause(self._result(stderr="", exit_status=3)),
+            "Python exited with status 3",
+        )
+
+    def test_a_successful_action_has_no_cause(self) -> None:
+        from orbit.terminal.analysis_mode import _action_cause
+
+        self.assertIsNone(_action_cause(self._result(status="ok", exit_status=0)))
+
+    def test_enormous_stderr_stays_bounded(self) -> None:
+        from orbit.terminal.analysis_mode import MAX_ACTION_CAUSE_CHARS, _action_cause
+
+        noise = "\n".join(f"  File \"/host/private/{i}.py\", line {i}" for i in range(5000))
+        stderr = f"Traceback (most recent call last):\n{noise}\nValueError: {'x' * 20000}\n"
+        cause = _action_cause(self._result(stderr=stderr))
+        assert cause is not None
+        self.assertLessEqual(len(cause), MAX_ACTION_CAUSE_CHARS)
+        self.assertTrue(cause.startswith("ValueError: "))
+        self.assertNotIn("/host/private", cause)
+
+    def test_host_frames_are_not_echoed(self) -> None:
+        from orbit.terminal.analysis_mode import _action_cause
+
+        stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "/home/someone/secret/main.py", line 1, in <module>\n'
+            "RuntimeError: boom\n"
+        )
+        cause = _action_cause(self._result(stderr=stderr))
+        self.assertEqual(cause, "RuntimeError: boom")
+        self.assertNotIn("/home/someone", cause or "")
+
+    def test_summary_keeps_ids_and_adds_the_cause(self) -> None:
+        from orbit.runtime.analysis_runtime import AnalysisStepResult
+        from orbit.runtime.evidence import EvidenceRecord
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        action = self._result(stderr="PermissionError: nope\n")
+        record = EvidenceRecord(
+            evidence_id="ev_aaa_bbb",
+            tool_name="execute_analysis",
+            kind="fetch",
+            raw_ref="evidence:ev_aaa_bbb",
+            raw_sha256="d" * 64,
+            raw_chars=10,
+            raw_lines=1,
+            status="ok",
+            metadata={},
+            route_card=None,
+            final_card=None,
+        )
+        step = AnalysisStepResult(
+            model_calls=1,
+            action_attempted=True,
+            action_executed=True,
+            assistant_text="",
+            result=action,
+            evidence=record,
+            raw_output_evidence_id="ev_ccc_ddd",
+        )
+        rendered = format_analysis_step(step)
+        self.assertIn("action: error", rendered)
+        self.assertIn("PermissionError: nope", rendered)
+        self.assertIn("evidence ev_aaa_bbb", rendered)
+        self.assertIn("raw ev_ccc_ddd", rendered)
+
+    def test_a_successful_summary_is_unchanged(self) -> None:
+        from orbit.runtime.analysis_runtime import AnalysisStepResult
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        step = AnalysisStepResult(
+            model_calls=1,
+            action_attempted=True,
+            action_executed=True,
+            assistant_text="",
+            result=self._result(status="ok", exit_status=0),
+        )
+        self.assertEqual(format_analysis_step(step), "action: ok")
+
+    def test_a_multiline_exception_message_leaks_no_host_path(self) -> None:
+        # The last non-frame line of a multi-line message is a continuation,
+        # not the failure; reporting it printed a host path nobody asked for.
+        from orbit.terminal.analysis_mode import _action_cause
+
+        stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "/program/main.py", line 3, in <module>\n'
+            "ValueError: line one\n"
+            "of the message continues /home/someone/secret/path\n"
+        )
+        cause = _action_cause(self._result(stderr=stderr))
+        self.assertEqual(cause, "ValueError: line one")
+        self.assertNotIn("/home/someone", cause or "")
+
+    def test_stderr_without_an_exception_falls_back_to_the_exit_status(self) -> None:
+        from orbit.terminal.analysis_mode import _action_cause
+
+        stderr = "some warning: not an exception\ntrailing /home/someone/noise\n"
+        cause = _action_cause(self._result(stderr=stderr, exit_status=2))
+        self.assertEqual(cause, "Python exited with status 2")
+        self.assertNotIn("/home/someone", cause or "")
+
+    def test_a_bounded_result_does_not_add_an_exit_status(self) -> None:
+        # The bound is already named in the summary; the exit status would
+        # describe the symptom rather than the reason.
+        from orbit.terminal.analysis_mode import _action_cause
+
+        cause = _action_cause(
+            self._result(status="bounded", bound_exceeded="scratch_bytes", stderr="")
+        )
+        self.assertIsNone(cause)
+
+    def test_whitespace_only_stderr_yields_the_exit_status(self) -> None:
+        from orbit.terminal.analysis_mode import _action_cause
+
+        self.assertEqual(
+            _action_cause(self._result(stderr="   \n\n  \n", exit_status=1)),
+            "Python exited with status 1",
+        )
+
+
+class PromptEchoLabelTest(ModeTestBase):
+    """The echo must use the marker the line was displayed with.
+
+    A command can change the mode between reading a line and erasing it, so
+    re-deriving the label afterwards would erase the wrong number of rows.
+    """
+
+    def test_the_erase_width_counts_the_label(self) -> None:
+        from orbit.terminal.repl_input import visual_row_count
+
+        prompt = "x" * 74
+        # 74 chars fits one 80-column row bare, but not behind "analysis> ".
+        self.assertEqual(visual_row_count(f"> {prompt}", columns=80), 1)
+        self.assertEqual(visual_row_count(f"analysis> {prompt}", columns=80), 2)
+
+    def test_clear_input_echo_uses_the_supplied_label(self) -> None:
+        from orbit.terminal import repl_input
+
+        seen: list[str] = []
+        with (
+            mock.patch.object(repl_input.sys.stdout, "isatty", return_value=True),
+            mock.patch.object(repl_input, "get_terminal_size", return_value=os.terminal_size((80, 20))),
+            mock.patch("builtins.print", side_effect=lambda *a, **k: seen.append(str(a[0]))),
+        ):
+            repl_input.clear_input_echo("x" * 74, "analysis")
+        # Two rows because the marker pushed the line over the column count.
+        self.assertIn("2F", seen[0])
+
+    def test_the_echo_label_is_the_displayed_one_not_the_post_command_one(self) -> None:
+        repl = self.repl()
+        displayed = repl._prompt_label()
+        self.assertEqual(displayed, "chat")
+        self.run_command(repl, f"/analysis {self.artifact}")
+        # The mode changed, so re-deriving now would give the wrong marker for
+        # the line that was typed while CHAT was displayed.
+        self.assertEqual(repl._prompt_label(), "analysis")
+        self.assertNotEqual(displayed, repl._prompt_label())

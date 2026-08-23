@@ -108,8 +108,12 @@ class Repl:
                 return self._finish_interactive_session(130, leading_newline=True)
             if not prompt:
                 continue
+            # The marker this line was actually displayed with. A command may
+            # change the mode, so re-deriving it after the fact would erase
+            # the wrong number of rows.
+            echo_label = self._prompt_label()
             if prompt.startswith("/"):
-                clear_input_echo(prompt)
+                clear_input_echo(prompt, echo_label)
                 self.prompt_redisplay_pending = True
                 if self._handle_command(prompt):
                     self.prompt_gap_pending = True
@@ -124,14 +128,23 @@ class Repl:
                 if resolution.prompt != prompt:
                     prompt = resolution.prompt
                 else:
-                    replace_input_echo(prompt)
+                    replace_input_echo(prompt, echo_label)
             else:
-                replace_input_echo(prompt)
+                replace_input_echo(prompt, echo_label)
             if self.history:
                 self.history.add(prompt)
                 self.history.save()
             self._ask(prompt)
             self.prompt_gap_pending = True
+
+    def _prompt_label(self) -> str:
+        """The marker for the runtime that owns the next line.
+
+        Read straight off `workflow_mode`, the state the Repl already keeps,
+        so the marker cannot drift from the mode it names. Display only: it
+        is never appended to history and never reaches the backend.
+        """
+        return "analysis" if self.workflow_mode is WorkflowMode.ANALYSIS else "chat"
 
     def _read_next_prompt(self) -> str:
         if self.queued_prompts:
@@ -139,10 +152,11 @@ class Repl:
         if self.prompt_gap_pending:
             print(flush=True)
             self.prompt_gap_pending = False
+        label = self._prompt_label()
         if self.prompt_redisplay_pending:
             self.prompt_redisplay_pending = False
-            return read_prompt_input(redisplay=True)
-        return read_prompt_input()
+            return read_prompt_input(redisplay=True, label=label)
+        return read_prompt_input(label=label)
 
     def _ask(self, prompt: str, *, command_action: CommandAction | None = None) -> None:
         # The mode decides which runtime owns this line before anything else
