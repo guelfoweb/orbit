@@ -26,6 +26,7 @@ from orbit.runtime.analysis_runtime import (
     ANALYSIS_SYSTEM_PROMPT,
     ANALYSIS_TOOL_NAME,
     ANALYSIS_TOOL_SCHEMA,
+    NO_EVIDENCE_REPORT,
     MAX_EVIDENCE_CHARS,
     SESSION_CAPACITY_EXHAUSTED,
     AnalysisRuntime,
@@ -1690,3 +1691,271 @@ class GenerationLimitRefusalTest(AnalysisRuntimeTestBase):
         assert result.rejection is not None
         self.assertIn("not valid JSON", result.rejection)
         self.assertNotIn("generation limit", result.rejection)
+
+
+class AnalysisReportTest(AnalysisRuntimeTestBase):
+    """`/report` answers from evidence already collected, and runs nothing.
+
+    A prompt-only attempt to teach this failed its real gate: asked to
+    interpret what it had found, the model called the tool again and reprinted
+    the artifact. This removes the choice instead of arguing with it -- the
+    report call is made with no tools, so no action is reachable from it.
+    """
+
+    def _with_evidence(self, *extra):
+        backend = ScriptedBackend(
+            tool_response("import orbit_tools\nprint('three strings found')"), *extra
+        )
+        runtime = self.runtime(backend)
+        runtime.step("look at it")
+        return runtime, backend
+
+    def test_no_evidence_reports_without_calling_the_model(self) -> None:
+        backend = ScriptedBackend()
+        runtime = self.runtime(backend)
+
+        report = runtime.report()
+
+        self.assertEqual(backend.calls, 0, "nothing to ground a report in")
+        self.assertEqual(report.model_calls, 0)
+        self.assertEqual(report.text, NO_EVIDENCE_REPORT)
+
+    def test_a_report_makes_exactly_one_model_call(self) -> None:
+        runtime, backend = self._with_evidence(prose_response("Confirmed: three strings."))
+
+        report = runtime.report()
+
+        self.assertEqual(report.model_calls, 1)
+        self.assertEqual(backend.calls, 2, "one step, one report, nothing else")
+
+    def test_the_report_call_is_offered_no_tools(self) -> None:
+        """The whole point: the model cannot choose to run an action."""
+        runtime, backend = self._with_evidence(prose_response("Confirmed."))
+
+        runtime.report()
+
+        self.assertEqual(backend.seen_tools[-1], [], "no tool surface at all")
+        self.assertIn(ANALYSIS_TOOL_NAME, backend.seen_tools[0], "but the step still had one")
+
+    def test_a_report_executes_no_action(self) -> None:
+        runtime, _ = self._with_evidence(prose_response("Confirmed."))
+        before = runtime.actions_executed
+
+        runtime.report()
+
+        self.assertEqual(runtime.actions_executed, before)
+
+    def test_a_report_leaves_the_evidence_store_untouched(self) -> None:
+        runtime, _ = self._with_evidence(prose_response("Confirmed: much."))
+        before = dict(runtime.evidence_store.records)
+
+        runtime.report("what did we find?")
+
+        self.assertEqual(runtime.evidence_store.records.keys(), before.keys())
+        for key, record in before.items():
+            self.assertEqual(runtime.evidence_store.records[key], record)
+
+    def test_report_prose_is_never_attested_as_evidence(self) -> None:
+        runtime, _ = self._with_evidence(prose_response("I believe there are five indicators."))
+        before = len(runtime.evidence_store.records)
+
+        report = runtime.report()
+
+        self.assertEqual(len(runtime.evidence_store.records), before)
+        self.assertIn("five indicators", report.text)
+
+    def test_a_report_does_not_enter_the_analysis_history(self) -> None:
+        """The history is the append-only record; a report is a view of it."""
+        runtime, _ = self._with_evidence(prose_response("Confirmed."))
+        before = json.dumps(runtime.messages, default=str)
+
+        runtime.report("summarise")
+
+        self.assertEqual(json.dumps(runtime.messages, default=str), before)
+
+    def test_the_analyst_question_reaches_the_model(self) -> None:
+        runtime, backend = self._with_evidence(prose_response("Answering."))
+
+        runtime.report("tell me the IoCs and artifacts")
+
+        sent = json.dumps(backend.seen_messages[-1], default=str)
+        self.assertIn("tell me the IoCs and artifacts", sent)
+
+    def test_a_default_report_asks_for_the_standard_shape(self) -> None:
+        runtime, backend = self._with_evidence(prose_response("Answering."))
+
+        runtime.report()
+
+        sent = json.dumps(backend.seen_messages[-1], default=str).lower()
+        for expected in ("confirmed", "indicators", "artifacts", "unresolved", "next step"):
+            self.assertIn(expected, sent)
+
+    def test_the_report_context_is_grounded_and_bounded(self) -> None:
+        runtime, backend = self._with_evidence(prose_response("Answering."))
+
+        report = runtime.report()
+
+        sent = json.dumps(backend.seen_messages[-1], default=str)
+        self.assertIn("evidence:<id>", sent, "citation contract stated")
+        self.assertIn("unresolved", sent.lower())
+        self.assertTrue(report.evidence_ids, "the report names what it read")
+        for evidence_id in report.evidence_ids:
+            self.assertIn(evidence_id, sent)
+
+    def test_the_report_context_never_carries_the_whole_history(self) -> None:
+        """Built from the store, not the conversation."""
+        runtime, backend = self._with_evidence(prose_response("Answering."))
+
+        runtime.report()
+
+        report_messages = backend.seen_messages[-1]
+        self.assertEqual(len(report_messages), 2, "one system, one user")
+        self.assertEqual(report_messages[0]["role"], "system")
+        for message in report_messages:
+            self.assertNotIn("tool_calls", message)
+
+    def test_the_evidence_carried_is_capped(self) -> None:
+        """Checked with more records than the cap, or it proves nothing."""
+        from orbit.runtime.analysis_runtime import MAX_REPORT_EVIDENCE_RECORDS
+
+        self.assertEqual(MAX_REPORT_EVIDENCE_RECORDS, 12)
+        steps = MAX_REPORT_EVIDENCE_RECORDS + 5
+        backend = ScriptedBackend(
+            *[tool_response(f"import orbit_tools\nprint('step {i}')") for i in range(steps)]
+        )
+        runtime = self.runtime(backend)
+        for i in range(steps):
+            runtime.step(f"step {i}")
+
+        records = runtime._reportable_records()
+
+        self.assertEqual(len(records), MAX_REPORT_EVIDENCE_RECORDS, "the cap must bite")
+        self.assertLess(len(records), steps)
+
+    def test_only_the_bounded_record_is_carried_not_the_raw_one(self) -> None:
+        """Each action writes two records; the report must read the bounded one."""
+        runtime, _ = self._with_evidence(prose_response("Answering."))
+
+        names = {record.tool_name for record in runtime._reportable_records()}
+
+        self.assertEqual(names, {ANALYSIS_TOOL_NAME})
+        self.assertNotIn(f"{ANALYSIS_TOOL_NAME}_raw", names)
+        stored = {r.tool_name for r in runtime.evidence_store.records.values()}
+        self.assertIn(f"{ANALYSIS_TOOL_NAME}_raw", stored, "both exist; one was chosen")
+
+    def test_the_report_sees_what_the_step_saw(self) -> None:
+        """A finding in the middle of an observation must not vanish.
+
+        A head-and-tail excerpt drops the middle silently, and the report is
+        told to call anything the evidence does not establish unresolved --
+        so a dropped finding becomes a confident wrong answer rather than a
+        visible gap.
+        """
+        marker = "CRITICAL_MIDDLE_MARKER"
+        payload = "H" * 700 + "\n" + marker + "\n" + "T" * 700
+        backend = ScriptedBackend(
+            tool_response(f"import orbit_tools\nprint({payload!r})"),
+            prose_response("Answering."),
+        )
+        runtime = self.runtime(backend)
+        runtime.step("look")
+
+        runtime.report()
+
+        sent = json.dumps(backend.seen_messages[-1], default=str)
+        self.assertIn(marker, sent, "the middle of the observation must survive")
+
+    def test_a_record_that_cannot_reattest_is_described_not_quoted(self) -> None:
+        runtime, _ = self._with_evidence(prose_response("Answering."))
+        record = runtime._reportable_records()[0]
+        with unittest.mock.patch.object(
+            runtime.evidence_store, "reattest_exact", return_value=None
+        ):
+            card = runtime._evidence_card(record)
+
+        self.assertIn("tool_evidence_card", card)
+        self.assertIn(record.evidence_id, card)
+
+    def test_a_tool_shaped_report_response_executes_nothing(self) -> None:
+        """Even offered no tools, a model may emit something tool-shaped."""
+        runtime, backend = self._with_evidence(
+            tool_response("import orbit_tools\nprint('should never run')")
+        )
+        before = runtime.actions_executed
+
+        report = runtime.report()
+
+        self.assertEqual(runtime.actions_executed, before, "zero actions from a report")
+        self.assertEqual(report.model_calls, 1, "and no repair call")
+        json.dumps(runtime.messages, default=str)
+
+    def test_an_empty_report_response_is_truthful(self) -> None:
+        runtime, _ = self._with_evidence(prose_response(""))
+
+        report = runtime.report()
+
+        self.assertIn("no usable text", report.text)
+        self.assertEqual(report.model_calls, 1)
+
+    def test_the_session_still_works_after_a_report(self) -> None:
+        runtime, backend = self._with_evidence(
+            prose_response("Confirmed."),
+            tool_response("import orbit_tools\nprint('second stage')"),
+        )
+
+        runtime.report()
+        resumed = runtime.step("decode the next stage")
+
+        self.assertTrue(resumed.action_executed, "tools are available again")
+        self.assertEqual(runtime.actions_executed, 2)
+        self.assertEqual(backend.calls, 3)
+
+    def test_a_report_is_outside_the_rolling_analysis_lineage(self) -> None:
+        """A report cannot replace the checkpoint a `continue` depends on.
+
+        The backend joins the rolling ANALYSIS lineage only for calls whose
+        declared phase is the step phase. A report declares its own, so it is
+        excluded by construction rather than by anything it remembers to do --
+        which is why `continue` afterwards still meets the pre-report state.
+        """
+        from orbit.backend.llama_server import _analysis_rolling_anchor_requested
+        from orbit.runtime.analysis_runtime import ANALYSIS_REPORT_PHASE, ANALYSIS_STEP_PHASE
+        from orbit.runtime.kv_diag import model_call_context
+
+        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
+            step_eligible = _analysis_rolling_anchor_requested(native_backend=True)
+        with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
+            report_eligible = _analysis_rolling_anchor_requested(native_backend=True)
+
+        self.assertTrue(step_eligible, "a step joins the lineage")
+        self.assertFalse(report_eligible, "a report must not")
+
+        # And the phase report() actually declares, observed at the backend
+        # rather than read off a constant -- otherwise declaring the step
+        # phase here would silently rejoin the lineage.
+        seen: list[bool] = []
+
+        class PhaseWatchingBackend(ScriptedBackend):
+            def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                            on_delta, on_progress=None):
+                seen.append(_analysis_rolling_anchor_requested(native_backend=True))
+                return super().chat_stream(
+                    messages, temperature=temperature, max_tokens=max_tokens,
+                    tools=tools, on_delta=on_delta, on_progress=on_progress)
+
+        backend = PhaseWatchingBackend(
+            tool_response("import orbit_tools\nprint('x')"),
+            prose_response("Confirmed."),
+        )
+        runtime = self.runtime(backend)
+        runtime.step("look")
+        runtime.report()
+
+        self.assertEqual(seen, [True, False], "step joins, report does not")
+
+    def test_a_report_declares_its_own_phase(self) -> None:
+        """A report is not a link in the analysis chain, and says so."""
+        from orbit.runtime.analysis_runtime import ANALYSIS_REPORT_PHASE, ANALYSIS_STEP_PHASE
+
+        self.assertNotEqual(ANALYSIS_REPORT_PHASE, ANALYSIS_STEP_PHASE)
+        self.assertEqual(ANALYSIS_REPORT_PHASE, "analysis_report")
