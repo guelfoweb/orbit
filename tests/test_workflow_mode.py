@@ -1239,6 +1239,222 @@ class AnalysisDuplicateProseTest(ModeTestBase):
         self.assertEqual(second.count(PROSE_MARKER), 1, "state must not leak between steps")
 
 
+# Filenames a hostile directory can carry. Each is a real terminal instruction
+# if it reaches the interpreter unescaped.
+HOSTILE_NAMES = (
+    "erase\x1b[2Jme.txt",
+    "osc\x1b]0;PWNED\x07title.txt",
+    "cr\rFORGED.txt",
+    "c1\x9b31m.txt",
+    "hyper\x1b]8;;https://evil.example\x1b\\link.txt",
+    "clip\x1b]52;c;cGF5bG9hZA==\x07.txt",
+)
+UNSAFE_BYTES = ("\x1b", "\r", "\x07", "\x00", "\x9b")
+
+
+class CommandActionOutputTerminalTest(ModeTestBase):
+    """`CommandAction.output` carries content Orbit did not author.
+
+    A command lists a directory or reads a file, so the text it prints holds
+    filenames and file bytes from whatever is being examined -- for Orbit,
+    often a malware sample directory. It is display-only: a command that needs
+    a model sends `prompt` and `evidence` instead, and `output` is never
+    persisted.
+    """
+
+    def hostile_dir(self) -> tuple[Path, list[str]]:
+        root = self.tmp / "hostile"
+        root.mkdir()
+        created: list[str] = []
+        for name in HOSTILE_NAMES:
+            try:
+                (root / name).write_text("x", encoding="utf-8")
+            except OSError:  # pragma: no cover - filesystem dependent
+                continue
+            created.append(name)
+        (root / "plain.txt").write_text("x", encoding="utf-8")
+        return root, created
+
+    def assert_terminal_safe(self, output: str) -> None:
+        for unsafe in UNSAFE_BYTES:
+            self.assertNotIn(unsafe, output, f"{unsafe!r} reached the terminal")
+
+    # 1 / 2 / 9 / 10: the real defect, at the real sink.
+    def test_ls_neutralizes_hostile_filenames(self) -> None:
+        root, created = self.hostile_dir()
+        self.assertTrue(created, "the filesystem must accept at least one hostile name")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/ls {root}")
+
+        self.assert_terminal_safe(output)
+        self.assertIn("plain.txt", output, "ordinary entries still listed")
+
+    def test_read_neutralizes_control_bytes_in_file_content(self) -> None:
+        target = self.tmp / "ctrl.txt"
+        target.write_text("A\x1b[2J\rB\x07 SAFE-TAIL", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/read {target}")
+
+        self.assert_terminal_safe(output)
+        self.assertIn("SAFE-TAIL", output)
+
+    def test_read_neutralizes_a_hostile_filename_in_its_header(self) -> None:
+        target = self.tmp / "head\x1b[2Jer.txt"
+        try:
+            target.write_text("body", encoding="utf-8")
+        except OSError:  # pragma: no cover - filesystem dependent
+            self.skipTest("filesystem rejects escape characters in names")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/read {target}")
+
+        self.assert_terminal_safe(output)
+        self.assertIn("body", output)
+
+    def test_search_over_a_local_document_is_sanitized(self) -> None:
+        """`/search` carries document text, which is external content too."""
+        target = self.tmp / "doc.txt"
+        target.write_text("alpha NEEDLE\x1b[2J\rFORGED beta\n", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/search NEEDLE {target}")
+
+        self.assert_terminal_safe(output)
+        self.assertIn("NEEDLE", output)
+
+    # 3 / 4 / 5: ordinary output is untouched.
+    def test_plain_listing_is_unchanged(self) -> None:
+        root = self.tmp / "plain_dir"
+        root.mkdir()
+        (root / "one.txt").write_text("x", encoding="utf-8")
+        (root / "two.txt").write_text("x", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/ls {root}")
+
+        self.assertIn("one.txt", output)
+        self.assertIn("two.txt", output)
+        self.assertIn("\n", output, "line structure preserved")
+
+    def test_unicode_filenames_survive_the_sanitized_sink(self) -> None:
+        """Filenames go through the display boundary, so they pin over-sanitizing."""
+        root = self.tmp / "unicode_dir"
+        root.mkdir()
+        for name in ("café.txt", "日本語.txt", "αβγ.txt", "🎯.txt", "ünïcödé.txt"):
+            (root / name).write_text("x", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/ls {root}")
+
+        for fragment in ("café", "日本語", "αβγ", "🎯", "ünïcödé"):
+            self.assertIn(fragment, output, "printable Unicode must not be escaped")
+
+    def test_unicode_file_content_is_unchanged(self) -> None:
+        target = self.tmp / "unicode.txt"
+        target.write_text("café 日本語 αβγ 🎯 ünïcödé", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/read {target}")
+
+        for fragment in ("café", "日本語", "αβγ", "🎯", "ünïcödé"):
+            self.assertIn(fragment, output)
+
+    def test_one_shot_cli_sink_is_also_sanitized(self) -> None:
+        """The non-interactive `orbit /ls ...` path prints through cli.main."""
+        from orbit.terminal import cli
+
+        root, created = self.hostile_dir()
+        self.assertTrue(created)
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            exit_code = cli.main(["--workdir", str(self.tmp), "/ls", str(root)])
+
+        self.assertEqual(exit_code, 0)
+        output = buffer.getvalue()
+        self.assert_terminal_safe(output)
+        self.assertIn("plain.txt", output, "the listing still reached the analyst")
+
+    def test_newlines_in_file_content_are_preserved(self) -> None:
+        target = self.tmp / "lines.txt"
+        target.write_text("first\nsecond\nthird", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/read {target}")
+
+        for fragment in ("first", "second", "third"):
+            self.assertIn(fragment, output)
+        self.assertNotIn("\\n", output, "real newlines, not escaped ones")
+
+    # 11: mixed content keeps every safe fragment.
+    def test_mixed_content_keeps_the_safe_text(self) -> None:
+        target = self.tmp / "mixed.txt"
+        target.write_text("HEAD-OK\x1b[2J middle \rTAIL-OK", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/read {target}")
+
+        self.assert_terminal_safe(output)
+        for fragment in ("HEAD-OK", "middle", "TAIL-OK"):
+            self.assertIn(fragment, output)
+
+    # 12 / 13 / 14: status and error output still reach the analyst.
+    def test_usage_errors_are_still_shown(self) -> None:
+        repl = self.repl()
+
+        output = self.run_command(repl, "/read")
+
+        self.assertIn("error:", output)
+        self.assertIn("usage:", output)
+
+    def test_missing_file_error_is_still_shown(self) -> None:
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/read {self.tmp / 'absent.txt'}")
+
+        self.assertIn("error:", output)
+
+    def test_successful_read_still_shows_its_metadata(self) -> None:
+        target = self.tmp / "ok.txt"
+        target.write_text("hello\n", encoding="utf-8")
+        repl = self.repl()
+
+        output = self.run_command(repl, f"/read {target}")
+
+        self.assertIn("hello", output)
+        self.assertIn("ok.txt", output)
+
+    # 15: the raw object is display-sanitized only, never mutated.
+    def test_raw_command_action_output_is_not_mutated(self) -> None:
+        from orbit.terminal.command_actions import build_list_action
+
+        root, created = self.hostile_dir()
+        self.assertTrue(created)
+
+        action = build_list_action(str(root), workdir=self.tmp)
+
+        self.assertIn(
+            "\x1b",
+            action.output,
+            "the producer keeps the real bytes; only the display escapes them",
+        )
+
+    # 16 / 17 / 18: nothing about a data command touches the model or storage.
+    def test_data_command_makes_no_model_call_and_stores_nothing(self) -> None:
+        root, _ = self.hostile_dir()
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        before_messages = list(repl.runtime.messages)
+
+        self.run_command(repl, f"/ls {root}")
+
+        self.assertEqual(backend.calls, 0, "a data command asks no model")
+        self.assertEqual(repl.runtime.messages, before_messages, "history unchanged")
+        self.assertEqual(len(repl.runtime.evidence_store.records), 0, "no evidence written")
+
+
 if __name__ == "__main__":
     unittest.main()
 
