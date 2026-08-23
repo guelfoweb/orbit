@@ -585,7 +585,13 @@ class Repl:
             assert action.prompt is not None
             self._ask(action.prompt, command_action=action)
         else:
-            print(action.output)
+            # A command's output carries content Orbit did not author: file
+            # bytes, and filenames from whatever directory is being examined.
+            # A crafted name is enough to move the cursor or erase the screen,
+            # so it is neutralized here, where it is displayed. `action.output`
+            # itself is untouched, and the model never sees it -- a command
+            # that needs one sends `prompt` and `evidence` instead.
+            print(sanitize_terminal_text(action.output, allow_newlines=True))
         return True
 
     @staticmethod
