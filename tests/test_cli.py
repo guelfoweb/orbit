@@ -350,9 +350,110 @@ def _run_cli(stdin: str, *args: str) -> subprocess.CompletedProcess[str]:
             input=stdin,
             text=True,
             capture_output=True,
-            env={"PYTHONPATH": str(ROOT / "src"), "HOME": home},
+            env={
+                "PYTHONPATH": str(ROOT / "src"),
+                "HOME": home,
+                # These drive the REPL itself, not readiness; there is no
+                # server behind the subprocess.
+                "ORBIT_SKIP_SERVER_READINESS": "1",
+            },
             check=False,
         )
+
+
+
+class ServerReadinessTests(unittest.TestCase):
+    """An interactive session must not open against a server that is not there.
+
+    Drawing `chat>` and then failing on whatever the analyst types reads as
+    their mistake rather than a missing server.
+    """
+
+    def _args(self, tmp: Path):
+        return [
+            "--workdir", str(tmp),
+            "--base-url", "http://127.0.0.1:12120",
+        ]
+
+    def _run(self, *, healthy: bool):
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            backend = mock.MagicMock()
+            backend.health.return_value = healthy
+            backend.model_info.return_value = None
+            err = io.StringIO()
+            out = io.StringIO()
+            with (
+                mock.patch.object(cli, "LlamaServerBackend", return_value=backend),
+                mock.patch.object(cli, "Repl") as repl_cls,
+                contextlib.redirect_stderr(err),
+                contextlib.redirect_stdout(out),
+            ):
+                repl_cls.return_value.run.return_value = 0
+                code = cli.main(self._args(tmp))
+            return code, err.getvalue(), out.getvalue(), backend, repl_cls
+
+    def test_an_unavailable_server_exits_before_the_prompt(self) -> None:
+        code, err, out, backend, repl_cls = self._run(healthy=False)
+
+        self.assertEqual(code, 1)
+        repl_cls.assert_not_called()
+        self.assertNotIn("chat>", out)
+        self.assertIn("Orbit server is not ready", err)
+
+    def test_the_error_names_the_endpoint_and_the_remedy(self) -> None:
+        _, err, _, _, _ = self._run(healthy=False)
+
+        self.assertIn("127.0.0.1:12120", err)
+        self.assertIn("Start the server and try again", err)
+        self.assertEqual(len(err.strip().splitlines()), 1, "one concise line")
+
+    def test_it_does_not_retry(self) -> None:
+        _, _, _, backend, _ = self._run(healthy=False)
+
+        self.assertEqual(backend.health.call_count, 1, "no hidden retry loop")
+
+    def test_a_ready_server_enters_the_repl(self) -> None:
+        code, err, _, backend, repl_cls = self._run(healthy=True)
+
+        self.assertEqual(code, 0)
+        repl_cls.assert_called_once()
+        self.assertNotIn("not ready", err)
+
+    def test_it_reuses_the_existing_health_mechanism(self) -> None:
+        """No second protocol: the check is `backend.health()`."""
+        _, _, _, backend, _ = self._run(healthy=False)
+
+        backend.health.assert_called()
+
+    def test_the_escape_hatch_is_explicit_and_narrow(self) -> None:
+        """Only the exact opt-in string skips the check.
+
+        The hatch exists so subprocess REPL tests can run without a server. A
+        loose truthiness test would turn any stray value into a silent bypass.
+        """
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            for value, expect_repl in (("1", True), ("0", False), ("true", False), ("", False)):
+                backend = mock.MagicMock()
+                backend.health.return_value = False
+                backend.model_info.return_value = None
+                with (
+                    mock.patch.dict("os.environ", {"ORBIT_SKIP_SERVER_READINESS": value}),
+                    mock.patch.object(cli, "LlamaServerBackend", return_value=backend),
+                    mock.patch.object(cli, "Repl") as repl_cls,
+                    contextlib.redirect_stderr(io.StringIO()),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    repl_cls.return_value.run.return_value = 0
+                    cli.main(self._args(tmp))
+                    with self.subTest(value=value):
+                        self.assertEqual(repl_cls.called, expect_repl)
+
+    def test_endpoint_label_falls_back_to_the_configured_url(self) -> None:
+        self.assertEqual(cli._endpoint_label("http://127.0.0.1:12120"), "127.0.0.1:12120")
+        self.assertEqual(cli._endpoint_label("http://example.test"), "example.test")
+        self.assertEqual(cli._endpoint_label("not-a-url"), "not-a-url")
 
 
 if __name__ == "__main__":

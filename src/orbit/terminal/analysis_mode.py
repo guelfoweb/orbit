@@ -19,6 +19,7 @@ from typing import Callable
 
 from orbit.backend.base import ChatBackend
 from orbit.runtime.analysis_runtime import (
+    WORK_MOUNT,
     AnalysisRuntime,
     AnalysisStepResult,
     StepDiagnostics,
@@ -142,7 +143,11 @@ def format_analysis_step(result: AnalysisStepResult) -> str:
         lines.append(_action_summary(result))
     elif result.action_attempted:
         lines.append("action attempted but not executed")
-    if result.artifact_handles:
+    if result.artifact_handles and not (
+        result.action_executed and result.result is not None and result.result.artifacts
+    ):
+        # Only when the preview did not already list them with size and digest;
+        # printing both says the same thing twice.
         lines.append(f"artifacts: {', '.join(result.artifact_handles)}")
     if not lines:
         lines.append("(no output)")
@@ -186,6 +191,15 @@ def format_step_diagnostics(diagnostics: "StepDiagnostics | None") -> str:
 MAX_ACTION_CAUSE_CHARS = 160
 
 
+# What an action's output may occupy on the analyst's screen. Independent of
+# the model-facing bound: that one is about prompt cost, this one is about a
+# terminal staying readable. Sized like the rest of the CLI's excerpts -- a
+# couple of dozen lines is enough to see what a step produced and decide the
+# next one, and the full text is a copyable evidence id away.
+MAX_PREVIEW_CHARS = 1200
+MAX_PREVIEW_LINES = 24
+
+
 def _action_summary(result: AnalysisStepResult) -> str:
     action = result.result
     if action is None:
@@ -196,11 +210,142 @@ def _action_summary(result: AnalysisStepResult) -> str:
     cause = _action_cause(action)
     if cause:
         summary += f" | {cause}"
+
+    preview = _preview_block(action)
+    trailer: list[str] = []
     if result.evidence is not None:
-        summary += f" | evidence {result.evidence.evidence_id}"
+        trailer.append(f"evidence: {result.evidence.evidence_id}")
     if result.raw_output_evidence_id:
-        summary += f" | raw {result.raw_output_evidence_id}"
-    return summary
+        trailer.append(f"raw: {result.raw_output_evidence_id}")
+
+    if not preview:
+        # Nothing to show: keep the one-line shape an action with no output
+        # always had.
+        if trailer:
+            summary += " | " + " | ".join(
+                part.replace("evidence: ", "evidence ").replace("raw: ", "raw ")
+                for part in trailer
+            )
+        return summary
+
+    lines = [summary, *preview]
+    if trailer:
+        lines.append("")
+        lines.extend(trailer)
+    return "\n".join(lines).rstrip()
+
+
+def _preview_block(action: AnalysisResult) -> list[str]:
+    """What the action produced, bounded for a terminal.
+
+    An evidence id says where to look; it does not say what happened. Without
+    this the analyst has to open the store by hand before they can choose the
+    next step, which is the one thing an interactive session should not
+    require. Nothing here is interpreted -- it is the action's own output,
+    excerpted -- and no model is consulted to explain it.
+    """
+    # stdout only. On failure the cause line already carries the exception,
+    # and printing stderr underneath would say the same sentence twice.
+    block: list[str] = []
+    excerpt = _excerpt(action.stdout)
+    if excerpt:
+        block.append("")
+        block.append("result:")
+        block.extend(f"  {_sanitize(line)}" for line in excerpt)
+    if action.artifacts:
+        block.append("")
+        block.append("artifacts:")
+        for artifact in action.artifacts:
+            # The virtual path the analyst can name in the next step, never the
+            # host temp directory the workspace happens to live in.
+            block.append(
+                f"  - {WORK_MOUNT}/{_sanitize(artifact.name)} | "
+                f"{_human_size(artifact.size_bytes)} | "
+                f"sha256 {_sanitize(_short_sha(artifact.sha256))}"
+            )
+    return block
+
+
+def _excerpt(text: str) -> list[str]:
+    """Readable lines from `text`, bounded and marked when shortened."""
+    if not text or not text.strip():
+        return []
+    if _looks_binary(text):
+        # Metadata only. Binary on a terminal corrupts the display and tells
+        # the analyst nothing they can act on.
+        return [f"<{len(text)} chars of non-text output; see raw evidence>"]
+    lines = text.splitlines()
+    kept = lines[:MAX_PREVIEW_LINES]
+    shortened = len(lines) > MAX_PREVIEW_LINES
+    out: list[str] = []
+    budget = MAX_PREVIEW_CHARS
+    for line in kept:
+        if budget <= 0:
+            shortened = True
+            break
+        if len(line) > budget:
+            out.append(line[:budget] + "…")
+            budget = 0
+            shortened = True
+            continue
+        out.append(line)
+        budget -= len(line)
+    if shortened:
+        out.append(f"[preview truncated; {len(text)} chars total, full output in evidence]")
+    return out
+
+
+_CONTROL = {ord(c) for c in "\t"}
+
+
+def _sanitize(text: str) -> str:
+    """Strip control characters that would act on the terminal.
+
+    Everything previewed here is model-authored output. Left as-is it can move
+    the cursor and overwrite what Orbit already printed -- a crafted action
+    could forge its own `action: ok` line above itself. Tabs survive because
+    they are ordinary in program output; everything else in the control range
+    becomes a visible escape.
+    """
+    return "".join(
+        ch if ch.isprintable() or ord(ch) in _CONTROL else repr(ch)[1:-1]
+        for ch in text
+    )
+
+
+def _looks_binary(text: str) -> bool:
+    """Control characters beyond the ordinary whitespace ones."""
+    printable = sum(1 for ch in text[:2000] if ch in "\t\n\r" or ch >= " ")
+    sample = min(len(text), 2000)
+    return sample > 0 and printable / sample < 0.9
+
+
+# Enough to tell two artifacts apart at a glance and to grep the full value
+# out of evidence; short enough that the line still fits an 80-column
+# terminal, which the full 64 hex characters did not.
+SHORT_SHA_CHARS = 12
+
+
+def _short_sha(value: str) -> str:
+    """The leading hex of a digest, for reading rather than verifying.
+
+    Presentation only: what is stored, provenanced and re-attested is always
+    the whole digest. Anything that is not a plain hex digest is shown as it
+    is, so a malformed value stays visible instead of being quietly trimmed
+    into something that looks well-formed.
+    """
+    text = str(value or "")
+    if len(text) <= SHORT_SHA_CHARS or not all(c in "0123456789abcdefABCDEF" for c in text):
+        return text
+    return f"{text[:SHORT_SHA_CHARS]}\u2026"
+
+
+def _human_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
 
 
 def _action_cause(action: AnalysisResult) -> str | None:
