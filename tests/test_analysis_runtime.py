@@ -1095,3 +1095,145 @@ class ModifiedArtifactProvenanceTest(AnalysisRuntimeTestBase):
             second.evidence.metadata["artifacts"], [],
             "an action that wrote nothing must not claim an earlier file",
         )
+
+
+class InputMountContractTest(AnalysisRuntimeTestBase):
+    """`/workspace/input` is the artifact file, and every surface says so.
+
+    A production run read `/workspace/input/<original filename>` and was
+    correctly refused: the sandbox binds the artifact *as* that path, so a
+    subpath under it cannot exist. The wording invited the mistake by
+    describing the artifact as "mounted at" a bare path, which reads as a
+    directory. These pin the corrected contract on all three model-facing
+    surfaces, because one of them reverting would reintroduce the ambiguity.
+    """
+
+    def _surfaces(self) -> dict[str, str]:
+        runtime = self.runtime(ScriptedBackend(prose_response("ok")))
+        return {
+            "system prompt": ANALYSIS_SYSTEM_PROMPT,
+            "tool schema": ANALYSIS_TOOL_SCHEMA["function"]["description"],
+            "first user turn": runtime.messages[1]["content"],
+        }
+
+    def test_every_surface_calls_it_a_file(self) -> None:
+        for name, text in self._surfaces().items():
+            with self.subTest(surface=name):
+                lowered = text.lower()
+                self.assertIn("/workspace/input", lowered)
+                self.assertIn("file", lowered, "the surface must name it a file")
+
+    # Prepositions that put the artifact *inside* the path rather than
+    # equating it with the path. Checking the literal old sentence was not
+    # enough: "the artifact file lives read-only under /workspace/input"
+    # keeps every required keyword and still says directory.
+    CONTAINER_FRAMINGS = (
+        "mounted at /workspace/input",
+        "at /workspace/input",
+        "under /workspace/input",
+        "in /workspace/input",
+        "inside /workspace/input",
+        "into /workspace/input",
+        "from /workspace/input/",
+        "within /workspace/input",
+        "/workspace/input directory",
+        "/workspace/input folder",
+        "/workspace/input area",
+        "/workspace/input/",
+    )
+
+    def test_no_surface_describes_it_as_a_container(self) -> None:
+        # Not a keyword check: these are the shapes that make the path read as
+        # somewhere the artifact lives rather than as the artifact.
+        for name, text in self._surfaces().items():
+            lowered = text.lower()
+            for framing in self.CONTAINER_FRAMINGS:
+                with self.subTest(surface=name, framing=framing):
+                    self.assertNotIn(
+                        framing,
+                        lowered,
+                        f"{name} frames /workspace/input as a container",
+                    )
+
+    def test_each_surface_equates_the_path_with_the_file(self) -> None:
+        """Positive form: the path must be *identified* with the artifact.
+
+        The prohibition above can be satisfied by saying nothing at all, so
+        each surface also has to make the equation explicitly.
+        """
+        equations = (
+            "/workspace/input is the artifact file",
+            "/workspace/input is the read-only artifact file",
+            "the file /workspace/input",
+        )
+        for name, text in self._surfaces().items():
+            lowered = text.lower()
+            with self.subTest(surface=name):
+                self.assertTrue(
+                    any(phrase in lowered for phrase in equations),
+                    f"{name} never equates /workspace/input with the file",
+                )
+
+    def test_the_system_prompt_forbids_appending_a_path(self) -> None:
+        lowered = ANALYSIS_SYSTEM_PROMPT.lower()
+        self.assertIn("read exactly", lowered)
+        self.assertIn("never append", lowered)
+        self.assertIn("subpath", lowered)
+
+    def test_the_tool_schema_says_it_is_not_a_directory(self) -> None:
+        description = ANALYSIS_TOOL_SCHEMA["function"]["description"].lower()
+        self.assertIn("not a directory", description)
+
+    def test_derived_files_still_belong_under_the_work_root(self) -> None:
+        for name, text in self._surfaces().items():
+            if "/workspace/work" not in text:
+                continue
+            with self.subTest(surface=name):
+                self.assertIn("/workspace/work", text)
+        self.assertIn("/workspace/work", ANALYSIS_SYSTEM_PROMPT)
+        self.assertIn("/workspace/work", ANALYSIS_TOOL_SCHEMA["function"]["description"])
+
+    def test_the_contract_names_no_sample_and_no_malware_hint(self) -> None:
+        # The fix must generalise; a filename from the failing run would make
+        # it advice about one artifact.
+        for name, text in self._surfaces().items():
+            with self.subTest(surface=name):
+                lowered = text.lower()
+                for banned in ("fattura", ".js", "malware", "dropper", "sample"):
+                    self.assertNotIn(banned, lowered)
+
+    def test_the_shim_exposes_the_same_path_it_accepts(self) -> None:
+        # The prompt points at `orbit_tools.SOURCE_PATH`; that has to be the
+        # one path `_safe_path` will allow, or the hint sends the model wrong.
+        from orbit.runtime.analysis_tools_shim import ORBIT_TOOLS_SOURCE, SOURCE_MOUNT
+        from orbit.runtime.analysis_sandbox import SOURCE_MOUNT as SANDBOX_MOUNT
+
+        self.assertEqual(SOURCE_MOUNT, SANDBOX_MOUNT)
+        self.assertIn(f'SOURCE_PATH = "{SOURCE_MOUNT}"', ORBIT_TOOLS_SOURCE)
+        self.assertIn("SOURCE_PATH", ANALYSIS_SYSTEM_PROMPT)
+
+    def test_the_stable_prefix_still_holds_no_volatile_identity(self) -> None:
+        # The wording grew; it must not have grown to include session data.
+        for volatile in (self.source.sha256, self.source.original_path):
+            self.assertNotIn(volatile, ANALYSIS_SYSTEM_PROMPT)
+            self.assertNotIn(volatile, ANALYSIS_TOOL_SCHEMA["function"]["description"])
+
+    def test_the_first_turn_never_shows_the_original_filename(self) -> None:
+        """The analyst's own path must not be echoed back at the model.
+
+        Naming `samples/<file>` beside the mount is exactly what invites
+        appending it to `/workspace/input`. The size and hash identify the
+        artifact without handing the model a path to concatenate.
+        """
+        runtime = self.runtime(ScriptedBackend(prose_response("ok")))
+        first_turn = runtime.messages[1]["content"]
+
+        self.assertNotIn(self.source.original_path, first_turn)
+        self.assertNotIn(Path(self.source.original_path).name, first_turn)
+        self.assertIn(self.source.sha256, first_turn)
+
+    def test_chat_prompts_are_untouched_by_the_analysis_contract(self) -> None:
+        from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
+
+        for prompt in (CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT):
+            self.assertNotIn("/workspace/input", prompt)

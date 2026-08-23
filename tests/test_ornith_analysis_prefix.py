@@ -40,7 +40,7 @@ from orbit.native_llama.prefix_anchor import PrefixAnchorState
 from orbit.runtime.analysis_runtime import ANALYSIS_SYSTEM_PROMPT, ANALYSIS_TOOL_SCHEMA
 
 # Pinned literal: the prewarm captures this contract verbatim.
-ANALYSIS_SYSTEM_PROMPT_SHA256 = "313f3b7a8ae1c13379e1015a7abbc24ec313ef37949124b6355b98e3c4e0142e"
+ANALYSIS_SYSTEM_PROMPT_SHA256 = "fad4cd857bfb631058a7f5279f81573d800fe56013d82f3e4abab5fb50e2a2c8"
 
 
 class AnalysisPrefixConfigTests(unittest.TestCase):
@@ -73,7 +73,7 @@ class AnalysisPrefixConfigTests(unittest.TestCase):
         self.assertNotEqual(ORNITH_ANALYSIS_LINEAGE_ID, ORNITH15_PROFILE_ID)
 
     def test_count_is_smaller_than_the_route_count(self) -> None:
-        # A whole first ANALYSIS request is ~480 tokens against ~840 for a
+        # A whole first ANALYSIS request is ~540 tokens against ~840 for a
         # route request, so the route's count cannot fit here.
         self.assertLess(ORNITH_ANALYSIS_PREFIX_TOKEN_COUNT, ORNITH_ROUTE_PREFIX_TOKEN_COUNT)
 
@@ -663,11 +663,14 @@ class AnalysisFallbackAttributionTests(unittest.TestCase):
 
 
 class AnalysisPromptUnchangedTests(unittest.TestCase):
-    def test_analysis_system_prompt_is_untouched_by_this_mission(self) -> None:
+    def test_analysis_system_prompt_matches_the_qualified_pin(self) -> None:
         import hashlib
 
         # Pinned: the prewarm captures this contract, so a silent edit would
-        # change the prefix without changing the identity that guards it.
+        # change the prefix without changing the identity that guards it. The
+        # pin moved once, with the input-contract fix that told the model
+        # /workspace/input is the artifact file rather than a directory, and
+        # only alongside the prefix requalification that change forced.
         self.assertEqual(
             hashlib.sha256(ANALYSIS_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
             ANALYSIS_SYSTEM_PROMPT_SHA256,
