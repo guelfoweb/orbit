@@ -132,13 +132,31 @@ def _resolve_target(raw_path: str, *, workdir: Path) -> Path:
     return candidate
 
 
-def format_analysis_step(result: AnalysisStepResult) -> str:
-    """Render one step for the analyst who has just been handed control back."""
+def format_analysis_step(
+    result: AnalysisStepResult, *, prose_already_shown: bool = False
+) -> str:
+    """Render one step for the analyst who has just been handed control back.
+
+    `prose_already_shown` says the assistant prose was streamed to the terminal
+    as it arrived, so repeating it here would show the analyst the same answer
+    twice. It is rendering state supplied by the caller that did the streaming,
+    not something inferred from the text: a backend that returns content
+    without emitting deltas streams nothing, and then this is the only place
+    the prose is shown at all.
+
+    The streamed copy is the filtered one. `result.assistant_text` is the raw
+    response content, which still holds any raw tool-call markup the backend's
+    stream filter kept off the terminal; preferring what was streamed keeps
+    that markup hidden, which is what the filter is for.
+
+    Everything else -- action status, evidence preview, artifacts -- is
+    rendered either way, because none of it was streamed.
+    """
     lines: list[str] = []
     # Model-authored prose: sanitized here because this is where it is
     # displayed. `result.assistant_text` itself stays the model's original.
     text = sanitize_terminal_text(result.assistant_text, allow_newlines=True).strip()
-    if text:
+    if text and not prose_already_shown:
         lines.append(text)
     if result.rejection:
         lines.append(f"action refused: {result.rejection}")
@@ -152,7 +170,9 @@ def format_analysis_step(result: AnalysisStepResult) -> str:
         # Only when the preview did not already list them with size and digest;
         # printing both says the same thing twice.
         lines.append(f"artifacts: {', '.join(result.artifact_handles)}")
-    if not lines:
+    if not lines and not (text and prose_already_shown):
+        # "(no output)" means the step produced nothing worth showing -- not
+        # that the prose was already streamed a moment ago.
         lines.append("(no output)")
     return "\n".join(lines)
 
