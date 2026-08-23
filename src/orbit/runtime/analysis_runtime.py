@@ -103,7 +103,59 @@ ANALYSIS_TOOL_SCHEMA: dict[str, Any] = {
 # What may enter model-visible history from one action. The sandbox permits
 # 8 MiB of scratch; that ceiling governs what a program may write, not what
 # a prompt should carry. Full output stays addressable in EvidenceStore.
-MAX_EVIDENCE_CHARS = 8 * 1024
+#
+# 3200 rather than the previous 8192, measured rather than chosen. A real
+# failing turn carried a 7767-char observation -- under the old cap, so it was
+# never truncated -- which tokenised to 6226 tokens: 98.3% of that step's
+# 6331-token prefill, and 231.8s of the 376s the turn took.
+#
+# The bound is in characters because runtime has no exact tokenizer and must
+# not grow one; the backend owns tokenisation. `estimate_text_tokens` exists
+# but under-counts this content roughly threefold (0.28-0.42 of the real count
+# on the measured corpora), so budgeting with it would admit about three times
+# the intended prompt. A character cap is the honest instrument here, and the
+# number is derived from the densest content actually observed:
+#
+#   8 preserved successful observations: 1197-2435 chars, 788-2044 tokens
+#   densest ratio in that corpus:        1.123 chars/token (obfuscated JS)
+#   3200 chars is therefore about 2850 tokens on content of that kind
+#
+# That figure describes the measured corpora, not a guarantee. A character cap
+# does not bound tokens: rare codepoints reach 4 tokens per character on this
+# tokenizer, so 3200 characters of them would be roughly 12800 tokens. The cap
+# is still the right instrument -- runtime has no exact tokenizer and must not
+# grow one -- and it is a strict improvement at every density, because the
+# 8192 it replaces was four times worse on exactly that input. Analysis input
+# is attacker-supplied by definition, so this is a bound on the ordinary case
+# and a reduction, not a defence.
+#
+# Every one of the successful observations fits untruncated, and the failing
+# one drops from 6226 to about 2200 tokens. Full output remains byte-complete
+# and re-attestable in EvidenceStore; only this projection reaches the model,
+# which is told the output exists rather than being handed a way to fetch it.
+MAX_EVIDENCE_CHARS = 3200
+
+# What one analyst step may generate. Derived from the 8 model-authored actions
+# of the preserved successful trajectory, tokenised with the real Ornith
+# tokenizer:
+#
+#   outputs: 60, 80, 84, 296, 351, 354, 858, 1417, 1953 tokens
+#   median 351, largest 1953
+#
+# The previous 1024 was not a qualified number, and the measurement shows it
+# was already too small: it would have truncated two of those nine calls. That
+# is what the failing turn actually hit -- 1024 output tokens, finish_reason
+# `length`, and a tool call cut off mid-JSON after 1488 characters. The failure
+# was the ceiling being too low, not generation running away.
+#
+# 2048 is the smallest value that truncates none of them, clearing the largest
+# by 5%. Headroom beyond that is not free: decode runs about 7 tok/s here, so
+# every extra 1000 tokens of allowance is another ~140s that a doomed step
+# spends before it can be refused. At 2048 the worst refused turn costs roughly
+# what the observed failure already cost (~374s against 376s measured), while
+# no successful action is cut short. A larger 2560 would have bought 31%
+# headroom nothing has ever needed and made the bad case ~70s worse.
+QUALIFIED_ANALYSIS_MAX_TOKENS = 2048
 
 # The per-action allowance the qualified sandbox enforces is a limit on what
 # ONE action may produce. A persistent workspace also needs a ceiling on what
@@ -261,6 +313,16 @@ class AnalysisStepResult:
         return True
 
 
+def _stopped_at_generation_limit(response: Any) -> bool:
+    """Whether generation was cut off by the budget rather than finishing.
+
+    `length` is the backend's own word for "I stopped because I ran out", so
+    it is read rather than inferred from token counts, which would need this
+    module to know the effective limit at the point of judgement.
+    """
+    return str(getattr(response, "finish_reason", "") or "").lower() == "length"
+
+
 def _tool_argument_chars(calls: list[dict[str, Any]]) -> int:
     """Total size of the generated tool arguments, never their content.
 
@@ -395,7 +457,7 @@ class AnalysisRuntime:
     workspace: AnalysisWorkspace | None = None
     messages: list[Message] = field(default_factory=list)
     temperature: float = 0.0
-    max_tokens: int = 1024
+    max_tokens: int = QUALIFIED_ANALYSIS_MAX_TOKENS
     model_calls: int = 0
     actions_executed: int = 0
     analyst_turns: int = 0
@@ -416,6 +478,17 @@ class AnalysisRuntime:
                     ),
                 }
             )
+
+    @property
+    def effective_max_tokens(self) -> int:
+        """The smaller of what the analyst asked for and what is qualified.
+
+        A configured limit below the qualified one is a deliberate choice and
+        is honoured; a larger one is not, because nothing above this has been
+        shown to be needed and the cost of finding out is a minute of decode
+        the analyst waits through.
+        """
+        return min(int(self.max_tokens), QUALIFIED_ANALYSIS_MAX_TOKENS)
 
     def session_usage(self) -> tuple[int, int]:
         """Return (bytes, files) currently retained in the session workspace.
@@ -483,7 +556,7 @@ class AnalysisRuntime:
             response = self.backend.chat_stream(
                 list(self.messages),
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                max_tokens=self.effective_max_tokens,
                 tools=[ANALYSIS_TOOL_SCHEMA],
                 on_delta=_capture,
                 on_progress=on_progress,
@@ -523,6 +596,15 @@ class AnalysisRuntime:
             )
 
         rejection = self._structural_rejection(calls) if calls else None
+        if rejection is not None and _stopped_at_generation_limit(response):
+            # Same refusal path, a truer reason. The call is unparseable
+            # because generation ended mid-JSON, not because the model
+            # produced something malformed by choice, and an analyst who reads
+            # "not valid JSON" would look for the wrong problem.
+            rejection = (
+                "analysis step reached its generation limit before producing "
+                "a valid tool call"
+            )
         if rejection is not None:
             assistant["content"] = _rejected_action_text(content, rejection)
             self.messages.append(assistant)
