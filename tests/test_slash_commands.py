@@ -73,7 +73,10 @@ class SlashCommandTests(unittest.TestCase):
         names = [command.name for command in COMMANDS]
 
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual([command.name for command in commands_matching("/re")], ["/read", "/reset"])
+        self.assertEqual(
+            [command.name for command in commands_matching("/re")],
+            ["/read", "/reset", "/report"],
+        )
         rendered = help_text()
         for name in ("/read", "/search", "/ls", "/models", "/help", "/status", "/props", "/clear", "/reset", "/exit"):
             self.assertIn(name, rendered)

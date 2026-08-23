@@ -1782,3 +1782,61 @@ class WorkdirReminderTest(ModeTestBase):
         self.run_prompt(repl, "hello")
         sent = json.dumps(backend.messages_seen, default=str)
         self.assertNotIn("workdir:", sent)
+
+
+class ReportCommandTest(ModeTestBase):
+    """`/report` is analyst-controlled and mode-scoped."""
+
+    def _analysis_repl(self, *responses):
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        return repl, backend
+
+    def test_report_is_refused_in_chat(self) -> None:
+        repl = self.repl()
+        self.assertIs(repl.workflow_mode, WorkflowMode.CHAT)
+
+        output = self.run_command(repl, "/report")
+
+        self.assertIn("needs an analysis session", output)
+        self.assertIs(repl.workflow_mode, WorkflowMode.CHAT)
+
+    def test_report_with_no_evidence_calls_no_model(self) -> None:
+        repl, backend = self._analysis_repl()
+        before = backend.calls
+
+        output = self.run_command(repl, "/report")
+
+        self.assertEqual(backend.calls, before, "nothing to report on, nothing to ask")
+        self.assertIn("No analysis evidence has been collected yet", output)
+
+    def test_report_keeps_the_session_in_analysis(self) -> None:
+        repl, _ = self._analysis_repl()
+
+        self.run_command(repl, "/report")
+
+        self.assertIs(repl.workflow_mode, WorkflowMode.ANALYSIS)
+        self.assertIsNotNone(repl.analysis)
+        self.assertEqual(repl._prompt_label(), "analysis")
+
+    def test_the_command_is_registered_with_its_question_form(self) -> None:
+        from orbit.terminal.command_registry import resolve_command
+
+        plain = resolve_command("/report")
+        asked = resolve_command("/report tell me the IoCs and artifacts")
+
+        assert plain is not None and asked is not None
+        self.assertEqual(plain.spec.handler, "report")
+        self.assertEqual(plain.arguments, "")
+        self.assertEqual(asked.arguments, "tell me the IoCs and artifacts")
+
+    def test_report_does_not_change_chat_or_routing(self) -> None:
+        repl = self.repl()
+        self.run_command(repl, "/report")
+
+        self.assertIs(repl.workflow_mode, WorkflowMode.CHAT)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.assertIs(repl.workflow_mode, WorkflowMode.ANALYSIS)
+        self.run_command(repl, "/chat")
+        self.assertIs(repl.workflow_mode, WorkflowMode.CHAT)

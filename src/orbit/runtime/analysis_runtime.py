@@ -44,7 +44,7 @@ from orbit.runtime.analysis_sandbox import (
     execute_analysis,
     scratch_baseline,
 )
-from orbit.runtime.evidence import EvidenceRecord, EvidenceStore
+from orbit.runtime.evidence import EvidenceRecord, EvidenceStore, final_card
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.tool_calls import tool_call_id
 
@@ -55,6 +55,30 @@ ANALYSIS_TOOL_NAME = "execute_analysis"
 # which rolling checkpoint this prompt continues, and learns nothing about CHAT
 # or ANALYSIS from it.
 ANALYSIS_STEP_PHASE = "analysis_step"
+
+# The phase a report declares. Distinct from a step because it is a different
+# kind of call -- no tools, no action -- and the KV lineages are keyed by what
+# the caller declares, so naming it separately keeps a report from being
+# mistaken for a link in the analysis chain.
+ANALYSIS_REPORT_PHASE = "analysis_report"
+
+# What one report may read from the store. The evidence cards are already
+# bounded by `final_card`; this caps how many of them a single report carries,
+# so a long session cannot grow the report prompt without limit.
+MAX_REPORT_EVIDENCE_RECORDS = 12
+
+ANALYSIS_REPORT_INSTRUCTION = (
+    "Report on the evidence already collected. Run nothing: this turn has no "
+    "tools and performs no analysis.\n"
+    "Ground every finding in that evidence and cite it as evidence:<id>. "
+    "Anything the evidence does not establish is unresolved -- say so rather "
+    "than supplying it.\n"
+    "Cover, briefly and only where the evidence supports it: confirmed "
+    "findings; indicators; artifacts produced; behaviour established; what "
+    "remains unresolved; and the single next step most worth taking."
+)
+
+NO_EVIDENCE_REPORT = "No analysis evidence has been collected yet."
 
 # Stable prefix. Everything here is identical for every step of every
 # analysis on a given profile, which is what makes a future exact-prefix
@@ -288,6 +312,16 @@ class StepDiagnostics:
             "tool_argument_chars": self.tool_argument_chars,
             "refusal": self.refusal,
         }
+
+
+@dataclass(frozen=True)
+class AnalysisReport:
+    """What one `/report` produced. Never evidence, never history."""
+
+    text: str
+    model_calls: int
+    evidence_ids: tuple[str, ...] = ()
+    diagnostics: "StepDiagnostics | None" = None
 
 
 @dataclass(frozen=True)
@@ -781,6 +815,134 @@ class AnalysisRuntime:
             except OSError:
                 continue
         return digests
+
+    def report(
+        self,
+        question: str = "",
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> "AnalysisReport":
+        """Answer from the evidence already collected, running nothing.
+
+        A view over the store, not a step in the investigation. The failure
+        this replaces was a model choosing to re-read an artifact it had
+        already read when asked to interpret it; the fix is to remove the
+        choice rather than argue with it, so this call is made with no tools
+        at all. It cannot run an action because it is not offered one.
+
+        Nothing here is appended to `self.messages`. The analysis history is
+        the append-only record a later exact-prefix strategy depends on, and a
+        report is not evidence: the prose it produces is an answer about the
+        record, never part of it.
+        """
+        records = self._reportable_records()
+        if not records:
+            # Deterministic, and free: there is nothing to ground a report in,
+            # and asking a model to say so would be a call spent on a fact the
+            # runtime already knows.
+            return AnalysisReport(text=NO_EVIDENCE_REPORT, model_calls=0, evidence_ids=())
+
+        messages = self._report_messages(question, records)
+        deltas: list[str] = []
+
+        def _capture(text: str) -> None:
+            deltas.append(text)
+            if on_delta is not None and text:
+                on_delta(text)
+
+        started = time.monotonic()
+        with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
+            response = self.backend.chat_stream(
+                messages,
+                temperature=self.temperature,
+                max_tokens=self.effective_max_tokens,
+                tools=[],
+                on_delta=_capture,
+                on_progress=on_progress,
+            )
+        seconds = time.monotonic() - started
+
+        text = (response.content or "").strip()
+        if not text:
+            # Truthful rather than silent, and no repair call: a second
+            # invocation would cross the boundary this runtime holds.
+            text = "the report call produced no usable text"
+        return AnalysisReport(
+            text=text,
+            model_calls=1,
+            evidence_ids=tuple(r.evidence_id for r in records),
+            diagnostics=StepDiagnostics(
+                prompt_tokens=getattr(response, "prompt_tokens", None),
+                output_tokens=getattr(response, "completion_tokens", None),
+                reused_tokens=getattr(response, "cached_tokens", None),
+                finish_reason=getattr(response, "finish_reason", None),
+                generation_tokens_per_second=getattr(
+                    response, "generation_tokens_per_second", None
+                ),
+                duration_seconds=round(seconds, 3),
+            ),
+        )
+
+    def _reportable_records(self) -> list[EvidenceRecord]:
+        """The action evidence a report may cite, oldest first and bounded."""
+        records = [
+            record
+            for record in self.evidence_store.records.values()
+            if record.tool_name == ANALYSIS_TOOL_NAME
+        ]
+        return records[-MAX_REPORT_EVIDENCE_RECORDS:]
+
+    def _evidence_card(self, record: EvidenceRecord) -> str:
+        """One record as the report sees it: header plus the observation.
+
+        `final_card` shows a 700/300 head-and-tail excerpt, which is right for
+        a citation card but wrong here -- a finding in the middle of a step's
+        output would vanish, and the report would then call it unresolved,
+        which is a confident wrong answer rather than a missing one. The
+        re-attested text is the same bounded observation the step already put
+        in front of the model, so carrying it adds nothing the model has not
+        already been trusted with, and it is verified rather than remembered.
+        """
+        body = self.evidence_store.reattest_exact(record.evidence_id)
+        if body is None:
+            # Re-attestation is the gate; a record that cannot pass it is
+            # described, never quoted.
+            return final_card(record)
+        return "\n".join(
+            [
+                "tool_evidence_card: true",
+                f"evidence_id: {record.evidence_id}",
+                f"status: {record.status}",
+                f"size: {record.raw_chars} chars",
+                "evidence:",
+                body,
+            ]
+        )
+
+    def _report_messages(
+        self, question: str, records: list[EvidenceRecord]
+    ) -> list[NativeMessage]:
+        """A fresh grounded context, built from the store rather than history.
+
+        Deliberately not the analysis conversation: that carries tool calls and
+        an artifact identity this turn must not act on, and reusing it would
+        put the model back in the frame where running something is the
+        expected move.
+        """
+        cards = "\n\n".join(self._evidence_card(record) for record in records)
+        asked = question.strip() or "Report on what the evidence establishes."
+        return [
+            {"role": "system", "content": ANALYSIS_REPORT_INSTRUCTION},
+            {
+                "role": "user",
+                "content": (
+                    f"Artifact under analysis: {self.source.size_bytes} bytes, "
+                    f"sha256 {self.source.sha256}.\n\n"
+                    f"Evidence collected so far:\n\n{cards}\n\n{asked}"
+                ),
+            },
+        ]
 
     def _structural_rejection(self, calls: list[dict[str, Any]]) -> str | None:
         """Why this tool call cannot be committed, or None if it can.
