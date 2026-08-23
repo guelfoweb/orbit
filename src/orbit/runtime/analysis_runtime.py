@@ -61,7 +61,9 @@ ANALYSIS_STEP_PHASE = "analysis_step"
 # path, no hash, no session id, no timestamp, no analyst text.
 ANALYSIS_SYSTEM_PROMPT = (
     "You are performing static analysis of one artifact in an isolated offline workspace.\n"
-    "The artifact is mounted read-only at /workspace/input. There is no network.\n"
+    "/workspace/input is the artifact file itself, mounted read-only: read exactly\n"
+    "that path and never append the original filename or a subpath to it\n"
+    "(`orbit_tools.SOURCE_PATH` is it). There is no network.\n"
     "Inspect and transform it by writing Python and running it with execute_analysis; "
     "`import orbit_tools` provides read_file(path, offset, limit).\n"
     "Write bounded files under /workspace/work to keep a derived artifact.\n"
@@ -76,8 +78,9 @@ ANALYSIS_TOOL_SCHEMA: dict[str, Any] = {
         "name": ANALYSIS_TOOL_NAME,
         "description": (
             "Run one bounded Python program in the isolated analysis workspace. "
-            "The artifact is read-only at /workspace/input; write derived files under "
-            "/workspace/work. Print the facts you want recorded as evidence."
+            "/workspace/input is the read-only artifact file itself, not a directory; "
+            "write derived files under /workspace/work. "
+            "Print the facts you want recorded as evidence."
         ),
         "parameters": {
             "type": "object",
@@ -342,7 +345,7 @@ class AnalysisRuntime:
                 {
                     "role": "user",
                     "content": (
-                        f"Artifact under analysis: /workspace/input "
+                        f"Artifact under analysis: the file /workspace/input "
                         f"({self.source.size_bytes} bytes, sha256 {self.source.sha256})."
                     ),
                 }

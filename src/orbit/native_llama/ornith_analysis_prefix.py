@@ -10,10 +10,10 @@ mechanism: the same `derive_qwen_route_prefix_spec`, the same
 `PrefixAnchorState`, the same capture and restore. Two things differ, and both
 are deliberate.
 
-The count is smaller. A whole first ANALYSIS request is around 480 tokens
+The count is smaller. A whole first ANALYSIS request is around 540 tokens
 against roughly 840 for a route request, so the route's 768 cannot fit; the
 derivation would refuse it outright rather than shorten it. Measured on this
-template the invariant region is 451 tokens, and 384 sits inside it with room
+template the invariant region is 485 tokens, and 384 sits inside it with room
 to spare.
 
 The identity is its own. Sharing the route lineage's format version and
@@ -44,10 +44,16 @@ ORNITH_ANALYSIS_PREFIX_ENV = "ORBIT_ORNITH_ANALYSIS_PREFIX_REUSE"
 # nothing about CHAT or ANALYSIS from it.
 ORNITH_ANALYSIS_LINEAGE_ID = "orbit-ornith15-native-v1#analysis"
 
-# 384: measured invariant region on this template is 451 tokens, so the
-# captured prefix stops 67 tokens short of anything that varies. The whole
-# request is ~480 tokens, which is why the route lineage's 768 is unusable
+# 384: measured invariant region on this template is 485 tokens, so the
+# captured prefix stops 101 tokens short of anything that varies. The whole
+# request is ~540 tokens, which is why the route lineage's 768 is unusable
 # here rather than merely wasteful.
+#
+# Re-measured after the input contract was reworded to say /workspace/input is
+# the artifact file rather than a place it sits: the region grew 451 -> 485, so
+# 384 was re-validated against a different token sequence rather than left
+# alone. The count is derived, never trimmed to fit -- a prompt that shrank the
+# region below it would be refused outright.
 ORNITH_ANALYSIS_PREFIX_TOKEN_COUNT = 384
 ORNITH_ANALYSIS_PREFIX_FORMAT_VERSION = "ornith15-analysis-prefix-v1"
 ORNITH_ANALYSIS_TOKENIZER_IDENTITY = "gpt2:qwen35"
