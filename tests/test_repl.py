@@ -896,7 +896,7 @@ class ReplTests(unittest.TestCase):
                 responses = iter(("", "next"))
                 stdout = io.StringIO()
 
-                def fake_read() -> str:
+                def fake_read(*, label: str = "") -> str:
                     print("> ")
                     return next(responses)
 
@@ -935,7 +935,7 @@ class ReplTests(unittest.TestCase):
 
             redisplays: list[bool] = []
 
-            def fake_read(*, redisplay: bool = False) -> str:
+            def fake_read(*, redisplay: bool = False, label: str = "") -> str:
                 nonlocal reads
                 reads += 1
                 redisplays.append(redisplay)
@@ -971,7 +971,7 @@ class ReplTests(unittest.TestCase):
             )
             redisplays: list[bool] = []
 
-            def fake_read(*, redisplay: bool = False) -> str:
+            def fake_read(*, redisplay: bool = False, label: str = "") -> str:
                 redisplays.append(redisplay)
                 try:
                     return next(prompts)
@@ -1006,7 +1006,7 @@ class ReplTests(unittest.TestCase):
             prompts = iter(("/read note.txt summarize",))
             redisplays: list[bool] = []
 
-            def fake_read(*, redisplay: bool = False) -> str:
+            def fake_read(*, redisplay: bool = False, label: str = "") -> str:
                 redisplays.append(redisplay)
                 try:
                     return next(prompts)
