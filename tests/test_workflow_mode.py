@@ -1196,3 +1196,98 @@ class PromptEchoLabelTest(ModeTestBase):
         # the line that was typed while CHAT was displayed.
         self.assertEqual(repl._prompt_label(), "analysis")
         self.assertNotEqual(displayed, repl._prompt_label())
+
+
+class AnalysisProgressRenderingTest(ModeTestBase):
+    """The analyst sees the step working, and never sees raw tool JSON."""
+
+    def test_the_step_receives_a_progress_and_delta_seam(self) -> None:
+        """The Repl must hand the runtime somewhere to report to.
+
+        Without this the terminal stays silent for the whole call, which is
+        the behaviour that made a long step look like a hang.
+        """
+        import inspect
+
+        from orbit.terminal.repl import Repl
+
+        source = inspect.getsource(Repl._ask_analysis)
+        self.assertIn("on_progress=", source)
+        self.assertIn("on_delta=", source)
+        self.assertIn("StreamRenderer(", source)
+
+    def test_the_renderer_is_finished_on_every_exit_path(self) -> None:
+        # A renderer left running keeps a timer thread and a stale status line.
+        import inspect
+
+        from orbit.terminal.repl import Repl
+
+        source = inspect.getsource(Repl._ask_analysis)
+        self.assertEqual(source.count("renderer.finish("), 4)
+
+    def test_analysis_never_renders_reasoning(self) -> None:
+        """Checked on the constructed renderer, not on the source text.
+
+        The literal `thinking=False` also appears in a comment here, so a
+        substring check passed even with the real argument flipped.
+        """
+        from orbit.terminal.streaming import StreamRenderer
+
+        captured: list[dict] = []
+        original = StreamRenderer.__init__
+
+        def spy(self, *args, **kwargs):
+            captured.append(dict(kwargs))
+            original(self, *args, **kwargs)
+
+        repl = self.repl()
+        self.run_command(repl, f"/analysis {self.artifact}")
+        with mock.patch.object(StreamRenderer, "__init__", spy):
+            self.run_prompt(repl, "look at it")
+
+        self.assertTrue(captured, "the analysis step must build a renderer")
+        self.assertFalse(
+            captured[-1].get("thinking", True),
+            "ANALYSIS must never render reasoning",
+        )
+
+    def test_diagnostics_render_sizes_not_content(self) -> None:
+        from orbit.runtime.analysis_runtime import StepDiagnostics
+        from orbit.terminal.analysis_mode import format_step_diagnostics
+
+        line = format_step_diagnostics(
+            StepDiagnostics(
+                prompt_tokens=1077, output_tokens=1024, reused_tokens=768,
+                finish_reason="length", tool_argument_chars=9312,
+                refusal="tool arguments are not valid JSON",
+            )
+        )
+        self.assertIn("1077 in", line)
+        self.assertIn("309 eval", line)
+        self.assertIn("768 cache", line)
+        self.assertIn("1024 out", line)
+        self.assertIn("length", line)
+        self.assertIn("tool args 9312 chars", line)
+
+    def test_a_step_without_diagnostics_renders_nothing_extra(self) -> None:
+        from orbit.terminal.analysis_mode import format_step_diagnostics
+
+        self.assertEqual(format_step_diagnostics(None), "")
+
+    def test_non_tty_progress_is_not_interactive(self) -> None:
+        """Non-interactive output must stay plain: no timer, no escapes."""
+        from orbit.backend.base import StreamProgress
+        from orbit.terminal.streaming import StreamRenderer
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            renderer = StreamRenderer(thinking=False, interactive=False)
+            renderer.set_activity("analysis")
+            renderer.start()
+            renderer.progress(StreamProgress(
+                phase="prefill", current=1, total=2, percent=50,
+                evaluated_current=1, evaluated_total=2,
+            ))
+            renderer.finish()
+        rendered = out.getvalue()
+        self.assertNotIn("\x1b[", rendered, "no ANSI in non-interactive output")

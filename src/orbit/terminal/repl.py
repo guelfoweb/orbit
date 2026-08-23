@@ -18,6 +18,7 @@ from orbit.runtime.workflow_mode import DEFAULT_WORKFLOW_MODE, WorkflowMode
 from orbit.terminal.analysis_mode import (
     AnalysisModeError,
     format_analysis_step,
+    format_step_diagnostics,
     open_analysis_session,
     open_confined_analysis_session,
 )
@@ -281,20 +282,37 @@ class Repl:
         assert self.analysis is not None
         print()
         started = time.monotonic()
+        # The same renderer CHAT uses. An analysis step is one long model call
+        # with no intermediate output, so without this the terminal shows
+        # nothing at all until the step returns -- a wait that is
+        # indistinguishable from a hang. `thinking=False` because ANALYSIS
+        # never displays reasoning.
+        renderer = StreamRenderer(
+            thinking=False,
+            render_markdown_mode="plain",
+        )
+        renderer.set_activity("analysis")
         # `step()` appends the analyst line before it calls the model, so a
         # cancelled or failed step would otherwise leave an unanswered user
         # turn in the history. CHAT rewinds to a checkpoint for the same
         # reason; ANALYSIS has more at stake, because that history is the
         # append-only record a later exact-prefix strategy depends on.
         checkpoint = self._analysis_checkpoint()
+        renderer.start()
         try:
-            result = self.analysis.step(analyst_message)
+            result = self.analysis.step(
+                analyst_message,
+                on_progress=renderer.progress,
+                on_delta=renderer.write,
+            )
         except KeyboardInterrupt:
+            renderer.finish(interrupted=True)
             self._restore_analysis_checkpoint(checkpoint)
             print(dim("cancelled"), flush=True)
             return
         except (ContextAdmissionError, LlamaServerError, TimeoutError) as exc:
             # Recoverable: the analyst keeps the session and can steer again.
+            renderer.finish(interrupted=True)
             self._restore_analysis_checkpoint(checkpoint)
             print(runtime_error_text(exc), file=sys.stderr)
             return
@@ -302,17 +320,20 @@ class Repl:
             # Anything else ends the process, as it does in CHAT. CHAT leaves
             # nothing behind when it does; an analysis session would leave a
             # temporary workspace, so release it before the exception goes up.
+            renderer.finish(interrupted=True)
             self._close_analysis()
             raise
+        renderer.finish()
         print(format_analysis_step(result), flush=True)
         elapsed = time.monotonic() - started
-        print(
-            dim(
-                f"analysis | mode: ANALYSIS | model calls: {result.model_calls} | "
-                f"actions: {1 if result.action_executed else 0} | {elapsed:.1f}s"
-            ),
-            flush=True,
+        summary = (
+            f"analysis | mode: ANALYSIS | model calls: {result.model_calls} | "
+            f"actions: {1 if result.action_executed else 0} | {elapsed:.1f}s"
         )
+        detail = format_step_diagnostics(result.diagnostics)
+        if detail:
+            summary += f" | {detail}"
+        print(dim(summary), flush=True)
 
     def _analysis_checkpoint(self) -> tuple[int, int]:
         """History length and analyst-turn count before a step is attempted."""

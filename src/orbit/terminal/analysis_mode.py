@@ -21,6 +21,7 @@ from orbit.backend.base import ChatBackend
 from orbit.runtime.analysis_runtime import (
     AnalysisRuntime,
     AnalysisStepResult,
+    StepDiagnostics,
     AnalysisWorkspace,
     acquire_analysis_source,
     snapshot_analysis_bytes,
@@ -146,6 +147,38 @@ def format_analysis_step(result: AnalysisStepResult) -> str:
     if not lines:
         lines.append("(no output)")
     return "\n".join(lines)
+
+
+def format_step_diagnostics(diagnostics: "StepDiagnostics | None") -> str:
+    """One compact line of what the step's model call cost.
+
+    Shown for every step, including refused ones. A refusal writes no
+    evidence, so without this the expensive case is the one that leaves no
+    record of how long the model ran or how much it produced. Sizes and
+    reasons only: no model output reaches this line.
+    """
+    if diagnostics is None:
+        return ""
+    parts: list[str] = []
+    if diagnostics.prompt_tokens is not None:
+        evaluated = diagnostics.evaluated_tokens
+        reused = diagnostics.reused_tokens or 0
+        parts.append(f"{diagnostics.prompt_tokens} in")
+        if evaluated is not None:
+            parts.append(f"{evaluated} eval")
+        if reused:
+            parts.append(f"{reused} cache")
+    if diagnostics.output_tokens is not None:
+        parts.append(f"{diagnostics.output_tokens} out")
+    if diagnostics.generation_tokens_per_second:
+        parts.append(f"{diagnostics.generation_tokens_per_second:.1f} tok/s")
+    if diagnostics.finish_reason:
+        parts.append(str(diagnostics.finish_reason))
+    if diagnostics.refusal and diagnostics.tool_argument_chars:
+        # Size only. The arguments were refused because they are unparseable,
+        # so printing them would put raw model output on the screen.
+        parts.append(f"tool args {diagnostics.tool_argument_chars} chars")
+    return " · ".join(parts)
 
 
 # Long enough to carry a Python exception line, short enough that a failing
