@@ -17,10 +17,10 @@ READLINE_IGNORE_START = "\001"
 READLINE_IGNORE_END = "\002"
 
 
-def read_prompt_input(*, redisplay: bool = False) -> str:
+def read_prompt_input(*, redisplay: bool = False, label: str = "") -> str:
     clear_redisplay_hook = _install_redisplay_hook() if redisplay else None
     try:
-        first_line = input(input_prompt())
+        first_line = input(input_prompt(label))
     finally:
         if clear_redisplay_hook is not None:
             clear_redisplay_hook()
@@ -56,29 +56,40 @@ def _install_redisplay_hook() -> Callable[[], None] | None:
     return clear_hook
 
 
-def input_prompt() -> str:
+def input_prompt(label: str = "") -> str:
+    """The marker the analyst types after.
+
+    `label` names the runtime that owns the next line. It is display only:
+    the caller passes the mode it already holds, so nothing here decides or
+    stores what mode the session is in, and the string never reaches a model.
+    """
     if not sys.stdout.isatty():
-        return "> "
-    return f"{READLINE_IGNORE_START}{CYAN}{READLINE_IGNORE_END}> {READLINE_IGNORE_START}{RESET}{READLINE_IGNORE_END}"
+        return f"{label}> "
+    return (
+        f"{READLINE_IGNORE_START}{CYAN}{READLINE_IGNORE_END}{label}> "
+        f"{READLINE_IGNORE_START}{RESET}{READLINE_IGNORE_END}"
+    )
 
 
-def replace_input_echo(prompt: str) -> None:
+def replace_input_echo(prompt: str, label: str = "") -> None:
     if not should_replace_input_echo(prompt):
         return
     if not sys.stdout.isatty():
         return
     preview = compact_prompt_preview(prompt, multiline=True)
-    rendered = colorize_user_prompt(f"> {preview}")
+    rendered = colorize_user_prompt(f"{label}> {preview}")
     columns = max(20, get_terminal_size((80, 20)).columns)
-    visual_rows = visual_row_count(f"> {prompt}", columns=columns)
+    # The marker occupies columns on the first row, so the label has to be
+    # counted or a wrapped line is erased one row short.
+    visual_rows = visual_row_count(f"{label}> {prompt}", columns=columns)
     print(f"\x1b[{visual_rows}F\x1b[J{rendered}", flush=True)
 
 
-def clear_input_echo(prompt: str) -> None:
+def clear_input_echo(prompt: str, label: str = "") -> None:
     if not sys.stdout.isatty():
         return
     columns = max(20, get_terminal_size((80, 20)).columns)
-    visual_rows = visual_row_count(f"> {prompt}", columns=columns)
+    visual_rows = visual_row_count(f"{label}> {prompt}", columns=columns)
     print(f"\x1b[{visual_rows}F\x1b[J", end="", flush=True)
 
 
