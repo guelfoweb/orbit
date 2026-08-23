@@ -1237,3 +1237,226 @@ class InputMountContractTest(AnalysisRuntimeTestBase):
 
         for prompt in (CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT):
             self.assertNotIn("/workspace/input", prompt)
+
+
+class ProgressSeamTest(AnalysisRuntimeTestBase):
+    """A step must be observable while it runs, and cost nothing to observe.
+
+    A single analysis call can occupy minutes. Without a signal the terminal
+    shows nothing until it returns, which is indistinguishable from a hang.
+    """
+
+    class _ProgressBackend(ScriptedBackend):
+        """Emits a prefill and a generation update, as the real stream does."""
+
+        def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                        on_delta, on_progress=None):
+            from orbit.backend.base import StreamProgress
+
+            if on_progress is not None:
+                on_progress(StreamProgress(
+                    phase="prefill", current=200, total=400, percent=50,
+                    evaluated_current=200, evaluated_total=400, cached_tokens=768,
+                ))
+                on_progress(StreamProgress(
+                    phase="generation", current=12, total=0, percent=0,
+                    elapsed_seconds=1.5, tokens_per_second=11.0,
+                ))
+            return super().chat_stream(
+                messages, temperature=temperature, max_tokens=max_tokens,
+                tools=tools, on_delta=on_delta, on_progress=on_progress,
+            )
+
+    def test_progress_arrives_before_the_step_returns(self) -> None:
+        seen: list[str] = []
+        backend = self._ProgressBackend(prose_response("done"))
+        runtime = self.runtime(backend)
+
+        result = runtime.step("look", on_progress=lambda u: seen.append(u.phase))
+
+        self.assertEqual(seen, ["prefill", "generation"])
+        self.assertIsNotNone(result)
+
+    def test_observing_adds_no_model_call(self) -> None:
+        backend = self._ProgressBackend(prose_response("done"))
+        runtime = self.runtime(backend)
+
+        runtime.step("look", on_progress=lambda u: None, on_delta=lambda t: None)
+
+        self.assertEqual(backend.calls, 1, "one analyst line is one model call")
+
+    def test_progress_text_never_enters_the_conversation(self) -> None:
+        backend = self._ProgressBackend(prose_response("done"))
+        runtime = self.runtime(backend)
+
+        runtime.step("look", on_progress=lambda u: None)
+
+        sent = json.dumps(backend.seen_messages, default=str)
+        for marker in ("prefill", "generation", "tok/s", "analysis ·"):
+            self.assertNotIn(marker, sent)
+        for message in runtime.messages:
+            self.assertNotIn("prefill", str(message.get("content") or ""))
+
+    def test_prose_streams_but_tool_arguments_never_do(self) -> None:
+        """The delta seam carries assistant text only.
+
+        A tool call is generated as JSON that is only valid once complete, so
+        streaming it would put unparsed model output on the analyst's screen.
+        """
+        streamed: list[str] = []
+        marker = "SENTINEL_IN_TOOL_CODE"
+        code = f"import orbit_tools\nprint('{marker}')"
+        backend = ScriptedBackend(tool_response(code, text="thinking about it"))
+        runtime = self.runtime(backend)
+
+        runtime.step("look", on_delta=streamed.append)
+
+        joined = "".join(streamed)
+        self.assertIn("thinking about it", joined)
+        # The delta seam must carry prose and nothing else. Checked on a
+        # marker rather than the whole code string: the arguments are
+        # JSON-encoded, so escaping alone would hide a literal-substring
+        # check while the payload still reached the screen.
+        self.assertNotIn(marker, joined)
+        self.assertNotIn("orbit_tools", joined)
+        self.assertNotIn("{", joined)
+        self.assertEqual(joined, "thinking about it")
+
+    def test_a_refused_call_streams_no_arguments_either(self) -> None:
+        """The unparseable case is the one that must never be shown."""
+        streamed: list[str] = []
+        backend = ScriptedBackend(tool_response("x", text="working"))
+        backend._responses[0].tool_calls[0]["function"]["arguments"] = "{BROKEN_SENTINEL"
+        runtime = self.runtime(backend)
+
+        result = runtime.step("look", on_delta=streamed.append)
+
+        self.assertIsNotNone(result.rejection)
+        self.assertNotIn("BROKEN_SENTINEL", "".join(streamed))
+
+    def test_callbacks_are_optional(self) -> None:
+        backend = ScriptedBackend(prose_response("done"))
+        runtime = self.runtime(backend)
+
+        result = runtime.step("look")
+
+        self.assertEqual(result.model_calls, 1)
+
+
+class StepDiagnosticsTest(AnalysisRuntimeTestBase):
+    """Every step records what its model call cost -- refusals included.
+
+    A refused step writes no evidence, so it used to leave no trace at all of
+    how long the model ran or how much it generated. That is precisely the
+    turn someone needs to diagnose later.
+    """
+
+    def test_a_successful_action_records_its_cost(self) -> None:
+        backend = ScriptedBackend(tool_response("import orbit_tools\nprint('x')"))
+        result = self.runtime(backend).step("look")
+
+        diag = result.diagnostics
+        self.assertIsNotNone(diag)
+        assert diag is not None
+        self.assertEqual(diag.prompt_tokens, 10)
+        self.assertEqual(diag.output_tokens, 5)
+        self.assertEqual(diag.tool_call_count, 1)
+        self.assertGreater(diag.tool_argument_chars, 0)
+        self.assertIsNone(diag.refusal)
+        self.assertIsNotNone(diag.duration_seconds)
+
+    def test_a_refused_step_still_records_its_cost(self) -> None:
+        backend = ScriptedBackend(tool_response("x", name=ANALYSIS_TOOL_NAME))
+        # Replace the arguments with something unparseable.
+        backend._responses[0].tool_calls[0]["function"]["arguments"] = "{not json"
+        result = self.runtime(backend).step("look")
+
+        self.assertIsNotNone(result.rejection)
+        self.assertFalse(result.action_executed)
+        diag = result.diagnostics
+        assert diag is not None
+        self.assertEqual(diag.refusal, result.rejection)
+        self.assertEqual(diag.tool_argument_chars, len("{not json"))
+        self.assertEqual(diag.output_tokens, 5)
+        self.assertIsNotNone(diag.duration_seconds)
+
+    def test_diagnostics_carry_no_model_output(self) -> None:
+        secret = "SENTINEL-MODEL-TEXT"
+        backend = ScriptedBackend(tool_response("y", text=secret))
+        backend._responses[0].tool_calls[0]["function"]["arguments"] = "{" + secret
+        result = self.runtime(backend).step("look")
+
+        blob = json.dumps(result.diagnostics.as_log_fields(), default=str)
+        self.assertNotIn(secret, blob, "diagnostics must record sizes, not content")
+
+    def test_evaluated_tokens_are_derived_not_guessed(self) -> None:
+        from orbit.runtime.analysis_runtime import StepDiagnostics
+
+        self.assertEqual(
+            StepDiagnostics(prompt_tokens=1077, reused_tokens=768).evaluated_tokens, 309
+        )
+        self.assertIsNone(StepDiagnostics().evaluated_tokens)
+
+    def test_every_forensic_field_is_plumbed_from_the_response(self) -> None:
+        """The fields the post-mortem depends on must come from the response.
+
+        `getattr(response, name, None)` turns a renamed `ChatResult` field into
+        a silent `None` rather than an error, and fixtures that leave these
+        unset cannot tell a wired field from an absent one. This pins the exact
+        shape of the failure being investigated: a step that hit the token
+        ceiling after a long decode.
+        """
+        response = ChatResult(
+            content="", model="m", finish_reason="length",
+            tool_calls=[{
+                "id": "c", "type": "function",
+                "function": {"name": ANALYSIS_TOOL_NAME, "arguments": "{BROKEN"},
+            }],
+            prompt_tokens=1077, completion_tokens=1024, cached_tokens=768,
+            prompt_tokens_per_second=37.0, generation_tokens_per_second=11.3,
+        )
+        result = self.runtime(ScriptedBackend(response)).step("look")
+
+        diag = result.diagnostics
+        assert diag is not None
+        self.assertEqual(diag.finish_reason, "length")
+        self.assertEqual(diag.prompt_tokens, 1077)
+        self.assertEqual(diag.reused_tokens, 768)
+        self.assertEqual(diag.evaluated_tokens, 309)
+        self.assertEqual(diag.output_tokens, 1024)
+        self.assertEqual(diag.generation_tokens_per_second, 11.3)
+        self.assertEqual(diag.tool_argument_chars, len("{BROKEN"))
+        self.assertIsNotNone(diag.refusal)
+
+    def test_duration_measures_only_the_model_call(self) -> None:
+        """Not the sandbox, not evidence capture -- the generation itself."""
+        import time as _time
+
+        from orbit.runtime import analysis_runtime as module
+
+        ticks = iter([100.0, 142.5])
+        with unittest.mock.patch.object(
+            module.time, "monotonic", side_effect=lambda: next(ticks)
+        ):
+            result = self.runtime(
+                ScriptedBackend(prose_response("done"))
+            ).step("look")
+
+        assert result.diagnostics is not None
+        self.assertEqual(result.diagnostics.duration_seconds, 42.5)
+
+    def test_the_session_survives_a_refused_step(self) -> None:
+        backend = ScriptedBackend(
+            tool_response("x"), tool_response("import orbit_tools\nprint('ok')")
+        )
+        backend._responses[0].tool_calls[0]["function"]["arguments"] = "{not json"
+        runtime = self.runtime(backend)
+
+        refused = runtime.step("first")
+        self.assertIsNotNone(refused.rejection)
+        self.assertEqual(runtime.actions_executed, 0)
+
+        recovered = runtime.step("second")
+        self.assertTrue(recovered.action_executed)
+        self.assertEqual(backend.calls, 2)
+        json.dumps(runtime.messages, default=str)

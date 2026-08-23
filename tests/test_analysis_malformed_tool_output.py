@@ -437,7 +437,10 @@ class InternalFailuresStillPropagateTest(MalformedToolOutputTestBase):
 
     def test_step_does_not_wrap_the_model_call_in_a_try(self) -> None:
         source = (SRC / "orbit" / "runtime" / "analysis_runtime.py").read_text(encoding="utf-8")
-        start = source.index("def step(self, analyst_message")
+        # Anchored on the definition line only: the signature gained keyword
+        # progress callbacks, and pinning the whole parameter list would make
+        # this guard fail for a reason that has nothing to do with guarding.
+        start = source.index("    def step(")
         head = source[start : source.index("self.model_calls += 1", start)]
 
         self.assertNotIn("try:", head, "the model call must not be broadly guarded")

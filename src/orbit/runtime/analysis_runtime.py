@@ -31,9 +31,10 @@ import json
 import shutil
 import stat
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from orbit.backend.base import ChatBackend, Message
 from orbit.runtime.analysis_sandbox import (
@@ -195,6 +196,49 @@ class AnalysisWorkspace:
 
 
 @dataclass(frozen=True)
+class StepDiagnostics:
+    """What the one model call of a step actually cost.
+
+    Recorded for every step, and deliberately for refused ones too. A step
+    that produced no action wrote no evidence, so a refusal used to leave no
+    trace of how long the model ran or how much it generated -- which is
+    exactly the case someone later needs to diagnose. None of these fields
+    carries model output: sizes and reasons only, never the text.
+    """
+
+    prompt_tokens: int | None = None
+    output_tokens: int | None = None
+    reused_tokens: int | None = None
+    finish_reason: str | None = None
+    generation_tokens_per_second: float | None = None
+    duration_seconds: float | None = None
+    tool_call_count: int = 0
+    tool_argument_chars: int = 0
+    refusal: str | None = None
+
+    @property
+    def evaluated_tokens(self) -> int | None:
+        if self.prompt_tokens is None:
+            return None
+        return self.prompt_tokens - (self.reused_tokens or 0)
+
+    def as_log_fields(self) -> dict[str, object]:
+        """Flat, payload-free fields safe to persist or print."""
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "evaluated_tokens": self.evaluated_tokens,
+            "reused_tokens": self.reused_tokens,
+            "output_tokens": self.output_tokens,
+            "finish_reason": self.finish_reason,
+            "generation_tokens_per_second": self.generation_tokens_per_second,
+            "duration_seconds": self.duration_seconds,
+            "tool_call_count": self.tool_call_count,
+            "tool_argument_chars": self.tool_argument_chars,
+            "refusal": self.refusal,
+        }
+
+
+@dataclass(frozen=True)
 class AnalysisStepResult:
     """What one analyst step produced. Control is with the analyst on return."""
 
@@ -207,6 +251,7 @@ class AnalysisStepResult:
     rejection: str | None = None
     raw_output_evidence_id: str | None = None
     artifact_handles: tuple[str, ...] = ()
+    diagnostics: StepDiagnostics | None = None
 
     @property
     def control_returned(self) -> bool:
@@ -214,6 +259,27 @@ class AnalysisStepResult:
         # here. Named so tests assert the property rather than the absence of
         # a loop.
         return True
+
+
+def _tool_argument_chars(calls: list[dict[str, Any]]) -> int:
+    """Total size of the generated tool arguments, never their content.
+
+    A refused call is refused precisely because its arguments cannot be
+    parsed, so the only safe thing to record about them is how big they were.
+    """
+    total = 0
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict):
+            continue
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            total += len(arguments)
+        elif arguments is not None:
+            total += len(json.dumps(arguments, ensure_ascii=False))
+    return total
 
 
 def acquire_analysis_source(original: Path | str, workspace: Path | str) -> AnalysisSource:
@@ -381,24 +447,49 @@ class AnalysisRuntime:
             )
         return None
 
-    def step(self, analyst_message: str) -> AnalysisStepResult:
-        """Run exactly one analyst-driven step and return control."""
+    def step(
+        self,
+        analyst_message: str,
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AnalysisStepResult:
+        """Run exactly one analyst-driven step and return control.
+
+        The callbacks report what is already happening; neither adds a model
+        call, changes a message, or reaches the backend. A step that spends
+        minutes in one generation was previously indistinguishable from a hung
+        process, which is the whole reason they exist.
+
+        `on_delta` receives assistant prose only. Tool-call arguments never
+        pass through it: a partially generated call is not valid JSON, and
+        showing it would put unparsed model output on the analyst's screen.
+        """
         self.analyst_turns += 1
         self.messages.append({"role": "user", "content": analyst_message})
 
         deltas: list[str] = []
+
+        def _capture(text: str) -> None:
+            deltas.append(text)
+            if on_delta is not None and text:
+                on_delta(text)
+
         # Declaring the phase adds no call: it only labels the one call this
         # step already makes, so the backend can continue the analysis chain's
         # own KV instead of prefilling it again.
+        call_started = time.monotonic()
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
             response = self.backend.chat_stream(
                 list(self.messages),
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 tools=[ANALYSIS_TOOL_SCHEMA],
-                on_delta=deltas.append,
+                on_delta=_capture,
+                on_progress=on_progress,
             )
         self.model_calls += 1
+        call_seconds = time.monotonic() - call_started
 
         calls = list(response.tool_calls or [])
         content = response.content or ""
@@ -416,6 +507,21 @@ class AnalysisRuntime:
         # every later step, so one unparseable `tool_calls` entry makes every
         # subsequent step fail to render and ends the session. Recording the
         # rejection as prose keeps the turn truthful and the history usable.
+        def _diagnostics(refusal: str | None) -> StepDiagnostics:
+            return StepDiagnostics(
+                prompt_tokens=getattr(response, "prompt_tokens", None),
+                output_tokens=getattr(response, "completion_tokens", None),
+                reused_tokens=getattr(response, "cached_tokens", None),
+                finish_reason=getattr(response, "finish_reason", None),
+                generation_tokens_per_second=getattr(
+                    response, "generation_tokens_per_second", None
+                ),
+                duration_seconds=round(call_seconds, 3),
+                tool_call_count=len(calls),
+                tool_argument_chars=_tool_argument_chars(calls),
+                refusal=refusal,
+            )
+
         rejection = self._structural_rejection(calls) if calls else None
         if rejection is not None:
             assistant["content"] = _rejected_action_text(content, rejection)
@@ -429,6 +535,7 @@ class AnalysisRuntime:
                 action_executed=False,
                 assistant_text=response.content or "",
                 rejection=rejection,
+                diagnostics=_diagnostics(rejection),
             )
 
         if calls:
@@ -441,6 +548,7 @@ class AnalysisRuntime:
                 action_attempted=False,
                 action_executed=False,
                 assistant_text=response.content or "",
+                diagnostics=_diagnostics(None),
             )
 
         capacity_error = self._session_capacity_error()
@@ -454,6 +562,7 @@ class AnalysisRuntime:
                 action_executed=False,
                 assistant_text=response.content or "",
                 rejection=capacity_error,
+                diagnostics=_diagnostics(capacity_error),
             )
 
         code = json.loads(calls[0]["function"]["arguments"])["code"]
@@ -484,6 +593,7 @@ class AnalysisRuntime:
                 action_executed=False,
                 assistant_text=response.content or "",
                 rejection=detail,
+                diagnostics=_diagnostics(detail),
             )
 
         self.actions_executed += 1
@@ -551,6 +661,7 @@ class AnalysisRuntime:
             evidence=record,
             raw_output_evidence_id=raw_record.evidence_id,
             artifact_handles=tuple(f"{WORK_MOUNT}/{a.name}" for a in result.artifacts),
+            diagnostics=_diagnostics(None),
         )
 
     def close(self) -> None:
