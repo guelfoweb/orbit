@@ -51,6 +51,15 @@ from orbit.runtime.thinking_mode import ThinkingMode
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
 
+def _abbreviate_home(path: Path) -> str:
+    """`~/...` for paths under HOME, because the absolute form is noise."""
+    try:
+        relative = Path(path).resolve().relative_to(Path.home())
+    except (ValueError, RuntimeError, OSError):
+        return str(path)
+    return "~" if str(relative) == "." else f"~/{relative}"
+
+
 @dataclass
 class Repl:
     runtime: ChatRuntime
@@ -66,6 +75,7 @@ class Repl:
     # test sets this; it exists so the swap window can be exercised
     # deterministically instead of raced for.
     _analysis_acquired_hook: Callable[[], None] | None = field(default=None, repr=False)
+    _announced_workdir: str | None = field(default=None, repr=False)
     analysis: AnalysisRuntime | None = field(default=None, repr=False)
     queued_prompts: list[str] = field(default_factory=list)
     turn_model_steps: list[ModelStepMetrics] = field(default_factory=list, repr=False)
@@ -96,6 +106,7 @@ class Repl:
         status = collect_runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode)
         for line in format_startup_banner(status).splitlines():
             print(dim(line))
+        self._announce_workdir()
         if has_existing_session_context(self.runtime.messages):
             print(dim("recent session context:"))
             for line in format_recent_session_messages(self.runtime.messages):
@@ -137,6 +148,23 @@ class Repl:
                 self.history.save()
             self._ask(prompt)
             self.prompt_gap_pending = True
+
+    def _announce_workdir(self) -> None:
+        """Say where this session is working, once.
+
+        Called at startup only. `config.workdir` is resolved when the config
+        loads and nothing mutates it afterwards -- there is no `/cd` -- so a
+        per-turn change check would be a string comparison that can never
+        fire. Guarded anyway, so calling it twice stays harmless.
+
+        Display only: the model's view of the workdir is whatever the runtime
+        already sends, and this neither adds to nor alters it.
+        """
+        current = str(self.config.workdir)
+        if current == self._announced_workdir:
+            return
+        self._announced_workdir = current
+        print(dim(f"workdir: {_abbreviate_home(self.config.workdir)}"), flush=True)
 
     def _prompt_label(self) -> str:
         """The marker for the runtime that owns the next line.
