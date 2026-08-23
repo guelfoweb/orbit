@@ -961,6 +961,284 @@ class PromptQueueRemovalTest(ModeTestBase):
         self.assertIn("SAFE-TAIL", output)
 
 
+PROSE_MARKER = "PROSE-MARKER"
+ANALYSIS_PROSE = f"{PROSE_MARKER} this file is a JScript dropper."
+
+
+class ProseBackend(ScriptedBackend):
+    """Streams its prose the way the real backend does, then returns it."""
+
+    def __init__(self, text: str = ANALYSIS_PROSE, tool_calls=None) -> None:
+        super().__init__(tool_calls=tool_calls)
+        self.text = text
+
+    def _result(self) -> ChatResult:
+        base = super()._result()
+        return ChatResult(
+            content=self.text,
+            model=base.model,
+            finish_reason=base.finish_reason,
+            tool_calls=base.tool_calls,
+            prompt_tokens=base.prompt_tokens,
+            completion_tokens=base.completion_tokens,
+            cached_tokens=base.cached_tokens,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+    def chat_stream(
+        self, messages, *, temperature, max_tokens, tools=None, on_delta=None, on_progress=None
+    ) -> ChatResult:
+        self.calls += 1
+        self.tools_seen.append(tools)
+        self.messages_seen.append([dict(m) for m in messages])
+        if on_delta:
+            on_delta(self.text)
+        return self._result()
+
+
+class NonStreamingProseBackend(ProseBackend):
+    """Returns content without ever emitting a delta.
+
+    A real possibility -- `AnalysisRuntime` only forwards a delta when the
+    backend produces one -- and the case where the final block is the only
+    thing that can show the prose at all.
+    """
+
+    def chat_stream(
+        self, messages, *, temperature, max_tokens, tools=None, on_delta=None, on_progress=None
+    ) -> ChatResult:
+        self.calls += 1
+        self.tools_seen.append(tools)
+        self.messages_seen.append([dict(m) for m in messages])
+        return self._result()
+
+
+ANALYSIS_ACTION_CALL = [
+    {
+        "id": "call_0",
+        "type": "function",
+        "function": {"name": ANALYSIS_TOOL_NAME, "arguments": json.dumps({"code": "print(1)"})},
+    }
+]
+
+
+class AnalysisDuplicateProseTest(ModeTestBase):
+    """One logical assistant answer is shown to the analyst exactly once."""
+
+    def analysis_repl(self, backend):
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        return repl
+
+    def test_direct_prose_is_displayed_exactly_once(self) -> None:
+        backend = ProseBackend()
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "what is this?")
+
+        self.assertEqual(output.count(PROSE_MARKER), 1)
+        self.assertEqual(backend.calls, 1, "one model call")
+
+    def test_streamed_text_is_complete_and_ordered(self) -> None:
+        backend = ProseBackend(text=f"{PROSE_MARKER} alpha beta gamma delta")
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "describe it")
+
+        self.assertIn(f"{PROSE_MARKER} alpha beta gamma delta", output)
+        self.assertLess(
+            output.index("alpha"), output.index("delta"), "streamed order preserved"
+        )
+
+    def test_multiline_prose_is_displayed_once(self) -> None:
+        backend = ProseBackend(text=f"{PROSE_MARKER} first line\nsecond line\nthird line")
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "describe it")
+
+        self.assertEqual(output.count(PROSE_MARKER), 1)
+        self.assertEqual(output.count("second line"), 1)
+        self.assertEqual(output.count("third line"), 1)
+
+    def test_long_prose_is_displayed_once(self) -> None:
+        backend = ProseBackend(text=f"{PROSE_MARKER} " + ("word " * 400))
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "describe it")
+
+        self.assertEqual(output.count(PROSE_MARKER), 1)
+        self.assertEqual(output.count("word "), 400)
+
+    def test_unicode_prose_is_displayed_once_and_unchanged(self) -> None:
+        backend = ProseBackend(text=f"{PROSE_MARKER} caf\u00e9 \u65e5\u672c\u8a9e \u03b1\u03b2\u03b3 \U0001f3af")
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "describe it")
+
+        self.assertEqual(output.count(PROSE_MARKER), 1)
+        for fragment in ("caf\u00e9", "\u65e5\u672c\u8a9e", "\u03b1\u03b2\u03b3", "\U0001f3af"):
+            self.assertEqual(output.count(fragment), 1)
+
+    def test_unsafe_control_input_stays_sanitized_on_the_surviving_path(self) -> None:
+        backend = ProseBackend(text=f"{PROSE_MARKER}\x1b[2J\x1b]52;c;cGF5\x07\rFORGED\x9b31m tail")
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "describe it")
+
+        self.assertEqual(output.count(PROSE_MARKER), 1)
+        for unsafe in ("\x1b", "\r", "\x07", "\x9b"):
+            self.assertNotIn(unsafe, output)
+        self.assertIn("tail", output)
+
+    def test_action_step_does_not_duplicate_prose(self) -> None:
+        backend = ProseBackend(tool_calls=ANALYSIS_ACTION_CALL)
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "run something")
+
+        self.assertEqual(output.count(PROSE_MARKER), 1)
+
+    def test_action_status_and_evidence_preview_survive_exactly_once(self) -> None:
+        backend = ProseBackend(tool_calls=ANALYSIS_ACTION_CALL)
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "run something")
+
+        self.assertEqual(output.count("action: ok"), 1, "action status still shown")
+        self.assertEqual(output.count("evidence:"), 1, "evidence preview still shown")
+        self.assertEqual(output.count("result:"), 1)
+
+    def test_diagnostics_line_survives(self) -> None:
+        backend = ProseBackend()
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "what is this?")
+
+        self.assertIn("mode: ANALYSIS", output)
+        self.assertIn("model calls: 1", output)
+
+    def test_action_only_response_still_renders_final_status(self) -> None:
+        """No prose at all: the final block must still say what happened."""
+        backend = ProseBackend(text="", tool_calls=ANALYSIS_ACTION_CALL)
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "run something")
+
+        self.assertIn("action: ok", output)
+        self.assertIn("evidence:", output)
+
+    def test_empty_response_still_reports_no_output(self) -> None:
+        """Nothing streamed and nothing done still tells the analyst so."""
+        backend = ProseBackend(text="")
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "what is this?")
+
+        self.assertIn("(no output)", output)
+
+    def test_non_streamed_prose_is_still_displayed_once(self) -> None:
+        """The fallback: nothing was streamed, so the final block must show it."""
+        backend = NonStreamingProseBackend()
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "what is this?")
+
+        self.assertEqual(
+            output.count(PROSE_MARKER), 1, "the only copy must not be suppressed"
+        )
+
+    def test_non_streamed_prose_is_sanitized(self) -> None:
+        backend = NonStreamingProseBackend(text=f"{PROSE_MARKER}\x1b[2J\rFORGED tail")
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "what is this?")
+
+        self.assertEqual(output.count(PROSE_MARKER), 1)
+        for unsafe in ("\x1b", "\r"):
+            self.assertNotIn(unsafe, output)
+
+    def test_history_and_evidence_keep_the_original_text(self) -> None:
+        backend = ProseBackend(tool_calls=ANALYSIS_ACTION_CALL)
+        repl = self.analysis_repl(backend)
+        self.run_prompt(repl, "run something")
+
+        stored = "".join(
+            str(message.get("content") or "")
+            for message in repl.analysis.messages
+            if message.get("role") == "assistant"
+        )
+        self.assertIn(ANALYSIS_PROSE, stored, "history unchanged by a display fix")
+        self.assertEqual(len(repl.analysis.evidence_store.records), 2)
+
+    def test_model_and_action_counts_are_unchanged(self) -> None:
+        backend = ProseBackend(tool_calls=ANALYSIS_ACTION_CALL)
+        repl = self.analysis_repl(backend)
+        calls_before = backend.calls
+
+        self.run_prompt(repl, "run something")
+
+        self.assertEqual(backend.calls - calls_before, 1, "one model call per step")
+        self.assertEqual(repl.analysis.actions_executed, 1)
+
+    def test_visible_text_sets_the_render_flag(self) -> None:
+        from orbit.terminal.streaming import StreamRenderer
+
+        renderer = StreamRenderer(thinking=False, render_markdown_mode="plain", interactive=False)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer.start()
+            self.assertFalse(renderer.rendered_visible_text)
+            renderer.write(ANALYSIS_PROSE)
+
+        self.assertTrue(renderer.rendered_visible_text)
+
+    def test_streamed_prose_ends_its_line_before_the_final_block(self) -> None:
+        """Streamed deltas leave the cursor mid-line.
+
+        The reprinted copy used to supply the break; with it gone the terminal
+        must close the line itself, or the action status runs onto the prose.
+        """
+        backend = ProseBackend(tool_calls=ANALYSIS_ACTION_CALL)
+        repl = self.analysis_repl(backend)
+
+        output = self.run_prompt(repl, "run something")
+
+        self.assertNotIn(
+            f"{PROSE_MARKER} this file is a JScript dropper.action:",
+            output,
+            "the action status must not run onto the prose line",
+        )
+        self.assertIn("dropper.\naction: ok", output)
+
+    def test_whitespace_only_stream_does_not_count_as_displayed_prose(self) -> None:
+        """Whitespace shows the analyst nothing, so it must not suppress the copy."""
+        from orbit.terminal.streaming import StreamRenderer
+
+        renderer = StreamRenderer(thinking=False, render_markdown_mode="plain", interactive=False)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer.start()
+            renderer.write("   \n  ")
+
+        self.assertFalse(renderer.rendered_visible_text)
+
+        with contextlib.redirect_stdout(buffer):
+            renderer.write(ANALYSIS_PROSE)
+
+        self.assertTrue(renderer.rendered_visible_text, "real prose still counts")
+
+    def test_two_steps_each_show_their_own_prose_once(self) -> None:
+        backend = ProseBackend()
+        repl = self.analysis_repl(backend)
+
+        first = self.run_prompt(repl, "what is this?")
+        second = self.run_prompt(repl, "and now?")
+
+        self.assertEqual(first.count(PROSE_MARKER), 1)
+        self.assertEqual(second.count(PROSE_MARKER), 1, "state must not leak between steps")
+
+
 if __name__ == "__main__":
     unittest.main()
 

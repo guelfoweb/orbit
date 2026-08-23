@@ -58,6 +58,13 @@ class StreamRenderer:
         self._markdown_live = _LiveMarkdownRenderer(enabled=self._markdown_mode == "live")
         self._started = False
         self._first_delta = False
+        # Whether model prose with visible content has reached the terminal
+        # through this renderer. Rendering state, owned by the terminal: a
+        # caller that also holds a final copy of the same prose uses it to
+        # avoid printing it twice. Whitespace alone does not count -- it shows
+        # the analyst nothing, and the final copy would still be worth having.
+        # Never reset by `finish()`, because what was displayed stays displayed.
+        self._rendered_visible_text = False
         self._timer_active = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -84,9 +91,10 @@ class StreamRenderer:
         Every streamed delta passes through here -- CHAT, an analysis step,
         and `/report` all hand theirs to this method -- so it is where model
         text stops being able to act on the terminal. It is not the only such
-        boundary: `format_analysis_step` reprints the same prose and sanitizes
-        it too. Only what is displayed is sanitized; what the runtime keeps in
-        history, in the session file, and in evidence is the model's original.
+        boundary: `format_analysis_step` sanitizes the prose it renders when
+        nothing was streamed. Only what is displayed is sanitized; what the
+        runtime keeps in history, in the session file, and in evidence is the
+        model's original.
 
         Sanitizing here, before the thinking filter and the markdown renderer,
         is deliberate: those run downstream and emit Orbit's own colour, which
@@ -141,6 +149,11 @@ class StreamRenderer:
         if self._interactive and self._started and not self._first_delta:
             self._render_wait_line()
 
+    @property
+    def rendered_visible_text(self) -> bool:
+        """Whether the analyst has already seen model prose from this renderer."""
+        return self._rendered_visible_text
+
     def finish(self, *, interrupted: bool = False) -> None:
         if self._thinking_filter is not None:
             for fragment, dimmed in self._thinking_filter.finish():
@@ -174,6 +187,11 @@ class StreamRenderer:
         self._write_visible_text(fragment)
 
     def _write_visible_text(self, text: str) -> None:
+        # Set here rather than in `write()`: with a thinking filter active the
+        # incoming delta may be entirely hidden reasoning, which the analyst
+        # never sees and which must not suppress the final prose. Whitespace is
+        # excluded for the same reason -- nothing legible was shown.
+        self._rendered_visible_text = self._rendered_visible_text or bool(text.strip())
         try:
             if self._markdown_mode == "live":
                 for chunk in self._markdown_live.write(text):
