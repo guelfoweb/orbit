@@ -918,6 +918,49 @@ class ChatNonRegressionTest(ModeTestBase):
         self.assertNotIn(ANALYSIS_TOOL_NAME, seen["allowed"] or ())
 
 
+class PromptQueueRemovalTest(ModeTestBase):
+    """The unused prompt queue is gone; ANALYSIS input is unaffected by that."""
+
+    def test_repl_exposes_no_prompt_queue(self) -> None:
+        repl = self.repl()
+
+        self.assertFalse(hasattr(repl, "queued_prompts"))
+
+    def test_analysis_prompt_is_processed_exactly_once(self) -> None:
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        calls_before = backend.calls
+
+        self.run_prompt(repl, "what is this file?")
+
+        self.assertEqual(backend.calls - calls_before, 1, "one analyst line, one step")
+        self.assertIs(repl.workflow_mode, WorkflowMode.ANALYSIS)
+
+    def test_two_identical_analysis_prompts_run_twice(self) -> None:
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        calls_before = backend.calls
+
+        self.run_prompt(repl, "look again")
+        self.run_prompt(repl, "look again")
+
+        self.assertEqual(backend.calls - calls_before, 2, "identical input is still two steps")
+
+    def test_assistant_text_sanitizer_still_applies(self) -> None:
+        """The queue removal must not disturb the terminal sanitizer."""
+        backend = HostileTextBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+
+        output = self.run_prompt(repl, "what is this file?")
+
+        for unsafe in ("\x1b", "\r", "\x07", "\x00", "\x9b"):
+            self.assertNotIn(unsafe, output)
+        self.assertIn("SAFE-TAIL", output)
+
+
 if __name__ == "__main__":
     unittest.main()
 

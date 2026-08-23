@@ -77,7 +77,6 @@ class Repl:
     _analysis_acquired_hook: Callable[[], None] | None = field(default=None, repr=False)
     _announced_workdir: str | None = field(default=None, repr=False)
     analysis: AnalysisRuntime | None = field(default=None, repr=False)
-    queued_prompts: list[str] = field(default_factory=list)
     turn_model_steps: list[ModelStepMetrics] = field(default_factory=list, repr=False)
     turn_backend_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
     session_token_usage: TokenUsageAccumulator = field(default_factory=TokenUsageAccumulator, repr=False)
@@ -176,8 +175,6 @@ class Repl:
         return "analysis" if self.workflow_mode is WorkflowMode.ANALYSIS else "chat"
 
     def _read_next_prompt(self) -> str:
-        if self.queued_prompts:
-            return self.queued_prompts.pop(0)
         if self.prompt_gap_pending:
             print(flush=True)
             self.prompt_gap_pending = False
