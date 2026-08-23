@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from urllib.parse import urlparse
 import time
 
 from orbit import __version__
@@ -131,6 +133,21 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --image/--audio require a one-shot prompt", file=sys.stderr)
         return 1
 
+    # Only the interactive path checks this. `--health` is the question itself,
+    # and a one-shot already fails visibly on its single call; a session, by
+    # contrast, would draw a prompt and then fail on whatever the analyst
+    # typed, which reads as their mistake rather than a missing server.
+    # A single documented escape hatch, for tests that drive the REPL as a
+    # subprocess with no server behind it. Named so it cannot be mistaken for
+    # a supported way to run without one, and read only here.
+    if os.environ.get("ORBIT_SKIP_SERVER_READINESS") != "1" and not backend.health():
+        print(
+            f"error: Orbit server is not ready at {_endpoint_label(config.base_url)}. "
+            "Start the server and try again.",
+            file=sys.stderr,
+        )
+        return 1
+
     session = select_interactive_session(config.workdir)
     # Resuming, not merely reading: a stored history that cannot be parsed as a
     # conversation must not become the live one. On refusal the warning is
@@ -159,6 +176,14 @@ def main(argv: list[str] | None = None) -> int:
         history=history,
         workflow_mode=workflow_mode,
     ).run()
+
+
+def _endpoint_label(base_url: str) -> str:
+    """`host:port` for the error, falling back to whatever was configured."""
+    parsed = urlparse(base_url)
+    if parsed.hostname:
+        return f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname
+    return base_url
 
 
 def _handle_one_shot_command(

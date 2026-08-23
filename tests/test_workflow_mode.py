@@ -1101,8 +1101,10 @@ class ActionCauseRenderingTest(unittest.TestCase):
         rendered = format_analysis_step(step)
         self.assertIn("action: error", rendered)
         self.assertIn("PermissionError: nope", rendered)
-        self.assertIn("evidence ev_aaa_bbb", rendered)
-        self.assertIn("raw ev_ccc_ddd", rendered)
+        # The ids moved onto their own lines once a preview can sit above
+        # them; they are for copying, and a long joined tail is hard to select.
+        self.assertIn("ev_aaa_bbb", rendered)
+        self.assertIn("ev_ccc_ddd", rendered)
 
     def test_a_successful_summary_is_unchanged(self) -> None:
         from orbit.runtime.analysis_runtime import AnalysisStepResult
@@ -1291,3 +1293,492 @@ class AnalysisProgressRenderingTest(ModeTestBase):
             renderer.finish()
         rendered = out.getvalue()
         self.assertNotIn("\x1b[", rendered, "no ANSI in non-interactive output")
+
+
+class EvidencePreviewTest(unittest.TestCase):
+    """After an action the analyst must be able to see what it produced.
+
+    An evidence id says where to look, not what happened. Without a preview
+    the only way to choose the next step is to open the store by hand.
+    """
+
+    def _result(self, **overrides):
+        from orbit.runtime.analysis_sandbox import AnalysisResult
+
+        base = dict(
+            status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+            stdout="", stderr="", exit_status=0, duration_seconds=1.0,
+        )
+        base.update(overrides)
+        return AnalysisResult(**base)
+
+    def _step(self, action, **overrides):
+        from orbit.runtime.analysis_runtime import AnalysisStepResult
+        from orbit.runtime.evidence import EvidenceRecord
+
+        record = EvidenceRecord(
+            evidence_id="ev_aaa_bbb", tool_name="execute_analysis", kind="fetch",
+            raw_ref="evidence:ev_aaa_bbb", raw_sha256="d" * 64, raw_chars=10,
+            raw_lines=1, status="ok", metadata={}, route_card=None, final_card=None,
+        )
+        base = dict(
+            model_calls=1, action_attempted=True, action_executed=True,
+            assistant_text="", result=action, evidence=record,
+            raw_output_evidence_id="ev_ccc_ddd",
+        )
+        base.update(overrides)
+        return AnalysisStepResult(**base)
+
+    def test_the_preview_caps_are_pinned_and_independent(self) -> None:
+        """Absolute values, not self-referential comparisons.
+
+        Asserting a bound against the constant it bounds passes at any value.
+        These are also deliberately separate from the model-facing budget:
+        one is about prompt cost, the other about a readable terminal.
+        """
+        from orbit.runtime.analysis_runtime import MAX_EVIDENCE_CHARS
+        from orbit.terminal.analysis_mode import MAX_PREVIEW_CHARS, MAX_PREVIEW_LINES
+
+        self.assertEqual(MAX_PREVIEW_CHARS, 1200)
+        self.assertEqual(MAX_PREVIEW_LINES, 24)
+        self.assertLess(MAX_PREVIEW_CHARS, MAX_EVIDENCE_CHARS)
+
+    def test_useful_stdout_is_visible(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(stdout="strings found: 12\nWScript.Shell\n"))
+        )
+        self.assertIn("result:", rendered)
+        self.assertIn("strings found: 12", rendered)
+        self.assertIn("WScript.Shell", rendered)
+
+    def test_multiline_output_is_bounded_by_lines(self) -> None:
+        from orbit.terminal.analysis_mode import MAX_PREVIEW_LINES, format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(stdout="\n".join(f"line {i}" for i in range(500))))
+        )
+        shown = [ln for ln in rendered.splitlines() if ln.startswith("  line ")]
+        self.assertLessEqual(len(shown), MAX_PREVIEW_LINES)
+        self.assertIn("preview truncated", rendered)
+
+    def test_a_single_enormous_line_is_bounded_by_chars(self) -> None:
+        from orbit.terminal.analysis_mode import MAX_PREVIEW_CHARS, format_analysis_step
+
+        rendered = format_analysis_step(self._step(self._result(stdout="Z" * 100000)))
+        body = "\n".join(
+            ln for ln in rendered.splitlines() if ln.startswith("  ") and "Z" in ln
+        )
+        self.assertLessEqual(len(body), MAX_PREVIEW_CHARS + 40)
+        self.assertIn("preview truncated", rendered)
+
+    def test_truncation_keeps_the_raw_evidence_id(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(self._step(self._result(stdout="Q" * 90000)))
+        self.assertIn("preview truncated", rendered)
+        self.assertIn("ev_ccc_ddd", rendered)
+        self.assertIn("full output in evidence", rendered)
+
+    def test_artifacts_show_virtual_path_size_and_sha(self) -> None:
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(
+                stdout="done\n",
+                artifacts=(DerivedArtifact(name="stage2.js", size_bytes=4096, sha256="a" * 64),),
+            ))
+        )
+        self.assertIn("artifacts:", rendered)
+        self.assertIn("/workspace/work/stage2.js", rendered)
+        self.assertIn("4.0 KiB", rendered)
+        # Shortened for the terminal; the stored digest keeps all 64 chars.
+        self.assertIn("sha256 " + "a" * 12 + "\u2026", rendered)
+
+    def test_the_artifact_digest_is_shortened_for_reading(self) -> None:
+        """Twelve hex characters and an ellipsis, not the whole digest.
+
+        The full 64 characters pushed the line past 80 columns, so it wrapped
+        and became harder to read than no digest at all. Twelve is enough to
+        tell two artifacts apart and to grep the full value out of evidence.
+        """
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import SHORT_SHA_CHARS, format_analysis_step
+
+        digest = "ec8ccda0a41f" + "3b" * 26
+        rendered = format_analysis_step(
+            self._step(self._result(
+                stdout="done\n",
+                artifacts=(DerivedArtifact(name="stage1.txt", size_bytes=1008, sha256=digest),),
+            ))
+        )
+        self.assertEqual(SHORT_SHA_CHARS, 12)
+        self.assertIn("sha256 ec8ccda0a41f\u2026", rendered)
+        self.assertNotIn(digest, rendered, "the full digest must not be on screen")
+
+    def test_the_stored_digest_is_never_truncated(self) -> None:
+        """Presentation only: what is recorded keeps all 64 characters."""
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        digest = "ec8ccda0a41f" + "3b" * 26
+        artifact = DerivedArtifact(name="stage1.txt", size_bytes=1008, sha256=digest)
+        step = self._step(self._result(stdout="done\n", artifacts=(artifact,)))
+        format_analysis_step(step)
+
+        self.assertEqual(artifact.sha256, digest)
+        self.assertEqual(len(artifact.sha256), 64)
+        self.assertEqual(step.result.artifacts[0].sha256, digest)
+
+    def test_two_artifacts_stay_distinguishable(self) -> None:
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        first = "aaaaaaaaaaaa" + "0" * 52
+        second = "bbbbbbbbbbbb" + "0" * 52
+        rendered = format_analysis_step(
+            self._step(self._result(
+                stdout="done\n",
+                artifacts=(
+                    DerivedArtifact(name="one.bin", size_bytes=1, sha256=first),
+                    DerivedArtifact(name="two.bin", size_bytes=2, sha256=second),
+                ),
+            ))
+        )
+        self.assertIn("aaaaaaaaaaaa\u2026", rendered)
+        self.assertIn("bbbbbbbbbbbb\u2026", rendered)
+
+    def test_a_digest_carrying_escapes_cannot_act_on_the_terminal(self) -> None:
+        """The digest is model-adjacent data and gets the same treatment.
+
+        Sanitising the artifact name but not its digest would leave the same
+        hole one field to the right.
+        """
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(
+                stdout="x\n",
+                artifacts=(DerivedArtifact(
+                    name="a.txt", size_bytes=1, sha256="\x1b[31m" + "a" * 60),),
+            ))
+        )
+        self.assertNotIn("\x1b", rendered)
+
+    def test_a_malformed_digest_is_shown_as_it_is(self) -> None:
+        """Never trimmed into something that merely looks well-formed."""
+        from orbit.terminal.analysis_mode import _short_sha
+
+        for value in ("", "abc", "not-a-hex-digest", "zz" * 32):
+            with self.subTest(value=value[:12]):
+                self.assertEqual(_short_sha(value), value)
+
+    def test_stderr_is_still_not_shown_for_a_successful_action(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(stdout="ok\n", stderr="warning: trailing data\n"))
+        )
+        self.assertNotIn("warning: trailing data", rendered)
+
+    def test_the_artifact_handles_line_is_not_duplicated(self) -> None:
+        """The preview already lists them with size and digest."""
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(
+                self._result(
+                    stdout="done\n",
+                    artifacts=(DerivedArtifact(name="a.txt", size_bytes=1, sha256="a" * 64),),
+                ),
+                artifact_handles=("/workspace/work/a.txt",),
+            )
+        )
+        self.assertEqual(rendered.count("/workspace/work/a.txt"), 1)
+
+    def test_the_handles_line_still_renders_without_a_preview(self) -> None:
+        """Delta B suppresses the duplicate, it does not remove the fallback.
+
+        When the preview did not list artifacts there is nothing to duplicate,
+        so the handles line must still appear -- otherwise suppressing it
+        would lose the information instead of de-duplicating it.
+        """
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(
+                self._result(stdout="done\n"),  # no artifacts -> no preview list
+                artifact_handles=("/workspace/work/kept.txt",),
+            )
+        )
+        self.assertIn("artifacts: /workspace/work/kept.txt", rendered)
+
+    def test_the_shortener_runs_before_the_sanitiser(self) -> None:
+        """Order matters: sanitising first would expand, then trim mid-escape."""
+        import inspect
+
+        from orbit.terminal import analysis_mode
+
+        source = inspect.getsource(analysis_mode._preview_block)
+        self.assertIn("_sanitize(_short_sha(artifact.sha256))", source)
+
+    def test_a_digest_at_the_boundary_is_not_marked_short(self) -> None:
+        from orbit.terminal.analysis_mode import SHORT_SHA_CHARS, _short_sha
+
+        exact = "a" * SHORT_SHA_CHARS
+        self.assertEqual(_short_sha(exact), exact, "nothing was dropped")
+        self.assertEqual(_short_sha(exact + "b"), exact + "\u2026")
+
+    def test_host_paths_are_never_rendered(self) -> None:
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(
+                stdout="done\n",
+                artifacts=(DerivedArtifact(name="out.bin", size_bytes=10, sha256="b" * 64),),
+            ))
+        )
+        for host in ("/tmp/orbit-analysis-session-", "/home/", "/tmp/"):
+            self.assertNotIn(host, rendered)
+
+    def test_binary_output_is_metadata_only(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(stdout="\x00\x01\x02\x03\xff" * 400))
+        )
+        self.assertIn("non-text output", rendered)
+        self.assertNotIn("\x00", rendered)
+        self.assertIn("ev_ccc_ddd", rendered)
+
+    def test_ansi_in_model_output_cannot_act_on_the_terminal(self) -> None:
+        """A crafted action must not be able to forge Orbit's own output.
+
+        Everything previewed here is model-authored. Cursor movement would let
+        it overwrite the lines Orbit already printed -- including a fake
+        `action: ok` above itself.
+        """
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(self._result(stdout="\x1b[1A\x1b[2Kaction: ok | evidence ev_FAKE\n"))
+        )
+        self.assertNotIn("\x1b", rendered)
+        self.assertIn("\\x1b[1A", rendered, "shown literally instead")
+
+    def test_an_artifact_name_cannot_break_the_line_shape(self) -> None:
+        from orbit.runtime.analysis_sandbox import DerivedArtifact
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        for name in ("\x1b[31mred", "two\nlines", "\r\ncarriage"):
+            with self.subTest(name=name):
+                rendered = format_analysis_step(
+                    self._step(self._result(
+                        stdout="x\n",
+                        artifacts=(DerivedArtifact(name=name, size_bytes=1, sha256="a" * 64),),
+                    ))
+                )
+                artifact_lines = [
+                    ln for ln in rendered.splitlines() if ln.strip().startswith("- /workspace")
+                ]
+                self.assertEqual(len(artifact_lines), 1, "one artifact, one line")
+                self.assertNotIn("\x1b", rendered)
+
+    def test_tabs_in_output_survive(self) -> None:
+        """Ordinary program output must not be mangled by the sanitiser."""
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(self._step(self._result(stdout="a\tb\n")))
+        self.assertIn("a\tb", rendered)
+
+    def test_an_action_with_no_output_stays_on_one_line(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(self._step(self._result()))
+        self.assertEqual(len(rendered.splitlines()), 1)
+        self.assertIn("action: ok", rendered)
+        self.assertIn("ev_aaa_bbb", rendered)
+
+    def test_error_cause_rendering_is_unchanged(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(
+            self._step(
+                self._result(status="error", exit_status=1,
+                             stderr="Traceback...\nPermissionError: nope\n"),
+                action_executed=True,
+            )
+        )
+        self.assertIn("action: error", rendered)
+        self.assertIn("PermissionError: nope", rendered)
+        # The cause line already carries it; the preview must not repeat it.
+        self.assertEqual(rendered.count("PermissionError: nope"), 1)
+
+    def test_both_evidence_ids_survive(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        rendered = format_analysis_step(self._step(self._result(stdout="hello\n")))
+        self.assertIn("evidence: ev_aaa_bbb", rendered)
+        self.assertIn("raw: ev_ccc_ddd", rendered)
+
+    def test_the_preview_is_terminal_only(self) -> None:
+        """Rendering must not mutate the step or reach a backend.
+
+        Checked behaviourally rather than by scanning the source: the rendered
+        text is a pure function of the result, so calling it twice on the same
+        input gives the same answer and changes nothing.
+        """
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        step = self._step(self._result(stdout="hello\nworld\n"))
+        before = json.dumps(step.result.__dict__, default=str)
+        first = format_analysis_step(step)
+        second = format_analysis_step(step)
+
+        self.assertEqual(first, second)
+        self.assertEqual(json.dumps(step.result.__dict__, default=str), before)
+
+
+class AmberAnalysisPromptTest(ModeTestBase):
+    def test_analysis_is_amber_and_chat_is_not(self) -> None:
+        from orbit.terminal import repl_input
+        from orbit.terminal.theme import CYAN, YELLOW
+
+        with mock.patch.object(repl_input.sys, "stdout") as stdout:
+            stdout.isatty.return_value = True
+            chat = repl_input.input_prompt("chat")
+            analysis = repl_input.input_prompt("analysis")
+
+        self.assertIn(YELLOW, analysis)
+        self.assertNotIn(CYAN, analysis)
+        self.assertIn(CYAN, chat)
+        self.assertNotIn(YELLOW, chat)
+
+    def test_analysis_is_not_red(self) -> None:
+        from orbit.terminal import repl_input
+        from orbit.terminal.theme import RED
+
+        with mock.patch.object(repl_input.sys, "stdout") as stdout:
+            stdout.isatty.return_value = True
+            self.assertNotIn(RED, repl_input.input_prompt("analysis"))
+
+    def test_no_ansi_in_non_tty(self) -> None:
+        from orbit.terminal import repl_input
+
+        with mock.patch.object(repl_input.sys, "stdout") as stdout:
+            stdout.isatty.return_value = False
+            for label in ("chat", "analysis"):
+                self.assertEqual(repl_input.input_prompt(label), f"{label}> ")
+
+
+class WorkdirReminderTest(ModeTestBase):
+    def test_it_is_announced_once_and_not_repeated(self) -> None:
+        repl = self.repl()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            repl._announce_workdir()
+            repl._announce_workdir()
+            repl._announce_workdir()
+        self.assertEqual(out.getvalue().count("workdir:"), 1)
+
+    def test_it_is_announced_again_when_the_workdir_changes(self) -> None:
+        import dataclasses
+
+        repl = self.repl()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            repl._announce_workdir()
+            repl.config = dataclasses.replace(repl.config, workdir=self.tmp / "other")
+            repl._announce_workdir()
+        self.assertEqual(out.getvalue().count("workdir:"), 2)
+
+    def test_run_announces_the_workdir_before_the_first_prompt(self) -> None:
+        """The headline behaviour, driven through run() rather than the helper.
+
+        Calling `_announce_workdir` directly proves the helper works; it does
+        not prove anything calls it.
+        """
+        repl = self.repl()
+        out = io.StringIO()
+        with (
+            mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=EOFError),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            repl.run()
+        self.assertIn("workdir:", out.getvalue())
+
+    def test_the_workdir_is_not_repeated_on_every_turn(self) -> None:
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        out = io.StringIO()
+        prompts = iter(["hello", "again"])
+
+        def fake_read(**_kwargs):
+            try:
+                return next(prompts)
+            except StopIteration:
+                raise EOFError from None
+
+        with (
+            mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=fake_read),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            repl.run()
+        self.assertEqual(out.getvalue().count("workdir:"), 1)
+
+    def test_home_itself_renders_as_a_bare_tilde(self) -> None:
+        from pathlib import Path
+
+        from orbit.terminal.repl import _abbreviate_home
+
+        self.assertEqual(_abbreviate_home(Path.home()), "~")
+
+    def test_home_is_abbreviated(self) -> None:
+        from pathlib import Path
+
+        from orbit.terminal.repl import _abbreviate_home
+
+        rendered = _abbreviate_home(Path.home() / "LAB" / "orbit" / "workdir")
+        self.assertTrue(rendered.startswith("~/"))
+        self.assertNotIn(str(Path.home()), rendered)
+
+    def test_a_path_outside_home_is_left_alone(self) -> None:
+        from pathlib import Path
+
+        from orbit.terminal.repl import _abbreviate_home
+
+        self.assertEqual(_abbreviate_home(Path("/opt/data")), "/opt/data")
+
+    def test_the_analyst_preview_never_enters_model_history(self) -> None:
+        """The bounded model observation is unchanged by this rendering."""
+        from orbit.runtime.analysis_runtime import ANALYSIS_TOOL_NAME
+
+        backend = ScriptedBackend([{
+            "id": "c", "type": "function",
+            "function": {"name": ANALYSIS_TOOL_NAME,
+                         "arguments": json.dumps({"code": "print('x' * 50)"})},
+        }])
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.run_prompt(repl, "look")
+
+        history = json.dumps(repl.analysis.messages, default=str)
+        for marker in ("result:", "artifacts:", "preview truncated", "evidence: ev_"):
+            self.assertNotIn(marker, history)
+
+    def test_the_workdir_never_reaches_the_backend(self) -> None:
+        backend = ScriptedBackend()
+        repl = self.repl(backend)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            repl._announce_workdir()
+        self.run_prompt(repl, "hello")
+        sent = json.dumps(backend.messages_seen, default=str)
+        self.assertNotIn("workdir:", sent)

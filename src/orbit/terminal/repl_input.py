@@ -7,7 +7,7 @@ from collections.abc import Callable
 from shutil import get_terminal_size
 
 from orbit.terminal.prompt_preview import compact_prompt_preview, is_long_text_prompt
-from orbit.terminal.theme import CYAN, RESET, accent, yellow_dim
+from orbit.terminal.theme import CYAN, RESET, YELLOW, accent, yellow_dim
 
 
 PASTE_BADGE_PATTERN = re.compile(r"(\[text \d+ chars #[0-9a-f]{8}\])$")
@@ -65,8 +65,12 @@ def input_prompt(label: str = "") -> str:
     """
     if not sys.stdout.isatty():
         return f"{label}> "
+    # ANALYSIS is amber, not red: the session is doing normal work under
+    # different rules, and red belongs to failures. The colour is chosen from
+    # the label the caller passed, so it cannot disagree with the text.
+    colour = YELLOW if label == "analysis" else CYAN
     return (
-        f"{READLINE_IGNORE_START}{CYAN}{READLINE_IGNORE_END}{label}> "
+        f"{READLINE_IGNORE_START}{colour}{READLINE_IGNORE_END}{label}> "
         f"{READLINE_IGNORE_START}{RESET}{READLINE_IGNORE_END}"
     )
 
