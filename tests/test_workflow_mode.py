@@ -1840,3 +1840,272 @@ class ReportCommandTest(ModeTestBase):
         self.assertIs(repl.workflow_mode, WorkflowMode.ANALYSIS)
         self.run_command(repl, "/chat")
         self.assertIs(repl.workflow_mode, WorkflowMode.CHAT)
+
+
+# One string carrying every unsafe family at once, with safe text interleaved
+# so a test can prove the sanitizer removes control without eating content.
+HOSTILE_TEXT = (
+    "SAFE-HEAD\n"
+    "\x1b[31mred\x1b[0m "            # CSI colour
+    "\x1b[2J\x1b[H"                  # erase screen, home cursor
+    "\x1b[1A\x1b[2K"                 # cursor up, erase line
+    "\x1b]0;window-title\x07"        # OSC title, BEL terminated
+    "\x1b]8;;https://evil.example\x1b\\link\x1b]8;;\x1b\\"  # OSC 8 hyperlink
+    "\x1b]52;c;cGF5bG9hZA==\x07"     # OSC 52 clipboard write
+    "\rFORGED action: ok\n"          # carriage-return line overwrite
+    "\x00\x07\x08"                   # raw C0
+    "\x9b31m"                        # C1 CSI
+    "SAFE-TAIL café 日本語 🎯"
+)
+
+
+class HostileTextBackend(ScriptedBackend):
+    """Answers with terminal control sequences, the way a hostile model would."""
+
+    def __init__(self, text: str = HOSTILE_TEXT, tool_calls=None) -> None:
+        super().__init__(tool_calls=tool_calls)
+        self.text = text
+
+    def _result(self) -> ChatResult:
+        base = super()._result()
+        return ChatResult(
+            content=self.text,
+            model=base.model,
+            finish_reason=base.finish_reason,
+            tool_calls=base.tool_calls,
+            prompt_tokens=base.prompt_tokens,
+            completion_tokens=base.completion_tokens,
+            cached_tokens=base.cached_tokens,
+            prompt_tokens_per_second=None,
+            generation_tokens_per_second=None,
+        )
+
+    def chat_stream(
+        self, messages, *, temperature, max_tokens, tools=None, on_delta=None, on_progress=None
+    ) -> ChatResult:
+        self.calls += 1
+        self.tools_seen.append(tools)
+        self.messages_seen.append([dict(m) for m in messages])
+        if on_delta:
+            on_delta(self.text)
+        return self._result()
+
+
+class AssistantTextSanitizerTest(unittest.TestCase):
+    """The sanitizer primitive itself."""
+
+    def sanitize(self, text: str, **kw) -> str:
+        from orbit.terminal.theme import sanitize_terminal_text
+
+        return sanitize_terminal_text(text, **kw)
+
+    def test_plain_ascii_is_unchanged(self) -> None:
+        text = "action: ok | evidence collected, 3 findings."
+        self.assertEqual(self.sanitize(text, allow_newlines=True), text)
+
+    def test_unicode_is_unchanged(self) -> None:
+        text = "café — 日本語 ✓ αβγ Ω 🎯 emoji, ünïcödé"
+        self.assertEqual(self.sanitize(text, allow_newlines=True), text)
+
+    def test_newlines_and_tabs_survive_multiline_prose(self) -> None:
+        text = "# Findings\n\n- one\n\t- indented\n\nEnd."
+        self.assertEqual(self.sanitize(text, allow_newlines=True), text)
+
+    def test_colour_csi_cannot_execute(self) -> None:
+        out = self.sanitize("\x1b[31mred\x1b[0m", allow_newlines=True)
+        self.assertNotIn("\x1b", out)
+        self.assertIn("red", out)
+
+    def test_cursor_movement_and_erase_cannot_execute(self) -> None:
+        out = self.sanitize("\x1b[2J\x1b[H\x1b[1A\x1b[2Kgone", allow_newlines=True)
+        self.assertNotIn("\x1b", out)
+        self.assertIn("gone", out)
+
+    def test_osc_title_sequence_cannot_execute(self) -> None:
+        out = self.sanitize("\x1b]0;pwned\x07after", allow_newlines=True)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+        self.assertIn("after", out)
+
+    def test_osc8_hyperlink_cannot_execute(self) -> None:
+        out = self.sanitize(
+            "\x1b]8;;https://evil.example\x1b\\click\x1b]8;;\x1b\\", allow_newlines=True
+        )
+        self.assertNotIn("\x1b", out)
+        self.assertIn("click", out)
+
+    def test_osc52_clipboard_payload_cannot_execute(self) -> None:
+        out = self.sanitize("\x1b]52;c;cGF5bG9hZA==\x07", allow_newlines=True)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+
+    def test_carriage_return_overwrite_is_neutralized(self) -> None:
+        out = self.sanitize("real line\rFORGED", allow_newlines=True)
+        self.assertNotIn("\r", out)
+        self.assertIn("real line", out)
+        self.assertIn("FORGED", out, "the text stays visible, it just cannot overwrite")
+
+    def test_c1_and_raw_c0_controls_are_neutralized(self) -> None:
+        out = self.sanitize("a\x9b31mb\x00c\x08d", allow_newlines=True)
+        for bad in ("\x9b", "\x00", "\x08"):
+            self.assertNotIn(bad, out)
+        for good in ("a", "b", "c", "d"):
+            self.assertIn(good, out)
+
+    def test_mixed_content_keeps_every_safe_fragment(self) -> None:
+        out = self.sanitize(HOSTILE_TEXT, allow_newlines=True)
+        for bad in ("\x1b", "\r", "\x07", "\x00", "\x9b", "\x08"):
+            self.assertNotIn(bad, out)
+        for good in ("SAFE-HEAD", "red", "link", "SAFE-TAIL", "café", "日本語", "🎯"):
+            self.assertIn(good, out)
+        self.assertIn("\n", out, "prose formatting survives")
+
+    def test_newlines_are_escaped_when_not_allowed(self) -> None:
+        """Single-line surfaces (evidence preview) keep the stricter default."""
+        self.assertNotIn("\n", self.sanitize("a\nb"))
+
+
+class RenderedAssistantTextTest(ModeTestBase):
+    """The real production rendering seams, not just the helper."""
+
+    UNSAFE = ("\x1b", "\r", "\x07", "\x00", "\x9b")
+
+    def assert_terminal_safe(self, output: str) -> None:
+        for bad in self.UNSAFE:
+            self.assertNotIn(bad, output, f"{bad!r} reached the terminal")
+
+    def test_chat_assistant_output_is_sanitized(self) -> None:
+        backend = HostileTextBackend()
+        repl = self.repl(backend)
+        repl.tools_mode = "off"
+
+        output = self.run_prompt(repl, "hello")
+
+        self.assert_terminal_safe(output)
+        self.assertIn("SAFE-HEAD", output)
+        self.assertIn("SAFE-TAIL", output)
+
+    def test_analysis_direct_prose_is_sanitized(self) -> None:
+        backend = HostileTextBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+
+        output = self.run_prompt(repl, "what is this file?")
+
+        self.assert_terminal_safe(output)
+        self.assertIn("SAFE-TAIL", output)
+
+    def test_report_prose_is_sanitized(self) -> None:
+        # The step must run an action, otherwise `/report` takes the
+        # zero-evidence path and never renders model prose at all.
+        backend = HostileTextBackend(
+            tool_calls=[
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": ANALYSIS_TOOL_NAME,
+                        "arguments": json.dumps({"code": "print(1)"}),
+                    },
+                }
+            ]
+        )
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.run_prompt(repl, "look at it")
+        self.assertTrue(
+            repl.analysis.evidence_store.records, "the report needs evidence to speak about"
+        )
+        calls_before = backend.calls
+
+        output = self.run_command(repl, "/report what did you find")
+
+        self.assertGreater(backend.calls, calls_before, "the report must actually run")
+        self.assert_terminal_safe(output)
+        self.assertIn("SAFE-TAIL", output, "the report prose must have been rendered")
+
+    def test_history_keeps_the_original_unsanitized_text(self) -> None:
+        """Sanitizing is presentation only: the record stays byte-exact."""
+        backend = HostileTextBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.run_prompt(repl, "look at it")
+
+        stored = [
+            m for m in repl.analysis.messages if m.get("role") == "assistant"
+        ]
+        self.assertTrue(stored, "the step must be recorded")
+        self.assertIn(
+            HOSTILE_TEXT,
+            "".join(str(m.get("content") or "") for m in stored),
+            "history must keep the model's original output",
+        )
+
+    def test_chat_history_keeps_the_original_unsanitized_text(self) -> None:
+        backend = HostileTextBackend()
+        repl = self.repl(backend)
+        repl.tools_mode = "off"
+        self.run_prompt(repl, "hello")
+
+        stored = "".join(
+            str(m.get("content") or "")
+            for m in repl.runtime.messages
+            if m.get("role") == "assistant"
+        )
+        self.assertIn(HOSTILE_TEXT, stored)
+
+    def test_step_result_keeps_the_original_unsanitized_text(self) -> None:
+        """The runtime's own field is data, not display: it must not be touched."""
+        backend = HostileTextBackend()
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+
+        result = repl.analysis.step("look at it")
+
+        self.assertEqual(
+            result.assistant_text,
+            HOSTILE_TEXT,
+            "sanitizing belongs at the terminal, not in the runtime result",
+        )
+
+    def test_report_result_keeps_the_original_unsanitized_text(self) -> None:
+        backend = HostileTextBackend(
+            tool_calls=[
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": ANALYSIS_TOOL_NAME,
+                        "arguments": json.dumps({"code": "print(1)"}),
+                    },
+                }
+            ]
+        )
+        repl = self.repl(backend)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        self.run_prompt(repl, "look at it")
+
+        report = repl.analysis.report("what did you find")
+
+        self.assertEqual(report.text, HOSTILE_TEXT)
+
+    def test_chat_result_keeps_the_original_unsanitized_text(self) -> None:
+        backend = HostileTextBackend()
+        repl = self.repl(backend)
+        repl.tools_mode = "off"
+        self.run_prompt(repl, "hello")
+
+        stored = "".join(
+            str(m.get("content") or "")
+            for m in repl.runtime.messages
+            if m.get("role") == "assistant"
+        )
+        self.assertIn(HOSTILE_TEXT, stored)
+        self.assertIn("\x1b", stored, "storage keeps the real control byte")
+
+    def test_evidence_preview_sanitization_is_unchanged(self) -> None:
+        """The pre-existing analysis-output sanitization still applies."""
+        from orbit.terminal.analysis_mode import _sanitize
+
+        self.assertEqual(_sanitize("a\x1b[2Jb"), "a\\x1b[2Jb")
+        self.assertEqual(_sanitize("a\nb"), "a\\nb", "single-line surface unchanged")
