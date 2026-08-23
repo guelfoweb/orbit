@@ -560,6 +560,9 @@ class Repl:
         if handler == "analysis":
             print(self._handle_analysis_command(arguments))
             return True
+        if handler == "report":
+            self._handle_report_command(arguments)
+            return True
         if handler == "chat":
             if arguments:
                 print(self._command_usage_error(invocation.spec.usage), file=sys.stderr)
@@ -687,6 +690,53 @@ class Repl:
             f"mode: ANALYSIS | {source.original_path} "
             f"({source.size_bytes} bytes, sha256 {source.sha256})"
         )
+
+    def _handle_report_command(self, question: str) -> None:
+        """`/report` -- answer from the evidence already collected.
+
+        Valid only inside a session, because there is nothing to report on
+        otherwise. It runs no action, so the analysis history and the evidence
+        store are both left exactly as they were; what it returns is displayed
+        and not recorded.
+        """
+        if self.workflow_mode is not WorkflowMode.ANALYSIS or self.analysis is None:
+            print(
+                "error: /report needs an analysis session; start one with /analysis <path>",
+                file=sys.stderr,
+            )
+            return
+        print()
+        started = time.monotonic()
+        renderer = StreamRenderer(thinking=False, render_markdown_mode="plain")
+        renderer.set_activity("analysis")
+        renderer.start()
+        try:
+            report = self.analysis.report(
+                question,
+                on_progress=renderer.progress,
+                on_delta=renderer.write,
+            )
+        except KeyboardInterrupt:
+            renderer.finish(interrupted=True)
+            print(dim("cancelled"), flush=True)
+            return
+        except (ContextAdmissionError, LlamaServerError, TimeoutError) as exc:
+            # Recoverable: a failed report leaves the session exactly as it was.
+            renderer.finish(interrupted=True)
+            print(runtime_error_text(exc), file=sys.stderr)
+            return
+        renderer.finish()
+        if report.model_calls == 0:
+            print(report.text, flush=True)
+        elapsed = time.monotonic() - started
+        summary = (
+            f"report | mode: ANALYSIS | model calls: {report.model_calls} | "
+            f"actions: 0 | {elapsed:.1f}s"
+        )
+        detail = format_step_diagnostics(report.diagnostics)
+        if detail:
+            summary += f" | {detail}"
+        print(dim(summary), flush=True)
 
     def _handle_chat_command(self) -> str:
         """Return to CHAT. No model call, and the analysis is kept.
