@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -873,21 +874,6 @@ class ReplTests(unittest.TestCase):
             ),
         )
 
-    def test_repl_reads_queued_prompt_before_new_input(self) -> None:
-        runtime = CountingRuntime()
-        repl = Repl(
-            runtime=runtime,
-            backend=runtime.backend,
-            config=AppConfig(workdir=Path(".")),
-            queued_prompts=["queued prompt"],
-        )
-
-        with mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=AssertionError("should not read input")):
-            prompt = repl._read_next_prompt()
-
-        self.assertEqual(prompt, "queued prompt")
-        self.assertEqual(repl.queued_prompts, [])
-
     def test_prompt_gap_is_exactly_one_blank_line_and_does_not_accumulate(self) -> None:
         for interactive in (False, True):
             with self.subTest(interactive=interactive):
@@ -1119,6 +1105,170 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(runtime.messages, [])
         self.assertIsNotNone(repl.session)
         self.assertNotEqual(repl.session.path, session.path)
+
+
+# The cursor-up + erase-to-end block `replace_input_echo` emits to rewrite the
+# terminal's own echo of a typed line. Matched as a pair: moving the cursor up
+# without erasing is destructive too, since later output overwrites those rows.
+ECHO_REPLACEMENT = re.compile(r"\x1b\[\d+F\x1b\[J")
+
+
+class _EchoTty(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+class TypedPromptInputTest(unittest.TestCase):
+    """What survives after the unused prompt queue was removed.
+
+    Every prompt now comes from the terminal, so these pin the real typed-input
+    behaviour rather than the deleted feature.
+    """
+
+    LONG = "L" * 900          # over the 800-char long-text threshold
+    MULTILINE = "first\nsecond"
+
+    def drive(self, typed, *, history=None, workflow_mode=None):
+        """Run the real REPL loop over a scripted terminal."""
+        out = _EchoTty()
+        runtime = CountingRuntime()
+        asked: list[str] = []
+        for name in ("ask_auto", "ask_chat"):
+            original = getattr(runtime, name)
+
+            def record(prompt, *args, _original=original, **kwargs):
+                asked.append(prompt)
+                return _original(prompt, *args, **kwargs)
+
+            setattr(runtime, name, record)
+        kwargs = {}
+        if workflow_mode is not None:
+            kwargs["workflow_mode"] = workflow_mode
+        repl = Repl(
+            runtime=runtime,
+            backend=runtime.backend,
+            config=AppConfig(workdir=Path(".")),
+            history=history,
+            **kwargs,
+        )
+        pending = list(typed)
+
+        def fake_input(*args, **kwargs):
+            if pending:
+                return pending.pop(0)
+            raise EOFError
+
+        with contextlib.redirect_stdout(out), \
+             mock.patch("orbit.terminal.repl.read_prompt_input", side_effect=fake_input), \
+             mock.patch("sys.stdin", _EchoTty()):
+            repl.run()
+        return out.getvalue(), asked, repl, runtime
+
+    def history_for(self, root: Path) -> PromptHistory:
+        """A history on an isolated root, the way cli.py always supplies one."""
+        return PromptHistory.for_workdir(root, root=root)
+
+    # Under the long-text threshold, so the echo is left exactly as typed.
+    def test_short_typed_prompt_is_not_rewritten(self) -> None:
+        output, asked, _, _ = self.drive(["short one"])
+
+        self.assertNotRegex(output, ECHO_REPLACEMENT)
+        self.assertEqual(asked, ["short one"])
+
+    # Over the threshold: the terminal's own echo is replaced with a preview.
+    def test_long_typed_prompt_echo_is_replaced(self) -> None:
+        output, asked, _, _ = self.drive([self.LONG])
+
+        self.assertRegex(output, ECHO_REPLACEMENT)
+        self.assertEqual(asked, [self.LONG])
+
+    # Multiline is the other trigger for replacement.
+    def test_multiline_typed_prompt_echo_is_replaced(self) -> None:
+        output, asked, _, _ = self.drive([self.MULTILINE])
+
+        self.assertRegex(output, ECHO_REPLACEMENT)
+        self.assertEqual(asked, [self.MULTILINE])
+
+    # The configuration cli.py actually ships: a history is always present, and
+    # the loop takes a different echo branch when it is.
+    def test_long_typed_prompt_with_history_echo_is_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output, asked, _, _ = self.drive(
+                [self.LONG], history=self.history_for(Path(tmp))
+            )
+
+        self.assertRegex(output, ECHO_REPLACEMENT)
+        self.assertEqual(asked, [self.LONG])
+
+    # A slash command clears the echo of its own line and runs no model turn.
+    def test_slash_command_clears_its_echo_and_asks_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output, asked, _, runtime = self.drive(
+                ["/help"], history=self.history_for(Path(tmp))
+            )
+
+        self.assertEqual(asked, [])
+        self.assertEqual(runtime.ask_calls, 0)
+        self.assertIn("/report", output, "the command still produced its output")
+        self.assertIn(
+            "\x1b[J",
+            output,
+            "a typed command clears the echo of the line that invoked it",
+        )
+
+    # One typed line is exactly one turn.
+    def test_chat_prompt_is_processed_exactly_once(self) -> None:
+        _, asked, _, runtime = self.drive(["what is a packer?"])
+
+        self.assertEqual(asked, ["what is a packer?"])
+        self.assertEqual(runtime.ask_calls, 1)
+
+    # Identical prompts are two turns, never deduplicated.
+    def test_two_identical_typed_prompts_execute_twice(self) -> None:
+        _, asked, _, runtime = self.drive(["same", "same"])
+
+        self.assertEqual(asked, ["same", "same"])
+        self.assertEqual(runtime.ask_calls, 2)
+
+    # What reaches the history file is the prompt, verbatim and once.
+    def test_typed_prompt_is_written_to_history(self) -> None:
+        # PromptHistory wraps the process-global readline module, so entries
+        # from earlier tests in this process would otherwise lead the file.
+        # Production never sees that: one process, one workdir, one history.
+        readline = _load_readline()
+        if readline is not None:
+            readline.clear_history()
+            self.addCleanup(readline.clear_history)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self.history_for(Path(tmp))
+            _, asked, _, _ = self.drive(["remember me"], history=history)
+
+            self.assertEqual(asked, ["remember me"])
+            self.assertTrue(history.path.exists(), "the prompt must be persisted")
+            self.assertEqual(
+                history.path.read_text(encoding="utf-8").splitlines(),
+                ["remember me"],
+                "written once, verbatim",
+            )
+
+    # The removed feature leaves nothing behind on the class.
+    def test_repl_has_no_prompt_queue(self) -> None:
+        runtime = CountingRuntime()
+        repl = Repl(
+            runtime=runtime,
+            backend=runtime.backend,
+            config=AppConfig(workdir=Path(".")),
+        )
+
+        self.assertFalse(hasattr(repl, "queued_prompts"))
+        with self.assertRaises(TypeError):
+            Repl(
+                runtime=runtime,
+                backend=runtime.backend,
+                config=AppConfig(workdir=Path(".")),
+                queued_prompts=["x"],
+            )
 
 
 if __name__ == "__main__":
