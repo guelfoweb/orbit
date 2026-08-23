@@ -8,7 +8,15 @@ import time
 from dataclasses import dataclass
 
 from orbit.backend.base import StreamProgress
-from orbit.terminal.theme import CYAN, DIM, RESET, dim, is_tty, supports_ansi
+from orbit.terminal.theme import (
+    CYAN,
+    DIM,
+    RESET,
+    dim,
+    is_tty,
+    sanitize_terminal_text,
+    supports_ansi,
+)
 
 
 PREFILL_COMPLETION_LABEL = "waiting for model..."
@@ -71,8 +79,22 @@ class StreamRenderer:
         self._thread.start()
 
     def write(self, text: str) -> None:
+        """Render one delta of model-authored text.
+
+        Every streamed delta passes through here -- CHAT, an analysis step,
+        and `/report` all hand theirs to this method -- so it is where model
+        text stops being able to act on the terminal. It is not the only such
+        boundary: `format_analysis_step` reprints the same prose and sanitizes
+        it too. Only what is displayed is sanitized; what the runtime keeps in
+        history, in the session file, and in evidence is the model's original.
+
+        Sanitizing here, before the thinking filter and the markdown renderer,
+        is deliberate: those run downstream and emit Orbit's own colour, which
+        must not be stripped.
+        """
         if not text:
             return
+        text = sanitize_terminal_text(text, allow_newlines=True)
         if self._timer_active:
             self._first_delta = True
             self._stop_timer(clear=True)

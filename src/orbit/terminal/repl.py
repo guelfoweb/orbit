@@ -46,7 +46,7 @@ from orbit.terminal.status import (
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_activity_label, format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
-from orbit.terminal.theme import dim, runtime_error_text
+from orbit.terminal.theme import dim, runtime_error_text, sanitize_terminal_text
 from orbit.runtime.thinking_mode import ThinkingMode
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
 
@@ -727,7 +727,11 @@ class Repl:
             return
         renderer.finish()
         if report.model_calls == 0:
-            print(report.text, flush=True)
+            # Today this branch can only carry NO_EVIDENCE_REPORT, a constant.
+            # It is sanitized anyway because it is a print that never passed
+            # the renderer's boundary: if the branch ever comes to carry model
+            # prose, it is already safe rather than newly vulnerable.
+            print(sanitize_terminal_text(report.text, allow_newlines=True), flush=True)
         elapsed = time.monotonic() - started
         summary = (
             f"report | mode: ANALYSIS | model calls: {report.model_calls} | "

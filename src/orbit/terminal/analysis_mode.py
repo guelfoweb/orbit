@@ -30,6 +30,7 @@ from orbit.runtime.analysis_runtime import (
 from orbit.runtime.analysis_sandbox import AnalysisResult
 from orbit.runtime.confined_acquire import ConfinedAcquireError, acquire_confined_bytes
 from orbit.runtime.evidence import EvidenceStore
+from orbit.terminal.theme import sanitize_terminal_text
 
 
 class AnalysisModeError(Exception):
@@ -134,7 +135,9 @@ def _resolve_target(raw_path: str, *, workdir: Path) -> Path:
 def format_analysis_step(result: AnalysisStepResult) -> str:
     """Render one step for the analyst who has just been handed control back."""
     lines: list[str] = []
-    text = result.assistant_text.strip()
+    # Model-authored prose: sanitized here because this is where it is
+    # displayed. `result.assistant_text` itself stays the model's original.
+    text = sanitize_terminal_text(result.assistant_text, allow_newlines=True).strip()
     if text:
         lines.append(text)
     if result.rejection:
@@ -295,22 +298,14 @@ def _excerpt(text: str) -> list[str]:
     return out
 
 
-_CONTROL = {ord(c) for c in "\t"}
-
-
 def _sanitize(text: str) -> str:
     """Strip control characters that would act on the terminal.
 
-    Everything previewed here is model-authored output. Left as-is it can move
-    the cursor and overwrite what Orbit already printed -- a crafted action
-    could forge its own `action: ok` line above itself. Tabs survive because
-    they are ordinary in program output; everything else in the control range
-    becomes a visible escape.
+    Everything previewed here is model-authored output, and these previews are
+    single lines of a larger block, so newlines are escaped along with the rest
+    of the control range. `sanitize_terminal_text` is the shared boundary.
     """
-    return "".join(
-        ch if ch.isprintable() or ord(ch) in _CONTROL else repr(ch)[1:-1]
-        for ch in text
-    )
+    return sanitize_terminal_text(text)
 
 
 def _looks_binary(text: str) -> bool:

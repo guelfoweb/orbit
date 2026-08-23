@@ -66,3 +66,29 @@ def _styled(text: str, prefix: str) -> str:
     if not supports_ansi():
         return text
     return f"{prefix}{text}{RESET}"
+
+
+# Tab is ordinary in program output and in prose; everything else in the
+# control range is an instruction to the terminal rather than text.
+_SAFE_CONTROL = {ord("\t")}
+_SAFE_CONTROL_MULTILINE = {ord("\t"), ord("\n")}
+
+
+def sanitize_terminal_text(text: str, *, allow_newlines: bool = False) -> str:
+    """Neutralize control sequences in model-authored text before printing it.
+
+    Everything the model writes reaches the terminal as text, so left as-is it
+    can act on it instead: move the cursor, erase the screen, set the window
+    title, drive an OSC 52 clipboard write, or return to the start of the line
+    and overwrite what Orbit already printed -- which is how a crafted response
+    forges its own status line above itself. Printable text of any script
+    survives untouched; a control character becomes its visible escape.
+
+    `allow_newlines` keeps `\\n` for multi-line prose. Carriage return is never
+    kept: it is the line-overwrite primitive, and prose has no use for it.
+    """
+    safe = _SAFE_CONTROL_MULTILINE if allow_newlines else _SAFE_CONTROL
+    return "".join(
+        ch if ch.isprintable() or ord(ch) in safe else repr(ch)[1:-1]
+        for ch in text
+    )
