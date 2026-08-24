@@ -36,11 +36,12 @@ from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_rout
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.history_serialization import serialize_profile_messages
 from orbit.runtime.analysis_runtime import ANALYSIS_STEP_PHASE
+from orbit.backend.base import RecoverableBackendError
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 from orbit.runtime.tool_healing import tool_call_healing_status
 
 
-class LlamaServerError(RuntimeError):
+class LlamaServerError(RecoverableBackendError):
     pass
 
 

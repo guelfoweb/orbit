@@ -16,6 +16,18 @@ class StreamPromptMetrics:
     cached_tokens: int | None = None
 
 
+class RecoverableBackendError(RuntimeError):
+    """A backend failure that ends the current request, not the session.
+
+    The distinction matters because the two are handled oppositely: a
+    recoverable failure leaves the analyst their session and evidence, while an
+    unexpected `RuntimeError` is a bug and must propagate so the process tears
+    down and releases its workspace. Naming the recoverable case here lets a
+    runtime catch exactly it without importing upward from the backend layer,
+    and without widening to bare `RuntimeError` and swallowing real crashes.
+    """
+
+
 class StreamConsumerAbort(Exception):
     """A stream consumer stopped its own call on purpose; the backend is fine.
 
