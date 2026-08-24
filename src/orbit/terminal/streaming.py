@@ -154,6 +154,15 @@ class StreamRenderer:
         """Whether the analyst has already seen model prose from this renderer."""
         return self._rendered_visible_text
 
+    def reset_visible_text(self) -> None:
+        """Forget that prose was shown, so the next step is judged on its own.
+
+        An autonomous run renders several steps through one renderer. Without
+        this, one step that streamed prose would suppress the prose of every
+        later step, because the flag would still be set from the earlier one.
+        """
+        self._rendered_visible_text = False
+
     def finish(self, *, interrupted: bool = False) -> None:
         if self._thinking_filter is not None:
             for fragment, dimmed in self._thinking_filter.finish():

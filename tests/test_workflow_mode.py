@@ -17,7 +17,7 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
-from orbit.runtime.analysis_runtime import ANALYSIS_TOOL_NAME, AnalysisRuntime
+from orbit.runtime.analysis_runtime import ANALYSIS_AUTONOMY_ENV, ANALYSIS_TOOL_NAME, AnalysisRuntime
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.sessions import SessionStore
 from orbit.runtime.tools import TOOL_NAMES
@@ -85,6 +85,17 @@ class ScriptedBackend:
 
 class ModeTestBase(unittest.TestCase):
     def setUp(self) -> None:
+        # These tests describe the one-step analyst boundary, which is the
+        # default and stays available. Pinning the autonomy switch off makes
+        # that explicit: without it the suite's result depends on the
+        # environment it happens to run in, and an operator who exported the
+        # switch would see these fail for a behaviour that is working.
+        # Autonomous continuation has its own suite.
+        patcher = unittest.mock.patch.dict(
+            os.environ, {ANALYSIS_AUTONOMY_ENV: "0"}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.tmp = Path(tempfile.mkdtemp(prefix="orbit-mode-test-"))
         self.addCleanup(self._cleanup)
         self.artifact = self.tmp / "sample.js"
@@ -1756,13 +1767,67 @@ class AnalysisProgressRenderingTest(ModeTestBase):
         self.assertIn("StreamRenderer(", source)
 
     def test_the_renderer_is_finished_on_every_exit_path(self) -> None:
-        # A renderer left running keeps a timer thread and a stale status line.
+        """A renderer left running keeps a timer thread and a stale status line.
+
+        Checked structurally rather than by counting call sites: the property
+        is that no path leaves the method without finishing the renderer, and a
+        pinned count asserts something narrower that a legitimate new exit path
+        breaks. Every `return` and `raise` after the renderer starts must be
+        preceded, within its own branch, by a `renderer.finish(` call.
+        """
+        import ast
         import inspect
+        import textwrap
 
         from orbit.terminal.repl import Repl
 
-        source = inspect.getsource(Repl._ask_analysis)
-        self.assertEqual(source.count("renderer.finish("), 4)
+        source = textwrap.dedent(inspect.getsource(Repl._ask_analysis))
+        tree = ast.parse(source)
+
+        def is_finish(stmt) -> bool:
+            """A bare `renderer.finish(...)` call statement, not a nested one."""
+            return (
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Call)
+                and ast.unparse(stmt.value.func) == "renderer.finish"
+            )
+
+        def exits_are_guarded(block, finished: bool) -> list[str]:
+            """Walk one linear block, tracking whether finish() ran before an exit.
+
+            Only a finish executed on this path counts. A finish that appears
+            inside a nested branch or an exception handler does not guard the
+            statements that follow the enclosing statement, because that path
+            may not have run it -- which is exactly the mistake that let an
+            unguarded early return pass an earlier version of this check.
+            """
+            problems: list[str] = []
+            for stmt in block:
+                if is_finish(stmt):
+                    finished = True
+                    continue
+                if isinstance(stmt, (ast.Return, ast.Raise)):
+                    if not finished:
+                        problems.append(ast.unparse(stmt))
+                    continue
+                for field in ("body", "orelse", "finalbody"):
+                    branch = getattr(stmt, field, None)
+                    if isinstance(branch, list) and branch:
+                        problems += exits_are_guarded(branch, finished)
+                for handler in getattr(stmt, "handlers", []):
+                    problems += exits_are_guarded(handler.body, False)
+            return problems
+
+        body = tree.body[0].body
+        start = next(
+            (i for i, stmt in enumerate(body) if "renderer.start()" in ast.unparse(stmt)),
+            None,
+        )
+        self.assertIsNotNone(start, "the renderer must be started")
+        unguarded = exits_are_guarded(body[start + 1 :], False)
+        self.assertEqual(unguarded, [], f"exit paths without renderer.finish(): {unguarded}")
+        # And it is actually called, so an empty method could not pass.
+        self.assertIn("renderer.finish(", source)
 
     def test_analysis_never_renders_reasoning(self) -> None:
         """Checked on the constructed renderer, not on the source text.

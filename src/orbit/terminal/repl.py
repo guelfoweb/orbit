@@ -9,7 +9,11 @@ from typing import Callable
 from orbit.backend.base import ChatResult, StreamPromptMetrics
 from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.runtime import ChatRuntime
-from orbit.runtime.analysis_runtime import AnalysisRuntime
+from orbit.runtime.analysis_runtime import (
+    AnalysisRuntime,
+    AutonomousRunResult,
+    analysis_autonomy_enabled,
+)
 from orbit.runtime.context_manager import ContextAdmissionError
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
@@ -324,12 +328,54 @@ class Repl:
         # append-only record a later exact-prefix strategy depends on.
         checkpoint = self._analysis_checkpoint()
         renderer.start()
+        run: AutonomousRunResult | None = None
         try:
-            result = self.analysis.step(
-                analyst_message,
-                on_progress=renderer.progress,
-                on_delta=renderer.write,
-            )
+            if analysis_autonomy_enabled():
+                # Same step primitive, issued repeatedly while each one adds
+                # verifiable state. `step()` still owns every guarantee; the
+                # loop only decides whether to ask again.
+                #
+                # Each completed step is rendered as it lands. Showing only the
+                # last one would hide every action an autonomous run took --
+                # and its terminating step is usually prose, so the analyst
+                # would be told actions ran and given no evidence id to cite or
+                # re-attest.
+                def show(step, record) -> None:
+                    block = format_analysis_step(
+                        step, prose_already_shown=renderer.rendered_visible_text
+                    )
+                    if renderer.rendered_visible_text:
+                        print(flush=True)
+                    if block:
+                        print(block, flush=True)
+                    renderer.reset_visible_text()
+
+                run = self.analysis.run_autonomous(
+                    analyst_message,
+                    on_progress=renderer.progress,
+                    on_delta=renderer.write,
+                    on_step=show,
+                )
+                result = run.last_step
+                if result is None:
+                    # No step completed -- cancelled, a backend failure, or a
+                    # zero call budget -- so there is nothing to render and the
+                    # pre-run turn is safe to undo. Why it ended still has to be
+                    # told truthfully: a backend that died must not be reported
+                    # as an analyst interrupt.
+                    renderer.finish(interrupted=True)
+                    self._restore_analysis_checkpoint(checkpoint)
+                    if run.cancelled:
+                        print(dim("cancelled"), flush=True)
+                    else:
+                        print(dim(run.stop_reason), flush=True)
+                    return
+            else:
+                result = self.analysis.step(
+                    analyst_message,
+                    on_progress=renderer.progress,
+                    on_delta=renderer.write,
+                )
         except KeyboardInterrupt:
             renderer.finish(interrupted=True)
             self._restore_analysis_checkpoint(checkpoint)
@@ -353,8 +399,13 @@ class Repl:
         # the final block then carries only what streaming could not: action
         # status, evidence preview, artifacts.
         prose_already_shown = renderer.rendered_visible_text
-        step_block = format_analysis_step(result, prose_already_shown=prose_already_shown)
-        if prose_already_shown:
+        # An autonomous run already rendered every step through `on_step`.
+        step_block = (
+            ""
+            if run is not None
+            else format_analysis_step(result, prose_already_shown=prose_already_shown)
+        )
+        if prose_already_shown and run is None:
             # Streamed deltas leave the cursor mid-line; close that line so the
             # block below starts on its own. Previously the reprinted copy of
             # the prose supplied this break.
@@ -362,10 +413,17 @@ class Repl:
         if step_block:
             print(step_block, flush=True)
         elapsed = time.monotonic() - started
-        summary = (
-            f"analysis | mode: ANALYSIS | model calls: {result.model_calls} | "
-            f"actions: {1 if result.action_executed else 0} | {elapsed:.1f}s"
-        )
+        if run is not None:
+            summary = (
+                f"analysis | mode: ANALYSIS | model calls: {run.model_calls} | "
+                f"actions: {run.actions_executed} | steps: {len(run.steps)} | "
+                f"stopped: {run.stop_reason} | {elapsed:.1f}s"
+            )
+        else:
+            summary = (
+                f"analysis | mode: ANALYSIS | model calls: {result.model_calls} | "
+                f"actions: {1 if result.action_executed else 0} | {elapsed:.1f}s"
+            )
         detail = format_step_diagnostics(result.diagnostics)
         if detail:
             summary += f" | {detail}"
