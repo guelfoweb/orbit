@@ -708,6 +708,23 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   path without a startup retry. An operator SIGINT during Qwen3-Coder prewarm
   exits before the server binds instead of exposing the cold fallback. Qwen3.6
   and Gemma behavior remains unchanged.
+- The verified Ornith profile has a second, separate prefix for ANALYSIS: 384
+  tokens, its own `ornith15-analysis-prefix-v1` identity and its own checkpoint
+  slot, derived from the ANALYSIS system contract and the `execute_analysis`
+  schema alone. It is captured lazily by default -- the first analysis step of a
+  server's life captures it, later sessions restore it -- and a rolling ANALYSIS
+  checkpoint always outranks it.
+- `ORBIT_ORNITH_ANALYSIS_PREFIX_PREWARM=1` additionally captures that prefix at
+  startup, so the first analysis session restores 384 instead of paying cold
+  prefill. It is off by default because it costs the startup that asks for it:
+  a measured 11.0-second capture and a 73,736,684-byte resident checkpoint, paid
+  by every server start whether or not an analysis ever runs. With it on, a
+  measured first analysis step restored 384 of 588 prompt tokens and its prefill
+  fell from 18.2 to 6.0 seconds. Timings are descriptive.
+- `ORBIT_ORNITH_ANALYSIS_PREFIX_REUSE=0` disables Ornith ANALYSIS capture and
+  restore entirely, eager and lazy alike. The two switches answer different
+  questions -- whether the prefix may be reused at all, and who pays to capture
+  it -- so asking for the eager capture cannot override the kill switch.
 
 ## Atomic Text Artifact Generation
 
