@@ -55,19 +55,19 @@ COMMANDS = (
     ),
     CommandSpec(
         "/analysis",
-        "Session",
+        "Analysis",
         "/analysis <path>",
         "Analyse one local artifact in an isolated workspace.",
         "analysis",
     ),
     CommandSpec(
         "/report",
-        "Session",
+        "Analysis",
         "/report [question]",
         "Report on the evidence already collected, running no analysis action.",
         "report",
     ),
-    CommandSpec("/chat", "Session", "/chat", "Return to normal chat mode.", "chat"),
+    CommandSpec("/chat", "Analysis", "/chat", "Return to normal chat mode.", "chat"),
     CommandSpec("/help", "Help", "/help", "Show command help.", "help"),
 )
 

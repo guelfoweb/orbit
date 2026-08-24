@@ -725,6 +725,18 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   restore entirely, eager and lazy alike. The two switches answer different
   questions -- whether the prefix may be reused at all, and who pays to capture
   it -- so asking for the eager capture cannot override the kill switch.
+- `ORBIT_ANALYSIS_AUTONOMOUS=1` lets an analysis continue by itself while each
+  step produces verifiably new evidence, instead of returning to the analyst
+  after every step. It stops on natural completion, on stalled progress, on
+  repeated failure, or at a hard bound of 12 actions, and every ending except a
+  cancellation produces one grounded report. Off by default, and fail-closed:
+  any value other than `1` reads as off.
+
+  It is opt-in for cost, not for correctness. A step that measures something
+  new is counted as progress whether or not the measurement was worth making, so
+  an artifact with almost nothing to derive can still attract many actions.
+  Whether that trade is worthwhile is an operator judgement rather than a
+  default.
 
 ## Atomic Text Artifact Generation
 

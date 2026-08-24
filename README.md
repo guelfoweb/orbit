@@ -17,13 +17,62 @@ Linux is the main target environment. macOS may work. Windows is not a target.
 | [Gemma 4 26B-A4B](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | ~24.2 tok/s | ~7.1 tok/s | ~3.0 s | ~20.9 s | ~29.4 GiB |
 | [Qwen 3.6 35B-A3B](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF) | ~31.8 tok/s | ~7.6 tok/s | ~6.1 s | ~23.8 s | ~36.4 GiB |
 | [Qwen3-Coder 30B-A3B](https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF) | ~26.0 tok/s | ~10.7 tok/s | ~3.0 s | ~18.4 s | ~31.3 GiB |
+| [Ornith 1.5 35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) | — | — | — | — | — |
 
 NUC10 Intel Core i7-10710U (6 cores / 12 threads) with 64 GB RAM, no GPU
 Linux, llama.cpp b9551, ctx=8192, 6 threads, batch/ubatch 256/128, Flash Attention AUTO, thinking off, and MTP off.
 
+Ornith 1.5 35B-A3B is the verified profile the analysis workflow was qualified on. Its row is empty
+because it has not been measured under the warm steady-state chat protocol used for the other rows.
+Expect memory in the same range as the other 35B-A3B profile.
+
 Chat and tool latencies are warm steady-state medians after one excluded warm-up. Prefill measures evaluated tokens only and excludes cache benefit. These are not universal performance claims; actual results vary with CPU, memory bandwidth, quantization, backend build, and workload.
 
 `orbit server --low-memory` is an opt-in mode supported only for the verified Qwen3-Coder 30B-A3B profile. Default behavior is unchanged and CPU repacking remains enabled unless this flag is specified. On the documented NUC10, peak RSS was approximately 31.3 GiB by default and 18.3 GiB in low-memory mode, a 41.6% reduction, with weighted prefill approximately 13.9% slower and decode approximately 1% slower. 24 GB RAM is the recommended practical minimum for a complete host; 20 GiB was qualified only as a process-memory limit and is not a general host recommendation.
+
+## Chat and Analysis
+
+Orbit has two workflows. Chat is the default and is unchanged: you ask, the model
+answers, and it may use the exposed tools.
+
+Analysis is for inspecting one local artifact in an isolated workspace. Start it
+explicitly, or let Orbit route to it when a request is clearly about analysing a
+file:
+
+```
+/analysis path/to/artifact
+/report            # answer from the evidence already collected, running nothing
+/chat              # back to normal chat
+```
+
+An analysis step is deliberately narrow. The model writes a short Python program,
+Orbit runs it in a sandbox with no network and a read-only copy of the artifact,
+and the output is recorded in an evidence store with its provenance. One model
+call performs at most one action, and control returns to you after each step, so
+you steer by typing the next instruction — `continue` included.
+
+Everything the model derives stays inside the session workspace. Full outputs
+remain re-attestable in the evidence store; only bounded excerpts are shown to
+the model.
+
+### Autonomous continuation (opt-in)
+
+By default an analysis advances one step at a time and waits for you. With
+
+```bash
+ORBIT_ANALYSIS_AUTONOMOUS=1 orbit
+```
+
+Orbit continues by itself while each step produces verifiably new evidence,
+stopping when the model finishes, when progress stalls, or at a hard bound of 12
+actions. Every ending except a cancellation produces one grounded report from the
+evidence collected.
+
+This mode is off by default. It is opt-in for cost rather than for
+correctness: a step that measures something new counts as progress whether or
+not the measurement was worth making, so an artifact with little to derive can
+still attract many actions. Whether that trade is worthwhile is a judgement for
+the operator. Ctrl-C stops a run immediately.
 
 ## Requirements
 
@@ -53,6 +102,20 @@ Inspect the host and review the recommended server configuration:
 ```bash
 scripts/suggest-server-profile.sh
 ```
+
+## Limitations
+
+- Linux x86_64 CPU-only is the qualified platform. macOS may work; Windows is not
+  a target. There is no GPU path.
+- Analysis runs one artifact per session, and the sandbox has no network.
+- Autonomous continuation is opt-in and may perform unnecessary work on trivial
+  artifacts (see above).
+- Eager capture of the analysis prefix at startup is opt-in
+  (`ORBIT_ORNITH_ANALYSIS_PREFIX_PREWARM=1`); by default the prefix is captured
+  lazily by the first analysis step, which costs that step and benefits every
+  later one.
+- Analysis features are qualified on the verified Ornith 1.5 profile. Other
+  verified profiles fall back to ordinary cold behaviour rather than failing.
 
 ## Quick Start
 
