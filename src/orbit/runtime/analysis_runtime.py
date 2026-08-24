@@ -28,15 +28,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import stat
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
-from orbit.backend.base import ChatBackend, Message
+from orbit.backend.base import ChatBackend, Message, RecoverableBackendError
+from orbit.runtime.context_manager import ContextAdmissionError
+from orbit.runtime.analysis_progress import (
+    COMPLETE,
+    ERROR,
+    NEW_CONTENT,
+    NO_PROGRESS,
+    ProgressLedger,
+    ProgressRecord,
+)
 from orbit.runtime.analysis_sandbox import (
     WORK_MOUNT,
     AnalysisResult,
@@ -193,6 +203,52 @@ QUALIFIED_ANALYSIS_MAX_TOKENS = 2048
 # and 256 files is eight times the per-action file count -- enough headroom for
 # a session far longer than any recorded run, small enough to stay a bound.
 # Revisit with real analyst-session telemetry.
+# --- bounded autonomous continuation ------------------------------------
+#
+# Orbit continues an analysis by itself only while each step is still adding
+# verifiable state. Every bound below exists so that a run ends, truthfully,
+# with its evidence intact rather than spending the analyst's machine on
+# repetition.
+#
+# The action and model-call bounds are the values the preserved research
+# harness ran with (`MAX_ACTIONS = 8`, `MAX_MODEL_CALLS = 10`). Those are the
+# figures its measured trajectories were bounded by, so they are reused rather
+# than re-invented -- but they are reused as a starting point, not as a proven
+# optimum: that harness reached a FAIL verdict on a different model and
+# profile, so nothing about its outcome transfers. The margin between them is
+# the harness's own: two calls above the action bound, there because a run may
+# spend calls that execute nothing.
+#
+# The stagnation and error bounds have no historical value to inherit -- the
+# harness bounded stagnation by a replan counter, not by consecutive
+# classification -- so they are set conservatively at 2. Two consecutive
+# no-progress steps is the smallest number that distinguishes a model briefly
+# re-orienting from one that is stuck; one would abort on a single redundant
+# read. All four are configurable per run.
+MAX_AUTONOMOUS_ACTIONS = 8
+MAX_AUTONOMOUS_MODEL_CALLS = 10
+MAX_CONSECUTIVE_NO_PROGRESS = 2
+MAX_CONSECUTIVE_ERRORS = 2
+
+# What Orbit says to itself to take the next step. It carries no guidance
+# about what to examine: choosing that is the model's job, and a runtime that
+# suggested a direction would be doing analysis rather than orchestration.
+AUTONOMOUS_CONTINUATION_MESSAGE = "continue"
+
+# Off until it has been measured on real work. Existing one-step behaviour --
+# one analyst line, one model call, control back -- is what every analysis does
+# unless this is set, so nothing about production changes by merging the loop.
+ANALYSIS_AUTONOMY_ENV = "ORBIT_ANALYSIS_AUTONOMOUS"
+
+# Why a run stopped. Reported verbatim to the analyst.
+STOP_COMPLETE = "model returned prose with no action"
+STOP_NO_PROGRESS = "no new evidence"
+STOP_ERROR = "repeated action failures"
+STOP_MAX_ACTIONS = "action bound reached"
+STOP_MAX_MODEL_CALLS = "model call bound reached"
+STOP_CANCELLED = "cancelled"
+STOP_BACKEND_ERROR = "backend error"
+
 MAX_SESSION_SCRATCH_BYTES = 64 * 1024 * 1024
 MAX_SESSION_SCRATCH_FILES = 256
 SESSION_CAPACITY_EXHAUSTED = "session artifact capacity exhausted"
@@ -344,6 +400,37 @@ class AnalysisStepResult:
         # Always true by construction: step() has no path that continues past
         # here. Named so tests assert the property rather than the absence of
         # a loop.
+        return True
+
+
+def analysis_autonomy_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether ANALYSIS may continue itself. Off by default, fail-closed.
+
+    Same `1`/`0` grammar as the other Orbit runtime switches, and anything
+    unrecognised reads as off: an operator who mistypes gets the behaviour
+    that was already shipping, not an unbounded loop.
+    """
+    env = os.environ if environ is None else environ
+    return env.get(ANALYSIS_AUTONOMY_ENV, "").strip() == "1"
+
+
+@dataclass
+class AutonomousRunResult:
+    """What one bounded autonomous run produced. Control is with the analyst."""
+
+    steps: tuple[AnalysisStepResult, ...]
+    progress: tuple[ProgressRecord, ...]
+    stop_reason: str
+    model_calls: int
+    actions_executed: int
+    cancelled: bool = False
+
+    @property
+    def last_step(self) -> AnalysisStepResult | None:
+        return self.steps[-1] if self.steps else None
+
+    @property
+    def control_returned(self) -> bool:
         return True
 
 
@@ -776,6 +863,168 @@ class AnalysisRuntime:
             artifact_handles=tuple(f"{WORK_MOUNT}/{a.name}" for a in result.artifacts),
             diagnostics=_diagnostics(None),
         )
+
+    def run_autonomous(
+        self,
+        analyst_message: str,
+        *,
+        max_actions: int = MAX_AUTONOMOUS_ACTIONS,
+        max_model_calls: int = MAX_AUTONOMOUS_MODEL_CALLS,
+        max_no_progress: int = MAX_CONSECUTIVE_NO_PROGRESS,
+        max_errors: int = MAX_CONSECUTIVE_ERRORS,
+        on_progress: Callable[[Any], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        on_step: Callable[[AnalysisStepResult, ProgressRecord], None] | None = None,
+    ) -> AutonomousRunResult:
+        """Run analyst-directed steps until progress stops or a bound is hit.
+
+        Autonomy here is only this: Orbit issues the next ordinary step itself
+        instead of waiting for the analyst to type `continue`, and stops as
+        soon as steps stop producing verifiably new state. A step that adds
+        nothing is allowed exactly one retry -- two consecutive no-progress or
+        error steps end the run -- so novelty governs how long a run lives
+        without making every single step prove itself first. Every step is the same qualified
+        `step()` -- one model call, at most one action, structural rejection,
+        sandbox, evidence, append-only history, rolling KV -- so nothing about
+        what a step may do changes. The model still chooses what to examine;
+        the runtime only decides whether it is worth asking again.
+
+        The loop stops the moment a step stops adding state. It never repairs,
+        never retries, never re-runs a rejected action, and never makes a
+        second kind of model call: there is no finalisation pass and no
+        classifier, because both would be the runtime forming an opinion about
+        an analysis it is not qualified to judge.
+
+        Cancellation propagates: `KeyboardInterrupt` from the backend ends the
+        run and returns what has already been established, with the workspace
+        and evidence intact.
+        """
+        ledger = ProgressLedger()
+        steps: list[AnalysisStepResult] = []
+        records: list[ProgressRecord] = []
+        model_calls = 0
+        actions = 0
+        consecutive_no_progress = 0
+        consecutive_errors = 0
+        message = analyst_message
+        stop_reason = STOP_MAX_MODEL_CALLS
+        cancelled = False
+
+        while True:
+            if model_calls >= max_model_calls:
+                stop_reason = STOP_MAX_MODEL_CALLS
+                break
+            try:
+                step = self.step(message, on_progress=on_progress, on_delta=on_delta)
+            except KeyboardInterrupt:
+                # What ran already stands. `step()` has committed its own
+                # history and evidence, or rewound nothing; the analyst keeps
+                # the session either way.
+                cancelled = True
+                stop_reason = STOP_CANCELLED
+                self._close_incomplete_turn()
+                break
+            except (ContextAdmissionError, TimeoutError, RecoverableBackendError) as exc:
+                # A recoverable backend failure ends the run, it does not undo
+                # it. Letting this propagate would unwind to a caller holding
+                # only a pre-run checkpoint, and rewinding to that point would
+                # delete the history and provenance of every step that already
+                # succeeded -- leaving their evidence on disk with nothing
+                # referring to it, and re-issuing turn ids that are already in
+                # use. What ran, ran; the analyst is told why it stopped.
+                #
+                # Only the recoverable failures. An unexpected `RuntimeError`
+                # must still propagate: this repo overloads bare RuntimeError to
+                # mean "a bug, tear the session down and release the
+                # workspace", and catching it here would both swallow real
+                # crashes and leak the temporary workspace. `RecoverableBackendError`
+                # lives in the backend base module so this can name exactly the
+                # recoverable case without importing upward.
+                error = f"{type(exc).__name__}: {exc}"
+                stop_reason = f"{STOP_BACKEND_ERROR}: {error}"
+                self._close_incomplete_turn()
+                break
+
+            steps.append(step)
+            model_calls += step.model_calls
+            if step.action_executed:
+                actions += 1
+
+            record = ledger.classify(len(records) + 1, step)
+            records.append(record)
+            if on_step is not None:
+                on_step(step, record)
+
+            if record.classification == COMPLETE:
+                stop_reason = STOP_COMPLETE
+                break
+
+            if record.classification == ERROR:
+                consecutive_errors += 1
+                consecutive_no_progress = 0
+                if consecutive_errors >= max_errors:
+                    # Carry the last refusal: "repeated action failures" alone
+                    # tells the analyst a bound was hit but not what failed.
+                    stop_reason = (
+                        f"{STOP_ERROR}: {record.detail}" if record.detail else STOP_ERROR
+                    )
+                    break
+            elif record.classification == NO_PROGRESS:
+                consecutive_no_progress += 1
+                consecutive_errors = 0
+                if consecutive_no_progress >= max_no_progress:
+                    stop_reason = (
+                        f"{STOP_NO_PROGRESS}: action repeated"
+                        if record.repeated_action
+                        else STOP_NO_PROGRESS
+                    )
+                    break
+            else:
+                consecutive_no_progress = 0
+                consecutive_errors = 0
+
+            # The rule is "continue unless a bound trips", not "continue only
+            # after NEW_CONTENT". A single ERROR or NO_PROGRESS step still
+            # earns one more call, because a model that mis-formed a call or
+            # re-read something it already had is often one step from useful
+            # work, and refusing to ask again would make the loop less capable
+            # than an analyst typing `continue` by hand. What makes that safe
+            # is that those steps are the only ones counted: two consecutively
+            # ends the run, and the totals below bound it regardless.
+            #
+            # Checked after the counters above so a run that is both stagnating
+            # and out of budget reports the reason it actually hit first.
+            if actions >= max_actions:
+                stop_reason = STOP_MAX_ACTIONS
+                break
+
+            message = AUTONOMOUS_CONTINUATION_MESSAGE
+
+        return AutonomousRunResult(
+            steps=tuple(steps),
+            progress=tuple(records),
+            stop_reason=stop_reason,
+            model_calls=model_calls,
+            actions_executed=actions,
+            cancelled=cancelled,
+        )
+
+    def _close_incomplete_turn(self) -> None:
+        """Drop a trailing analyst turn whose step never produced a reply.
+
+        `step()` appends the analyst line before it calls the model, so a step
+        that was cancelled or failed mid-call leaves an unanswered `user` entry
+        at the end of an append-only history. Two consecutive user turns is a
+        shape the history is not supposed to contain, and every later step
+        re-renders the whole thing, so the damage is permanent if it is left.
+
+        Only a trailing user message is removed, and only the one this run put
+        there: anything a step actually answered is already followed by an
+        assistant turn and is untouched.
+        """
+        if self.messages and self.messages[-1].get("role") == "user":
+            self.messages.pop()
+            self.analyst_turns = max(0, self.analyst_turns - 1)
 
     def close(self) -> None:
         """Release the session workspace. Idempotent."""
