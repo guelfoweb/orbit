@@ -575,10 +575,7 @@ class AnalysisRuntime:
         self.analyst_turns += 1
         self.messages.append({"role": "user", "content": analyst_message})
 
-        deltas: list[str] = []
-
         def _capture(text: str) -> None:
-            deltas.append(text)
             if on_delta is not None and text:
                 on_delta(text)
 
@@ -844,10 +841,8 @@ class AnalysisRuntime:
             return AnalysisReport(text=NO_EVIDENCE_REPORT, model_calls=0, evidence_ids=())
 
         messages = self._report_messages(question, records)
-        deltas: list[str] = []
 
         def _capture(text: str) -> None:
-            deltas.append(text)
             if on_delta is not None and text:
                 on_delta(text)
 
