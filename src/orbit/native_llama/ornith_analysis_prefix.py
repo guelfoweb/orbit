@@ -37,6 +37,21 @@ from .qwen_route_prefix import (
 
 ORNITH_ANALYSIS_PREFIX_ENV = "ORBIT_ORNITH_ANALYSIS_PREFIX_REUSE"
 
+# Whether the ANALYSIS prefix is captured at startup rather than on first use.
+#
+# Separate from the switch above, and default-off, because the two answer
+# different questions. That one asks whether this prefix may be reused at all;
+# this one asks who pays for the capture. Reuse is free -- the first analysis
+# step captures on its way past -- so it is on by default. An eager capture is
+# not: it is a measured ~11s of startup prefill and ~74MB of resident
+# checkpoint, paid by every server start whether or not an analysis ever runs.
+# A server that only ever chats would pay it for nothing, so the operator asks
+# for it rather than opting out.
+#
+# With this off the lazy path is exactly what it was: the first ANALYSIS step
+# captures the checkpoint, and every later session restores it.
+ORNITH_ANALYSIS_PREWARM_ENV = "ORBIT_ORNITH_ANALYSIS_PREFIX_PREWARM"
+
 # The lineage key. Every per-profile registry, identity and invalidation path
 # in the client is keyed by a profile id, so the analysis prefix takes a key of
 # its own rather than sharing Ornith's route key. It names a lineage, not a
@@ -80,6 +95,34 @@ def resolve_ornith_analysis_prefix_reuse(
     )
 
 
+def resolve_ornith_analysis_prefix_prewarm(
+    environ: Mapping[str, str] | None = None,
+    *,
+    default_enabled: bool = False,
+) -> QwenRoutePrefixConfig:
+    """Whether to capture the ANALYSIS prefix eagerly at startup.
+
+    Same grammar and same fail-closed handling as the reuse switch beside it --
+    `1` on, `0` off, anything else off with a validation error -- so an operator
+    who knows one knows the other. Only the default differs, and it differs
+    because this one costs startup time rather than saving it.
+    """
+    env = os.environ if environ is None else environ
+    configured = env.get(ORNITH_ANALYSIS_PREWARM_ENV)
+    if configured is None:
+        return QwenRoutePrefixConfig(enabled=default_enabled, source="default")
+    value = configured.strip()
+    if value == "1":
+        return QwenRoutePrefixConfig(enabled=True, source="stable")
+    if value == "0":
+        return QwenRoutePrefixConfig(enabled=False, source="stable")
+    return QwenRoutePrefixConfig(
+        enabled=False,
+        source="stable",
+        validation_error="invalid_ornith_analysis_prefix_prewarm_value",
+    )
+
+
 def derive_ornith_analysis_prefix_spec(
     *,
     system_prompt: str,
@@ -101,11 +144,13 @@ def derive_ornith_analysis_prefix_spec(
 __all__ = [
     "ORNITH_ANALYSIS_LINEAGE_ID",
     "ORNITH_ANALYSIS_PREFIX_ENV",
+    "ORNITH_ANALYSIS_PREWARM_ENV",
     "ORNITH_ANALYSIS_PREFIX_FORMAT_VERSION",
     "ORNITH_ANALYSIS_PREFIX_TOKEN_COUNT",
     "ORNITH_ANALYSIS_TOKENIZER_IDENTITY",
     "QwenRoutePrefixSpec",
     "QwenRoutePrefixStatus",
     "derive_ornith_analysis_prefix_spec",
+    "resolve_ornith_analysis_prefix_prewarm",
     "resolve_ornith_analysis_prefix_reuse",
 ]
