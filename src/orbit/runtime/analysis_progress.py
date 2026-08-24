@@ -17,11 +17,22 @@ guessed at novelty from the text of an observation. Production has
 `raw_sha256` and records a sha256 per artifact, so novelty here is read from
 attested state rather than inferred from prose.
 
+Two things are asked of every executed action, and both must pass for it to
+count as progress:
+
+  1. Is this a strategy that has not already been tried against this state?
+     The fingerprint is (code sha, source identity, pre-action workspace
+     state). Re-running the same program against the same inputs is the same
+     experiment, and an experiment already run cannot produce new knowledge --
+     however different its stdout looks. That is what makes a program printing
+     a timestamp, a pid or a random value stop counting as discovery.
+  2. Did it actually add attested state -- an evidence content hash not seen
+     before, or an artifact digest new or changed for its handle?
+
 Classification of one executed action:
 
-  NEW_CONTENT   the action produced an evidence content hash not seen before,
-                or an artifact digest that is new or changed for its handle.
-  NO_PROGRESS   the action executed and re-derived only what is already known.
+  NEW_CONTENT   an unseen strategy that also added attested state.
+  NO_PROGRESS   a repeated strategy, or a strategy that added nothing.
   ERROR         the action was attempted but not executed, or the model
                 produced a structurally invalid call.
   COMPLETE      the model returned prose and attempted no action. Control
@@ -34,6 +45,7 @@ classifies as COMPLETE, never NEW_CONTENT, however much the text asserts.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 NEW_CONTENT = "NEW_CONTENT"
@@ -53,7 +65,17 @@ class ProgressRecord:
     new_artifacts: tuple[str, ...] = ()
     changed_artifacts: tuple[str, ...] = ()
     repeated_action: bool = False
+    repeated_strategy: bool = False
     detail: str | None = None
+
+    @property
+    def is_new_content(self) -> bool:
+        """Whether this step added verifiably new state.
+
+        Read by the loop to decide whether a run may continue past its action
+        budget: only a step that actually advanced the analysis earns that.
+        """
+        return self.classification == NEW_CONTENT
 
 
 @dataclass
@@ -67,6 +89,7 @@ class ProgressLedger:
     known_evidence: set[str] = field(default_factory=set)
     artifacts: dict[str, str] = field(default_factory=dict)
     action_fingerprints: set[tuple[str, str]] = field(default_factory=set)
+    strategy_fingerprints: set[str] = field(default_factory=set)
     history: list[ProgressRecord] = field(default_factory=list)
 
     def classify(self, index: int, step: object) -> ProgressRecord:
@@ -102,10 +125,34 @@ class ProgressLedger:
         evidence_sha = getattr(evidence, "raw_sha256", None)
         code_sha = self._code_sha256(step, evidence)
 
+        # Computed before the delta is absorbed: the state a strategy is
+        # judged against is the state it actually ran against, not the one it
+        # produced.
+        strategy = self._strategy_fingerprint(step, evidence, code_sha)
+        repeated_strategy = strategy in self.strategy_fingerprints
+
         new_artifacts, changed_artifacts = self._artifact_delta(evidence)
         new_evidence = bool(evidence_sha) and evidence_sha not in self.known_evidence
+        added_state = bool(new_evidence or new_artifacts or changed_artifacts)
 
-        if new_evidence or new_artifacts or changed_artifacts:
+        # A repeated strategy is not discovery -- unless it materialised or
+        # changed an artifact. Writing a durable handle is transport, not
+        # inference: the bytes become addressable and re-attestable, which
+        # changes what the session can do next rather than restating what it
+        # already knew. Re-writing a handle with identical bytes is neither,
+        # and the delta is empty there.
+        #
+        # This exception is deliberately not bounded further. A program that
+        # writes on every run may be carving the next stage out of a packed
+        # artifact -- exactly the work autonomous analysis exists for -- or it
+        # may be rewriting random bytes and going nowhere. No deterministic
+        # signal available here separates them: both reuse one program, both
+        # write every run, and both produce a new evidence hash because the
+        # observation names the digest they just wrote. Every rule strong
+        # enough to stop the second was measured to halt the first mid-unpack,
+        # which is the worse failure and the one this mechanism exists to
+        # prevent. The action bound ends the spinning case, and ends it safely.
+        if added_state and (not repeated_strategy or new_artifacts or changed_artifacts):
             classification = NEW_CONTENT
         else:
             classification = NO_PROGRESS
@@ -121,11 +168,38 @@ class ProgressLedger:
             new_artifacts=new_artifacts,
             changed_artifacts=changed_artifacts,
             repeated_action=repeated,
+            repeated_strategy=repeated_strategy,
         )
         if evidence_sha:
             self.known_evidence.add(evidence_sha)
         self.action_fingerprints.add(fingerprint)
+        self.strategy_fingerprints.add(strategy)
         return self._append(record)
+
+    def _strategy_fingerprint(
+        self, step: object, evidence: object, code_sha: str | None
+    ) -> str:
+        """Identity of the experiment, independent of what it printed.
+
+        The same program, over the same input, against the same workspace, is
+        the same experiment. Its stdout may still differ -- a timestamp, a pid,
+        a random value, a dict that iterates in a new order -- and none of that
+        is a discovery about the artifact.
+
+        The workspace component is the set of artifact handles and digests the
+        ledger had already absorbed when this action ran, so a program that is
+        genuinely re-run after the workspace changed is a different experiment
+        and is judged on its own merits. Nothing here inspects or normalises
+        code or output: it is three hashes of state the runtime already had.
+        """
+        metadata = getattr(evidence, "metadata", None) or {}
+        result = getattr(step, "result", None)
+        source = getattr(result, "input_sha256", None)
+        if not source and isinstance(metadata, dict):
+            source = metadata.get("input_sha256") or metadata.get("analysis_source_sha256")
+        workspace = ";".join(f"{h}={d}" for h, d in sorted(self.artifacts.items()))
+        components = "\x00".join([code_sha or "", str(source or ""), workspace])
+        return hashlib.sha256(components.encode("utf-8")).hexdigest()
 
     def _append(self, record: ProgressRecord) -> ProgressRecord:
         self.history.append(record)
