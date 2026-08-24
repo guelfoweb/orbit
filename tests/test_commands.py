@@ -22,6 +22,30 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("Compact conversation memory or old tool results.", help_text())
         self.assertIn("/max-tokens [n]", help_text())
         self.assertIn("/continue", help_text())
+
+    def test_each_help_category_appears_once(self) -> None:
+        """A category split across the registry renders its heading twice.
+
+        `help_text` emits a heading whenever the category changes while walking
+        COMMANDS in order, so two blocks sharing a name but separated by another
+        category produce it twice. That is how the analysis commands first
+        shipped: declared as "Session" but placed after "Runtime".
+        """
+        from collections import Counter
+
+        headings = [
+            line for line in help_text().splitlines()
+            if line and not line.startswith("/")
+        ]
+        repeated = [name for name, count in Counter(headings).items() if count > 1]
+        self.assertEqual(repeated, [], f"category rendered more than once: {repeated}")
+
+    def test_the_analysis_commands_are_grouped_together(self) -> None:
+        text = help_text()
+        self.assertIn("Analysis", text)
+        analysis_block = text[text.index("Analysis"):]
+        for command in ("/analysis <path>", "/report [question]", "/chat"):
+            self.assertIn(command, analysis_block)
         self.assertIn("/sessions clear", help_text())
         self.assertIn("/think [off|on]", help_text())
         self.assertIn("/status [ctx]", help_text())
