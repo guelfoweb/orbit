@@ -36,12 +36,16 @@ from orbit.runtime.analysis_progress import (
 )
 from orbit.runtime.analysis_runtime import (
     ANALYSIS_AUTONOMY_ENV,
+    AUTONOMOUS_REPLAN_MESSAGE,
     ANALYSIS_TOOL_NAME,
     AUTONOMOUS_CONTINUATION_MESSAGE,
     MAX_AUTONOMOUS_ACTIONS,
     MAX_AUTONOMOUS_MODEL_CALLS,
     MAX_CONSECUTIVE_ERRORS,
     MAX_CONSECUTIVE_NO_PROGRESS,
+    MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS,
+    SOFT_MAX_AUTONOMOUS_ACTIONS,
+    STOP_SOFT_MAX_ACTIONS,
     STOP_BACKEND_ERROR,
     STOP_CANCELLED,
     STOP_COMPLETE,
@@ -126,7 +130,7 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
             tool_response(emit("first")),
             prose_response("nothing further"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         # Two calls: the action earned the second one.
         self.assertEqual(backend.calls, 2)
@@ -142,12 +146,14 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
         backend = ScriptedBackend(
             tool_response(emit("first")), prose_response("done")
         )
-        self.runtime(backend).run_autonomous("inspect it")
+        self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         second_prompt = backend.seen_messages[1]
         analyst_lines = [m for m in second_prompt if m.get("role") == "user"]
         self.assertEqual(analyst_lines[-1]["content"], AUTONOMOUS_CONTINUATION_MESSAGE)
-        self.assertEqual(AUTONOMOUS_CONTINUATION_MESSAGE, "continue")
+        # Generic: it asks for one new useful step and names nothing specific.
+        self.assertIn("new useful", AUTONOMOUS_CONTINUATION_MESSAGE)
+        self.assertIn("Do not repeat", AUTONOMOUS_CONTINUATION_MESSAGE)
 
     def test_several_new_content_steps_continue(self) -> None:
         backend = ScriptedBackend(
@@ -156,7 +162,7 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
             tool_response(emit("three")),
             prose_response("that is all"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(run.actions_executed, 3)
         self.assertEqual(run.model_calls, 4)
@@ -167,7 +173,7 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
 
     def test_prose_with_no_action_stops_immediately(self) -> None:
         backend = ScriptedBackend(prose_response("I have nothing to run"))
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(backend.calls, 1)
         self.assertEqual(run.actions_executed, 0)
@@ -179,7 +185,7 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
         backend = ScriptedBackend(
             prose_response("I have decoded stage two and will continue shortly")
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(backend.calls, 1)
         self.assertNotIn(NEW_CONTENT, [r.classification for r in run.progress])
@@ -191,7 +197,7 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
             tool_response(write_artifact("stage.bin", "bbb")),
             prose_response("done"),
         )
-        run = self.runtime(backend).run_autonomous("transform it")
+        run = self.runtime(backend).run_autonomous("transform it", finalize=False)
 
         self.assertEqual(run.actions_executed, 2)
         second = run.progress[1]
@@ -204,7 +210,7 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
             tool_response(emit("two")),
             prose_response("done"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         recorded = [s.evidence for s in run.steps if s.evidence is not None]
         self.assertEqual(len(recorded), 2)
@@ -219,7 +225,7 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
             tool_response(emit("x"), count=2),
             prose_response("done"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         first = run.steps[0]
         self.assertTrue(first.action_attempted)
@@ -235,7 +241,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
         backend = ScriptedBackend(
             tool_response(code), tool_response(code), tool_response(code)
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
             [r.classification for r in run.progress],
@@ -253,7 +259,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
             tool_response("x = 1\n" + emit("same")),
             tool_response("y = 2\n" + emit("same")),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
             [r.classification for r in run.progress],
@@ -271,7 +277,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
         """
         code = write_artifact("same.bin", "identical")
         backend = ScriptedBackend(*[tool_response(code)] * 5)
-        run = self.runtime(backend).run_autonomous("transform it")
+        run = self.runtime(backend).run_autonomous("transform it", finalize=False)
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS), run.stop_reason)
         # No step after the first ever reports a changed digest for the handle.
@@ -284,7 +290,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
     def test_stagnation_bound_stops_the_run(self) -> None:
         code = emit("same")
         backend = ScriptedBackend(*[tool_response(code)] * 6)
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS), run.stop_reason)
         self.assertEqual(backend.calls, 1 + MAX_CONSECUTIVE_NO_PROGRESS)
@@ -297,7 +303,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
             tool_response(emit("b")),
             prose_response("done"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
             [r.classification for r in run.progress],
@@ -309,7 +315,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
 class ErrorsAreBoundedTests(AutonomousTestBase):
     def test_consecutive_errors_stop_the_run(self) -> None:
         backend = ScriptedBackend(*[tool_response(emit("x"), count=2)] * 5)
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.stop_reason.startswith(STOP_ERROR), run.stop_reason)
         self.assertEqual(backend.calls, MAX_CONSECUTIVE_ERRORS)
@@ -326,7 +332,7 @@ class ErrorsAreBoundedTests(AutonomousTestBase):
             prompt_tokens_per_second=None, generation_tokens_per_second=None,
         )
         backend = ScriptedBackend(broken, broken, broken)
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.stop_reason.startswith(STOP_ERROR), run.stop_reason)
         self.assertEqual(backend.calls, MAX_CONSECUTIVE_ERRORS)
@@ -341,7 +347,7 @@ class ErrorsAreBoundedTests(AutonomousTestBase):
             tool_response(emit("x"), count=2),
             prose_response("done"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
             [r.classification for r in run.progress],
@@ -356,7 +362,7 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
             *[tool_response(emit(f"v{i}")) for i in range(MAX_AUTONOMOUS_ACTIONS + 3)]
         )
         run = self.runtime(backend).run_autonomous(
-            "inspect it", max_model_calls=MAX_AUTONOMOUS_ACTIONS + 3
+            "inspect it", max_model_calls=MAX_AUTONOMOUS_ACTIONS + 3, finalize=False
         )
 
         self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
@@ -368,7 +374,7 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
             *[tool_response(emit(f"v{i}")) for i in range(12)]
         )
         run = self.runtime(backend).run_autonomous(
-            "inspect it", max_model_calls=3, max_actions=99
+            "inspect it", max_model_calls=3, max_actions=99, finalize=False
         )
 
         self.assertEqual(run.stop_reason, STOP_MAX_MODEL_CALLS)
@@ -376,8 +382,9 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
         self.assertEqual(backend.calls, 3)
 
     def test_bounds_are_small_and_explicit(self) -> None:
-        self.assertEqual(MAX_AUTONOMOUS_ACTIONS, 8)
-        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 10)
+        self.assertEqual(SOFT_MAX_AUTONOMOUS_ACTIONS, 8)
+        self.assertEqual(MAX_AUTONOMOUS_ACTIONS, 12)
+        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 15)
         self.assertEqual(MAX_CONSECUTIVE_NO_PROGRESS, 2)
         self.assertEqual(MAX_CONSECUTIVE_ERRORS, 2)
         # The call bound must leave room for calls that execute nothing.
@@ -398,7 +405,7 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
         for _ in range(20):
             script.append(tool_response(same, count=2))  # ERROR
             script.append(tool_response(same))           # NO_PROGRESS
-        run = self.runtime(ScriptedBackend(*script)).run_autonomous("inspect it")
+        run = self.runtime(ScriptedBackend(*script)).run_autonomous("inspect it", finalize=False)
 
         classifications = [r.classification for r in run.progress]
         self.assertIn(ERROR, classifications)
@@ -413,7 +420,7 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
             tool_response(emit("two")),
             prose_response("done"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(backend.calls, run.model_calls)
         for offered in backend.seen_tools:
@@ -429,7 +436,7 @@ class HumanControlTests(AutonomousTestBase):
                 return super().chat_stream(messages, **kwargs)
 
         backend = CancellingBackend(tool_response(emit("one")))
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.cancelled)
         self.assertEqual(run.stop_reason, STOP_CANCELLED)
@@ -457,7 +464,7 @@ class HumanControlTests(AutonomousTestBase):
             tool_response(emit("one")), tool_response(emit("two"))
         )
         runtime = self.runtime(backend)
-        run = runtime.run_autonomous("inspect it")
+        run = runtime.run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.cancelled)
         self.assertEqual(run.actions_executed, 2)
@@ -475,7 +482,7 @@ class HumanControlTests(AutonomousTestBase):
             def chat_stream(self, messages, **kwargs):
                 raise KeyboardInterrupt
 
-        run = self.runtime(CancelImmediately()).run_autonomous("inspect it")
+        run = self.runtime(CancelImmediately()).run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.cancelled)
         self.assertEqual(run.steps, ())
@@ -491,10 +498,10 @@ class HumanControlTests(AutonomousTestBase):
             prose_response("done"),
         )
         runtime = self.runtime(backend)
-        first = runtime.run_autonomous("inspect it")
+        first = runtime.run_autonomous("inspect it", finalize=False)
         history_after_first = len(runtime.messages)
 
-        second = runtime.run_autonomous("now look at the header instead")
+        second = runtime.run_autonomous("now look at the header instead", finalize=False)
 
         self.assertEqual(first.stop_reason, STOP_COMPLETE)
         self.assertEqual(second.actions_executed, 1)
@@ -526,7 +533,7 @@ class RecoverableBackendFailureTests(AutonomousTestBase):
         from orbit.backend.llama_server import LlamaServerError
 
         runtime = self.runtime(self._failing(LlamaServerError("backend died")))
-        run = runtime.run_autonomous("inspect it")  # must not raise
+        run = runtime.run_autonomous("inspect it", finalize=False)  # must not raise
 
         self.assertTrue(run.stop_reason.startswith(STOP_BACKEND_ERROR))
         self.assertIn("LlamaServerError", run.stop_reason)
@@ -537,7 +544,7 @@ class RecoverableBackendFailureTests(AutonomousTestBase):
         from orbit.backend.llama_server import LlamaServerError
 
         runtime = self.runtime(self._failing(LlamaServerError("backend died")))
-        run = runtime.run_autonomous("inspect it")
+        run = runtime.run_autonomous("inspect it", finalize=False)
 
         for step in run.steps:
             self.assertTrue(self.store.reattest_exact(step.evidence.evidence_id))
@@ -568,7 +575,7 @@ class RecoverableBackendFailureTests(AutonomousTestBase):
         for exc in (LlamaServerError("died"), KeyboardInterrupt()):
             with self.subTest(exc=type(exc).__name__):
                 runtime = self.runtime(self._failing(exc))
-                runtime.run_autonomous("inspect it")
+                runtime.run_autonomous("inspect it", finalize=False)
 
                 roles = [m["role"] for m in runtime.messages]
                 self.assertNotEqual(roles[-1], "user")
@@ -585,7 +592,7 @@ class RecoverableBackendFailureTests(AutonomousTestBase):
             tool_response(emit("one")), prose_response("done")
         )
         runtime = self.runtime(backend)
-        runtime.run_autonomous("inspect it")
+        runtime.run_autonomous("inspect it", finalize=False)
         before = [dict(m) for m in runtime.messages]
 
         # History ends with an assistant turn; the guard must do nothing.
@@ -602,7 +609,7 @@ class RecoverableBackendFailureTests(AutonomousTestBase):
         """
         backend = ScriptedBackend(tool_response(emit("one")), prose_response("done"))
         runtime = self.runtime(backend)
-        runtime.run_autonomous("inspect it")
+        runtime.run_autonomous("inspect it", finalize=False)
 
         turns_before = runtime.analyst_turns
         runtime.messages.append({"role": "user", "content": "unanswered"})
@@ -631,7 +638,7 @@ class RecoverableBackendFailureTests(AutonomousTestBase):
         runtime = self.runtime(Exploding(tool_response(emit("one"))))
 
         with self.assertRaises(RuntimeError) as caught:
-            runtime.run_autonomous("inspect it")
+            runtime.run_autonomous("inspect it", finalize=False)
         self.assertEqual(str(caught.exception), "backend exploded")
 
     def test_a_recoverable_error_is_absorbed_but_a_bug_is_not(self) -> None:
@@ -665,8 +672,8 @@ class RecoverableBackendFailureTests(AutonomousTestBase):
             prose_response("done"),
         )
         runtime = self.runtime(backend)
-        first = runtime.run_autonomous("inspect it")
-        second = runtime.run_autonomous("look at the header instead")
+        first = runtime.run_autonomous("inspect it", finalize=False)
+        second = runtime.run_autonomous("look at the header instead", finalize=False)
 
         self.assertTrue(first.stop_reason.startswith(STOP_BACKEND_ERROR))
         self.assertEqual(second.actions_executed, 1)
@@ -725,7 +732,7 @@ class RollingLineageTests(AutonomousTestBase):
             tool_response(emit("two")),
             prose_response("done"),
         )
-        run = self.runtime(backend).run_autonomous("inspect it")
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(len(seen), 3)
         self.assertEqual(set(seen), {ANALYSIS_STEP_PHASE})
@@ -747,7 +754,7 @@ class RollingLineageTests(AutonomousTestBase):
             tool_response(emit("two")),
             prose_response("done"),
         )
-        self.runtime(backend).run_autonomous("inspect it")
+        self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(len(backend.seen_messages), 3)
         for earlier, later in zip(backend.seen_messages, backend.seen_messages[1:]):
@@ -768,7 +775,7 @@ class RollingLineageTests(AutonomousTestBase):
         backend = PhaseObservingBackend(
             tool_response(emit("one")), prose_response("done")
         )
-        self.runtime(backend).run_autonomous("inspect it")
+        self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         for phase in seen:
             self.assertEqual(phase, ANALYSIS_STEP_PHASE)
@@ -787,7 +794,7 @@ class IntermediateEvidenceIsShownTests(AutonomousTestBase):
             prose_response("done"),
         )
         self.runtime(backend).run_autonomous(
-            "inspect it", on_step=lambda step, record: rendered.append(step)
+            "inspect it", on_step=lambda step, record: rendered.append(step), finalize=False
         )
 
         # The hook the terminal renders through fires once per completed step.
@@ -823,7 +830,7 @@ class IntermediateEvidenceIsShownTests(AutonomousTestBase):
 
         try:
             self.runtime(backend).run_autonomous(
-                "inspect it", on_delta=renderer.write, on_step=show
+                "inspect it", on_delta=renderer.write, on_step=show, finalize=False
             )
         finally:
             renderer.finish()
@@ -857,7 +864,7 @@ class IntermediateEvidenceIsShownTests(AutonomousTestBase):
             def chat_stream(self, messages, **kwargs):
                 raise LlamaServerError("upstream is down")
 
-        run = self.runtime(DeadBackend()).run_autonomous("inspect it")
+        run = self.runtime(DeadBackend()).run_autonomous("inspect it", finalize=False)
 
         self.assertIsNone(run.last_step)
         self.assertFalse(run.cancelled, "a dead backend is not a cancellation")
@@ -868,7 +875,7 @@ class IntermediateEvidenceIsShownTests(AutonomousTestBase):
             def chat_stream(self, messages, **kwargs):
                 raise KeyboardInterrupt
 
-        run = self.runtime(Interrupting()).run_autonomous("inspect it")
+        run = self.runtime(Interrupting()).run_autonomous("inspect it", finalize=False)
 
         self.assertIsNone(run.last_step)
         self.assertTrue(run.cancelled)
@@ -961,3 +968,784 @@ class ProgressLedgerUnitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- progress reliability: strategy fingerprint, replan, grounded ending ----
+
+
+def nondet(tag: str) -> str:
+    """A program whose stdout differs every run but whose experiment does not."""
+    return (
+        "import os, random, time\n"
+        f"print({tag!r}, random.random(), time.time(), os.getpid(), end='')"
+    )
+
+
+class StrategyFingerprintTests(AutonomousTestBase):
+    """Re-running one experiment is not discovery, whatever it prints.
+
+    Novelty by evidence hash alone cannot see this: a program that prints a
+    timestamp, a pid or a random value produces a different hash every time and
+    looked like progress on every repetition. The fingerprint asks the other
+    question -- has this strategy already been tried against this state -- and
+    only an unseen strategy that also added attested state counts.
+    """
+
+    def test_repeated_action_with_random_output_is_not_progress(self) -> None:
+        run = self.runtime(
+            ScriptedBackend(*[tool_response(nondet("scan"))] * 8)
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NO_PROGRESS, NO_PROGRESS],
+        )
+        self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
+        self.assertTrue(run.progress[-1].repeated_strategy)
+        # It stops far short of the action bound it used to run to.
+        self.assertEqual(run.actions_executed, 3)
+
+    def test_repeated_action_with_timestamp_output_is_not_progress(self) -> None:
+        code = "import time\nprint('t', time.time(), end='')"
+        run = self.runtime(ScriptedBackend(*[tool_response(code)] * 8)).run_autonomous(
+            "inspect it", finalize=False
+        )
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NO_PROGRESS, NO_PROGRESS],
+        )
+
+    def test_repeated_action_with_pid_output_is_not_progress(self) -> None:
+        code = "import os\nprint('pid', os.getpid(), os.urandom(8).hex(), end='')"
+        run = self.runtime(ScriptedBackend(*[tool_response(code)] * 8)).run_autonomous(
+            "inspect it", finalize=False
+        )
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NO_PROGRESS, NO_PROGRESS],
+        )
+
+    def test_a_new_action_producing_new_evidence_is_still_progress(self) -> None:
+        """The fingerprint must not suppress genuine work."""
+        run = self.runtime(
+            ScriptedBackend(
+                tool_response(emit("a")),
+                tool_response(emit("b")),
+                tool_response(emit("c")),
+                prose_response("done"),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NEW_CONTENT, NEW_CONTENT, COMPLETE],
+        )
+
+    def test_duplicate_evidence_from_a_new_action_is_not_progress(self) -> None:
+        """Both questions must pass: an unseen strategy that adds nothing fails."""
+        run = self.runtime(
+            ScriptedBackend(
+                tool_response(emit("same")),
+                tool_response("x = 1\n" + emit("same")),
+                tool_response("y = 2\n" + emit("same")),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NO_PROGRESS, NO_PROGRESS],
+        )
+
+    def test_the_same_code_after_the_workspace_changed_is_a_new_experiment(
+        self,
+    ) -> None:
+        """Re-running a program over changed inputs is not a repeat.
+
+        Without the workspace component the fingerprint would be (code, source)
+        alone, and a program legitimately re-run after an earlier step
+        materialised a new artifact would be suppressed as a repeat -- exactly
+        the multi-stage case autonomous analysis exists for.
+        """
+        read_work = (
+            "import pathlib\n"
+            "p = pathlib.Path('/workspace/work/stage.txt')\n"
+            "print(p.read_text() if p.exists() else 'absent', end='')"
+        )
+        run = self.runtime(
+            ScriptedBackend(
+                tool_response(read_work),                       # 'absent'
+                tool_response(write_artifact("stage.txt", "one")),
+                tool_response(read_work),                       # same code, new state
+                prose_response("done"),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NEW_CONTENT, NEW_CONTENT, COMPLETE],
+        )
+        self.assertFalse(run.progress[2].repeated_strategy)
+
+    def test_an_iterative_carver_is_never_suppressed(self) -> None:
+        """The case that matters most: one program, real progress every run.
+
+        A carver that extracts the next embedded object each time reuses one
+        program and writes on every run. It must keep going. An earlier version
+        of this classifier bounded how often one program could claim artifact
+        progress, and it halted this exact trajectory after two objects while
+        three more remained -- a confidently incomplete analysis, which is
+        worse than a slow one.
+        """
+        carver = (
+            "import pathlib\n"
+            "w = pathlib.Path('/workspace/work')\n"
+            "n = len(list(w.glob('obj*.bin')))\n"
+            "(w / f'obj{n}.bin').write_text('object-%d' % n)\n"
+            "print('carved object', n, end='')"
+        )
+        run = self.runtime(
+            ScriptedBackend(*[tool_response(carver)] * MAX_AUTONOMOUS_ACTIONS)
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT] * MAX_AUTONOMOUS_ACTIONS,
+        )
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+
+    def test_a_program_that_only_rewrites_random_bytes_is_still_bounded(self) -> None:
+        """The honest limit of the classifier, recorded rather than papered over.
+
+        A program rewriting random bytes into an artifact is indistinguishable
+        here from one carving the next stage: same program, writes every run,
+        and a new evidence hash each time because the observation names the
+        digest just written. No deterministic signal available to the ledger
+        separates them, so this case is not caught by classification at all --
+        it is ended by the action bound. That is a bounded, safe stop, and the
+        alternative was suppressing genuine unpacking.
+        """
+        code = (
+            "import random, pathlib\n"
+            "pathlib.Path('/workspace/work/a.bin').write_text(str(random.random()))\n"
+            "print('wrote', end='')"
+        )
+        run = self.runtime(ScriptedBackend(*[tool_response(code)] * 12)).run_autonomous(
+            "inspect it", finalize=False
+        )
+
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        self.assertEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
+
+    def test_genuine_multi_stage_work_is_not_suppressed(self) -> None:
+        """Distinct programs building on each other must run to the bound.
+
+        This is the case autonomous analysis exists for, and it is what the
+        artifact credit must not break: each stage is a different program, so
+        none of them exhausts its own credit.
+        """
+        stages = [
+            tool_response(
+                "import pathlib\n"
+                f"pathlib.Path('/workspace/work/s{i}.bin').write_text('{i}')\n"
+                f"print('stage{i}', end='')"
+            )
+            for i in range(1, MAX_AUTONOMOUS_ACTIONS + 1)
+        ]
+        run = self.runtime(ScriptedBackend(*stages)).run_autonomous(
+            "inspect it", finalize=False
+        )
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT] * MAX_AUTONOMOUS_ACTIONS,
+        )
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+
+    def test_the_fingerprint_covers_code_source_and_workspace(self) -> None:
+        """All three components are load-bearing, checked directly."""
+        from orbit.runtime.analysis_progress import ProgressLedger
+
+        ledger = ProgressLedger()
+
+        class R:
+            def __init__(self, code, src):
+                self.code_sha256 = code
+                self.input_sha256 = src
+
+        class S:
+            def __init__(self, code, src):
+                self.result = R(code, src)
+
+        base = ledger._strategy_fingerprint(S("c1", "s1"), None, "c1")
+        self.assertNotEqual(base, ledger._strategy_fingerprint(S("c2", "s1"), None, "c2"))
+        self.assertNotEqual(base, ledger._strategy_fingerprint(S("c1", "s2"), None, "c1"))
+        # Workspace state participates too.
+        ledger.artifacts["/workspace/work/a"] = "d1"
+        self.assertNotEqual(base, ledger._strategy_fingerprint(S("c1", "s1"), None, "c1"))
+
+    def test_the_fingerprint_does_not_inspect_code_or_output(self) -> None:
+        """It is three hashes of state, not an interpreter."""
+        import inspect
+
+        from orbit.runtime import analysis_progress
+
+        # Executable code only: the docstring says the method does not
+        # normalise, and a check that tripped on its own disclaimer would push
+        # that explanation out of the file.
+        import textwrap
+
+        source = _without_docstrings(
+            textwrap.dedent(
+                inspect.getsource(analysis_progress.ProgressLedger._strategy_fingerprint)
+            )
+        )
+        for banned in ("ast.", "re.", "normali", ".lower()", ".split(", ".strip()"):
+            self.assertNotIn(banned, source, f"{banned!r} suggests inspection")
+        self.assertIn("sha256", source)
+
+
+class BoundedReplanTests(AutonomousTestBase):
+    """Exactly one replan, and only on the first unproductive step."""
+
+    def _messages(self, backend) -> list[str]:
+        return [
+            m["content"]
+            for msgs in backend.seen_messages
+            for m in msgs[-1:]
+            if m["role"] == "user"
+        ]
+
+    def test_first_no_progress_inserts_exactly_one_replan(self) -> None:
+        same = emit("x")
+        backend = ScriptedBackend(
+            tool_response(same), tool_response(same),
+            tool_response(emit("new")), prose_response("done"),
+        )
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        sent = self._messages(backend)
+        self.assertEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), 1)
+        self.assertEqual(run.replans, 1)
+        # It is sent after the unproductive step, not before.
+        self.assertEqual(sent.index(AUTONOMOUS_REPLAN_MESSAGE), 2)
+
+    def test_the_replan_message_is_model_visible(self) -> None:
+        same = emit("x")
+        backend = ScriptedBackend(
+            tool_response(same), tool_response(same),
+            tool_response(emit("new")), prose_response("done"),
+        )
+        self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        third_prompt = backend.seen_messages[2]
+        self.assertEqual(third_prompt[-1]["content"], AUTONOMOUS_REPLAN_MESSAGE)
+
+    def test_replan_followed_by_new_content_resumes_the_normal_loop(self) -> None:
+        same = emit("x")
+        backend = ScriptedBackend(
+            tool_response(same), tool_response(same),
+            tool_response(emit("new")), tool_response(emit("newer")),
+            prose_response("done"),
+        )
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NO_PROGRESS, NEW_CONTENT, NEW_CONTENT, COMPLETE],
+        )
+        self.assertEqual(run.stop_reason, STOP_COMPLETE)
+        # Only the one replan, even though the loop continued afterwards.
+        self.assertEqual(self._messages(backend).count(AUTONOMOUS_REPLAN_MESSAGE), 1)
+
+    def test_the_replan_is_once_per_episode_not_once_per_run(self) -> None:
+        """A recovered run that stalls again is told again.
+
+        `consecutive_no_progress` resets on progress, so an alternating
+        trajectory re-arms the replan: each stall is a new situation and gets
+        its own message. What is never repeated is asking twice about the SAME
+        stall -- a second consecutive unproductive step ends the run.
+
+        The earlier tests all used a single stall, so this property went
+        untested while the code comment claimed "exactly one is ever sent".
+        The total stays bounded: every replan follows a step that consumed an
+        action, so replans <= actions <= the hard ceiling.
+        """
+        script = []
+        for i in range(6):
+            script.append(tool_response(emit(f"v{i}")))
+            script.append(tool_response(emit(f"v{i}")))  # duplicate -> NO_PROGRESS
+        backend = ScriptedBackend(*script)
+
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        classifications = [r.classification for r in run.progress]
+        self.assertEqual(classifications, [NEW_CONTENT, NO_PROGRESS] * (len(classifications) // 2))
+        stalls = classifications.count(NO_PROGRESS)
+        # Every stall was a fresh one -- none followed another -- so each got
+        # its own replan. This is the property; the exact count depends on
+        # where the action budget cuts the trajectory off.
+        self.assertGreater(run.replans, 1, "each fresh stall earns its own replan")
+        self.assertEqual(run.replans, stalls)
+        self.assertLessEqual(
+            run.replans, run.actions_executed, "replans cannot outnumber actions"
+        )
+        sent = [
+            m["content"]
+            for msgs in backend.seen_messages
+            for m in msgs[-1:]
+            if m["role"] == "user"
+        ]
+        # One fewer message than armings: the last stall arms a replan the run
+        # never gets to send, because the action budget ends it first. The
+        # counter records intent, the transcript records what the model saw.
+        self.assertEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans - 1)
+        self.assertTrue(
+            all(a == AUTONOMOUS_CONTINUATION_MESSAGE or a == AUTONOMOUS_REPLAN_MESSAGE
+                for a in sent[1:]),
+            "the runtime sends only its two generic messages",
+        )
+
+    def test_the_same_stall_is_never_replanned_twice(self) -> None:
+        """Two consecutive unproductive steps end the run after one replan."""
+        same = emit("x")
+        backend = ScriptedBackend(*[tool_response(same)] * 6)
+
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.replans, 1)
+        self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
+
+    def test_second_consecutive_no_progress_stops(self) -> None:
+        same = emit("x")
+        backend = ScriptedBackend(*[tool_response(same)] * 6)
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
+        self.assertEqual(run.replans, 1, "no second replan")
+        self.assertEqual(self._messages(backend).count(AUTONOMOUS_REPLAN_MESSAGE), 1)
+
+    def test_the_continuation_message_asks_for_one_new_useful_step(self) -> None:
+        """Generic: it names no artifact, technique or direction."""
+        text = AUTONOMOUS_CONTINUATION_MESSAGE.lower()
+        self.assertIn("new", text)
+        self.assertIn("do not repeat", text)
+        for domain in ("xor", "powershell", "url", "base64", "decode", "malware", "ioc"):
+            self.assertNotIn(domain, text)
+            self.assertNotIn(domain, AUTONOMOUS_REPLAN_MESSAGE.lower())
+
+    def test_the_continuation_message_is_model_visible(self) -> None:
+        backend = ScriptedBackend(tool_response(emit("a")), prose_response("done"))
+        self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            backend.seen_messages[1][-1]["content"], AUTONOMOUS_CONTINUATION_MESSAGE
+        )
+
+
+class GroundedFinalizationTests(AutonomousTestBase):
+    """Every ending that is not a cancellation produces one grounded answer."""
+
+    def _run(self, *responses, **kw):
+        backend = ScriptedBackend(*responses)
+        run = self.runtime(backend).run_autonomous("inspect it", **kw)
+        return run, backend
+
+    def test_natural_completion_produces_a_grounded_report(self) -> None:
+        run, backend = self._run(
+            tool_response(emit("a")), prose_response("done"), prose_response("REPORT")
+        )
+
+        self.assertEqual(run.stop_reason, STOP_COMPLETE)
+        self.assertIsNotNone(run.final_report)
+        self.assertEqual(run.final_report.text, "REPORT")
+
+    def test_a_protective_stop_produces_a_grounded_report(self) -> None:
+        same = emit("x")
+        run, backend = self._run(
+            tool_response(same), tool_response(same), tool_response(same),
+            prose_response("REPORT"),
+        )
+
+        self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
+        self.assertIsNotNone(run.final_report)
+        self.assertEqual(run.final_report.text, "REPORT")
+
+    def test_the_report_is_told_the_run_stopped_early(self) -> None:
+        """A reader must not mistake a bounded stop for a finished analysis."""
+        same = emit("x")
+        run, backend = self._run(
+            tool_response(same), tool_response(same), tool_response(same),
+            prose_response("REPORT"),
+        )
+
+        final_prompt = backend.seen_messages[-1]
+        text = " ".join(str(m.get("content", "")) for m in final_prompt)
+        self.assertIn("stopped before the model chose to finish", text)
+        self.assertIn(STOP_NO_PROGRESS, text)
+
+    def test_a_natural_ending_is_not_labelled_as_stopped_early(self) -> None:
+        run, backend = self._run(
+            tool_response(emit("a")), prose_response("done"), prose_response("REPORT")
+        )
+
+        final_prompt = backend.seen_messages[-1]
+        text = " ".join(str(m.get("content", "")) for m in final_prompt)
+        self.assertNotIn("stopped before the model chose to finish", text)
+
+    def test_finalization_is_offered_no_tools(self) -> None:
+        run, backend = self._run(
+            tool_response(emit("a")), prose_response("done"), prose_response("REPORT")
+        )
+
+        # The analysis steps carry the tool; the closing report carries none.
+        self.assertEqual(backend.seen_tools[0], [ANALYSIS_TOOL_NAME])
+        self.assertEqual(backend.seen_tools[-1], [])
+
+    def test_finalization_cannot_restart_the_analysis(self) -> None:
+        """A tool call in the closing report must execute nothing."""
+        run, backend = self._run(
+            tool_response(emit("a")),
+            prose_response("done"),
+            tool_response(emit("should never run"), text="REPORT"),
+        )
+
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(len(run.steps), 2, "the report is not a step")
+        # Exactly one closing call: no loop back into stepping.
+        self.assertEqual(backend.calls, 3)
+
+    def test_finalization_appends_nothing_to_history(self) -> None:
+        backend = ScriptedBackend(
+            tool_response(emit("a")), prose_response("done"), prose_response("REPORT")
+        )
+        runtime = self.runtime(backend)
+        runtime.run_autonomous("inspect it")
+
+        self.assertNotIn("REPORT", [m.get("content") for m in runtime.messages])
+        self.assertEqual(runtime.messages[-1]["role"], "assistant")
+
+    def test_cancellation_does_not_finalise(self) -> None:
+        """The analyst asked it to stop; another model call is not stopping."""
+
+        class CancelStepsOnly(ScriptedBackend):
+            """Interrupts the loop, but would happily serve a report.
+
+            A backend that raised on every call could not tell a run that
+            skipped finalization from one that attempted it and was itself
+            interrupted -- both end with no report. This one answers a
+            no-tools call normally, so an unwanted finalization is visible.
+            """
+
+            def chat_stream(self, messages, *, tools=None, **kwargs):
+                if tools != [] and self.calls >= 1:
+                    raise KeyboardInterrupt
+                return super().chat_stream(messages, tools=tools, **kwargs)
+
+        backend = CancelStepsOnly(tool_response(emit("a")), prose_response("REPORT"))
+        run = self.runtime(backend).run_autonomous("inspect it")
+
+        self.assertTrue(run.cancelled)
+        self.assertIsNone(run.final_report)
+        # No closing call was spent: the analyst asked for the run to stop.
+        # Asserted on the tool surface too, because a finalization attempt that
+        # was itself interrupted would also leave `final_report` None -- only
+        # the absence of a no-tools call proves none was attempted.
+        self.assertEqual(backend.calls, 1)
+        self.assertNotIn([], backend.seen_tools)
+
+    def test_a_backend_failure_during_finalization_keeps_the_run(self) -> None:
+        from orbit.backend.llama_server import LlamaServerError
+
+        class FailAtReport(ScriptedBackend):
+            def chat_stream(self, messages, *, tools=None, **kwargs):
+                if tools == []:
+                    raise LlamaServerError("died at report")
+                return super().chat_stream(messages, tools=tools, **kwargs)
+
+        backend = FailAtReport(tool_response(emit("a")), prose_response("done"))
+        run = self.runtime(backend).run_autonomous("inspect it")
+
+        self.assertEqual(run.stop_reason, STOP_COMPLETE)
+        self.assertIsNone(run.final_report)
+        self.assertEqual(run.actions_executed, 1)
+        self.assertTrue(
+            self.store.reattest_exact(run.steps[0].evidence.evidence_id)
+        )
+
+    def test_cancelling_the_closing_report_does_not_destroy_the_run(self) -> None:
+        """Ctrl-C during the report is the likeliest interrupt of all.
+
+        It is the longest single generation in a run, and by then the analyst
+        has already read every step. If it escaped `run_autonomous` the caller
+        would unwind to a pre-run checkpoint and rewind past every completed
+        step, leaving their evidence durable on disk with nothing referring to
+        it.
+        """
+        class CancelAtReport(ScriptedBackend):
+            def chat_stream(self, messages, *, tools=None, **kwargs):
+                if tools == []:
+                    raise KeyboardInterrupt
+                return super().chat_stream(messages, tools=tools, **kwargs)
+
+        backend = CancelAtReport(
+            tool_response(emit("one")), tool_response(emit("two")), prose_response("done")
+        )
+        runtime = self.runtime(backend)
+
+        run = runtime.run_autonomous("inspect it")  # must not raise
+
+        self.assertIsNone(run.final_report)
+        self.assertEqual(run.actions_executed, 2)
+        self.assertEqual(run.stop_reason, STOP_COMPLETE)
+        self.assertGreater(len(runtime.messages), 2)
+        for step in run.steps:
+            if step.evidence is not None:
+                self.assertTrue(self.store.reattest_exact(step.evidence.evidence_id))
+
+    def test_a_run_with_no_steps_produces_no_report(self) -> None:
+        class Dead(ScriptedBackend):
+            def chat_stream(self, messages, **kwargs):
+                raise KeyboardInterrupt
+
+        run = self.runtime(Dead()).run_autonomous("inspect it")
+        self.assertIsNone(run.final_report)
+
+
+# --- soft action budget with a hard ceiling ---------------------------------
+
+
+class SoftActionBudgetTests(AutonomousTestBase):
+    """Past the budget, continuing must be earned by verifiable progress.
+
+    8 was a budget inherited from the research harness, not a boundary: a
+    measured full-sample run ended on it with all eight steps still producing
+    new evidence and the report naming the next deterministic step. A budget
+    that cuts off work is a different thing from a policy that declines it, so
+    the budget now yields to demonstrated progress -- and only to that.
+    """
+
+    def _productive(self, n: int) -> list:
+        return [tool_response(emit(f"v{i}")) for i in range(n)]
+
+    def test_new_content_at_the_soft_limit_may_continue(self) -> None:
+        run = self.runtime(
+            ScriptedBackend(
+                *self._productive(SOFT_MAX_AUTONOMOUS_ACTIONS + 2),
+                prose_response("done"),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertGreater(run.actions_executed, SOFT_MAX_AUTONOMOUS_ACTIONS)
+        self.assertNotEqual(run.stop_reason, STOP_SOFT_MAX_ACTIONS)
+
+    def test_no_progress_at_the_soft_limit_stops(self) -> None:
+        same = emit("repeat")
+        run = self.runtime(
+            ScriptedBackend(
+                *self._productive(SOFT_MAX_AUTONOMOUS_ACTIONS),
+                tool_response(same),
+                tool_response(same),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.stop_reason, STOP_SOFT_MAX_ACTIONS)
+        self.assertEqual(run.progress[-1].classification, NO_PROGRESS)
+        self.assertLess(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
+
+    def test_an_error_at_the_soft_limit_stops_the_run(self) -> None:
+        """At the budget an error is a non-productive step, so the run ends.
+
+        Below the budget one error is tolerated and only a second consecutive
+        one stops the run. At or past it, continuing must be earned, and a
+        refused action has earned nothing -- so the soft gate ends the run
+        before the error counter can reach two. The error policy itself is
+        unchanged; it is simply not the bound that fires first here.
+        """
+        run = self.runtime(
+            ScriptedBackend(
+                *self._productive(SOFT_MAX_AUTONOMOUS_ACTIONS),
+                tool_response(emit("x"), count=2),
+                tool_response(emit("x"), count=2),
+                prose_response("unreached"),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.stop_reason, STOP_SOFT_MAX_ACTIONS)
+        self.assertEqual(run.progress[-1].classification, ERROR)
+        self.assertEqual(run.actions_executed, SOFT_MAX_AUTONOMOUS_ACTIONS)
+
+    def test_a_single_error_below_the_budget_is_still_tolerated(self) -> None:
+        """The unchanged error policy, exercised where the budget is not in play."""
+        run = self.runtime(
+            ScriptedBackend(
+                tool_response(emit("a")),
+                tool_response(emit("x"), count=2),
+                tool_response(emit("b")),
+                prose_response("done"),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, ERROR, NEW_CONTENT, COMPLETE],
+        )
+        self.assertEqual(run.stop_reason, STOP_COMPLETE)
+
+    def test_actions_beyond_the_soft_limit_keep_running_while_productive(self) -> None:
+        run = self.runtime(
+            ScriptedBackend(*self._productive(MAX_AUTONOMOUS_ACTIONS - 1), prose_response("done"))
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS - 1)
+        self.assertEqual(run.stop_reason, STOP_COMPLETE)
+
+    def test_the_hard_ceiling_stops_even_while_still_productive(self) -> None:
+        """The ceiling is not conditional. Progress does not extend it."""
+        run = self.runtime(
+            ScriptedBackend(*self._productive(MAX_AUTONOMOUS_ACTIONS + 4))
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        self.assertEqual(
+            [r.classification for r in run.progress], [NEW_CONTENT] * MAX_AUTONOMOUS_ACTIONS
+        )
+
+    def test_the_ceiling_is_exact_not_off_by_one(self) -> None:
+        run = self.runtime(
+            ScriptedBackend(*self._productive(MAX_AUTONOMOUS_ACTIONS + 4))
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.actions_executed, 12)
+        self.assertNotEqual(run.actions_executed, 11)
+        self.assertNotEqual(run.actions_executed, 13)
+
+    def test_natural_completion_before_the_ceiling_stops_normally(self) -> None:
+        run = self.runtime(
+            ScriptedBackend(*self._productive(3), prose_response("done"))
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.stop_reason, STOP_COMPLETE)
+        self.assertEqual(run.actions_executed, 3)
+
+    def test_the_hard_ceiling_is_reachable_despite_tolerated_failures(self) -> None:
+        """The call ceiling must not truncate a trajectory the policy allows.
+
+        The error policy tolerates one failure between productive steps --
+        progress resets the counter -- so a run can legitimately interleave
+        them. An earlier ceiling of `actions + 1` made the hard action ceiling
+        unreachable for any run containing even one mis-formed call: it stopped
+        at 7 actions on `model call bound reached`, below the soft budget, and
+        the ceiling's own test was then only exercised by flawless runs.
+        """
+        script = []
+        for i in range(MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS):
+            script.append(tool_response(emit(f"p{i}")))
+            script.append(tool_response(emit("bad"), count=2))
+        script += [
+            tool_response(emit(f"q{i}"))
+            for i in range(MAX_AUTONOMOUS_ACTIONS - MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS)
+        ]
+        script.append(prose_response("unreached"))
+
+        run = self.runtime(ScriptedBackend(*script)).run_autonomous(
+            "inspect it", finalize=False
+        )
+
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        self.assertEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
+        self.assertNotEqual(run.stop_reason, STOP_MAX_MODEL_CALLS)
+
+    def test_the_nonproductive_allowance_is_explicit(self) -> None:
+        """The only chosen term in the budget is named, not folded into a number."""
+        self.assertEqual(MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS, 2)
+        self.assertEqual(
+            MAX_AUTONOMOUS_MODEL_CALLS,
+            MAX_AUTONOMOUS_ACTIONS + 1 + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS,
+        )
+
+    def test_the_budget_relation_is_derived_not_guessed(self) -> None:
+        """The call ceiling must not be able to truncate the action policy.
+
+        Every loop iteration spends exactly one model call, so a ceiling below
+        hard actions + one closing prose call could end a run for want of
+        budget while the action policy still allowed it -- making the hard
+        ceiling unreachable and its test vacuous.
+        """
+        self.assertEqual(SOFT_MAX_AUTONOMOUS_ACTIONS, 8)
+        self.assertEqual(MAX_AUTONOMOUS_ACTIONS, 12)
+        self.assertGreater(MAX_AUTONOMOUS_ACTIONS, SOFT_MAX_AUTONOMOUS_ACTIONS)
+        self.assertGreaterEqual(
+            MAX_AUTONOMOUS_MODEL_CALLS,
+            MAX_AUTONOMOUS_ACTIONS + 1 + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS,
+        )
+
+    def test_the_call_ceiling_cannot_cut_the_hard_action_policy_short(self) -> None:
+        """Driven, not asserted: 12 actions then prose must fit the budget."""
+        run = self.runtime(
+            ScriptedBackend(
+                *self._productive(MAX_AUTONOMOUS_ACTIONS), prose_response("done")
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        # The action ceiling is what stops it, not the call ceiling.
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        self.assertLessEqual(run.model_calls, MAX_AUTONOMOUS_MODEL_CALLS)
+
+    def test_replan_semantics_are_unchanged_by_the_budget(self) -> None:
+        same = emit("x")
+        backend = ScriptedBackend(
+            tool_response(same), tool_response(same),
+            tool_response(emit("new")), prose_response("done"),
+        )
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.replans, 1)
+        self.assertEqual(
+            [r.classification for r in run.progress],
+            [NEW_CONTENT, NO_PROGRESS, NEW_CONTENT, COMPLETE],
+        )
+
+    def test_consecutive_limits_are_unchanged_below_the_budget(self) -> None:
+        same = emit("x")
+        run = self.runtime(ScriptedBackend(*[tool_response(same)] * 6)).run_autonomous(
+            "inspect it", finalize=False
+        )
+
+        self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
+        self.assertEqual(run.actions_executed, 3)
+
+    def test_the_report_runs_exactly_once_after_a_soft_budget_stop(self) -> None:
+        same = emit("repeat")
+        backend = ScriptedBackend(
+            *self._productive(SOFT_MAX_AUTONOMOUS_ACTIONS),
+            tool_response(same), tool_response(same),
+            prose_response("REPORT"),
+        )
+        run = self.runtime(backend).run_autonomous("inspect it")
+
+        self.assertEqual(run.stop_reason, STOP_SOFT_MAX_ACTIONS)
+        self.assertIsNotNone(run.final_report)
+        self.assertEqual(run.final_report.text, "REPORT")
+        self.assertEqual(backend.seen_tools.count([]), 1)
+
+    def test_the_report_runs_exactly_once_after_the_hard_ceiling(self) -> None:
+        backend = ScriptedBackend(
+            *self._productive(MAX_AUTONOMOUS_ACTIONS), prose_response("REPORT")
+        )
+        run = self.runtime(backend).run_autonomous("inspect it")
+
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        self.assertIsNotNone(run.final_report)
+        self.assertEqual(backend.seen_tools.count([]), 1)
+
+    def test_the_report_is_not_counted_as_an_action(self) -> None:
+        backend = ScriptedBackend(
+            *self._productive(3), prose_response("done"), prose_response("REPORT")
+        )
+        run = self.runtime(backend).run_autonomous("inspect it")
+
+        self.assertEqual(run.actions_executed, 3)
+        self.assertEqual(len(run.steps), 4, "the report is not a step")
