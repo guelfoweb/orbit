@@ -324,6 +324,11 @@ def emit_route_prefix_prewarm_event(metadata: dict[str, Any]) -> None:
         return
     event = {
         "event": "kv_diag_route_prefix_prewarm",
+        # Startup captures two lineages now, so the event says which one it
+        # describes; without it the CHAT and ANALYSIS prewarms are two
+        # indistinguishable records. Defaults to the CHAT lineage, which is
+        # what every caller predating the ANALYSIS prewarm emitted.
+        "prewarm_lineage": _safe_str(metadata.get("prewarm_lineage")) or "chat",
         "tools_default_enabled": bool(metadata.get("tools_default_enabled")),
         "tools_startup_enabled": bool(metadata.get("tools_startup_enabled")),
         "prewarm_enabled": bool(metadata.get("prewarm_enabled")),

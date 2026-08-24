@@ -38,7 +38,12 @@ class _FakeNativeClient:
         self.cancelled = False
         self.capture_calls = 0
         self.qwen3_coder_capture_calls = 0
+        self.analysis_capture_calls = 0
         self.raise_on_capture = False
+        self.raise_on_analysis_capture = False
+        self.captured_system_prompts: list[str] = []
+        self.captured_tools: list[list[dict]] = []
+        self.captured_lineages: list[str] = []
         _FakeNativeClient.instances.append(self)
 
     def set_quiet_logging(self) -> None:
@@ -84,8 +89,49 @@ class _FakeNativeClient:
             restore_ready=True,
         )
 
-    def capture_qwen3_coder_route_prefix_prefill_only(self, *, system_prompt: str, tools_mode: str = "on"):
+    def capture_qwen3_coder_route_prefix_prefill_only(
+        self,
+        *,
+        system_prompt: str,
+        tools_mode: str = "on",
+        tools=None,
+        analysis_lineage: bool = False,
+    ):
+        # Mirrors the real signature: startup now captures two lineages through
+        # this one entry point, and a fake that accepted only the CHAT shape
+        # would pass while the production call raised TypeError.
+        self.captured_system_prompts.append(system_prompt)
+        self.captured_tools.append([dict(tool) for tool in (tools or [])])
+        self.captured_lineages.append("analysis" if analysis_lineage else "chat")
         del system_prompt
+        if analysis_lineage:
+            self.analysis_capture_calls += 1
+            if self.raise_on_analysis_capture:
+                raise RuntimeError("synthetic analysis capture failure")
+            # The real capture refuses on the reuse kill switch before it does
+            # anything else; a fake that ignored it would let a test assert a
+            # capture production would have declined.
+            if not self.config.ornith_analysis_prefix_reuse_enabled:
+                return NativeRoutePrefixPrefillResult(
+                    attempted=False,
+                    succeeded=False,
+                    skipped=True,
+                    skip_reason="route_prefix_reuse_disabled",
+                )
+            # Stand-in figures, not measurements: the size only has to differ
+            # from the CHAT fake's so a test can tell the two slots apart. The
+            # measured ANALYSIS checkpoint is recorded in AGENTS.md.
+            return NativeRoutePrefixPrefillResult(
+                attempted=True,
+                succeeded=True,
+                skipped=False,
+                prefix_hash="ornith-analysis-prefix-hash",
+                prefix_token_count=384,
+                checkpoint_size_bytes=37_753_932,
+                prefill_ms=6.0,
+                decode_calls=6,
+                restore_ready=True,
+            )
         self.qwen3_coder_capture_calls += 1
         if self.raise_on_capture:
             raise RuntimeError("synthetic capture failure")

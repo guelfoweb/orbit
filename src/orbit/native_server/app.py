@@ -43,7 +43,10 @@ from orbit.native_llama.qwen36_shell_tool_prefix import (
     exact_qwen36_shell_tool_schema,
     resolve_qwen36_shell_tool_prefix_reuse,
 )
-from orbit.native_llama.ornith_analysis_prefix import resolve_ornith_analysis_prefix_reuse
+from orbit.native_llama.ornith_analysis_prefix import (
+    resolve_ornith_analysis_prefix_prewarm,
+    resolve_ornith_analysis_prefix_reuse,
+)
 from orbit.native_llama.ornith_route_prefix import resolve_ornith_route_prefix_reuse
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_server.protocol import (
@@ -59,6 +62,7 @@ from orbit.native_server.protocol import (
     trim_at_stop,
     validate_session_id,
 )
+from orbit.runtime.analysis_runtime import ANALYSIS_SYSTEM_PROMPT, ANALYSIS_TOOL_SCHEMA
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.tool_healing import tool_call_healing_status
 
@@ -858,6 +862,12 @@ def run_server(argv: list[str] | None = None) -> int:
             signal.signal(signal.SIGINT, cancel_startup_prewarm)
             try:
                 prewarm_startup_route_prefix(client)
+                # Beside the CHAT capture, never instead of it: the CHAT prewarm
+                # has already run and recorded its result, and this one owns a
+                # separate slot. It is inside the same cancellable window because
+                # it is more startup prefill the operator may want to interrupt.
+                if not prewarm_interrupted:
+                    prewarm_startup_analysis_prefix(client)
             finally:
                 signal.signal(signal.SIGINT, previous_sigint)
             if prewarm_interrupted:
@@ -992,6 +1002,72 @@ def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefix
     return result
 
 
+def prewarm_startup_analysis_prefix(client: NativeLlamaClient) -> NativeRoutePrefixPrefillResult:
+    """Capture the ANALYSIS prefix at startup, beside the CHAT one.
+
+    Same mechanism, same gates, one more slot. The prefix is derived from the
+    ANALYSIS system contract and the real `execute_analysis` schema -- both
+    module constants -- so nothing about a session, an artifact or an analyst
+    enters it, and the client's own exact-prefix derivation re-proves that
+    against the prompt it is actually serving before anything is reused.
+
+    Without this the first ANALYSIS step of a server's life is always cold:
+    the checkpoint it would have restored is the one that step captures.
+
+    A failure here is contained. It returns a result rather than raising, and
+    the CHAT prewarm has already completed and been recorded by the time this
+    runs, so a broken ANALYSIS capture costs the first analysis step nothing it
+    was not already paying.
+    """
+    mode = route_prefix_prewarm_mode()
+    tools_enabled = tools_startup_enabled()
+    if mode != PREFIX_PREWARM_STARTUP:
+        result = _startup_prewarm_skipped("disabled")
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result, lineage="analysis")
+        return result
+    if not tools_enabled:
+        result = _startup_prewarm_skipped("tools_disabled")
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result, lineage="analysis")
+        return result
+    if not prefix_anchor_enabled():
+        result = _startup_prewarm_skipped("anchor_disabled")
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result, lineage="analysis")
+        return result
+    if not resolve_ornith_analysis_prefix_prewarm().enabled:
+        # Off unless the operator asked for it. An eager ANALYSIS capture costs
+        # real startup time and resident memory, and a server that only chats
+        # would pay both for nothing. Skipping here changes nothing else: the
+        # first analysis step still captures the checkpoint on its way past,
+        # exactly as it did before this prewarm existed.
+        result = _startup_prewarm_skipped("analysis_prewarm_not_requested")
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result, lineage="analysis")
+        return result
+    profile = getattr(client, "model_profile", None)
+    if getattr(profile, "profile_id", None) != ORNITH15_PROFILE_ID:
+        # Only Ornith has a qualified ANALYSIS prefix. Every other profile keeps
+        # the lazy capture it has now.
+        result = _startup_prewarm_skipped("model_profile_ineligible")
+        _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result, lineage="analysis")
+        return result
+    try:
+        result = client.capture_qwen3_coder_route_prefix_prefill_only(
+            system_prompt=ANALYSIS_SYSTEM_PROMPT,
+            tools_mode="on",
+            tools=[ANALYSIS_TOOL_SCHEMA],
+            analysis_lineage=True,
+        )
+    except Exception as exc:
+        result = NativeRoutePrefixPrefillResult(
+            attempted=True,
+            succeeded=False,
+            skipped=False,
+            failed_reason=f"startup_prewarm_failed:{type(exc).__name__}",
+            restore_ready=False,
+        )
+    _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result, lineage="analysis")
+    return result
+
+
 def _startup_prewarm_skipped(reason: str) -> NativeRoutePrefixPrefillResult:
     return NativeRoutePrefixPrefillResult(
         attempted=False,
@@ -1006,9 +1082,19 @@ def _startup_prewarm_skipped(reason: str) -> NativeRoutePrefixPrefillResult:
     )
 
 
-def _emit_startup_prewarm_diag(*, mode: str, tools_enabled: bool, result: NativeRoutePrefixPrefillResult) -> None:
+def _emit_startup_prewarm_diag(
+    *,
+    mode: str,
+    tools_enabled: bool,
+    result: NativeRoutePrefixPrefillResult,
+    lineage: str = "chat",
+) -> None:
     emit_route_prefix_prewarm_event(
         {
+            # Two prewarms now run at startup and both emit here, so the event
+            # says which lineage it describes. The backend still learns nothing
+            # about CHAT or ANALYSIS from a request: this is diagnostics only.
+            "prewarm_lineage": lineage,
             "tools_default_enabled": tools_startup_enabled({}),
             "tools_startup_enabled": tools_enabled,
             "prewarm_enabled": mode == PREFIX_PREWARM_STARTUP and tools_enabled,
