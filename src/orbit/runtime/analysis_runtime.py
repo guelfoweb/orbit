@@ -225,15 +225,98 @@ QUALIFIED_ANALYSIS_MAX_TOKENS = 2048
 # no-progress steps is the smallest number that distinguishes a model briefly
 # re-orienting from one that is stuck; one would abort on a single redundant
 # read. All four are configurable per run.
-MAX_AUTONOMOUS_ACTIONS = 8
-MAX_AUTONOMOUS_MODEL_CALLS = 10
+# Where a run stops asking for more, and where it is stopped.
+#
+# 8 is a budget, not a boundary. It came from the preserved research harness,
+# whose sibling variant ran at 6 and whose own tests asserted only the relation
+# between the two counts -- never that 8 was where an analysis becomes unsafe
+# or useless. A measured full-sample run then ended on it with all eight steps
+# still producing new evidence and the report naming the next deterministic
+# step, which is a budget cutting off work, not a policy declining it.
+#
+# So 8 is the point where continuing has to justify itself. A run still adding
+# verifiably new state may pass it; a run that is stagnating, repeating a
+# strategy, or failing is stopped there exactly as before. 12 is the ceiling,
+# and nothing crosses it.
+SOFT_MAX_AUTONOMOUS_ACTIONS = 8
+MAX_AUTONOMOUS_ACTIONS = 12
+
+# How many non-executing calls a whole run may spend before the budget, rather
+# than the analysis, decides when it ends.
+#
+# A step can consume a call without executing anything: a malformed tool call,
+# a refused action, a capacity stop. The error policy tolerates one of those
+# between productive steps -- progress resets the counter -- so in principle a
+# run could alternate progress and failure all the way to the action ceiling.
+# Affording every one of those would put the ceiling at 2*12+1 = 25 calls,
+# which on this hardware is hours spent mostly on rejected calls.
+#
+# 2 is the allowance. It is a judgement and is written down as one: the
+# qualified full-sample run spent zero non-executing calls in eight actions, and
+# the research harness that set these bounds allowed one in a whole run. Two is
+# the smallest number above the historical allowance, and it buys tolerance for
+# an occasional mis-formed call without buying an hour of them. A run that
+# needs more than two is not being cut short by arithmetic; it is failing.
+MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS = 2
+
+# Derived from the loop, not chosen. Every iteration spends exactly one model
+# call -- `step()` returns `model_calls=1` on all of its return paths -- so
+# calls and iterations are the same thing, and the ceiling has to cover the
+# largest run the action policy can legitimately want:
+#
+#     12 iterations that execute an action        (the hard ceiling)
+#   +  1 for the model to finish with prose       (natural completion)
+#   +  2 non-executing calls it may spend on the way
+#   = 15
+#
+# The 12 is forced by the control flow. The prose call is slack rather than a
+# requirement -- a run that reaches the ceiling breaks before spending it, so
+# it is only needed by a run that finishes early -- and the allowance is a
+# choice, the constant above. 14 would also be sufficient; 15 keeps one call
+# of margin. What is not optional is being above 13: that was the previous
+# value, and it made the hard ceiling unreachable for any run containing two
+# mis-formed calls, with its test correspondingly vacuous.
+#
+# The closing report is not counted here: it is made outside the loop, is not
+# part of the investigation, and its exclusion is what keeps this number a
+# statement about analysis rather than about bookkeeping.
+MAX_AUTONOMOUS_MODEL_CALLS = (
+    MAX_AUTONOMOUS_ACTIONS + 1 + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS
+)
+
 MAX_CONSECUTIVE_NO_PROGRESS = 2
 MAX_CONSECUTIVE_ERRORS = 2
 
-# What Orbit says to itself to take the next step. It carries no guidance
-# about what to examine: choosing that is the model's job, and a runtime that
-# suggested a direction would be doing analysis rather than orchestration.
-AUTONOMOUS_CONTINUATION_MESSAGE = "continue"
+# What Orbit says to itself to take the next step.
+#
+# It names no artifact, no technique and no direction: choosing those is the
+# model's job, and a runtime that suggested one would be doing analysis rather
+# than orchestration. What it does say is the standing rule of the loop -- one
+# new useful step, nothing already established -- because the alternative is a
+# bare "continue" that leaves the model to infer whether re-examining what it
+# has already seen counts as continuing. It does not.
+AUTONOMOUS_CONTINUATION_MESSAGE = (
+    "Continue from the current evidence. Choose one new useful "
+    "evidence-producing step. Do not repeat established actions, inputs or "
+    "findings."
+)
+
+# Sent on the first unproductive step of a streak. The previous instruction
+# asked for a new step; this one says plainly that the last attempt was not
+# one, and asks for a different strategy rather than a different phrasing of
+# the same one.
+#
+# Once per episode, not once per run: a step that adds new state resets the
+# streak, so a later unproductive step is a new situation and is told so again.
+# What is never repeated is asking twice about the same stall -- a second
+# consecutive unproductive step ends the run, because a runtime that kept
+# asking would be arguing with the model. The total is bounded by the action
+# ceiling regardless, since every replan follows a step that consumed one.
+AUTONOMOUS_REPLAN_MESSAGE = (
+    "The previous action produced no new evidence. Choose a different "
+    "deterministic strategy using the current evidence and artifacts. Do not "
+    "repeat an exhausted action, input or established finding."
+)
 
 # Off until it has been measured on real work. Existing one-step behaviour --
 # one analyst line, one model call, control back -- is what every analysis does
@@ -245,6 +328,7 @@ STOP_COMPLETE = "model returned prose with no action"
 STOP_NO_PROGRESS = "no new evidence"
 STOP_ERROR = "repeated action failures"
 STOP_MAX_ACTIONS = "action bound reached"
+STOP_SOFT_MAX_ACTIONS = "action budget reached without further progress"
 STOP_MAX_MODEL_CALLS = "model call bound reached"
 STOP_CANCELLED = "cancelled"
 STOP_BACKEND_ERROR = "backend error"
@@ -424,6 +508,8 @@ class AutonomousRunResult:
     model_calls: int
     actions_executed: int
     cancelled: bool = False
+    replans: int = 0
+    final_report: "AnalysisReport | None" = None
 
     @property
     def last_step(self) -> AnalysisStepResult | None:
@@ -869,12 +955,14 @@ class AnalysisRuntime:
         analyst_message: str,
         *,
         max_actions: int = MAX_AUTONOMOUS_ACTIONS,
-        max_model_calls: int = MAX_AUTONOMOUS_MODEL_CALLS,
+        soft_max_actions: int = SOFT_MAX_AUTONOMOUS_ACTIONS,
+        max_model_calls: int = MAX_AUTONOMOUS_MODEL_CALLS,  # plus one closing report
         max_no_progress: int = MAX_CONSECUTIVE_NO_PROGRESS,
         max_errors: int = MAX_CONSECUTIVE_ERRORS,
         on_progress: Callable[[Any], None] | None = None,
         on_delta: Callable[[str], None] | None = None,
         on_step: Callable[[AnalysisStepResult, ProgressRecord], None] | None = None,
+        finalize: bool = True,
     ) -> AutonomousRunResult:
         """Run analyst-directed steps until progress stops or a bound is hit.
 
@@ -898,6 +986,12 @@ class AnalysisRuntime:
         Cancellation propagates: `KeyboardInterrupt` from the backend ends the
         run and returns what has already been established, with the workspace
         and evidence intact.
+
+        `max_model_calls` bounds the investigation loop. A run that is not
+        cancelled then spends one further call on the closing report, so the
+        backend may see `max_model_calls + 1` calls in total; the returned
+        `model_calls` counts them all, so the figure reported is the figure
+        spent.
         """
         ledger = ProgressLedger()
         steps: list[AnalysisStepResult] = []
@@ -906,9 +1000,12 @@ class AnalysisRuntime:
         actions = 0
         consecutive_no_progress = 0
         consecutive_errors = 0
+        replans = 0
+        replan_pending = False
         message = analyst_message
         stop_reason = STOP_MAX_MODEL_CALLS
         cancelled = False
+        final_report: "AnalysisReport | None" = None
 
         while True:
             if model_calls >= max_model_calls:
@@ -974,11 +1071,21 @@ class AnalysisRuntime:
                 consecutive_errors = 0
                 if consecutive_no_progress >= max_no_progress:
                     stop_reason = (
-                        f"{STOP_NO_PROGRESS}: action repeated"
+                        f"{STOP_NO_PROGRESS}: strategy repeated"
+                        if record.repeated_strategy
+                        else f"{STOP_NO_PROGRESS}: action repeated"
                         if record.repeated_action
                         else STOP_NO_PROGRESS
                     )
                     break
+                # First unproductive step of this streak: say so, and ask for
+                # a different strategy rather than another attempt at the same
+                # one. Reached only when the consecutive bound above did not
+                # fire, so it is never sent twice about the same stall; a run
+                # that recovers and stalls again is told again, because that is
+                # a different stall.
+                replan_pending = True
+                replans += 1
             else:
                 consecutive_no_progress = 0
                 consecutive_errors = 0
@@ -997,8 +1104,69 @@ class AnalysisRuntime:
             if actions >= max_actions:
                 stop_reason = STOP_MAX_ACTIONS
                 break
+            if actions >= soft_max_actions and not record.is_new_content:
+                # Past the soft budget, continuing has to be earned. A step
+                # that added verifiably new state earns it; anything else --
+                # stagnation, a repeated strategy, a refused action -- stops
+                # here exactly as it did when this was the only bound.
+                #
+                # Reached only when the consecutive counters have not already
+                # ended the run, so this is the single-failure case they
+                # deliberately tolerate: tolerated below the budget, not above
+                # it.
+                stop_reason = STOP_SOFT_MAX_ACTIONS
+                break
 
-            message = AUTONOMOUS_CONTINUATION_MESSAGE
+            if replan_pending:
+                message = AUTONOMOUS_REPLAN_MESSAGE
+                replan_pending = False
+            else:
+                message = AUTONOMOUS_CONTINUATION_MESSAGE
+
+        # One grounded answer at the end, from the evidence already stored.
+        #
+        # A protective stop is the case that needs this most: a run that ended
+        # on a bound or on stagnation has collected real evidence and would
+        # otherwise hand the analyst a stop reason and nothing else. The
+        # natural ending gets one too, so a completed analysis reads the same
+        # way whichever way it finished.
+        #
+        # `report()` is the qualified primitive for this and is reused
+        # unchanged: it is offered no tools, appends nothing to history, and
+        # cannot continue the analysis. It is called once, outside the loop, so
+        # there is no path from a report back into another step.
+        #
+        # Cancellation is the exception. The analyst asked for the run to stop,
+        # and spending another model call -- minutes of generation -- to
+        # summarise it is the opposite of stopping.
+        if not cancelled and finalize and steps:
+            try:
+                final_report = self.report(
+                    question=self._final_question(stop_reason),
+                    on_progress=on_progress,
+                    on_delta=on_delta,
+                )
+            except (
+                KeyboardInterrupt,
+                ContextAdmissionError,
+                TimeoutError,
+                RecoverableBackendError,
+            ):
+                # A report that cannot be produced must not discard the run
+                # that earned it. The analyst keeps the evidence and the stop
+                # reason, and can ask for a report themselves.
+                #
+                # `KeyboardInterrupt` belongs here for the same reason as the
+                # rest, and more urgently: the closing report is the longest
+                # single generation in a run and the one an analyst is most
+                # likely to interrupt, having already read every step. Letting
+                # it propagate would unwind past a caller holding only a
+                # pre-run checkpoint, and rewinding to that point deletes the
+                # history and provenance of every completed step -- leaving
+                # their evidence durable on disk with nothing referring to it.
+                final_report = None
+            else:
+                model_calls += final_report.model_calls
 
         return AutonomousRunResult(
             steps=tuple(steps),
@@ -1007,6 +1175,24 @@ class AnalysisRuntime:
             model_calls=model_calls,
             actions_executed=actions,
             cancelled=cancelled,
+            replans=replans,
+            final_report=final_report,
+        )
+
+    @staticmethod
+    def _final_question(stop_reason: str) -> str:
+        """What the closing report is asked, given how the run ended.
+
+        A run that ended naturally is simply asked to report. One that was cut
+        short says so, because a reader who is not told that a bound intervened
+        would read an incomplete analysis as a finished one.
+        """
+        if stop_reason == STOP_COMPLETE:
+            return ""
+        return (
+            "This analysis stopped before the model chose to finish "
+            f"({stop_reason}). Report what the evidence establishes and what "
+            "remains unresolved."
         )
 
     def _close_incomplete_turn(self) -> None:

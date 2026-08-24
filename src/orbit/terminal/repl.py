@@ -414,9 +414,16 @@ class Repl:
             print(step_block, flush=True)
         elapsed = time.monotonic() - started
         if run is not None:
+            # The closing report streamed as it was generated, like any other
+            # prose. Print it here only if it did not: a backend that does not
+            # stream would otherwise produce a run whose grounded conclusion
+            # never reached the analyst at all.
+            if run.final_report is not None and not renderer.rendered_visible_text:
+                print(run.final_report.text, flush=True)
+            replans = f" | replans: {run.replans}" if run.replans else ""
             summary = (
                 f"analysis | mode: ANALYSIS | model calls: {run.model_calls} | "
-                f"actions: {run.actions_executed} | steps: {len(run.steps)} | "
+                f"actions: {run.actions_executed} | steps: {len(run.steps)}{replans} | "
                 f"stopped: {run.stop_reason} | {elapsed:.1f}s"
             )
         else:
