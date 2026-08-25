@@ -14,7 +14,9 @@ models/
 workdir/pdf/
 src/orbit/native_llama/vendor/build/
 src/orbit/native_llama/vendor/lib/*.so
+src/orbit/native_llama/vendor/lib/*.so.*
 src/orbit/native_llama/vendor/lib/*.dylib
+src/orbit/native_llama/vendor/lib/*.dylib.*
 src/orbit/native_llama/vendor/lib/*.a
 src/orbit/native_llama/vendor/lib/*.identity.json
 src/orbit/native_llama/vendor/shim/*.so
