@@ -55,6 +55,7 @@ from orbit.runtime.analysis_sandbox import (
     scratch_baseline,
 )
 from orbit.runtime.evidence import EvidenceRecord, EvidenceStore, final_card
+from orbit.runtime.evidence_authority import active_records, evaluate_standing
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.tool_calls import tool_call_id
 
@@ -1315,13 +1316,42 @@ class AnalysisRuntime:
         )
 
     def _reportable_records(self) -> list[EvidenceRecord]:
-        """The action evidence a report may cite, oldest first and bounded."""
+        """The action evidence a report may cite, oldest first and bounded.
+
+        Superseded versions are dropped before the bound is applied, not after.
+        An analysis that rewrote an artifact leaves both versions in the store,
+        and handing the finalizer a value beside its own correction lets it
+        quote either -- which is how a stale value once reached a report that
+        had the corrected one in front of it. Dropping first also means the
+        bound spends its places on current evidence rather than on history.
+
+        Nothing is deleted: the store keeps every version, and a superseded
+        record stays re-attestable for audit. This decides what may be cited as
+        authoritative, not what exists.
+        """
         records = [
             record
             for record in self.evidence_store.records.values()
             if record.tool_name == ANALYSIS_TOOL_NAME
         ]
-        return records[-MAX_REPORT_EVIDENCE_RECORDS:]
+        return active_records(records)[-MAX_REPORT_EVIDENCE_RECORDS:]
+
+    def superseded_records(self) -> list[EvidenceRecord]:
+        """Versions a report may not cite as current. Retained, not deleted."""
+        records = [
+            record
+            for record in self.evidence_store.records.values()
+            if record.tool_name == ANALYSIS_TOOL_NAME
+        ]
+        standing = evaluate_standing(records)
+        # Same tolerance `active_records` applies: a record the evaluator
+        # skipped has no entry, and the two views must agree about that or a
+        # record one accepts becomes a KeyError in the other.
+        return [
+            r
+            for r in records
+            if r.evidence_id in standing and not standing[r.evidence_id].is_active
+        ]
 
     def _evidence_card(self, record: EvidenceRecord) -> str:
         """One record as the report sees it: header plus the observation.
