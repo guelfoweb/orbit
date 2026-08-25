@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -15,7 +16,11 @@ from orbit.native_llama.bindings import ChatBridgeLibrary, LlamaLibrary
 from orbit.native_llama.build_support import DEFAULT_VENDOR_BUILD_BIN
 from orbit.native_llama.chat_bridge import CHAT_BRIDGE_API_VERSION, chat_bridge_filename, validate_chat_bridge_artifact
 from orbit.native_llama.client import _resolve_chat_bridge_path
-from orbit.native_llama.native_names import platform_runtime_libs, runtime_library_filename
+from orbit.native_llama.native_names import (
+    mtmd_bridge_filename,
+    platform_runtime_libs,
+    runtime_library_filename,
+)
 
 
 class NativeChatBridgeTests(unittest.TestCase):
@@ -150,7 +155,7 @@ ChatBridgeLibrary(runtime, runtime / chat_bridge_filename())
 mapped = {
     line.rsplit(' ', 1)[-1]
     for line in Path('/proc/self/maps').read_text(encoding='utf-8').splitlines()
-    if '/libllama' in line or '/libggml' in line
+    if any(marker in line for marker in ('/libllama', '/libggml', '/libmtmd', '/liborbit-'))
 }
 outside = sorted(path for path in mapped if not path.startswith(str(runtime) + '/'))
 if outside:
@@ -176,6 +181,236 @@ if outside:
         ).exists(),
         "packaged native runtime or Linux process maps are unavailable",
     )
+    @unittest.skipUnless(
+        (DEFAULT_VENDOR_BUILD_BIN / mtmd_bridge_filename()).exists()
+        and (DEFAULT_VENDOR_BUILD_BIN / runtime_library_filename("mtmd")).exists()
+        and Path("/proc/self/maps").exists(),
+        "native mtmd bridge or Linux process maps are unavailable",
+    )
+    def test_mtmd_bridge_cannot_introduce_a_second_runtime_family(self) -> None:
+        """The mtmd bridge claims the family like every other entry point.
+
+        `libmtmd` links against llama and ggml, so this bridge pulls a whole
+        runtime family in behind it. Verifying the bridge's own artifact
+        identity only says those files belong together -- not that they are
+        the family this process already runs on. Without a claim a second,
+        internally consistent family loads beside the first, which is the
+        topology observed in the crashed processes.
+
+        Exercised through `MtmdLibrary` rather than by inspecting the source,
+        because the defect this replaces was invisible to tests that only ever
+        constructed `LlamaLibrary`.
+        """
+        root = Path(__file__).resolve().parents[1]
+        source = DEFAULT_VENDOR_BUILD_BIN
+        script = """
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+from orbit.native_llama.bindings import LlamaLibrary, MtmdLibrary
+from orbit.native_llama.native_names import (
+    mtmd_bridge_filename,
+    platform_runtime_load_order,
+    runtime_library_filename,
+)
+
+source = Path(sys.argv[1])
+bridge_name = mtmd_bridge_filename()
+family = [*platform_runtime_load_order(), runtime_library_filename('mtmd'), bridge_name]
+with tempfile.TemporaryDirectory(prefix='orbit-mtmd-family.') as tmp:
+    second = Path(tmp) / 'second'
+    second.mkdir()
+    for name in family:
+        # Copy the SONAME spellings too, not just the linker name: the loader
+        # asks for `libmtmd.so.0`, so a directory holding only `libmtmd.so`
+        # fails to load before the guard is ever consulted -- which would let
+        # this test pass for the wrong reason.
+        for candidate in sorted(source.glob(name + '*')):
+            if candidate.is_file():
+                shutil.copy2(candidate.resolve(), second / candidate.name)
+        real = source / name
+        if real.exists() and not (second / name).exists():
+            shutil.copy2(real.resolve(), second / name)
+    identity = source / (bridge_name + '.identity.json')
+    if identity.exists():
+        shutil.copy2(identity, second / identity.name)
+
+    # First family: the one this process is entitled to.
+    LlamaLibrary(source)
+    try:
+        MtmdLibrary(second, second / bridge_name)
+    except RuntimeError as exc:
+        if 'native runtime family conflict' not in str(exc):
+            raise
+    else:
+        raise SystemExit('mtmd bridge accepted a second native runtime family')
+
+    mapped = {
+        line.rsplit(' ', 1)[-1]
+        for line in Path('/proc/self/maps').read_text(encoding='utf-8').splitlines()
+        if any(m in line for m in ('/libllama', '/libggml', '/libmtmd', '/liborbit-'))
+    }
+    if any(path.startswith(str(second) + '/') for path in mapped):
+        raise SystemExit('second family was mapped before rejection')
+"""
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(root / "src")
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(source)],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_a_path_alias_is_the_same_family(self) -> None:
+        """Two names for one directory are one runtime, not two.
+
+        The guard compares canonical paths. Comparing the paths as written
+        would refuse a legitimate load whenever the caller reached the same
+        directory through a symlink or a non-normalised path -- a false
+        conflict that would look exactly like the real one.
+        """
+        from orbit.native_llama import bindings
+
+        with tempfile.TemporaryDirectory(prefix="orbit-family-alias.") as tmp:
+            real = Path(tmp) / "real"
+            real.mkdir()
+            alias = Path(tmp) / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            indirect = Path(tmp) / "." / "real"
+
+            with mock.patch.object(bindings, "_RUNTIME_FAMILY_ROOT", None):
+                bindings._claim_runtime_family(real)
+                # Neither spelling is a second family.
+                self.assertEqual(bindings._claim_runtime_family(alias), real.resolve())
+                self.assertEqual(bindings._claim_runtime_family(indirect), real.resolve())
+
+    def test_an_incomplete_family_is_refused_before_it_is_claimed(self) -> None:
+        """A directory missing part of the runtime is not a family.
+
+        Claiming it would bind the process to something that cannot satisfy
+        its own dependencies, and the loader would then answer the missing
+        pieces from wherever else it could find them.
+        """
+        from orbit.native_llama import bindings
+
+        with tempfile.TemporaryDirectory(prefix="orbit-family-partial.") as tmp:
+            partial = Path(tmp) / "partial"
+            partial.mkdir()
+            (partial / runtime_library_filename("mtmd")).write_bytes(b"")
+
+            with mock.patch.object(bindings, "_RUNTIME_FAMILY_ROOT", None):
+                with self.assertRaises(RuntimeError) as caught:
+                    bindings._require_runtime_prefix(
+                        partial.resolve(), runtime_library_filename("llama-common")
+                    )
+                self.assertIn("incomplete native runtime family", str(caught.exception))
+                self.assertIsNone(
+                    bindings._RUNTIME_FAMILY_ROOT,
+                    "an incomplete family must not be claimed",
+                )
+
+    @unittest.skipUnless(
+        (DEFAULT_VENDOR_BUILD_BIN / mtmd_bridge_filename()).exists()
+        and (DEFAULT_VENDOR_BUILD_BIN / runtime_library_filename("mtmd")).exists()
+        and Path("/proc/self/maps").exists(),
+        "native mtmd bridge or Linux process maps are unavailable",
+    )
+    def test_mtmd_family_is_loaded_by_path_not_by_search(self) -> None:
+        """A search path must not decide which family answers.
+
+        `libmtmd` is an optional member of the family, so the mandatory prefix
+        does not name it. Left to the loader, the bridge's own `DT_NEEDED`
+        would be answered by whatever the search path offered first -- here a
+        foreign copy -- which puts a second family in the process even though
+        the claim succeeded.
+        """
+        root = Path(__file__).resolve().parents[1]
+        script = """
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+from orbit.native_llama.bindings import MtmdLibrary
+from orbit.native_llama.native_names import mtmd_bridge_filename, runtime_library_filename
+
+source = Path(sys.argv[1])
+foreign = Path(sys.argv[2])
+MtmdLibrary(source, source / mtmd_bridge_filename())
+mapped = {
+    line.rsplit(' ', 1)[-1]
+    for line in Path('/proc/self/maps').read_text(encoding='utf-8').splitlines()
+    if any(m in line for m in ('/libllama', '/libggml', '/libmtmd', '/liborbit-'))
+}
+outside = sorted(path for path in mapped if path.startswith(str(foreign) + '/'))
+if outside:
+    raise SystemExit('foreign family answered the search path: ' + ','.join(outside))
+"""
+        with tempfile.TemporaryDirectory(prefix="orbit-mtmd-search.") as tmp:
+            foreign = Path(tmp) / "foreign"
+            foreign.mkdir()
+            for candidate in DEFAULT_VENDOR_BUILD_BIN.glob(
+                runtime_library_filename("mtmd") + "*"
+            ):
+                if candidate.is_file():
+                    shutil.copy2(candidate.resolve(), foreign / candidate.name)
+
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(root / "src")
+            # The condition under test: a search path that offers the same
+            # SONAME from somewhere else.
+            env["LD_LIBRARY_PATH"] = str(foreign)
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(DEFAULT_VENDOR_BUILD_BIN), str(foreign)],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_a_rejected_family_does_not_replace_the_claimed_one(self) -> None:
+        """A refusal must not quietly rebind the process to the family it refused.
+
+        If the conflict path recorded the rejected root, the first rejection
+        would move the claim: the next load from the original family would
+        then be refused instead, and a third from the rejected family would be
+        accepted. The process would end up running the family it just said no
+        to, and every later check would agree with it.
+
+        Exercised through the guard directly because no artifact needs to
+        exist for the ordering to be wrong.
+        """
+        from orbit.native_llama import bindings
+
+        with tempfile.TemporaryDirectory(prefix="orbit-claim-order.") as tmp:
+            first = Path(tmp) / "first"
+            second = Path(tmp) / "second"
+            first.mkdir()
+            second.mkdir()
+
+            with mock.patch.object(bindings, "_RUNTIME_FAMILY_ROOT", None):
+                claimed = bindings._claim_runtime_family(first)
+                self.assertEqual(claimed, first.resolve())
+
+                with self.assertRaises(RuntimeError):
+                    bindings._claim_runtime_family(second)
+
+                self.assertEqual(
+                    bindings._RUNTIME_FAMILY_ROOT,
+                    first.resolve(),
+                    "a rejected family replaced the claimed one",
+                )
+                # The original family is still the one this process may load.
+                self.assertEqual(bindings._claim_runtime_family(first), first.resolve())
+                with self.assertRaises(RuntimeError):
+                    bindings._claim_runtime_family(second)
+
     def test_process_rejects_a_second_runtime_family(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = root / "src/orbit/native_llama/vendor/lib"
@@ -205,7 +440,7 @@ with tempfile.TemporaryDirectory(prefix='orbit-runtime-family.') as tmp:
     mapped = {
         line.rsplit(' ', 1)[-1]
         for line in Path('/proc/self/maps').read_text(encoding='utf-8').splitlines()
-        if '/libllama' in line or '/libggml' in line
+        if any(marker in line for marker in ('/libllama', '/libggml', '/libmtmd', '/liborbit-'))
     }
     if any(path.startswith(str(roots[1]) + '/') for path in mapped):
         raise SystemExit('second native runtime family was mapped')
