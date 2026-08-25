@@ -8,10 +8,14 @@ from unittest import mock
 
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.events import NativeTimings
+from orbit.native_llama.native_names import platform_runtime_libs
 from orbit.native_llama.paths import NativeLlamaPaths
 from orbit.native_llama.persistent_mtp import (
     PersistentMtpSessionRuntime,
+    create_persistent_mtp_session,
+    free_persistent_mtp_session,
     _persistent_mtp_link_bin,
+    _shim_exports_required_symbols,
     build_persistent_mtp_shim,
     run_persistent_mtp_completion,
 )
@@ -46,6 +50,189 @@ class NativePersistentMtpTests(unittest.TestCase):
 
         self.assertEqual(shim, packaged)
         mocked_compile.assert_called_once()
+
+    def test_symbol_probe_loads_the_runtime_before_opening_the_shim(self) -> None:
+        """The probe must settle the shim's dependencies from the claimed runtime.
+
+        The packaged shim records `$ORIGIN/../build/llama.cpp/bin` as its
+        search path -- one specific directory, not "wherever this family
+        lives". When the resolved runtime is `vendor/lib` instead, opening the
+        shim unqualified pulls `libllama-common` out of the build directory,
+        putting a second runtime family in the process by the same definition
+        the family guard uses.
+
+        Asserted on the load ORDER rather than on a message: the runtime has to
+        be in place before the shim is opened, or the loader has already
+        answered the shim's dependencies from somewhere else.
+        """
+        loaded: list[Path] = []
+
+        def record(path: Path, *, mode: int) -> object:
+            loaded.append(path)
+            return mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            build_bin = Path(tmp) / "runtime"
+            build_bin.mkdir()
+            for name in platform_runtime_libs():
+                (build_bin / name).write_bytes(b"")
+            shim = Path(tmp) / "liborbit-persistent-mtp.so"
+            shim.write_bytes(b"")
+
+            with mock.patch(
+                "orbit.native_llama.persistent_mtp.load_native_cdll", side_effect=record
+            ):
+                _shim_exports_required_symbols(shim, build_bin)
+
+        self.assertIn(shim, loaded, "the shim itself must still be opened")
+        self.assertGreater(
+            loaded.index(shim),
+            0,
+            "the runtime must be loaded before the shim, not after or not at all",
+        )
+        self.assertEqual(
+            loaded[: loaded.index(shim)],
+            [build_bin / name for name in platform_runtime_libs()],
+            "the shim's dependencies must come from the caller's runtime",
+        )
+
+    def test_shim_selection_passes_the_runtime_to_the_symbol_probe(self) -> None:
+        """The production caller must hand the probe the runtime it will claim.
+
+        The preload only helps if the call site supplies the right directory.
+        `build_bin` is where the compiler links from and can differ from the
+        resolved runtime; preloading it would map a family this process never
+        claimed, which is the state this change exists to remove.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            packaged = Path(tmp) / "liborbit-persistent-mtp.so"
+            packaged.write_bytes(b"")
+            build_bin = Path(tmp) / "runtime"
+            build_bin.mkdir()
+
+            runtime_bin = Path(tmp) / "claimed"
+            runtime_bin.mkdir()
+
+            with mock.patch(
+                "orbit.native_llama.persistent_mtp.packaged_shim_path", return_value=packaged
+            ), mock.patch(
+                "orbit.native_llama.persistent_mtp._shim_exports_required_symbols",
+                return_value=True,
+            ) as probe:
+                build_persistent_mtp_shim(
+                    llama_root=None, build_bin=build_bin, runtime_bin=runtime_bin
+                )
+
+        # The runtime this process will claim, not the directory the compiler
+        # links against: preloading the latter is what puts a second family in
+        # the process when the two diverge.
+        probe.assert_called_once_with(packaged, runtime_bin)
+
+    def test_session_creation_gives_the_shim_builder_the_claimed_runtime(self) -> None:
+        """The session paths must forward the family they are about to claim.
+
+        `build_persistent_mtp_shim` cannot know which runtime the caller
+        claimed unless the caller says so, and the link directory it already
+        receives is the wrong answer whenever the two diverge.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            build_bin = Path(tmp) / "runtime"
+            build_bin.mkdir()
+            paths = NativeLlamaPaths(
+                llama_root=None,
+                build_bin=build_bin,
+                library=build_bin / "libllama.so",
+                model=Path(tmp) / "model.gguf",
+                draft_mtp_model=Path(tmp) / "draft.gguf",
+                mtp_available=True,
+            )
+
+            with mock.patch(
+                "orbit.native_llama.persistent_mtp.build_persistent_mtp_shim",
+                return_value=Path(tmp) / "shim.so",
+            ) as builder, mock.patch(
+                "orbit.native_llama.persistent_mtp._persistent_mtp_link_bin",
+                return_value=Path(tmp) / "link-elsewhere",
+            ):
+                with self.assertRaises(Exception):
+                    create_persistent_mtp_session(
+                        llama_root=Path(tmp),
+                        paths=paths,
+                        ctx_tgt=None,
+                        context_tokens=1,
+                        batch_size=1,
+                        ubatch_size=1,
+                        threads=1,
+                        threads_batch=1,
+                        library_factory=mock.Mock(),
+                    )
+
+        self.assertEqual(
+            builder.call_args.kwargs.get("runtime_bin"),
+            build_bin,
+            "the claimed runtime must reach the shim builder",
+        )
+
+    def test_runtime_library_reuse_also_forwards_the_claimed_runtime(self) -> None:
+        """The second shim-building call site must forward it too.
+
+        `_runtime_library` rebuilds the shim for reset, free and completion, so
+        leaving it unwired would keep the leak alive on every path except
+        session creation -- which is the shape of the wiring gap this change
+        exists to close.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            build_bin = Path(tmp) / "runtime"
+            build_bin.mkdir()
+            paths = NativeLlamaPaths(
+                llama_root=None,
+                build_bin=build_bin,
+                library=build_bin / "libllama.so",
+                model=Path(tmp) / "model.gguf",
+                draft_mtp_model=Path(tmp) / "draft.gguf",
+                mtp_available=True,
+            )
+            runtime = PersistentMtpSessionRuntime(
+                handle=None, ctx_dft=None, spec=None, library=None
+            )
+
+            with mock.patch(
+                "orbit.native_llama.persistent_mtp.build_persistent_mtp_shim",
+                return_value=Path(tmp) / "shim.so",
+            ) as builder, mock.patch(
+                "orbit.native_llama.persistent_mtp._persistent_mtp_link_bin",
+                return_value=Path(tmp) / "link-elsewhere",
+            ):
+                free_persistent_mtp_session(
+                    paths=paths,
+                    runtime=runtime,
+                    llama_root=Path(tmp),
+                    library_factory=lambda *_args: mock.Mock(),
+                )
+
+        self.assertEqual(
+            builder.call_args.kwargs.get("runtime_bin"),
+            build_bin,
+            "the claimed runtime must reach the shim builder on this path too",
+        )
+
+    def test_symbol_probe_without_a_runtime_keeps_its_previous_behaviour(self) -> None:
+        """Callers that pass no runtime still get a plain symbol check."""
+        loaded: list[Path] = []
+
+        def record(path: Path, *, mode: int) -> object:
+            loaded.append(path)
+            return mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shim = Path(tmp) / "liborbit-persistent-mtp.so"
+            shim.write_bytes(b"")
+            with mock.patch(
+                "orbit.native_llama.persistent_mtp.load_native_cdll", side_effect=record
+            ):
+                _shim_exports_required_symbols(shim)
+
+        self.assertEqual(loaded, [shim])
 
     def test_persistent_mtp_link_bin_uses_runtime_bin_when_sonames_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

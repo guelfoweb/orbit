@@ -177,10 +177,19 @@ def build_persistent_mtp_shim(
     llama_root: Path | None,
     build_dir: Path | None = None,
     build_bin: Path | None = None,
+    runtime_bin: Path | None = None,
     runner=subprocess.run,
 ) -> Path:
     packaged = packaged_shim_path(persistent_mtp_shim_filename())
-    if packaged is not None and _shim_exports_required_symbols(packaged):
+    # `build_bin` is where the compiler links from; `runtime_bin` is the family
+    # this process will actually run on. They are usually the same directory
+    # and diverge only when the resolved runtime lacks the SONAME aliases the
+    # linker needs. The probe has to preload the runtime, not the link
+    # directory: preloading the latter is what would put a second family in
+    # the process, which is the thing being prevented.
+    if packaged is not None and _shim_exports_required_symbols(
+        packaged, runtime_bin if runtime_bin is not None else build_bin
+    ):
         return packaged
     artifact_name = persistent_mtp_shim_filename()
     llama_root = require_legacy_llama_root(llama_root, artifact_name=artifact_name)
@@ -208,11 +217,32 @@ def _persistent_mtp_link_bin(paths: NativeLlamaPaths) -> Path:
     return build_bin
 
 
-def _shim_exports_required_symbols(path: Path) -> bool:
+def _shim_exports_required_symbols(path: Path, build_bin: Path | None = None) -> bool:
+    """Whether the packaged shim exports the symbols this process needs.
+
+    `build_bin` is the runtime the caller intends to use. It matters because
+    the shim records `$ORIGIN/../build/llama.cpp/bin` as its search path --
+    one specific directory, not "wherever this family lives". When the
+    resolved runtime is the packaged `vendor/lib` instead, dlopening the shim
+    unqualified pulls `libllama-common` out of the build directory: a second
+    runtime family in the process, by the same definition the family guard
+    uses, since it compares resolved paths.
+
+    Loading the runtime from `build_bin` first settles those dependencies by
+    SONAME before the shim is opened, exactly as `PersistentMtpLibrary` does.
+    That also removes a false negative: the mixed load made this probe report
+    a missing symbol, so a working packaged shim was discarded and the failure
+    surfaced later as "no packaged shim artifact is available".
+    """
     if not path.exists() or not path.is_file():
         return False
     flags = native_cdll_flags()
     try:
+        if build_bin is not None:
+            for dep in platform_runtime_libs():
+                dependency = build_bin / dep
+                if dependency.exists():
+                    load_native_cdll(dependency, mode=flags)
         lib = load_native_cdll(path, mode=flags)
     except OSError:
         return False
@@ -239,6 +269,7 @@ def create_persistent_mtp_session(
         llama_root=llama_root,
         build_dir=build_dir,
         build_bin=_persistent_mtp_link_bin(paths),
+        runtime_bin=paths.build_bin,
         runner=runner,
     )
     library = library_factory(paths.build_bin, shim)
@@ -274,7 +305,12 @@ def _runtime_library(
 ) -> object:
     if runtime.library is not None and hasattr(runtime.library, "lib"):
         return runtime.library
-    shim = build_persistent_mtp_shim(llama_root=llama_root, build_dir=build_dir, build_bin=_persistent_mtp_link_bin(paths))
+    shim = build_persistent_mtp_shim(
+        llama_root=llama_root,
+        build_dir=build_dir,
+        build_bin=_persistent_mtp_link_bin(paths),
+        runtime_bin=paths.build_bin,
+    )
     return library_factory(paths.build_bin, shim)
 
 
