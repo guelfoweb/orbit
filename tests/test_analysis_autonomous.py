@@ -701,15 +701,27 @@ class AutonomyIsOptInTests(unittest.TestCase):
         self.assertFalse(analysis_autonomy_enabled({ANALYSIS_AUTONOMY_ENV: "yes"}))
 
     @mock.patch.dict(os.environ, {}, clear=True)
-    def test_the_terminal_uses_one_step_when_the_gate_is_off(self) -> None:
+    def test_the_terminal_uses_one_step_when_autonomy_is_off(self) -> None:
+        """The terminal branches on its session state, not on the environment.
+
+        It used to read `analysis_autonomy_enabled()` on every analysis turn.
+        That state is now resolved once at startup and can be overridden with
+        `/autonomous`, so re-reading the environment per turn would let an
+        exported value silently outrank what the analyst last chose. The gate
+        itself is unchanged and still supplies the startup default.
+        """
         from orbit.terminal import repl as repl_module
 
         import inspect
 
         source = inspect.getsource(repl_module.Repl._ask_analysis)
-        self.assertIn("analysis_autonomy_enabled()", source)
+        self.assertIn("self.autonomous_analysis", source)
+        self.assertNotIn("analysis_autonomy_enabled()", source)
         self.assertIn("self.analysis.step(", source)
+        # The runtime gate still decides the startup default, and is still off.
         self.assertFalse(analysis_autonomy_enabled())
+        init = inspect.getsource(repl_module.Repl.__post_init__)
+        self.assertIn("analysis_autonomy_enabled()", init)
 
 
 class RollingLineageTests(AutonomousTestBase):
