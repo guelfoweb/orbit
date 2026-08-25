@@ -478,7 +478,32 @@ class MtmdLibrary:
     def __init__(self, build_bin: Path, bridge_path: Path | None = None) -> None:
         resolved_bridge = bridge_path or build_bin / runtime_library_filename("orbit-mtmd-bridge")
         self.build_identity = validate_mtmd_bridge_artifact(build_bin, resolved_bridge)
+        # `libmtmd` links against llama and ggml, so loading this bridge pulls a
+        # whole runtime family in behind it. Claim the family before anything is
+        # loaded, exactly as the llama and chat-bridge entry points do: the
+        # artifact identity checked above says these files belong together, not
+        # that they are the family this process already runs on. Without the
+        # claim a second, internally consistent family loads beside the first
+        # and both sets of static destructors run at exit.
+        # Through `llama-common`: that is the whole mandatory chain, and
+        # `libmtmd` is an optional member of the family rather than a step in
+        # the load order, so asking for it by name would not resolve. Its own
+        # `DT_NEEDED` set is llama and ggml, all of which this prefix covers.
+        required = _require_runtime_prefix(
+            build_bin.resolve(), runtime_library_filename("llama-common")
+        )
+        self.build_bin = _claim_runtime_family(build_bin)
         flags = native_cdll_flags()
+        self._handles: list[CDLL] = []
+        for path in required:
+            self._handles.append(load_native_cdll(path, mode=flags))
+        # `libmtmd` last: it is an optional member of the family, so the
+        # mandatory prefix above does not name it, and leaving it to the loader
+        # means the bridge's own DT_NEEDED decides where it comes from. Loading
+        # it by full path from the claimed family settles that here instead.
+        self._handles.append(
+            load_native_cdll(self.build_bin / runtime_library_filename("mtmd"), mode=flags)
+        )
         self.lib = load_native_cdll(
             resolved_bridge,
             mode=flags,
