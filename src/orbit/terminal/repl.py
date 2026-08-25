@@ -87,8 +87,19 @@ class Repl:
     backend_usage_observer_installed: bool = field(default=False, init=False, repr=False)
     prompt_gap_pending: bool = field(default=True, init=False, repr=False)
     prompt_redisplay_pending: bool = field(default=False, init=False, repr=False)
+    # Whether an analysis may continue itself, for this process only.
+    #
+    # Read once at startup from the runtime's own gate rather than consulted
+    # per turn, so `/autonomous` can override the environment without writing
+    # to it: the setting belongs to this session, and a later analysis in the
+    # same process should honour what the analyst last chose rather than what
+    # they exported before starting. `None` means "not yet resolved" and is
+    # replaced in __post_init__; it is not a third state.
+    autonomous_analysis: bool | None = field(default=None)
 
     def __post_init__(self) -> None:
+        if self.autonomous_analysis is None:
+            self.autonomous_analysis = analysis_autonomy_enabled()
         if self.tools_mode is None:
             self.tools_mode = self.config.tools
         self.backend.thinking = self.config.think
@@ -330,7 +341,7 @@ class Repl:
         renderer.start()
         run: AutonomousRunResult | None = None
         try:
-            if analysis_autonomy_enabled():
+            if self.autonomous_analysis:
                 # Same step primitive, issued repeatedly while each one adds
                 # verifiable state. `step()` still owns every guarantee; the
                 # loop only decides whether to ask again.
@@ -608,6 +619,9 @@ class Repl:
             self.config, message = set_max_tokens(self.config, arguments)
             print(message)
             return True
+        if handler == "autonomous":
+            print(self._handle_autonomous_command(arguments))
+            return True
         if handler == "think":
             print(self._handle_think_command(f"/think {arguments}".rstrip()))
             return True
@@ -707,6 +721,33 @@ class Repl:
         self.backend.thinking = self.config.think
         self.runtime.thinking_mode = self.config.think
         return f"think: {value}"
+
+    def _handle_autonomous_command(self, arguments: str) -> str:
+        """Show or set autonomous analysis for this session.
+
+        The terminal owns the switch, not the policy: what autonomy means, when
+        it stops, and what it costs all stay in the runtime. This decides only
+        whether the next analysis turn asks for it.
+
+        Nothing is written to the environment and nothing is persisted. An
+        override lives for this process, so a later `orbit` starts from the
+        environment again -- an analyst who turned autonomy on to finish one
+        artifact does not silently keep it on tomorrow.
+        """
+        value = arguments.strip().lower()
+        if not value:
+            return f"autonomous analysis: {'on' if self.autonomous_analysis else 'off'}"
+        if value not in {"on", "off"}:
+            # The state is left exactly as it was: a mistyped argument must not
+            # decide whether an analysis runs itself.
+            return "error: usage: /autonomous [off|on]"
+        self.autonomous_analysis = value == "on"
+        if self.autonomous_analysis:
+            return (
+                "autonomous analysis: on -- an analysis continues by itself "
+                "while each step adds new evidence"
+            )
+        return "autonomous analysis: off -- each analysis step returns to you"
 
     def _enter_analysis_from_route(self, artifact: str) -> bool:
         """Open an analysis session the route asked for. True if it opened.
