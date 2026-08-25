@@ -67,6 +67,13 @@ COMMANDS = (
         "Report on the evidence already collected, running no analysis action.",
         "report",
     ),
+    CommandSpec(
+        "/autonomous",
+        "Analysis",
+        "/autonomous [off|on]",
+        "Show or set autonomous analysis for this session.",
+        "autonomous",
+    ),
     CommandSpec("/chat", "Analysis", "/chat", "Return to normal chat mode.", "chat"),
     CommandSpec("/help", "Help", "/help", "Show command help.", "help"),
 )
