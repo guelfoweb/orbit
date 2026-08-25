@@ -4,11 +4,25 @@ import json
 import re
 import shlex
 
+from orbit.terminal.theme import sanitize_terminal_text
+
 
 LARGE_TOOL_RESULT_CHARS = 10_000
 SHELL_FULL_CONTRACT_ERROR_PREFIX = "error: shell-full analysis requests require content/source/string evidence"
 PREVIEW_LINE_LIMIT = 3
 PREVIEW_INLINE_LIMIT = 120
+# A streamed result is a progress signal, not the evidence record: it shows
+# enough of what an action produced to follow along, while the full text
+# stays one evidence id away. Sized below the guided step preview, which is
+# what the analyst reads once control is handed back.
+BLOCK_LINE_LIMIT = 12
+BLOCK_LINE_CHARS = 160
+# Total rows the block may occupy, blank separators included. The line
+# budget counts content, so without this a body that is mostly blank space
+# still costs a row per gap: 32000 empty lines around three statements
+# scrolls the surrounding status out of view to show nothing.
+BLOCK_ROW_LIMIT = 24
+BLOCK_INDENT = "    "
 DISPLAY_TOOL_NAMES = {
     "exec_shell_full_command": "Exec",
     "fetch_url": "Web",
@@ -83,10 +97,110 @@ def format_tool_result_event(name: str, chars: int, source: str | None = None, c
     suffix = f" · {' · '.join(suffix_parts)}" if suffix_parts else ""
     chunk = _chunk_label(content)
     prefix = f"{chunk} " if chunk else ""
+    block = _result_block(content)
+    if block:
+        # A multi-line result gets a header line carrying the same metadata a
+        # one-line result carries, then the output itself indented beneath it,
+        # so code and structured text stay readable instead of running into
+        # the status line beside them.
+        header = f"└ {prefix}{chars} chars{suffix}"
+        return "\n".join([header, *block])
     preview_text = _truncate_inline(preview, limit=PREVIEW_INLINE_LIMIT) if preview else None
     if preview_text:
         return f"└ {prefix}{preview_text}{suffix}"
     return f"└ {prefix}{chars} chars{suffix}"
+
+
+def _result_block(content: str | None) -> list[str]:
+    """The action's own output as an indented block, when a block helps.
+
+    Structural only: the decision is the shape of the text -- how many lines,
+    whether they carry indentation -- never what the text says. There is no
+    language detection, no Markdown parsing and no syntax guessing.
+
+    Three kinds of result deliberately keep the compact one-line form they
+    already had, because a block would cost several lines to say what one line
+    said just as clearly:
+
+    - errors and contract refusals, whose first line is the whole point and
+      which must stay visually distinct from output that succeeded;
+    - metadata-only envelopes, which carry no action output at all;
+    - flat short output such as a directory listing, where `a | b | c` reads
+      better than the same three words stacked.
+
+    What is left is what a block is for: the body of a real result, long
+    enough or structured enough that its line breaks and indentation are part
+    of the information.
+    """
+    if not content or not content.strip():
+        return []
+    if content.strip().startswith("error:"):
+        # An error's first line is its subject, and the compact form keeps it
+        # beside the failure marker rather than under a `chars` header. A
+        # contract refusal is one of these: it opens with `error:` too, so this
+        # covers refusals without a second check that could drift apart.
+        return []
+    body = _result_body(content)
+    if body is None:
+        return []
+    stripped = body.strip("\n")
+    if not stripped.strip():
+        return []
+    lines = [line for line in _display_lines(stripped) if line.strip()]
+    if len(lines) < 2:
+        return []
+    if not _is_structured(lines):
+        return []
+    return _block_lines(stripped)
+
+
+# Flat lines carry no shape of their own, so they only earn a block once
+# there are too many to read as an inline join. A directory listing of a few
+# entries is the common case and stays compact; a screen of them does not.
+MIN_FLAT_BLOCK_LINES = 8
+
+
+def _is_structured(lines: list[str]) -> bool:
+    """Whether these lines need their own shape to stay readable.
+
+    Indentation is the signal that line breaks carry meaning -- it is what
+    distinguishes a source file or a nested structure from a flat list of
+    names. Failing that, enough lines to no longer fit an inline join.
+
+    Only space and tab count as indentation. `str.isspace` is also true of
+    carriage return, vertical tab, form feed and the Unicode separators, which
+    would let a single control byte in tool output decide which shape Orbit
+    renders -- harmless to the terminal, since the text is escaped either way,
+    but the choice should be Orbit's.
+    """
+    if any(line[:1] in (" ", "\t") for line in lines):
+        return True
+    return len(lines) >= MIN_FLAT_BLOCK_LINES
+
+
+def _result_body(content: str) -> str | None:
+    """The action's output within a transport envelope, or the content itself."""
+    for marker in ("content:\n", "text:\n"):
+        if marker in content:
+            return content.split(marker, 1)[1]
+    if _METADATA_HEAD.match(content):
+        # A recognized envelope with no body marker carries no action output
+        # to show: everything it has is metadata the header line covers.
+        return None
+    return content
+
+
+# An envelope opens with a transport token Orbit itself wrote, anchored at the
+# start of the result.
+#
+# Only these distinctive tokens count. `path:`, `status:` and `chars:` are
+# fields *inside* an envelope, never its opening line, and treating them as
+# envelope markers would misread real command output that happens to begin
+# with one -- `path: /etc/hosts` from a config dump, say -- as metadata, and
+# silently drop its body from the display.
+_METADATA_HEAD = re.compile(
+    r"^(shell_output_\w+:|url_fetch:|directory_listing:|system_info:)"
+)
 
 
 def _command_from_args(args: str) -> str | None:
@@ -295,11 +409,77 @@ def _prefix_path_preview(path: str | None, preview: str | None) -> str | None:
 def _truncate_inline(text: str | None, *, limit: int) -> str:
     if not text:
         return ""
-    normalized = " ".join(text.split())
+    normalized = _normalize_inline(text)
     if len(normalized) <= limit:
         return normalized
     return normalized[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _normalize_inline(text: str) -> str:
-    return " ".join(text.split())
+    """One terminal-safe line, for text that shares a line with metadata.
+
+    Collapsing whitespace removes newlines and tabs but leaves the rest of the
+    control range intact, and an escape sequence is not whitespace: without
+    sanitizing, tool output could move the cursor or erase the line it is
+    printed on. `sanitize_terminal_text` is the shared boundary, applied
+    before collapsing so an escaped sequence becomes ordinary visible text
+    rather than a control character that survives as-is.
+    """
+    return " ".join(sanitize_terminal_text(text).split())
+
+
+def _display_lines(text: str) -> list[str]:
+    """Split on newline only, so no other control character can forge a line."""
+    return text.split("\n")
+
+
+def _block_lines(text: str) -> list[str]:
+    """`text` as indented display lines, bounded and marked when shortened.
+
+    Line breaks and leading indentation are what make code and structured
+    output readable, so they are preserved rather than collapsed; each line is
+    sanitized on its own, which escapes any control character without touching
+    the printable text around it. Nothing here inspects what the text is: no
+    language detection, no Markdown, no syntax guessing -- only how much of it
+    fits on a terminal.
+
+    Only `\n` starts a new line here. `str.splitlines` also breaks on carriage
+    return, vertical tab, form feed and the Unicode separators, which would let
+    tool output invent lines inside the block -- the same line forgery the
+    sanitizer exists to stop. Split on `\n` alone and every one of those stays
+    an ordinary character that sanitizing turns into visible text.
+    """
+    out: list[str] = []
+    shortened = False
+    kept = 0
+    for index, line in enumerate(_display_lines(text)):
+        if not line.strip():
+            # A blank line separates what is around it; it is not itself a
+            # line of output, so it does not spend the line budget. Emitted
+            # empty rather than indented: indenting nothing only adds trailing
+            # whitespace the renderer invented. It still costs a row, so that
+            # a long run of them cannot scroll the terminal on its own.
+            if len(out) >= BLOCK_ROW_LIMIT:
+                shortened = True
+                break
+            out.append("")
+            continue
+        if kept == BLOCK_LINE_LIMIT or len(out) >= BLOCK_ROW_LIMIT:
+            shortened = True
+            break
+        safe = sanitize_terminal_text(line)
+        if len(safe) > BLOCK_LINE_CHARS:
+            safe = safe[:BLOCK_LINE_CHARS] + "…"
+            shortened = True
+        out.append(f"{BLOCK_INDENT}{safe}")
+        kept += 1
+    del index
+    while out and not out[-1]:
+        # Trailing separators have nothing left to separate.
+        out.pop()
+    if shortened:
+        # No char count here: it would be the length of this body, while the
+        # header line already reports the result's own size. Two different
+        # numbers for "the same" output on adjacent lines is worse than one.
+        out.append(f"{BLOCK_INDENT}[preview truncated; full output in evidence]")
+    return out
