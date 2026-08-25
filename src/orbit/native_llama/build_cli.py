@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from .build_support import BUNDLED_SOURCE_ROOT, DEFAULT_VENDOR_BUILD_BIN, DEFAULT_VENDOR_BUILD_ROOT, validate_llama_source_root
+from .build_support import BUNDLED_SOURCE_ROOT, DEFAULT_VENDOR_BUILD_BIN, DEFAULT_VENDOR_BUILD_ROOT, ORIGIN_RUNPATH, validate_llama_source_root
 from .chat_bridge import build_chat_bridge, install_chat_bridge
 from .llama_provenance import load_llama_provenance
 from .mtp_accept_probe import build_mtp_accept_probe_helper
@@ -112,6 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         "-DLLAMA_BUILD_UI=OFF",
         "-DLLAMA_BUILD_TOOLS=ON",
         "-DLLAMA_OPENSSL=OFF",
+        # Resolve sibling runtime libraries relative to the loaded library
+        # rather than through the absolute build directory CMake would embed.
+        # An absolute build-tree RUNPATH follows a copied checkout: its
+        # libllama keeps naming the directory it was built in, so a second
+        # checkout on the same machine loads its own libllama while resolving
+        # libggml back into the first one. Two families of llama/ggml then
+        # share one address space, which is not a configuration either was
+        # built for.
+        f"-DCMAKE_BUILD_RPATH={ORIGIN_RUNPATH}",
+        f"-DCMAKE_INSTALL_RPATH={ORIGIN_RUNPATH}",
+        "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
         *provenance_args,
     ]
     build_cmd = [cmake, "--build", str(build_dir)]
@@ -278,6 +289,32 @@ def _copy_runtime_libraries(build_bin: Path) -> None:
         if not source.exists():
             continue
         shutil.copy2(source, DEFAULT_VENDOR_LIB_DIR / name)
+        _copy_soname_aliases(source, DEFAULT_VENDOR_LIB_DIR)
+
+
+def _copy_soname_aliases(source: Path, destination: Path) -> None:
+    """Copy the versioned names a library is actually requested by.
+
+    `libllama.so` is the linker's name for the library; the loader is asked for
+    the SONAME its dependents record, which is `libllama.so.0`. Copying only
+    the bare name leaves the packaged directory unable to answer its own
+    dependencies, so resolution falls through to whatever else on the machine
+    offers that SONAME -- which is how a packaged runtime ended up loading
+    half of a second Orbit checkout's libraries.
+
+    In the build tree those versioned names are symlinks to one real file.
+    They are materialized as copies here because a symlink would point outside
+    the packaged directory once this tree is installed elsewhere.
+    """
+    real = source.resolve()
+    for candidate in source.parent.iterdir():
+        if candidate == source or not candidate.is_file():
+            continue
+        if not candidate.name.startswith(source.name):
+            continue
+        if candidate.resolve() != real:
+            continue
+        shutil.copy2(candidate, destination / candidate.name)
 
 
 def _build_packaged_shims(source_root: Path, build_bin: Path) -> None:
