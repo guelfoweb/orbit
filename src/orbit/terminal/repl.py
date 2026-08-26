@@ -387,6 +387,10 @@ class Repl:
                 # would be told actions ran and given no evidence id to cite or
                 # re-attest.
                 def show(step, record) -> None:
+                    # The wait line is still being redrawn in place. End it
+                    # first, or this block lands on the same row and the
+                    # elapsed duration is overwritten instead of kept.
+                    renderer.settle_progress_line()
                     block = format_analysis_step(
                         step, prose_already_shown=renderer.rendered_visible_text
                     )
@@ -440,6 +444,11 @@ class Repl:
             renderer.finish(interrupted=True)
             self._close_analysis()
             raise
+        # A guided step prints its block after the renderer has stopped, so
+        # it asks for the finished progress line to be kept rather than
+        # settling over a live one.
+        if run is None:
+            renderer.keep_progress_line()
         renderer.finish()
         # The renderer already showed the prose if the backend streamed it;
         # the final block then carries only what streaming could not: action

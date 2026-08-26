@@ -75,6 +75,27 @@ class StreamRenderer:
         self._thinking_dim_open = False
         self._phase_label: str | None = None
         self._activity_kind = "model"
+        # The last generation line drawn in place, kept so it can be committed
+        # to the transcript instead of erased. The wait line is written with a
+        # bare `\r` and no newline, so whatever prints next lands on the same
+        # row; and clearing it takes the elapsed duration with it. Generation
+        # only -- a prefill or "working" tick is scaffolding the analyst does
+        # not need once the step is over.
+        self._settled_line: str | None = None
+        # Held for every write to the wait-line row. The timer thread redraws
+        # that row while the main thread may be committing or clearing it;
+        # without this a redraw can land between a commit and the print that
+        # follows, putting an unterminated line back under the caller's output
+        # -- the exact collision this class exists to prevent.
+        self._line_lock = threading.Lock()
+        # Set while a caller is printing after a settle, so the timer does not
+        # draw a new line underneath that output.
+        self._suspend_ticks = False
+        # Whether a caller has asked for the finished line to be kept. Commit
+        # only on request: the renderer cannot infer the intent from what has
+        # streamed, because a turn that only calls a tool sends no prose at
+        # all and would otherwise look identical to one that finished.
+        self._commit_pending = False
 
     def start(self) -> None:
         self._started = True
@@ -138,14 +159,54 @@ class StreamRenderer:
         self._start_time = time.monotonic()
         self._first_delta = False
         self._progress = None
+        # Restarting resets the rest of the line state, so it resets this too.
+        # A settle suspends ticks for the caller's print; leaving them
+        # suspended across a restart would freeze the live line for the whole
+        # next segment.
+        self._suspend_ticks = False
         if not self._interactive or not self._started:
             return
         self._timer_active = True
         self._thread = threading.Thread(target=self._run_wait_timer, daemon=True)
         self._thread.start()
 
+    def settle_progress_line(self) -> None:
+        """Commit the live generation line before printing something else.
+
+        A caller that prints while the timer is still running -- an autonomous
+        run rendering each completed step -- would otherwise land on the row
+        the wait line is redrawing, because that line carries no newline of
+        its own. Calling this first ends the line properly and keeps the
+        elapsed duration on screen. Safe to call when nothing is pending.
+        """
+        with self._line_lock:
+            if self._settled_line is None:
+                return
+            self._commit_pending = False
+            self._commit_wait_line()
+            self._progress = None
+            # Silence the timer for the caller's print. Serialising the two
+            # writers is not enough on its own: a tick that lands after the
+            # commit draws a fresh unterminated line, and the caller's output
+            # then collides with that one instead. The timer is restarted by
+            # the next `progress()` or `event()`, as it is after any pause.
+            self._suspend_ticks = True
+
+    def keep_progress_line(self) -> None:
+        """Ask for the finished generation line to be kept when the timer stops.
+
+        For a caller that ends the step through `finish()` rather than by
+        printing over a live line: a guided analysis writes its block after
+        the renderer has already stopped.
+        """
+        self._commit_pending = True
+
     def progress(self, update: StreamProgress | WorkProgress) -> None:
-        self._progress = update
+        with self._line_lock:
+            # Published together: releasing the timer before the new progress
+            # is in place would let a tick draw from the previous step's.
+            self._progress = update
+            self._suspend_ticks = False
         if self._interactive and self._started and not self._first_delta:
             self._render_wait_line()
 
@@ -227,8 +288,47 @@ class StreamRenderer:
             self._thread.join(timeout=1)
         self._thread = None
         self._timer_active = False
-        if clear:
-            self._clear_wait_line()
+        # Taken after the join above, so the timer thread is already gone and
+        # cannot be holding it.
+        with self._line_lock:
+            # Only a line the caller is finished with gets committed. Once
+            # prose has started streaming the progress line has been
+            # superseded by the answer itself, and `write()` asks for it to be
+            # erased -- committing it there would put a generating row above
+            # every CHAT reply.
+            if self._commit_pending and self._settled_line is not None:
+                self._commit_pending = False
+                self._commit_wait_line()
+                return
+            # Dropped rather than kept: a line abandoned mid-stream must not
+            # surface later as though it had just finished.
+            self._commit_pending = False
+            self._settled_line = None
+            if clear:
+                self._clear_wait_line()
+
+    def _commit_wait_line(self) -> None:
+        """Leave the finished generation line standing, set apart above and below.
+
+        The live line is drawn with `\r` and no newline so each tick can
+        overwrite the last. That is right while it is still moving, and wrong
+        the moment it stops: the next thing printed lands on the same row, and
+        clearing it instead loses the elapsed duration the analyst was
+        watching accumulate. Committing it writes the newline the redraw loop
+        deliberately omitted.
+
+        A blank line above separates it from the evidence or prose it follows;
+        one below separates it from the `action:` line that comes next. Both
+        are plain newlines, so the separation holds where colour does not --
+        a pipe, `NO_COLOR`, `TERM=dumb`.
+        """
+        line = self._settled_line
+        self._settled_line = None
+        if line is None:
+            return
+        # Overwrite the in-place copy rather than adding a second one.
+        print("\r" + _pad_to_terminal_width(""), end="", flush=True)
+        print(f"\r\n{dim(line)}\n", flush=True)
 
     def _run_wait_timer(self) -> None:
         while not self._stop.is_set():
@@ -236,6 +336,12 @@ class StreamRenderer:
             self._stop.wait(self.interval)
 
     def _render_wait_line(self) -> None:
+        with self._line_lock:
+            if self._suspend_ticks:
+                return
+            self._render_wait_line_locked()
+
+    def _render_wait_line_locked(self) -> None:
         elapsed = time.monotonic() - self._start_time
         detail = self._progress_activity_detail() or self._phase_label or "working"
         progress_elapsed = getattr(self._progress, "elapsed_seconds", None)
@@ -244,8 +350,10 @@ class StreamRenderer:
             if self._progress is not None and self._progress.phase == "generation" and _valid_metric(progress_elapsed)
             else elapsed
         )
-        line = dim(_fit_activity_line(self._activity_kind, detail, format_elapsed(shown_elapsed)))
-        print(f"\r{_pad_to_terminal_width(line)}", end="", flush=True)
+        fitted = _fit_activity_line(self._activity_kind, detail, format_elapsed(shown_elapsed))
+        if self._progress is not None and self._progress.phase == "generation":
+            self._settled_line = fitted
+        print(f"\r{_pad_to_terminal_width(dim(fitted))}", end="", flush=True)
 
     @staticmethod
     def _clear_wait_line() -> None:
