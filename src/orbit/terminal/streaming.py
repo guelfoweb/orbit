@@ -159,6 +159,11 @@ class StreamRenderer:
         self._start_time = time.monotonic()
         self._first_delta = False
         self._progress = None
+        # Restarting resets the rest of the line state, so it resets this too.
+        # A settle suspends ticks for the caller's print; leaving them
+        # suspended across a restart would freeze the live line for the whole
+        # next segment.
+        self._suspend_ticks = False
         if not self._interactive or not self._started:
             return
         self._timer_active = True

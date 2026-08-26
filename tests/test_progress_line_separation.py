@@ -592,3 +592,120 @@ class ToolCallPresentationTests(ProgressLineHarness):
             any("7 tok" in line for line in lines),
             "an abandoned line resurfaced on a later request",
         )
+
+
+class CommitRequestInvariantTests(ProgressLineHarness):
+    """A request must not outlive the line it was made for.
+
+    `keep_progress_line()` can be called when nothing has settled yet. If the
+    flag survives the drop path, a later line -- one nobody asked to keep --
+    is committed instead. Production happens to call `keep` immediately before
+    `finish()`, which hides this; the invariant is asserted directly so a
+    reordering cannot reintroduce it.
+    """
+
+    def test_a_stale_request_does_not_commit_a_later_line(self) -> None:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.set_activity("analysis")
+            renderer.start()
+            renderer.keep_progress_line()
+            # Nothing has settled, so this takes the drop path.
+            renderer.event("tool: x")
+            renderer.progress(generation(99.0, tokens=9, rate=5.0))
+            renderer._render_wait_line()
+            renderer.finish()
+        lines = screen(buffer.getvalue())
+
+        self.assertFalse(
+            any("generating" in line for line in lines),
+            "a stale keep request committed a line nobody asked for",
+        )
+
+    def test_a_request_is_consumed_by_the_commit_it_causes(self) -> None:
+        """One request keeps one line, not every line after it."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.set_activity("analysis")
+            renderer.start()
+            renderer.progress(generation(10.0, tokens=11))
+            renderer._render_wait_line()
+            renderer.keep_progress_line()
+            renderer.finish()
+            # A second segment nobody asked about.
+            renderer.progress(generation(20.0, tokens=22))
+            renderer._render_wait_line()
+            renderer.finish()
+        lines = screen(buffer.getvalue())
+
+        self.assertTrue(any("11 tok" in line for line in lines), "the kept line is missing")
+        self.assertFalse(
+            any("22 tok" in line for line in lines),
+            "the request leaked into a later line",
+        )
+
+
+class PhaseSelectionTests(ProgressLineHarness):
+    """Only a finished generation is worth keeping in the transcript."""
+
+    def test_a_prefill_line_is_not_committed_on_the_guided_path(self) -> None:
+        """A guided step that never generates must leave no scaffolding row.
+
+        `test_a_prefill_line_is_still_cleared` covers the plain stop; this
+        covers the requested one, which is the route the guided fix uses.
+        """
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.set_activity("analysis")
+            renderer.start()
+            renderer.progress(
+                StreamProgress(
+                    phase="prefill",
+                    current=0,
+                    total=100,
+                    percent=10,
+                    evaluated_current=10,
+                    evaluated_total=100,
+                )
+            )
+            renderer._render_wait_line()
+            renderer.keep_progress_line()
+            renderer.finish()
+            print("action: ok", flush=True)
+        lines = screen(buffer.getvalue())
+
+        self.assertFalse(
+            any("prefill" in line for line in lines),
+            "a prefill row was committed to the transcript",
+        )
+
+
+class TimerRestartTests(ProgressLineHarness):
+    def test_a_restart_releases_suspended_ticks(self) -> None:
+        """Restarting the timer resets line state, this included.
+
+        A settle suspends ticks for the caller's print. If an `event()`
+        restarts the timer while they are still suspended, the live line stays
+        frozen for the whole next segment. Not reachable from today's single
+        settle caller, which passes no event callback -- asserted so that
+        wiring one in later cannot silently freeze the line.
+        """
+        renderer = StreamRenderer(interval=999, interactive=True)
+        renderer.set_activity("analysis")
+        renderer.start()
+        renderer.progress(generation(5.0))
+        renderer._render_wait_line()
+        renderer.settle_progress_line()
+        self.assertTrue(renderer._suspend_ticks, "settling should suspend ticks")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer._restart_timer()
+
+        self.assertFalse(
+            renderer._suspend_ticks,
+            "a restarted timer must not stay suspended",
+        )
