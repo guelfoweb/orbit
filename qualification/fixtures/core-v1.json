@@ -7,7 +7,8 @@
       "profiles": [
         "orbit-gemma4-native-v1",
         "orbit-qwen36-native-v1",
-        "orbit-qwen3-coder-native-v1"
+        "orbit-qwen3-coder-native-v1",
+        "orbit-ornith15-native-v1"
       ],
       "request": {
         "prompt": "Reply with exactly ORBIT_QUALIFICATION_CHAT_OK and nothing else.",
@@ -26,7 +27,8 @@
       "profiles": [
         "orbit-gemma4-native-v1",
         "orbit-qwen36-native-v1",
-        "orbit-qwen3-coder-native-v1"
+        "orbit-qwen3-coder-native-v1",
+        "orbit-ornith15-native-v1"
       ],
       "request": {
         "prompt": "Determine the absolute current working directory using a local capability.",
@@ -48,7 +50,8 @@
       "profiles": [
         "orbit-gemma4-native-v1",
         "orbit-qwen36-native-v1",
-        "orbit-qwen3-coder-native-v1"
+        "orbit-qwen3-coder-native-v1",
+        "orbit-ornith15-native-v1"
       ],
       "request": {
         "prompt": "Run exactly the local shell command `pwd`, then answer with only its output.",
@@ -70,7 +73,8 @@
       "profiles": [
         "orbit-gemma4-native-v1",
         "orbit-qwen36-native-v1",
-        "orbit-qwen3-coder-native-v1"
+        "orbit-qwen3-coder-native-v1",
+        "orbit-ornith15-native-v1"
       ],
       "request": {
         "prompt": "Create qualification.json with this valid JSON integer, then verify the artifact:\n\n3141592653589793238462643383279502884197169399375105820974944592",

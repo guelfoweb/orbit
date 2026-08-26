@@ -14,6 +14,32 @@ for a tool. Linux x86_64 CPU-only is the qualified platform.
   <img src="docs/orbit-cli.png" alt="Orbit CLI" width="900">
 </p>
 
+## Supported Models
+
+| Model | Prefill | Generation | Tools-on chat | Tool + final | Peak RAM |
+|---|---:|---:|---:|---:|---:|
+| [Gemma 4 26B-A4B](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | ~24.2 tok/s | ~7.1 tok/s | ~3.0 s | ~20.9 s | ~29.4 GiB |
+| [Qwen 3.6 35B-A3B](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF) | ~31.8 tok/s | ~7.6 tok/s | ~6.1 s | ~23.8 s | ~36.4 GiB |
+| [Qwen3-Coder 30B-A3B](https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF) | ~26.0 tok/s | ~10.7 tok/s | ~3.0 s | ~18.4 s | ~31.3 GiB |
+| [Ornith 1.5 35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) | ~29.0 tok/s | ~8.3 tok/s | ~36.8 s cold / ~8.4 s warm | ~49.0 s | ~35.8 GiB |
+
+**Performance figures are measurements on one CPU-only system**, not universal
+model performance — they vary with hardware, configuration, cache state and
+workload. The reference system is a NUC10 Intel Core i7-10710U (6 cores / 12
+threads), 64 GB RAM, no GPU; Linux, llama.cpp b9551, `ctx=8192`, 6 threads,
+batch/ubatch 256/128, thinking off.
+
+The Ornith row was measured with the qualification harness in this repository
+and every figure is reproducible from
+[its benchmark record](docs/benchmarks/ornith-1.5-35b-a3b.md). The first three
+rows predate that harness and could not be reproduced from any data kept in the
+repository; treat them as indicative until they are re-measured. Tools-on chat
+in particular is dominated by route-prefix cache state rather than model speed.
+
+`--low-memory` is supported only for Qwen3-Coder 30B-A3B. On the system above it
+cut peak RSS from ~31.3 to ~18.3 GiB, costing ~13.9% on prefill and ~1% on
+decode.
+
 ## Requirements
 
 - Python 3.11 or newer, on Linux
@@ -131,44 +157,6 @@ It is off by default, and opt-in for cost rather than correctness: a step that
 measures something new counts as progress whether or not the measurement was
 worth making, so an artifact with little to derive can still attract many
 actions. Whether that trade is worthwhile is the operator's call.
-
-## Supported Models
-
-| Model | Prefill | Generation | Tools-on chat | Tool + final | Peak RAM |
-|---|---:|---:|---:|---:|---:|
-| [Gemma 4 26B-A4B](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | ~24.2 tok/s | ~7.1 tok/s | ~3.0 s | ~20.9 s | ~29.4 GiB |
-| [Qwen 3.6 35B-A3B](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF) | ~31.8 tok/s | ~7.6 tok/s | ~6.1 s | ~23.8 s | ~36.4 GiB |
-| [Qwen3-Coder 30B-A3B](https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF) | ~26.0 tok/s | ~10.7 tok/s | ~3.0 s | ~18.4 s | ~31.3 GiB |
-| [Ornith 1.5 35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) | — | — | — | — | — |
-
-Measured on a NUC10 Intel Core i7-10710U (6 cores / 12 threads), 64 GB RAM, no
-GPU; Linux, llama.cpp b9551, `ctx=8192`, 6 threads, batch/ubatch 256/128, Flash
-Attention AUTO, thinking off, MTP off.
-
-Chat and tool latencies are warm steady-state medians after one excluded
-warm-up; prefill counts evaluated tokens only. **These are measurements on that
-one system, not universal model performance** — results vary with hardware,
-context, cache reuse and workload.
-
-**Ornith 1.5 35B-A3B** is verified, and the profile the ANALYSIS workflow is
-qualified on. It has not been run under the chat protocol above, so it has no
-comparable row there. Measured on the same system under the ANALYSIS workload,
-at `--ctx 16384`, quantization Q4_K_M:
-
-| Metric | Measured |
-|---|---|
-| Prefill (cold, no cache reuse) | 21–33 tok/s (n=5, median 31.8) |
-| Generation | ~5–10 tok/s (n=22 derived, median 5.9) |
-
-Prefill counts only calls with no reuse, so it matches the definition above.
-Generation is derived from wall clock minus prefill — a looser bound than a
-dedicated decode benchmark. Peak RAM is not stated because it was never
-measured. Methodology and per-call figures:
-[docs/benchmarks/ornith-1.5-35b-a3b.md](docs/benchmarks/ornith-1.5-35b-a3b.md).
-
-`--low-memory` is supported only for Qwen3-Coder 30B-A3B. On the system above it
-cut peak RSS from ~31.3 to ~18.3 GiB, costing ~13.9% on prefill and ~1% on
-decode.
 
 ## Limitations
 

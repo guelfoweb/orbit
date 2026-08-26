@@ -1,0 +1,274 @@
+{
+  "schema": "orbit-benchmark-results/1",
+  "model": {
+    "repository": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+    "file": "Ornith-1.5-35B-Q4_K_M.gguf",
+    "quantization": "Q4_K_M",
+    "file_bytes": 21713462848,
+    "file_sha256": "ca6ea26329c88b78ffd90a85163be2e746c2fafd1024f56db47e499f117f9a7f",
+    "profile_id": "orbit-ornith15-native-v1",
+    "architecture": "qwen35moe",
+    "template_sha256": "f55f52930aa8bf44ab5cb85f99370fcc3c56e9a85640b812086d5330bce5d86b"
+  },
+  "orbit": {
+    "git_revision": "892cfad36453b55f28f0dcdd50aea7a36450f58e",
+    "backend": "orbit-native",
+    "llama_cpp_build_number": 9551,
+    "llama_cpp_build_commit": "379ac6673b5cd75c7b4e07d1521c50f1e093878c"
+  },
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) i7-10710U CPU @ 1.10GHz",
+    "machine": "Intel NUC10i7FNH",
+    "physical_cores": 6,
+    "logical_cores": 12,
+    "ram_total_gb": 63,
+    "gpu": null,
+    "os": "Linux 7.0.0-30-generic x86_64"
+  },
+  "configuration": {
+    "ctx_size": 8192,
+    "threads": 6,
+    "threads_batch": 6,
+    "batch_size": 256,
+    "ubatch_size": 128,
+    "parallel_slots": 1,
+    "thinking": "off",
+    "mtp": "off",
+    "temperature": 0
+  },
+  "protocol": {
+    "harness": "scripts/orbit_qualify.py",
+    "fixtures": [
+      "chat_route_first (optimizations-v1)",
+      "pwd_route (core-v1)",
+      "pwd_final (core-v1)",
+      "json_artifact (core-v1)",
+      "existing_file_modification (workflows-v1)"
+    ],
+    "warmups_excluded": 1,
+    "measured_repetitions": 3,
+    "definitions": {
+      "prefill_tokens_per_second": "sum evaluated / sum per-call evaluated seconds; server timings.prompt_per_second; evaluated tokens only",
+      "generation_tokens_per_second": "sum output / sum per-call decode seconds; server timings.predicted_per_second",
+      "tools_on_chat": "wall of the tools-on fixture that routes to CHAT and executes no tool",
+      "tool_plus_final": "wall of the fixture that calls one tool then produces a final answer",
+      "peak_rss": "Linux VmHWM of the server PID; process lifetime including model load"
+    }
+  },
+  "raw_runs": [
+    {
+      "run": 1,
+      "model_calls": 14,
+      "prefill_tokens_per_second": 29.98,
+      "generation_tokens_per_second": 8.3,
+      "peak_rss_bytes": 38422634496,
+      "workloads": {
+        "chat_route_first": {
+          "wall_seconds": 6.79,
+          "cached_tokens": 768,
+          "model_calls": 2,
+          "status": "PASS"
+        },
+        "pwd_route": {
+          "wall_seconds": 5.42,
+          "cached_tokens": 768,
+          "model_calls": 1,
+          "status": "PASS"
+        },
+        "pwd_final": {
+          "wall_seconds": 41.41,
+          "cached_tokens": 0,
+          "model_calls": 2,
+          "status": "PASS"
+        },
+        "json_artifact": {
+          "wall_seconds": 161.05,
+          "cached_tokens": 0,
+          "model_calls": 4,
+          "status": "PASS"
+        },
+        "existing_file_modification": {
+          "wall_seconds": 272.53,
+          "cached_tokens": 0,
+          "model_calls": 5,
+          "status": "PASS"
+        }
+      }
+    },
+    {
+      "run": 2,
+      "model_calls": 15,
+      "prefill_tokens_per_second": 26.55,
+      "generation_tokens_per_second": 7.04,
+      "peak_rss_bytes": 38422634496,
+      "workloads": {
+        "chat_route_first": {
+          "wall_seconds": 32.53,
+          "cached_tokens": 0,
+          "model_calls": 2,
+          "status": "PASS"
+        },
+        "pwd_route": {
+          "wall_seconds": 7.14,
+          "cached_tokens": 768,
+          "model_calls": 1,
+          "status": "PASS"
+        },
+        "pwd_final": {
+          "wall_seconds": 49.01,
+          "cached_tokens": 0,
+          "model_calls": 2,
+          "status": "PASS"
+        },
+        "json_artifact": {
+          "wall_seconds": 189.8,
+          "cached_tokens": 0,
+          "model_calls": 4,
+          "status": "PASS"
+        },
+        "existing_file_modification": {
+          "wall_seconds": 328.84,
+          "cached_tokens": 0,
+          "model_calls": 6,
+          "status": "PASS"
+        }
+      }
+    },
+    {
+      "run": 3,
+      "model_calls": 15,
+      "prefill_tokens_per_second": 28.95,
+      "generation_tokens_per_second": 8.27,
+      "peak_rss_bytes": 38422634496,
+      "workloads": {
+        "chat_route_first": {
+          "wall_seconds": 37.82,
+          "cached_tokens": 0,
+          "model_calls": 2,
+          "status": "PASS"
+        },
+        "pwd_route": {
+          "wall_seconds": 8.19,
+          "cached_tokens": 768,
+          "model_calls": 1,
+          "status": "PASS"
+        },
+        "pwd_final": {
+          "wall_seconds": 53.72,
+          "cached_tokens": 0,
+          "model_calls": 2,
+          "status": "PASS"
+        },
+        "json_artifact": {
+          "wall_seconds": 171.9,
+          "cached_tokens": 0,
+          "model_calls": 4,
+          "status": "PASS"
+        },
+        "existing_file_modification": {
+          "wall_seconds": 321.57,
+          "cached_tokens": 0,
+          "model_calls": 6,
+          "status": "PASS"
+        }
+      }
+    }
+  ],
+  "tools_on_chat_repetitions": [
+    {
+      "run": 1,
+      "wall_seconds": 6.79,
+      "cached_tokens": 768,
+      "cache_state": "warm",
+      "status": "PASS",
+      "route_call_wall_seconds": 5.56,
+      "route_call_evaluated_tokens": 172
+    },
+    {
+      "run": 2,
+      "wall_seconds": 32.53,
+      "cached_tokens": 0,
+      "cache_state": "cold",
+      "status": "PASS",
+      "route_call_wall_seconds": 31.03,
+      "route_call_evaluated_tokens": 940
+    },
+    {
+      "run": 3,
+      "wall_seconds": 37.82,
+      "cached_tokens": 0,
+      "cache_state": "cold",
+      "status": "PASS",
+      "route_call_wall_seconds": 35.81,
+      "route_call_evaluated_tokens": 940
+    },
+    {
+      "run": 4,
+      "wall_seconds": 36.84,
+      "cached_tokens": 0,
+      "cache_state": "cold",
+      "status": "PASS",
+      "route_call_wall_seconds": 35.05,
+      "route_call_evaluated_tokens": 940
+    },
+    {
+      "run": 5,
+      "wall_seconds": 10.01,
+      "cached_tokens": 768,
+      "cache_state": "warm",
+      "status": "PASS",
+      "route_call_wall_seconds": 8.08,
+      "route_call_evaluated_tokens": 172
+    }
+  ],
+  "published": {
+    "prefill_tokens_per_second": {
+      "value": 29.0,
+      "basis": "median of 3 run aggregates",
+      "runs": [
+        29.98,
+        26.55,
+        28.95
+      ]
+    },
+    "generation_tokens_per_second": {
+      "value": 8.3,
+      "basis": "median of 3 run aggregates",
+      "runs": [
+        8.3,
+        7.04,
+        8.27
+      ]
+    },
+    "tools_on_chat_seconds": {
+      "value_cold": 36.8,
+      "basis_cold": "median of 3 cold repetitions",
+      "runs_cold": [
+        32.53,
+        37.82,
+        36.84
+      ],
+      "value_warm": 8.4,
+      "basis_warm": "median of 2 warm (route prefix restored) repetitions",
+      "runs_warm": [
+        6.79,
+        10.01
+      ]
+    },
+    "tool_plus_final_seconds": {
+      "value": 49.0,
+      "basis": "median of 3 runs, all cold",
+      "runs": [
+        41.41,
+        49.01,
+        53.72
+      ]
+    },
+    "peak_rss_gib": {
+      "value": 35.8,
+      "basis": "server VmHWM, identical across all runs",
+      "bytes": 38422634496
+    },
+    "rounding": "median of measured values, rounded half-up to one decimal"
+  }
+}
