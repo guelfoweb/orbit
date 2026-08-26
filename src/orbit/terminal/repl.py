@@ -429,8 +429,18 @@ class Repl:
             # prose. Print it here only if it did not: a backend that does not
             # stream would otherwise produce a run whose grounded conclusion
             # never reached the analyst at all.
+            #
+            # Sanitized because this print is the one that did not pass the
+            # renderer. The streamed copy crosses that boundary on its way out
+            # and the empty-report branch sanitizes too, so without this the
+            # report is safe exactly when a backend happens to stream it. The
+            # text itself is untouched: `run.final_report.text` still holds
+            # what the model wrote.
             if run.final_report is not None and not renderer.rendered_visible_text:
-                print(run.final_report.text, flush=True)
+                print(
+                    sanitize_terminal_text(run.final_report.text, allow_newlines=True),
+                    flush=True,
+                )
             replans = f" | replans: {run.replans}" if run.replans else ""
             summary = (
                 f"analysis | mode: ANALYSIS | model calls: {run.model_calls} | "
