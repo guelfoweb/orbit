@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
 
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
+from orbit.runtime import analysis_runtime
 from orbit.runtime.analysis_runtime import ANALYSIS_AUTONOMY_ENV, ANALYSIS_TOOL_NAME, AnalysisRuntime
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.sessions import SessionStore
@@ -36,6 +37,36 @@ from orbit.terminal.repl import Repl
 # automatic-recognition mission; the pin is updated only alongside the
 # prewarm requalification that a changed route prompt forces.
 ROUTE_PROMPT_SHA256 = "d38e293a1d8fc0efb5371cff08bb5870ffc4faa6b96b889ff2af54ba2b66a38d"
+
+
+def track_session_workspaces(test) -> list[Path]:
+    """Record the session workspaces created from here on.
+
+    Listing the shared temp root before and after reads state this process
+    does not own: another Orbit run creating a workspace between the two
+    samples lands in the difference and fails the test for a directory it
+    never created. `tempfile.gettempdir()` is resolved once per process, so
+    redirecting `TMPDIR` does not separate the two runs either.
+
+    Wrapping the call `AnalysisWorkspace.create` actually makes yields the
+    exact paths this test caused to exist, which no other process can add to.
+    """
+    created: list[Path] = []
+    real = analysis_runtime.tempfile.mkdtemp
+
+    def recording(*args, **kwargs):
+        path = real(*args, **kwargs)
+        # Recorded by the name the call actually produced rather than by the
+        # `prefix` keyword: `mkdtemp` also takes it positionally, and reading
+        # the argument would silently miss such a call.
+        if Path(path).name.startswith("orbit-analysis-session-"):
+            created.append(Path(path))
+        return path
+
+    patcher = mock.patch.object(analysis_runtime.tempfile, "mkdtemp", recording)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return created
 
 
 class ScriptedBackend:
@@ -217,7 +248,8 @@ class EnterAnalysisTest(ModeTestBase):
         self.assertIs(repl.analysis, first)
 
     def test_failed_open_leaves_no_workspace_behind(self) -> None:
-        before = set(Path(tempfile.gettempdir()).glob("orbit-analysis-session-*"))
+        created = track_session_workspaces(self)
+
         with self.assertRaises(AnalysisModeError):
             open_analysis_session(
                 "/nonexistent/zzz.js",
@@ -225,8 +257,13 @@ class EnterAnalysisTest(ModeTestBase):
                 workdir=self.tmp,
                 evidence_store_factory=lambda root: EvidenceStore(root=root / "evidence"),
             )
-        after = set(Path(tempfile.gettempdir()).glob("orbit-analysis-session-*"))
-        self.assertEqual(before, after)
+
+        # This open refuses while resolving the target, before a workspace is
+        # created, so `created` is expected to be empty. The assertion is kept
+        # over tracked paths rather than asserted as "nothing was created":
+        # if resolution ever moves after creation, the workspace appears here
+        # and must still be gone.
+        self.assertEqual([path for path in created if path.exists()], [])
 
 
 class AnalysisDispatchTest(ModeTestBase):
@@ -459,16 +496,20 @@ class LifecycleTest(ModeTestBase):
         self.assertTrue(workspace_root.exists())
 
     def test_no_workspace_leaks_across_a_full_cycle(self) -> None:
-        pattern = "orbit-analysis-session-*"
-        before = set(Path(tempfile.gettempdir()).glob(pattern))
+        created = track_session_workspaces(self)
         repl = self.repl()
         self.run_command(repl, f"/analysis {self.artifact}")
         self.run_prompt(repl, "continue")
         self.run_command(repl, "/chat")
         with contextlib.redirect_stdout(io.StringIO()):
             repl._finish_interactive_session(0)
-        after = set(Path(tempfile.gettempdir()).glob(pattern))
-        self.assertEqual(before, after)
+
+        self.assertTrue(created, "the cycle must have opened a session workspace")
+        self.assertEqual(
+            [path for path in created if path.exists()],
+            [],
+            "finishing the session must remove the workspace it opened",
+        )
 
 
 class PersistenceTest(ModeTestBase):
