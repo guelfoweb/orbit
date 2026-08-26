@@ -64,6 +64,10 @@ from orbit.runtime.completion_shadow import (
     scheduled_actions,
     shadow_enabled,
 )
+from orbit.runtime.completion_shadow_ledger import (
+    ShadowLedgerWriter,
+    ledger_path_for_evidence_root,
+)
 from orbit.runtime.evidence_authority import active_records, evaluate_standing
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.tool_calls import tool_call_id
@@ -1022,6 +1026,25 @@ class AnalysisRuntime:
         final_report: "AnalysisReport | None" = None
         shadow = ShadowLedger() if shadow_enabled() else None
         shadow_due = scheduled_actions()
+        # Created only when the shadow runs: with the flag off this does no
+        # filesystem work at all, not even a stat.
+        shadow_ledger = None
+        if shadow is not None:
+            # Creation is guarded too: resolving the path reads the store, and
+            # a run must survive a ledger that cannot be opened at all.
+            try:
+                shadow_ledger = ShadowLedgerWriter(
+                    ledger_path_for_evidence_root(self.evidence_store.root)
+                )
+                shadow_ledger.write_run_start(
+                    request=analyst_message,
+                    schedule="after4every2",
+                    max_actions=max_actions,
+                    soft_max_actions=soft_max_actions,
+                    max_model_calls=max_model_calls,
+                )
+            except Exception:  # noqa: BLE001 - diagnostics never end a run
+                shadow_ledger = None
 
         while True:
             if model_calls >= max_model_calls:
@@ -1073,9 +1096,15 @@ class AnalysisRuntime:
             # exactly the state a real gate would have seen -- while every
             # `break` below remains reachable regardless of what it says.
             if shadow is not None and shadow_due(actions):
-                shadow.observations.append(
-                    self._observe_completion_shadow(actions, analyst_message)
-                )
+                observation = self._observe_completion_shadow(actions, analyst_message)
+                shadow.observations.append(observation)
+                if shadow_ledger is not None:
+                    # The writer swallows its own I/O failures; this guards the
+                    # serialization around them for the same reason.
+                    try:
+                        shadow_ledger.write_checkpoint(observation)
+                    except Exception:  # noqa: BLE001 - diagnostics never end a run
+                        shadow_ledger.failures.append("checkpoint_serialization_failed")
 
             if record.classification == COMPLETE:
                 stop_reason = STOP_COMPLETE
@@ -1193,6 +1222,30 @@ class AnalysisRuntime:
             else:
                 model_calls += final_report.model_calls
 
+        if shadow_ledger is not None:
+            # Written last, so its absence is how a reader tells a killed run
+            # from a finished one. Linking the ledger to the outcome is the
+            # whole point: a WOULD_STOP at action N only means something
+            # beside what the run went on to find.
+            #
+            # Guarded as a whole rather than trusting the writer's own guard:
+            # building the final snapshot reads the store, and a diagnostic
+            # must not be able to fail a run that has already completed.
+            try:
+                self._write_shadow_final(
+                    shadow_ledger,
+                    shadow,
+                    request=analyst_message,
+                    stop_reason=stop_reason,
+                    actions=actions,
+                    model_calls=model_calls,
+                    cancelled=cancelled,
+                    replans=replans,
+                    final_report=final_report,
+                )
+            except Exception:  # noqa: BLE001 - diagnostics must not end a run
+                pass
+
         return AutonomousRunResult(
             steps=tuple(steps),
             progress=tuple(records),
@@ -1203,6 +1256,50 @@ class AnalysisRuntime:
             replans=replans,
             final_report=final_report,
             completion_shadow=shadow,
+        )
+
+    def _write_shadow_final(
+        self,
+        ledger,
+        shadow,
+        *,
+        request: str,
+        stop_reason: str,
+        actions: int,
+        model_calls: int,
+        cancelled: bool,
+        replans: int,
+        final_report,
+    ) -> None:
+        """Link the checkpoint ledger to what the run actually produced."""
+        final_active = active_records(list(self.evidence_store.records.values()))
+        final_snapshot = build_snapshot(
+            request=request,
+            records=final_active,
+            load_raw=self.evidence_store.load_raw,
+        )
+        ledger.write_run_final(
+            stop_reason=stop_reason,
+            actions_executed=actions,
+            model_calls=model_calls,
+            cancelled=cancelled,
+            replans=replans,
+            final_report_produced=final_report is not None,
+            final_evidence_ids=[
+                str(getattr(record, "evidence_id", "")) for record in final_active
+            ],
+            final_artifacts=list(final_snapshot.artifacts),
+            final_snapshot_sha256=final_snapshot.digest,
+            final_snapshot_evidence=[
+                {"evidence_id": evidence_id, "text": text}
+                for evidence_id, text in final_snapshot.evidence
+            ],
+            request=final_snapshot.request,
+            shadow_verifier_calls=shadow.calls,
+            shadow_verifier_prompt_tokens=shadow.prompt_tokens,
+            shadow_verifier_output_tokens=shadow.output_tokens,
+            shadow_verifier_wall_seconds=round(shadow.wall_seconds, 3),
+            ledger_write_failures=list(ledger.failures),
         )
 
     def _observe_completion_shadow(self, actions: int, request: str):
