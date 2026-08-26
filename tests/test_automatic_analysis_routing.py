@@ -23,12 +23,15 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+from orbit.runtime import analysis_runtime
 
 from orbit.backend.base import ChatResult
 from orbit.runtime import ChatRuntime
@@ -48,6 +51,33 @@ from orbit.terminal.repl import Repl
 # CHAT prewarm to be re-derived, so this pin and that requalification move
 # together or not at all.
 ROUTE_PROMPT_SHA256 = "d38e293a1d8fc0efb5371cff08bb5870ffc4faa6b96b889ff2af54ba2b66a38d"
+
+
+def track_session_workspaces(test) -> list[Path]:
+    """Record the session workspaces created from here on.
+
+    Listing the shared temp root before and after reads state this process
+    does not own: a concurrent Orbit run creating a workspace between the two
+    samples lands in the difference and fails the test for a directory it
+    never created. Wrapping the call the workspace factory actually makes
+    yields only what this test caused to exist.
+    """
+    created: list[Path] = []
+    real = analysis_runtime.tempfile.mkdtemp
+
+    def recording(*args, **kwargs):
+        path = real(*args, **kwargs)
+        # Recorded by the name the call actually produced rather than by the
+        # `prefix` keyword: `mkdtemp` also takes it positionally, and reading
+        # the argument would silently miss such a call.
+        if Path(path).name.startswith("orbit-analysis-session-"):
+            created.append(Path(path))
+        return path
+
+    patcher = mock.patch.object(analysis_runtime.tempfile, "mkdtemp", recording)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return created
 
 
 class RouteLanguageTest(unittest.TestCase):
@@ -442,14 +472,15 @@ class InvalidArtifactTest(TransitionTestBase):
         self.assertEqual(seen, ["what is 2+2"])
 
     def test_a_refused_transition_leaks_no_workspace(self) -> None:
-        pattern = "orbit-analysis-session-*"
-        before = set(Path(tempfile.gettempdir()).glob(pattern))
+        created = track_session_workspaces(self)
         backend = CountingBackend(self.analysis_payload(self.tmp / "nope.js"))
         repl = self.repl(backend)
 
         self.ask(repl, "analyze nope.js")
 
-        self.assertEqual(set(Path(tempfile.gettempdir()).glob(pattern)) - before, set())
+        # Refused before a workspace is created, so `created` is normally
+        # empty; the assertion still holds if creation ever moves earlier.
+        self.assertEqual([path for path in created if path.exists()], [])
 
 
 class ConfinedAcquisitionTest(TransitionTestBase):
@@ -678,12 +709,13 @@ class ConfinedAcquisitionTest(TransitionTestBase):
         self.assertEqual(seen, ["what is 2+2"])
 
     def test_a_refusal_leaks_no_workspace(self) -> None:
-        pattern = "orbit-analysis-session-*"
-        before = set(Path(tempfile.gettempdir()).glob(pattern))
+        created = track_session_workspaces(self)
 
         self._assert_refused(str(self.secret))
 
-        self.assertEqual(set(Path(tempfile.gettempdir()).glob(pattern)) - before, set())
+        # Refused before a workspace is created, so `created` is normally
+        # empty; the assertion still holds if creation ever moves earlier.
+        self.assertEqual([path for path in created if path.exists()], [])
 
     # --- explicit command parity ----------------------------------------
     def test_explicit_analysis_may_still_name_an_outside_path(self) -> None:

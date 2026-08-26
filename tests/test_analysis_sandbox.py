@@ -12,12 +12,14 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from orbit.runtime import analysis_sandbox
 from orbit.runtime.analysis_sandbox import (
     ALLOWED_COMMANDS,
     MAX_CODE_CHARS,
@@ -97,6 +99,37 @@ class PreflightTest(unittest.TestCase):
                     analysis_sandbox.execute_analysis(source_path=src, code="print(1)")
             finally:
                 analysis_sandbox.BWRAP = original
+
+
+def track_sandbox_temp_dirs(test: unittest.TestCase) -> list[Path]:
+    """Record the temporary directories `analysis_sandbox` creates from here on.
+
+    The alternative -- listing the shared temp root before and after -- reads
+    state this process does not own. Another Orbit run creating a directory
+    under the same prefix between the two samples lands in the difference, and
+    the test fails for a directory it never created. Redirecting `TMPDIR` does
+    not help: `tempfile.gettempdir()` is resolved once per process, so a
+    concurrent run still writes into the same root.
+
+    Wrapping the constructor the module actually calls gives the exact paths
+    this test caused to exist, which is both narrower and stronger: it can
+    distinguish a directory that was cleaned up from one that merely never
+    appeared, and no other process can add to it.
+    """
+    created: list[Path] = []
+    real = analysis_sandbox.tempfile.TemporaryDirectory
+
+    class Recording(real):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(Path(self.name))
+
+    patcher = mock.patch.object(
+        analysis_sandbox.tempfile, "TemporaryDirectory", Recording
+    )
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return created
 
 
 @requires_bwrap
@@ -268,88 +301,79 @@ class SandboxBehaviourTest(SandboxTestBase):
         self.assertIn("LEFTOVER False", second.stdout)
 
     def test_temporary_directories_do_not_accumulate(self) -> None:
-        # Explicit cleanup is defence in depth: TemporaryDirectory also removes
-        # itself via a GC finalizer, so removing the explicit call is not
-        # observable from outside. What is worth pinning is the property that
-        # matters -- actions leave nothing behind on the host.
-        #
-        # Only the prefixes an action actually creates are counted. The old
-        # assertion globbed `orbit-analysis-*` in the shared temp root, which
-        # also matches `orbit-analysis-session-*` -- the name `AnalysisWorkspace`
-        # gives a session. A workspace another module held open while this ran
-        # therefore landed in the delta and failed this test for a directory it
-        # never created. Redirecting TMPDIR does not fix that either: the root
-        # is process-global, so a concurrent workspace lands inside it too.
-        #
-        # `execute_analysis` creates exactly these two, both owned by a
-        # `TemporaryDirectory` it closes before returning.
-        import tempfile
+        """Actions leave nothing behind on the host.
 
-        root = Path(tempfile.gettempdir())
-        owned = ("orbit-analysis-program-", "orbit-analysis-work-")
+        Explicit cleanup is defence in depth: `TemporaryDirectory` also removes
+        itself via a GC finalizer, so deleting the explicit call is not
+        observable from outside. What is worth pinning is the property that
+        matters, and it is asserted over the directories these actions actually
+        created rather than over whatever the shared temp root happens to hold.
+        """
+        created = track_sandbox_temp_dirs(self)
 
-        def owned_dirs() -> set[str]:
-            return {
-                entry.name
-                for prefix in owned
-                for entry in root.glob(f"{prefix}*")
-            }
-
-        before = owned_dirs()
         for _ in range(3):
             self.run_code("print('tick')")
+
+        # One per action per owner: the program directory and the scratch
+        # directory. Pinning the count means an assertion that saw nothing --
+        # because the tracker watched the wrong thing -- cannot pass by
+        # observing an empty list.
         self.assertEqual(
-            owned_dirs() - before,
-            set(),
-            "each action must remove its temporary directories",
+            len(created), 6, "each action creates a program and a scratch directory"
+        )
+        self.assertEqual(
+            [path for path in created if path.exists()],
+            [],
+            "each action must remove the temporary directories it created",
         )
 
     def test_an_unrelated_matching_directory_is_ignored(self) -> None:
         """A session workspace is not this test's to account for.
 
-        This is the exact shape that made the old assertion flaky: the name
-        matches `orbit-analysis-*`, it appears between the two samples, and no
-        action here created it.
+        This is the shape that made the old assertion flaky: the name matches
+        the prefixes an action uses, it appears between the two samples, and no
+        action here created it. Tracking what this test caused makes the
+        distinction directly instead of hoping the names do not collide.
         """
         from orbit.runtime.analysis_runtime import AnalysisWorkspace
 
-        import tempfile
-
-        root = Path(tempfile.gettempdir())
-        owned = ("orbit-analysis-program-", "orbit-analysis-work-")
-
-        def owned_dirs() -> set[str]:
-            return {e.name for prefix in owned for e in root.glob(f"{prefix}*")}
-
-        before = owned_dirs()
+        created = track_sandbox_temp_dirs(self)
         unrelated = AnalysisWorkspace.create()
         self.addCleanup(unrelated.close)
-        # Created after the baseline and still present at the second sample.
         self.assertTrue(unrelated.root.exists())
         self.assertTrue(unrelated.root.name.startswith("orbit-analysis-"))
+
         for _ in range(3):
             self.run_code("print('tick')")
-        self.assertEqual(owned_dirs() - before, set())
+
+        self.assertNotIn(
+            unrelated.root,
+            created,
+            "a workspace this test did not run through the sandbox is not owned",
+        )
+        self.assertEqual([path for path in created if path.exists()], [])
+        # Still open, and unaffected by the sandbox's own cleanup.
+        self.assertTrue(unrelated.root.exists())
 
     def test_a_leaked_owned_directory_still_fails(self) -> None:
-        """The assertion must still catch a real leak with an owned prefix.
+        """The assertion must still catch a real leak.
 
-        Narrowing the prefixes must not have narrowed away the property. A
-        directory named as one an action owns, left behind, has to be seen.
+        Narrowing what is observed must not narrow away the property: a
+        directory the sandbox created and failed to remove has to be seen.
         """
-        import tempfile
+        created = track_sandbox_temp_dirs(self)
+        self.run_code("print('tick')")
+        self.assertTrue(created)
 
-        root = Path(tempfile.gettempdir())
-        owned = ("orbit-analysis-program-", "orbit-analysis-work-")
-
-        def owned_dirs() -> set[str]:
-            return {e.name for prefix in owned for e in root.glob(f"{prefix}*")}
-
-        before = owned_dirs()
-        leaked = Path(tempfile.mkdtemp(prefix="orbit-analysis-work-"))
+        # Recreate one of the directories the action owned, as a leak would.
+        leaked = created[0]
+        leaked.mkdir(parents=True, exist_ok=True)
         self.addCleanup(shutil.rmtree, leaked, True)
+
         self.assertNotEqual(
-            owned_dirs() - before, set(), "a leak under an owned prefix must be visible"
+            [path for path in created if path.exists()],
+            [],
+            "a directory the action owned, left behind, must be visible",
         )
 
     def test_nonzero_exit_is_classified_as_error(self) -> None:
