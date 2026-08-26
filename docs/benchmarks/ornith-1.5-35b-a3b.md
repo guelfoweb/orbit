@@ -1,204 +1,175 @@
-# Ornith 1.5 35B-A3B — measurements on the reference system
+# Ornith 1.5 35B-A3B — Supported Models benchmark
 
-What has actually been measured for this profile, where each number came from,
-and — just as importantly — what has **not** been measured.
+Auditable source for the `Ornith 1.5 35B-A3B` row in the README
+[Supported Models](../../README.md#supported-models) table.
 
-Everything below is a measurement on one machine. It is not a claim about the
+Every number here is a measurement on one machine. It is not a claim about the
 model in general: results move with CPU, memory bandwidth, quantization,
-backend build, and workload.
+backend build, cache state, and workload.
 
-## Why this profile is measured separately
+Raw machine-readable results: [`ornith-1.5-35b-a3b.json`](ornith-1.5-35b-a3b.json).
 
-The other rows in the README table are warm steady-state medians from a
-controlled *chat* benchmark: one excluded warm-up, three measured repetitions, a
-fixed long-prefill fixture, at `ctx=8192` with 6 threads.
+## Reference system
 
-**No Ornith run has been made under that protocol.** Every measurement here
-comes from the *analysis* workflow at `ctx=16384` with 12 threads. Reporting
-those numbers inside the chat table would imply a comparability that does not
-exist, so the README gives this profile its own table with its own stated basis
-instead.
+| Property | Value |
+|---|---|
+| CPU | Intel Core i7-10710U (NUC10i7FNH), 6 cores / 12 threads |
+| RAM | 63 GiB |
+| GPU | none |
+| OS | Linux 7.0.0-30-generic x86_64 |
+| llama.cpp build | b9551 (`379ac66`) |
+| Orbit revision | `892cfad` |
 
-Within that basis the figures are sound. The prefill numbers below count only
-calls with **no cache reuse**, which makes them comparable to the README's
-"evaluated tokens only, excludes cache benefit" definition; the reuse-affected
-numbers are excluded and explained under
-[Prefill on reuse calls](#prefill-on-reuse-calls-not-comparable).
-
-## Model specification
-
-Properties of the model file, not of Orbit.
+## Model
 
 | Property | Value |
 |---|---|
 | Repository | [ornith-ai/Ornith-1.5-35B-A3B-GGUF](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) |
-| File | `Ornith-1.5-35B-Q4_K_M.gguf` |
-| Quantization | Q4_K_M (4.89 BPW) |
-| File size | 20.21 GiB |
-| Parameters | 35.51 B (35B-A3B) |
-| Architecture | `qwen35moe`, 256 experts, 8 active |
-| Training context | 262144 |
+| File | `Ornith-1.5-35B-Q4_K_M.gguf`, 21,713,462,848 bytes (20.22 GiB) |
+| SHA-256 | `ca6ea26329c88b78ffd90a85163be2e746c2fafd1024f56db47e499f117f9a7f` |
+| Quantization | Q4_K_M |
+| Profile | `orbit-ornith15-native-v1`, architecture `qwen35moe` |
 
-Source: `print_info` lines 54–136 of the run log listed under
-[Evidence sources](#evidence-sources).
-
-## Reference hardware
-
-| Property | Value |
-|---|---|
-| CPU | Intel Core i7-10710U (NUC10), 6 cores / 12 threads |
-| RAM | 64 GB |
-| GPU | none (`gpu_layers = 0`) |
-| OS | Linux x86_64 |
-| llama.cpp build | b9551 |
-
-## Orbit configuration used for these measurements
-
-| Setting | Value |
-|---|---|
-| Context | 16384 |
-| Batch / ubatch | 256 / 128 |
-| Threads | 12 (generation and batch) |
-| Flash Attention | `auto` |
-| Thinking | off |
+## Configuration
 
 ```bash
-orbit server --ctx 16384 --batch 256 --ubatch 128
+orbit server --ctx 8192 --threads 6 --threads-batch 6 --batch 256 --ubatch 128 --think off
 ```
 
-Note this differs from the README table's benchmark configuration
-(`ctx=8192`, 6 threads), which is one reason the numbers are not interchangeable.
+`ctx=8192`, 6 generation and batch threads, batch/ubatch 256/128, one parallel
+slot, temperature 0, thinking off, MTP off.
+
+## Protocol
+
+Harness: `scripts/orbit_qualify.py` against a separately managed server, over
+the five qualification fixtures used for this table:
+
+| Workload | Fixture |
+|---|---|
+| tools-on chat | `chat_route_first` (`optimizations-v1`) |
+| pwd route | `pwd_route` (`core-v1`) |
+| tool + final | `pwd_final` (`core-v1`) |
+| artifact + verify | `json_artifact` (`core-v1`) |
+| existing-file modification | `existing_file_modification` (`workflows-v1`) |
+
+One excluded warm-up, then three measured repetitions. All 15 fixture
+executions passed, with identity, lifecycle and protocol gates clean.
+
+Column definitions, taken from the harness rather than the column names:
+
+- **Prefill** — `sum(evaluated) / sum(per-call evaluated seconds)` across every
+  call of every fixture, from the server's `timings.prompt_per_second`.
+  Evaluated tokens only, so cached tokens do not inflate it.
+- **Generation** — the same weighting on output tokens, from
+  `timings.predicted_per_second`.
+- **Tools-on chat** — wall time of the tools-on fixture that routes to CHAT and
+  executes no tool.
+- **Tool + final** — wall time of the fixture that calls one tool and then
+  produces a final answer.
+- **Peak RAM** — Linux `VmHWM` of the server process, whole lifetime including
+  model load.
 
 ## Measured values
 
-### Prefill, cold calls only — the published range
+### Aggregate rates, per repetition
 
-Calls that evaluated their prompt with **zero** reused tokens, so no restore work
-sits inside the timing window. These are the samples behind the README's
-`21–33 tok/s (n=5, median 31.8)`:
-
-| Source | Evaluated tokens | Prefill |
-|---|---:|---:|
-| `/report` measurement | 5526 | 32.9 tok/s |
-| autonomous run A, call 1 | 604 | 31.8 tok/s |
-| autonomous run A, final call | 9613 | 21.0 tok/s |
-| autonomous run B, call 1 | 604 | 31.9 tok/s |
-| autonomous run B, final call | 8419 | 23.2 tok/s |
-
-n = 5, min 21.0, max 32.9, median 31.8. The two lower values are the largest
-prompts, which is the expected shape rather than noise.
-
-### Generation — the published range
-
-Derived as output tokens ÷ (wall clock − prefill) over every call with at least
-20 output tokens: **n = 22, median 5.9 tok/s**, spanning 1.8–9.9 with a single
-low outlier at 1.8; excluding it, 4.8–9.9. The README states `~5–10 tok/s`.
-
-This is a **looser bound than a dedicated decode benchmark**: the denominator
-includes any non-decode overhead in the call. The one directly measured decode
-figure, 8.1 tok/s from the `/report` call below, falls inside the derived range,
-which is the cross-check that makes the range publishable.
-
-### Single `/report` call
-
-One model call, measured end to end. **n = 1** — recorded here because it is
-real and directly measured, not because one sample is a benchmark.
-
-| Metric | Value |
-|---|---|
-| Prompt tokens | 5526 evaluated, 0 cached |
-| Output tokens | 886 |
-| Prefill | 32.9 tok/s |
-| Decode | 8.1 tok/s |
-| Wall clock | 277.1 s (168.1 s to first token) |
-
-Measured 2026-08-24 against served commit `98049a9`.
-
-### Prefix cache reuse
-
-The clearest result on this profile. Across one 13-call autonomous analysis run,
-per-call KV reuse rises as the run accumulates context (selected calls; the
-totals below are over all 13):
-
-| Call | Reused | Evaluated | Reuse |
+| Run | Model calls | Prefill | Generation |
 |---:|---:|---:|---:|
-| 1 | 0 | 604 | 0.0% |
-| 2 | 604 | 2,337 | 20.5% |
-| 3 | 2,941 | 2,957 | 49.9% |
-| 4 | 5,898 | 1,285 | 82.1% |
-| 6 | 8,616 | 824 | 91.3% |
-| 10 | 12,227 | 443 | 96.5% |
-| 12 | 14,736 | 594 | 96.1% |
-| 13 | 0 | 9,613 | 0.0% |
+| 1 | 14 | 29.98 tok/s | 8.30 tok/s |
+| 2 | 15 | 26.55 tok/s | 7.04 tok/s |
+| 3 | 15 | 28.95 tok/s | 8.27 tok/s |
 
-Run totals: **95,799 reused / 24,943 evaluated = 79.3% overall**, with per-call
-reuse peaking near 96%. Call 13 opens a fresh report context and so starts cold
-again — the reset is expected, not a regression. Token accounting was exact on
-every call.
+Published: **~29.0 tok/s** prefill, **~8.3 tok/s** generation.
 
-Read the aggregate carefully: 79.3% is the whole run including its cold start;
-~96% is the *steady-state peak*, not an average.
+Every published figure is the median of its measured values, rounded
+half-up to one decimal: prefill 28.95 → 29.0, generation 8.27 → 8.3.
 
-### ANALYSIS prefix prewarm
+### Per-workload wall time
 
-Descriptive timings, **n = 1** each, for the opt-in
-`ORBIT_ORNITH_ANALYSIS_PREFIX_PREWARM=1` startup capture:
+| Workload | Run 1 | Run 2 | Run 3 | Median |
+|---|---:|---:|---:|---:|
+| tools-on chat | 6.79 s | 32.53 s | 37.82 s | see below |
+| pwd route | 5.42 s | 7.14 s | 8.19 s | 7.14 s |
+| tool + final | 41.41 s | 49.01 s | 53.72 s | **49.01 s** |
+| artifact + verify | 161.05 s | 189.80 s | 171.90 s | 171.90 s |
+| existing-file modification | 272.53 s | 328.84 s | 321.57 s | 321.57 s |
 
-- capture cost: 11.0 s of startup prefill, 73,736,684 bytes resident
-- with it on, a first analysis step restored 384 of 588 prompt tokens and its
-  prefill fell from 18.2 s to 6.0 s
+Published: **~49.0 s** for tool + final.
 
-Reuse itself is on by default and free — the first analysis step captures the
-checkpoint on its way past. The environment variable only decides whether that
-capture is paid eagerly at startup instead.
+### Tools-on chat depends on route-prefix cache state
+
+This workload is bimodal, so it was repeated five times and the two states are
+reported separately rather than averaged together:
+
+| Run | Fixture wall | Route call | Cached tokens | State |
+|---:|---:|---:|---:|---|
+| 1 | 6.79 s | 5.56 s | 768 | warm |
+| 2 | 32.53 s | 31.03 s | 0 | cold |
+| 3 | 37.82 s | 35.81 s | 0 | cold |
+| 4 | 36.84 s | 35.05 s | 0 | cold |
+| 5 | 10.01 s | 8.08 s | 768 | warm |
+
+The workload is identical in every run — 940 input tokens, same output. Only
+the route-prefix checkpoint differs: restoring 768 tokens cuts the route call
+from a median of 35.05 s (cold, n=3) to 6.82 s (warm, n=2).
+
+Published: **~36.8 s cold** (median, n=3) **/ ~8.4 s warm** (median, n=2). Both
+states are given because a single number here says more about the cache than
+about the model.
+
+### Peak RAM
+
+`VmHWM` was **38,422,634,496 bytes = 35.78 GiB**, identical across all runs.
+Published: **~35.8 GiB**.
+
+## Comparability with the other rows
+
+The Ornith row was measured with the qualification harness in this repository,
+which is the only benchmark protocol the repository actually contains.
+
+The other three rows were published in `ba5c580` and **could not be reproduced
+from any data in this repository**. Their values do not appear in any surviving
+harness output, log, or result file — only in README revisions. They also differ
+substantially from the earlier `ff74ee3` values, most sharply on tools-on chat
+(Gemma 31.7 s → 3.0 s, Qwen 3.6 25.1 s → 6.1 s), while their Peak RAM figures
+are byte-identical across both tables — consistent with having been carried over
+rather than re-measured. The `ff74ee3` set is itself only partly traceable: 12 of
+its 15 cells match a recovered baseline document, but Qwen 3.6's tools-on chat
+(25.1 s vs 44.63 s) and tool + final (30.5 s vs 43.16 s) do not.
+
+The measurements above show why that column moves so much: it is dominated by
+route-prefix cache state, not by model speed. Combining the two sets silently
+would misrepresent both, so the README footnote marks rows 1–3 as unverified
+against the current harness.
+
+## Reproducing
+
+```bash
+orbit server --ctx 8192 --threads 6 --threads-batch 6 --batch 256 --ubatch 128 --think off &
+SRV=$!   # server PID, required for VmHWM
+
+python3 scripts/orbit_qualify.py --base-url http://127.0.0.1:12120 \
+  --profile orbit-ornith15-native-v1 --server-pid $SRV \
+  --fixtures qualification/fixtures/optimizations-v1.json --fixture chat_route_first \
+  --output run-chat.json
+python3 scripts/orbit_qualify.py --base-url http://127.0.0.1:12120 \
+  --profile orbit-ornith15-native-v1 --server-pid $SRV \
+  --fixtures qualification/fixtures/core-v1.json \
+  --fixture pwd_route --fixture pwd_final --fixture json_artifact \
+  --output run-core.json
+python3 scripts/orbit_qualify.py --base-url http://127.0.0.1:12120 \
+  --profile orbit-ornith15-native-v1 --server-pid $SRV \
+  --fixtures qualification/fixtures/workflows-v1.json \
+  --fixture existing_file_modification --output run-mod.json
+```
+
+Discard the first pass as a warm-up and repeat three times.
 
 ## Not measured
 
-Stated explicitly so nobody infers a number that does not exist:
-
-- **Peak RAM / RSS.** No resident-memory measurement exists for this profile.
-  The 20.21 GiB file size and the mapped model buffer are not RSS, and the
-  other 35B-A3B profile's figure must not be carried over.
-- **Warm steady-state chat throughput**, tools-on chat latency, and tool+final
-  latency — the chat-protocol columns. No data of any kind; the throughput
-  figures above are the analysis workload, not that protocol.
-- **Flash Attention resolved value.** The log records `auto`, never what it
-  resolved to.
-- **MTP state.** Absent from the evidence; absent is not the same as off.
-
-### Prefill on reuse calls, not comparable
-
-Per-call `prefill_ms` on calls that **did** reuse cache is not usable as a
-prefill-throughput figure. The timer starts before the prefix reuse and restore
-work, while the token count excludes reused tokens, so restore overhead lands in
-the denominator but not the numerator. That systematically depresses the rate:
-across the two runs, the reuse-affected calls median 14.4 tok/s (n=11) and
-17.5 tok/s (n=7), against 21–33 tok/s on cold calls — a spread that reflects
-the metric's definition, not the hardware.
-
-This is why the published range is drawn from zero-reuse calls only.
-
-## Evidence sources
-
-All paths relative to the qualification checkpoint archive, which is kept
-outside the repository.
-
-| What | Source |
-|---|---|
-| `/report` call | `report-performance-baseline-20260824-022942/artifacts/measurement.json` |
-| Served commit | `report-performance-baseline-20260824-022942/artifacts/served_commit.txt` |
-| Cache reuse, per call | `analysis-autonomous-final-20260824-202440/evidence/fullrun-qualification.json` |
-| Model spec, runtime config | `analysis-autonomous-progress-20260824-190424/evidence/fullrun.ABORTED-infra-kill.log` |
-| Prewarm timings | `AGENTS.md` |
-| Qualification status | `docs/releases/v0.0.1-rc34.md`, `docs/releases/v0.0.1-rc35.md` |
-
-Two log files in the archive — `fullrun-budget.log` and
-`fullrun-qualification.log` — are byte-identical. They are one run, and counting
-them twice would double the sample.
-
-## Reproducing a publishable row
-
-To fill the README row properly, run the protocol the other rows use — one
-excluded warm-up and three measured repetitions against the fixed long-prefill
-fixture, at `ctx=8192` with 6 threads — and capture peak RSS alongside it. See
-`docs/QWEN3_CODER_QUALIFICATION.md` for the procedure.
+- **Warm-only steady state.** Runs are a mix of cold and warm cache; only the
+  tools-on chat workload was repeated enough to separate the two.
+- **Flash Attention resolved value.** The configuration records `auto`, never
+  what it resolved to.
+- **`--low-memory`.** Not supported for this profile.
+- **TTFT.** The harness reports it as unavailable.

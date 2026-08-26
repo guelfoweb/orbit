@@ -4,7 +4,7 @@
     {
       "name": "chat_route_first",
       "capability": "tools",
-      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1", "orbit-ornith15-native-v1"],
       "request": {"prompt": "Say hello in one word.", "tools": true, "full_request": true},
       "expect": {"route": "CHAT", "finish_reason": "stop", "max_model_calls": 2},
       "parity": {"mode": "structural"}
@@ -12,7 +12,7 @@
     {
       "name": "pwd_route",
       "capability": "tools",
-      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1", "orbit-ornith15-native-v1"],
       "request": {"prompt": "Determine the absolute current working directory using a local capability.", "tools": true},
       "expect": {
         "route": "FILESYSTEM",
@@ -25,7 +25,7 @@
     {
       "name": "pwd_final",
       "capability": "tools",
-      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1", "orbit-ornith15-native-v1"],
       "request": {"prompt": "Run exactly the local shell command `pwd`, then answer with only its output.", "tools": true},
       "expect": {
         "tool_calls": [{"name": "exec_shell_full_command", "arguments": {"command": "pwd"}}],
@@ -38,7 +38,7 @@
     {
       "name": "chat_route_second",
       "capability": "tools",
-      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "profiles": ["orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1", "orbit-ornith15-native-v1"],
       "request": {"prompt": "Who designed you? Answer briefly.", "tools": true, "full_request": true},
       "expect": {"route": "CHAT", "finish_reason": "stop", "max_model_calls": 2},
       "parity": {"mode": "structural"}

@@ -4,7 +4,7 @@
     {
       "name": "bug_fix_and_test",
       "capability": "tools",
-      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1", "orbit-ornith15-native-v1"],
       "workspace": {
         "files": [
           {"path": "calculator.py", "content": "def add(left, right):\n    return left - right\n"},
@@ -37,7 +37,7 @@
     {
       "name": "existing_file_modification",
       "capability": "tools",
-      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1", "orbit-ornith15-native-v1"],
       "workspace": {
         "files": [
           {"path": "settings.ini", "content": "[service]\nmode=development\nretries=2\n"},
@@ -65,7 +65,7 @@
     {
       "name": "failed_command_recovery",
       "capability": "tools",
-      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1"],
+      "profiles": ["orbit-gemma4-native-v1", "orbit-qwen36-native-v1", "orbit-qwen3-coder-native-v1", "orbit-ornith15-native-v1"],
       "workspace": {
         "files": [
           {"path": "fallback.txt", "content": "RECOVERY_OK\n"},
