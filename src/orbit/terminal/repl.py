@@ -387,6 +387,10 @@ class Repl:
                 # would be told actions ran and given no evidence id to cite or
                 # re-attest.
                 def show(step, record) -> None:
+                    # The wait line is still being redrawn in place. End it
+                    # first, or this block lands on the same row and the
+                    # elapsed duration is overwritten instead of kept.
+                    renderer.settle_progress_line()
                     block = format_analysis_step(
                         step, prose_already_shown=renderer.rendered_visible_text
                     )

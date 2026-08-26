@@ -75,6 +75,13 @@ class StreamRenderer:
         self._thinking_dim_open = False
         self._phase_label: str | None = None
         self._activity_kind = "model"
+        # The last generation line drawn in place, kept so it can be committed
+        # to the transcript instead of erased. The wait line is written with a
+        # bare `\r` and no newline, so whatever prints next lands on the same
+        # row; and clearing it takes the elapsed duration with it. Generation
+        # only -- a prefill or "working" tick is scaffolding the analyst does
+        # not need once the step is over.
+        self._settled_line: str | None = None
 
     def start(self) -> None:
         self._started = True
@@ -143,6 +150,26 @@ class StreamRenderer:
         self._timer_active = True
         self._thread = threading.Thread(target=self._run_wait_timer, daemon=True)
         self._thread.start()
+
+    def settle_progress_line(self) -> None:
+        """Commit the live generation line before printing something else.
+
+        A caller that prints while the timer is still running -- an autonomous
+        run rendering each completed step -- would otherwise land on the row
+        the wait line is redrawing, because that line carries no newline of
+        its own. Calling this first ends the line properly and keeps the
+        elapsed duration on screen. Safe to call when nothing is pending.
+        """
+        if self._settled_line is None:
+            return
+        self._commit_wait_line()
+        if self._timer_active:
+            # The line was committed; the timer keeps ticking for the next
+            # phase and must start a fresh one rather than overwrite it.
+            self._start_new_wait_line()
+
+    def _start_new_wait_line(self) -> None:
+        self._progress = None
 
     def progress(self, update: StreamProgress | WorkProgress) -> None:
         self._progress = update
@@ -227,8 +254,34 @@ class StreamRenderer:
             self._thread.join(timeout=1)
         self._thread = None
         self._timer_active = False
+        if self._settled_line is not None:
+            self._commit_wait_line()
+            return
         if clear:
             self._clear_wait_line()
+
+    def _commit_wait_line(self) -> None:
+        """Leave the finished generation line standing, set apart above and below.
+
+        The live line is drawn with `\r` and no newline so each tick can
+        overwrite the last. That is right while it is still moving, and wrong
+        the moment it stops: the next thing printed lands on the same row, and
+        clearing it instead loses the elapsed duration the analyst was
+        watching accumulate. Committing it writes the newline the redraw loop
+        deliberately omitted.
+
+        A blank line above separates it from the evidence or prose it follows;
+        one below separates it from the `action:` line that comes next. Both
+        are plain newlines, so the separation holds where colour does not --
+        a pipe, `NO_COLOR`, `TERM=dumb`.
+        """
+        line = self._settled_line
+        self._settled_line = None
+        if line is None:
+            return
+        # Overwrite the in-place copy rather than adding a second one.
+        print("\r" + _pad_to_terminal_width(""), end="", flush=True)
+        print(f"\r\n{dim(line)}\n", flush=True)
 
     def _run_wait_timer(self) -> None:
         while not self._stop.is_set():
@@ -244,8 +297,10 @@ class StreamRenderer:
             if self._progress is not None and self._progress.phase == "generation" and _valid_metric(progress_elapsed)
             else elapsed
         )
-        line = dim(_fit_activity_line(self._activity_kind, detail, format_elapsed(shown_elapsed)))
-        print(f"\r{_pad_to_terminal_width(line)}", end="", flush=True)
+        fitted = _fit_activity_line(self._activity_kind, detail, format_elapsed(shown_elapsed))
+        if self._progress is not None and self._progress.phase == "generation":
+            self._settled_line = fitted
+        print(f"\r{_pad_to_terminal_width(dim(fitted))}", end="", flush=True)
 
     @staticmethod
     def _clear_wait_line() -> None:
