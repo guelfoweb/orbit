@@ -55,6 +55,15 @@ from orbit.runtime.analysis_sandbox import (
     scratch_baseline,
 )
 from orbit.runtime.evidence import EvidenceRecord, EvidenceStore, final_card
+from orbit.runtime.completion_shadow import (
+    ANALYSIS_COMPLETION_SHADOW_PHASE,
+    VERIFIER_MAX_TOKENS,
+    ShadowLedger,
+    build_snapshot,
+    evaluate_completion_shadow,
+    scheduled_actions,
+    shadow_enabled,
+)
 from orbit.runtime.evidence_authority import active_records, evaluate_standing
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.tool_calls import tool_call_id
@@ -511,6 +520,10 @@ class AutonomousRunResult:
     cancelled: bool = False
     replans: int = 0
     final_report: "AnalysisReport | None" = None
+    # Diagnostics only. Nothing in the loop reads this back, and its verifier
+    # calls are deliberately absent from `model_calls`: a shadow observation
+    # must not consume the budget that bounds the investigation.
+    completion_shadow: ShadowLedger | None = None
 
     @property
     def last_step(self) -> AnalysisStepResult | None:
@@ -1007,6 +1020,8 @@ class AnalysisRuntime:
         stop_reason = STOP_MAX_MODEL_CALLS
         cancelled = False
         final_report: "AnalysisReport | None" = None
+        shadow = ShadowLedger() if shadow_enabled() else None
+        shadow_due = scheduled_actions()
 
         while True:
             if model_calls >= max_model_calls:
@@ -1052,6 +1067,15 @@ class AnalysisRuntime:
             records.append(record)
             if on_step is not None:
                 on_step(step, record)
+
+            # Observational only, and placed here deliberately: after the step
+            # is committed and before any stop decision, so the shadow sees
+            # exactly the state a real gate would have seen -- while every
+            # `break` below remains reachable regardless of what it says.
+            if shadow is not None and shadow_due(actions):
+                shadow.observations.append(
+                    self._observe_completion_shadow(actions, analyst_message)
+                )
 
             if record.classification == COMPLETE:
                 stop_reason = STOP_COMPLETE
@@ -1178,7 +1202,69 @@ class AnalysisRuntime:
             cancelled=cancelled,
             replans=replans,
             final_report=final_report,
+            completion_shadow=shadow,
         )
+
+    def _observe_completion_shadow(self, actions: int, request: str):
+        """One shadow checkpoint. Never raises, never affects the run.
+
+        The verifier call is issued tools-free under its own phase. Both
+        matter: the phase means the backend is asked for no rolling anchor, so
+        the analysis checkpoint is neither replaced nor consulted, and
+        `tools=[]` with thinking off keeps the prompt-cache transition a
+        qualified one, which is what preserves that checkpoint across the
+        detour. Diverging on either would drop the next step to a cold prefill.
+
+        One cost is real and bounded: the reset does drop the ANALYSIS *prewarm*
+        prefix, which is invalidated unconditionally rather than under the
+        preserve flag. It buys nothing back here, because the rolling
+        checkpoint holds this session's own tokens and is never shorter, so the
+        prewarm stands down whenever rolling can serve the prompt. It would
+        matter only to a cold step, and the earliest checkpoint fires after the
+        analysis is already warm.
+        """
+        from orbit.runtime.completion_shadow import ShadowObservation
+
+        try:
+            records = active_records(list(self.evidence_store.records.values()))
+            active_ids = {
+                str(getattr(record, "evidence_id", "") or "") for record in records
+            }
+            snapshot = build_snapshot(
+                request=request,
+                records=records,
+                load_raw=self.evidence_store.load_raw,
+            )
+
+            def ask(instruction: str, rendered: str):
+                messages = [
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": rendered},
+                ]
+                with model_call_context(
+                    phase=ANALYSIS_COMPLETION_SHADOW_PHASE, tools_mode="off"
+                ):
+                    return self.backend.chat(
+                        messages,
+                        temperature=0,
+                        max_tokens=VERIFIER_MAX_TOKENS,
+                        tools=[],
+                    )
+
+            return evaluate_completion_shadow(
+                action=actions,
+                snapshot=snapshot,
+                ask=ask,
+                active_evidence_ids=active_ids,
+                reattest=self.evidence_store.reattest_exact,
+            )
+        except BaseException as exc:  # noqa: BLE001 - diagnostics must not end a run
+            return ShadowObservation(
+                action=actions,
+                snapshot_digest="",
+                would_stop=False,
+                blocked_by=f"shadow_error: {type(exc).__name__}",
+            )
 
     @staticmethod
     def _final_question(stop_reason: str) -> str:
