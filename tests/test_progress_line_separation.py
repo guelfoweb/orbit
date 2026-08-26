@@ -92,6 +92,8 @@ class ProgressLineHarness(unittest.TestCase):
                 if interactive:
                     renderer._render_wait_line()
                 if via_finish:
+                    # What a guided step does: ask for the line, then stop.
+                    renderer.keep_progress_line()
                     renderer.finish()
                 else:
                     renderer.settle_progress_line()
@@ -198,8 +200,12 @@ class ActionOutcomeTests(ProgressLineHarness):
 
 
 class BothCompletionPathsTests(ProgressLineHarness):
-    def test_the_guided_path_settles_through_finish(self) -> None:
-        """A guided step ends at `finish()`, not at an explicit settle."""
+    def test_the_guided_path_keeps_its_line_through_finish(self) -> None:
+        """A guided step asks for the line, then ends at `finish()`.
+
+        It prints its block after the renderer has stopped, so it has no live
+        line to settle over -- it requests the keep instead.
+        """
         lines = self.run_step(via_finish=True)
         index = next(i for i, line in enumerate(lines) if "generating" in line)
         self.assertEqual(lines[index - 1], "")
@@ -344,6 +350,31 @@ class ProductionWiringTests(unittest.TestCase):
             show.index("settle_progress_line()"),
             show.index("print("),
             "the settle must come before the first print, not after",
+        )
+
+    def test_the_guided_path_asks_to_keep_its_line(self) -> None:
+        """A guided step prints after `finish()`, so it must request the keep.
+
+        Every guided test drives `keep_progress_line()` itself, which proves
+        the renderer honours a request and nothing about whether production
+        makes one. Removing the call would leave those tests green while the
+        guided progress line silently disappeared again.
+        """
+        import inspect
+
+        from orbit.terminal import repl as repl_module
+
+        source = inspect.getsource(repl_module.Repl._ask_analysis)
+
+        self.assertIn(
+            "keep_progress_line()",
+            source,
+            "the guided path must ask for its finished line to be kept",
+        )
+        self.assertLess(
+            source.index("keep_progress_line()"),
+            source.rindex("renderer.finish()"),
+            "the request must come before the renderer stops",
         )
 
     def test_the_seam_is_safe_when_nothing_is_pending(self) -> None:
@@ -493,3 +524,71 @@ class TimerInterferenceTests(ProgressLineHarness):
         lines = self.run_step(steps=2)
         rendered = [line for line in lines if "generating" in line]
         self.assertEqual(len(rendered), 2, "the second step drew no progress line")
+
+
+class ToolCallPresentationTests(ProgressLineHarness):
+    """A CHAT turn that only calls a tool must gain nothing either.
+
+    Tool-call tokens never reach `write()` -- the native protocol delivers
+    them as tool_call events, not deltas -- while the same model call still
+    emits generation progress per token. A renderer that infers "the caller
+    is finished" from streamed prose therefore sees a tool turn as a finished
+    step, and commits a progress row above every tool call. That is why the
+    commit is requested explicitly rather than deduced.
+    """
+
+    def tool_turn(self) -> list[str]:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.start()
+            renderer.progress(generation(2.0, tokens=12))
+            renderer._render_wait_line()
+            renderer.event("tool: read_file(path=a.js)")
+        return screen(buffer.getvalue())
+
+    def test_a_tool_call_gains_no_progress_row(self) -> None:
+        lines = self.tool_turn()
+        self.assertFalse(
+            any("generating" in line for line in lines),
+            "a committed progress row appeared above a CHAT tool call",
+        )
+
+    def test_the_tool_event_is_the_first_thing_printed(self) -> None:
+        lines = self.tool_turn()
+        self.assertEqual(lines[0], "tool: read_file(path=a.js)")
+
+    def test_a_turn_with_no_prose_at_all_gains_nothing(self) -> None:
+        """`finish()` with neither prose nor a request keeps nothing."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.start()
+            renderer.progress(generation(2.0, tokens=2))
+            renderer._render_wait_line()
+            renderer.finish()
+        lines = screen(buffer.getvalue())
+
+        self.assertFalse(
+            any("generating" in line for line in lines),
+            "a silent turn committed a progress row",
+        )
+
+    def test_an_unrequested_line_cannot_surface_from_a_later_stop(self) -> None:
+        """An abandoned line must not be committed by a subsequent request."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.start()
+            renderer.progress(generation(2.0, tokens=7))
+            renderer._render_wait_line()
+            renderer.event("tool: read_file(path=a.js)")
+            # A later step asks to keep its own line; the abandoned one is gone.
+            renderer.keep_progress_line()
+            renderer.finish()
+        lines = screen(buffer.getvalue())
+
+        self.assertFalse(
+            any("7 tok" in line for line in lines),
+            "an abandoned line resurfaced on a later request",
+        )

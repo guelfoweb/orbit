@@ -444,6 +444,11 @@ class Repl:
             renderer.finish(interrupted=True)
             self._close_analysis()
             raise
+        # A guided step prints its block after the renderer has stopped, so
+        # it asks for the finished progress line to be kept rather than
+        # settling over a live one.
+        if run is None:
+            renderer.keep_progress_line()
         renderer.finish()
         # The renderer already showed the prose if the backend streamed it;
         # the final block then carries only what streaming could not: action

@@ -91,6 +91,11 @@ class StreamRenderer:
         # Set while a caller is printing after a settle, so the timer does not
         # draw a new line underneath that output.
         self._suspend_ticks = False
+        # Whether a caller has asked for the finished line to be kept. Commit
+        # only on request: the renderer cannot infer the intent from what has
+        # streamed, because a turn that only calls a tool sends no prose at
+        # all and would otherwise look identical to one that finished.
+        self._commit_pending = False
 
     def start(self) -> None:
         self._started = True
@@ -172,6 +177,7 @@ class StreamRenderer:
         with self._line_lock:
             if self._settled_line is None:
                 return
+            self._commit_pending = False
             self._commit_wait_line()
             self._progress = None
             # Silence the timer for the caller's print. Serialising the two
@@ -180,6 +186,15 @@ class StreamRenderer:
             # then collides with that one instead. The timer is restarted by
             # the next `progress()` or `event()`, as it is after any pause.
             self._suspend_ticks = True
+
+    def keep_progress_line(self) -> None:
+        """Ask for the finished generation line to be kept when the timer stops.
+
+        For a caller that ends the step through `finish()` rather than by
+        printing over a live line: a guided analysis writes its block after
+        the renderer has already stopped.
+        """
+        self._commit_pending = True
 
     def progress(self, update: StreamProgress | WorkProgress) -> None:
         with self._line_lock:
@@ -276,11 +291,13 @@ class StreamRenderer:
             # superseded by the answer itself, and `write()` asks for it to be
             # erased -- committing it there would put a generating row above
             # every CHAT reply.
-            if self._settled_line is not None and not self._first_delta:
+            if self._commit_pending and self._settled_line is not None:
+                self._commit_pending = False
                 self._commit_wait_line()
                 return
             # Dropped rather than kept: a line abandoned mid-stream must not
             # surface later as though it had just finished.
+            self._commit_pending = False
             self._settled_line = None
             if clear:
                 self._clear_wait_line()
