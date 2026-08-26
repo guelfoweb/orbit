@@ -42,10 +42,21 @@ SHADOW_ENV = "ORBIT_ANALYSIS_COMPLETION_SHADOW"
 MAX_SNAPSHOT_RECORDS = 12
 MAX_SNAPSHOT_CHARS_PER_RECORD = 600
 MAX_SNAPSHOT_ARTIFACTS = 16
+# The request is bounded like everything else. It is operator-supplied rather
+# than hostile, but it is echoed into every checkpoint and the final record, so
+# leaving it unbounded would make "bounded by construction" untrue of the one
+# term an analyst can make arbitrarily long.
+MAX_SNAPSHOT_REQUEST_CHARS = 2000
 
 # Short by construction. Both verifiers answer in one or two lines, and a long
 # generation here is a cost paid against a run that is not going to stop.
 VERIFIER_MAX_TOKENS = 64
+
+# What a persisted verifier answer may occupy. Enough to audit a parse verdict
+# after the fact; far too little to become a transcript. The verifiers are
+# instructed to answer in one line, so anything past this is already a protocol
+# violation and the truncation is itself the finding.
+MAX_PERSISTED_RAW_CHARS = 400
 
 _EVIDENCE_ID_RE = re.compile(r"\bev_[0-9a-f]{12}_[0-9a-f]{16}\b")
 
@@ -118,6 +129,7 @@ def build_snapshot(
             if handle and handle not in artifacts:
                 artifacts.append(handle)
     artifacts = artifacts[:MAX_SNAPSHOT_ARTIFACTS]
+    request = (request or "")[:MAX_SNAPSHOT_REQUEST_CHARS]
     payload = json.dumps(
         {"request": request, "evidence": evidence, "artifacts": artifacts},
         ensure_ascii=False,
@@ -227,6 +239,16 @@ class ShadowObservation:
     prompt_tokens: int = 0
     output_tokens: int = 0
     wall_seconds: float = 0.0
+    # Recorded so a decision can be audited offline without rerunning
+    # inference. `snapshot` is the exact bounded projection both verifiers saw,
+    # which is what the historical corpus lacked; the raw answers are bounded
+    # excerpts kept for parser audit, never a transcript.
+    snapshot: "CompletionSnapshot | None" = None
+    verifier_a_evidence_ids: tuple[str, ...] = ()
+    verifier_a_detail: str = ""
+    verifier_b_detail: str = ""
+    verifier_a_raw: str = ""
+    verifier_b_raw: str = ""
 
     def as_log_fields(self) -> dict[str, object]:
         return {
@@ -284,7 +306,9 @@ def evaluate_completion_shadow(
     returns an object exposing `content` and, optionally, token counts. It is
     injected so the loop owns the call and this module owns only the policy.
     """
-    observation = ShadowObservation(action=action, snapshot_digest=snapshot.digest)
+    observation = ShadowObservation(
+        action=action, snapshot_digest=snapshot.digest, snapshot=snapshot
+    )
     started = time.monotonic()
 
     def account(response: Any) -> str:
@@ -299,6 +323,9 @@ def evaluate_completion_shadow(
         rendered = snapshot.render()
         verdict_a = parse_verifier_a(account(ask(VERIFIER_A_INSTRUCTION, rendered)))
         observation.verifier_a = verdict_a.decision
+        observation.verifier_a_evidence_ids = verdict_a.evidence_ids
+        observation.verifier_a_detail = verdict_a.detail[:MAX_PERSISTED_RAW_CHARS]
+        observation.verifier_a_raw = verdict_a.raw[:MAX_PERSISTED_RAW_CHARS]
         if not verdict_a.ok:
             observation.blocked_by = "verifier_a_unparsed"
             return observation
@@ -332,6 +359,8 @@ def evaluate_completion_shadow(
         # challenge collapses into agreement with the thing it exists to test.
         verdict_b = parse_verifier_b(account(ask(VERIFIER_B_INSTRUCTION, rendered)))
         observation.verifier_b = verdict_b.decision
+        observation.verifier_b_detail = verdict_b.detail[:MAX_PERSISTED_RAW_CHARS]
+        observation.verifier_b_raw = verdict_b.raw[:MAX_PERSISTED_RAW_CHARS]
         if not verdict_b.ok:
             observation.blocked_by = "verifier_b_unparsed"
             return observation
@@ -357,6 +386,8 @@ def evaluate_completion_shadow(
 
 __all__ = [
     "ANALYSIS_COMPLETION_SHADOW_PHASE",
+    "MAX_PERSISTED_RAW_CHARS",
+    "MAX_SNAPSHOT_REQUEST_CHARS",
     "SHADOW_ENV",
     "VERIFIER_MAX_TOKENS",
     "CompletionSnapshot",
