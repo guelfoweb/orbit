@@ -68,20 +68,31 @@ def format_tool_call_event(name: str, args: str) -> str:
             parsed = {}
         check = parsed.get("check") if isinstance(parsed, dict) else None
         if isinstance(check, str):
-            return f"› Artifact  verify published artifact · {check}"
-    detail = f"  {args}" if args else ""
-    return f"› {display_tool_name(name)}{detail}"
+            return f"› Artifact  verify published artifact · {_normalize_inline(check)}"
+    # Nothing above recognised the tool, so neither the name nor the argument
+    # string has been through a parser that would have dropped control bytes.
+    detail = f"  {_normalize_inline(args)}" if args else ""
+    return f"› {_normalize_inline(display_tool_name(name))}{detail}"
 
 
 def format_tool_activity_label(name: str, args: str) -> str:
+    """One short line naming what is running, for the waiting indicator.
+
+    Every branch returns model- or tool-authored text, and the caller prints it
+    on a line that begins with a carriage return. Left raw, an escape sequence
+    in a command or URL could move the cursor or erase that line and write over
+    Orbit's own status row. `_normalize_inline` is the same boundary the other
+    formatters use, and it is idempotent, so a value that arrives already
+    sanitized is not escaped twice.
+    """
     if name == "exec_shell_full_command":
-        return _command_from_args(args) or name
+        return _normalize_inline(_command_from_args(args) or name)
     if name == "fetch_url":
-        return _url_from_args(args) or name
+        return _normalize_inline(_url_from_args(args) or name)
     if name == "list_directory":
         path, _recursive = _list_directory_from_args(args)
-        return path or name
-    return display_tool_name(name)
+        return _normalize_inline(path or name)
+    return _normalize_inline(display_tool_name(name))
 
 
 def format_tool_result_event(name: str, chars: int, source: str | None = None, content: str | None = None) -> str:
