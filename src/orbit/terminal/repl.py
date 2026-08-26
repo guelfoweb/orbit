@@ -82,11 +82,13 @@ def _print_orbit_summary(summary: str) -> str:
     both that and the line being copied out of context.
 
     One blank line, unconditionally. A report cannot arrive already ending in
-    one: `AnalysisReport` strips its text at construction, the empty-report
-    constant has no trailing newline, and sanitizing never appends one. An
-    earlier version took a flag for that case, but the flag could never be
-    true, which left the branch untestable and the caller carrying state for
-    a situation that does not occur.
+    one: `AnalysisReport.text` is stripped at construction, and the two other
+    values it can hold -- the no-evidence constant and the no-usable-text
+    fallback -- are newline-free literals. Sanitizing does not add a trailing
+    newline, but it does preserve one, so the strip is what makes this safe.
+    An earlier version took a flag for the ends-in-a-newline case, but the
+    flag could never be true, which left the branch untestable and the caller
+    carrying state for a situation that does not occur.
 
     Returns what was printed so a test can assert on it without capturing
     stdout.
