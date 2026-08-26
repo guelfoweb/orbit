@@ -64,6 +64,41 @@ def _abbreviate_home(path: Path) -> str:
     return "~" if str(relative) == "." else f"~/{relative}"
 
 
+def _print_orbit_summary(summary: str) -> str:
+    """Print one Orbit-authored telemetry line, set apart from the answer above.
+
+    The line Orbit writes after an analysis -- `analysis | mode: ANALYSIS |
+    ...` -- sits directly under the model's closing report, and both are plain
+    left-aligned prose. `dim()` used to be the only thing telling them apart,
+    and it is a no-op wherever ANSI is unavailable: a pipe, a redirected log,
+    `NO_COLOR`, `TERM=dumb`. In those places the analyst reads Orbit's own
+    counters as the model's last sentence, or the model's last sentence as
+    Orbit's counters -- and a report is free to contain a line that looks
+    exactly like the summary.
+
+    A blank line and the `›` prefix already mean "Orbit is speaking" elsewhere
+    in this terminal, so the separation reuses them instead of introducing new
+    vocabulary. The blank line survives the loss of colour; the prefix survives
+    both that and the line being copied out of context.
+
+    One blank line, unconditionally. A report cannot arrive already ending in
+    one: `AnalysisReport.text` is stripped at construction, and the two other
+    values it can hold -- the no-evidence constant and the no-usable-text
+    fallback -- are newline-free literals. Sanitizing does not add a trailing
+    newline, but it does preserve one, so the strip is what makes this safe.
+    An earlier version took a flag for the ends-in-a-newline case, but the
+    flag could never be true, which left the branch untestable and the caller
+    carrying state for a situation that does not occur.
+
+    Returns what was printed so a test can assert on it without capturing
+    stdout.
+    """
+    line = f"› {summary}"
+    print()
+    print(dim(line), flush=True)
+    return line
+
+
 @dataclass
 class Repl:
     runtime: ChatRuntime
@@ -438,7 +473,9 @@ class Repl:
             # what the model wrote.
             if run.final_report is not None and not renderer.rendered_visible_text:
                 print(
-                    sanitize_terminal_text(run.final_report.text, allow_newlines=True),
+                    sanitize_terminal_text(
+                        run.final_report.text, allow_newlines=True
+                    ),
                     flush=True,
                 )
             replans = f" | replans: {run.replans}" if run.replans else ""
@@ -455,7 +492,7 @@ class Repl:
         detail = format_step_diagnostics(result.diagnostics)
         if detail:
             summary += f" | {detail}"
-        print(dim(summary), flush=True)
+        _print_orbit_summary(summary)
 
     def _analysis_checkpoint(self) -> tuple[int, int]:
         """History length and analyst-turn count before a step is attempted."""
@@ -870,7 +907,7 @@ class Repl:
         detail = format_step_diagnostics(report.diagnostics)
         if detail:
             summary += f" | {detail}"
-        print(dim(summary), flush=True)
+        _print_orbit_summary(summary)
 
     def _handle_chat_command(self) -> str:
         """Return to CHAT. No model call, and the analysis is kept.

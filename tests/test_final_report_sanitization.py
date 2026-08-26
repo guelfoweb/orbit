@@ -77,7 +77,13 @@ class ProductionCallSiteTests(unittest.TestCase):
         self.assertIn(marker, source)
         branch = source[source.index(marker) : source.index(marker) + 260]
 
-        self.assertIn("sanitize_terminal_text(run.final_report.text", branch)
+        # Matched on the two facts that matter -- the report text is passed to
+        # the sanitizer, and nothing in this branch prints it raw -- rather
+        # than on one exact spelling, so wrapping the call over lines or
+        # binding it to a local does not fail this spuriously.
+        self.assertIn("sanitize_terminal_text(", branch)
+        self.assertIn("run.final_report.text", branch)
+        self.assertNotIn("print(run.final_report.text", branch)
 
     def test_all_three_final_output_paths_sanitize(self) -> None:
         """Streamed, non-streaming and empty must agree.
@@ -94,7 +100,10 @@ class ProductionCallSiteTests(unittest.TestCase):
             inspect.getsource(streaming.StreamRenderer.write),
         )
         repl_source = inspect.getsource(repl)
-        self.assertIn("sanitize_terminal_text(run.final_report.text", repl_source)
+        # Neither final report may reach `print` unsanitized.
+        self.assertNotIn("print(run.final_report.text", repl_source)
+        self.assertNotIn("print(report.text", repl_source)
+        self.assertIn("run.final_report.text", repl_source)
         self.assertIn("sanitize_terminal_text(report.text", repl_source)
 
 
