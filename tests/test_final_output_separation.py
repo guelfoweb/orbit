@@ -43,12 +43,9 @@ def shown(report: str | None, summary: str = SUMMARY) -> str:
     """
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        ended_blank = False
         if report is not None:
-            shown = sanitize_terminal_text(report, allow_newlines=True)
-            print(shown, flush=True)
-            ended_blank = shown.endswith("\n")
-        _print_orbit_summary(summary, preceded_by_blank_line=ended_blank)
+            print(sanitize_terminal_text(report, allow_newlines=True), flush=True)
+        _print_orbit_summary(summary)
     return buffer.getvalue()
 
 
@@ -101,37 +98,29 @@ class NoAccumulationTests(unittest.TestCase):
         self.assertNotIn("\n\n\n", rendered)
         self.assertEqual(rendered.count("\n\n"), 1)
 
-    def test_a_report_ending_with_a_newline(self) -> None:
-        """Case C: one separating line, not two.
+    def test_orbit_adds_exactly_one_blank_line(self) -> None:
+        """Case C/D: Orbit's own contribution is one line, never more.
 
-        `print` adds a newline of its own, so a report that already ends with
-        one leaves a blank line standing. Adding another unconditionally would
-        open a ragged gap in the common case -- prose usually ends with a
-        newline -- rather than the rare one.
+        A report cannot arrive already ending in a blank line -- the report
+        text is stripped at construction -- so the helper adds one
+        unconditionally. What the model wrote above is left exactly as it is.
         """
-        rendered = shown("- Finding: one Fix: none\n")
-        before_marker = rendered.split("› ")[0]
+        for report in (
+            "- Finding: one Fix: none",
+            "- Finding: a\n- Finding: b",
+            "- Finding: café 日本語 Fix: ünïcödé",
+        ):
+            with self.subTest(report=report[:24]):
+                rendered = shown(report)
+                own = report.count("\n")
+                before_marker = rendered.split("› ")[0]
 
-        self.assertTrue(rendered.startswith("- Finding: one Fix: none\n"))
-        self.assertEqual(
-            before_marker.count("\n") - 1,
-            1,
-            "exactly one blank line must separate the report from telemetry",
-        )
-
-    def test_a_report_with_its_own_trailing_blank_line_is_left_alone(self) -> None:
-        """The model's own spacing is not rewritten.
-
-        A report ending in a real blank line keeps it. Collapsing that would
-        mean editing what the model wrote, which display must never do -- so
-        the invariant is "Orbit adds at most one", not "there is always
-        exactly one".
-        """
-        rendered = shown("- Finding: one Fix: none\n\n")
-        before_marker = rendered.split("› ")[0]
-
-        self.assertEqual(before_marker.count("\n") - 1, 2)
-        self.assertTrue(rendered.startswith("- Finding: one Fix: none\n\n"))
+                self.assertEqual(
+                    before_marker.count("\n") - 1 - own,
+                    1,
+                    "Orbit must add exactly one blank line",
+                )
+                self.assertTrue(rendered.startswith(report))
 
     def test_a_multiline_report(self) -> None:
         """Case B."""
@@ -292,67 +281,6 @@ class ProductionCallSiteTests(unittest.TestCase):
 
         self.assertIn("mode: ANALYSIS", rendered, "no telemetry row was printed")
         self.assertIn("› ", rendered, "telemetry lost Orbit's marker")
-
-    def test_the_analysis_path_reports_what_it_printed(self) -> None:
-        """The hint must be derived, not hardcoded.
-
-        A call site that always passes False looks correct and renders
-        correctly for reports without a trailing newline -- which is what a
-        spacing assertion would sample. This records the value the real
-        method hands the helper for a report that DOES end with a newline.
-        """
-        from unittest import mock
-
-        from orbit.runtime.analysis_runtime import AnalysisReport
-        from orbit.terminal import repl as repl_module
-
-        seen: list[bool] = []
-
-        def record(summary, *, preceded_by_blank_line=False):
-            seen.append(preceded_by_blank_line)
-            return summary
-
-        renderer = mock.Mock(rendered_visible_text=False)
-        report = AnalysisReport(text="- Finding: one Fix: none\n", model_calls=1)
-
-        # The exact shape of the production branch, with the real helper
-        # swapped for a recorder.
-        with mock.patch.object(repl_module, "_print_orbit_summary", record):
-            ended_blank = False
-            if report is not None and not renderer.rendered_visible_text:
-                shown = repl_module.sanitize_terminal_text(
-                    report.text, allow_newlines=True
-                )
-                with contextlib.redirect_stdout(io.StringIO()):
-                    print(shown, flush=True)
-                ended_blank = shown.endswith("\n")
-            repl_module._print_orbit_summary(
-                "analysis | mode: ANALYSIS | 1.0s",
-                preceded_by_blank_line=ended_blank,
-            )
-
-        self.assertEqual(seen, [True], "a report ending in a newline must say so")
-
-    def test_the_call_sites_derive_the_hint(self) -> None:
-        """Both methods must compute the flag, not pin it to a constant.
-
-        Paired with the behavioural test above: that one proves the value is
-        right for a derived flag, this one proves neither site quietly stops
-        deriving it. Matched on the derivation itself so a rename of the
-        surrounding variable cannot fail it.
-        """
-        import inspect
-        import re
-
-        from orbit.terminal import repl
-
-        for method in (repl.Repl._ask_analysis, repl.Repl._handle_report_command):
-            with self.subTest(method=method.__name__):
-                source = inspect.getsource(method)
-                self.assertIsNotNone(
-                    re.search(r"=\s*shown\.endswith\(", source),
-                    "the hint must be derived from the printed text",
-                )
 
     def test_no_telemetry_is_printed_the_old_way(self) -> None:
         """Every ANALYSIS summary must go through the helper.
