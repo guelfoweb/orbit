@@ -64,6 +64,38 @@ def _abbreviate_home(path: Path) -> str:
     return "~" if str(relative) == "." else f"~/{relative}"
 
 
+def _print_orbit_summary(summary: str, *, preceded_by_blank_line: bool = False) -> str:
+    """Print one Orbit-authored telemetry line, set apart from the answer above.
+
+    The line Orbit writes after an analysis -- `analysis | mode: ANALYSIS |
+    ...` -- sits directly under the model's closing report, and both are plain
+    left-aligned prose. `dim()` used to be the only thing telling them apart,
+    and it is a no-op wherever ANSI is unavailable: a pipe, a redirected log,
+    `NO_COLOR`, `TERM=dumb`. In those places the analyst reads Orbit's own
+    counters as the model's last sentence, or the model's last sentence as
+    Orbit's counters -- and a report is free to contain a line that looks
+    exactly like the summary.
+
+    A blank line and the `›` prefix already mean "Orbit is speaking" elsewhere
+    in this terminal, so the separation reuses them instead of introducing new
+    vocabulary. The blank line survives the loss of colour; the prefix survives
+    both that and the line being copied out of context.
+
+    `preceded_by_blank_line` says the caller already left one. A report is
+    prose and often ends with its own newline, which `print` turns into a
+    blank line of its own; adding a second unconditionally would open a
+    ragged gap exactly in the common case rather than the rare one.
+
+    Returns what was printed so a test can assert on it without capturing
+    stdout.
+    """
+    line = f"› {summary}"
+    if not preceded_by_blank_line:
+        print()
+    print(dim(line), flush=True)
+    return line
+
+
 @dataclass
 class Repl:
     runtime: ChatRuntime
@@ -424,6 +456,9 @@ class Repl:
         if step_block:
             print(step_block, flush=True)
         elapsed = time.monotonic() - started
+        # Declared before the branch: the summary below prints on every path,
+        # including the one that has no run and therefore no report.
+        ended_blank = False
         if run is not None:
             # The closing report streamed as it was generated, like any other
             # prose. Print it here only if it did not: a backend that does not
@@ -437,10 +472,13 @@ class Repl:
             # text itself is untouched: `run.final_report.text` still holds
             # what the model wrote.
             if run.final_report is not None and not renderer.rendered_visible_text:
-                print(
-                    sanitize_terminal_text(run.final_report.text, allow_newlines=True),
-                    flush=True,
+                shown = sanitize_terminal_text(
+                    run.final_report.text, allow_newlines=True
                 )
+                print(shown, flush=True)
+                # `print` adds one newline; a report ending in its own leaves a
+                # blank line already standing.
+                ended_blank = shown.endswith("\n")
             replans = f" | replans: {run.replans}" if run.replans else ""
             summary = (
                 f"analysis | mode: ANALYSIS | model calls: {run.model_calls} | "
@@ -455,7 +493,7 @@ class Repl:
         detail = format_step_diagnostics(result.diagnostics)
         if detail:
             summary += f" | {detail}"
-        print(dim(summary), flush=True)
+        _print_orbit_summary(summary, preceded_by_blank_line=ended_blank)
 
     def _analysis_checkpoint(self) -> tuple[int, int]:
         """History length and analyst-turn count before a step is attempted."""
@@ -856,12 +894,15 @@ class Repl:
             print(runtime_error_text(exc), file=sys.stderr)
             return
         renderer.finish()
+        ended_blank = False
         if report.model_calls == 0:
             # Today this branch can only carry NO_EVIDENCE_REPORT, a constant.
             # It is sanitized anyway because it is a print that never passed
             # the renderer's boundary: if the branch ever comes to carry model
             # prose, it is already safe rather than newly vulnerable.
-            print(sanitize_terminal_text(report.text, allow_newlines=True), flush=True)
+            shown = sanitize_terminal_text(report.text, allow_newlines=True)
+            print(shown, flush=True)
+            ended_blank = shown.endswith("\n")
         elapsed = time.monotonic() - started
         summary = (
             f"report | mode: ANALYSIS | model calls: {report.model_calls} | "
@@ -870,7 +911,7 @@ class Repl:
         detail = format_step_diagnostics(report.diagnostics)
         if detail:
             summary += f" | {detail}"
-        print(dim(summary), flush=True)
+        _print_orbit_summary(summary, preceded_by_blank_line=ended_blank)
 
     def _handle_chat_command(self) -> str:
         """Return to CHAT. No model call, and the analysis is kept.
