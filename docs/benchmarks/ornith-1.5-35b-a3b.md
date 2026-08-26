@@ -117,7 +117,8 @@ Measured 2026-08-24 against served commit `98049a9`.
 ### Prefix cache reuse
 
 The clearest result on this profile. Across one 13-call autonomous analysis run,
-per-call KV reuse rises as the run accumulates context:
+per-call KV reuse rises as the run accumulates context (selected calls; the
+totals below are over all 13):
 
 | Call | Reused | Evaluated | Reuse |
 |---:|---:|---:|---:|
@@ -171,9 +172,9 @@ Per-call `prefill_ms` on calls that **did** reuse cache is not usable as a
 prefill-throughput figure. The timer starts before the prefix reuse and restore
 work, while the token count excludes reused tokens, so restore overhead lands in
 the denominator but not the numerator. That systematically depresses the rate:
-medians of 14.6 tok/s (n=13) and 18.3 tok/s (n=9) across two runs, against
-21–33 tok/s on cold calls — a spread that reflects the metric's definition, not
-the hardware.
+across the two runs, the reuse-affected calls median 14.4 tok/s (n=11) and
+17.5 tok/s (n=7), against 21–33 tok/s on cold calls — a spread that reflects
+the metric's definition, not the hardware.
 
 This is why the published range is drawn from zero-reuse calls only.
 
