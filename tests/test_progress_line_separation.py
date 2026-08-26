@@ -405,3 +405,91 @@ class MultiStepStateTests(ProgressLineHarness):
             1,
             "the finished step was committed twice",
         )
+
+
+class ChatPresentationTests(ProgressLineHarness):
+    """CHAT must render exactly as it did before this change.
+
+    Native streaming reports generation progress per token, so a progress line
+    is always armed by the time the first delta arrives. Committing it there
+    would put a `model · generating · …` row and two blank lines above every
+    CHAT answer -- a regression in the one place this change was required not
+    to touch.
+    """
+
+    def chat_turn(self) -> list[str]:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.start()
+            renderer.progress(generation(0.0, tokens=1, rate=5.0))
+            renderer._render_wait_line()
+            renderer.write("The answer is 42.")
+            renderer.finish()
+            print()
+            print("~ 80 tok · 12s", flush=True)
+        return screen(buffer.getvalue())
+
+    def test_a_streamed_answer_gains_no_progress_row(self) -> None:
+        lines = self.chat_turn()
+        self.assertFalse(
+            any("generating" in line for line in lines),
+            "a committed progress row appeared above a CHAT answer",
+        )
+
+    def test_the_answer_is_the_first_thing_printed(self) -> None:
+        """No leading blank lines before the reply."""
+        lines = self.chat_turn()
+        self.assertEqual(lines[0], "The answer is 42.")
+
+    def test_an_abandoned_line_never_surfaces_later(self) -> None:
+        """A line dropped mid-stream must not be committed by a later stop."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            renderer = StreamRenderer(interval=999, interactive=True)
+            renderer.start()
+            renderer.progress(generation(114.0))
+            renderer._render_wait_line()
+            renderer.write("prose")
+            renderer.finish()
+            renderer.finish()
+        lines = screen(buffer.getvalue())
+
+        self.assertFalse(any("generating" in line for line in lines))
+
+
+class TimerInterferenceTests(ProgressLineHarness):
+    """A tick must not draw a new line into the caller's print window.
+
+    Serialising the timer and the committing thread is not sufficient on its
+    own: a tick landing after the commit draws a fresh unterminated line, and
+    the caller's output then collides with that one instead.
+    """
+
+    def test_no_tick_lands_between_the_commit_and_the_next_print(self) -> None:
+        import time
+
+        collisions = 0
+        for _ in range(20):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                renderer = StreamRenderer(interval=0.002, interactive=True)
+                renderer.set_activity("analysis")
+                renderer.start()
+                renderer.progress(generation(114.0))
+                renderer.settle_progress_line()
+                # The window `format_analysis_step` occupies in production.
+                time.sleep(0.02)
+                print("action: ok", flush=True)
+                renderer.finish()
+            for line in screen(buffer.getvalue()):
+                if ("generating" in line or "working" in line) and "action:" in line:
+                    collisions += 1
+
+        self.assertEqual(collisions, 0, "a timer tick collided with the caller's output")
+
+    def test_the_timer_resumes_for_the_following_step(self) -> None:
+        """Suspending ticks must not silence the rest of the run."""
+        lines = self.run_step(steps=2)
+        rendered = [line for line in lines if "generating" in line]
+        self.assertEqual(len(rendered), 2, "the second step drew no progress line")
