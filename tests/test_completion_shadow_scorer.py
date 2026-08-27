@@ -47,9 +47,23 @@ class PredicateTests(unittest.TestCase):
         self.assertFalse(evaluate_finding(spec, "gamma").satisfied)
 
     def test_absent_all_is_inverted(self) -> None:
+        """Inverted, and scored against source bytes rather than narrative.
+
+        Absence is a property of the artifact. Deciding it from cumulative
+        narrative let an analysis step that *explains* the artifact makes no
+        such call introduce the token and unsatisfy the finding.
+        """
         spec = {"id": "x", "kind": "absent_all", "values": ["eval("]}
-        self.assertTrue(evaluate_finding(spec, "safe code").satisfied)
-        self.assertFalse(evaluate_finding(spec, "eval(payload)").satisfied)
+        self.assertTrue(
+            evaluate_finding(spec, "narrative", source_text="safe code").satisfied
+        )
+        self.assertFalse(
+            evaluate_finding(spec, "narrative", source_text="eval(payload)").satisfied
+        )
+
+    def test_absent_all_without_source_is_unscorable(self) -> None:
+        spec = {"id": "x", "kind": "absent_all", "values": ["eval("]}
+        self.assertTrue(evaluate_finding(spec, "safe code").unscorable)
 
     def test_regex_is_bounded_not_semantic(self) -> None:
         spec = {"id": "x", "kind": "regex", "pattern": r"(?i)Get-Date"}
@@ -128,7 +142,16 @@ class VerifierClassificationTests(unittest.TestCase):
         self.assertEqual(classify_b("NO_GAP", False, False), "B_FALSE_NO_GAP")
 
     def test_b_not_called_when_a_continued(self) -> None:
-        self.assertEqual(classify_b(None, False, False), "B_NOT_CALLED")
+        """B's absence is read from `blocked_by`, not from a bare missing verdict.
+
+        A_CONTINUE means B was deliberately never asked -- the gate's own cost
+        control. Without that reason, a missing verdict is a failed verifier.
+        """
+        self.assertEqual(
+            classify_b(None, False, False, blocked_by="verifier_a_continue"),
+            "B_NOT_CALLED",
+        )
+        self.assertEqual(classify_b(None, False, False), "B_ERRORED")
 
     def test_indeterminate_dominates(self) -> None:
         self.assertEqual(classify_a("COMPLETE", False, True), "A_INDETERMINATE")
