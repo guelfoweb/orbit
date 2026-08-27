@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
+from orbit.runtime.completion_shadow import COMPLETION_SNAPSHOT_TOKEN_BUDGET
+
 # Bumped when a reader could otherwise misread an older file. Readers must
 # refuse a version they do not know rather than guess at its shape.
 LEDGER_SCHEMA_VERSION = 1
@@ -142,6 +144,9 @@ class ShadowLedgerWriter:
             # fidelity, which reads as unknown rather than lossless. Bumping
             # the schema would have invalidated an expensive corpus that is
             # still perfectly valid for everything it does record.
+            "snapshot_tokens": observation.snapshot_tokens,
+            "token_budget": COMPLETION_SNAPSHOT_TOKEN_BUDGET,
+            "verification_skipped": bool(observation.verification_skipped),
             "snapshot_fidelity": (
                 observation.snapshot_fidelity.as_log_fields()
                 if getattr(observation, "snapshot_fidelity", None) is not None
