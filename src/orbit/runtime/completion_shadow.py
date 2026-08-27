@@ -52,6 +52,43 @@ MAX_SNAPSHOT_REQUEST_CHARS = 2000
 # generation here is a cost paid against a run that is not going to stop.
 VERIFIER_MAX_TOKENS = 64
 
+# The whole verifier prompt -- instruction plus snapshot -- must fit this, or
+# the checkpoint is skipped rather than trimmed. A verdict reached on a partial
+# view says nothing about whether the analysis is done, so asking for one is
+# worse than not asking: it spends a model call to obtain an answer that cannot
+# be interpreted.
+#
+# 6144 measured, not chosen. Against the collected corpus, tokenised with the
+# qualified Ornith vocabulary, the full lossless prompt for every checkpoint
+# is: 2014, 2155, 3009, 3132, 3229, 3486, 3581, 3738, 3932, 4724, 4777, 5016,
+# 6374. This admits twelve of the thirteen and skips only the largest.
+#
+# The budget exists to bound lossless verification, and for no other purpose.
+# It is not a proxy for how hard an artifact is to analyse: snapshot size is a
+# token count, and reading it as an analytical signal would smuggle in exactly
+# the kind of heuristic this design refuses. Sizing it here so that both simple
+# and complex checkpoints can be verified is deliberate -- a budget that only
+# admitted the small ones would leave the interesting half unmeasured.
+#
+# With a 64-token generation allowance the worst case is 6208 tokens, 37.9% of
+# the qualified 16384 context, leaving 10176 tokens of headroom.
+COMPLETION_SNAPSHOT_TOKEN_BUDGET = 6144
+
+# The chat template wraps each message in role markers before anything reaches
+# the model, and those tokens are in neither the instruction nor the snapshot.
+# Measured 37 on the qualified Ornith template, via `llama_chat_apply_template`
+# on the real two-message verifier exchange: the rendered prompt costs 37 more
+# tokens than the instruction and snapshot do on their own. A hand-written
+# ChatML skeleton gives 38, and the couple of tokens between them are boundary
+# merges -- which is why the authoritative number comes from the renderer the
+# model actually uses rather than from a reconstructed string.
+#
+# Carried at 64 rather than the measured value so a template revision cannot
+# silently make the budget describe less than the prompt it bounds. A model
+# whose wrapper exceeded 64 would under-budget, which is why the headroom below
+# the context is kept large.
+CHAT_TEMPLATE_OVERHEAD_TOKENS = 64
+
 # What a persisted verifier answer may occupy. Enough to audit a parse verdict
 # after the fact; far too little to become a transcript. The verifiers are
 # instructed to answer in one line, so anything past this is already a protocol
@@ -166,6 +203,94 @@ class CompletionSnapshot:
             lines.extend(("", "ARTIFACTS:"))
             lines.extend(f"- {handle}" for handle in self.artifacts)
         return "\n".join(lines)
+
+
+def build_lossless_snapshot(
+    *,
+    request: str,
+    records: Sequence[Any],
+    load_raw: Callable[[str], str | None],
+) -> CompletionSnapshot:
+    """The complete canonical snapshot: every ACTIVE record, whole.
+
+    Nothing is trimmed to make it fit. Whether it *does* fit is decided
+    afterwards against the token budget, and a snapshot that does not fit is
+    skipped rather than shortened -- the caller never receives a partial view
+    to reason about.
+    """
+    evidence: list[tuple[str, str]] = []
+    artifacts: list[str] = []
+    unusable = 0
+    for record in records:
+        evidence_id = str(getattr(record, "evidence_id", "") or "")
+        if not evidence_id:
+            unusable += 1
+            continue
+        evidence.append((evidence_id, load_raw(evidence_id) or ""))
+        metadata = getattr(record, "metadata", None) or {}
+        for artifact in metadata.get("artifacts") or []:
+            handle = str(artifact.get("handle") or "")
+            if handle and handle not in artifacts:
+                artifacts.append(handle)
+
+    full_request = request or ""
+    reasons: tuple[str, ...] = ("record_unusable",) if unusable else ()
+    fidelity = CompletionSnapshotFidelity(
+        lossless=not reasons,
+        reasons=reasons,
+        request_truncated=False,
+        request_authoritative_chars=len(full_request),
+        request_included_chars=len(full_request),
+        active_records_total=len(records),
+        active_records_included=len(evidence),
+        omitted_record_count=unusable,
+        truncated_records=(),
+        artifacts_total=len(artifacts),
+        artifacts_included=len(artifacts),
+        omitted_artifact_count=0,
+    )
+    payload = json.dumps(
+        {"request": full_request, "evidence": evidence, "artifacts": artifacts},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return CompletionSnapshot(
+        request=full_request,
+        evidence=tuple(evidence),
+        artifacts=tuple(artifacts),
+        digest=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        fidelity=fidelity,
+    )
+
+
+def snapshot_fits_budget(
+    snapshot: CompletionSnapshot,
+    count_tokens: Callable[[str], int],
+    *,
+    budget: int = COMPLETION_SNAPSHOT_TOKEN_BUDGET,
+) -> tuple[bool, int]:
+    """Exact tokens for the whole verifier prompt, and whether it fits.
+
+    Counted with the model's own tokenizer rather than estimated: an estimate
+    that is wrong in the permissive direction would put an oversized prompt in
+    front of the verifier, which is the one outcome the budget exists to
+    prevent.
+
+    Three parts are counted, because all three are sent: the snapshot, the
+    larger of the two instructions, and the chat template's own wrapper. The
+    wrapper is easy to forget -- it is in neither string -- but it is real, and
+    leaving it out would make the budget describe something narrower than the
+    prompt it is supposed to bound.
+    """
+    largest_instruction = max(
+        count_tokens(VERIFIER_A_INSTRUCTION), count_tokens(VERIFIER_B_INSTRUCTION)
+    )
+    total = (
+        count_tokens(snapshot.render())
+        + largest_instruction
+        + CHAT_TEMPLATE_OVERHEAD_TOKENS
+    )
+    return total <= budget, total
 
 
 def build_snapshot(
@@ -369,6 +494,8 @@ class ShadowObservation:
     # excerpts kept for parser audit, never a transcript.
     snapshot: "CompletionSnapshot | None" = None
     snapshot_fidelity: "CompletionSnapshotFidelity | None" = None
+    snapshot_tokens: int | None = None
+    verification_skipped: bool = False
     verifier_a_evidence_ids: tuple[str, ...] = ()
     verifier_a_detail: str = ""
     verifier_b_detail: str = ""
@@ -387,6 +514,8 @@ class ShadowObservation:
             "prompt_tokens": self.prompt_tokens,
             "output_tokens": self.output_tokens,
             "wall_seconds": round(self.wall_seconds, 3),
+            "snapshot_tokens": self.snapshot_tokens,
+            "verification_skipped": self.verification_skipped,
         }
 
 
@@ -424,6 +553,8 @@ def evaluate_completion_shadow(
     ask: Callable[[str, str], Any],
     active_evidence_ids: set[str],
     reattest: Callable[[str], object | None],
+    fits_budget: bool = True,
+    snapshot_tokens: int | None = None,
 ) -> ShadowObservation:
     """Run the two-stage check and report what it *would* have done.
 
@@ -437,7 +568,17 @@ def evaluate_completion_shadow(
         snapshot=snapshot,
         snapshot_fidelity=getattr(snapshot, "fidelity", None),
     )
+    observation.snapshot_tokens = snapshot_tokens
     started = time.monotonic()
+
+    # Checked before anything is asked, and before the timer matters: a
+    # snapshot that does not fit is not shortened to make it fit, so there is
+    # no view to put in front of a verifier. Spending a call here would buy an
+    # answer that cannot be interpreted either way.
+    if not fits_budget:
+        observation.blocked_by = "snapshot_too_large"
+        observation.verification_skipped = True
+        return observation
 
     def account(response: Any) -> str:
         observation.calls += 1
@@ -527,6 +668,8 @@ __all__ = [
     "MAX_PERSISTED_RAW_CHARS",
     "MAX_SNAPSHOT_REQUEST_CHARS",
     "SHADOW_ENV",
+    "CHAT_TEMPLATE_OVERHEAD_TOKENS",
+    "COMPLETION_SNAPSHOT_TOKEN_BUDGET",
     "VERIFIER_MAX_TOKENS",
     "CompletionSnapshot",
     "CompletionSnapshotFidelity",
@@ -534,7 +677,9 @@ __all__ = [
     "ShadowObservation",
     "TruncatedRecord",
     "VerifierVerdict",
+    "build_lossless_snapshot",
     "build_snapshot",
+    "snapshot_fits_budget",
     "evaluate_completion_shadow",
     "parse_verifier_a",
     "parse_verifier_b",

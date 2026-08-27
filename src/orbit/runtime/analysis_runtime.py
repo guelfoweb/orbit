@@ -59,7 +59,9 @@ from orbit.runtime.completion_shadow import (
     ANALYSIS_COMPLETION_SHADOW_PHASE,
     VERIFIER_MAX_TOKENS,
     ShadowLedger,
+    build_lossless_snapshot,
     build_snapshot,
+    snapshot_fits_budget,
     evaluate_completion_shadow,
     scheduled_actions,
     shadow_enabled,
@@ -73,6 +75,10 @@ from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.tool_calls import tool_call_id
 
 ANALYSIS_TOOL_NAME = "execute_analysis"
+
+class _TokenCountUnavailable(RuntimeError):
+    """The backend could not tokenize, so the completion budget is unverifiable."""
+
 
 # The phase this runtime declares around its one model call. It names a kind of
 # call, not a mode: the backend uses it the way it already uses "route", to know
@@ -1327,7 +1333,7 @@ class AnalysisRuntime:
             active_ids = {
                 str(getattr(record, "evidence_id", "") or "") for record in records
             }
-            snapshot = build_snapshot(
+            snapshot = build_lossless_snapshot(
                 request=request,
                 records=records,
                 load_raw=self.evidence_store.load_raw,
@@ -1348,12 +1354,30 @@ class AnalysisRuntime:
                         tools=[],
                     )
 
+            # Exact tokens from the model's own tokenizer. If the backend
+            # cannot supply them the checkpoint is skipped rather than
+            # estimated: an estimate wrong in the permissive direction would
+            # put an oversized prompt in front of a verifier, which is the one
+            # outcome the budget exists to prevent.
+            def count_tokens(text: str) -> int:
+                counted = self.backend.count_text_tokens(text)
+                if counted is None:
+                    raise _TokenCountUnavailable()
+                return int(counted.tokens)
+
+            try:
+                fits, total = snapshot_fits_budget(snapshot, count_tokens)
+            except _TokenCountUnavailable:
+                fits, total = False, None
+
             return evaluate_completion_shadow(
                 action=actions,
                 snapshot=snapshot,
                 ask=ask,
                 active_evidence_ids=active_ids,
                 reattest=self.evidence_store.reattest_exact,
+                fits_budget=fits,
+                snapshot_tokens=total,
             )
         except BaseException as exc:  # noqa: BLE001 - diagnostics must not end a run
             return ShadowObservation(

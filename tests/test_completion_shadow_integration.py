@@ -63,6 +63,17 @@ class _CountingBackend:
         self.calls += 1
         return response
 
+    def count_text_tokens(self, text: str):
+        """A deterministic stand-in for the model tokenizer.
+
+        Whole-word counting, not the real vocabulary: these tests are about the
+        budget mechanism, not about token fidelity, and a fixture that returned
+        None would make every checkpoint skip and hide the behaviour under test.
+        """
+        from orbit.backend.base import TokenCount
+
+        return TokenCount(tokens=len(text.split()), context_tokens=16384)
+
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
                     on_delta=None, on_progress=None):
         response = self.chat(
