@@ -23,6 +23,7 @@ from score_completion_shadow import (  # noqa: E402
     classify_b,
     classify_gap,
     evaluate_finding,
+    predicate_scope,
     score_corpus,
     score_text,
 )
@@ -40,6 +41,15 @@ def _checkpoint(label: str, action: int) -> dict:
 
     led = read_ledger(CORPUS / f"runs/{label}/completion-shadow.jsonl")
     return next(c for c in led.checkpoints if c["action"] == action)
+
+
+def _source(label: str) -> str:
+    """The immutable artifact bytes, for negative source predicates."""
+    for name in ("artifact.js", "artifact.ps1"):
+        path = CORPUS / f"runs/{label}/{name}"
+        if path.exists():
+            return path.read_text(errors="replace")
+    raise AssertionError(f"no preserved artifact for run {label}")
 
 
 def _text(checkpoint: dict) -> str:
@@ -94,7 +104,8 @@ class CorpusPresent(unittest.TestCase):
 
 class RunAScoringTests(CorpusPresent):
     def test_a4_is_oracle_complete(self) -> None:
-        score = score_text(ORACLES["A"], _text(_checkpoint("A", 4)), 4)
+        score = score_text(ORACLES["A"], _text(_checkpoint("A", 4)), 4,
+                           source_text=_source("A"))
         self.assertEqual(score.state, "COMPLETE")
         self.assertEqual(score.missing, [])
 
@@ -238,7 +249,8 @@ class CounterfactualTests(CorpusPresent):
         for label in ("A", "C"):
             with self.subTest(run=label):
                 score = score_text(
-                    ORACLES[label], _text(_checkpoint(label, 4)), 4
+                    ORACLES[label], _text(_checkpoint(label, 4)), 4,
+                    source_text=_source(label),
                 )
                 self.assertEqual(score.state, "COMPLETE")
 
@@ -419,27 +431,38 @@ class SyntheticCorpusTests(unittest.TestCase):
         self.assertEqual(row["b_class"], "B_INDETERMINATE")
 
 
-class AntiMonotonicFindingTests(unittest.TestCase):
-    """Guards the guard: `lost` must be able to fire, or asserting it is empty
-    proves nothing."""
+class NegativeSourceFactTests(unittest.TestCase):
+    """A negative source fact is a property of the artifact, not the narrative.
+
+    These previously pinned the opposite -- that appended text could unsatisfy
+    an absence predicate. That was the defect: an analysis step explaining that
+    the artifact makes no network call has to name the calls it does not make,
+    and the predicate then failed against its own explanation.
+    """
 
     SPEC = {"id": "no_dangerous_capability", "kind": "absent_all",
             "values": ["require(", "eval("]}
+    SOURCE = "function greet(name) { console.log(name); }"
 
-    def test_absent_all_is_lost_when_the_capability_appears_later(self) -> None:
-        early = "function greet(name) { console.log(name); }"
-        later = early + "\nrequire('child_process')"
-        self.assertTrue(evaluate_finding(self.SPEC, early).satisfied)
-        self.assertFalse(evaluate_finding(self.SPEC, later).satisfied)
+    def test_scope_is_negative_source_fact(self) -> None:
+        self.assertEqual(predicate_scope(self.SPEC), "NEGATIVE_SOURCE_FACT")
 
-    def test_such_a_finding_could_never_appear_as_gained(self) -> None:
-        """Which is exactly why the one-directional filter was insufficient."""
-        early = "clean"
-        later = "clean require("
-        gained = evaluate_finding(self.SPEC, later).satisfied and not evaluate_finding(self.SPEC, early).satisfied
-        lost = evaluate_finding(self.SPEC, early).satisfied and not evaluate_finding(self.SPEC, later).satisfied
-        self.assertFalse(gained)
-        self.assertTrue(lost)
+    def test_narrative_naming_the_capability_cannot_unsatisfy_it(self) -> None:
+        narrative = self.SOURCE + "\nNote: the file never calls require( or eval("
+        result = evaluate_finding(self.SPEC, narrative, source_text=self.SOURCE)
+        self.assertTrue(result.satisfied)
+
+    def test_it_is_still_false_when_the_source_really_contains_it(self) -> None:
+        source = self.SOURCE + "\nrequire('child_process')"
+        self.assertFalse(
+            evaluate_finding(self.SPEC, "clean narrative", source_text=source).satisfied
+        )
+
+    def test_without_source_it_is_unscorable_not_guessed(self) -> None:
+        """Refusing to answer beats answering from the wrong evidence."""
+        result = evaluate_finding(self.SPEC, self.SOURCE)
+        self.assertTrue(result.unscorable)
+        self.assertFalse(result.satisfied)
 
 
 class VerifierBAbsenceTests(unittest.TestCase):
@@ -692,10 +715,11 @@ class PredicateSemanticsTests(unittest.TestCase):
         self.assertFalse(evaluate_finding(spec, "neither").satisfied)
 
     def test_absent_all_rejects_any_present_value(self) -> None:
+        """Scored against source bytes: absence is a property of the artifact."""
         spec = dict(self.MULTI, kind="absent_all")
-        self.assertTrue(evaluate_finding(spec, "neither here").satisfied)
-        self.assertFalse(evaluate_finding(spec, "alpha here").satisfied)
-        self.assertFalse(evaluate_finding(spec, "beta here").satisfied)
+        self.assertTrue(evaluate_finding(spec, "", source_text="neither here").satisfied)
+        self.assertFalse(evaluate_finding(spec, "", source_text="alpha here").satisfied)
+        self.assertFalse(evaluate_finding(spec, "", source_text="beta here").satisfied)
 
 
 class IntegrityRefusalTests(unittest.TestCase):

@@ -33,6 +33,7 @@ INDETERMINATE, which is the conservative reading.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -50,14 +51,74 @@ class FindingResult:
     detail: str = ""
 
 
-def evaluate_finding(spec: dict, text: str) -> FindingResult:
-    """One deterministic predicate. No interpretation, no similarity."""
+# What a predicate is allowed to inspect.
+#
+#   SOURCE_FACT           a positive/negative fact about the immutable artifact
+#   DERIVED_FACT          established only after deterministic analysis
+#   ARTIFACT_FACT         a fact about an artifact analysis produced
+#   NEGATIVE_SOURCE_FACT  an absence property of the source
+#
+# The distinction is not decorative. A NEGATIVE_SOURCE_FACT decided by searching
+# cumulative narrative is unsound: an analysis step that *explains* the artifact
+# makes no network call has to name the calls it does not make, and the moment
+# it does, the absence predicate fails against its own explanation. Under
+# append-only state that makes COMPLETE -> INCOMPLETE reachable from commentary
+# alone, which is exactly what happened to `no_dangerous_capability`.
+#
+# So absence is evaluated against the source bytes, never the narrative.
+PREDICATE_SCOPES = {
+    "literal_all": "DERIVED_FACT",
+    "literal_any": "DERIVED_FACT",
+    "regex": "DERIVED_FACT",
+    "absent_all": "NEGATIVE_SOURCE_FACT",
+    "unscorable": "UNSCORABLE",
+}
+
+
+def predicate_scope(spec: dict) -> str:
+    """Scope of one predicate, per-spec first and `kind` as the fallback.
+
+    Keying on `kind` alone would force every absence predicate onto source
+    bytes, including a legitimate absence-of-DERIVED-fact ("analysis never
+    reported an unresolved gap"), where the token by construction never appears
+    and the finding would silently self-satisfy. No such predicate exists in the
+    oracle today, so this is a latent hazard rather than a live bug -- but the
+    override is one line and the failure mode is invisible.
+    """
+    declared = spec.get("scope")
+    if declared:
+        return declared if declared in set(PREDICATE_SCOPES.values()) else "UNKNOWN"
+    return PREDICATE_SCOPES.get(spec["kind"], "UNKNOWN")
+
+
+def evaluate_finding(
+    spec: dict, text: str, *, source_text: str | None = None
+) -> FindingResult:
+    """One deterministic predicate. No interpretation, no similarity.
+
+    `text` is the cumulative evidence narrative. `source_text` is the immutable
+    artifact. A NEGATIVE_SOURCE_FACT is decided against `source_text` and
+    refuses to be scored without it, rather than silently falling back to the
+    narrative and reintroducing the anti-monotonicity this exists to prevent.
+    """
     kind = spec["kind"]
     fid = spec["id"]
     if kind == "unscorable":
         return FindingResult(fid, False, True, spec.get("comment", ""))
 
+    if predicate_scope(spec) == "NEGATIVE_SOURCE_FACT":
+        if source_text is None:
+            return FindingResult(
+                fid, False, True,
+                "negative source predicate requires the artifact source",
+            )
+        text = source_text
+
     # A forbidden value can never satisfy a finding, even if it looks close.
+    # Note for whoever first writes an `absent_all` carrying a `forbidden` list:
+    # this reads whichever text won the scope routing above, so on a negative
+    # source fact it inspects source bytes rather than the narrative. No
+    # predicate combines the two today.
     # This is what keeps a superseded value from passing as authoritative.
     forbidden = [v for v in spec.get("forbidden", []) if v.lower() in text.lower()]
 
@@ -97,10 +158,18 @@ class CheckpointScore:
         return "COMPLETE" if not self.missing else "INCOMPLETE"
 
 
-def score_text(oracle: dict, text: str, action: int) -> CheckpointScore:
+def score_text(
+    oracle: dict, text: str, action: int, *, source_text: str | None = None
+) -> CheckpointScore:
+    """Score one state. `source_text` is required for negative source facts.
+
+    Without it a NEGATIVE_SOURCE_FACT scores UNSCORABLE rather than being
+    decided against the narrative -- refusing to answer beats answering from
+    the wrong evidence.
+    """
     score = CheckpointScore(action=action, required_total=len(oracle["required_findings"]))
     for spec in oracle["required_findings"]:
-        result = evaluate_finding(spec, text)
+        result = evaluate_finding(spec, text, source_text=source_text)
         if result.unscorable:
             score.unscorable.append(result.id)
         elif result.satisfied:
@@ -213,7 +282,58 @@ def load_run(corpus: Path, label: str) -> dict:
     cumulative = "\n".join(
         (store.load_raw(r.evidence_id) or "") for r in store.records.values()
     )
-    return {"label": label, "run": run, "ledger": ledger, "cumulative": cumulative}
+    # The immutable artifact, for NEGATIVE_SOURCE_FACT predicates. Absence is a
+    # property of the source, and scoring it against the narrative is the defect
+    # the predicate scopes exist to prevent. A corpus that preserved no artifact
+    # yields None, and such findings then score UNSCORABLE rather than guessed.
+    #
+    # Bound to its recorded hash, exactly as the ledger is. The artifact is now
+    # load-bearing for absence, so accepting unverified bytes here would let a
+    # swapped or rewritten file score confidently against the wrong source --
+    # and a `final_report.txt` picked up as "the artifact" would reintroduce
+    # narrative scoring through a different door, which is the whole defect.
+    artifacts = sorted(d.glob("artifact.*"))
+    if len(artifacts) > 1:
+        raise SystemExit(
+            f"[{label}] {len(artifacts)} artifact.* files; cannot choose a source"
+        )
+    source_text = None
+    if artifacts:
+        # A directory named artifact.* is a refusal like any other, not an
+        # uncaught IsADirectoryError from three frames down.
+        if not artifacts[0].is_file():
+            raise SystemExit(f"[{label}] {artifacts[0].name} is not a regular file")
+        raw = artifacts[0].read_bytes()
+        expected = str(run.get("artifact_sha256_before") or "")
+        # An absent or empty recorded hash is a refusal, not a waiver. Skipping
+        # verification when the corpus records nothing would make the guard's
+        # strength depend on the data it is guarding: a hash-less run would
+        # accept arbitrary bytes as "the immutable artifact", and absence
+        # scored against a narrative-shaped file is the original defect.
+        if not expected:
+            raise SystemExit(
+                f"[{label}] artifact present but run.json records no "
+                "artifact_sha256_before; cannot vouch for the source bytes"
+            )
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != expected:
+            raise SystemExit(
+                f"[{label}] artifact hash mismatch: {actual} != {expected}; "
+                "refusing to score absence against unverified bytes"
+            )
+        # Absence over nothing is vacuously true, so an empty artifact would
+        # satisfy every absent_all. Authentic bytes or not, that is not a
+        # judgement worth making silently.
+        if not raw.strip():
+            raise SystemExit(
+                f"[{label}] artifact is empty; absence predicates would be "
+                "vacuously satisfied"
+            )
+        source_text = raw.decode(errors="replace")
+    return {
+        "label": label, "run": run, "ledger": ledger,
+        "cumulative": cumulative, "source_text": source_text,
+    }
 
 
 def snapshot_text(checkpoint: dict) -> str:
@@ -242,8 +362,10 @@ def score_corpus(corpus: Path, oracles: dict) -> dict:
         oracle = oracles["samples"][label]
         rows = []
         for cp in data["ledger"].checkpoints:
-            snap = score_text(oracle, snapshot_text(cp), cp["action"])
-            cum = score_text(oracle, data["cumulative"], cp["action"])
+            snap = score_text(oracle, snapshot_text(cp), cp["action"],
+                              source_text=data["source_text"])
+            cum = score_text(oracle, data["cumulative"], cp["action"],
+                             source_text=data["source_text"])
             skipped = bool(cp.get("verification_skipped"))
             a_class = classify_a(
                 cp["verifier_a"], snap.oracle_complete, bool(snap.unscorable),
