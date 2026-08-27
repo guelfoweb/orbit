@@ -309,6 +309,67 @@ class WriterTests(unittest.TestCase):
         self.assertEqual(len(stored["snapshot_artifacts"]), MAX_SNAPSHOT_ARTIFACTS)
         self.assertEqual(verify_snapshot_hashes(read_ledger(self.path)), ())
 
+    def test_fidelity_is_persisted_and_readable(self) -> None:
+        from orbit.runtime.completion_shadow import build_snapshot as bs
+
+        class _Rec:
+            evidence_id = "ev_a"
+            metadata: dict = {}
+
+        lossy = bs(request="r", records=[_Rec()], load_raw=lambda _i: "x" * 5000)
+        obs = _observation(4)
+        obs.snapshot = lossy
+        obs.snapshot_fidelity = lossy.fidelity
+        obs.snapshot_digest = lossy.digest
+        writer = ShadowLedgerWriter(self.path)
+        writer.write_checkpoint(obs)
+
+        record = read_ledger(self.path).checkpoints[0]
+        stored = record["snapshot_fidelity"]
+        self.assertFalse(stored["lossless"])
+        self.assertIn("record_content_truncated", stored["reasons"])
+        self.assertEqual(stored["truncated_records"][0]["authoritative_chars"], 5000)
+        self.assertEqual(stored["truncated_records"][0]["included_chars"], 600)
+
+    def test_reader_reports_lossy_and_unknown_separately(self) -> None:
+        from orbit.runtime.completion_shadow import build_snapshot as bs
+
+        class _Rec:
+            evidence_id = "ev_a"
+            metadata: dict = {}
+
+        lossy = bs(request="r", records=[_Rec()], load_raw=lambda _i: "x" * 5000)
+        with_fid = _observation(4)
+        with_fid.snapshot, with_fid.snapshot_fidelity = lossy, lossy.fidelity
+        without = _observation(6)  # older shape: no fidelity recorded
+
+        writer = ShadowLedgerWriter(self.path)
+        writer.write_checkpoint(with_fid)
+        writer.write_checkpoint(without)
+
+        result = read_ledger(self.path)
+        self.assertEqual(result.lossy_actions, (4,))
+        self.assertEqual(result.fidelity_unknown_actions, (6,),
+                         "a ledger predating fidelity is unknown, never lossless")
+        self.assertNotIn(6, result.lossy_actions,
+                         "unknown fidelity must not be reported as lossy either")
+
+    def test_a_lossless_record_is_not_counted_lossy(self) -> None:
+        from orbit.runtime.completion_shadow import build_snapshot as bs
+
+        class _Rec:
+            evidence_id = "ev_a"
+            metadata: dict = {}
+
+        clean = bs(request="r", records=[_Rec()], load_raw=lambda _i: "short")
+        self.assertTrue(clean.fidelity.lossless)
+        obs = _observation(8)
+        obs.snapshot, obs.snapshot_fidelity = clean, clean.fidelity
+        ShadowLedgerWriter(self.path).write_checkpoint(obs)
+        result = read_ledger(self.path)
+        self.assertEqual(result.lossy_actions, ())
+        self.assertEqual(result.fidelity_unknown_actions, ())
+
     def test_request_is_bounded_in_the_snapshot(self) -> None:
         from orbit.runtime.completion_shadow import MAX_SNAPSHOT_REQUEST_CHARS
 
