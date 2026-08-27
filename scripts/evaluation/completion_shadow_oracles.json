@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "note": "Evaluator-only. Never loaded by Orbit runtime, backend, EvidenceStore, terminal or the completion gate. Predicates are deterministic: literal or bounded regex over persisted snapshot text, evidence ids, or artifact handles. No LLM interpretation, no semantic similarity.",
+  "samples": {
+    "A": {
+      "artifact": "trivial_greeting_demo.js",
+      "artifact_sha256": "dc3043129234f3f2b96393978fc41b6b9b41bfbd3c2cae02e4025e82cfdb02d1",
+      "conclusion": "benign",
+      "required_findings": [
+        {"id": "greet_function", "kind": "literal_any", "values": ["function greet", "greet(name)"]},
+        {"id": "hardcoded_array", "kind": "literal_any", "values": ["\"Ada\"", "'Ada'", "Ada"]},
+        {"id": "stdout_only", "kind": "literal_any", "values": ["console.log"]},
+        {"id": "no_dangerous_capability", "kind": "absent_all",
+         "values": ["XMLHttpRequest", "WScript.Shell", "ActiveXObject", "eval(", "require(", "fetch("],
+         "comment": "No network, filesystem, process creation or dynamic code in the artifact content."}
+      ]
+    },
+    "B": {
+      "artifact": "suspicious_dropper_demo.js",
+      "artifact_sha256": "ac7aea71beb9494fcaac015ef0cf7072fc2a208c23d8e0c6241de9f69013b3f9",
+      "conclusion": "benign demo, inert as written",
+      "required_findings": [
+        {"id": "dropper_structure_present", "kind": "regex", "pattern": "(?i)(ActiveXObject|WScript|XMLHTTP|ADODB)"},
+        {"id": "inert_url_data", "kind": "regex", "pattern": "(?i)https?://"},
+        {"id": "no_real_execution", "kind": "unscorable",
+         "comment": "Requires reasoning about reachability of the dropper path. Not deterministically decidable from persisted snapshot text."}
+      ]
+    },
+    "C": {
+      "artifact": "peXF7I6W.ps1",
+      "artifact_sha256": "5eba3e4538cffbde5d39ba81eb4ed85e9c9cc6065e036503073a43a9478f405d",
+      "conclusion": "malicious PowerShell dropper/downloader",
+      "required_findings": [
+        {"id": "c2_domain", "kind": "literal_all", "values": ["gibuzuy37v2v.top"],
+         "forbidden": ["gibuyuy37v2v.top"],
+         "comment": "Stale-evidence guard: only the authoritative gibuzuy37v2v.top may satisfy this finding. NOTE: on the 20260827 corpus the superseded spelling gibuyuy37v2v.top appears in no evidence file, so this guard was never exercised by that data -- it is unit-tested, not corpus-proven. The guard is advisory: a forbidden value annotates detail and does not veto an otherwise satisfied finding, so a record quoting the stale value beside the correct one still satisfies, which is the correction-record case."},
+        {"id": "c2_uri_tag", "kind": "literal_all", "values": ["?s=mints13"]},
+        {"id": "download_execute", "kind": "regex", "pattern": "(?i)\\biex\\b|invoke-expression"},
+        {"id": "curl_fetch", "kind": "regex", "pattern": "(?i)curl"},
+        {"id": "dropper_path", "kind": "regex", "pattern": "(?i)Users..?Public..?Documents"},
+        {"id": "hidden_launch", "kind": "regex", "pattern": "(?i)(windowstyle\\s+hidden|-w\\s+hidden|hidden)"},
+        {"id": "logic_bomb", "kind": "regex", "pattern": "(?i)Get-Date[^\\n]{0,120}(\\+|-gt|-lt|-ge|-le|AddMinutes|Add\\()", "comment": "Get-Date alone is a timestamp; the oracle requires the arithmetic/comparison that makes it a logic bomb."},
+        {"id": "cleanup_targets", "kind": "regex", "pattern": "(?i)APPDATA"}
+      ]
+    }
+  }
+}
