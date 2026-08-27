@@ -138,6 +138,15 @@ class ShadowLedgerWriter:
             "verifier_prompt_tokens": observation.prompt_tokens,
             "verifier_output_tokens": observation.output_tokens,
             "verifier_wall_seconds": round(observation.wall_seconds, 3),
+            # Additive: a v1 reader ignores it and a v1 ledger simply has no
+            # fidelity, which reads as unknown rather than lossless. Bumping
+            # the schema would have invalidated an expensive corpus that is
+            # still perfectly valid for everything it does record.
+            "snapshot_fidelity": (
+                observation.snapshot_fidelity.as_log_fields()
+                if getattr(observation, "snapshot_fidelity", None) is not None
+                else None
+            ),
             **fields,
         }
         return self._append(payload)
@@ -167,6 +176,28 @@ class LedgerReadResult:
     def complete(self) -> bool:
         """A run that never wrote its final record did not finish normally."""
         return self.run_final is not None
+
+    @property
+    def lossy_actions(self) -> tuple[int, ...]:
+        """Checkpoints whose snapshot was not the whole of its input.
+
+        A checkpoint with no fidelity record is not counted: an older ledger
+        that predates the field is unknown, not lossless.
+        """
+        return tuple(
+            int(item["action"])
+            for item in self.checkpoints
+            if isinstance(item.get("snapshot_fidelity"), dict)
+            and item["snapshot_fidelity"].get("lossless") is False
+        )
+
+    @property
+    def fidelity_unknown_actions(self) -> tuple[int, ...]:
+        return tuple(
+            int(item["action"])
+            for item in self.checkpoints
+            if not isinstance(item.get("snapshot_fidelity"), dict)
+        )
 
     @property
     def would_stop_actions(self) -> tuple[int, ...]:
