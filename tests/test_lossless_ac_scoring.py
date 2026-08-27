@@ -6,8 +6,11 @@ scorer reaches no model.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,6 +22,7 @@ from score_completion_shadow import (  # noqa: E402
     classify_a,
     classify_b,
     evaluate_finding,
+    score_corpus,
     score_text,
 )
 
@@ -41,11 +45,19 @@ def _text(checkpoint: dict) -> str:
     return "\n".join(e["text"] for e in checkpoint["snapshot_evidence"])
 
 
-def _findings_added_after_action_4(label: str) -> list[str]:
-    """Required findings the FULL EvidenceStore has that action 4 did not.
+def _findings_changed_after_action_4(label: str) -> tuple[list[str], list[str]]:
+    """How the required findings differ between action 4 and the FULL store.
 
-    The authoritative comparison: everything the analysis ever established,
-    at full length, against what the verifiers were shown at action 4.
+    Returns (gained, lost). Both directions matter, and for opposite reasons.
+
+    `gained` is the obvious question: did stopping at action 4 miss something
+    the analysis went on to establish?
+
+    `lost` exists because not every predicate is monotonic. `absent_all` -- "no
+    dangerous capability appears" -- can only *lose* satisfaction as text
+    grows, so a capability discovered after action 4 shows up here and could
+    never appear in `gained`. Reporting only `gained` would leave the one class
+    of late discovery that most undermines an early stop unable to register.
     """
     from orbit.runtime.evidence import EvidenceStore
 
@@ -55,12 +67,22 @@ def _findings_added_after_action_4(label: str) -> list[str]:
         (store.load_raw(r.evidence_id) or "") for r in store.records.values()
     )
     at4 = _text(_checkpoint(label, 4))
-    return [
-        spec["id"]
-        for spec in ORACLES[label]["required_findings"]
-        if evaluate_finding(spec, full).satisfied
-        and not evaluate_finding(spec, at4).satisfied
-    ]
+    gained, lost = [], []
+    for spec in ORACLES[label]["required_findings"]:
+        if spec["kind"] == "unscorable":
+            continue
+        before = evaluate_finding(spec, at4).satisfied
+        after = evaluate_finding(spec, full).satisfied
+        if after and not before:
+            gained.append(spec["id"])
+        elif before and not after:
+            lost.append(spec["id"])
+    return gained, lost
+
+
+def _findings_added_after_action_4(label: str) -> list[str]:
+    """Back-compat view: only the findings gained. See the function above."""
+    return _findings_changed_after_action_4(label)[0]
 
 
 class CorpusPresent(unittest.TestCase):
@@ -90,7 +112,9 @@ class RunAScoringTests(CorpusPresent):
         would be the weaker claim, and could pass while the run had in fact
         discovered something new.
         """
-        self.assertEqual(_findings_added_after_action_4("A"), [])
+        gained, lost = _findings_changed_after_action_4("A")
+        self.assertEqual(gained, [], "a finding appeared only after action 4")
+        self.assertEqual(lost, [], "a finding stopped holding after action 4")
 
 
 class RunCScoringTests(CorpusPresent):
@@ -119,7 +143,9 @@ class RunCScoringTests(CorpusPresent):
         self.assertEqual(classify_b(cp["verifier_b"], True, False), "B_FALSE_GAP")
 
     def test_no_material_finding_appears_after_action_4(self) -> None:
-        self.assertEqual(_findings_added_after_action_4("C"), [])
+        gained, lost = _findings_changed_after_action_4("C")
+        self.assertEqual(gained, [], "a finding appeared only after action 4")
+        self.assertEqual(lost, [], "a finding stopped holding after action 4")
 
     def test_the_full_store_is_richer_than_the_final_snapshot(self) -> None:
         """Guards the guard: if the full store were no larger than the bounded
@@ -238,3 +264,225 @@ class ScorerIsOfflineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyntheticCorpusTests(unittest.TestCase):
+    """Tests for the scorer's own structure, built rather than borrowed.
+
+    The preserved corpus cannot exercise these: it has no truncated run, no
+    crashed verifier, and no absent workload class. Without a corpus it
+    constructs itself, the label-discovery and skip-vs-error paths ship
+    untested -- and a scorer with those changes reverted passes anyway.
+    """
+
+    def _corpus(self, runs: dict[str, dict]) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="scorer-corpus-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for label, spec in runs.items():
+            run_dir = root / "runs" / label
+            (run_dir / "evidence").mkdir(parents=True)
+            lines = [json.dumps({
+                "record": "run_start", "run_id": "r1", "schema_version": 1,
+                "request": "analyze x", "schedule": [4], "soft_max_actions": 8,
+                "max_actions": 12, "max_model_calls": 15,
+            })]
+            for cp in spec.get("checkpoints", ()):
+                evidence = [["ev_" + "0" * 12 + "_" + "0" * 16, cp.get("text", "")]]
+                # The scorer verifies snapshot digests before it will score, so
+                # a fixture has to carry real ones -- which is also what proves
+                # that check is live rather than decorative.
+                digest = hashlib.sha256(json.dumps(
+                    {"request": "analyze x", "evidence": evidence, "artifacts": []},
+                    ensure_ascii=False, sort_keys=True,
+                ).encode("utf-8")).hexdigest()
+                lines.append(json.dumps({
+                    "record": "checkpoint", "run_id": "r1", "schema_version": 1,
+                    "request": "analyze x", "action": cp["action"],
+                    "snapshot_evidence": [{"evidence_id": evidence[0][0],
+                                           "text": evidence[0][1]}],
+                    "snapshot_artifacts": [], "snapshot_sha256": digest,
+                    "snapshot_tokens": 10, "token_budget": 6144,
+                    "verification_skipped": cp.get("skipped", False),
+                    "snapshot_fidelity": {"lossless": True, "reasons": []},
+                    "verifier_a": cp.get("a"), "verifier_a_detail": "",
+                    "verifier_a_evidence_ids": [], "verifier_a_raw": "",
+                    "verifier_b": cp.get("b"), "verifier_b_detail": cp.get("b_detail", ""),
+                    "verifier_b_raw": "", "verifier_calls": 0,
+                    "verifier_output_tokens": 0, "verifier_prompt_tokens": 0,
+                    "verifier_wall_seconds": 0.0, "would_stop": False,
+                    "blocked_by": cp.get("blocked_by"),
+                }))
+            (run_dir / "completion-shadow.jsonl").write_text("\n".join(lines) + "\n")
+            if spec.get("run_json", True):
+                (run_dir / "run.json").write_text(json.dumps({
+                    "label": label, "artifact": "x", "artifact_sha256_before": "0" * 64,
+                    "artifact_sha256_after": "0" * 64, "stop_reason": "done",
+                    "actions_executed": 4, "model_calls": 4, "wall_seconds": 1.0,
+                    "shadow": True, "steps": 4, "replans": 0, "cancelled": False,
+                    "final_report": "", "prompt": "analyze x", "step_detail": [],
+                }))
+        return root
+
+    @staticmethod
+    def _oracles(labels) -> dict:
+        return {"schema_version": 1, "samples": {
+            label: {"artifact": "x", "artifact_sha256": "0" * 64, "conclusion": "c",
+                    "required_findings": [
+                        {"id": "marker", "kind": "literal_all", "values": ["MARKER"]}]}
+            for label in labels}}
+
+    def test_every_run_with_a_run_json_is_scored(self) -> None:
+        """Pins label discovery: a hardcoded A/B/C loop cannot pass this."""
+        corpus = self._corpus({
+            "Q": {"checkpoints": [{"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]},
+            "Z": {"checkpoints": [{"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]},
+        })
+        report = score_corpus(corpus, self._oracles(("Q", "Z")))
+        self.assertEqual(sorted(report["runs"]), ["Q", "Z"])
+
+    def test_a_run_directory_without_run_json_is_reported_not_dropped(self) -> None:
+        """A run killed before its final write must not pass for an absent one."""
+        corpus = self._corpus({
+            "Q": {"checkpoints": [{"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]},
+            "P": {"run_json": False,
+                  "checkpoints": [{"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]},
+        })
+        report = score_corpus(corpus, self._oracles(("Q", "P")))
+        self.assertEqual(sorted(report["runs"]), ["Q"])
+        self.assertEqual(report["incomplete_runs"], ["P"])
+
+    def test_a_crashed_verifier_is_not_scored_as_a_budget_skip(self) -> None:
+        """The distinction the whole A_NOT_CALLED label depends on."""
+        corpus = self._corpus({"Q": {"checkpoints": [
+            {"action": 4, "a": None, "b": None, "text": "MARKER",
+             "skipped": True, "blocked_by": "snapshot_too_large"},
+            {"action": 6, "a": None, "b": None, "text": "MARKER",
+             "skipped": False, "blocked_by": "verifier_error: RuntimeError"},
+        ]}})
+        rows = score_corpus(corpus, self._oracles(("Q",)))["runs"]["Q"]["checkpoints"]
+        self.assertEqual((rows[0]["a_class"], rows[0]["b_class"]),
+                         ("A_NOT_CALLED", "B_NOT_CALLED"))
+        self.assertEqual((rows[1]["a_class"], rows[1]["b_class"]),
+                         ("A_ERRORED", "B_ERRORED"))
+
+    def test_observed_schedule_reflects_what_was_checkpointed(self) -> None:
+        corpus = self._corpus({"Q": {"checkpoints": [
+            {"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]}})
+        report = score_corpus(corpus, self._oracles(("Q",)))
+        self.assertEqual(report["runs"]["Q"]["observed_schedule"], [4])
+        self.assertNotEqual(report["runs"]["Q"]["observed_schedule"], report["schedule"])
+
+    def test_a_false_complete_is_reachable(self) -> None:
+        """Guards the empty cells: the matrix must be able to report a miss."""
+        corpus = self._corpus({"Q": {"checkpoints": [
+            {"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "nothing here"}]}})
+        row = score_corpus(corpus, self._oracles(("Q",)))["runs"]["Q"]["checkpoints"][0]
+        self.assertEqual(row["a_class"], "A_FALSE_COMPLETE")
+        self.assertEqual(row["b_class"], "B_FALSE_NO_GAP")
+
+    def test_an_unscorable_finding_prevents_a_complete_verdict(self) -> None:
+        """The docstring's safety promise, asserted rather than trusted."""
+        oracles = {"schema_version": 1, "samples": {"Q": {
+            "artifact": "x", "artifact_sha256": "0" * 64, "conclusion": "c",
+            "required_findings": [
+                {"id": "marker", "kind": "literal_all", "values": ["MARKER"]},
+                {"id": "judgement", "kind": "unscorable", "comment": "not decidable"},
+            ]}}}
+        corpus = self._corpus({"Q": {"checkpoints": [
+            {"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]}})
+        row = score_corpus(corpus, oracles)["runs"]["Q"]["checkpoints"][0]
+        self.assertNotEqual(row["snapshot_state"], "COMPLETE")
+        self.assertEqual(row["a_class"], "A_INDETERMINATE")
+
+
+class AntiMonotonicFindingTests(unittest.TestCase):
+    """Guards the guard: `lost` must be able to fire, or asserting it is empty
+    proves nothing."""
+
+    SPEC = {"id": "no_dangerous_capability", "kind": "absent_all",
+            "values": ["require(", "eval("]}
+
+    def test_absent_all_is_lost_when_the_capability_appears_later(self) -> None:
+        early = "function greet(name) { console.log(name); }"
+        later = early + "\nrequire('child_process')"
+        self.assertTrue(evaluate_finding(self.SPEC, early).satisfied)
+        self.assertFalse(evaluate_finding(self.SPEC, later).satisfied)
+
+    def test_such_a_finding_could_never_appear_as_gained(self) -> None:
+        """Which is exactly why the one-directional filter was insufficient."""
+        early = "clean"
+        later = "clean require("
+        gained = evaluate_finding(self.SPEC, later).satisfied and not evaluate_finding(self.SPEC, early).satisfied
+        lost = evaluate_finding(self.SPEC, early).satisfied and not evaluate_finding(self.SPEC, later).satisfied
+        self.assertFalse(gained)
+        self.assertTrue(lost)
+
+
+class PredicateSemanticsTests(unittest.TestCase):
+    """`all` vs `any` is invisible on one-value oracles, so pin it directly."""
+
+    MULTI = {"id": "m", "kind": "literal_all", "values": ["alpha", "beta"]}
+
+    def test_literal_all_requires_every_value(self) -> None:
+        self.assertTrue(evaluate_finding(self.MULTI, "alpha and beta").satisfied)
+        self.assertFalse(evaluate_finding(self.MULTI, "alpha only").satisfied)
+        self.assertFalse(evaluate_finding(self.MULTI, "beta only").satisfied)
+
+    def test_literal_any_requires_only_one(self) -> None:
+        spec = dict(self.MULTI, kind="literal_any")
+        self.assertTrue(evaluate_finding(spec, "alpha only").satisfied)
+        self.assertFalse(evaluate_finding(spec, "neither").satisfied)
+
+    def test_absent_all_rejects_any_present_value(self) -> None:
+        spec = dict(self.MULTI, kind="absent_all")
+        self.assertTrue(evaluate_finding(spec, "neither here").satisfied)
+        self.assertFalse(evaluate_finding(spec, "alpha here").satisfied)
+        self.assertFalse(evaluate_finding(spec, "beta here").satisfied)
+
+
+class IntegrityRefusalTests(unittest.TestCase):
+    """The scorer must refuse a corpus it cannot trust, not score it anyway."""
+
+    def test_a_tampered_snapshot_hash_refuses_to_score(self) -> None:
+        helper = SyntheticCorpusTests()
+        helper.addCleanup = lambda *a, **k: None
+        corpus = helper._corpus({"Q": {"checkpoints": [
+            {"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]}})
+        self.addCleanup(shutil.rmtree, corpus, ignore_errors=True)
+        ledger = corpus / "runs/Q/completion-shadow.jsonl"
+        lines = ledger.read_text().splitlines()
+        record = json.loads(lines[1])
+        record["snapshot_evidence"][0]["text"] = "TAMPERED"
+        lines[1] = json.dumps(record)
+        ledger.write_text("\n".join(lines) + "\n")
+        with self.assertRaises(SystemExit):
+            score_corpus(corpus, helper._oracles(("Q",)))
+
+
+class ForbiddenValueGuardTests(unittest.TestCase):
+    """What the `forbidden` list does, stated as what it actually does."""
+
+    SPEC = {"id": "c2", "kind": "literal_all", "values": ["gibuzuy37v2v.top"],
+            "forbidden": ["gibuyuy37v2v.top"]}
+
+    def test_the_correct_value_alone_satisfies(self) -> None:
+        self.assertTrue(evaluate_finding(self.SPEC, "host gibuzuy37v2v.top").satisfied)
+
+    def test_the_stale_value_alone_does_not_satisfy(self) -> None:
+        self.assertFalse(evaluate_finding(self.SPEC, "host gibuyuy37v2v.top").satisfied)
+
+    def test_the_stale_value_alone_fails_because_the_correct_one_is_absent(self) -> None:
+        """Names the real mechanism: `forbidden` does not veto, `literal_all` decides.
+
+        Worth pinning explicitly, because the obvious reading of the previous
+        test is that the guard rejected the stale value. It did not -- and a
+        record carrying both values still satisfies, which is what a correction
+        record looks like.
+        """
+        both = evaluate_finding(self.SPEC, "was gibuyuy37v2v.top, now gibuzuy37v2v.top")
+        self.assertTrue(both.satisfied)
+        without_guard = evaluate_finding(
+            {k: v for k, v in self.SPEC.items() if k != "forbidden"},
+            "host gibuyuy37v2v.top",
+        )
+        self.assertFalse(without_guard.satisfied)

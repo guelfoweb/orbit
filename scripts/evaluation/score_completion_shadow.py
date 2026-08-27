@@ -110,12 +110,23 @@ def score_text(oracle: dict, text: str, action: int) -> CheckpointScore:
     return score
 
 
-def classify_a(verdict: str | None, oracle_complete: bool, indeterminate: bool) -> str:
+def classify_a(
+    verdict: str | None,
+    oracle_complete: bool,
+    indeterminate: bool,
+    *,
+    skipped: bool = True,
+) -> str:
     # A checkpoint whose verifier never ran has no verdict to grade. Reading a
     # missing answer as CONTINUE would invent an observation -- and would score
     # the budget's own skip as if the verifier had been wrong.
+    #
+    # But a missing verdict has two causes, and they are not the same result.
+    # The budget declining to spend a call is the mechanism working; a verifier
+    # that raised leaves `verification_skipped` false, and reporting that as a
+    # skip would hide a broken backend inside a healthy-looking matrix.
     if verdict is None:
-        return "A_NOT_CALLED"
+        return "A_NOT_CALLED" if skipped else "A_ERRORED"
     if indeterminate:
         return "A_INDETERMINATE"
     if verdict == "COMPLETE":
@@ -123,9 +134,15 @@ def classify_a(verdict: str | None, oracle_complete: bool, indeterminate: bool) 
     return "A_TRUE_CONTINUE" if not oracle_complete else "A_FALSE_CONTINUE"
 
 
-def classify_b(verdict: str | None, oracle_complete: bool, indeterminate: bool) -> str:
+def classify_b(
+    verdict: str | None,
+    oracle_complete: bool,
+    indeterminate: bool,
+    *,
+    skipped: bool = True,
+) -> str:
     if verdict is None:
-        return "B_NOT_CALLED"
+        return "B_NOT_CALLED" if skipped else "B_ERRORED"
     if indeterminate:
         return "B_INDETERMINATE"
     if verdict == "GAP":
@@ -187,12 +204,22 @@ def snapshot_text(checkpoint: dict) -> str:
 
 
 def score_corpus(corpus: Path, oracles: dict) -> dict:
+    # The configured schedule, kept for reference. Per-run observed schedules
+    # are recorded alongside each run: a run that ended early was never
+    # checkpointed at the later actions, and reporting the constant as though
+    # it had been reads as "checkpointed and skipped".
     report = {"runs": {}, "schedule": list(SCHEDULE)}
     # Discovered rather than hardcoded: a corpus need not contain every
     # workload class, and a missing one is an absent run, not a failure.
-    labels = sorted(
-        d.name for d in (corpus / "runs").iterdir() if (d / "run.json").exists()
-    )
+    #
+    # A run directory without run.json is a third thing, though, and silence
+    # would be wrong for it: a run killed after checkpointing but before its
+    # final write leaves exactly that shape. It cannot be scored -- there is no
+    # final state to score against -- but it is reported rather than dropped,
+    # so a lost workload class cannot pass for a corpus that never had one.
+    present = sorted(d.name for d in (corpus / "runs").iterdir() if d.is_dir())
+    labels = [name for name in present if (corpus / "runs" / name / "run.json").exists()]
+    report["incomplete_runs"] = [name for name in present if name not in labels]
     for label in labels:
         data = load_run(corpus, label)
         oracle = oracles["samples"][label]
@@ -200,8 +227,15 @@ def score_corpus(corpus: Path, oracles: dict) -> dict:
         for cp in data["ledger"].checkpoints:
             snap = score_text(oracle, snapshot_text(cp), cp["action"])
             cum = score_text(oracle, data["cumulative"], cp["action"])
-            a_class = classify_a(cp["verifier_a"], snap.oracle_complete, bool(snap.unscorable))
-            b_class = classify_b(cp["verifier_b"], snap.oracle_complete, bool(snap.unscorable))
+            skipped = bool(cp.get("verification_skipped"))
+            a_class = classify_a(
+                cp["verifier_a"], snap.oracle_complete, bool(snap.unscorable),
+                skipped=skipped,
+            )
+            b_class = classify_b(
+                cp["verifier_b"], snap.oracle_complete, bool(snap.unscorable),
+                skipped=skipped,
+            )
             rows.append({
                 "action": cp["action"],
                 "required_total": snap.required_total,
@@ -231,6 +265,9 @@ def score_corpus(corpus: Path, oracles: dict) -> dict:
             "model_calls": data["run"]["model_calls"],
             "wall_seconds": data["run"]["wall_seconds"],
             "shadow": data["run"]["shadow"],
+            # Observed, not configured: a run that ended at action 9 was never
+            # checkpointed at 10 or 12, and must not read as having skipped them.
+            "observed_schedule": [row["action"] for row in rows],
             "checkpoints": rows,
         }
     return report
