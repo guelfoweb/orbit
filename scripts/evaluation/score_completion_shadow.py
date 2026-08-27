@@ -110,7 +110,23 @@ def score_text(oracle: dict, text: str, action: int) -> CheckpointScore:
     return score
 
 
-def classify_a(verdict: str, oracle_complete: bool, indeterminate: bool) -> str:
+def classify_a(
+    verdict: str | None,
+    oracle_complete: bool,
+    indeterminate: bool,
+    *,
+    skipped: bool = False,
+) -> str:
+    # A checkpoint whose verifier never ran has no verdict to grade. Reading a
+    # missing answer as CONTINUE would invent an observation -- and would score
+    # the budget's own skip as if the verifier had been wrong.
+    #
+    # But a missing verdict has two causes, and they are not the same result.
+    # The budget declining to spend a call is the mechanism working; a verifier
+    # that raised leaves `verification_skipped` false, and reporting that as a
+    # skip would hide a broken backend inside a healthy-looking matrix.
+    if verdict is None:
+        return "A_NOT_CALLED" if skipped else "A_ERRORED"
     if indeterminate:
         return "A_INDETERMINATE"
     if verdict == "COMPLETE":
@@ -118,9 +134,32 @@ def classify_a(verdict: str, oracle_complete: bool, indeterminate: bool) -> str:
     return "A_TRUE_CONTINUE" if not oracle_complete else "A_FALSE_CONTINUE"
 
 
-def classify_b(verdict: str | None, oracle_complete: bool, indeterminate: bool) -> str:
+# Reasons B is deliberately never asked. Each is the gate working: A did not
+# propose a completion, or the completion was disqualified before the expensive
+# half was worth spending. None of them is a verifier failure.
+B_NOT_ASKED_REASONS = frozenset({
+    "snapshot_too_large",
+    "verifier_a_unparsed",
+    "verifier_a_continue",
+    "verifier_a_cited_no_evidence",
+    "referenced_evidence_not_active",
+    "referenced_evidence_reattest_failed",
+})
+
+
+def classify_b(
+    verdict: str | None,
+    oracle_complete: bool,
+    indeterminate: bool,
+    *,
+    blocked_by: str | None = None,
+) -> str:
+    # B's absence is read from why the checkpoint stopped, not from A's skip
+    # flag. `verification_skipped` is set only by the budget, so sharing it
+    # would report the ordinary "A said CONTINUE, so B was never asked" path
+    # -- the cost control working exactly as designed -- as a dead backend.
     if verdict is None:
-        return "B_NOT_CALLED"
+        return "B_NOT_CALLED" if blocked_by in B_NOT_ASKED_REASONS else "B_ERRORED"
     if indeterminate:
         return "B_INDETERMINATE"
     if verdict == "GAP":
@@ -182,16 +221,38 @@ def snapshot_text(checkpoint: dict) -> str:
 
 
 def score_corpus(corpus: Path, oracles: dict) -> dict:
+    # The configured schedule, kept for reference. Per-run observed schedules
+    # are recorded alongside each run: a run that ended early was never
+    # checkpointed at the later actions, and reporting the constant as though
+    # it had been reads as "checkpointed and skipped".
     report = {"runs": {}, "schedule": list(SCHEDULE)}
-    for label in ("A", "B", "C"):
+    # Discovered rather than hardcoded: a corpus need not contain every
+    # workload class, and a missing one is an absent run, not a failure.
+    #
+    # A run directory without run.json is a third thing, though, and silence
+    # would be wrong for it: a run killed after checkpointing but before its
+    # final write leaves exactly that shape. It cannot be scored -- there is no
+    # final state to score against -- but it is reported rather than dropped,
+    # so a lost workload class cannot pass for a corpus that never had one.
+    present = sorted(d.name for d in (corpus / "runs").iterdir() if d.is_dir())
+    labels = [name for name in present if (corpus / "runs" / name / "run.json").exists()]
+    report["incomplete_runs"] = [name for name in present if name not in labels]
+    for label in labels:
         data = load_run(corpus, label)
         oracle = oracles["samples"][label]
         rows = []
         for cp in data["ledger"].checkpoints:
             snap = score_text(oracle, snapshot_text(cp), cp["action"])
             cum = score_text(oracle, data["cumulative"], cp["action"])
-            a_class = classify_a(cp["verifier_a"], snap.oracle_complete, bool(snap.unscorable))
-            b_class = classify_b(cp["verifier_b"], snap.oracle_complete, bool(snap.unscorable))
+            skipped = bool(cp.get("verification_skipped"))
+            a_class = classify_a(
+                cp["verifier_a"], snap.oracle_complete, bool(snap.unscorable),
+                skipped=skipped,
+            )
+            b_class = classify_b(
+                cp["verifier_b"], snap.oracle_complete, bool(snap.unscorable),
+                blocked_by=cp.get("blocked_by"),
+            )
             rows.append({
                 "action": cp["action"],
                 "required_total": snap.required_total,
@@ -221,6 +282,9 @@ def score_corpus(corpus: Path, oracles: dict) -> dict:
             "model_calls": data["run"]["model_calls"],
             "wall_seconds": data["run"]["wall_seconds"],
             "shadow": data["run"]["shadow"],
+            # Observed, not configured: a run that ended at action 9 was never
+            # checkpointed at 10 or 12, and must not read as having skipped them.
+            "observed_schedule": [row["action"] for row in rows],
             "checkpoints": rows,
         }
     return report
