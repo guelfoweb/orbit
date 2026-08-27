@@ -110,7 +110,12 @@ def score_text(oracle: dict, text: str, action: int) -> CheckpointScore:
     return score
 
 
-def classify_a(verdict: str, oracle_complete: bool, indeterminate: bool) -> str:
+def classify_a(verdict: str | None, oracle_complete: bool, indeterminate: bool) -> str:
+    # A checkpoint whose verifier never ran has no verdict to grade. Reading a
+    # missing answer as CONTINUE would invent an observation -- and would score
+    # the budget's own skip as if the verifier had been wrong.
+    if verdict is None:
+        return "A_NOT_CALLED"
     if indeterminate:
         return "A_INDETERMINATE"
     if verdict == "COMPLETE":
@@ -183,7 +188,12 @@ def snapshot_text(checkpoint: dict) -> str:
 
 def score_corpus(corpus: Path, oracles: dict) -> dict:
     report = {"runs": {}, "schedule": list(SCHEDULE)}
-    for label in ("A", "B", "C"):
+    # Discovered rather than hardcoded: a corpus need not contain every
+    # workload class, and a missing one is an absent run, not a failure.
+    labels = sorted(
+        d.name for d in (corpus / "runs").iterdir() if (d / "run.json").exists()
+    )
+    for label in labels:
         data = load_run(corpus, label)
         oracle = oracles["samples"][label]
         rows = []
