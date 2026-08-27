@@ -115,7 +115,7 @@ def classify_a(
     oracle_complete: bool,
     indeterminate: bool,
     *,
-    skipped: bool = True,
+    skipped: bool = False,
 ) -> str:
     # A checkpoint whose verifier never ran has no verdict to grade. Reading a
     # missing answer as CONTINUE would invent an observation -- and would score
@@ -134,15 +134,32 @@ def classify_a(
     return "A_TRUE_CONTINUE" if not oracle_complete else "A_FALSE_CONTINUE"
 
 
+# Reasons B is deliberately never asked. Each is the gate working: A did not
+# propose a completion, or the completion was disqualified before the expensive
+# half was worth spending. None of them is a verifier failure.
+B_NOT_ASKED_REASONS = frozenset({
+    "snapshot_too_large",
+    "verifier_a_unparsed",
+    "verifier_a_continue",
+    "verifier_a_cited_no_evidence",
+    "referenced_evidence_not_active",
+    "referenced_evidence_reattest_failed",
+})
+
+
 def classify_b(
     verdict: str | None,
     oracle_complete: bool,
     indeterminate: bool,
     *,
-    skipped: bool = True,
+    blocked_by: str | None = None,
 ) -> str:
+    # B's absence is read from why the checkpoint stopped, not from A's skip
+    # flag. `verification_skipped` is set only by the budget, so sharing it
+    # would report the ordinary "A said CONTINUE, so B was never asked" path
+    # -- the cost control working exactly as designed -- as a dead backend.
     if verdict is None:
-        return "B_NOT_CALLED" if skipped else "B_ERRORED"
+        return "B_NOT_CALLED" if blocked_by in B_NOT_ASKED_REASONS else "B_ERRORED"
     if indeterminate:
         return "B_INDETERMINATE"
     if verdict == "GAP":
@@ -234,7 +251,7 @@ def score_corpus(corpus: Path, oracles: dict) -> dict:
             )
             b_class = classify_b(
                 cp["verifier_b"], snap.oracle_complete, bool(snap.unscorable),
-                skipped=skipped,
+                blocked_by=cp.get("blocked_by"),
             )
             rows.append({
                 "action": cp["action"],

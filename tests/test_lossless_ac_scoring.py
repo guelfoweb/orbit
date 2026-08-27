@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from score_completion_shadow import (  # noqa: E402
     classify_a,
     classify_b,
+    classify_gap,
     evaluate_finding,
     score_corpus,
     score_text,
@@ -205,8 +206,15 @@ class SkippedCheckpointTests(CorpusPresent):
             self.assertIsNone(cp["verifier_a"])
             self.assertIsNone(cp["verifier_b"])
             self.assertEqual(cp["blocked_by"], "snapshot_too_large")
-            self.assertEqual(classify_a(cp["verifier_a"], True, False), "A_NOT_CALLED")
-            self.assertEqual(classify_b(cp["verifier_b"], True, False), "B_NOT_CALLED")
+            self.assertEqual(
+                classify_a(cp["verifier_a"], True, False,
+                           skipped=cp["verification_skipped"]),
+                "A_NOT_CALLED",
+            )
+            self.assertEqual(
+                classify_b(cp["verifier_b"], True, False, blocked_by=cp["blocked_by"]),
+                "B_NOT_CALLED",
+            )
 
     def test_skipped_checkpoints_cannot_would_stop(self) -> None:
         from orbit.runtime.completion_shadow_ledger import read_ledger
@@ -281,6 +289,21 @@ class SyntheticCorpusTests(unittest.TestCase):
         for label, spec in runs.items():
             run_dir = root / "runs" / label
             (run_dir / "evidence").mkdir(parents=True)
+            # The scorer's `cumulative` view reads the EvidenceStore, not the
+            # ledger, so a fixture that wants to exercise it must write one.
+            index = {}
+            for i, body in enumerate(spec.get("evidence", ())):
+                eid = f"ev_{i:012x}_{i:016x}"
+                (run_dir / "evidence" / f"{eid}.txt").write_text(body)
+                index[eid] = {
+                    "evidence_id": eid, "tool_name": "execute_analysis_raw",
+                    "kind": "fetch", "raw_ref": f"evidence:{eid}",
+                    "raw_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                    "raw_chars": len(body), "raw_lines": body.count("\n") + 1,
+                    "status": "ok", "metadata": {},
+                }
+            if index:
+                (run_dir / "evidence" / "index.json").write_text(json.dumps(index))
             lines = [json.dumps({
                 "record": "run_start", "run_id": "r1", "schema_version": 1,
                 "request": "analyze x", "schedule": [4], "soft_max_actions": 8,
@@ -416,6 +439,218 @@ class AntiMonotonicFindingTests(unittest.TestCase):
         lost = evaluate_finding(self.SPEC, early).satisfied and not evaluate_finding(self.SPEC, later).satisfied
         self.assertFalse(gained)
         self.assertTrue(lost)
+
+
+class VerifierBAbsenceTests(unittest.TestCase):
+    """Every reason B has no verdict, checked against the runtime's own paths.
+
+    Driven through `evaluate_completion_shadow` rather than asserted from a
+    hand-written table, so a new early return in the gate shows up here as an
+    unexplained B_ERRORED instead of passing unnoticed.
+    """
+
+    EVIDENCE_ID = "ev_0123456789ab_0123456789abcdef"
+
+    def _observe(self, a_answer: str, **kwargs):
+        from orbit.runtime.completion_shadow import (
+            CompletionSnapshot, evaluate_completion_shadow,
+        )
+
+        class Response:
+            def __init__(self, content: str) -> None:
+                self.content = content
+                self.prompt_tokens = self.completion_tokens = 1
+
+        snapshot = CompletionSnapshot(
+            request="r", evidence=((self.EVIDENCE_ID, "t"),), artifacts=(), digest="d"
+        )
+        defaults = dict(
+            action=4, snapshot=snapshot,
+            ask=lambda instruction, rendered: Response(a_answer),
+            active_evidence_ids={self.EVIDENCE_ID},
+            reattest=lambda _id: object(), fits_budget=True, snapshot_tokens=10,
+        )
+        defaults.update(kwargs)
+        return evaluate_completion_shadow(**defaults)
+
+    def test_a_continue_means_b_was_never_asked_not_that_it_failed(self) -> None:
+        """The common path, and the cost control the gate is built around."""
+        obs = self._observe("CONTINUE missing: more work")
+        self.assertIsNone(obs.verifier_b)
+        self.assertEqual(obs.blocked_by, "verifier_a_continue")
+        self.assertEqual(
+            classify_b(obs.verifier_b, True, False, blocked_by=obs.blocked_by),
+            "B_NOT_CALLED",
+        )
+
+    def test_every_deliberate_non_ask_reads_as_not_called(self) -> None:
+        cases = {
+            "verifier_a_continue": dict(a_answer="CONTINUE missing: x"),
+            "verifier_a_unparsed": dict(a_answer="who knows"),
+            "verifier_a_cited_no_evidence": dict(a_answer="COMPLETE evidence: none"),
+            "referenced_evidence_not_active": dict(
+                a_answer=f"COMPLETE evidence: {self.EVIDENCE_ID}",
+                active_evidence_ids=set(),
+            ),
+            "referenced_evidence_reattest_failed": dict(
+                a_answer=f"COMPLETE evidence: {self.EVIDENCE_ID}",
+                reattest=lambda _id: None,
+            ),
+        }
+        for expected, kwargs in cases.items():
+            with self.subTest(expected):
+                answer = kwargs.pop("a_answer")
+                obs = self._observe(answer, **kwargs)
+                self.assertEqual(obs.blocked_by, expected)
+                self.assertIsNone(obs.verifier_b)
+                self.assertEqual(
+                    classify_b(obs.verifier_b, True, False, blocked_by=obs.blocked_by),
+                    "B_NOT_CALLED",
+                    f"{expected} must not read as a verifier failure",
+                )
+
+    def test_a_raising_verifier_still_reads_as_an_error(self) -> None:
+        """Guards the guard: B_ERRORED must remain reachable."""
+        def boom(instruction, rendered):
+            raise RuntimeError("backend died")
+
+        obs = self._observe("unused", ask=boom)
+        self.assertTrue(obs.blocked_by.startswith("verifier_error:"))
+        self.assertEqual(
+            classify_b(obs.verifier_b, True, False, blocked_by=obs.blocked_by),
+            "B_ERRORED",
+        )
+
+    def test_budget_skip_reads_as_not_called_on_both_sides(self) -> None:
+        obs = self._observe("unused", fits_budget=False)
+        self.assertEqual(obs.blocked_by, "snapshot_too_large")
+        self.assertEqual(classify_a(obs.verifier_a, True, False, skipped=True), "A_NOT_CALLED")
+        self.assertEqual(
+            classify_b(obs.verifier_b, True, False, blocked_by=obs.blocked_by),
+            "B_NOT_CALLED",
+        )
+
+
+class GapMaterialityTests(unittest.TestCase):
+    """The label the PR's headline rests on: C@4's gap is NON_MATERIAL."""
+
+    @staticmethod
+    def _score(missing=(), unscorable=()):
+        score = score_text({"required_findings": []}, "", 4)
+        score.missing = list(missing)
+        score.unscorable = list(unscorable)
+        return score
+
+    def test_a_gap_is_material_when_a_required_finding_is_missing(self) -> None:
+        self.assertEqual(classify_gap("something absent", self._score(missing=["c2"])),
+                         "MATERIAL_AND_REAL")
+
+    def test_a_gap_is_non_material_when_every_finding_is_satisfied(self) -> None:
+        self.assertEqual(classify_gap("second stage not retrieved", self._score()),
+                         "NON_MATERIAL_OR_ALREADY_SATISFIED")
+
+    def test_an_unscorable_finding_makes_the_gap_unscorable(self) -> None:
+        self.assertEqual(classify_gap("anything", self._score(unscorable=["j"])), "UNSCORABLE")
+
+    def test_no_detail_is_unscorable(self) -> None:
+        self.assertEqual(classify_gap("", self._score(missing=["c2"])), "UNSCORABLE")
+
+    def test_the_labels_are_distinguishable(self) -> None:
+        """A scorer returning one constant would give the PR its headline free."""
+        labels = {
+            classify_gap("d", self._score(missing=["x"])),
+            classify_gap("d", self._score()),
+            classify_gap("d", self._score(unscorable=["u"])),
+        }
+        self.assertEqual(len(labels), 3)
+
+
+class CumulativeViewTests(unittest.TestCase):
+    """The scorer's own cumulative path, asserted through its output.
+
+    The corpus tests build an EvidenceStore themselves, so the scorer's
+    snapshot-vs-cumulative distinction -- the module's central idea -- was
+    never checked against what the scorer actually reports.
+    """
+
+    def test_cumulative_can_hold_a_finding_the_snapshot_lacks(self) -> None:
+        helper = SyntheticCorpusTests()
+        helper.addCleanup = lambda *a, **k: None
+        corpus = helper._corpus({"Q": {
+            "evidence": ["MARKER established later"],
+            "checkpoints": [
+                {"action": 4, "a": "CONTINUE", "b": None, "text": "nothing yet",
+                 "blocked_by": "verifier_a_continue"},
+            ]}})
+        self.addCleanup(shutil.rmtree, corpus, ignore_errors=True)
+        rows = score_corpus(corpus, helper._oracles(("Q",)))["runs"]["Q"]["checkpoints"]
+        self.assertEqual(rows[0]["snapshot_state"], "INCOMPLETE")
+        self.assertEqual(rows[0]["cumulative_state"], "COMPLETE")
+        self.assertEqual(rows[0]["snapshot_missing"], ["marker"])
+        self.assertEqual(rows[0]["cumulative_missing"], [])
+
+    def test_cumulative_is_not_merely_a_copy_of_the_snapshot(self) -> None:
+        helper = SyntheticCorpusTests()
+        helper.addCleanup = lambda *a, **k: None
+        corpus = helper._corpus({"Q": {
+            "evidence": ["MARKER established later"],
+            "checkpoints": [
+                {"action": 4, "a": "CONTINUE", "b": None, "text": "nothing yet",
+                 "blocked_by": "verifier_a_continue"},
+            ]}})
+        self.addCleanup(shutil.rmtree, corpus, ignore_errors=True)
+        row = score_corpus(corpus, helper._oracles(("Q",)))["runs"]["Q"]["checkpoints"][0]
+        self.assertNotEqual(row["snapshot_state"], row["cumulative_state"])
+
+
+class LedgerRefusalTests(unittest.TestCase):
+    """A ledger the scorer cannot trust must stop it, not be scored around."""
+
+    def _corpus_with(self, mutate) -> Path:
+        helper = SyntheticCorpusTests()
+        helper.addCleanup = lambda *a, **k: None
+        corpus = helper._corpus({"Q": {"checkpoints": [
+            {"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]}})
+        self.addCleanup(shutil.rmtree, corpus, ignore_errors=True)
+        ledger = corpus / "runs/Q/completion-shadow.jsonl"
+        ledger.write_text(mutate(ledger.read_text()))
+        return corpus, helper
+
+    def test_a_corrupt_line_refuses_to_score(self) -> None:
+        corpus, helper = self._corpus_with(lambda s: s + "{not json\n")
+        with self.assertRaises(BaseException):
+            score_corpus(corpus, helper._oracles(("Q",)))
+
+    def test_an_unsupported_schema_version_refuses_to_score(self) -> None:
+        corpus, helper = self._corpus_with(
+            lambda s: s.replace('"schema_version": 1', '"schema_version": 2')
+        )
+        with self.assertRaises(BaseException):
+            score_corpus(corpus, helper._oracles(("Q",)))
+
+
+class UnknownPredicateTests(unittest.TestCase):
+    """A typo in the oracle must be unscorable, never silently satisfied."""
+
+    def test_an_unknown_kind_is_unscorable(self) -> None:
+        result = evaluate_finding({"id": "x", "kind": "literal_al", "values": ["a"]}, "a")
+        self.assertTrue(result.unscorable)
+        self.assertFalse(result.satisfied)
+
+
+class StrayFileTests(unittest.TestCase):
+    """A stray file in runs/ is not a truncated run."""
+
+    def test_a_loose_file_is_neither_scored_nor_reported_incomplete(self) -> None:
+        helper = SyntheticCorpusTests()
+        helper.addCleanup = lambda *a, **k: None
+        corpus = helper._corpus({"Q": {"checkpoints": [
+            {"action": 4, "a": "COMPLETE", "b": "NO_GAP", "text": "MARKER"}]}})
+        self.addCleanup(shutil.rmtree, corpus, ignore_errors=True)
+        (corpus / "runs" / "README.txt").write_text("notes")
+        report = score_corpus(corpus, helper._oracles(("Q",)))
+        self.assertEqual(sorted(report["runs"]), ["Q"])
+        self.assertEqual(report["incomplete_runs"], [])
 
 
 class PredicateSemanticsTests(unittest.TestCase):
