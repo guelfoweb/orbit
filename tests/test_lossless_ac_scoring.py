@@ -416,6 +416,7 @@ class SyntheticCorpusTests(unittest.TestCase):
         row = score_corpus(corpus, oracles)["runs"]["Q"]["checkpoints"][0]
         self.assertNotEqual(row["snapshot_state"], "COMPLETE")
         self.assertEqual(row["a_class"], "A_INDETERMINATE")
+        self.assertEqual(row["b_class"], "B_INDETERMINATE")
 
 
 class AntiMonotonicFindingTests(unittest.TestCase):
@@ -531,6 +532,22 @@ class VerifierBAbsenceTests(unittest.TestCase):
         )
 
 
+class ClassifierDefaultTests(unittest.TestCase):
+    """The defaults must fail loud, since a forgotten kwarg is the trap."""
+
+    def test_classify_a_defaults_to_the_loud_answer(self) -> None:
+        """Omitting `skipped` must not silently restore the skip/error conflation."""
+        self.assertEqual(classify_a(None, True, False), "A_ERRORED")
+
+    def test_classify_b_has_no_boolean_default_to_get_wrong(self) -> None:
+        """B reads `blocked_by`, so an omitted argument cannot mean "skipped"."""
+        self.assertEqual(classify_b(None, True, False), "B_ERRORED")
+        self.assertEqual(
+            classify_b(None, True, False, blocked_by="verifier_a_continue"),
+            "B_NOT_CALLED",
+        )
+
+
 class GapMaterialityTests(unittest.TestCase):
     """The label the PR's headline rests on: C@4's gap is NON_MATERIAL."""
 
@@ -577,7 +594,10 @@ class CumulativeViewTests(unittest.TestCase):
         helper = SyntheticCorpusTests()
         helper.addCleanup = lambda *a, **k: None
         corpus = helper._corpus({"Q": {
-            "evidence": ["MARKER established later"],
+            # Two records with the marker in the second: a cumulative view
+            # that read only the first would miss it, which is the whole
+            # point of aggregating the store.
+            "evidence": ["first record, nothing yet", "MARKER established later"],
             "checkpoints": [
                 {"action": 4, "a": "CONTINUE", "b": None, "text": "nothing yet",
                  "blocked_by": "verifier_a_continue"},
@@ -593,7 +613,10 @@ class CumulativeViewTests(unittest.TestCase):
         helper = SyntheticCorpusTests()
         helper.addCleanup = lambda *a, **k: None
         corpus = helper._corpus({"Q": {
-            "evidence": ["MARKER established later"],
+            # Two records with the marker in the second: a cumulative view
+            # that read only the first would miss it, which is the whole
+            # point of aggregating the store.
+            "evidence": ["first record, nothing yet", "MARKER established later"],
             "checkpoints": [
                 {"action": 4, "a": "CONTINUE", "b": None, "text": "nothing yet",
                  "blocked_by": "verifier_a_continue"},
