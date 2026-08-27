@@ -85,6 +85,68 @@ def scheduled_actions(schedule: str = "after4every2") -> Callable[[int], bool]:
 
 
 @dataclass(frozen=True)
+class TruncatedRecord:
+    """One record that reached the verifiers shorter than it really is."""
+
+    evidence_id: str
+    authoritative_chars: int
+    included_chars: int
+
+
+@dataclass(frozen=True)
+class CompletionSnapshotFidelity:
+    """Whether the snapshot is the whole of its canonical input, or less.
+
+    Side-band only: this never reaches a verifier and never changes a byte of
+    what they are shown. It exists because a verdict reached on a truncated
+    view is not evidence about the verifier -- it is evidence about the view.
+    Without this the two are indistinguishable after the fact.
+
+    "Lossless" is deliberately hard to earn: every ACTIVE record the contract
+    selected must be present, whole, with every artifact handle and the full
+    request. Anything less is lossy with a stated reason. Nothing here infers
+    that an omission was harmless -- that judgement is exactly what this
+    refuses to make.
+    """
+
+    lossless: bool
+    reasons: tuple[str, ...] = ()
+    request_truncated: bool = False
+    request_authoritative_chars: int = 0
+    request_included_chars: int = 0
+    active_records_total: int = 0
+    active_records_included: int = 0
+    omitted_record_count: int = 0
+    truncated_records: tuple[TruncatedRecord, ...] = ()
+    artifacts_total: int = 0
+    artifacts_included: int = 0
+    omitted_artifact_count: int = 0
+
+    def as_log_fields(self) -> dict[str, object]:
+        return {
+            "lossless": self.lossless,
+            "reasons": list(self.reasons),
+            "request_truncated": self.request_truncated,
+            "request_authoritative_chars": self.request_authoritative_chars,
+            "request_included_chars": self.request_included_chars,
+            "active_records_total": self.active_records_total,
+            "active_records_included": self.active_records_included,
+            "omitted_record_count": self.omitted_record_count,
+            "truncated_records": [
+                {
+                    "evidence_id": r.evidence_id,
+                    "authoritative_chars": r.authoritative_chars,
+                    "included_chars": r.included_chars,
+                }
+                for r in self.truncated_records
+            ],
+            "artifacts_total": self.artifacts_total,
+            "artifacts_included": self.artifacts_included,
+            "omitted_artifact_count": self.omitted_artifact_count,
+        }
+
+
+@dataclass(frozen=True)
 class CompletionSnapshot:
     """What both verifiers see, and the hash that proves they saw the same thing."""
 
@@ -92,6 +154,9 @@ class CompletionSnapshot:
     evidence: tuple[tuple[str, str], ...]
     artifacts: tuple[str, ...]
     digest: str
+    # Describes the snapshot; is not part of it. `digest` still covers exactly
+    # the model-visible bytes, so adding this cannot move a hash.
+    fidelity: "CompletionSnapshotFidelity | None" = None
 
     def render(self) -> str:
         lines = [f"REQUEST: {self.request}", "", "ESTABLISHED EVIDENCE:"]
@@ -117,19 +182,77 @@ def build_snapshot(
     """
     evidence: list[tuple[str, str]] = []
     artifacts: list[str] = []
-    for record in records[-MAX_SNAPSHOT_RECORDS:]:
+    truncated: list[TruncatedRecord] = []
+    selected = records[-MAX_SNAPSHOT_RECORDS:]
+    for record in selected:
         evidence_id = str(getattr(record, "evidence_id", "") or "")
         if not evidence_id:
             continue
         raw = load_raw(evidence_id) or ""
-        evidence.append((evidence_id, raw[:MAX_SNAPSHOT_CHARS_PER_RECORD]))
+        excerpt = raw[:MAX_SNAPSHOT_CHARS_PER_RECORD]
+        evidence.append((evidence_id, excerpt))
+        if len(excerpt) < len(raw):
+            truncated.append(TruncatedRecord(evidence_id, len(raw), len(excerpt)))
         metadata = getattr(record, "metadata", None) or {}
         for artifact in metadata.get("artifacts") or []:
             handle = str(artifact.get("handle") or "")
             if handle and handle not in artifacts:
                 artifacts.append(handle)
+
+    # Handles are gathered only from the records that survived the count cap,
+    # so an evicted record takes its artifacts with it. Counting the whole
+    # ACTIVE view separately is what keeps that cascade visible instead of
+    # letting it read as "there were only this many".
+    all_handles: list[str] = []
+    for record in records:
+        metadata = getattr(record, "metadata", None) or {}
+        for artifact in metadata.get("artifacts") or []:
+            handle = str(artifact.get("handle") or "")
+            if handle and handle not in all_handles:
+                all_handles.append(handle)
+
+    artifacts_before_cap = len(artifacts)
     artifacts = artifacts[:MAX_SNAPSHOT_ARTIFACTS]
-    request = (request or "")[:MAX_SNAPSHOT_REQUEST_CHARS]
+    full_request = request or ""
+    request = full_request[:MAX_SNAPSHOT_REQUEST_CHARS]
+
+    reasons: list[str] = []
+    omitted_records = max(0, len(records) - len(selected))
+    if omitted_records:
+        reasons.append("record_count_cap")
+    # A selected record that produced no entry was dropped for its own reason
+    # -- no usable evidence id -- and dropping it silently would let a snapshot
+    # missing a record still call itself whole. Counted separately from the
+    # count cap because the cause, and any fix, are different.
+    unusable_records = len(selected) - len(evidence)
+    if unusable_records:
+        reasons.append("record_unusable")
+    if truncated:
+        reasons.append("record_content_truncated")
+    if len(artifacts) < artifacts_before_cap:
+        reasons.append("artifact_count_cap")
+    if len(all_handles) > len(artifacts):
+        # Either the cap fired or an evicted record carried handles; both mean
+        # the verifiers were shown fewer artifacts than the analysis holds.
+        if "artifact_count_cap" not in reasons:
+            reasons.append("artifact_omitted_with_record")
+    if len(request) < len(full_request):
+        reasons.append("request_truncated")
+
+    fidelity = CompletionSnapshotFidelity(
+        lossless=not reasons,
+        reasons=tuple(reasons),
+        request_truncated=len(request) < len(full_request),
+        request_authoritative_chars=len(full_request),
+        request_included_chars=len(request),
+        active_records_total=len(records),
+        active_records_included=len(evidence),
+        omitted_record_count=omitted_records + unusable_records,
+        truncated_records=tuple(truncated),
+        artifacts_total=len(all_handles),
+        artifacts_included=len(artifacts),
+        omitted_artifact_count=max(0, len(all_handles) - len(artifacts)),
+    )
     payload = json.dumps(
         {"request": request, "evidence": evidence, "artifacts": artifacts},
         ensure_ascii=False,
@@ -141,6 +264,7 @@ def build_snapshot(
         evidence=tuple(evidence),
         artifacts=tuple(artifacts),
         digest=digest,
+        fidelity=fidelity,
     )
 
 
@@ -244,6 +368,7 @@ class ShadowObservation:
     # which is what the historical corpus lacked; the raw answers are bounded
     # excerpts kept for parser audit, never a transcript.
     snapshot: "CompletionSnapshot | None" = None
+    snapshot_fidelity: "CompletionSnapshotFidelity | None" = None
     verifier_a_evidence_ids: tuple[str, ...] = ()
     verifier_a_detail: str = ""
     verifier_b_detail: str = ""
@@ -307,7 +432,10 @@ def evaluate_completion_shadow(
     injected so the loop owns the call and this module owns only the policy.
     """
     observation = ShadowObservation(
-        action=action, snapshot_digest=snapshot.digest, snapshot=snapshot
+        action=action,
+        snapshot_digest=snapshot.digest,
+        snapshot=snapshot,
+        snapshot_fidelity=getattr(snapshot, "fidelity", None),
     )
     started = time.monotonic()
 
@@ -368,6 +496,16 @@ def evaluate_completion_shadow(
             observation.blocked_by = "verifier_b_gap"
             return observation
 
+        # Last gate, and deliberately last: a verdict reached on a partial view
+        # says nothing about whether the analysis is done. Refusing here is not
+        # a judgement that something material was lost -- it is a refusal to
+        # guess either way, which is the same conservatism every other gate
+        # applies.
+        fidelity = getattr(snapshot, "fidelity", None)
+        if fidelity is not None and not fidelity.lossless:
+            observation.blocked_by = "snapshot_lossy"
+            return observation
+
         observation.would_stop = True
         return observation
     except BaseException as exc:  # noqa: BLE001 - a failed verifier must never end a run
@@ -391,8 +529,10 @@ __all__ = [
     "SHADOW_ENV",
     "VERIFIER_MAX_TOKENS",
     "CompletionSnapshot",
+    "CompletionSnapshotFidelity",
     "ShadowLedger",
     "ShadowObservation",
+    "TruncatedRecord",
     "VerifierVerdict",
     "build_snapshot",
     "evaluate_completion_shadow",
