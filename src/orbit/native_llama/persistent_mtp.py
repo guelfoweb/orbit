@@ -14,9 +14,17 @@ from .native_artifacts import packaged_shim_path, require_legacy_llama_root
 from .native_names import persistent_mtp_shim_filename, platform_runtime_libs
 from .paths import NativeLlamaPaths
 
+# Symbols every persistent-MTP shim must export. A prebuilt shim is reused only
+# if it satisfies this, so a name here that no shim defines makes the check
+# unsatisfiable and forces a rebuild on every call, for every architecture.
+#
+# `orbit_mtp_session_set_followup_suffix_tokens` was such a name. Its
+# implementation was written for a debug frontier-reuse path on a branch that
+# never landed, while the entry requiring it did; nothing has ever called it and
+# no shim has ever exported it. Removed rather than stubbed, because a symbol
+# that exists only to satisfy the checker would defeat the checker's purpose.
 _REQUIRED_SHIM_SYMBOLS = (
     "orbit_mtp_session_complete",
-    "orbit_mtp_session_set_followup_suffix_tokens",
     "orbit_mtp_session_last_first_sample_trace_json",
     "orbit_mtp_session_request_boundary_refill_marker",
 )
