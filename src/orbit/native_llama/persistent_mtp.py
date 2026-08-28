@@ -21,6 +21,19 @@ _REQUIRED_SHIM_SYMBOLS = (
     "orbit_mtp_session_request_boundary_refill_marker",
 )
 
+# Required ONLY when a self-MTP session is about to be constructed. Kept out of
+# the base tuple deliberately: adding them there would reject every previously
+# valid shim for normal decoding and for the external-draft path, neither of
+# which needs these symbols. A shim that predates self-MTP stays a perfectly
+# good shim for everything it was already doing.
+_SELF_MTP_REQUIRED_SHIM_SYMBOLS = (
+    "orbit_selfmtp_session_create",
+    "orbit_selfmtp_session_destroy",
+    "orbit_mtp_session_owns_model",
+    "orbit_mtp_session_borrowed_model",
+    "orbit_mtp_session_borrowed_ctx_tgt",
+)
+
 MtpTokenCallback = CFUNCTYPE(None, c_char_p, c_void_p)
 MtpProgressCallback = CFUNCTYPE(None, c_int32, c_int32, c_int32, c_void_p)
 
@@ -42,6 +55,11 @@ class PersistentMtpSessionRuntime:
     rss_before_kb: int | None = None
     rss_after_init_kb: int | None = None
     rss_peak_kb: int | None = None
+    # True when this session borrows the caller's model instead of loading its
+    # own. Teardown reads it to pick the destroy that matches the ownership the
+    # constructor established -- freeing a borrowed model would double-free it
+    # the moment the client tears itself down.
+    self_mtp: bool = False
 
 
 class PersistentMtpLibrary:
@@ -179,6 +197,7 @@ def build_persistent_mtp_shim(
     build_bin: Path | None = None,
     runtime_bin: Path | None = None,
     runner=subprocess.run,
+    require_self_mtp: bool = False,
 ) -> Path:
     packaged = packaged_shim_path(persistent_mtp_shim_filename())
     # `build_bin` is where the compiler links from; `runtime_bin` is the family
@@ -187,8 +206,13 @@ def build_persistent_mtp_shim(
     # linker needs. The probe has to preload the runtime, not the link
     # directory: preloading the latter is what would put a second family in
     # the process, which is the thing being prevented.
+    required = _REQUIRED_SHIM_SYMBOLS
+    if require_self_mtp:
+        required = required + _SELF_MTP_REQUIRED_SHIM_SYMBOLS
     if packaged is not None and _shim_exports_required_symbols(
-        packaged, runtime_bin if runtime_bin is not None else build_bin
+        packaged,
+        runtime_bin if runtime_bin is not None else build_bin,
+        required,
     ):
         return packaged
     artifact_name = persistent_mtp_shim_filename()
@@ -217,7 +241,11 @@ def _persistent_mtp_link_bin(paths: NativeLlamaPaths) -> Path:
     return build_bin
 
 
-def _shim_exports_required_symbols(path: Path, build_bin: Path | None = None) -> bool:
+def _shim_exports_required_symbols(
+    path: Path,
+    build_bin: Path | None = None,
+    symbols: tuple[str, ...] | None = None,
+) -> bool:
     """Whether the packaged shim exports the symbols this process needs.
 
     `build_bin` is the runtime the caller intends to use. It matters because
@@ -246,7 +274,8 @@ def _shim_exports_required_symbols(path: Path, build_bin: Path | None = None) ->
         lib = load_native_cdll(path, mode=flags)
     except OSError:
         return False
-    return all(hasattr(lib, symbol) for symbol in _REQUIRED_SHIM_SYMBOLS)
+    required = _REQUIRED_SHIM_SYMBOLS if symbols is None else symbols
+    return all(hasattr(lib, symbol) for symbol in required)
 
 
 def create_persistent_mtp_session(
@@ -341,6 +370,71 @@ def reset_persistent_mtp_session(
         rss_before_kb=runtime.rss_before_kb,
         rss_after_init_kb=runtime.rss_after_init_kb,
         rss_peak_kb=runtime.rss_peak_kb,
+        # Carried forward, not re-derived. Reset returns a NEW runtime object
+        # wrapping the SAME native handle, so dropping this would silently turn
+        # a borrowing session into an owning one after the first completion --
+        # and teardown would then free the caller's model.
+        self_mtp=runtime.self_mtp,
+    )
+
+
+def create_self_mtp_session(
+    *,
+    llama_root: Path,
+    paths: NativeLlamaPaths,
+    model: c_void_p,
+    ctx_tgt: c_void_p,
+    context_tokens: int,
+    batch_size: int,
+    ubatch_size: int,
+    threads: int,
+    threads_batch: int,
+    build_dir: Path | None = None,
+    runner=subprocess.run,
+    library_factory=PersistentMtpLibrary,
+) -> PersistentMtpSessionRuntime:
+    """Build a single-GGUF self-MTP session over an already-loaded model.
+
+    Deliberately separate from `create_persistent_mtp_session`: that one takes a
+    draft model PATH and loads it, owning the result. This one takes the model
+    the client already holds and borrows it. Collapsing the two and inferring
+    the mode from equal paths is how a double free gets written.
+    """
+    if not model:
+        raise RuntimeError("self-MTP requires the already-loaded model")
+    if not ctx_tgt:
+        raise RuntimeError("self-MTP requires the target context")
+    shim = build_persistent_mtp_shim(
+        llama_root=llama_root,
+        build_dir=build_dir,
+        build_bin=_persistent_mtp_link_bin(paths),
+        runtime_bin=paths.build_bin,
+        runner=runner,
+        # The self-MTP entry points are demanded only here. A shim predating
+        # them stays valid for normal decoding and for the external-draft path.
+        require_self_mtp=True,
+    )
+    library = library_factory(paths.build_bin, shim)
+    handle = library.lib.orbit_selfmtp_session_create(
+        model,
+        ctx_tgt,
+        context_tokens,
+        batch_size,
+        ubatch_size,
+        threads,
+        threads_batch,
+    )
+    if not handle:
+        raise RuntimeError(_decode_error(library.lib.orbit_mtp_last_error()))
+    return PersistentMtpSessionRuntime(
+        handle=c_void_p(handle),
+        ctx_dft=library.lib.orbit_mtp_session_ctx_dft(handle),
+        spec=library.lib.orbit_mtp_session_spec(handle),
+        library=library,
+        rss_before_kb=_long_or_none(library.lib.orbit_mtp_session_rss_before_kb(handle)),
+        rss_after_init_kb=_long_or_none(library.lib.orbit_mtp_session_rss_after_init_kb(handle)),
+        rss_peak_kb=_long_or_none(library.lib.orbit_mtp_session_rss_peak_kb(handle)),
+        self_mtp=True,
     )
 
 
@@ -359,7 +453,12 @@ def free_persistent_mtp_session(
         library_factory=library_factory,
         llama_root=llama_root,
     )
-    library.lib.orbit_mtp_session_free(runtime.handle)
+    if runtime.self_mtp:
+        # Frees only the MTP context and speculative state. The model and the
+        # target context are borrowed and are freed by the client afterwards.
+        library.lib.orbit_selfmtp_session_destroy(runtime.handle)
+    else:
+        library.lib.orbit_mtp_session_free(runtime.handle)
 
 
 def run_persistent_mtp_completion(

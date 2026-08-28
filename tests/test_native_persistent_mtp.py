@@ -11,6 +11,7 @@ from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.native_names import platform_runtime_libs
 from orbit.native_llama.paths import NativeLlamaPaths
 from orbit.native_llama.persistent_mtp import (
+    _REQUIRED_SHIM_SYMBOLS,
     PersistentMtpSessionRuntime,
     create_persistent_mtp_session,
     free_persistent_mtp_session,
@@ -126,7 +127,13 @@ class NativePersistentMtpTests(unittest.TestCase):
         # The runtime this process will claim, not the directory the compiler
         # links against: preloading the latter is what puts a second family in
         # the process when the two diverge.
-        probe.assert_called_once_with(packaged, runtime_bin)
+        # The third argument is the symbol set being demanded. It stays the
+        # BASE tuple here: self-MTP symbols are required only when a self-MTP
+        # session is actually being built, so an older shim keeps working for
+        # normal decoding and for the external-draft path.
+        probe.assert_called_once_with(
+            packaged, runtime_bin, _REQUIRED_SHIM_SYMBOLS
+        )
 
     def test_session_creation_gives_the_shim_builder_the_claimed_runtime(self) -> None:
         """The session paths must forward the family they are about to claim.

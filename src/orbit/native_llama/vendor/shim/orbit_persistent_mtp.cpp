@@ -180,6 +180,15 @@ static long rss_kb() {
 struct orbit_mtp_session {
     uint32_t n_batch = 0;
     llama_model * model_dft = nullptr;
+    // Whether this session allocated model_dft and must free it. False for the
+    // single-GGUF self-MTP path, where the draft head lives inside the model
+    // the caller already loaded and still owns: freeing it here would be a
+    // double free the moment the caller tears its own client down.
+    bool owns_model_dft = true;
+    // Borrowed in both modes. Recorded only so teardown can be audited: this
+    // session never frees it, and the client that created it frees it after
+    // this session is destroyed.
+    llama_context * ctx_tgt_borrowed = nullptr;
     llama_context * ctx_dft = nullptr;
     common_speculative * spec = nullptr;
     common_params_speculative spec_params;
@@ -1429,7 +1438,11 @@ static void cleanup_session(orbit_mtp_session * session) {
         session->ctx_dft = nullptr;
     }
     if (session->model_dft) {
-        llama_model_free(session->model_dft);
+        if (session->owns_model_dft) {
+            llama_model_free(session->model_dft);
+        }
+        // Cleared either way: a borrowed pointer must not outlive this
+        // session's view of it, and clearing makes repeated cleanup safe.
         session->model_dft = nullptr;
     }
 }
@@ -1596,6 +1609,7 @@ extern "C" void * orbit_mtp_session_create(
     session->rss_peak_kb = session->rss_before_kb;
 
     auto model_params = llama_model_default_params();
+    session->owns_model_dft = true;
     session->model_dft = llama_model_load_from_file(draft_model_path, model_params);
     session->rss_peak_kb = std::max(session->rss_peak_kb, rss_kb());
     if (!session->model_dft) {
@@ -1669,6 +1683,120 @@ extern "C" bool orbit_mtp_session_reset(void * handle, void * ctx_tgt_ptr) {
     session->request_boundary_prompt_tgt.clear();
 
     return true;
+}
+
+// Single-GGUF self-MTP. Deliberately a separate symbol rather than inferring
+// self-MTP from `target_path == draft_path`: the two modes differ in who owns
+// the model, and inferring ownership from an incidental string comparison is
+// how double frees are written.
+//
+// The caller passes the llama_model * it already loaded and continues to own
+// it. This session creates only the MTP context and the speculative state.
+extern "C" void * orbit_selfmtp_session_create(
+    void * model_ptr,
+    void * ctx_tgt_ptr,
+    uint32_t n_ctx,
+    uint32_t n_batch,
+    uint32_t n_ubatch,
+    int32_t n_threads,
+    int32_t n_threads_batch
+) {
+    g_last_error.clear();
+    if (!model_ptr) {
+        set_error("self-MTP requires the already-loaded model");
+        return nullptr;
+    }
+    if (!ctx_tgt_ptr) {
+        set_error("target context is required");
+        return nullptr;
+    }
+
+    std::unique_ptr<orbit_mtp_session> session(new orbit_mtp_session());
+    session->n_batch = std::max<uint32_t>(1, n_batch);
+    session->rss_before_kb = rss_kb();
+    session->rss_peak_kb = session->rss_before_kb;
+
+    // Borrowed, never loaded here and never freed here. Same for ctx_tgt.
+    session->owns_model_dft = false;
+    session->model_dft = static_cast<llama_model *>(model_ptr);
+    session->ctx_tgt_borrowed = static_cast<llama_context *>(ctx_tgt_ptr);
+
+    auto ctx_params = llama_context_default_params();
+    ctx_params.n_ctx = n_ctx;
+    ctx_params.n_batch = n_batch;
+    ctx_params.n_ubatch = n_ubatch;
+    ctx_params.n_threads = n_threads;
+    ctx_params.n_threads_batch = n_threads_batch;
+    ctx_params.n_outputs_max = 1 + ORBIT_MTP_DRAFT_N_MAX;
+    ctx_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+    ctx_params.n_rs_seq = 0;
+    ctx_params.ctx_other = static_cast<llama_context *>(ctx_tgt_ptr);
+
+    session->ctx_dft = llama_init_from_model(session->model_dft, ctx_params);
+    session->rss_peak_kb = std::max(session->rss_peak_kb, rss_kb());
+    if (!session->ctx_dft) {
+        set_error("failed to create self-MTP draft context");
+        cleanup_session(session.get());
+        return nullptr;
+    }
+
+    session->spec_params.types = common_speculative_types_from_names({"draft-mtp"});
+    session->spec_params.draft.n_max = ORBIT_MTP_DRAFT_N_MAX;
+    session->spec_params.draft.ctx_tgt = static_cast<llama_context *>(ctx_tgt_ptr);
+    session->spec_params.draft.ctx_dft = session->ctx_dft;
+
+    session->spec = common_speculative_init(session->spec_params, 1);
+    session->rss_peak_kb = std::max(session->rss_peak_kb, rss_kb());
+    if (!session->spec) {
+        set_error("failed to initialize self-MTP speculative state");
+        cleanup_session(session.get());
+        return nullptr;
+    }
+
+    session->rss_after_init_kb = rss_kb();
+    return session.release();
+}
+
+extern "C" bool orbit_mtp_session_owns_model(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->owns_model_dft : false;
+}
+
+// Destroy a self-MTP session. Frees ONLY what this session created -- the
+// speculative state and the MTP context. The model and the target context are
+// borrowed and are freed by the client that owns them, AFTER this returns.
+//
+// Idempotent: every pointer is nulled as it is released, so a second call is a
+// no-op rather than a double free.
+extern "C" void orbit_selfmtp_session_destroy(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    if (!session) {
+        return;
+    }
+    if (session->spec) {
+        common_speculative_free(session->spec);
+        session->spec = nullptr;
+    }
+    if (session->ctx_dft) {
+        llama_free(session->ctx_dft);
+        session->ctx_dft = nullptr;
+    }
+    // Borrowed. Dropped, never freed.
+    session->model_dft = nullptr;
+    session->ctx_tgt_borrowed = nullptr;
+    delete session;
+}
+
+// Diagnostics for the ownership tests: whether the borrowed handles are still
+// the ones the caller passed in, so a test can prove they were not disturbed.
+extern "C" void * orbit_mtp_session_borrowed_model(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? static_cast<void *>(session->model_dft) : nullptr;
+}
+
+extern "C" void * orbit_mtp_session_borrowed_ctx_tgt(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? static_cast<void *>(session->ctx_tgt_borrowed) : nullptr;
 }
 
 extern "C" void orbit_mtp_session_free(void * handle) {
