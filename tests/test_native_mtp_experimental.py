@@ -444,6 +444,14 @@ class NativeMtpExperimentalTests(unittest.TestCase):
     def test_complete_chat_keeps_mtp_enabled_for_final_from_tool_history(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
         client.apply_chat_template = mock.Mock(return_value="prompt")
+        # Admission is a runtime question, so this external-draft client needs a
+        # constructed session like its siblings. It previously passed on registry
+        # metadata alone, which admitted a client whose completion gate would
+        # then reject it as `persistent-mtp-uninitialized`. What this test is
+        # about -- tool history must not disable MTP -- is unchanged.
+        client._session.ctx_tgt = object()
+        client._session.mtp_enabled = True
+        client._persistent_mtp_runtime = object()
         expected = NativeTimings(
             prompt_tokens=10,
             output_tokens=2,
