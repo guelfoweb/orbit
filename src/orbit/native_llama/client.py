@@ -651,7 +651,15 @@ class NativeLlamaClient:
         ctx_params.n_ubatch = self.config.ubatch_size
         ctx_params.n_threads = self.config.threads
         ctx_params.n_threads_batch = self.config.threads_batch
-        ctx_params.n_outputs_max = 1 + 3
+        ctx_params.n_outputs_max = 1 + MTP_DRAFT_N_MAX
+        # Bounded recurrent rollback for the speculative tail. Zero unless MTP
+        # was requested on an architecture that supports it, so ordinary
+        # sessions pay nothing. This only ENABLES the primitive; the MTP
+        # lifecycle still rebuilds target KV per completion.
+        ctx_params.n_rs_seq = target_rs_budget_for_profile(
+            getattr(self, "model_profile", None),
+            mtp_requested=self.config.use_mtp_experimental,
+        )
         ctx_params.abort_callback = abort_cb
         ctx_params.abort_callback_data = None
         ctx_params.no_perf = False
@@ -4339,6 +4347,49 @@ def _trim_at_stop(content: str, stops: tuple[str, ...]) -> str:
     if first is None:
         return content
     return content[:first]
+
+
+# Longest draft the persistent MTP shim proposes per step
+# (`ORBIT_MTP_DRAFT_N_MAX` in vendor/shim/orbit_persistent_mtp.cpp). The shim
+# owns the value; this mirror exists because the target context is built here.
+MTP_DRAFT_N_MAX = 3
+
+# Architectures whose recurrent state llama.cpp can roll back partially
+# (`llm_arch_supports_rs_rollback`, llama-arch.cpp). Requesting a budget on any
+# other architecture is silently clamped to 0 by llama.cpp, so this is about not
+# paying for state we cannot use rather than about safety.
+_RS_ROLLBACK_ARCHITECTURES = frozenset({"qwen35", "qwen35moe"})
+
+
+def target_rs_budget_for_profile(profile, *, mtp_requested: bool) -> int:
+    """Recurrent-rollback snapshots the TARGET context needs, or 0.
+
+    Speculative decoding decodes `id_last` plus the draft into the target and
+    then removes whatever was rejected, via
+    `llama_memory_seq_rm(mem_tgt, 0, committed_frontier, -1)`. On a hybrid cache
+    that removal only succeeds while the distance is within `n_rs_seq`
+    (llama-memory-recurrent.cpp).
+
+    The distance is `draft_len - accepted`, never more than `MTP_DRAFT_N_MAX`.
+    `id_last` does not contribute: the shim commits it into the frontier before
+    removing anything (`committed_prompt_size = base + 1 + accepted`, then
+    `p0 = n_past`), so it is always below `p0`. The shim's own capacity check
+    agrees -- `n_rollback = draft.size() + 1 - outcome.ids.size()`, which is
+    `draft.size() - accepted` -- and so does upstream llama.cpp, whose
+    `common_params_speculative::need_n_rs_seq()` returns `draft.n_max` for MTP.
+
+    Each snapshot multiplies the recurrent buffer (`n_rows = mem_size *
+    (1 + n_rs_seq)`), so it is granted only when MTP is actually requested and
+    only on an architecture that can use it.
+    """
+    if not mtp_requested:
+        return 0
+    if profile is None or not getattr(profile, "verified", False):
+        return 0
+    architecture = str(getattr(profile, "architecture", "") or "").strip().lower()
+    if architecture not in _RS_ROLLBACK_ARCHITECTURES:
+        return 0
+    return MTP_DRAFT_N_MAX
 
 
 def _prepare_mtp_prompt(
