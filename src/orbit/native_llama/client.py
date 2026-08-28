@@ -32,14 +32,17 @@ from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
 from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_strict_append_miss, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
+from .artifact_capabilities import verified_artifact_supports
 from .model_profiles import (
     ORNITH15_PROFILE_ID,
     PROFILE_METADATA_KEYS,
     QWEN36_PROFILE_ID,
     QWEN3_CODER_PROFILE_ID,
+    SELF_MTP_CAPABILITY,
     NativeModelProfile,
     detect_native_model_profile,
     supports_low_memory_mode,
+    verified_native_model_identity,
 )
 from .model_discovery import inspect_native_model_profile
 from .mtp_completion import MtpCompletionResult
@@ -113,6 +116,7 @@ from .qwen3_coder_route_prefix import (
 from .persistent_mtp import (
     PersistentMtpSessionRuntime,
     create_persistent_mtp_session,
+    create_self_mtp_session,
     free_persistent_mtp_session,
     reset_persistent_mtp_session,
     run_persistent_mtp_completion,
@@ -794,6 +798,73 @@ class NativeLlamaClient:
             return
         self.mtp_decode_probe = run_mtp_decode_probe(llama_root=self.paths.llama_root, paths=self.paths)
 
+    def _self_mtp_eligible(self) -> bool:
+        """Is THIS EXACT artifact qualified for single-GGUF self-MTP?
+
+        Only reached when MTP was explicitly requested. Normal startup never
+        calls this, so normal startup never hashes the artifact.
+
+        Two stages, cheap first: the verified identity is consulted for whether
+        any artifact of this profile declares `self_mtp` at all, and only then
+        is the ~46 s digest of a 20 GiB file worth paying. A Gemma or
+        external-draft model therefore costs nothing to rule out.
+        """
+        profile = getattr(self, "model_profile", None)
+        if profile is None or not profile.verified:
+            return False
+        identity = verified_native_model_identity(profile.profile_id)
+        if identity is None or not identity.artifact_capabilities:
+            return False
+        return verified_artifact_supports(
+            self.paths.model, SELF_MTP_CAPABILITY, profile
+        )
+
+    def _initialize_self_mtp_session(self) -> bool:
+        """Construct the self-MTP session. True when it was actually built.
+
+        Returns False without touching session state when this artifact is not
+        qualified, so the caller can fall through to the external-draft path
+        exactly as it did before this existed.
+        """
+        try:
+            eligible = self._self_mtp_eligible()
+        except Exception as exc:
+            # A capability resolution failure is not an MTP verdict. Fail
+            # closed and say why rather than silently trying another path.
+            self._session.mtp_failed = True
+            self._session.mtp_failure_reason = f"self-mtp-capability-error: {exc}"
+            return True
+        if not eligible:
+            return False
+        if not self._session.ctx_tgt:
+            self._session.mtp_failed = True
+            self._session.mtp_failure_reason = "target-context-missing"
+            return True
+        try:
+            runtime = create_self_mtp_session(
+                llama_root=self.paths.llama_root,
+                paths=self.paths,
+                model=self._model,
+                ctx_tgt=self._session.ctx_tgt,
+                context_tokens=self.config.context_tokens,
+                batch_size=self.config.batch_size,
+                ubatch_size=self.config.ubatch_size,
+                threads=self.config.threads,
+                threads_batch=self.config.threads_batch,
+            )
+        except Exception as exc:
+            # The borrowed model and target context are untouched by a failed
+            # construction; the client still owns and frees them.
+            self._session.mtp_failed = True
+            self._session.mtp_failure_reason = str(exc)
+            return True
+        self._persistent_mtp_runtime = runtime
+        self._session.ctx_dft = runtime.ctx_dft
+        self._session.spec = runtime.spec
+        self._session.mtp_enabled = True
+        self._session.mtp_failed = False
+        return True
+
     def _initialize_persistent_mtp_session(self) -> None:
         self._free_persistent_mtp_session()
         self._session.ctx_dft = None
@@ -802,6 +873,12 @@ class NativeLlamaClient:
         self._session.mtp_failed = False
         self._session.mtp_failure_reason = None
         if not self.config.use_mtp_experimental:
+            return
+        # Self-MTP first, and only for an artifact whose exact bytes are
+        # qualified. It needs no registry `mtp` block and no profile-wide
+        # `mtp_supported`, both of which describe the external-draft
+        # architecture and would wrongly admit the legacy Ornith build.
+        if self._initialize_self_mtp_session():
             return
         profile = getattr(self, "model_profile", None)
         if profile is not None and not profile.mtp_supported:
@@ -2192,8 +2269,22 @@ class NativeLlamaClient:
         self._invalidate_committed_sequence()
         request_timing = request_timing or _RequestTiming.start()
         thinking = self._thinking_enabled(thinking)
+        # Whether MTP decoding may RUN is a property of the constructed
+        # session, not of registry metadata. `profile.mtp_supported` and
+        # `paths.mtp_available` both describe the EXTERNAL-DRAFT world -- a
+        # profile that participates in it, and a declared draft GGUF -- and are
+        # both False for a single-GGUF self-MTP artifact.
+        #
+        # Gating execution on them meant a correctly constructed self-MTP
+        # session reported `mtp_enabled=True` while every completion silently
+        # decoded normally: drafted 0, accepted 0, on the real artifact. So the
+        # metadata gates are skipped once a self-MTP session actually exists,
+        # and the runtime check below remains the single source of truth for
+        # both architectures.
+        runtime = self._persistent_mtp_runtime
+        self_mtp_session = runtime is not None and getattr(runtime, "self_mtp", False)
         profile = getattr(self, "model_profile", None)
-        if profile is not None and not profile.mtp_supported:
+        if not self_mtp_session and profile is not None and not profile.mtp_supported:
             self.mtp_fallback_reason = "model_profile_mtp_unsupported"
             self.last_mtp_completion = MtpCompletionResult(enabled=False, success=False, error=self.mtp_fallback_reason)
             return None
@@ -2204,7 +2295,10 @@ class NativeLlamaClient:
         if not self.config.use_mtp_experimental:
             self.last_mtp_completion = MtpCompletionResult(enabled=False, success=False, error=None)
             return None
-        if not self.paths.mtp_available:
+        # Same reasoning: a declared draft artifact is how an EXTERNAL-DRAFT
+        # session gets built, never a statement about whether this client has
+        # one. A self-MTP session needs no draft file at all.
+        if not self_mtp_session and not self.paths.mtp_available:
             self.mtp_fallback_reason = self.paths.fallback_reason or "draft-mtp-unavailable"
             self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
             return None
