@@ -1432,13 +1432,27 @@ class NativeLlamaClient:
             thinking=thinking,
             prompt=prompt,
         ) if self._final_prefix_experiment_eligible(final_prefix_experiment) else None
+        # Whether MTP may be requested for THIS call is a runtime question:
+        # does a usable MTP session actually exist? `profile.mtp_supported`
+        # answers a different one -- whether the profile participates in the
+        # EXTERNAL-DRAFT architecture -- and is False for a single-GGUF
+        # self-MTP artifact such as Ornith. Gating admission on it meant a
+        # correctly constructed self-MTP session was never admitted here, so
+        # every request decoded normally with drafted/accepted/draft-calls all
+        # zero while the session still reported itself enabled.
+        #
+        # The predicate below is the SAME one the completion gate uses, so
+        # admission and execution cannot disagree. It is architecture-neutral:
+        # both constructors set the runtime and the flag on success, so
+        # external-draft and self-MTP are admitted alike without being
+        # conflated. Both are required: a failed reset clears the flag while
+        # leaving the runtime referenced, and a stale flag can outlive a
+        # freed session.
         allow_mtp = (
             not tools
             and route_anchor_segments is None
-            and (
-                getattr(self, "model_profile", None) is None
-                or getattr(self, "model_profile").mtp_supported
-            )
+            and self._persistent_mtp_runtime is not None
+            and self._session.mtp_enabled
         )
         if final_prefix_segments is not None:
             allow_mtp = False
@@ -2311,7 +2325,9 @@ class NativeLlamaClient:
             self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
             return None
 
-        mtp_prompt = _prepare_mtp_prompt(prompt, thinking=thinking)
+        mtp_prompt = _prepare_mtp_prompt(
+            prompt, thinking=thinking, profile=getattr(self, "model_profile", None)
+        )
         try:
             # The persistent shim's request-boundary reuse can leave target/draft
             # state that fails the next target suffix prefill. Resetting here
@@ -4325,13 +4341,57 @@ def _trim_at_stop(content: str, stops: tuple[str, ...]) -> str:
     return content[:first]
 
 
-def _prepare_mtp_prompt(prompt: str, *, thinking: bool = False) -> str:
-    stripped = prompt.lstrip()
-    if stripped.startswith("<bos>") or "<|turn>" in prompt:
-        if thinking:
-            return prompt
-        return _strip_thinking_prompt(prompt)
-    return render_gemma4_chat([{"role": "user", "content": prompt}], thinking=thinking)
+def _prepare_mtp_prompt(
+    prompt: str, *, thinking: bool = False, profile: NativeModelProfile | None = None
+) -> str:
+    """Prepare an ALREADY-RENDERED prompt for the MTP path.
+
+    `complete_prompt` is handed a prompt that `apply_chat_template` has already
+    rendered with the profile's own renderer, so MTP must not reinterpret that
+    text as chat-message content. MTP is inference behaviour; it does not own
+    chat templating.
+
+    Which family's contract applies is decided by the verified profile, never by
+    looking for markers in the prompt. Prompt text is data: a user can type
+    "<bos>" or "<|turn>" in a message, and a profile whose template lives in the
+    GGUF produces neither. Sniffing for them sent every non-Gemma4 prompt into
+    `render_gemma4_chat`, which wrapped the whole rendered prompt as the content
+    of a fresh user turn -- so the model received a Gemma4 envelope around
+    foreign markup and generated scaffolding instead of an answer.
+
+    Only the Orbit-side Gemma4 renderer appends a thought-channel suffix that a
+    non-thinking MTP request has to drop, so that strip is gated on that
+    renderer owning the prompt. Everything else passes through untouched.
+    """
+    if getattr(profile, "uses_native_chat_bridge", False):
+        # The profile's own template already rendered this prompt. Orbit does
+        # not own it and must not re-render it.
+        return prompt
+    if not _is_gemma4_rendered(prompt):
+        # A raw, unrendered prompt -- what the low-level `complete()` API
+        # accepts. Only the Gemma4 renderer is Orbit's to apply, and reaching
+        # here means no bridge-backed profile claimed this prompt, so the
+        # long-standing Gemma4 envelope still applies. In production
+        # `model_profile` is always resolved before the MTP session is built
+        # (`_initialize_model_profile` precedes
+        # `_initialize_persistent_mtp_session` in `load`), so `None` here means
+        # an unloaded client, where this preserves prior behaviour.
+        return render_gemma4_chat([{"role": "user", "content": prompt}], thinking=thinking)
+    if thinking:
+        return prompt
+    return _strip_thinking_prompt(prompt)
+
+
+def _is_gemma4_rendered(prompt: str) -> bool:
+    """Whether this text already carries the Orbit-side Gemma4 envelope.
+
+    Used ONLY to tell a rendered Gemma4 prompt from a raw one WITHIN the Gemma4
+    contract, never to decide which family a prompt belongs to -- that comes
+    from the profile. A profile whose template lives in the GGUF returns before
+    this is consulted, so a user quoting these markers cannot redirect
+    rendering.
+    """
+    return prompt.lstrip().startswith("<bos>") or "<|turn>" in prompt
 
 
 def _canonical_greedy_sampler_hash() -> str:
