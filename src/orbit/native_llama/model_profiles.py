@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
+from types import MappingProxyType
 from typing import Mapping
 
 
@@ -136,17 +137,61 @@ _VERIFIED_TEMPLATE_HISTORY_SERIALIZATION = {
 }
 
 
+# Capabilities a specific ARTIFACT is qualified for, as opposed to what its
+# profile supports. The distinction is the whole point: two GGUFs can share a
+# profile, a model name and an architecture and still differ in what they are
+# qualified to do -- the current and legacy Ornith builds are exactly that
+# case, identical in every metadata field discovery reads.
+#
+# `self_mtp` means "this exact artifact is qualified to drive llama.cpp's
+# single-GGUF NextN self-speculative decoding". It is deliberately NOT
+# `NativeModelProfile.mtp_supported`, which gates the external-draft MTP path
+# and is a property of the profile.
+SELF_MTP_CAPABILITY = "self_mtp"
+
+# Current official Ornith 1.5 35B-A3B Q4_K_M build. Its blk.40 NextN weights
+# differ from the legacy local build; only this one is qualified.
+ORNITH15_CURRENT_ARTIFACT_SHA256 = (
+    "42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f"
+)
+
+
 @dataclass(frozen=True)
 class VerifiedNativeModelIdentity:
     profile_id: str
     model_name: str
     architecture: str
+    # sha256 -> frozenset of capability names. Keyed by content, never by path
+    # or basename, so the same bytes qualify under any filename and a renamed
+    # impostor never does. Empty by default: an artifact earns capabilities by
+    # being listed, so an unknown digest fails closed without a special case.
+    # Stored as a frozenset of (digest, capabilities) pairs rather than a
+    # mapping, because the field has to be BOTH hashable and compared.
+    #
+    # A mappingproxy delegates hashing to the dict it wraps, so keeping it here
+    # made the frozen record unhashable. Excluding it with `compare=False`
+    # restored the hash but collapsed equality: two identities differing only
+    # in which artifact they qualify became interchangeable, and a
+    # legacy-qualified record would silently overwrite a current-qualified one
+    # used as a dict key -- the very substitution this module exists to
+    # prevent, relocated from the digest lookup into record identity.
+    #
+    # A frozenset of pairs has neither problem: hashable, and it distinguishes.
+    # `artifact_capability_map()` reads it back as a mapping.
+    artifact_capabilities: frozenset[tuple[str, frozenset[str]]] = frozenset()
 
 
 VERIFIED_NATIVE_MODEL_IDENTITIES = (
     VerifiedNativeModelIdentity(GEMMA4_PROFILE_ID, GEMMA4_VERIFIED_MODEL_NAME, "gemma4"),
     VerifiedNativeModelIdentity(QWEN36_PROFILE_ID, QWEN36_VERIFIED_MODEL_NAME, "qwen35moe"),
-    VerifiedNativeModelIdentity(ORNITH15_PROFILE_ID, ORNITH15_VERIFIED_MODEL_NAME, "qwen35moe"),
+    VerifiedNativeModelIdentity(
+        ORNITH15_PROFILE_ID,
+        ORNITH15_VERIFIED_MODEL_NAME,
+        "qwen35moe",
+        frozenset(
+            {(ORNITH15_CURRENT_ARTIFACT_SHA256, frozenset({SELF_MTP_CAPABILITY}))}
+        ),
+    ),
     VerifiedNativeModelIdentity(QWEN38_PROFILE_ID, QWEN38_VERIFIED_MODEL_NAME, "qwen35"),
     VerifiedNativeModelIdentity(
         QWEN3_CODER_PROFILE_ID,
@@ -154,6 +199,13 @@ VERIFIED_NATIVE_MODEL_IDENTITIES = (
         "qwen3moe",
     ),
 )
+
+
+def artifact_capability_map(
+    identity: VerifiedNativeModelIdentity,
+) -> Mapping[str, frozenset[str]]:
+    """Read the stored pairs back as a digest -> capabilities mapping."""
+    return MappingProxyType(dict(identity.artifact_capabilities))
 
 
 def verified_native_model_identity(profile_id: str) -> VerifiedNativeModelIdentity | None:
