@@ -48,7 +48,6 @@ class SymbolRequirementTests(unittest.TestCase):
             pm._REQUIRED_SHIM_SYMBOLS,
             (
                 "orbit_mtp_session_complete",
-                "orbit_mtp_session_set_followup_suffix_tokens",
                 "orbit_mtp_session_last_first_sample_trace_json",
                 "orbit_mtp_session_request_boundary_refill_marker",
             ),
