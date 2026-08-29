@@ -210,6 +210,15 @@ struct common_speculative_impl {
 
     virtual ~common_speculative_impl() = default;
 
+    // Read-only diagnostic: describe this implementation's cross-batch carryover
+    // state, if it has one. Default reports "not applicable" so implementations
+    // without a carryover need not override. Never influences behaviour.
+    virtual bool pending_state(
+            llama_seq_id /*seq_id*/,
+            int32_t * /*pos*/, uint64_t * /*fp*/, uint64_t * /*gen*/) const {
+        return false;
+    }
+
     virtual void begin(llama_seq_id seq_id, const llama_tokens & prompt) = 0;
 
     virtual bool process(const llama_batch & batch) = 0;
@@ -485,6 +494,44 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     // call to pair with, so it's stashed here until that next call fires.
     std::vector<std::vector<float>> pending_h;   // [n_seq][n_embd]
 
+    // --- read-only diagnostic metadata for pending_h (no behavioural effect) ---
+    // pending_h alone is unobservable from outside this translation unit, so a
+    // caller cannot tell a canonical carryover from a freshly-zeroed one, nor
+    // which absolute position it was derived from. These fields record exactly
+    // that, written at the same three places pending_h itself is written. They
+    // are never read by any decision here.
+    //   pending_pos : absolute token position whose hidden row pending_h holds,
+    //                 or -1 when pending_h is the constructor's zero row.
+    //   pending_fp  : order-sensitive fingerprint of the row bytes, so two rows
+    //                 can be compared for identity without exposing the tensor.
+    //   pending_gen : increments on every pending_h write; distinguishes "same
+    //                 object, pending_h changed" from "object untouched".
+    std::vector<int32_t>  pending_pos;
+    std::vector<uint64_t> pending_fp;
+    std::vector<uint64_t> pending_gen;
+
+    // Positions of the batch slots seen by the most recent process() call, so
+    // accept() can name the absolute position of the row it selects.
+    std::vector<std::vector<int32_t>> verify_pos;
+
+    static uint64_t fingerprint_row(const float * row, int32_t n) {
+        // FNV-1a over the raw row bytes. Order-sensitive, so a shifted or
+        // reordered row does not collide with the original.
+        uint64_t h = 1469598103934665603ull;
+        const unsigned char * p = reinterpret_cast<const unsigned char *>(row);
+        for (size_t i = 0; i < (size_t) n * sizeof(float); ++i) {
+            h ^= (uint64_t) p[i];
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+
+    void note_pending(llama_seq_id seq_id, int32_t pos) {
+        pending_pos[seq_id] = pos;
+        pending_fp[seq_id] = fingerprint_row(pending_h[seq_id].data(), n_embd);
+        pending_gen[seq_id]++;
+    }
+
     std::vector<int32_t> i_batch_beg;
     std::vector<int32_t> i_batch_end;
 
@@ -557,6 +604,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt;
 
         pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
+        // -1 == "no predecessor": correct only for a batch starting at position 0.
+        pending_pos.assign(n_seq, -1);
+        pending_fp.assign(n_seq, 0ull);
+        pending_gen.assign(n_seq, 0ull);
+        verify_pos.assign(n_seq, std::vector<int32_t>());
 
         i_batch_beg.assign(n_seq, -1);
         i_batch_end.assign(n_seq, -1);
@@ -686,6 +738,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             verify_h_rows[seq_id] = n_rows;
             verify_h[seq_id].resize((size_t) n_rows * n_embd);
 
+            // Absolute position of each captured row, so accept() can name the
+            // provenance of whichever row it later selects.
+            verify_pos[seq_id].resize((size_t) n_rows);
+            for (int32_t i = 0; i < n_rows; ++i) {
+                verify_pos[seq_id][i] = batch_in.pos[i_batch_beg[seq_id] + i];
+            }
+
             for (int32_t i = 0; i < n_rows; ++i) {
                 const float * h = llama_get_embeddings_nextn_ith(ctx_tgt, i_batch_beg[seq_id] + i);
                 std::memcpy(verify_h[seq_id].data() + (size_t) i * n_embd, h, row_bytes);
@@ -693,6 +752,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             std::memcpy(pending_h[seq_id].data(),
                     verify_h[seq_id].data() + (size_t) (n_rows - 1) * n_embd, row_bytes);
+            note_pending(seq_id, verify_pos[seq_id][n_rows - 1]);
         }
 
         return true;
@@ -901,6 +961,20 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
+        note_pending(seq_id,
+                (i_h < (int32_t) verify_pos[seq_id].size()) ? verify_pos[seq_id][i_h] : -1);
+    }
+
+    bool pending_state(
+            llama_seq_id seq_id,
+            int32_t * pos, uint64_t * fp, uint64_t * gen) const override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return false;
+        }
+        if (pos) { *pos = pending_pos[seq_id]; }
+        if (fp)  { *fp  = pending_fp[seq_id];  }
+        if (gen) { *gen = pending_gen[seq_id]; }
+        return true;
     }
 
     bool need_embd() const override {
@@ -1791,6 +1865,25 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
             impl_other->accept(seq_id, n_accepted, true);
         }
     }
+}
+
+bool common_speculative_pending_state(
+        const common_speculative * spec,
+        llama_seq_id seq_id,
+        int32_t * pos,
+        uint64_t * fp,
+        uint64_t * gen) {
+    if (spec == nullptr) {
+        return false;
+    }
+    // Report the first implementation that maintains a carryover. Only the
+    // draft-MTP implementation does, so this is unambiguous in practice.
+    for (const auto & impl : spec->impls) {
+        if (impl && impl->pending_state(seq_id, pos, fp, gen)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void common_speculative_print_stats(const common_speculative * spec) {
