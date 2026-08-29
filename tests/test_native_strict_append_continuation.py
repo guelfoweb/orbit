@@ -239,10 +239,106 @@ class InvalidationCoverageTests(unittest.TestCase):
                 return stmt.lineno
         return None
 
-    def test_mtp_invalidates_as_its_first_statement(self) -> None:
-        # Must run before every early return, not inside a conditional branch.
-        body = self._body_after_docstring(self._function("_try_complete_with_mtp_experimental"))
-        self.assertTrue(self._is_invalidation(body[0]))
+    def test_mtp_publishes_or_drops_identity_on_every_exit(self) -> None:
+        """MTP no longer invalidates at entry; it decides at the exit instead.
+
+        The old contract -- invalidate as the first statement -- was correct while
+        MTP destroyed target KV on every completion. With the persistent pair the
+        target KV, draft KV and pending_h can survive, so unconditional entry
+        invalidation made `len(committed) == 0` always, and the resident path was
+        unreachable from production.
+
+        The invariant it protected is unchanged: identity must never outlive the
+        physical state it describes. Enforcement moved to the exit, where the
+        backend reports whether the pair is canonical. This asserts POSITION the
+        same way: the publication call must be reached on the success path, and
+        the helper it delegates to must invalidate on every non-canonical branch.
+        """
+        fn = self._function("_try_complete_with_mtp_experimental")
+        publishes = [
+            node for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "attr", None) == "_publish_mtp_committed_identity"
+        ]
+        self.assertTrue(publishes, "MTP must decide identity at its exit")
+
+        # Entry must NOT unconditionally invalidate any more, or the resident
+        # path becomes unreachable again.
+        body = self._body_after_docstring(fn)
+        self.assertFalse(
+            self._is_invalidation(body[0]),
+            "unconditional entry invalidation makes resident reuse unreachable",
+        )
+
+    def test_mtp_publication_helper_fails_closed(self) -> None:
+        """Every non-canonical outcome must drop identity; only a proven one publishes.
+
+        Executed rather than counted. Counting `_invalidate_committed_sequence`
+        call sites pinned a particular branch shape, so refactoring the helper
+        broke the test without changing its behaviour -- and, worse, a helper
+        that invalidated in three places but also published on a bad path would
+        still have passed. These cases drive the real helper and assert on the
+        identity it leaves behind.
+        """
+        from orbit.native_llama.mtp_completion import MtpCompletionResult
+
+        client, _ = _client([9, 9, 9], profile_id="other")
+        canonical = dict(enabled=True, success=True, error=None, pair_canonical=True)
+
+        cases = (
+            ("failed completion", dict(canonical, success=False,
+                                       resident_tokens=(1, 2, 3)), None),
+            ("non-canonical pair", dict(canonical, pair_canonical=False,
+                                        resident_tokens=(1, 2, 3)), None),
+            ("no resident tokens", dict(canonical, resident_tokens=()), None),
+            ("proven canonical", dict(canonical, resident_tokens=(1, 2, 3)),
+             [1, 2, 3]),
+        )
+        for name, kwargs, expected in cases:
+            with self.subTest(case=name):
+                client._session.committed_sequence_tokens = [9, 9, 9]
+                client._publish_mtp_committed_identity(
+                    MtpCompletionResult(**kwargs), "prompt"
+                )
+                actual = client._session.committed_sequence_tokens
+                if expected is None:
+                    self.assertFalse(
+                        actual,
+                        f"{name} must drop identity rather than leave a stale "
+                        f"or unproven sequence resident",
+                    )
+                else:
+                    self.assertEqual(actual, expected)
+
+    def test_mtp_identity_is_never_rebuilt_from_prompt_plus_generated(self) -> None:
+        """Identity must come from measured residency, not reconstruction.
+
+        `prompt + generated_tokens` is one token longer than target KV, because a
+        sampled token enters `generated` before it is decoded into the sequence.
+        Publishing that overstates residency, and an identity longer than KV is a
+        false cache hit: the next turn skips prefill for a position that was
+        never decoded. So the helper must not tokenize, and must not read
+        `generated_tokens`.
+        """
+        fn = self._function("_publish_mtp_committed_identity")
+        # Attribute and string names actually referenced by the code, so the
+        # explanatory comments naming the rejected approach do not count.
+        names = {
+            node.attr for node in ast.walk(fn) if isinstance(node, ast.Attribute)
+        } | {
+            node.value for node in ast.walk(fn)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        self.assertIn("resident_tokens", names)
+        self.assertNotIn(
+            "generated_tokens", names,
+            "publication must read resident_tokens, not generated_tokens: "
+            "prompt + generated overstates residency by one token",
+        )
+        self.assertNotIn(
+            "tokenize", names,
+            "retokenizing text cannot prove what is physically resident",
+        )
 
     def test_multimodal_invalidates_before_clearing_kv(self) -> None:
         fn = self._function("_complete_prompt_multimodal")
