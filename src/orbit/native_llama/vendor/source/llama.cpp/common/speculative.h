@@ -88,6 +88,13 @@ bool common_speculative_pending_state(
         uint64_t * fp,
         uint64_t * gen);
 
+// Discard the cross-batch hidden-state carryover for `seq_id`, restoring the
+// "no predecessor" state a freshly constructed implementation has. A caller that
+// reuses an implementation but then processes a batch based at position 0 must
+// call this: slot 0 is seeded from the carryover, and at position 0 the correct
+// seed is the zero row. Returns false when the implementation has no carryover.
+bool common_speculative_reset_pending(common_speculative * spec, llama_seq_id seq_id);
+
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }
 };

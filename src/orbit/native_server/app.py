@@ -1468,6 +1468,16 @@ def _mtp_last_completion_payload(client: NativeLlamaClient) -> dict[str, object]
         "rollback_tokens_total": completion.rollback_tokens_total,
         "checkpoint_count": completion.checkpoint_count,
         "restore_count": completion.restore_count,
+        # The two persistent-pair verdicts. They answer different questions and
+        # must never be conflated: `resident_reuse_active` is "did THIS
+        # completion reuse resident state", `pair_canonical` is "is the pair
+        # trustworthy for the NEXT one". A cold completion can end canonical,
+        # and a resident one can end poisoned. Without these, reuse could only
+        # be inferred from `cached_tokens`, which is non-zero for unrelated
+        # reasons and would read as a false positive.
+        "resident_reuse_active": completion.resident_reuse_active,
+        "pair_canonical": completion.pair_canonical,
+        "resident_token_count": len(completion.resident_tokens),
     }
 
 
