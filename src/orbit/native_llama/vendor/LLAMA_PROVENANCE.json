@@ -69,5 +69,7 @@
     "tools/mtmd/mtmd-helper.cpp",
     "vendor/cpp-httplib/LICENSE",
     "vendor/miniaudio/miniaudio.h"
-  ]
+  ],
+  "patchset_algorithm": "orbit-patchset-v2",
+  "patchset_v2_sha256": "7d470bdd8f0eb73f738b66f14f70b59f457408b464429e0b9237b85570ede3bd"
 }
