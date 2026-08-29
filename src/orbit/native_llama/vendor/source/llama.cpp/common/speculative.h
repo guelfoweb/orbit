@@ -71,6 +71,23 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec);
 
+// Read-only diagnostic describing the cross-batch hidden-state carryover the
+// speculative implementation holds for `seq_id`, if any.
+//   pos : absolute token position the carryover row was derived from, or -1 when
+//         it is the freshly-constructed zero row (i.e. "no predecessor").
+//   fp  : order-sensitive fingerprint of the row, for identity comparison
+//         without exposing tensor contents.
+//   gen : number of times the carryover has been written; distinguishes a
+//         surviving-but-updated state from an untouched one.
+// Returns false when the active implementation maintains no such state.
+// Has no effect on speculative behaviour.
+bool common_speculative_pending_state(
+        const common_speculative * spec,
+        llama_seq_id seq_id,
+        int32_t * pos,
+        uint64_t * fp,
+        uint64_t * gen);
+
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }
 };

@@ -2,7 +2,7 @@
   "format": 1,
   "upstream_commit": "379ac6673b5cd75c7b4e07d1521c50f1e093878c",
   "upstream_tag": "b9551",
-  "source_tree_sha256": "28cde4325d775b95daf396defaea6abeeaef53b9e713b89a2d7d4a3e1e19b0a4",
+  "source_tree_sha256": "e78615ff6dbe019a1a0d03d2e72f2bca90f9a5d03ccaaad5902d3e6cc5831b78",
   "patchset_sha256": "aa3bb3d637ea963320df82dd588a0a85982936c192b7629d424daba0d1604441",
   "omitted_upstream_path_count": 1509,
   "omitted_upstream_paths_sha256": "93f225c176ba65acdb282c231f5c309fff45180746e88ba69028936bff8db485",
@@ -11,6 +11,7 @@
     "common/chat-auto-parser-helpers.cpp",
     "common/chat.h",
     "common/speculative.cpp",
+    "common/speculative.h",
     "common/unicode.cpp",
     "ggml/include/ggml-cpu.h",
     "ggml/src/ggml-backend-dl.h",
@@ -71,5 +72,5 @@
     "vendor/miniaudio/miniaudio.h"
   ],
   "patchset_algorithm": "orbit-patchset-v2",
-  "patchset_v2_sha256": "7d470bdd8f0eb73f738b66f14f70b59f457408b464429e0b9237b85570ede3bd"
+  "patchset_v2_sha256": "8789a825b004ab5bc345e94dae04cc181072131dd64b5acaa2be8cc6469a0598"
 }
