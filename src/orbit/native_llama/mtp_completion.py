@@ -30,6 +30,19 @@ class MtpCompletionResult:
     draft_decode_calls: int = 0
     elapsed_ms: float | None = None
     tokens_per_second: float | None = None
+    # Snapshotted at completion time, before any reset can mutate the session.
+    # `resident_reuse_active` answers "did this completion reuse resident state";
+    # `pair_canonical` answers "is target+draft+pending_h reusable NOW". They are
+    # different questions: a cold completion can end canonical, and a resident
+    # completion can end poisoned, so the runtime must not substitute one for the
+    # other. `generated_tokens` carries the ids actually decoded, which is what a
+    # token-level committed identity must be built from.
+    resident_reuse_active: bool = False
+    pair_canonical: bool = False
+    generated_tokens: tuple[int, ...] = ()
+    # What the backend measured as physically resident in target KV. Committed
+    # identity is published from this, never from prompt + generated_tokens.
+    resident_tokens: tuple[int, ...] = ()
     full_accept_steps: int = 0
     replay_steps: int = 0
     partial_accept_steps: int = 0

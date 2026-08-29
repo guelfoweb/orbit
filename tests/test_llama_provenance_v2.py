@@ -34,6 +34,29 @@ def _available() -> bool:
     return (UPSTREAM / ".git").exists() and VENDORED.is_dir()
 
 
+class _VendoredCopy:
+    """A disposable copy of the vendored tree for mutating tests.
+
+    Mutating the real tree makes these tests order-dependent -- a sibling test
+    reading provenance during the window sees a dirty tree -- and a SIGKILL
+    leaves the repository dirty, which happened twice during development.
+    `addCleanup` covers exceptions, not kills. Copying is cheap (42 MB of source,
+    no model data) and removes both failure modes.
+    """
+
+    def __init__(self, case: unittest.TestCase) -> None:
+        self._dir = tempfile.mkdtemp(prefix="orbit_vendored_")
+        case.addCleanup(shutil.rmtree, self._dir, True)
+        self.root = Path(self._dir) / "llama.cpp"
+        shutil.copytree(VENDORED, self.root, symlinks=True)
+        self.manifest = Path(self._dir) / "LLAMA_PROVENANCE.json"
+        shutil.copy2(MANIFEST, self.manifest)
+
+    def argv(self, command: str) -> list[str]:
+        return [command, "--vendored-root", str(self.root),
+                "--manifest", str(self.manifest)]
+
+
 @unittest.skipUnless(_available(), "upstream llama.cpp checkout not present")
 class PatchsetV2Tests(unittest.TestCase):
     def _entries(self):
@@ -83,41 +106,41 @@ class PatchsetV2Tests(unittest.TestCase):
         A leftover probe here poisons every later run, including the baseline of
         a mutation campaign.
         """
-        entries = self._entries()
-        target = VENDORED / entries[0]["path"]
+        copy = _VendoredCopy(self)
+        entries = pv2.build_patchset(UPSTREAM, copy.root, COMMIT)
+        target = copy.root / entries[0]["path"]
         original = target.read_bytes()
         before = pv2.patchset_v2_sha256(entries)
-        self.addCleanup(target.write_bytes, original)
         target.write_bytes(original + b"\n// provenance v2 probe\n")
-        after = pv2.patchset_v2_sha256(self._entries())
+        after = pv2.patchset_v2_sha256(pv2.build_patchset(UPSTREAM, copy.root, COMMIT))
         self.assertNotEqual(after, before)
         target.write_bytes(original)
-        self.assertEqual(pv2.patchset_v2_sha256(self._entries()), before)
+        self.assertEqual(
+            pv2.patchset_v2_sha256(pv2.build_patchset(UPSTREAM, copy.root, COMMIT)),
+            before)
 
     def test_a_file_restored_to_upstream_leaves_the_patchset(self) -> None:
         """Input set is derived from divergence, not from the declared list."""
-        entries = self._entries()
+        copy = _VendoredCopy(self)
+        entries = pv2.build_patchset(UPSTREAM, copy.root, COMMIT)
         rel = entries[0]["path"]
-        target = VENDORED / rel
+        target = copy.root / rel
         original = target.read_bytes()
         upstream = pv2._upstream_blob(UPSTREAM, COMMIT, rel)
         self.assertIsNotNone(upstream)
-        self.addCleanup(target.write_bytes, original)
         target.write_bytes(upstream)
-        paths = [e["path"] for e in self._entries()]
-        self.assertNotIn(rel, paths)
+        self.assertNotIn(rel, [e["path"] for e in pv2.build_patchset(UPSTREAM, copy.root, COMMIT)])
         target.write_bytes(original)
-        self.assertIn(rel, [e["path"] for e in self._entries()])
+        self.assertIn(rel, [e["path"] for e in pv2.build_patchset(UPSTREAM, copy.root, COMMIT)])
 
     def test_orbit_only_file_is_represented_with_null_upstream(self) -> None:
-        added = VENDORED / "orbit_provenance_v2_probe.txt"
-        self.assertFalse(added.exists())
-        self.addCleanup(added.unlink, True)
+        copy = _VendoredCopy(self)
+        added = copy.root / "orbit_provenance_v2_probe.txt"
         added.write_bytes(b"orbit-only probe\n")
-        entry = next(e for e in self._entries() if e["path"] == added.name)
+        entry = next(e for e in pv2.build_patchset(UPSTREAM, copy.root, COMMIT)
+                     if e["path"] == added.name)
         self.assertIsNone(entry["upstream_sha256"])
         self.assertEqual(len(entry["vendored_sha256"]), 64)
-        added.unlink()
 
     def test_binary_content_is_hashed_byte_for_byte(self) -> None:
         """No newline normalization: CRLF and LF must differ."""
@@ -180,19 +203,16 @@ class PatchsetV2Tests(unittest.TestCase):
 
         This drives the real reader over a genuine CRLF file.
         """
-        probe = VENDORED / "orbit_v2_crlf_probe.txt"
-        self.assertFalse(probe.exists())
-        self.addCleanup(probe.unlink, True)
+        copy = _VendoredCopy(self)
+        probe = copy.root / "orbit_v2_crlf_probe.txt"
 
         probe.write_bytes(b"line one\r\nline two\r\n")
-        crlf = next(e for e in pv2.build_patchset(UPSTREAM, VENDORED, COMMIT)
+        crlf = next(e for e in pv2.build_patchset(UPSTREAM, copy.root, COMMIT)
                     if e["path"] == probe.name)["vendored_sha256"]
 
         probe.write_bytes(b"line one\nline two\n")
-        lf = next(e for e in pv2.build_patchset(UPSTREAM, VENDORED, COMMIT)
+        lf = next(e for e in pv2.build_patchset(UPSTREAM, copy.root, COMMIT)
                   if e["path"] == probe.name)["vendored_sha256"]
-
-        probe.unlink()
         self.assertNotEqual(crlf, lf, "CRLF and LF content must hash differently")
 
     def test_excluded_components_match_source_tree_filter(self) -> None:
@@ -306,25 +326,30 @@ class PatchsetV2EnforcementTests(unittest.TestCase):
 
     def test_vendored_drift_fails_the_gate_and_restores(self) -> None:
         """The decisive property: edit a patched file, do NOT regenerate."""
-        entries = pv2.build_patchset(UPSTREAM, VENDORED, COMMIT)
-        target = VENDORED / entries[0]["path"]
+        copy = _VendoredCopy(self)
+        self.assertEqual(pv2.main(copy.argv("generate")), 0)
+        self.assertEqual(pv2.main(copy.argv("check")), 0)
+
+        entries = pv2.build_patchset(UPSTREAM, copy.root, COMMIT)
+        target = copy.root / entries[0]["path"]
         original = target.read_bytes()
-        self.addCleanup(target.write_bytes, original)
 
         target.write_bytes(original + b"\n// undeclared drift\n")
-        self.assertEqual(self._check(), 1, "vendored drift must fail the gate")
+        self.assertEqual(pv2.main(copy.argv("check")), 1,
+                         "vendored drift must fail the gate")
 
         target.write_bytes(original)
-        self.assertEqual(self._check(), 0, "restoring the file must clear the gate")
+        self.assertEqual(pv2.main(copy.argv("check")), 0,
+                         "restoring the file must clear the gate")
 
     def test_a_new_undeclared_patched_file_fails_the_gate(self) -> None:
-        added = VENDORED / "orbit_v2_enforcement_probe.txt"
-        self.assertFalse(added.exists())
-        self.addCleanup(added.unlink, True)
+        copy = _VendoredCopy(self)
+        self.assertEqual(pv2.main(copy.argv("generate")), 0)
+        added = copy.root / "orbit_v2_enforcement_probe.txt"
         added.write_bytes(b"undeclared orbit-only file\n")
-        self.assertEqual(self._check(), 1)
+        self.assertEqual(pv2.main(copy.argv("check")), 1)
         added.unlink()
-        self.assertEqual(self._check(), 0)
+        self.assertEqual(pv2.main(copy.argv("check")), 0)
 
     def test_tampered_v2_hash_fails_the_gate(self) -> None:
         with tempfile.TemporaryDirectory() as td:

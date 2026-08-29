@@ -2285,10 +2285,19 @@ class NativeLlamaClient:
         on_token=None,
         request_timing: _RequestTiming | None = None,
     ) -> NativeTimings | None:
-        # MTP rewrites the shared target KV (llama_memory_clear / seq_rm in the
-        # persistent MTP shim) and returns before the standard commit point, so
-        # the recorded identity can no longer describe resident memory.
-        self._invalidate_committed_sequence()
+        # Historically this invalidated committed identity unconditionally,
+        # because the shim destroyed target KV on every completion and a recorded
+        # identity could not describe resident memory. With the persistent pair
+        # that premise no longer always holds: on a trusted resident path the
+        # target KV, the draft KV and pending_h all survive.
+        #
+        # Identity is therefore kept long enough to test the strict prefix, and
+        # the decision to publish or drop it is deferred to the exit, where the
+        # backend reports whether the pair is physically canonical. Publication
+        # is driven by proven physical state, never by the fact that MTP ran.
+        committed_at_entry = list(
+            getattr(self._session, "committed_sequence_tokens", None) or []
+        )
         request_timing = request_timing or _RequestTiming.start()
         thinking = self._thinking_enabled(thinking)
         # Whether MTP decoding may RUN is a property of the constructed
@@ -2336,23 +2345,43 @@ class NativeLlamaClient:
         mtp_prompt = _prepare_mtp_prompt(
             prompt, thinking=thinking, profile=getattr(self, "model_profile", None)
         )
-        try:
-            # The persistent shim's request-boundary reuse can leave target/draft
-            # state that fails the next target suffix prefill. Resetting here
-            # keeps MTP usable without changing prompt, route, or tool behavior.
-            runtime = reset_persistent_mtp_session(
-                llama_root=self.paths.llama_root,
-                paths=self.paths,
-                runtime=self._persistent_mtp_runtime,
-                ctx_tgt=self._session.ctx_tgt,
-            )
-        except Exception as exc:
-            self.mtp_fallback_reason = str(exc) or "persistent-mtp-reset-failed"
-            self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = self.mtp_fallback_reason
-            self._session.mtp_enabled = False
-            return None
+        # Semantic eligibility is decided here, in the runtime, from the token
+        # identity the runtime owns. The backend re-proves physical compatibility
+        # independently and may still refuse; neither side trusts the other's
+        # word. Strict equality only -- no longest-common-prefix, no retokenized
+        # approximation -- and a STRICT PROPER prefix, so a fresh target decode
+        # always precedes sampling (Defect A).
+        resident_prefix_len = self._resident_prefix_len_for_mtp(
+            mtp_prompt, committed_at_entry
+        )
+        # The reset frees the speculative implementation (destroying pending_h),
+        # clears draft KV and poisons pair trust. Running it unconditionally would
+        # destroy, on every turn, exactly the pair a resident claim depends on --
+        # making resident reuse structurally unreachable no matter what the
+        # backend does. So it is skipped when this turn carries a claim.
+        #
+        # This does not weaken anything: skipping the reset only PROPOSES reuse.
+        # The backend still re-proves target frontier, draft frontier, pending_h
+        # alignment and context identity before admitting the claim, and refuses
+        # to a full replay if any term fails. A claim of 0 keeps the old
+        # behaviour exactly.
+        if resident_prefix_len <= 0:
+            try:
+                runtime = reset_persistent_mtp_session(
+                    llama_root=self.paths.llama_root,
+                    paths=self.paths,
+                    runtime=self._persistent_mtp_runtime,
+                    ctx_tgt=self._session.ctx_tgt,
+                )
+            except Exception as exc:
+                self.mtp_fallback_reason = str(exc) or "persistent-mtp-reset-failed"
+                self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
+                self._session.mtp_failed = True
+                self._session.mtp_failure_reason = self.mtp_fallback_reason
+                self._session.mtp_enabled = False
+                return None
+        else:
+            runtime = self._persistent_mtp_runtime
         self._persistent_mtp_runtime = runtime
         self._session.ctx_dft = runtime.ctx_dft
         self._session.spec = runtime.spec
@@ -2374,6 +2403,7 @@ class NativeLlamaClient:
             ctx_tgt=self._session.ctx_tgt,
             prompt=mtp_prompt,
             max_tokens=generation_cap,
+            resident_prefix_len=resident_prefix_len,
             on_token=collect_mtp_token if on_token is not None else None,
             on_progress=lambda phase, current, total: self._handle_mtp_progress(
                 phase,
@@ -2386,6 +2416,12 @@ class NativeLlamaClient:
         if result.success and result.content and not thinking:
             result = replace(result, content=_strip_control_channels(result.content))
         self.last_mtp_completion = result
+        # Publication is keyed to the backend's canonical-pair verdict, captured
+        # at completion time. A completion that reused resident state but ended
+        # poisoned must NOT publish, and a cold completion that ended canonical
+        # MUST publish -- otherwise resident reuse could never bootstrap. The two
+        # facts are distinct and are never substituted for one another.
+        self._publish_mtp_committed_identity(result, mtp_prompt)
         if not result.success:
             if self.cancel_event.is_set():
                 self.mtp_fallback_reason = "cancelled"
@@ -4221,6 +4257,75 @@ class NativeLlamaClient:
         a false cache hit, which is a correctness bug rather than a slow path.
         """
         self._session.committed_sequence_tokens.clear()
+
+    def _resident_prefix_len_for_mtp(
+        self, mtp_prompt: str, committed: list[int]
+    ) -> int:
+        """Length of the committed prefix this completion may reuse, or 0.
+
+        The rule is the same strict append-only identity `_prepare_memory_for_prompt`
+        already enforces for the non-MTP path: the resident sequence must be a
+        token-exact PROPER prefix of this prompt. Proper matters -- a claim equal
+        to the whole prompt would leave no suffix to decode, so sampling would read
+        logits from the previous completion (Defect A).
+
+        Returning 0 is always safe: the backend then rebuilds cold.
+        """
+        if not committed:
+            return 0
+        if self._qwen3_coder_native_protocol():
+            return 0
+        try:
+            prompt_tokens = self.tokenize(mtp_prompt)
+        except Exception:
+            return 0
+        n = len(committed)
+        if not (0 < n < len(prompt_tokens)):
+            return 0
+        if prompt_tokens[:n] != committed:
+            # Diagnostic only, opt-in via ORBIT_KV_DIAG, and never consulted by
+            # any decision -- the refusal below is unconditional. Emitted because
+            # a divergence here and "no identity yet" both surface as a claim of
+            # 0, and only this distinguishes them when attributing a missed reuse.
+            emit_strict_append_miss(
+                committed=list(committed),
+                prompt=list(prompt_tokens),
+                session_id=getattr(self._session, "session_id", None),
+                profile_id=getattr(
+                    getattr(self, "model_profile", None), "profile_id", None
+                ),
+                lifecycle="mtp-resident-claim",
+            )
+            return 0
+        return n
+
+    def _publish_mtp_committed_identity(self, result, mtp_prompt: str) -> None:
+        """Record what the backend proved is resident, or drop the identity.
+
+        The verdict comes from the backend, captured at completion time. Identity
+        must never outlive the physical pair it describes, so anything short of a
+        canonical success drops it and the next turn rebuilds cold.
+        """
+        if not (
+            getattr(result, "success", False)
+            and getattr(result, "pair_canonical", False)
+        ):
+            self._invalidate_committed_sequence()
+            return
+        # The identity is the backend's own record of what is physically
+        # resident, not a reconstruction. `prompt + generated_tokens` would be
+        # one token too long: a sampled token enters `generated` at sample time
+        # but only enters the resident sequence on the following iteration. An
+        # identity longer than KV is a false cache hit -- the next turn would
+        # skip prefill for a position that was never decoded and land every
+        # subsequent token one position early, which corrupts output silently
+        # rather than merely losing reuse. Retokenizing the text is likewise not
+        # equivalent. So: publish what the backend measured, or publish nothing.
+        resident = tuple(getattr(result, "resident_tokens", ()) or ())
+        if not resident:
+            self._invalidate_committed_sequence()
+            return
+        self._session.committed_sequence_tokens = list(resident)
 
     def _commit_sequence(self, prompt_tokens, generated_tokens) -> None:
         """Record the exact sequence now resident in KV."""

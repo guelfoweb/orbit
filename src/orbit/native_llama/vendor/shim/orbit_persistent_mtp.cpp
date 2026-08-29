@@ -1,4 +1,9 @@
 #include "llama.h"
+// `llama_get_ctx_other` reports whether a draft context physically shares its
+// memory with the target. It lives in the internal extension header rather than
+// the public one; build_support already puts <llama_root>/src on the include
+// path, so this needs no build change.
+#include "llama-ext.h"
 #include "common/speculative.h"
 #include "common/sampling.h"
 
@@ -65,6 +70,197 @@ static bool boundary_split_enabled() {
         return true;
     }
     return std::strcmp(value, "0") != 0;
+}
+
+// Target-side event trace, for qualifying persistent target-KV behaviour.
+// Deliberately env-gated and stderr-only, exactly like the emitters above: it
+// exports no symbol, so the base and self-MTP ABI contracts are untouched and a
+// packaged shim stays interchangeable. Every call site is additionally guarded
+// by `target_trace_enabled()` so a disabled trace costs one boolean test and
+// never builds a payload.
+//
+// Only mem_tgt operations are recorded. The legacy debug counters cannot serve
+// this purpose: they mix target with draft, count decode batches rather than
+// tokens, and ignore seq_rm results.
+static bool target_trace_enabled() {
+    const char * value = std::getenv("ORBIT_MTP_TARGET_TRACE");
+    return value && value[0] && std::strcmp(value, "0") != 0;
+}
+
+static void emit_orbit_target_trace(const std::string & payload) {
+    std::fprintf(stderr, "ORBIT_MTP_TARGET %s\n", payload.c_str());
+}
+
+static void trace_target_clear(const char * site) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "TARGET_CLEAR site=" << (site ? site : "?");
+    emit_orbit_target_trace(out.str());
+}
+
+static void trace_target_prefill(const char * site, int32_t first_pos, size_t n_tokens) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "TARGET_PREFILL site=" << (site ? site : "?")
+        << " first_pos=" << first_pos
+        << " n_tokens=" << n_tokens;
+    emit_orbit_target_trace(out.str());
+}
+
+static void trace_target_seq_rm(const char * site, int32_t p0, int32_t p1, bool result) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "TARGET_SEQ_RM site=" << (site ? site : "?")
+        << " p0=" << p0 << " p1=" << p1
+        << " result=" << (result ? "true" : "false");
+    emit_orbit_target_trace(out.str());
+}
+
+static void trace_target_frontier(const char * label, llama_memory_t mem) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "TARGET_FRONTIER label=" << (label ? label : "?")
+        << " pos_max=" << (mem ? (long long) llama_memory_seq_pos_max(mem, 0) : -1);
+    emit_orbit_target_trace(out.str());
+}
+
+// Phase-B draft observability. Deliberately separate helpers rather than
+// parameterising the target ones above: those bytes are frozen evidence, and a
+// recorder that can mislabel a draft event as a target event is worse than no
+// recorder. Same env gate, same stderr sink, same "no payload when disabled"
+// discipline. The wire prefix is ORBIT_MTP_OBSDRAFT, chosen so it is neither a
+// prefix nor an extension of any existing ORBIT_MTP_* stream (DRAFT, DFT,
+// TARGET, FRONTIER, VALIDATE). A prefix-extension such as ORBIT_MTP_DRAFTOBS
+// would let `startswith("ORBIT_MTP_DRAFT")` swallow these records into that
+// stream's JSON parser and silently lose them from a run that looked fine.
+//
+// The speculative implementation owns `pending_h`, the predecessor hidden-state
+// row that seeds every proposal. Its CONTENT is now directly observable through
+// `common_speculative_pending_state`, so SPEC_STATE carries both the impl's
+// lifetime (epoch/pointer) and the row's provenance, fingerprint and write
+// count. Destroying the impl still re-zeroes `pending_h` by construction, but
+// that no longer has to be deduced -- the witness reports it.
+static void emit_orbit_draftobs_trace(const std::string & payload) {
+    std::fprintf(stderr, "ORBIT_MTP_OBSDRAFT %s\n", payload.c_str());
+}
+
+static void trace_draft_frontier(const char * label, llama_memory_t mem) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "DRAFT_FRONTIER label=" << (label ? label : "?")
+        << " pos_max=" << (mem ? (long long) llama_memory_seq_pos_max(mem, 0) : -1);
+    emit_orbit_draftobs_trace(out.str());
+}
+
+static void trace_resident_admission(
+        int32_t claim,
+        bool admitted,
+        bool pair_trusted,
+        bool identity_ok,
+        int32_t pending_pos,
+        unsigned long long pending_gen) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "RESIDENT_ADMISSION claim=" << claim
+        << " admitted=" << (admitted ? "true" : "false")
+        << " pair_trusted=" << (pair_trusted ? "true" : "false")
+        << " identity_ok=" << (identity_ok ? "true" : "false")
+        << " pending_pos=" << pending_pos
+        << " pending_gen=" << pending_gen;
+    emit_orbit_draftobs_trace(out.str());
+}
+
+static void trace_pair_trust(
+        const char * verdict,
+        int32_t frontier,
+        bool target_ok,
+        bool draft_ok,
+        bool pending_aligned,
+        bool identity_ok) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "PAIR_TRUST verdict=" << (verdict ? verdict : "?")
+        << " frontier=" << frontier
+        << " target_ok=" << (target_ok ? "true" : "false")
+        << " draft_ok=" << (draft_ok ? "true" : "false")
+        << " pending_aligned=" << (pending_aligned ? "true" : "false")
+        << " identity_ok=" << (identity_ok ? "true" : "false");
+    emit_orbit_draftobs_trace(out.str());
+}
+
+static void trace_pending_discarded(const char * site) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "PENDING_DISCARDED site=" << (site ? site : "?");
+    emit_orbit_draftobs_trace(out.str());
+}
+
+static void trace_request_reset_mode(const char * mode) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "REQUEST_RESET_MODE mode=" << (mode ? mode : "?");
+    emit_orbit_draftobs_trace(out.str());
+}
+
+static void trace_draft_clear(const char * site) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "DRAFT_CLEAR site=" << (site ? site : "?");
+    emit_orbit_draftobs_trace(out.str());
+}
+
+static void trace_draft_process(const char * site, int32_t first_pos, size_t n_tokens) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "DRAFT_PROCESS site=" << (site ? site : "?")
+        << " first_pos=" << first_pos
+        << " n_tokens=" << n_tokens;
+    emit_orbit_draftobs_trace(out.str());
+}
+
+static void trace_draft_seq_rm(const char * site, int32_t p0, int32_t p1, bool result) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "DRAFT_SEQ_RM site=" << (site ? site : "?")
+        << " p0=" << p0 << " p1=" << p1
+        << " result=" << (result ? "true" : "false");
+    emit_orbit_draftobs_trace(out.str());
+}
+
+// `epoch` is authoritative: it counts speculative-implementation constructions
+// performed by this shim, so a preserved impl keeps its epoch and a recreated one
+// increments. `spec` is corroborating only -- an allocator may hand back the same
+// address, so an unchanged pointer proves nothing on its own. `ctx_dft` is a
+// different object from the impl and is NOT freed by reset; recording it shows
+// which half of the pair changed.
+static void trace_spec_state(
+        const char * label,
+        unsigned long long epoch,
+        const void * spec,
+        const void * ctx_dft) {
+    if (!target_trace_enabled()) { return; }
+    std::ostringstream out;
+    out << "SPEC_STATE label=" << (label ? label : "?")
+        << " epoch=" << epoch
+        << " spec=" << spec
+        << " ctx_dft=" << ctx_dft;
+    // The epoch is a LIFETIME witness only. `pending_h` is the row that seeds
+    // every draft proposal, and its CONTENT state is what decides whether a
+    // following suffix has the predecessor it needs; an unchanged epoch says the
+    // object survived, never that the row is aligned. These three come from the
+    // read-only diagnostic accessor and are recorded here so a trace can answer
+    // that question directly.
+    int32_t pend_pos = -1;
+    uint64_t pend_fp = 0;
+    uint64_t pend_gen = 0;
+    const bool pend_ok = spec != nullptr && common_speculative_pending_state(
+        static_cast<const common_speculative *>(spec), 0,
+        &pend_pos, &pend_fp, &pend_gen);
+    out << " pending_ok=" << (pend_ok ? "true" : "false")
+        << " pending_pos=" << pend_pos
+        << " pending_fp=" << pend_fp
+        << " pending_gen=" << pend_gen;
+    emit_orbit_draftobs_trace(out.str());
 }
 
 static bool draft_trace_enabled() {
@@ -194,11 +390,66 @@ struct orbit_mtp_session {
     common_params_speculative spec_params;
     common_prompt_checkpoint request_boundary_ckpt;
     std::vector<llama_token> request_boundary_prompt_tgt;
+    // A resident-prefix claim supplied by the runtime for ONE completion. The
+    // runtime has already proven token identity against its committed
+    // sequence; this side only ever checks that physical target memory agrees.
+    // Consumed (zeroed) at the start of each completion so a stale claim can
+    // never leak into a later request.
+    int32_t pending_resident_prefix_len = 0;
+    // The target context the speculative implementation was CONSTRUCTED with.
+    // `common_speculative_impl` copies ctx_tgt into its params and derives
+    // is_mem_shared from that exact pair, so a preserved implementation keeps
+    // whatever target it was built against. Soft reuse must therefore prove the
+    // caller is still presenting the same context; production creates ctx_tgt
+    // once per model load, but that is caller behaviour, not an invariant of
+    // this function, and relying on caller ordering is how D3b-R defects were
+    // written.
+    llama_context * spec_pinned_ctx_tgt = nullptr;
+    // One trust bit for the WHOLE pair: target KV, draft KV and pending_h. The
+    // halves advance in lockstep and are only ever consumed together, so a
+    // half-trusted state is not reachable and would only be a way to salvage one
+    // side of a mismatched pair. Any uncertain mutation on either half, or an
+    // identity change, poisons the pair until a hard rebuild re-proves it.
+    bool persistent_pair_untrusted = true;
+    // Diagnostic only: which reset path the last completion entry took.
+    bool last_request_reset_was_soft = false;
+    // Counts speculative-implementation constructions performed by this shim.
+    // Diagnostic only: never read by any decision, only reported by the draft
+    // recorder so a trace can distinguish a preserved impl (epoch unchanged)
+    // from a destroyed-and-recreated one (epoch incremented). The object holding
+    // `pending_h` is not otherwise observable from here.
+    unsigned long long spec_epoch = 0;
+    // Whether the last completion actually reused a resident prefix. Set from
+    // the same predicate that drives the replay decision, so it cannot report
+    // reuse that did not happen.
+    bool last_resident_reuse_active = false;
+    // Set when a target seq_rm was refused, so the resident prefix cannot be
+    // proven canonical. A refused removal leaves rejected speculative tokens
+    // resident above the committed frontier; a later completion claiming
+    // frontier+1 would then "match" a poisoned frontier. Correct target state
+    // is mandatory, cache reuse is not.
+    bool last_target_untrusted = false;
     long rss_before_kb = -1;
     long rss_after_init_kb = -1;
     long rss_peak_kb = -1;
     std::vector<llama_token> cached_prompt_tokens;
     std::string last_content;
+    // The exact token ids this completion decoded into the target, in order.
+    // The runtime needs these to publish a token-level committed identity for
+    // the next turn; retokenizing `last_content` is not equivalent, because a
+    // round trip through text is not guaranteed to reproduce the ids that were
+    // actually made resident, and an identity that misdescribes KV is a false
+    // cache hit rather than a slow path.
+    std::vector<llama_token> last_generated_tokens;
+    // The token sequence physically resident in the target KV at the end of the
+    // last completion. This is NOT `prompt + last_generated_tokens`: a sampled
+    // token enters `generated` at sample time but only enters `prompt_tgt` on
+    // the following iteration, so the two differ by the final token. A runtime
+    // identity built from `generated` would claim one more resident token than
+    // exists, and a claim that overstates KV is a false cache hit -- the next
+    // prompt would be decoded one position early. Publishing the loop's own
+    // `prompt_tgt` keeps identity physically derived rather than reconstructed.
+    std::vector<llama_token> last_resident_tokens;
     int last_output_tokens = 0;
     int last_draft_tokens_total = 0;
     int last_accepted_tokens_total = 0;
@@ -1137,6 +1388,11 @@ static orbit_step_outcome resolve_validate_accept_restore(
     }
     session->last_target_decode_calls++;
     if (spec) {
+        // The per-step draft advance. This, not the prefill, is what moves the
+        // draft frontier during generation and updates `pending_h` on every
+        // step; leaving it untraced would make the exit frontier unexplainable
+        // from the event stream. Emitted before the timing bracket opens.
+        trace_draft_process("validate", validate_pos0, validate_tokens.size());
         const auto phase_start = std::chrono::steady_clock::now();
         const bool ok = common_speculative_process(spec, validate);
         phase_add(session->phase_speculative_process, phase_start);
@@ -1223,11 +1479,19 @@ static orbit_step_outcome resolve_validate_accept_restore(
             n_past = (int32_t) prompt_tgt.size();
             {
                 const auto phase_start = std::chrono::steady_clock::now();
-                llama_memory_seq_rm(mem_tgt, 0, n_past, -1);
-                llama_memory_seq_rm(mem_dft, 0, n_past, -1);
+                const bool tgt_rm_ok = llama_memory_seq_rm(mem_tgt, 0, n_past, -1);
+                trace_target_seq_rm("live_partial", n_past, -1, tgt_rm_ok);
+                if (!tgt_rm_ok) {
+                    session->last_target_untrusted = true;
+                }
+                const bool dft_rm_ok = llama_memory_seq_rm(mem_dft, 0, n_past, -1);
                 phase_add(session->phase_seq_rm, phase_start);
+                trace_draft_seq_rm("live_partial", n_past, -1, dft_rm_ok);
             }
             session->debug_seq_rm_count += 2;
+            // `live_ok` re-derives the frontier physically, so a refused removal
+            // already falls through to replay. The explicit result check above
+            // makes that intent visible rather than incidental.
             const bool live_ok =
                 prompt_tgt.size() == (size_t) n_past &&
                 llama_memory_seq_pos_max(mem_tgt, 0) == n_past - 1 &&
@@ -1269,7 +1533,14 @@ static orbit_step_outcome resolve_validate_accept_restore(
             ckpt.load_tgt(ctx_tgt, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
             {
                 const auto phase_start = std::chrono::steady_clock::now();
-                llama_memory_seq_rm(mem_tgt, 0, ckpt.pos_max + 1, -1);
+                const bool ckpt_rm_ok = llama_memory_seq_rm(mem_tgt, 0, ckpt.pos_max + 1, -1);
+                trace_target_seq_rm("ckpt_restore", ckpt.pos_max + 1, -1, ckpt_rm_ok);
+                if (!ckpt_rm_ok) {
+                    // The restore did not land: tokens remain above the
+                    // checkpoint. The caller replays from here, but the target
+                    // must not be treated as canonical in the meantime.
+                    session->last_target_untrusted = true;
+                }
                 phase_add(session->phase_seq_rm, phase_start);
             }
             session->debug_seq_rm_count++;
@@ -1297,8 +1568,11 @@ static orbit_step_outcome resolve_validate_accept_restore(
             {
                 const auto phase_start_seq_rm = std::chrono::steady_clock::now();
                 const int32_t before_max = llama_memory_seq_pos_max(mem_dft, 0);
-                llama_memory_seq_rm(mem_dft, 0, ckpt.pos_max + 1, -1);
+                const bool ckpt_dft_rm_ok =
+                    llama_memory_seq_rm(mem_dft, 0, ckpt.pos_max + 1, -1);
                 phase_add(session->phase_seq_rm, phase_start_seq_rm);
+                trace_draft_seq_rm(
+                    "ckpt_restore", ckpt.pos_max + 1, -1, ckpt_dft_rm_ok);
                 if (draft_trace_enabled()) {
                     std::ostringstream out;
                     out
@@ -1320,6 +1594,7 @@ static orbit_step_outcome resolve_validate_accept_restore(
             }
             session->debug_seq_rm_count++;
             phase_add(session->phase_ctx_dft_restore, phase_start);
+            trace_draft_frontier("ckpt_load_dft", llama_get_memory(ctx_dft));
         }
 
         if (debug_partial && debug_trace_step) {
@@ -1447,6 +1722,57 @@ static void cleanup_session(orbit_mtp_session * session) {
     }
 }
 
+// Whether the persistent pair may be reused without rebuilding it. Every term is
+// physical or identity-based: nothing here trusts the caller's intent.
+//   - the pair must not be poisoned by an earlier uncertain mutation
+//   - the speculative implementation must exist and still belong to THIS target
+//   - target and draft must agree on the same frontier F
+//   - pending_h must hold the predecessor for a suffix beginning at F+1, which is
+//     position F; frontier agreement alone is not sufficient, because a draft can
+//     be frontier-correct and content-wrong (proved by the D3b-R2 review)
+static bool persistent_pair_is_reusable(
+    orbit_mtp_session * session,
+    llama_context * ctx_tgt,
+    llama_memory_t mem_tgt,
+    llama_memory_t mem_dft
+) {
+    if (!session || !ctx_tgt || !mem_tgt || !mem_dft) { return false; }
+    if (session->persistent_pair_untrusted) { return false; }
+    if (!session->spec) { return false; }
+    if (session->spec_pinned_ctx_tgt != ctx_tgt) { return false; }
+
+    const int32_t tgt_max = llama_memory_seq_pos_max(mem_tgt, 0);
+    const int32_t dft_max = llama_memory_seq_pos_max(mem_dft, 0);
+    if (tgt_max < 0 || tgt_max != dft_max) { return false; }
+
+    int32_t pend_pos = -1;
+    uint64_t pend_fp = 0;
+    uint64_t pend_gen = 0;
+    if (!common_speculative_pending_state(session->spec, 0, &pend_pos, &pend_fp, &pend_gen)) {
+        return false;
+    }
+    // The predecessor of position F+1 is F.
+    return pend_pos == tgt_max && pend_gen > 0;
+}
+
+// Soft reset: keep the canonical pair, clear only per-request bookkeeping.
+// Deliberately does NOT touch mem_tgt, mem_dft, or the speculative implementation.
+// Everything inside the implementation that is per-request -- i_batch_beg/end,
+// verify_h, verify_h_rows, verify_pos, last_n_drafted, the samplers -- is
+// rewritten before it is read within a request, and every accept() is preceded by
+// a process() in the same request, so none of it carries stale meaning across the
+// boundary. pending_h, which does carry meaning, is exactly what must survive.
+static void soft_reset_request_state(orbit_mtp_session * session) {
+    session->request_boundary_ckpt.clear();
+    session->request_boundary_prompt_tgt.clear();
+    // The resident claim is deliberately NOT cleared here. This runs at the top
+    // of the completion the claim was set for, so clearing it would zero the
+    // claim before it is read below, and `resident_ok` would be false on exactly
+    // the turns where the pair IS reusable -- resident reuse could never happen.
+    // Nothing leaks: the claim is consumed one-shot where it is read (it is
+    // zeroed on the same two lines), and the hard path clears it separately.
+}
+
 static bool reset_speculative_request_state(
     orbit_mtp_session * session,
     llama_context * ctx_tgt
@@ -1464,7 +1790,15 @@ static bool reset_speculative_request_state(
     session->spec_params.draft.ctx_tgt = ctx_tgt;
     session->spec_params.draft.ctx_dft = session->ctx_dft;
     session->spec = common_speculative_init(session->spec_params, 1);
+    session->spec_epoch++;
+    // Pin the target this implementation was built against; soft reuse checks it.
+    session->spec_pinned_ctx_tgt = session->spec_params.draft.ctx_tgt;
     if (!session->spec) {
+        trace_spec_state(
+            "request_reset_after",
+            session->spec_epoch,
+            static_cast<const void *>(session->spec),
+            static_cast<const void *>(session->ctx_dft));
         set_error("failed to reinitialize speculative request state");
         return false;
     }
@@ -1642,6 +1976,16 @@ extern "C" void * orbit_mtp_session_create(
     session->spec_params.draft.ctx_dft = session->ctx_dft;
 
     session->spec = common_speculative_init(session->spec_params, 1);
+    session->spec_epoch++;
+    // Pin the target this implementation was built against; soft reuse checks it.
+    session->spec_pinned_ctx_tgt = session->spec_params.draft.ctx_tgt;
+    // Anchor the epoch baseline. Without this the first event of any run carries
+    // a nonzero epoch with no preceding construction event to explain it.
+    trace_spec_state(
+        "session_create",
+        session->spec_epoch,
+        static_cast<const void *>(session->spec),
+        static_cast<const void *>(session->ctx_dft));
     session->rss_peak_kb = std::max(session->rss_peak_kb, rss_kb());
     if (!session->spec) {
         set_error("failed to initialize speculative MTP state");
@@ -1662,6 +2006,19 @@ extern "C" bool orbit_mtp_session_reset(void * handle, void * ctx_tgt_ptr) {
         return false;
     }
 
+    // Observe the pair BEFORE anything is destroyed. This is the decisive
+    // measurement of the mission: whatever survives from here to the matching
+    // "reset_after" pair is what a future persistent-draft design would inherit.
+    {
+        auto * mem_before = llama_get_memory(session->ctx_dft);
+        trace_draft_frontier("reset_before", mem_before);
+        trace_spec_state(
+            "reset_before",
+            session->spec_epoch,
+            static_cast<const void *>(session->spec),
+            static_cast<const void *>(session->ctx_dft));
+    }
+
     if (session->spec) {
         common_speculative_free(session->spec);
         session->spec = nullptr;
@@ -1670,17 +2027,48 @@ extern "C" bool orbit_mtp_session_reset(void * handle, void * ctx_tgt_ptr) {
     auto * mem = llama_get_memory(session->ctx_dft);
     if (mem) {
         llama_memory_clear(mem, true);
+        trace_draft_clear("reset");
     }
 
     session->spec_params.draft.ctx_tgt = ctx_tgt;
     session->spec_params.draft.ctx_dft = session->ctx_dft;
     session->spec = common_speculative_init(session->spec_params, 1);
+    session->spec_epoch++;
+    // Pin the target this implementation was built against; soft reuse checks it.
+    session->spec_pinned_ctx_tgt = session->spec_params.draft.ctx_tgt;
     if (!session->spec) {
+        // Emit before returning: the epoch already advanced, so without this the
+        // stream would show an unexplained +1 with no closing record. spec=0
+        // identifies the failure.
+        trace_spec_state(
+            "reset_after",
+            session->spec_epoch,
+            static_cast<const void *>(session->spec),
+            static_cast<const void *>(session->ctx_dft));
         set_error("failed to reinitialize speculative MTP state");
         return false;
     }
+    {
+        auto * mem_after = llama_get_memory(session->ctx_dft);
+        trace_draft_frontier("reset_after", mem_after);
+        trace_spec_state(
+            "reset_after",
+            session->spec_epoch,
+            static_cast<const void *>(session->spec),
+            static_cast<const void *>(session->ctx_dft));
+    }
     session->request_boundary_ckpt.clear();
     session->request_boundary_prompt_tgt.clear();
+    // A pending claim describes one specific completion. Resetting speculative
+    // state invalidates it, but deliberately does NOT touch mem_tgt: draft
+    // state and canonical target KV are separate concerns.
+    session->pending_resident_prefix_len = 0;
+    // This reset just destroyed the draft half and the implementation holding
+    // pending_h. A trust bit left asserting "canonical pair" would be describing
+    // state that no longer exists. Physical checks happen to catch it downstream,
+    // but a flag that survives the operation destroying what it describes is a
+    // latent false-trust path, not a design.
+    session->persistent_pair_untrusted = true;
 
     return true;
 }
@@ -1746,6 +2134,16 @@ extern "C" void * orbit_selfmtp_session_create(
     session->spec_params.draft.ctx_dft = session->ctx_dft;
 
     session->spec = common_speculative_init(session->spec_params, 1);
+    session->spec_epoch++;
+    // Pin the target this implementation was built against; soft reuse checks it.
+    session->spec_pinned_ctx_tgt = session->spec_params.draft.ctx_tgt;
+    // Anchor the epoch baseline. Without this the first event of any run carries
+    // a nonzero epoch with no preceding construction event to explain it.
+    trace_spec_state(
+        "session_create",
+        session->spec_epoch,
+        static_cast<const void *>(session->spec),
+        static_cast<const void *>(session->ctx_dft));
     session->rss_peak_kb = std::max(session->rss_peak_kb, rss_kb());
     if (!session->spec) {
         set_error("failed to initialize self-MTP speculative state");
@@ -1755,6 +2153,40 @@ extern "C" void * orbit_selfmtp_session_create(
 
     session->rss_after_init_kb = rss_kb();
     return session.release();
+}
+
+// Declare a resident target-KV prefix for the NEXT completion only.
+//
+// `n` is a length the runtime has already verified semantically -- it proved
+// `prompt_tokens[:n] == committed_tokens` before calling. This layer never
+// repeats that comparison; it verifies only that physical target memory is
+// consistent with the claim, and falls back to a full replay if it is not.
+//
+// Deliberately a separate symbol rather than a new parameter on
+// `orbit_mtp_session_complete`: the base ABI stays stable, and a shim without
+// this symbol remains valid for every path that does not ask for resident
+// reuse.
+extern "C" bool orbit_mtp_session_set_resident_prefix_len(void * handle, int32_t n) {
+    g_last_error.clear();
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    if (!session) {
+        set_error("resident prefix requires a valid session");
+        return false;
+    }
+    if (n < 0) {
+        set_error("resident prefix length must be non-negative");
+        return false;
+    }
+    session->pending_resident_prefix_len = n;
+    return true;
+}
+
+// Whether the last completion actually preserved and reused a resident prefix.
+// False whenever the claim was absent, rejected, or physically unverifiable --
+// there is no "maybe" state.
+extern "C" bool orbit_mtp_session_last_resident_reuse_active(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? session->last_resident_reuse_active : false;
 }
 
 extern "C" bool orbit_mtp_session_owns_model(void * handle) {
@@ -1850,12 +2282,59 @@ extern "C" bool orbit_mtp_session_complete(
         set_error("persistent MTP session is not initialized");
         return false;
     }
-    if (!reset_speculative_request_state(session, ctx_tgt)) {
-        return false;
+    // Bracket this destruction explicitly. `reset_speculative_request_state`
+    // frees and recreates the speculative implementation on EVERY completion,
+    // independently of `orbit_mtp_session_reset`. Without its own labelled pair
+    // the epoch would jump between one request's exit and the next request's
+    // entry with nothing naming the cause, and an analyst would attribute all
+    // destruction to the session reset -- concluding that softening that reset
+    // would preserve `pending_h`, which is false while this site exists.
+    {
+        auto * mem_dft_pre = llama_get_memory(session->ctx_dft);
+        trace_draft_frontier("request_reset_before", mem_dft_pre);
+        trace_spec_state(
+            "request_reset_before",
+            session->spec_epoch,
+            static_cast<const void *>(session->spec),
+            static_cast<const void *>(session->ctx_dft));
+    }
+    // Soft when the whole pair is provably canonical and still belongs to this
+    // target, hard otherwise. A soft reset keeps ctx_tgt, ctx_dft, the
+    // speculative implementation and pending_h, and clears only per-request
+    // bookkeeping, so the next request can append its suffix instead of
+    // rebuilding history. Anything uncertain rebuilds: correctness over cache.
+    {
+        auto * mem_tgt_pre = llama_get_memory(ctx_tgt);
+        auto * mem_dft_pre2 = llama_get_memory(session->ctx_dft);
+        const bool soft = persistent_pair_is_reusable(
+            session, ctx_tgt, mem_tgt_pre, mem_dft_pre2);
+        session->last_request_reset_was_soft = soft;
+        if (soft) {
+            soft_reset_request_state(session);
+            trace_request_reset_mode("soft");
+        } else {
+            trace_request_reset_mode("hard");
+            if (!reset_speculative_request_state(session, ctx_tgt)) {
+                return false;
+            }
+            // A rebuilt pair has proven nothing yet.
+            session->persistent_pair_untrusted = true;
+        }
+    }
+    {
+        auto * mem_dft_post = llama_get_memory(session->ctx_dft);
+        trace_draft_frontier("request_reset_after", mem_dft_post);
+        trace_spec_state(
+            "request_reset_after",
+            session->spec_epoch,
+            static_cast<const void *>(session->spec),
+            static_cast<const void *>(session->ctx_dft));
     }
 
     session->last_content.clear();
     session->last_output_tokens = 0;
+    session->last_generated_tokens.clear();
+    session->last_resident_tokens.clear();
     session->last_draft_tokens_total = 0;
     session->last_accepted_tokens_total = 0;
     session->last_rejected_tokens_total = 0;
@@ -1969,7 +2448,93 @@ extern "C" bool orbit_mtp_session_complete(
             token_callback(piece.c_str(), callback_user_data);
         }
     };
-    bool need_replay = true;
+    trace_target_frontier("request_entry", mem_tgt);
+    trace_draft_frontier("request_entry", mem_dft);
+    trace_spec_state("request_entry", session->spec_epoch,
+        static_cast<const void *>(session->spec),
+        static_cast<const void *>(session->ctx_dft));
+
+    // Resident-prefix decision. The runtime may declare that the first N prompt
+    // tokens are already resident in target memory, having proven token
+    // identity against its own committed sequence. This layer does not repeat
+    // that comparison -- it asks only whether PHYSICAL memory agrees:
+    //
+    //   * the claim fits inside this prompt;
+    //   * the target frontier is exactly N-1, so N tokens really are resident;
+    //   * bounded recurrent rollback is available, since a rejected
+    //     speculative tail must be removable without discarding the prefix.
+    //
+    // `llama_n_rs_seq` is read directly rather than via `can_partial_rollback`,
+    // whose probe clears memory and would destroy the very prefix at stake.
+    //
+    // Any disagreement falls through to the existing replay path with no claim
+    // of reuse: a wrong prefix is a correctness bug, a full replay is only slow.
+    // Carried in from the PREVIOUS completion: if a target seq_rm was refused
+    // there, the frontier may include tokens that were supposed to be removed,
+    // so a claim of frontier+1 could match a poisoned state. Read it before
+    // clearing, so the flag gates exactly one following completion.
+    const bool target_untrusted_from_previous = session->last_target_untrusted;
+    session->last_target_untrusted = false;
+    const int32_t resident_claim = session->pending_resident_prefix_len;
+    session->pending_resident_prefix_len = 0;
+    // The claim must be a STRICT PROPER prefix: `< size()`, not `<=`. A claim
+    // covering the whole prompt would leave an empty suffix, so this completion
+    // would decode nothing into the target, and the first sample would then read
+    // logits left behind by the PREVIOUS completion. Falling closed to the full
+    // replay costs one prefill and guarantees fresh logits before sampling.
+    // Resident reuse now requires the WHOLE pair, not just the target. The draft
+    // must physically agree on the same frontier, and pending_h must hold the
+    // predecessor for a suffix beginning at the claim -- position claim-1. Without
+    // the pending term a draft could be frontier-correct and content-wrong, which
+    // is exactly the defect the D3b-R2 review found in the earlier attempt.
+    // The pair carried in from the previous completion is consulted before it is
+    // re-armed below, so one bad completion gates the next.
+    int32_t entry_pend_pos = -1;
+    uint64_t entry_pend_fp = 0;
+    uint64_t entry_pend_gen = 0;
+    const bool entry_pend_ok = common_speculative_pending_state(
+        session->spec, 0, &entry_pend_pos, &entry_pend_fp, &entry_pend_gen);
+    const bool pair_trusted_from_previous = !session->persistent_pair_untrusted;
+    const bool identity_ok =
+        session->spec != nullptr && session->spec_pinned_ctx_tgt == ctx_tgt;
+    const bool resident_ok =
+        resident_claim > 0 &&
+        !target_untrusted_from_previous &&
+        pair_trusted_from_previous &&
+        identity_ok &&
+        resident_claim < (int32_t) prompt_tgt.size() &&
+        llama_n_rs_seq(ctx_tgt) > 0 &&
+        llama_memory_seq_pos_max(mem_tgt, 0) == resident_claim - 1 &&
+        llama_memory_seq_pos_max(mem_dft, 0) == resident_claim - 1 &&
+        entry_pend_ok &&
+        entry_pend_pos == resident_claim - 1 &&
+        entry_pend_gen > 0;
+    session->last_resident_reuse_active = resident_ok;
+    trace_resident_admission(
+        resident_claim, resident_ok, pair_trusted_from_previous, identity_ok,
+        entry_pend_ok ? entry_pend_pos : -1, entry_pend_gen);
+
+    // Fail-closed target-trust contract. From here on this completion may mutate
+    // physical target state (clear, prefill decode, validation decode, seq_rm).
+    // Any exit that is not the single proven-canonical success return at the end
+    // of this function leaves that state unverified -- notably a failed
+    // `llama_decode(ctx_tgt, validate)`, which has already written speculative
+    // tokens above the committed frontier by the time it reports failure. Rather
+    // than patch each individual return site, arm the flag once here and clear it
+    // only after the loop has completed normally. A later resident claim is then
+    // refused until a cold clear/full replay has re-established canonical state.
+    session->last_target_untrusted = true;
+    // The pair is poisoned for the same reason and at the same moment as the
+    // target: from here on this completion may mutate target KV, draft KV and
+    // pending_h, and only the proven-canonical exit re-establishes them together.
+    session->persistent_pair_untrusted = true;
+
+    bool need_replay = !resident_ok;
+    // The prefill block below lives under `need_replay`. On the resident path
+    // we still need to enter it once -- to decode the SUFFIX -- while skipping
+    // the target clear. This one-shot flag distinguishes that first pass from a
+    // genuine replay.
+    bool resident_prefill_pending = resident_ok;
     bool is_recovery_replay = false;
     std::vector<llama_token> draft;
     common_prompt_checkpoint ckpt;
@@ -1994,10 +2559,40 @@ extern "C" bool orbit_mtp_session_complete(
     while ((int) generated.size() < generation_limit) {
         const auto loop_phase_start = std::chrono::steady_clock::now();
         const bool loop_need_replay_before = need_replay;
-        if (need_replay) {
+        if (need_replay || resident_prefill_pending) {
+            const bool resident_pass = resident_prefill_pending;
+            resident_prefill_pending = false;
             const bool replay_is_recovery = is_recovery_replay;
             const auto replay_phase_start = std::chrono::steady_clock::now();
-            const bool use_request_boundary = generated.empty() && can_restore_request_boundary && !used_request_boundary;
+            // A soft reset preserved `pending_h` for a suffix append at F+1. If
+            // this completion instead replays from position 0, that row is the
+            // WRONG predecessor: process() would seed draft slot 0 with the last
+            // frontier's hidden state where "no predecessor" is required, and the
+            // vendored code states the invariant directly -- "-1 == no
+            // predecessor: correct only for a batch starting at position 0".
+            // The resulting draft KV would be built from a wrong seed and the
+            // exit check would still certify it trusted, because process()
+            // overwrites pending_h with the last row before that check runs.
+            // Discard the carryover whenever this pass is not a resident append.
+            if (!resident_pass && session->spec) {
+                if (!common_speculative_reset_pending(session->spec, 0)) {
+                    // Cannot prove the carryover is safe for a from-zero replay,
+                    // so refuse to reuse the implementation at all.
+                    session->persistent_pair_untrusted = true;
+                }
+                trace_pending_discarded("replay_from_zero");
+            }
+            // Resident reuse takes precedence over request-boundary restore, and
+            // the exclusion is written here rather than assumed: the boundary
+            // branch clears mem_tgt and replays the prompt from 0, which would
+            // destroy the very prefix a resident pass is preserving. Both flags
+            // are computed independently and can be true together, so nothing
+            // but this `!resident_pass` keeps them apart. The caller currently
+            // resets the session before each completion, which clears the
+            // boundary checkpoint and makes the collision unlikely -- but that
+            // is caller ordering, not an invariant of this function.
+            const bool use_request_boundary = generated.empty() && can_restore_request_boundary
+                && !used_request_boundary && !resident_pass;
             if (debug_partial) {
                 const auto replay_origin =
                     use_request_boundary ? "request_boundary" :
@@ -2019,9 +2614,20 @@ extern "C" bool orbit_mtp_session_complete(
                 session->last_replay_steps++;
                 session->debug_replay_count++;
             }
-            llama_memory_clear(mem_tgt, true);
-            llama_memory_clear(mem_dft, true);
-            session->debug_memory_clear_count += 2;
+            // Both halves are cleared together or not at all. A resident pass
+            // preserves the target prefix AND the draft state that matches it;
+            // clearing only the draft would leave the pair mismatched -- draft
+            // empty while the target holds prompt[0:N) -- and pending_h naming a
+            // predecessor the draft no longer contains. The guard was previously
+            // on the target alone, which is what made the draft half unusable.
+            if (!resident_pass) {
+                llama_memory_clear(mem_tgt, true);
+                trace_target_clear("replay");
+                session->debug_memory_clear_count++;
+                llama_memory_clear(mem_dft, true);
+                trace_draft_clear("replay");
+                session->debug_memory_clear_count++;
+            }
 
             if (!prompt_tgt.empty()) {
                 if (use_request_boundary) {
@@ -2029,10 +2635,12 @@ extern "C" bool orbit_mtp_session_complete(
                         const auto phase_start = std::chrono::steady_clock::now();
                         session->request_boundary_ckpt.load_dft(session->ctx_dft, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         phase_add(session->phase_prefix_restore, phase_start);
+                        trace_draft_frontier("boundary_load_dft", llama_get_memory(session->ctx_dft));
                     }
                     {
                         const auto phase_start = std::chrono::steady_clock::now();
                         llama_memory_clear(mem_tgt, true);
+                        trace_target_clear("request_boundary");
                         phase_add(session->phase_seq_rm, phase_start);
                     }
                     session->debug_memory_clear_count++;
@@ -2045,6 +2653,7 @@ extern "C" bool orbit_mtp_session_complete(
                         const auto batch_build_start = std::chrono::steady_clock::now();
                         llama_batch refresh_tgt = llama_batch_init((int32_t) count, 0, 1);
                         fill_target_prefill_batch(refresh_tgt, chunk, (int32_t) offset);
+                        trace_target_prefill("boundary_refresh", (int32_t) offset, chunk.size());
                         last_target_prefill_batch_n_tokens = refresh_tgt.n_tokens;
                         phase_add(session->phase_batch_build, batch_build_start);
                         const long long decode_started_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2085,7 +2694,13 @@ extern "C" bool orbit_mtp_session_complete(
                     }
                     request_boundary_logits_refreshed = true;
                     used_request_boundary = true;
-                } else {
+                } else if (!resident_pass) {
+                    // Cold replay only. A resident pass must not land here: the
+                    // target already holds prompt[0:resident_claim], so
+                    // decoding the whole prompt at position 0 would overlap
+                    // resident positions and llama_decode rejects it. The
+                    // resident suffix is prefilled by the positional block
+                    // below, at pos0 = resident_claim.
                     const size_t chunk_size = (size_t) std::max<uint32_t>(1, session->n_batch);
                     for (size_t offset = 0; offset < prompt_tgt.size(); offset += chunk_size) {
                         const size_t count = std::min(chunk_size, prompt_tgt.size() - offset);
@@ -2095,6 +2710,7 @@ extern "C" bool orbit_mtp_session_complete(
                         const auto batch_build_start = std::chrono::steady_clock::now();
                         llama_batch prefill_tgt = llama_batch_init((int32_t) count, 0, 1);
                         fill_target_prefill_batch(prefill_tgt, chunk, (int32_t) offset);
+                        trace_target_prefill("full_replay", (int32_t) offset, chunk.size());
                         last_target_prefill_batch_n_tokens = prefill_tgt.n_tokens;
                         phase_add(session->phase_batch_build, batch_build_start);
                         const long long decode_started_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2143,7 +2759,16 @@ extern "C" bool orbit_mtp_session_complete(
                 }
                 std::vector<llama_token> process_tokens;
                 int32_t process_pos0 = 0;
-                if (use_request_boundary) {
+                if (resident_pass) {
+                    // prompt[0:resident_claim] is already resident; decode only
+                    // the suffix, based at the resident boundary. When the claim
+                    // covers the whole prompt this is empty and nothing is
+                    // decoded.
+                    process_tokens.assign(
+                        prompt_tgt.begin() + (ptrdiff_t) resident_claim,
+                        prompt_tgt.end());
+                    process_pos0 = resident_claim;
+                } else if (use_request_boundary) {
                     process_tokens.assign(
                         prompt_tgt.begin() + (ptrdiff_t) reusable_request_prefix,
                         prompt_tgt.end());
@@ -2153,7 +2778,10 @@ extern "C" bool orbit_mtp_session_complete(
                     process_pos0 = 0;
                 }
                 if (!process_tokens.empty()) {
-                    if (use_request_boundary) {
+                    // Both the request-boundary and resident paths decode a
+                    // slice at a non-zero base, so they share this loop; the
+                    // `else` below is the from-zero full replay.
+                    if (use_request_boundary || resident_pass) {
                         const size_t chunk_size = (size_t) std::max<uint32_t>(1, session->n_batch);
                         for (size_t offset = 0; offset < process_tokens.size(); offset += chunk_size) {
                             const size_t count = std::min(chunk_size, process_tokens.size() - offset);
@@ -2163,6 +2791,7 @@ extern "C" bool orbit_mtp_session_complete(
                             const auto batch_build_start = std::chrono::steady_clock::now();
                             llama_batch prefill_tgt = llama_batch_init((int32_t) count, 0, 1);
                             fill_target_prefill_batch(prefill_tgt, chunk, process_pos0 + (int32_t) offset);
+                            trace_target_prefill("suffix", process_pos0 + (int32_t) offset, chunk.size());
                             last_target_prefill_batch_n_tokens = prefill_tgt.n_tokens;
                             phase_add(session->phase_batch_build, batch_build_start);
                             const long long decode_started_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2209,16 +2838,46 @@ extern "C" bool orbit_mtp_session_complete(
                             }
                         }
                     }
+                    // The draft context has its OWN lifecycle. The target may reuse a
+                    // resident prefix and prefill only the suffix, but the draft memory
+                    // was cleared unconditionally above, so replaying only the suffix
+                    // there would leave positions [0, resident_claim) empty and the MTP
+                    // head would attend over a hole. Whether the draft can inherit the
+                    // target's history is a native fact, not a model-name fact:
+                    // llama.cpp keeps `ctx_other` only for architectures whose draft
+                    // memory is physically shared with the target (see
+                    // llama-context.cpp), and `common_speculative` skips its catch-up
+                    // decode exactly when that holds. When it does NOT hold, the draft
+                    // must be rebuilt contiguously from position 0.
+                    // SAME-SUFFIX CONTRACT. `common_speculative_process` consumes
+                    // the target's nextn hidden rows from the target's MOST RECENT
+                    // decode, indexed by batch slot. The batch handed to it must
+                    // therefore be exactly the batch the target just decoded.
+                    //
+                    // On a resident pass the target decoded only the suffix, and a
+                    // persistent draft already holds the prefix with pending_h
+                    // naming its last position, so the draft appends the SAME
+                    // suffix. Processing the full prompt here -- which an earlier
+                    // attempt did -- reads rows the target never produced for those
+                    // slots and silently builds the draft from stale conditioning.
+                    //
+                    // On a cold/replay pass the target decoded the whole prompt, so
+                    // the same rule yields the whole prompt. One rule, both cases:
+                    // the draft always mirrors the target's last decode.
+                    const std::vector<llama_token> & draft_tokens = process_tokens;
+                    const int32_t draft_pos0 = process_pos0;
                     const size_t chunk_size = (size_t) std::max<uint32_t>(1, session->n_batch);
-                    for (size_t offset = 0; offset < process_tokens.size(); offset += chunk_size) {
-                        const size_t count = std::min(chunk_size, process_tokens.size() - offset);
+                    for (size_t offset = 0; offset < draft_tokens.size(); offset += chunk_size) {
+                        const size_t count = std::min(chunk_size, draft_tokens.size() - offset);
                         std::vector<llama_token> chunk(
-                            process_tokens.begin() + (ptrdiff_t) offset,
-                            process_tokens.begin() + (ptrdiff_t) (offset + count));
+                            draft_tokens.begin() + (ptrdiff_t) offset,
+                            draft_tokens.begin() + (ptrdiff_t) (offset + count));
                         const auto batch_build_start = std::chrono::steady_clock::now();
                         llama_batch prefill = llama_batch_init((int32_t) count, 0, 1);
-                        fill_batch(prefill, chunk, process_pos0 + (int32_t) offset);
+                        fill_batch(prefill, chunk, draft_pos0 + (int32_t) offset);
                         phase_add(session->phase_batch_build, batch_build_start);
+                        trace_draft_process(
+                            "prefill", draft_pos0 + (int32_t) offset, chunk.size());
                         {
                             const auto phase_start = std::chrono::steady_clock::now();
                             const bool ok = common_speculative_process(session->spec, prefill);
@@ -2357,11 +3016,20 @@ extern "C" bool orbit_mtp_session_complete(
                 &prompt_tgt,
                 &draft,
             };
+            // Proposal generation also DECODES into ctx_dft: on the non-shared
+            // memory path it adds tokens at n_past + i + 1, so the draft frontier
+            // advances by up to MTP_DRAFT_N_MAX per step. That motion has no other
+            // event class in this stream, so bracket it -- otherwise the exit
+            // frontier is larger than the traced writes can account for, which is
+            // the ambiguity this recorder exists to remove. The reads sit OUTSIDE
+            // the phase bracket so observation cost never lands in exported timing.
+            trace_draft_frontier("draft_generate_before", mem_dft);
             {
                 const auto phase_start = std::chrono::steady_clock::now();
                 common_speculative_draft(session->spec);
                 phase_add(session->phase_draft_generation, phase_start);
             }
+            trace_draft_frontier("draft_generate_after", mem_dft);
             if (draft_trace_enabled()) {
                 std::ostringstream out;
                 out
@@ -2460,8 +3128,11 @@ extern "C" bool orbit_mtp_session_complete(
                     {
                         const auto phase_start = std::chrono::steady_clock::now();
                         const int32_t before_max = llama_memory_seq_pos_max(mem_dft, 0);
-                        llama_memory_seq_rm(mem_dft, 0, ckpt.pos_max + 1, -1);
+                        const bool ckpt_dft_rm_ok2 =
+                            llama_memory_seq_rm(mem_dft, 0, ckpt.pos_max + 1, -1);
                         phase_add(session->phase_seq_rm, phase_start);
+                        trace_draft_seq_rm(
+                            "ckpt_restore_step", ckpt.pos_max + 1, -1, ckpt_dft_rm_ok2);
                         if (draft_trace_enabled()) {
                             std::ostringstream out;
                             out
@@ -2483,6 +3154,7 @@ extern "C" bool orbit_mtp_session_complete(
                     }
                     session->debug_seq_rm_count++;
                     phase_add(session->phase_ctx_dft_restore, phase_start);
+                    trace_draft_frontier("ckpt_load_dft_step", llama_get_memory(session->ctx_dft));
                 }
                 session->last_checkpoint_count++;
                 have_ckpt = true;
@@ -2763,18 +3435,31 @@ extern "C" bool orbit_mtp_session_complete(
         }
 
         if (full_accept) {
+            bool need_replay_after_failed_rm = false;
             n_past = (int32_t) prompt_tgt.size();
             {
                 const auto phase_start = std::chrono::steady_clock::now();
-                llama_memory_seq_rm(mem_tgt, 0, n_past, -1);
-                llama_memory_seq_rm(mem_dft, 0, n_past, -1);
+                const bool full_rm_ok = llama_memory_seq_rm(mem_tgt, 0, n_past, -1);
+                trace_target_seq_rm("full_accept", n_past, -1, full_rm_ok);
+                const bool full_dft_rm_ok = llama_memory_seq_rm(mem_dft, 0, n_past, -1);
                 phase_add(session->phase_seq_rm, phase_start);
+                trace_draft_seq_rm("full_accept", n_past, -1, full_dft_rm_ok);
+                if (!full_rm_ok) {
+                    // The verification tail is still resident above the
+                    // committed frontier. Declaring "no replay needed" here
+                    // would leave those tokens in place and let a later
+                    // completion claiming frontier+1 match a poisoned frontier.
+                    // Rebuild instead, and mark the target unproven so no
+                    // resident claim can rest on it.
+                    session->last_target_untrusted = true;
+                    need_replay_after_failed_rm = true;
+                }
             }
             session->debug_seq_rm_count += 2;
             draft.clear();
             have_ckpt = false;
             draft_is_fresh = false;
-            need_replay = false;
+            need_replay = need_replay_after_failed_rm;
         } else if (step.resolution == orbit_step_resolution::live_partial) {
             n_past = (int32_t) prompt_tgt.size();
             draft.clear();
@@ -2802,6 +3487,11 @@ extern "C" bool orbit_mtp_session_complete(
     }
 
 done:
+    trace_target_frontier("request_exit", mem_tgt);
+    trace_draft_frontier("request_exit", mem_dft);
+    trace_spec_state("request_exit", session->spec_epoch,
+        static_cast<const void *>(session->spec),
+        static_cast<const void *>(session->ctx_dft));
     common_sampler_free(smpl);
     session->cached_prompt_tokens = prompt;
     session->last_fresh_acceptance_ratio = session->last_draft_tokens_total > 0
@@ -2902,7 +3592,108 @@ done:
             << "}";
         session->last_timing_json = out.str();
     }
+    // Proven-canonical exit: the speculative loop ran to completion, so every
+    // accepted token is committed and every rejected tail has been rolled back.
+    // Only here may the target be declared trusted again -- and only if the
+    // physical frontier actually agrees with the committed length, which is what
+    // a following resident claim will be validated against. A seq_rm refusal
+    // earlier in this completion leaves the frontier long; in that case the flag
+    // stays armed so the next completion falls back to a clear/full replay.
+    // `n_past` is the committed frontier the loop maintains, so compare the
+    // physical frontier against it directly rather than reconstructing a length.
+    session->last_target_untrusted =
+        llama_memory_seq_pos_max(mem_tgt, 0) != n_past - 1;
+    // The pair is trusted only when ALL THREE halves agree at the same frontier.
+    // Defect C's target-only check is subsumed here rather than replaced: the
+    // target term is identical, and the draft and pending terms are what make a
+    // persistent pair claim meaningful. Frontier agreement alone is not enough --
+    // a draft can be frontier-correct and content-wrong -- so pending_pos must
+    // name the predecessor of the next suffix, which is the frontier itself.
+    {
+        const int32_t canonical_frontier = n_past - 1;
+        const bool target_ok =
+            llama_memory_seq_pos_max(mem_tgt, 0) == canonical_frontier;
+        const bool draft_ok =
+            llama_memory_seq_pos_max(mem_dft, 0) == canonical_frontier;
+        int32_t pend_pos = -1;
+        uint64_t pend_fp = 0;
+        uint64_t pend_gen = 0;
+        const bool pend_ok = common_speculative_pending_state(
+            session->spec, 0, &pend_pos, &pend_fp, &pend_gen);
+        const bool pending_aligned =
+            pend_ok && pend_pos == canonical_frontier && pend_gen > 0;
+        const bool identity_ok =
+            session->spec != nullptr && session->spec_pinned_ctx_tgt == ctx_tgt;
+        session->persistent_pair_untrusted =
+            !(target_ok && draft_ok && pending_aligned && identity_ok);
+        trace_pair_trust(
+            session->persistent_pair_untrusted ? "untrusted" : "trusted",
+            canonical_frontier, target_ok, draft_ok, pending_aligned, identity_ok);
+    }
+    // Snapshot the decoded ids alongside the verdict, so a caller reads both as
+    // of this completion rather than querying mutable session state later.
+    session->last_generated_tokens = generated;
+    // Publish the resident sequence only when the physical frontier agrees with
+    // the committed length. If a seq_rm refusal left the frontier long, the
+    // vector no longer describes KV, and an empty publication makes the runtime
+    // fall back to a cold prompt rather than trust a stale identity.
+    if (llama_memory_seq_pos_max(mem_tgt, 0) == n_past - 1 &&
+        prompt_tgt.size() == (size_t) n_past) {
+        session->last_resident_tokens = prompt_tgt;
+    } else {
+        session->last_resident_tokens.clear();
+    }
     return true;
+}
+
+// Whether target, draft and pending_h were all proven canonical at the end of
+// the last completion, and the implementation still belongs to the same target
+// context. This is NOT the same question as "did this completion reuse resident
+// state": a cold completion can end canonical, and a resident completion can end
+// poisoned. The runtime must not conflate them.
+extern "C" bool orbit_mtp_session_last_pair_canonical(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? !session->persistent_pair_untrusted : false;
+}
+
+// Number of token ids the last completion decoded, and a copy of them. The
+// caller sizes its buffer with the count and then copies; a short buffer copies
+// nothing and reports the required size, so a caller cannot silently truncate.
+extern "C" int32_t orbit_mtp_session_last_generated_token_count(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? (int32_t) session->last_generated_tokens.size() : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_generated_tokens(
+        void * handle, int32_t * out, int32_t capacity) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    if (!session) { return 0; }
+    const int32_t count = (int32_t) session->last_generated_tokens.size();
+    if (!out || capacity < count) { return count; }
+    for (int32_t i = 0; i < count; ++i) {
+        out[i] = (int32_t) session->last_generated_tokens[i];
+    }
+    return count;
+}
+
+// The tokens physically resident in the target KV after the last completion.
+// The runtime publishes committed identity from these, never from
+// prompt + generated: see `last_resident_tokens`.
+extern "C" int32_t orbit_mtp_session_last_resident_token_count(void * handle) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    return session ? (int32_t) session->last_resident_tokens.size() : 0;
+}
+
+extern "C" int32_t orbit_mtp_session_last_resident_tokens(
+        void * handle, int32_t * out, int32_t capacity) {
+    auto * session = static_cast<orbit_mtp_session *>(handle);
+    if (!session) { return 0; }
+    const int32_t count = (int32_t) session->last_resident_tokens.size();
+    if (!out || capacity < count) { return count; }
+    for (int32_t i = 0; i < count; ++i) {
+        out[i] = (int32_t) session->last_resident_tokens[i];
+    }
+    return count;
 }
 
 extern "C" const char * orbit_mtp_session_last_content(void * handle) {

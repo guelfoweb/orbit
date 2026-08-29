@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ctypes import CDLL, CFUNCTYPE, c_bool, c_char_p, c_int32, c_long, c_uint32, c_void_p
+from ctypes import CDLL, CFUNCTYPE, POINTER, c_bool, c_char_p, c_int32, c_long, c_uint32, c_void_p
 from dataclasses import dataclass
 from pathlib import Path
 import ctypes
@@ -40,6 +40,22 @@ _SELF_MTP_REQUIRED_SHIM_SYMBOLS = (
     "orbit_mtp_session_owns_model",
     "orbit_mtp_session_borrowed_model",
     "orbit_mtp_session_borrowed_ctx_tgt",
+)
+
+# Required ONLY when a completion asks to reuse a resident target-KV prefix.
+# Kept out of both tuples above for the same reason they are kept apart from
+# each other: a shim without these stays perfectly valid for base decoding, for
+# the external-draft path, and for ordinary self-MTP. Asking for resident reuse
+# against such a shim fails closed rather than silently decoding from scratch
+# while reporting success.
+_RESIDENT_PREFIX_REQUIRED_SHIM_SYMBOLS = (
+    "orbit_mtp_session_last_pair_canonical",
+    "orbit_mtp_session_last_generated_token_count",
+    "orbit_mtp_session_last_generated_tokens",
+    "orbit_mtp_session_last_resident_token_count",
+    "orbit_mtp_session_last_resident_tokens",
+    "orbit_mtp_session_set_resident_prefix_len",
+    "orbit_mtp_session_last_resident_reuse_active",
 )
 
 MtpTokenCallback = CFUNCTYPE(None, c_char_p, c_void_p)
@@ -96,6 +112,29 @@ class PersistentMtpLibrary:
         lib.orbit_mtp_session_reset.restype = c_bool
         lib.orbit_mtp_session_free.argtypes = [c_void_p]
         lib.orbit_mtp_session_free.restype = None
+        if hasattr(lib, "orbit_mtp_session_set_resident_prefix_len"):
+            lib.orbit_mtp_session_set_resident_prefix_len.argtypes = [c_void_p, c_int32]
+            lib.orbit_mtp_session_set_resident_prefix_len.restype = c_bool
+        if hasattr(lib, "orbit_mtp_session_last_resident_reuse_active"):
+            lib.orbit_mtp_session_last_resident_reuse_active.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_resident_reuse_active.restype = c_bool
+        if hasattr(lib, "orbit_mtp_session_last_pair_canonical"):
+            lib.orbit_mtp_session_last_pair_canonical.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_pair_canonical.restype = c_bool
+        if hasattr(lib, "orbit_mtp_session_last_generated_token_count"):
+            lib.orbit_mtp_session_last_generated_token_count.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_generated_token_count.restype = c_int32
+        if hasattr(lib, "orbit_mtp_session_last_generated_tokens"):
+            lib.orbit_mtp_session_last_generated_tokens.argtypes = [
+                c_void_p, POINTER(c_int32), c_int32]
+            lib.orbit_mtp_session_last_generated_tokens.restype = c_int32
+        if hasattr(lib, "orbit_mtp_session_last_resident_token_count"):
+            lib.orbit_mtp_session_last_resident_token_count.argtypes = [c_void_p]
+            lib.orbit_mtp_session_last_resident_token_count.restype = c_int32
+        if hasattr(lib, "orbit_mtp_session_last_resident_tokens"):
+            lib.orbit_mtp_session_last_resident_tokens.argtypes = [
+                c_void_p, POINTER(c_int32), c_int32]
+            lib.orbit_mtp_session_last_resident_tokens.restype = c_int32
         lib.orbit_mtp_session_ctx_dft.argtypes = [c_void_p]
         lib.orbit_mtp_session_ctx_dft.restype = c_void_p
         lib.orbit_mtp_session_spec.argtypes = [c_void_p]
@@ -206,6 +245,7 @@ def build_persistent_mtp_shim(
     runtime_bin: Path | None = None,
     runner=subprocess.run,
     require_self_mtp: bool = False,
+    require_resident_prefix: bool = False,
 ) -> Path:
     packaged = packaged_shim_path(persistent_mtp_shim_filename())
     # `build_bin` is where the compiler links from; `runtime_bin` is the family
@@ -217,6 +257,12 @@ def build_persistent_mtp_shim(
     required = _REQUIRED_SHIM_SYMBOLS
     if require_self_mtp:
         required = required + _SELF_MTP_REQUIRED_SHIM_SYMBOLS
+    if require_resident_prefix:
+        # Persistent-pair reuse calls symbols an older packaged shim does not
+        # export. Without this the packaged-artifact short-circuit can return a
+        # base-only shim and the feature would fail at the ctypes lookup instead
+        # of at build selection, after the caller already believed it had one.
+        required = required + _RESIDENT_PREFIX_REQUIRED_SHIM_SYMBOLS
     if packaged is not None and _shim_exports_required_symbols(
         packaged,
         runtime_bin if runtime_bin is not None else build_bin,
@@ -421,6 +467,10 @@ def create_self_mtp_session(
         # The self-MTP entry points are demanded only here. A shim predating
         # them stays valid for normal decoding and for the external-draft path.
         require_self_mtp=True,
+        # The persistent pair is driven through the resident-prefix entry points,
+        # so this session cannot run against a shim lacking them. Demanding it at
+        # build selection fails loudly here rather than silently degrading later.
+        require_resident_prefix=True,
     )
     library = library_factory(paths.build_bin, shim)
     handle = library.lib.orbit_selfmtp_session_create(
@@ -469,6 +519,50 @@ def free_persistent_mtp_session(
         library.lib.orbit_mtp_session_free(runtime.handle)
 
 
+def _read_token_vector(lib, handle, count_symbol: str, copy_symbol: str) -> tuple[int, ...]:
+    """Copy a native token vector, sized by the native count.
+
+    The native side reports the required size when the buffer is too small, so a
+    caller cannot silently truncate. Absent accessors yield an empty tuple, which
+    the runtime treats as "no canonical identity available" rather than as an
+    empty-but-valid sequence.
+    """
+    if not hasattr(lib, count_symbol):
+        return ()
+    count = int(getattr(lib, count_symbol)(handle))
+    if count <= 0:
+        return ()
+    buffer = (c_int32 * count)()
+    written = int(getattr(lib, copy_symbol)(handle, buffer, count))
+    if written != count:
+        return ()
+    return tuple(int(value) for value in buffer)
+
+
+def _read_generated_tokens(lib, handle) -> tuple[int, ...]:
+    """The ids the last completion decoded."""
+    return _read_token_vector(
+        lib,
+        handle,
+        "orbit_mtp_session_last_generated_token_count",
+        "orbit_mtp_session_last_generated_tokens",
+    )
+
+
+def _read_resident_tokens(lib, handle) -> tuple[int, ...]:
+    """The ids physically resident in the target KV after the last completion.
+
+    This is the only sound source for committed identity; see the backend's
+    `last_resident_tokens` for why prompt + generated overstates residency.
+    """
+    return _read_token_vector(
+        lib,
+        handle,
+        "orbit_mtp_session_last_resident_token_count",
+        "orbit_mtp_session_last_resident_tokens",
+    )
+
+
 def run_persistent_mtp_completion(
     *,
     llama_root: Path,
@@ -479,6 +573,7 @@ def run_persistent_mtp_completion(
     max_tokens: int,
     on_token=None,
     on_progress=None,
+    resident_prefix_len: int = 0,
     build_dir: Path | None = None,
     library_factory=PersistentMtpLibrary,
 ) -> MtpCompletionResult:
@@ -504,6 +599,31 @@ def run_persistent_mtp_completion(
         progress_cb = MtpProgressCallback(_progress_cb)
     else:
         progress_cb = MtpProgressCallback(_noop_progress_callback)
+    # Declared here, not by the caller, so the claim is set as late as possible:
+    # after any session reset the caller may have performed, immediately before
+    # the completion that consumes it. A claim set earlier could be wiped by a
+    # reset in between. The claim lives for exactly one completion -- the
+    # backend reads it and zeroes it on the same two lines.
+    #
+    # A shim without the setter simply has no resident capability; asking for
+    # one fails closed rather than silently decoding from scratch while
+    # reporting reuse.
+    if resident_prefix_len > 0:
+        setter = getattr(
+            library.lib, "orbit_mtp_session_set_resident_prefix_len", None
+        )
+        if setter is None:
+            return MtpCompletionResult(
+                enabled=True,
+                success=False,
+                error="persistent-mtp-resident-prefix-unsupported",
+            )
+        if not setter(runtime.handle, int(resident_prefix_len)):
+            return MtpCompletionResult(
+                enabled=True,
+                success=False,
+                error=_decode_error(library.lib.orbit_mtp_last_error()),
+            )
     ok = library.lib.orbit_mtp_session_complete(
         runtime.handle,
         ctx_tgt,
@@ -539,6 +659,14 @@ def run_persistent_mtp_completion(
         draft_decode_calls=int(library.lib.orbit_mtp_session_last_draft_decode_calls(runtime.handle)),
         elapsed_ms=float(library.lib.orbit_mtp_session_last_elapsed_ms(runtime.handle)),
         tokens_per_second=float(library.lib.orbit_mtp_session_last_tokens_per_second(runtime.handle)),
+        resident_reuse_active=bool(
+            library.lib.orbit_mtp_session_last_resident_reuse_active(runtime.handle)
+        ) if hasattr(library.lib, "orbit_mtp_session_last_resident_reuse_active") else False,
+        pair_canonical=bool(
+            library.lib.orbit_mtp_session_last_pair_canonical(runtime.handle)
+        ) if hasattr(library.lib, "orbit_mtp_session_last_pair_canonical") else False,
+        generated_tokens=_read_generated_tokens(library.lib, runtime.handle),
+        resident_tokens=_read_resident_tokens(library.lib, runtime.handle),
         full_accept_steps=int(library.lib.orbit_mtp_session_last_full_accept_steps(runtime.handle)),
         replay_steps=int(library.lib.orbit_mtp_session_last_replay_steps(runtime.handle)),
         partial_accept_steps=int(library.lib.orbit_mtp_session_last_partial_accept_steps(runtime.handle)),

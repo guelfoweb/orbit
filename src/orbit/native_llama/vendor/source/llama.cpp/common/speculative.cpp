@@ -210,6 +210,14 @@ struct common_speculative_impl {
 
     virtual ~common_speculative_impl() = default;
 
+    // Discard the cross-batch carryover, returning the implementation to the
+    // "no predecessor" state its constructor produces. A caller that is about to
+    // process a batch based at position 0 must do this, because slot 0 is then
+    // required to be the zero row. Default reports "not applicable".
+    virtual bool reset_pending(llama_seq_id /*seq_id*/) {
+        return false;
+    }
+
     // Read-only diagnostic: describe this implementation's cross-batch carryover
     // state, if it has one. Default reports "not applicable" so implementations
     // without a carryover need not override. Never influences behaviour.
@@ -963,6 +971,18 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
         note_pending(seq_id,
                 (i_h < (int32_t) verify_pos[seq_id].size()) ? verify_pos[seq_id][i_h] : -1);
+    }
+
+    bool reset_pending(llama_seq_id seq_id) override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return false;
+        }
+        // Exactly the constructor's initial state: a zero row, no provenance.
+        std::fill(pending_h[seq_id].begin(), pending_h[seq_id].end(), 0.0f);
+        pending_pos[seq_id] = -1;
+        pending_fp[seq_id] = 0ull;
+        pending_gen[seq_id] = 0ull;
+        return true;
     }
 
     bool pending_state(
@@ -1865,6 +1885,18 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
             impl_other->accept(seq_id, n_accepted, true);
         }
     }
+}
+
+bool common_speculative_reset_pending(common_speculative * spec, llama_seq_id seq_id) {
+    if (spec == nullptr) {
+        return false;
+    }
+    for (const auto & impl : spec->impls) {
+        if (impl && impl->reset_pending(seq_id)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool common_speculative_pending_state(
