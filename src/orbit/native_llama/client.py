@@ -29,6 +29,7 @@ from .bindings import (
 from .chat_bridge import chat_bridge_filename
 from .committed_identity import CommittedIdentity, AttributeBackedIdentity
 from .mtp_session_lifecycle import MtpSessionLifecycle
+from .final_prefix_store import FinalPrefixExperimentStatus, FinalPrefixStore
 from .rolling_anchor_store import RollingAnchorStore
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
@@ -192,17 +193,6 @@ class NativeClientConfig:
     ornith_analysis_prefix_reuse_config_error: str | None = None
     moe_expert_usage_enabled: bool = False
     low_memory: bool = False
-
-
-@dataclass
-class FinalPrefixExperimentStatus:
-    initialized: bool = False
-    prefix_tokens: int = 0
-    capture_count: int = 0
-    restore_count: int = 0
-    fallback_count: int = 0
-    failure_reason: str | None = None
-    last_used: bool = False
 
 
 @dataclass(frozen=True)
@@ -412,8 +402,10 @@ class NativeLlamaClient:
         self._ornith_analysis_prefix_status = QwenRoutePrefixStatus()
         self._model_metadata_identity: dict[str, str] = {}
         self._qwen_native_build_identity: str | None = None
-        self._final_prefix_anchor_state = PrefixAnchorState()
-        self._final_prefix_status = FinalPrefixExperimentStatus()
+        # Sole owner of the final-prefix checkpoint and its status. The two
+        # fields below are properties over it, so existing readers keep working
+        # with one authoritative copy and nothing to synchronise.
+        self._final_prefix = FinalPrefixStore()
 
     def session_snapshot(self, session_id: str = DEFAULT_NATIVE_SESSION_ID) -> NativeSessionSnapshot:
         if session_id != self._session.session_id:
@@ -1405,7 +1397,7 @@ class NativeLlamaClient:
         should_cancel=None,
     ) -> NativeTimings:
         request_timing = _RequestTiming.start()
-        self._final_prefix_status.last_used = False
+        self._final_prefix_store().mark_unused()
         thinking = self._thinking_enabled(thinking)
         prepared_multimodal = prepare_multimodal_messages(messages, media_marker=self._media_marker)
         mode = (
@@ -1670,7 +1662,7 @@ class NativeLlamaClient:
         framed_messages = qwen3_coder_artifact_messages(messages)
         rendered = self.apply_chat_template(framed_messages, tools=None, thinking=False)
         prompt = qwen3_coder_artifact_prompt(rendered)
-        self._final_prefix_status.last_used = False
+        self._final_prefix_store().mark_unused()
         self._ensure_prompt_cache_mode(f"artifact:{QWEN3_CODER_ARTIFACT_PROTOCOL_ID}")
         raw_parts: list[str] = []
         sampler = self._create_qwen3_coder_artifact_sampler()
@@ -3899,14 +3891,11 @@ class NativeLlamaClient:
             self._final_prefix_anchor_state = restored
             if ok:
                 self._session.cached_prompt_tokens = list(plan.prefix_tokens)
-                self._final_prefix_status.initialized = True
-                self._final_prefix_status.prefix_tokens = len(plan.prefix_tokens)
-                self._final_prefix_status.restore_count += 1
-                self._final_prefix_status.failure_reason = None
-                self._final_prefix_status.last_used = True
+                self._final_prefix_store().mark_ready(
+                    len(plan.prefix_tokens), restored=True
+                )
                 return len(plan.prefix_tokens), len(plan.prefix_tokens)
-            self._final_prefix_status.initialized = False
-            self._final_prefix_status.prefix_tokens = 0
+            self._final_prefix_store().mark_not_ready()
             self._record_final_prefix_fallback(str(metadata.get("fallback_reason") or "restore_failed"))
             self._clear_target_memory()
             return 0, self._prepare_memory_for_prompt(prompt_tokens)
@@ -3935,18 +3924,49 @@ class NativeLlamaClient:
             return 0, self._prepare_memory_for_prompt(prompt_tokens)
         self._final_prefix_anchor_state = state
         if not state.valid:
-            self._final_prefix_status.initialized = False
-            self._final_prefix_status.prefix_tokens = 0
+            self._final_prefix_store().mark_not_ready()
             self._record_final_prefix_fallback(str(metadata.get("fallback_reason") or "capture_failed"))
             self._clear_target_memory()
             return 0, self._prepare_memory_for_prompt(prompt_tokens)
         self._session.cached_prompt_tokens = list(plan.prefix_tokens)
-        self._final_prefix_status.initialized = True
-        self._final_prefix_status.prefix_tokens = len(plan.prefix_tokens)
-        self._final_prefix_status.capture_count += 1
-        self._final_prefix_status.failure_reason = None
-        self._final_prefix_status.last_used = True
+        self._final_prefix_store().mark_ready(
+            len(plan.prefix_tokens), captured=True
+        )
         return len(plan.prefix_tokens), 0
+
+    @property
+    def _final_prefix_anchor_state(self) -> PrefixAnchorState:
+        """The final-prefix checkpoint, owned by `FinalPrefixStore`."""
+        return self._final_prefix_store().anchor
+
+    @_final_prefix_anchor_state.setter
+    def _final_prefix_anchor_state(self, state: PrefixAnchorState) -> None:
+        self._final_prefix_store().anchor = state
+
+    @property
+    def _final_prefix_status(self) -> FinalPrefixExperimentStatus:
+        """The experiment counters, owned by `FinalPrefixStore`."""
+        return self._final_prefix_store().status
+
+    @_final_prefix_status.setter
+    def _final_prefix_status(self, status: FinalPrefixExperimentStatus) -> None:
+        # Assigning the whole status object worked before the extraction, and
+        # several tests build a client that way. Replacing the owner's status
+        # keeps that legal without a second copy.
+        self._final_prefix_store()._status = status
+
+    def _final_prefix_store(self) -> FinalPrefixStore:
+        """The owner, created on demand for a bare client.
+
+        Clients built via `object.__new__` never run `__init__`, and before the
+        extraction those simply had the two attributes missing. Creating on
+        demand keeps them working without an eager-init requirement.
+        """
+        store = self.__dict__.get("_final_prefix")
+        if store is None:
+            store = FinalPrefixStore()
+            self._final_prefix = store
+        return store
 
     def _final_prefix_state_kwargs(self, segments: RoutePromptSegments, *, token_hash: str) -> dict[str, str]:
         config_id = (
@@ -3967,18 +3987,12 @@ class NativeLlamaClient:
         }
 
     def _record_final_prefix_fallback(self, reason: str) -> None:
-        self._final_prefix_status.fallback_count += 1
-        self._final_prefix_status.failure_reason = reason
-        self._final_prefix_status.last_used = False
+        """Delegate: see `FinalPrefixStore.record_fallback`."""
+        self._final_prefix_store().record_fallback(reason)
 
     def _invalidate_final_prefix(self, reason: str) -> None:
-        if not hasattr(self, "_final_prefix_anchor_state"):
-            return
-        self._final_prefix_anchor_state = PrefixAnchorState()
-        self._final_prefix_status.initialized = False
-        self._final_prefix_status.prefix_tokens = 0
-        self._final_prefix_status.failure_reason = reason
-        self._final_prefix_status.last_used = False
+        """Delegate: see `FinalPrefixStore.invalidate`."""
+        self._final_prefix_store().invalidate(reason)
 
     def _continue_generation_from_current_context(
         self,
