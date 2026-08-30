@@ -20,12 +20,26 @@ from orbit.native_llama.mtp_completion import MtpCompletionResult
 
 
 def _client(committed=(), prompt_tokens=(), coder=False):
-    """A client with just enough wired for the identity decisions."""
+    """A client with just enough wired for the identity decisions.
+
+    A REAL session, not a mock: committed identity is owned by the session's
+    `CommittedIdentity`, so a mocked session would bypass the owner entirely
+    and the tests would assert against a stand-in rather than the real state.
+    """
+    from orbit.native_llama.committed_identity import CommittedIdentity
+    from orbit.native_llama.session_state import NativeSessionState
+
     c = object.__new__(NativeLlamaClient)
-    c._session = MagicMock()
-    c._session.committed_sequence_tokens = list(committed)
+    c._session = NativeSessionState(session_id="test")
     c.tokenize = lambda text: list(prompt_tokens)
     c._qwen3_coder_native_protocol = lambda: coder
+    c._session.bind_committed_identity(
+        CommittedIdentity(
+            tokenize=lambda text: c.tokenize(text),
+            coder_protocol=lambda: c._qwen3_coder_native_protocol(),
+        )
+    )
+    c._session.committed_sequence_tokens = list(committed)
     return c
 
 
@@ -53,34 +67,34 @@ class ResidentClaimDerivationTests(unittest.TestCase):
         self.assertEqual(c._resident_prefix_len_for_mtp("p", []), 0)
 
     def test_exact_proper_prefix_yields_the_committed_length(self) -> None:
-        c = _client(prompt_tokens=(1, 2, 3, 4, 5))
+        c = _client(committed=(1, 2, 3), prompt_tokens=(1, 2, 3, 4, 5))
         self.assertEqual(c._resident_prefix_len_for_mtp("p", [1, 2, 3]), 3)
 
     def test_prefix_mismatch_yields_no_claim(self) -> None:
-        c = _client(prompt_tokens=(1, 2, 9, 4, 5))
+        c = _client(committed=(1, 2, 3), prompt_tokens=(1, 2, 9, 4, 5))
         self.assertEqual(c._resident_prefix_len_for_mtp("p", [1, 2, 3]), 0)
 
     def test_claim_equal_to_prompt_length_is_denied(self) -> None:
         """Defect A: a whole-prompt claim leaves no suffix, so sampling would
         read logits from the previous completion."""
-        c = _client(prompt_tokens=(1, 2, 3))
+        c = _client(committed=(1, 2, 3), prompt_tokens=(1, 2, 3))
         self.assertEqual(c._resident_prefix_len_for_mtp("p", [1, 2, 3]), 0)
 
     def test_claim_longer_than_the_prompt_is_denied(self) -> None:
-        c = _client(prompt_tokens=(1, 2))
+        c = _client(committed=(1, 2, 3), prompt_tokens=(1, 2))
         self.assertEqual(c._resident_prefix_len_for_mtp("p", [1, 2, 3]), 0)
 
     def test_no_longest_common_prefix_relaxation(self) -> None:
         """A shared head is not identity; anything short of exact yields 0."""
-        c = _client(prompt_tokens=(1, 2, 3, 99, 5))
+        c = _client(committed=(1, 2, 3, 4), prompt_tokens=(1, 2, 3, 99, 5))
         self.assertEqual(c._resident_prefix_len_for_mtp("p", [1, 2, 3, 4]), 0)
 
     def test_coder_protocol_opts_out(self) -> None:
-        c = _client(prompt_tokens=(1, 2, 3, 4), coder=True)
+        c = _client(committed=(1, 2), prompt_tokens=(1, 2, 3, 4), coder=True)
         self.assertEqual(c._resident_prefix_len_for_mtp("p", [1, 2]), 0)
 
     def test_tokenizer_failure_falls_back_to_cold(self) -> None:
-        c = _client(prompt_tokens=(1, 2, 3, 4))
+        c = _client(committed=(1, 2), prompt_tokens=(1, 2, 3, 4))
         def boom(_text):
             raise RuntimeError("tokenizer unavailable")
         c.tokenize = boom
@@ -91,7 +105,13 @@ class CommittedPublicationTests(unittest.TestCase):
     """Publication follows the backend's physical verdict, nothing else."""
 
     def _publish(self, client, result):
-        client._invalidate_committed_sequence = MagicMock()
+        """Drive the real publisher over real state.
+
+        `_invalidate_committed_sequence` is deliberately NOT mocked: identity is
+        owned by the session's `CommittedIdentity`, which clears itself, so a
+        mock there would observe a stand-in instead of the authoritative state.
+        A dropped identity is therefore an EMPTY sequence, not a call count.
+        """
         client._session.committed_sequence_tokens = [9, 9, 9]
         client._publish_mtp_committed_identity(result, "p")
         return client
@@ -105,14 +125,12 @@ class CommittedPublicationTests(unittest.TestCase):
         """A: cold canonical success must publish, or reuse cannot bootstrap."""
         c = self._publish(_client(prompt_tokens=(1, 2, 3)), _result())
         self.assertEqual(self._published(c), [1, 2, 3, 7])
-        c._invalidate_committed_sequence.assert_not_called()
 
     def test_failed_completion_drops_identity(self) -> None:
         c = self._publish(_client(prompt_tokens=(1, 2, 3)),
                           _result(success=False))
-        c._invalidate_committed_sequence.assert_called_once()
-        self.assertEqual(self._published(c), [9, 9, 9],
-                         "nothing may be published on a non-canonical exit")
+        self.assertEqual(self._published(c), [],
+                         "a non-canonical exit must leave no identity behind")
 
     def test_resident_reuse_with_poisoned_pair_does_not_publish(self) -> None:
         """G: resident_reuse_active is NOT pair_canonical."""
@@ -122,9 +140,8 @@ class CommittedPublicationTests(unittest.TestCase):
             generated_tokens=(7, 8), resident_tokens=(1, 2, 3, 7),
         )
         c = self._publish(_client(prompt_tokens=(1, 2, 3)), r)
-        c._invalidate_committed_sequence.assert_called_once()
-        self.assertEqual(self._published(c), [9, 9, 9],
-                         "nothing may be published on a non-canonical exit")
+        self.assertEqual(self._published(c), [],
+                         "a non-canonical exit must leave no identity behind")
 
     def test_cold_completion_ending_canonical_publishes(self) -> None:
         """H: no resident reuse, but the pair ended canonical -> publish."""
@@ -144,9 +161,8 @@ class CommittedPublicationTests(unittest.TestCase):
         """
         c = self._publish(_client(prompt_tokens=(1, 2, 3)),
                           _result(resident=()))
-        c._invalidate_committed_sequence.assert_called_once()
-        self.assertEqual(self._published(c), [9, 9, 9],
-                         "nothing may be published on a non-canonical exit")
+        self.assertEqual(self._published(c), [],
+                         "a non-canonical exit must leave no identity behind")
 
     def test_identity_is_the_measured_resident_sequence(self) -> None:
         """Identity must equal what the backend measured, verbatim."""
@@ -304,3 +320,100 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnershipContractTests(unittest.TestCase):
+    """The extraction's own guarantees: one owner, and no lost state.
+
+    These cover behaviour that exists ONLY because identity moved out of
+    `client.py`, so nothing older can protect them.
+    """
+
+    def test_binding_a_wired_owner_carries_tokens_across(self) -> None:
+        """Binding must not silently drop an already-recorded identity.
+
+        A session records identity before the client finishes wiring its
+        tokenizer; swapping in the wired owner must move those tokens, not
+        discard them. Dropping them would look like a harmless reset and
+        silently cost every subsequent reuse.
+        """
+        from orbit.native_llama.committed_identity import CommittedIdentity
+        from orbit.native_llama.session_state import NativeSessionState
+
+        session = NativeSessionState(session_id="carry")
+        session.committed_sequence_tokens = [1, 2, 3]
+        wired = CommittedIdentity(tokenize=lambda t: [], coder_protocol=lambda: False)
+        session.bind_committed_identity(wired)
+
+        self.assertEqual(wired.tokens, [1, 2, 3], "bind dropped the identity")
+        self.assertEqual(session.committed_sequence_tokens, [1, 2, 3])
+        self.assertIs(session.committed_identity, wired, "one owner only")
+
+    def test_commit_records_prompt_and_generated_exactly(self) -> None:
+        """`commit` must record the full resident sequence, in order.
+
+        Understating it -- dropping the generated tail -- is a false cache hit:
+        the next turn would claim a prefix shorter than KV and then diverge.
+        """
+        c = _client()
+        c._commit_sequence([1, 2, 3], [4, 5])
+        self.assertEqual(c._session.committed_sequence_tokens, [1, 2, 3, 4, 5])
+
+    def test_a_duck_typed_session_keeps_its_pre_extraction_behaviour(self) -> None:
+        """A session that only carries the token attribute must still work.
+
+        Identity used to live in `session.committed_sequence_tokens`, so any
+        object exposing it was a valid session. Several call sites rely on that.
+        Requiring a `NativeSessionState` would be a behaviour change.
+        """
+        import types
+
+        c = object.__new__(NativeLlamaClient)
+        c._session = types.SimpleNamespace(committed_sequence_tokens=[1, 2])
+        c.tokenize = lambda text: [1, 2, 3]
+        c._qwen3_coder_native_protocol = lambda: False
+
+        c._commit_sequence([7], [8])
+        self.assertEqual(c._session.committed_sequence_tokens, [7, 8])
+        c._invalidate_committed_sequence()
+        self.assertEqual(c._session.committed_sequence_tokens, [])
+
+    def test_a_duck_typed_session_still_derives_a_resident_claim(self) -> None:
+        """The claim must use the CLIENT's tokenizer, on any session shape.
+
+        This is the operation that actually regressed once: an adapter that
+        stubbed the tokenizer returned 0 here where the pre-extraction code
+        returned the committed length, silently refusing every reuse. The
+        failure was invisible to the suite because the duck-typed test only
+        exercised commit and invalidate -- the two operations that did NOT
+        regress. Derivation is the one that did.
+        """
+        import types
+
+        def client(committed, prompt, coder=False):
+            c = object.__new__(NativeLlamaClient)
+            c._session = types.SimpleNamespace(
+                committed_sequence_tokens=list(committed), session_id="duck"
+            )
+            c.tokenize = lambda text: list(prompt)
+            c._qwen3_coder_native_protocol = lambda: coder
+            return c
+
+        exact = client([1, 2, 3], [1, 2, 3, 4, 5])
+        self.assertEqual(
+            exact._resident_prefix_len_for_mtp("p", [1, 2, 3]), 3,
+            "an exact proper prefix must yield the committed length; 0 here "
+            "means the client's tokenizer is not reaching the derivation",
+        )
+        self.assertEqual(
+            client([1, 2, 9], [1, 2, 3, 4, 5])._resident_prefix_len_for_mtp("p", [1, 2, 9]), 0,
+            "a divergent prefix must refuse reuse",
+        )
+        self.assertEqual(
+            client([1, 2, 3], [1, 2, 3])._resident_prefix_len_for_mtp("p", [1, 2, 3]), 0,
+            "a whole-prompt claim leaves no suffix to decode",
+        )
+        self.assertEqual(
+            client([1, 2], [1, 2, 3, 4], coder=True)._resident_prefix_len_for_mtp("p", [1, 2]), 0,
+            "the coder opt-out must still reach the derivation",
+        )
