@@ -27,6 +27,7 @@ from .bindings import (
     llama_pos,
 )
 from .chat_bridge import chat_bridge_filename
+from .committed_identity import CommittedIdentity, AttributeBackedIdentity
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
@@ -331,6 +332,22 @@ class NativeLlamaClient:
         self.supports_vision = False
         self.supports_audio = False
         self._session = NativeSessionState(session_id=DEFAULT_NATIVE_SESSION_ID)
+        # Sole owner of committed-token identity. The session's
+        # `committed_sequence_tokens` attribute is backed by this object rather
+        # than holding a second copy, so there is one authoritative state and
+        # nothing to keep in sync.
+        self._committed_identity = CommittedIdentity(
+            # Late-bound: `tokenize` depends on the vocab, which is loaded
+            # after construction, so the owner must call through rather than
+            # capture the bound method now.
+            tokenize=lambda text: self.tokenize(text),
+            coder_protocol=lambda: self._qwen3_coder_native_protocol(),
+            session_id=lambda: getattr(self._session, "session_id", None),
+            profile_id=lambda: getattr(
+                getattr(self, "model_profile", None), "profile_id", None
+            ),
+        )
+        self._session.bind_committed_identity(self._committed_identity)
         self.mtp_probe = MtpProbeResult(enabled=self.config.mtp_probe_enabled, initialized=False, error=None)
         self.mtp_dry_run = MtpDryRunResult(enabled=self.config.mtp_dry_run_enabled, success=False, error=None)
         self.mtp_accept_probe = MtpAcceptProbeResult(enabled=self.config.mtp_accept_probe_enabled, success=False, error=None)
@@ -4248,90 +4265,54 @@ class NativeLlamaClient:
         self._invalidate_committed_sequence()
         return common
 
-    def _invalidate_committed_sequence(self) -> None:
-        """Drop committed-sequence identity whenever backend KV may diverge.
+    def _committed(self):
+        """The owner of committed identity for the current session.
 
-        Strict append-only continuation is only safe while the recorded tokens
-        are exactly the ones resident in KV. Every path that clears, rewrites
-        or replaces that memory must call this; a stale identity would produce
-        a false cache hit, which is a correctness bug rather than a slow path.
+        A session is normally a `NativeSessionState`, which owns one. Several
+        call sites build a client with a duck-typed stand-in that only carries
+        `committed_sequence_tokens`; before the extraction those worked, because
+        identity was reached through that plain attribute. A stand-in gets its
+        own owner here, seeded from whatever it holds and written back on every
+        mutation, so those callers keep their previous behaviour exactly.
         """
-        self._session.committed_sequence_tokens.clear()
+        session = self._session
+        owner = getattr(session, "committed_identity", None)
+        # `isinstance`, not a truth test: a MagicMock session answers every
+        # attribute with a child mock, so a bare `is not None` would accept one
+        # and turn all four operations into silent no-ops.
+        if isinstance(owner, CommittedIdentity):
+            return owner
+        return AttributeBackedIdentity(
+            session,
+            tokenize=lambda text: self.tokenize(text),
+            coder_protocol=lambda: self._qwen3_coder_native_protocol(),
+            session_id=lambda: getattr(session, "session_id", None),
+            profile_id=lambda: getattr(
+                getattr(self, "model_profile", None), "profile_id", None
+            ),
+        )
+
+    def _invalidate_committed_sequence(self) -> None:
+        """Delegate: see `CommittedIdentity.invalidate`."""
+        self._committed().invalidate()
 
     def _resident_prefix_len_for_mtp(
         self, mtp_prompt: str, committed: list[int]
     ) -> int:
-        """Length of the committed prefix this completion may reuse, or 0.
+        """Delegate: see `CommittedIdentity.resident_prefix_len_for_mtp`.
 
-        The rule is the same strict append-only identity `_prepare_memory_for_prompt`
-        already enforces for the non-MTP path: the resident sequence must be a
-        token-exact PROPER prefix of this prompt. Proper matters -- a claim equal
-        to the whole prompt would leave no suffix to decode, so sampling would read
-        logits from the previous completion (Defect A).
-
-        Returning 0 is always safe: the backend then rebuilds cold.
+        `committed` is accepted for call-site compatibility and is the same
+        sequence the owner holds; the owner is the authority.
         """
-        if not committed:
-            return 0
-        if self._qwen3_coder_native_protocol():
-            return 0
-        try:
-            prompt_tokens = self.tokenize(mtp_prompt)
-        except Exception:
-            return 0
-        n = len(committed)
-        if not (0 < n < len(prompt_tokens)):
-            return 0
-        if prompt_tokens[:n] != committed:
-            # Diagnostic only, opt-in via ORBIT_KV_DIAG, and never consulted by
-            # any decision -- the refusal below is unconditional. Emitted because
-            # a divergence here and "no identity yet" both surface as a claim of
-            # 0, and only this distinguishes them when attributing a missed reuse.
-            emit_strict_append_miss(
-                committed=list(committed),
-                prompt=list(prompt_tokens),
-                session_id=getattr(self._session, "session_id", None),
-                profile_id=getattr(
-                    getattr(self, "model_profile", None), "profile_id", None
-                ),
-                lifecycle="mtp-resident-claim",
-            )
-            return 0
-        return n
+        return self._committed().resident_prefix_len_for_mtp(mtp_prompt)
 
     def _publish_mtp_committed_identity(self, result, mtp_prompt: str) -> None:
-        """Record what the backend proved is resident, or drop the identity.
-
-        The verdict comes from the backend, captured at completion time. Identity
-        must never outlive the physical pair it describes, so anything short of a
-        canonical success drops it and the next turn rebuilds cold.
-        """
-        if not (
-            getattr(result, "success", False)
-            and getattr(result, "pair_canonical", False)
-        ):
-            self._invalidate_committed_sequence()
-            return
-        # The identity is the backend's own record of what is physically
-        # resident, not a reconstruction. `prompt + generated_tokens` would be
-        # one token too long: a sampled token enters `generated` at sample time
-        # but only enters the resident sequence on the following iteration. An
-        # identity longer than KV is a false cache hit -- the next turn would
-        # skip prefill for a position that was never decoded and land every
-        # subsequent token one position early, which corrupts output silently
-        # rather than merely losing reuse. Retokenizing the text is likewise not
-        # equivalent. So: publish what the backend measured, or publish nothing.
-        resident = tuple(getattr(result, "resident_tokens", ()) or ())
-        if not resident:
-            self._invalidate_committed_sequence()
-            return
-        self._session.committed_sequence_tokens = list(resident)
+        """Delegate: see `CommittedIdentity.publish_from_mtp`."""
+        self._committed().publish_from_mtp(result)
 
     def _commit_sequence(self, prompt_tokens, generated_tokens) -> None:
-        """Record the exact sequence now resident in KV."""
-        self._session.committed_sequence_tokens = (
-            list(prompt_tokens) + list(generated_tokens)
-        )
+        """Delegate: see `CommittedIdentity.commit`."""
+        self._committed().commit(prompt_tokens, generated_tokens)
 
     def _qwen3_coder_native_protocol(self) -> bool:
         profile = getattr(self, "model_profile", None)
