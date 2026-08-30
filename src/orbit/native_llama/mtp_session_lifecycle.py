@@ -126,6 +126,23 @@ class MtpSessionLifecycle:
         if disable:
             self._session.mtp_enabled = False
 
+    def record_unavailable(self, reason: str) -> None:
+        """Record that MTP does not apply, without marking it broken.
+
+        Distinct from `record_failure`: nothing went wrong. The artifact or
+        profile simply does not offer this architecture, so `mtp_failed` stays
+        False and only the reason is recorded.
+
+        The distinction is preserved because the pre-extraction code drew it,
+        not because anything currently depends on it: `mtp_failed` has no
+        production reader today and is absent from `NativeSessionSnapshot`.
+        That makes it a latent invariant rather than a live one -- but
+        "unsupported" and "broken" are genuinely different states, the field is
+        public on the session dataclass, and collapsing them during a
+        behaviour-preserving extraction would be an unforced change.
+        """
+        self._session.mtp_failure_reason = reason
+
     def discard(self, reason: str) -> None:
         """Drop a session whose runtime is no longer usable.
 
