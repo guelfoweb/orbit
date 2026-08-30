@@ -88,6 +88,31 @@ class MtpSessionLifecycle:
         if clear_failure_reason:
             self._session.mtp_failure_reason = None
 
+    def attach(self, runtime) -> None:
+        """Point the session at a runtime WITHOUT declaring it ready.
+
+        Distinct from `publish`: this records the handle and its two derived
+        context fields but leaves `mtp_enabled` / `mtp_failed` exactly as they
+        were. The completion path uses it where the runtime may be the one
+        already in use, and where readiness is decided later by the outcome --
+        using `publish` there would flip a failed session to enabled before it
+        had succeeded.
+        """
+        self._runtime = runtime
+        self._session.ctx_dft = runtime.ctx_dft
+        self._session.spec = runtime.spec
+
+    def mark_ready(self) -> None:
+        """Declare the current session healthy after a successful completion.
+
+        The counterpart to `record_failure`: no runtime changes hands, only the
+        verdict. Kept separate from `publish` because there is nothing to
+        publish -- the runtime is already attached.
+        """
+        self._session.mtp_failed = False
+        self._session.mtp_failure_reason = None
+        self._session.mtp_enabled = True
+
     def record_failure(self, reason: str, *, disable: bool = False) -> None:
         """Record that MTP could not be constructed or continued.
 

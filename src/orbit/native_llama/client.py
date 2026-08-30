@@ -2406,15 +2406,15 @@ class NativeLlamaClient:
             except Exception as exc:
                 self.mtp_fallback_reason = str(exc) or "persistent-mtp-reset-failed"
                 self.last_mtp_completion = MtpCompletionResult(enabled=True, success=False, error=self.mtp_fallback_reason)
-                self._session.mtp_failed = True
-                self._session.mtp_failure_reason = self.mtp_fallback_reason
-                self._session.mtp_enabled = False
+                self._mtp_lifecycle_owner().record_failure(
+                    self.mtp_fallback_reason, disable=True
+                )
                 return None
         else:
             runtime = self._persistent_mtp_runtime
-        self._persistent_mtp_runtime = runtime
-        self._session.ctx_dft = runtime.ctx_dft
-        self._session.spec = runtime.spec
+        # attach, not publish: readiness is decided by the outcome below, and
+        # the runtime may be the one already in use.
+        self._mtp_lifecycle_owner().attach(runtime)
         streamed_parts: list[str] = []
         generation_cap = max(1, max_tokens)
         self._last_completion_generation_cap = generation_cap
@@ -2464,26 +2464,22 @@ class NativeLlamaClient:
                         ctx_tgt=self._session.ctx_tgt,
                     )
                 except Exception as exc:
-                    self._session.mtp_failed = True
-                    self._session.mtp_failure_reason = str(exc) or "persistent-mtp-reset-failed-after-cancel"
-                    self._session.mtp_enabled = False
+                    self._mtp_lifecycle_owner().record_failure(
+                        str(exc) or "persistent-mtp-reset-failed-after-cancel",
+                        disable=True,
+                    )
                     return None
-                self._persistent_mtp_runtime = runtime
-                self._session.ctx_dft = runtime.ctx_dft
-                self._session.spec = runtime.spec
-                self._session.mtp_failed = False
-                self._session.mtp_failure_reason = None
-                self._session.mtp_enabled = True
+                self._mtp_lifecycle_owner().publish(
+                    runtime, clear_failure_reason=True
+                )
                 return None
             self.mtp_fallback_reason = result.error or "mtp-experimental-failed"
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = self.mtp_fallback_reason
-            self._session.mtp_enabled = False
+            self._mtp_lifecycle_owner().record_failure(
+                self.mtp_fallback_reason, disable=True
+            )
             return None
         self.mtp_fallback_reason = None
-        self._session.mtp_failed = False
-        self._session.mtp_failure_reason = None
-        self._session.mtp_enabled = True
+        self._mtp_lifecycle_owner().mark_ready()
         if result.content and on_token and not streamed_parts:
             on_token(result.content)
         prompt_token_list = self.tokenize(mtp_prompt) if self._vocab else []
