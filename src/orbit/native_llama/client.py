@@ -950,6 +950,21 @@ class NativeLlamaClient:
             lib.llama_memory_clear(mem, True)
         self._session.cached_prompt_tokens.clear()
         self._invalidate_committed_sequence()
+        # The last request's MTP outcome describes a conversation this reset is
+        # destroying. `/props` publishes both, and they mislead in opposite
+        # directions: a stale fallback reason reports a healthy session as
+        # failed, a stale completion reports success -- and its metrics -- for a
+        # session that has run nothing yet. Placed after the memory and
+        # committed-sequence invalidation, which stay first, and before every
+        # early return below, so a failed or absent runtime reset leaves the
+        # status no staler. `enabled` is restored from config rather than
+        # copied: a failed request may record `enabled=False` meaning "MTP was
+        # unavailable for that request", and carrying that forward would hide
+        # the `/props` completion payload for a client that has MTP configured.
+        self.mtp_fallback_reason = None
+        self.last_mtp_completion = MtpCompletionResult(
+            enabled=self.config.use_mtp_experimental, success=False, error=None
+        )
         self._session.prompt_cache_mode = None
         self._session.continuation_ready = False
         self._session.last_metrics = None
