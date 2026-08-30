@@ -53,6 +53,25 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertEqual(client.mtp_fallback_reason, "draft-mtp-missing")
 
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_a_missing_draft_without_a_reason_uses_the_default(self, _mocked_lib) -> None:
+        """`paths.fallback_reason` is optional, so the default must be reported.
+
+        Its sibling above always supplies a reason, leaving the default half of
+        `fallback_reason or "draft-mtp-unavailable"` unexercised -- a surviving
+        mutant recorded since REF-3. `/props` would otherwise publish `None`
+        while MTP was genuinely unavailable.
+        """
+        client = NativeLlamaClient(
+            self._paths(mtp_available=False, fallback_reason=None),
+            NativeClientConfig(use_mtp_experimental=True),
+        )
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "draft-mtp-unavailable")
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
     def test_try_complete_with_mtp_experimental_skips_when_thinking_is_on(self, _mocked_lib) -> None:
         client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True, thinking=True))
 
@@ -325,6 +344,35 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(client.mtp_fallback_reason, "persistent-mtp-uninitialized")
 
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_an_uninitialized_session_reports_its_own_failure_reason(self, _mocked_lib) -> None:
+        """The session's reason wins; the literal is only a default.
+
+        Its sibling above seeds `mtp_failure_reason` with the very string used
+        as the fallback default, so both halves of `reason or "default"` produce
+        the same answer and neither is pinned -- which is why two opposite
+        mutants (always-default and never-default) both survived here.
+        Seeding a distinct reason separates them.
+        """
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._session.mtp_failure_reason = "session-specific-reason"
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "session-specific-reason")
+
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_an_uninitialized_session_without_a_reason_uses_the_default(self, _mocked_lib) -> None:
+        """The other half: absent a session reason, the default is reported."""
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._session.mtp_failure_reason = None
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "persistent-mtp-uninitialized")
+
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
     @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
     @mock.patch("orbit.native_llama.client.LlamaLibrary")
@@ -403,6 +451,96 @@ class NativeMtpExperimentalTests(unittest.TestCase):
         self.assertFalse(client.cancel_event.is_set())
         self.assertTrue(client.last_mtp_completion.success)
         self.assertIsNone(client.mtp_fallback_reason)
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_a_failed_completion_without_an_error_uses_the_default(
+        self, _mocked_lib, mocked_reset, mocked_run
+    ) -> None:
+        """A failure that carries no error string still names a reason.
+
+        `MtpCompletionResult.error` is optional, so `result.error or
+        "mtp-experimental-failed"` can reach its default. Without this the
+        published reason would be `None` even though the completion failed --
+        the surviving half of a mutant recorded since REF-3.
+        """
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
+        client.tokenize = lambda prompt: [1, 2, 3]
+        mocked_run.return_value = MtpCompletionResult(
+            enabled=True, success=False, error=None
+        )
+
+        result = client._try_complete_with_mtp_experimental("hello", max_tokens=8)
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "mtp-experimental-failed")
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_a_successful_mtp_completion_clears_a_stale_fallback_reason(
+        self, _mocked_lib, mocked_reset, mocked_run
+    ) -> None:
+        """A reason left by an earlier request must not outlive a success.
+
+        `mtp_fallback_reason` is served over `/props`, and `orbit_smoke_harness`
+        reads it as a fallback for `mtp_failure_reason` to decide whether MTP is
+        usable. A stale reason therefore reports a healthy backend as unusable.
+
+        The sibling test above asserts the same field is `None` after a success,
+        but builds a fresh client where it is *already* `None`, so it passes
+        whether or not the clear happens. This one seeds a stale value first,
+        which is what makes the assertion mean something.
+        """
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
+        client.tokenize = lambda prompt: [1, 2, 3]
+        client.mtp_fallback_reason = "thinking-mode"
+        mocked_run.return_value = MtpCompletionResult(
+            enabled=True,
+            success=True,
+            error=None,
+            content="ok",
+            output_tokens=1,
+            elapsed_ms=12.5,
+        )
+
+        client.complete_prompt("hello", max_tokens=8)
+
+        self.assertIsNone(
+            client.mtp_fallback_reason,
+            "a success must clear the previous request's fallback reason",
+        )
+
+    @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
+    @mock.patch("orbit.native_llama.client.reset_persistent_mtp_session")
+    @mock.patch("orbit.native_llama.client.LlamaLibrary")
+    def test_a_cancelled_mtp_attempt_records_the_cancelled_reason(
+        self, _mocked_lib, mocked_reset, mocked_run
+    ) -> None:
+        """Cancellation reports `cancelled`, not the reason it replaced.
+
+        `settled_backend_props` polls past exactly `{"cancelled", "timeout"}`,
+        so this specific string is what lets a caller distinguish a transient
+        cancellation from a real failure.
+        """
+        client = NativeLlamaClient(self._paths(), NativeClientConfig(use_mtp_experimental=True))
+        client._vocab = object()
+        self._enable_mock_persistent_mtp(client, mocked_reset)
+        client.tokenize = lambda prompt: [1, 2, 3]
+        client.mtp_fallback_reason = "thinking-mode"
+        client.cancel()
+
+        result = client._try_complete_with_mtp_experimental(
+            "hello", max_tokens=8, thinking=False
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(client.mtp_fallback_reason, "cancelled")
 
     @mock.patch("orbit.native_llama.client.time.monotonic_ns", side_effect=[1_000_000_000, 1_200_000_000])
     @mock.patch("orbit.native_llama.client.run_persistent_mtp_completion")
