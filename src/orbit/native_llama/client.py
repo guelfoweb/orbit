@@ -29,6 +29,7 @@ from .bindings import (
 from .chat_bridge import chat_bridge_filename
 from .committed_identity import CommittedIdentity, AttributeBackedIdentity
 from .mtp_session_lifecycle import MtpSessionLifecycle
+from .rolling_anchor_store import RollingAnchorStore
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
@@ -375,13 +376,16 @@ class NativeLlamaClient:
         self._route_prefix_anchor_state = PrefixAnchorState()
         self._route_prefix_prefill_lock = threading.Lock()
         # Exactly one rolling route checkpoint per client, replaced in place.
-        self._rolling_route_anchor_state = RollingRouteAnchorState()
+        # Sole owner of the two rolling-anchor checkpoint slots. The fields
+        # below are properties over it, so the existing readers keep working
+        # with one authoritative copy and nothing to synchronise.
+        self._rolling_anchors = RollingAnchorStore()
         self._rolling_route_identity_cache: RollingRouteIdentity | None = None
         # A second slot, not a second mechanism: same state type, same
         # primitives. Two slots exist because the route chain and an analysis
         # chain are different conversations that interleave, and one slot
         # would make each switch evict the other's still-valid checkpoint.
-        self._rolling_analysis_anchor_state = RollingRouteAnchorState()
+
         self._reset_generation = 0
         self._qwen_route_prefix_anchor_state = PrefixAnchorState()
         self._qwen_route_prefix_spec: QwenRoutePrefixSpec | None = None
@@ -3570,46 +3574,63 @@ class NativeLlamaClient:
             reset_generation=self._reset_generation,
         )
 
-    def _rolling_anchor_slot(self, identity: RollingRouteIdentity | None) -> str:
-        """Which checkpoint an identity addresses, decided by its own strategy.
+    @property
+    def _rolling_route_anchor_state(self) -> RollingRouteAnchorState:
+        """The CHAT-route checkpoint, owned by `RollingAnchorStore`.
 
-        The backend still knows nothing about CHAT or ANALYSIS: it reads the
-        strategy the caller already put in the identity it supplied.
+        A property rather than a field so the existing readers keep working
+        while there is exactly one authoritative copy. Clients built via
+        `object.__new__` never run `__init__`, so a missing store reads as an
+        empty checkpoint -- which is what "no anchor" already meant.
         """
-        if identity is not None and identity.strategy_id == ROLLING_ANALYSIS_STRATEGY_ID:
-            return "analysis"
-        return "route"
+        return self._rolling_anchor_store().route_state
+
+    @_rolling_route_anchor_state.setter
+    def _rolling_route_anchor_state(self, state: RollingRouteAnchorState) -> None:
+        self._rolling_anchor_store()._route = state
+
+    @property
+    def _rolling_analysis_anchor_state(self) -> RollingRouteAnchorState:
+        """The ANALYSIS checkpoint; see `_rolling_route_anchor_state`."""
+        return self._rolling_anchor_store().analysis_state
+
+    @_rolling_analysis_anchor_state.setter
+    def _rolling_analysis_anchor_state(self, state: RollingRouteAnchorState) -> None:
+        self._rolling_anchor_store()._analysis = state
+
+    @_rolling_analysis_anchor_state.deleter
+    def _rolling_analysis_anchor_state(self) -> None:
+        # Before the extraction this was a plain attribute, so `del` was legal
+        # and left the slot absent. The contract that matters is what absence
+        # MEANS -- a missing checkpoint falls cold rather than raising -- so
+        # deleting empties the slot instead of removing the accessor.
+        self._rolling_anchor_store()._analysis = RollingRouteAnchorState()
+
+    def _rolling_anchor_store(self) -> RollingAnchorStore:
+        """The checkpoint owner, created on demand for a bare client."""
+        store = self.__dict__.get("_rolling_anchors")
+        if store is None:
+            store = RollingAnchorStore()
+            self._rolling_anchors = store
+        return store
+
+    def _rolling_anchor_slot(self, identity: RollingRouteIdentity | None) -> str:
+        """Delegate: see `RollingAnchorStore.slot_for`."""
+        return RollingAnchorStore.slot_for(identity)
 
     def _rolling_anchor_state_for(self, identity: RollingRouteIdentity | None) -> RollingRouteAnchorState:
-        # An absent slot reads as empty rather than raising: a checkpoint that
-        # is not there must fall cold, never fail the call.
-        if self._rolling_anchor_slot(identity) == "analysis":
-            return getattr(self, "_rolling_analysis_anchor_state", None) or RollingRouteAnchorState()
-        return self._rolling_route_anchor_state
+        """Delegate: see `RollingAnchorStore.state_for`."""
+        return self._rolling_anchor_store().state_for(identity)
 
     def _store_rolling_anchor_state(
         self, identity: RollingRouteIdentity | None, state: RollingRouteAnchorState
     ) -> None:
-        if self._rolling_anchor_slot(identity) == "analysis":
-            self._rolling_analysis_anchor_state = state
-        else:
-            self._rolling_route_anchor_state = state
+        """Delegate: see `RollingAnchorStore.store`."""
+        self._rolling_anchor_store().store(identity, state)
 
     def _invalidate_rolling_route_anchor(self, reason: str) -> None:
-        # Both lineages: a reset destroys the conversation whose tokens these
-        # are, and an analysis checkpoint surviving it would be exactly the
-        # stale-state reuse the identity check exists to prevent.
-        if self._rolling_route_anchor_state.valid or self._rolling_route_anchor_state.identity is not None:
-            self._rolling_route_anchor_state = invalidate_rolling_route_anchor(
-                self._rolling_route_anchor_state, reason
-            )
-        analysis_state = getattr(self, "_rolling_analysis_anchor_state", None)
-        if analysis_state is not None and (
-            analysis_state.valid or analysis_state.identity is not None
-        ):
-            self._rolling_analysis_anchor_state = invalidate_rolling_route_anchor(
-                analysis_state, reason
-            )
+        """Delegate: see `RollingAnchorStore.invalidate`."""
+        self._rolling_anchor_store().invalidate(reason)
 
     def _prepare_memory_with_ornith_rolling_route_anchor(self, prompt_tokens: list[int]) -> int:
         """Restore the rolling route checkpoint, then defer to strict append.
