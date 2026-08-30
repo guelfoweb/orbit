@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from orbit.native_llama.client import NativeLlamaClient
+from orbit.native_llama.committed_identity import CommittedIdentity
 from orbit.native_llama.mtp_completion import MtpCompletionResult
 from orbit.native_llama.persistent_mtp import _read_generated_tokens
 
@@ -89,14 +90,13 @@ class NoRetokenizationTests(unittest.TestCase):
         claims a prefix the model never made resident.
         """
         c = object.__new__(NativeLlamaClient)
-        c._session = MagicMock()
-        c._session.committed_sequence_tokens = []
+        # A REAL session: identity is owned by its CommittedIdentity, so a
+        # mocked session would bypass the owner and observe a stand-in.
+        from orbit.native_llama.session_state import NativeSessionState
+        c._session = NativeSessionState(session_id="test")
         # Any retokenization of the text would produce the corrupted sequence.
         c.tokenize = lambda text: [1, 2] if text == "prompt" else [10, 99, 12]
         c._qwen3_coder_native_protocol = lambda: False
-        c._invalidate_committed_sequence = (
-            lambda: setattr(c._session, "committed_sequence_tokens", [])
-        )
 
         result = MtpCompletionResult(
             enabled=True, success=True, error=None,
@@ -123,9 +123,7 @@ class NoRetokenizationTests(unittest.TestCase):
         import inspect
 
         fn = ast.parse(
-            inspect.getsource(
-                NativeLlamaClient._publish_mtp_committed_identity
-            ).lstrip()
+            inspect.getsource(CommittedIdentity.publish_from_mtp).lstrip()
         ).body[0]
         # Attribute nodes plus string constants: fields are reached through
         # getattr(result, "...") as well as direct attribute access.

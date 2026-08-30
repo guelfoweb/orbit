@@ -320,7 +320,11 @@ class InvalidationCoverageTests(unittest.TestCase):
         never decoded. So the helper must not tokenize, and must not read
         `generated_tokens`.
         """
-        fn = self._function("_publish_mtp_committed_identity")
+        # The policy now lives in CommittedIdentity; the client method is a
+        # delegate. Assert against the owner, where the decision is made.
+        import ast as _ast, inspect
+        from orbit.native_llama.committed_identity import CommittedIdentity
+        fn = _ast.parse(inspect.getsource(CommittedIdentity.publish_from_mtp).lstrip()).body[0]
         # Attribute and string names actually referenced by the code, so the
         # explanatory comments naming the rejected approach do not count.
         names = {
