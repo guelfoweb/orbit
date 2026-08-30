@@ -28,6 +28,7 @@ from .bindings import (
 )
 from .chat_bridge import chat_bridge_filename
 from .committed_identity import CommittedIdentity, AttributeBackedIdentity
+from .mtp_session_lifecycle import MtpSessionLifecycle
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
@@ -354,7 +355,17 @@ class NativeLlamaClient:
         self.mtp_decode_probe = MtpDecodeProbeResult(enabled=self.config.mtp_decode_probe_enabled, success=False, error=None)
         self.last_mtp_completion = MtpCompletionResult(enabled=self.config.use_mtp_experimental, success=False, error=None)
         self.mtp_fallback_reason: str | None = None
-        self._persistent_mtp_runtime: PersistentMtpSessionRuntime | None = None
+        # Sole owner of the MTP runtime handle and the four session fields that
+        # project it. Decision policy stays in the client; this records what
+        # happened so the transitions cannot drift between call sites.
+        self._mtp_lifecycle = MtpSessionLifecycle(
+            lambda: self._session,
+            free_runtime=lambda runtime: free_persistent_mtp_session(
+                llama_root=self.paths.llama_root,
+                paths=self.paths,
+                runtime=runtime,
+            ),
+        )
         self._last_completion_used_mtp = False
         self._last_completion_generation_cap = 0
         self.last_target_only_token_hashes: list[int] = []
@@ -883,20 +894,12 @@ class NativeLlamaClient:
             self._session.mtp_failed = True
             self._session.mtp_failure_reason = str(exc)
             return True
-        self._persistent_mtp_runtime = runtime
-        self._session.ctx_dft = runtime.ctx_dft
-        self._session.spec = runtime.spec
-        self._session.mtp_enabled = True
-        self._session.mtp_failed = False
+        self._mtp_lifecycle_owner().publish(runtime)
         return True
 
     def _initialize_persistent_mtp_session(self) -> None:
         self._free_persistent_mtp_session()
-        self._session.ctx_dft = None
-        self._session.spec = None
-        self._session.mtp_enabled = False
-        self._session.mtp_failed = False
-        self._session.mtp_failure_reason = None
+        self._mtp_lifecycle_owner().clear_state()
         if not self.config.use_mtp_experimental:
             return
         # Self-MTP first, and only for an artifact whose exact bytes are
@@ -931,11 +934,7 @@ class NativeLlamaClient:
             self._session.mtp_failed = True
             self._session.mtp_failure_reason = str(exc)
             return
-        self._persistent_mtp_runtime = runtime
-        self._session.ctx_dft = runtime.ctx_dft
-        self._session.spec = runtime.spec
-        self._session.mtp_enabled = True
-        self._session.mtp_failed = False
+        self._mtp_lifecycle_owner().publish(runtime)
 
     def reset_session_state(
         self,
@@ -988,19 +987,9 @@ class NativeLlamaClient:
                 ctx_tgt=self._session.ctx_tgt,
             )
         except Exception as exc:
-            self._session.mtp_enabled = False
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = str(exc)
-            self._session.ctx_dft = None
-            self._session.spec = None
-            self._persistent_mtp_runtime = None
+            self._mtp_lifecycle_owner().discard(str(exc))
             return
-        self._persistent_mtp_runtime = runtime
-        self._session.ctx_dft = runtime.ctx_dft
-        self._session.spec = runtime.spec
-        self._session.mtp_enabled = True
-        self._session.mtp_failed = False
-        self._session.mtp_failure_reason = None
+        self._mtp_lifecycle_owner().publish(runtime, clear_failure_reason=True)
 
     def _ensure_prompt_cache_mode(self, mode: str) -> None:
         current = self._session.prompt_cache_mode
@@ -1081,20 +1070,44 @@ class NativeLlamaClient:
         self.supports_vision = bool(self.mtmd.lib.orbit_mtmd_support_vision(ctx))
         self.supports_audio = bool(self.mtmd.lib.orbit_mtmd_support_audio(ctx))
 
-    def _free_persistent_mtp_session(self) -> None:
-        if self._persistent_mtp_runtime is None:
-            return
-        try:
-            free_persistent_mtp_session(
-                llama_root=self.paths.llama_root,
-                paths=self.paths,
-                runtime=self._persistent_mtp_runtime,
+    @property
+    def _persistent_mtp_runtime(self):
+        """The live MTP runtime, owned by `MtpSessionLifecycle`.
+
+        A property rather than a field so the existing call sites keep working
+        while there is exactly one authoritative copy. Clients built via
+        `object.__new__` never run `__init__`, so a missing collaborator reads
+        as "no MTP session", which is what those call sites already expect.
+        """
+        lifecycle = getattr(self, "_mtp_lifecycle", None)
+        return lifecycle.runtime if lifecycle is not None else None
+
+    @_persistent_mtp_runtime.setter
+    def _persistent_mtp_runtime(self, runtime) -> None:
+        # Assigning this attribute worked on any client before the extraction,
+        # including ones built via `object.__new__` that never ran `__init__`.
+        # Dropping the assignment when no collaborator exists would silently
+        # lose the runtime, so one is created on demand instead.
+        self._mtp_lifecycle_owner()._runtime = runtime
+
+    def _mtp_lifecycle_owner(self) -> MtpSessionLifecycle:
+        """The lifecycle owner, created on demand for a bare client."""
+        lifecycle = getattr(self, "_mtp_lifecycle", None)
+        if lifecycle is None:
+            lifecycle = MtpSessionLifecycle(
+                lambda: self._session,
+                free_runtime=lambda runtime: free_persistent_mtp_session(
+                    llama_root=self.paths.llama_root,
+                    paths=self.paths,
+                    runtime=runtime,
+                ),
             )
-        finally:
-            self._persistent_mtp_runtime = None
-            self._session.ctx_dft = None
-            self._session.spec = None
-            self._session.mtp_enabled = False
+            self._mtp_lifecycle = lifecycle
+        return lifecycle
+
+    def _free_persistent_mtp_session(self) -> None:
+        """Delegate: see `MtpSessionLifecycle.free`."""
+        self._mtp_lifecycle_owner().free()
 
     def complete(
         self,
