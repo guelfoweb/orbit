@@ -3412,6 +3412,45 @@ extern "C" bool orbit_mtp_session_complete(
             id_last = ids[i];
 
             if (llama_vocab_is_eog(vocab_tgt, id_last)) {
+                // Canonicalize before leaving. `full_accept` below resyncs
+                // n_past and trims both halves above the committed frontier;
+                // jumping straight to `done` skipped all of it, so on the
+                // boundary-committed path prompt_tgt still carried id_last plus
+                // the WHOLE draft while n_past was stale. Both publication-gate
+                // clauses then failed and identity was dropped, costing reuse on
+                // every EOG-terminated turn -- which is the normal case.
+                //
+                // The committed frontier is the tokens before the stop:
+                // frontier_logical_base + 1 (the predecessor id_last) + i
+                // (accepted this step). On the non-boundary path prompt_tgt is
+                // already exactly that size, so the resize is a no-op there.
+                const size_t committed_size = frontier_logical_base + 1 + i;
+                if (prompt_tgt.size() > committed_size) {
+                    prompt_tgt.resize(committed_size);
+                }
+                n_past = (int32_t) prompt_tgt.size();
+                // Re-anchor pending_h to the trimmed frontier. accept() ran
+                // earlier this step with the FULL accepted count, so pending_pos
+                // names verify_pos[accepted] = base + accepted, which is above
+                // the stop. Re-accepting with `i` moves it to base + i, i.e.
+                // exactly n_past - 1, the predecessor of the next suffix. Same
+                // discipline the partial-accept path already applies.
+                common_speculative_accept(session->spec, 0, (uint16_t) i);
+                // Discard the stop token and any speculative tail above the
+                // frontier from BOTH halves. Trimming one and not the other
+                // leaves a mismatched pair that still looks frontier-plausible.
+                const bool eog_rm_tgt = llama_memory_seq_rm(mem_tgt, 0, n_past, -1);
+                trace_target_seq_rm("eog_stop", n_past, -1, eog_rm_tgt);
+                const bool eog_rm_dft = llama_memory_seq_rm(mem_dft, 0, n_past, -1);
+                trace_draft_seq_rm("eog_stop", n_past, -1, eog_rm_dft);
+                session->debug_seq_rm_count += 2;
+                if (!eog_rm_tgt || !eog_rm_dft) {
+                    // A refused trim leaves tokens resident above the frontier.
+                    // Publishing would let a later claim rest on a poisoned
+                    // frontier, so mark the target unproven and let the pair
+                    // verdict below fail closed into a cold rebuild.
+                    session->last_target_untrusted = true;
+                }
                 goto done;
             }
 
