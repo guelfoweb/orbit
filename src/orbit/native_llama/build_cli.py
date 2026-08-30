@@ -20,7 +20,12 @@ from .mtp_decode_probe import build_mtp_decode_probe_helper
 from .mtp_dry_run import build_mtp_dry_run_helper
 from .mtp_probe import build_mtp_probe_helper
 from .mtmd_bridge import build_mtmd_bridge
-from .native_names import platform_optional_runtime_libs, platform_runtime_libs
+from .native_artifacts import SHIM_ARTIFACTS
+from .native_names import (
+    persistent_mtp_shim_filename,
+    platform_optional_runtime_libs,
+    platform_runtime_libs,
+)
 from .paths import DEFAULT_VENDOR_LIB_DIR, DEFAULT_VENDOR_SHIM_DIR
 from .persistent_mtp import build_persistent_mtp_shim
 
@@ -144,6 +149,30 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        # The shims are printed below as a build output, so they are verified
+        # like the runtime libraries. `compile_cpp_helper` now checks its own
+        # output, so this is the second line of defence: it also catches a shim
+        # that was never attempted, or one removed between building and here.
+        # Without it the build declares success and the failure surfaces much
+        # later, at the ctypes load.
+        # The persistent-MTP shim's filename is platform-dependent (.dylib on
+        # macOS), so it is taken from the same helper the builder writes with.
+        # `SHIM_ARTIFACTS` hardcodes the Linux `.so`, and demanding that name
+        # here would fail every successful macOS build. The other five are bare
+        # executables with no suffix.
+        expected_shims = tuple(
+            name for name in SHIM_ARTIFACTS if not name.startswith("liborbit-persistent-mtp")
+        ) + (persistent_mtp_shim_filename(),)
+        missing_shims = [
+            name for name in expected_shims if not (DEFAULT_VENDOR_SHIM_DIR / name).exists()
+        ]
+        if missing_shims:
+            print(
+                "error: native build completed but packaged MTP shims are missing: "
+                + ", ".join(missing_shims),
+                file=sys.stderr,
+            )
+            return 1
         duration = _format_elapsed(time.monotonic() - started_at)
         print(f"native runtime built from {source_root}", flush=True)
         print(f"packaged runtime libraries: {DEFAULT_VENDOR_LIB_DIR}", flush=True)
@@ -153,6 +182,21 @@ def main(argv: list[str] | None = None) -> int:
         print("next: orbit server --port 12120", flush=True)
         return 0
     except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # A missing or unusable toolchain surfaces here, not as a RuntimeError:
+        # compile_cpp_helper invokes `os.environ.get("CXX", "c++")` with no
+        # existence check, so an absent compiler raises FileNotFoundError. The
+        # process already exited non-zero on the traceback, so this changes no
+        # status -- it replaces a stack trace with the same actionable
+        # `error: ...` line every other failure path prints.
+        #
+        # Only the diagnostic is suppressed, and only when it is not wanted: an
+        # OSError can also come from an Orbit bug rather than the environment,
+        # so --verbose re-raises to keep the traceback available for debugging.
+        if args.verbose:
+            raise
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -333,9 +377,13 @@ def _build_packaged_shims(source_root: Path, build_bin: Path) -> None:
     identity = mtmd_bridge.with_name(f"{mtmd_bridge.name}.identity.json")
     if identity.exists():
         shutil.copy2(identity, DEFAULT_VENDOR_LIB_DIR / identity.name)
-    build_mtp_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
-    build_mtp_dry_run_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
-    build_mtp_accept_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
-    build_mtp_decode_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
-    build_mtp_completion_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
-    build_persistent_mtp_shim(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin)
+    # force=True on every shim: this is an explicit build, so each artifact must
+    # be produced from the current source. Without it the packaged short-circuit
+    # returns whatever is already on disk, the compiler is never invoked, and a
+    # source that does not compile is reported as a successful build.
+    build_mtp_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin, force=True)
+    build_mtp_dry_run_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin, force=True)
+    build_mtp_accept_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin, force=True)
+    build_mtp_decode_probe_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin, force=True)
+    build_mtp_completion_helper(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin, force=True)
+    build_persistent_mtp_shim(llama_root=source_root, build_dir=DEFAULT_VENDOR_SHIM_DIR, build_bin=build_bin, force=True)
