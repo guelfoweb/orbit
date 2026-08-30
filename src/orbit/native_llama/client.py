@@ -867,14 +867,14 @@ class NativeLlamaClient:
         except Exception as exc:
             # A capability resolution failure is not an MTP verdict. Fail
             # closed and say why rather than silently trying another path.
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = f"self-mtp-capability-error: {exc}"
+            self._mtp_lifecycle_owner().record_failure(
+                f"self-mtp-capability-error: {exc}"
+            )
             return True
         if not eligible:
             return False
         if not self._session.ctx_tgt:
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = "target-context-missing"
+            self._mtp_lifecycle_owner().record_failure("target-context-missing")
             return True
         try:
             runtime = create_self_mtp_session(
@@ -891,8 +891,7 @@ class NativeLlamaClient:
         except Exception as exc:
             # The borrowed model and target context are untouched by a failed
             # construction; the client still owns and frees them.
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = str(exc)
+            self._mtp_lifecycle_owner().record_failure(str(exc))
             return True
         self._mtp_lifecycle_owner().publish(runtime)
         return True
@@ -910,14 +909,19 @@ class NativeLlamaClient:
             return
         profile = getattr(self, "model_profile", None)
         if profile is not None and not profile.mtp_supported:
-            self._session.mtp_failure_reason = "model_profile_mtp_unsupported"
+            # Unavailable, not failed: this profile does not offer the
+            # external-draft architecture, which is not a malfunction.
+            self._mtp_lifecycle_owner().record_unavailable(
+                "model_profile_mtp_unsupported"
+            )
             return
         if not self.paths.mtp_available or self.paths.draft_mtp_model is None:
-            self._session.mtp_failure_reason = self.paths.fallback_reason or "draft-mtp-unavailable"
+            self._mtp_lifecycle_owner().record_unavailable(
+                self.paths.fallback_reason or "draft-mtp-unavailable"
+            )
             return
         if not self._session.ctx_tgt:
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = "target-context-missing"
+            self._mtp_lifecycle_owner().record_failure("target-context-missing")
             return
         try:
             runtime = create_persistent_mtp_session(
@@ -931,8 +935,7 @@ class NativeLlamaClient:
                 threads_batch=self.config.threads_batch,
             )
         except Exception as exc:
-            self._session.mtp_failed = True
-            self._session.mtp_failure_reason = str(exc)
+            self._mtp_lifecycle_owner().record_failure(str(exc))
             return
         self._mtp_lifecycle_owner().publish(runtime)
 

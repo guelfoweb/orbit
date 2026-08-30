@@ -617,3 +617,292 @@ class HotPathDelegationTests(unittest.TestCase):
                 "the rebuild publishes a healthy session; a surviving reason "
                 "would be reported for a session that recovered",
             )
+
+
+class UnavailableVsFailedTests(unittest.TestCase):
+    """"MTP does not apply here" is not "MTP broke".
+
+    The initialization path distinguishes them, and `/props` and every
+    diagnostic downstream depend on the difference. Collapsing them would
+    report a healthy unsupported configuration as a failure.
+    """
+
+    def test_record_unavailable_does_not_mark_the_session_failed(self) -> None:
+        owner, session, _ = _lifecycle()
+
+        owner.record_unavailable("model_profile_mtp_unsupported")
+
+        self.assertFalse(
+            session.mtp_failed,
+            "an unsupported profile is not a malfunction; marking it failed "
+            "reports a healthy configuration as broken",
+        )
+        self.assertEqual(
+            session.mtp_failure_reason, "model_profile_mtp_unsupported"
+        )
+
+    def test_record_unavailable_leaves_enabled_untouched(self) -> None:
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                owner, session, _ = _lifecycle()
+                session.mtp_enabled = enabled
+
+                owner.record_unavailable("draft-mtp-unavailable")
+
+                self.assertEqual(session.mtp_enabled, enabled)
+
+    def test_failure_and_unavailable_differ_exactly_in_mtp_failed(self) -> None:
+        """The one field that separates them, pinned so it cannot drift."""
+        a_owner, a_session, _ = _lifecycle()
+        b_owner, b_session, _ = _lifecycle()
+
+        a_owner.record_failure("same reason")
+        b_owner.record_unavailable("same reason")
+
+        self.assertEqual(a_session.mtp_failure_reason, b_session.mtp_failure_reason)
+        self.assertTrue(a_session.mtp_failed)
+        self.assertFalse(b_session.mtp_failed)
+
+
+class InitializationDelegationTests(unittest.TestCase):
+    """The initialization path must reach the right lifecycle transition.
+
+    Executed against a recording owner rather than inspected: which method is
+    called is the whole point, and a source-shape assertion would pass on a
+    call that never runs.
+    """
+
+    class _Recorder(MtpSessionLifecycle):
+        """A lifecycle that records the transitions it is asked to perform."""
+
+        def __init__(self, session):
+            super().__init__(lambda: session, free_runtime=lambda r: None)
+            self.calls: list[tuple] = []
+
+        def record_failure(self, reason, *, disable=False):
+            self.calls.append(("record_failure", reason, disable))
+            super().record_failure(reason, disable=disable)
+
+        def record_unavailable(self, reason):
+            self.calls.append(("record_unavailable", reason))
+            super().record_unavailable(reason)
+
+        def publish(self, runtime, *, clear_failure_reason=False):
+            self.calls.append(("publish", clear_failure_reason))
+            super().publish(runtime, clear_failure_reason=clear_failure_reason)
+
+    def _client(self, session, recorder):
+        import types
+
+        from orbit.native_llama.client import NativeLlamaClient
+
+        client = object.__new__(NativeLlamaClient)
+        client._session = session
+        client._mtp_lifecycle = recorder
+        client.paths = types.SimpleNamespace(
+            llama_root=None, mtp_available=False, draft_mtp_model=None,
+            fallback_reason=None,
+        )
+        client.config = types.SimpleNamespace(use_mtp_experimental=True)
+        client.model_profile = None
+        client._free_persistent_mtp_session = lambda: None
+        return client
+
+    def test_a_capability_error_is_recorded_as_a_failure(self) -> None:
+        """A capability probe that raises is a malfunction, not unavailability."""
+        session = NativeSessionState(session_id="cap")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+        client._self_mtp_eligible = lambda: (_ for _ in ()).throw(
+            RuntimeError("probe exploded")
+        )
+
+        self.assertTrue(client._initialize_self_mtp_session())
+
+        self.assertEqual(len(recorder.calls), 1)
+        kind, reason, disable = recorder.calls[0]
+        self.assertEqual(kind, "record_failure")
+        self.assertIn("self-mtp-capability-error", reason)
+        self.assertFalse(
+            disable, "initialization failure must not disable; nothing was on"
+        )
+        self.assertTrue(session.mtp_failed)
+
+    def test_an_ineligible_artifact_touches_no_state(self) -> None:
+        """Falling through to external-draft must leave the session alone.
+
+        The self-MTP path returns False WITHOUT recording anything, which is
+        what lets the caller try the other architecture.
+        """
+        session = NativeSessionState(session_id="inelig")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+        client._self_mtp_eligible = lambda: False
+
+        self.assertFalse(client._initialize_self_mtp_session())
+
+        self.assertEqual(recorder.calls, [], "no transition may be recorded")
+        self.assertFalse(session.mtp_failed)
+        self.assertIsNone(session.mtp_failure_reason)
+
+    def test_a_missing_target_context_is_a_failure(self) -> None:
+        session = NativeSessionState(session_id="noctx")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+        client._self_mtp_eligible = lambda: True
+
+        self.assertTrue(client._initialize_self_mtp_session())
+
+        self.assertEqual(recorder.calls[0][0], "record_failure")
+        self.assertEqual(recorder.calls[0][1], "target-context-missing")
+
+    def test_an_unsupported_profile_is_unavailable_not_failed(self) -> None:
+        """The decisive asymmetry, driven through the shipped method."""
+        import types
+
+        session = NativeSessionState(session_id="profile")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+        client.model_profile = types.SimpleNamespace(mtp_supported=False)
+        client._initialize_self_mtp_session = lambda: False
+
+        client._initialize_persistent_mtp_session()
+
+        kinds = [c[0] for c in recorder.calls]
+        self.assertIn(
+            "record_unavailable", kinds,
+            "an unsupported profile must be recorded as unavailable, not failed",
+        )
+        self.assertNotIn("record_failure", kinds)
+        self.assertFalse(session.mtp_failed)
+
+    def test_a_missing_draft_model_is_unavailable_not_failed(self) -> None:
+        session = NativeSessionState(session_id="nodraft")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+        client._initialize_self_mtp_session = lambda: False
+
+        client._initialize_persistent_mtp_session()
+
+        kinds = [c[0] for c in recorder.calls]
+        self.assertIn("record_unavailable", kinds)
+        self.assertNotIn("record_failure", kinds)
+        self.assertFalse(session.mtp_failed)
+
+    def test_mtp_off_records_nothing_at_all(self) -> None:
+        import types
+
+        session = NativeSessionState(session_id="off")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+        client.config = types.SimpleNamespace(use_mtp_experimental=False)
+
+        client._initialize_persistent_mtp_session()
+
+        self.assertEqual(
+            recorder.calls, [],
+            "MTP off must record no failure and no unavailability",
+        )
+        self.assertFalse(session.mtp_failed)
+        self.assertIsNone(session.mtp_failure_reason)
+
+    def test_self_mtp_is_attempted_before_external_draft(self) -> None:
+        """Ordering is policy and stays in the client; pin it behaviourally."""
+        order: list[str] = []
+        session = NativeSessionState(session_id="order")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+
+        def self_mtp():
+            order.append("self-mtp")
+            return False
+
+        client._initialize_self_mtp_session = self_mtp
+        client._initialize_persistent_mtp_session()
+
+        self.assertEqual(
+            order, ["self-mtp"],
+            "self-MTP must be attempted first; reversing the order would admit "
+            "the external-draft architecture for a qualified single-GGUF build",
+        )
+
+    def test_a_successful_self_mtp_short_circuits_external_draft(self) -> None:
+        session = NativeSessionState(session_id="short")
+        recorder = self._Recorder(session)
+        client = self._client(session, recorder)
+        client._initialize_self_mtp_session = lambda: True
+        client.model_profile = None
+
+        client._initialize_persistent_mtp_session()
+
+        self.assertEqual(
+            [c for c in recorder.calls if c[0] in ("record_unavailable", "record_failure")],
+            [],
+            "a handled self-MTP outcome must not fall through to external-draft",
+        )
+
+
+class NoDirectLifecycleWritesTests(unittest.TestCase):
+    """`client.py` must not write lifecycle-owned state anywhere.
+
+    REF-2 established the owner, REF-3 cleared the completion path and REF-4
+    the initialization path. A restored direct write is invisible to the
+    behavioural tests -- it produces the same state by the wrong route -- so it
+    is pinned structurally here, deliberately, as the one place where source
+    shape IS the contract.
+    """
+
+    OWNED = ("mtp_enabled", "mtp_failed", "mtp_failure_reason", "ctx_dft", "spec")
+
+    def test_the_client_never_assigns_lifecycle_state_directly(self) -> None:
+        import ast
+
+        source = (SRC / "orbit/native_llama/client.py").read_text()
+        offenders = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, (ast.Assign, ast.AugAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr in self.OWNED
+                    and isinstance(target.value, ast.Attribute)
+                    and target.value.attr == "_session"
+                ):
+                    offenders.append((target.attr, node.lineno))
+        self.assertEqual(
+            offenders, [],
+            f"client.py writes lifecycle-owned state directly at {offenders}; "
+            f"every transition must go through MtpSessionLifecycle, or the "
+            f"owner stops being authoritative",
+        )
+
+    def test_the_runtime_handle_is_never_assigned_outside_the_property(self) -> None:
+        """`_persistent_mtp_runtime = ...` is allowed only in its own setter."""
+        import ast
+
+        source = (SRC / "orbit/native_llama/client.py").read_text()
+        tree = ast.parse(source)
+        setters = {
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_persistent_mtp_runtime"
+        }
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "_persistent_mtp_runtime"
+                    and not any(abs(node.lineno - s) < 20 for s in setters)
+                ):
+                    offenders.append(node.lineno)
+        self.assertEqual(
+            offenders, [],
+            f"the runtime handle is assigned outside its property setter at "
+            f"{offenders}; that bypasses the owner",
+        )
