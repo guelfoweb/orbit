@@ -406,7 +406,22 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "multimodal_fallback_reason": state.client.paths.multimodal_fallback_reason,
                     "supports_vision": state.client.supports_vision,
                     "supports_audio": state.client.supports_audio,
+                    # "mtp_available" means an EXTERNAL DRAFT MODEL is present
+                    # (`draft_path is not None`). Several internal callers gate
+                    # on exactly that, so its meaning is preserved rather than
+                    # widened. It is therefore false for a qualified single-GGUF
+                    # self-MTP artifact, which reads as "MTP never ran" beside a
+                    # successful self-MTP completion -- hence the field below.
                     "mtp_available": state.client.paths.mtp_available,
+                    # Whether THIS session actually constructed a single-GGUF
+                    # self-MTP runtime. Observed state, not a capability probe:
+                    # deciding capability means hashing a 20 GiB artifact, which
+                    # must never happen per /props request. False here therefore
+                    # means "not running self-MTP now", which for an un-requested
+                    # or failed session is the honest answer.
+                    "self_mtp_active": bool(
+                        getattr(state.client._persistent_mtp_runtime, "self_mtp", False)
+                    ),
                     "fallback_reason": state.client.paths.fallback_reason,
                     "mtp_probe_enabled": state.client.mtp_probe.enabled,
                     "mtp_probe_initialized": state.client.mtp_probe.initialized,
