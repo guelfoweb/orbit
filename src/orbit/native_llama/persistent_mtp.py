@@ -246,6 +246,7 @@ def build_persistent_mtp_shim(
     runner=subprocess.run,
     require_self_mtp: bool = False,
     require_resident_prefix: bool = False,
+    force: bool = False,
 ) -> Path:
     packaged = packaged_shim_path(persistent_mtp_shim_filename())
     # `build_bin` is where the compiler links from; `runtime_bin` is the family
@@ -263,7 +264,15 @@ def build_persistent_mtp_shim(
         # base-only shim and the feature would fail at the ctypes lookup instead
         # of at build selection, after the caller already believed it had one.
         required = required + _RESIDENT_PREFIX_REQUIRED_SHIM_SYMBOLS
-    if packaged is not None and _shim_exports_required_symbols(
+    # The packaged short-circuit accepts an artifact on EXPORTED SYMBOLS alone,
+    # with no comparison against the source. That is right for a runtime that
+    # only needs a usable shim, but wrong for an explicit build: a broken source
+    # would never reach the compiler, so `build_native.py` reported success --
+    # "completed in 1s" -- while shipping the stale binary already on disk.
+    # `force` is how a build says "produce an artifact from THIS source", which
+    # then reaches compile_cpp_helper and fails loudly if the source does not
+    # compile.
+    if not force and packaged is not None and _shim_exports_required_symbols(
         packaged,
         runtime_bin if runtime_bin is not None else build_bin,
         required,
@@ -282,6 +291,7 @@ def build_persistent_mtp_shim(
         build_bin=build_bin,
         runner=runner,
         shared=True,
+        force=force,
     )
 
 

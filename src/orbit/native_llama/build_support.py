@@ -142,8 +142,38 @@ def compile_cpp_helper(
     command.extend(extra_link_args)
     command.extend(["-o", str(output)])
 
+    if force:
+        # Remove the previous artifact before compiling. Otherwise a toolchain
+        # that exits 0 without writing anything leaves the stale file in place,
+        # and every check below -- exists, is_dir, size -- is satisfied by that
+        # stale file, so it is returned as fresh output. Deleting first makes
+        # "the artifact is present afterwards" mean the compiler produced it.
+        # This also covers a truncated write, which a size check alone admits.
+        #
+        # Accepted trade: a forced build that then FAILS leaves no artifact,
+        # where previously the stale one survived. That is the point -- keeping
+        # it is the defect being fixed -- but it does mean a failed explicit
+        # build leaves the tree without a loadable shim until the source is
+        # fixed and rebuilt. Only `force` callers are affected, i.e. only the
+        # explicit build path; the runtime never unlinks.
+        output.unlink(missing_ok=True)
+
     completed = runner(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         raise RuntimeError(f"failed to build {artifact_label}: {detail or completed.returncode}")
+    # A zero return code is not proof the artifact was written. A compiler
+    # wrapper (ccache/distcc misconfiguration, a shim script, an output path on
+    # a full or read-only filesystem) can exit 0 having produced nothing, and
+    # returning `output` regardless makes callers believe a stale or absent file
+    # is a fresh build. Verify what the caller was promised.
+    if not output.exists():
+        raise RuntimeError(
+            f"failed to build {artifact_label}: the compiler reported success "
+            f"but produced no output at {output}"
+        )
+    if output.is_dir() or output.stat().st_size == 0:
+        raise RuntimeError(
+            f"failed to build {artifact_label}: {output} is not a usable artifact"
+        )
     return output

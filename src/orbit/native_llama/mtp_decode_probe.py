@@ -89,9 +89,15 @@ def build_mtp_decode_probe_helper(
     build_dir: Path | None = None,
     build_bin: Path | None = None,
     runner=subprocess.run,
+    force: bool = False,
 ) -> Path:
     packaged = packaged_shim_path("orbit-mtp-decode-probe")
-    if packaged is not None:
+    # An explicit build must PRODUCE the artifact, not accept whatever is on
+    # disk. Returning the packaged file on existence alone means a broken
+    # source never reaches the compiler, so the build reports success while
+    # shipping a stale binary. `force` is how a build says "compile THIS
+    # source"; the runtime still takes the packaged fast path.
+    if not force and packaged is not None:
         return packaged
     llama_root = require_legacy_llama_root(llama_root, artifact_name="orbit-mtp-decode-probe")
     build_root = build_dir or (Path.home() / ".orbit" / "native-build")
@@ -105,6 +111,7 @@ def build_mtp_decode_probe_helper(
         llama_root=llama_root,
         build_bin=build_bin,
         runner=runner,
+        force=force,
     )
 
 
