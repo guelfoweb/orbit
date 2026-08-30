@@ -658,8 +658,21 @@ class OrnithAnalysisIsolationTests(unittest.TestCase):
         self.assertIn("_rolling_analysis_anchor_state", text)
         self.assertIn("_ornith_route_prefix_anchor_state", text)
         # The prewarm slot must never be read by the analysis rolling path.
-        analysis_fn = text[text.index("def _rolling_anchor_state_for") :][:600]
-        self.assertNotIn("_ornith_route_prefix_anchor_state", analysis_fn)
+        # Slot selection now lives in RollingAnchorStore, so the guard follows
+        # it there: a window over the client's one-line delegate would cover
+        # only the delegate and pin nothing.
+        store = (
+            Path(__file__).resolve().parents[1]
+            / "src/orbit/native_llama/rolling_anchor_store.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "_ornith_route_prefix_anchor_state", store,
+            "the rolling store must never reach the prewarm slot",
+        )
+        self.assertNotIn(
+            "ornith_route_prefix", store,
+            "the rolling lineages are independent of the prewarm anchor",
+        )
 
     def test_route_prefix_registry_never_returns_the_analysis_slot(self) -> None:
         source = Path(__file__).resolve().parents[1] / "src/orbit/native_llama/client.py"
