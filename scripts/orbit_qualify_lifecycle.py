@@ -23,6 +23,7 @@ from orbit.qualification.schema import CallMetric, FixtureObservation, Lifecycle
 from orbit.runtime.kv_diag import model_call_context  # noqa: E402
 from orbit.runtime.messages import FINAL_FROM_TOOL_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT  # noqa: E402
 from scripts.orbit_qualify import build_provenance  # noqa: E402
+from scripts.qualify_fresh import run_fresh  # noqa: E402
 from scripts.orbit_qualify_compare import _free_port, _server_command, _stop, _wait_ready  # noqa: E402
 
 
@@ -179,8 +180,8 @@ class LifecycleExecutor:
             "orbit-qwen36-native-v1": "tests.test_qwen_route_prefix.QwenRoutePrefixClientTests.test_restore_failure_clears_state_and_uses_one_cold_fallback",
             "orbit-gemma4-native-v1": "tests.test_prefix_anchor_probe.PrefixAnchorProbeTests.test_final_prefix_restore_failure_uses_normal_prefill",
         }
-        completed = subprocess.run(
-            [sys.executable, "-m", "unittest", tests[self.profile_id]], cwd=ROOT,
+        completed = run_fresh(
+            ["-m", "unittest", tests[self.profile_id]], cwd=ROOT,
             env={**os.environ, "PYTHONPATH": str(SRC)}, capture_output=True, text=True, timeout=60,
         )
         report = completed.stdout + completed.stderr
