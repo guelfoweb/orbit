@@ -7,7 +7,7 @@ import os
 import re
 import shlex
 import stat
-from typing import Callable
+from typing import Callable, Sequence
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -332,6 +332,62 @@ def final_card(record: EvidenceRecord) -> str:
     for excerpt in _excerpt_lines(record):
         lines.append(excerpt)
     return "\n".join(lines)
+
+
+EVIDENCE_REFERENCE_PATTERN = r"\bevidence:(ev_[0-9a-f]{12}_[0-9a-f]{16})\b"
+
+
+class EvidenceRehydrationError(RuntimeError):
+    """Referenced evidence could not be re-attested exactly.
+
+    Raised instead of returning partial or substituted content: a caller that
+    asked for exact archived output must never be handed an approximation of
+    it, because the whole point of a reference is that the bytes are the ones
+    that were actually observed.
+    """
+
+
+def requested_evidence_ids(text: object) -> tuple[str, ...]:
+    """The canonical evidence ids named in `text`, in first-seen order."""
+    if not isinstance(text, str):
+        return ()
+    return tuple(dict.fromkeys(re.findall(EVIDENCE_REFERENCE_PATTERN, text)))
+
+
+def rehydrated_evidence_block(
+    store: "EvidenceStore",
+    evidence_ids: Sequence[str],
+    *,
+    unsafe: Callable[[str], bool] | None = None,
+) -> str:
+    """Render exact archived output for `evidence_ids` as one system block.
+
+    The shared half of what CHAT has always done: re-attest each id through
+    `reattest_exact` -- which checks identity, provenance and the raw ref -- and
+    fence the bytes with a per-record delimiter derived from their own digest,
+    so nothing in the content can close the fence early.
+
+    Raises `EvidenceRehydrationError` when any id cannot be re-attested. There
+    is deliberately no partial result: a caller holding a reference needs the
+    exact bytes or an explicit failure, never a silent gap.
+    """
+    parts = ["deterministic_evidence_rehydration: exact archived tool output"]
+    for evidence_id in evidence_ids:
+        raw = store.reattest_exact(evidence_id)
+        record = store.records.get(evidence_id)
+        if raw is None or record is None or (unsafe is not None and unsafe(raw)):
+            raise EvidenceRehydrationError(evidence_id)
+        delimiter = f"orbit-evidence-{record.raw_sha256}"
+        parts.extend(
+            [
+                f"evidence_id: {evidence_id}",
+                f"sha256: {record.raw_sha256}",
+                f"exact_content_begin: {delimiter}",
+                raw,
+                f"exact_content_end: {delimiter}",
+            ]
+        )
+    return "\n".join(parts)
 
 
 def tool_evidence_ref(record: EvidenceRecord) -> str:

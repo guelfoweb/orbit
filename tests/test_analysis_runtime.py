@@ -279,19 +279,78 @@ class SourceOwnershipTest(AnalysisRuntimeTestBase):
 
 
 class EvidenceBoundTest(AnalysisRuntimeTestBase):
-    def test_large_output_is_bounded_for_the_prompt_but_recorded_in_full(self) -> None:
+    def test_large_output_is_referenced_in_history_but_recorded_in_full(self) -> None:
+        """Large evidence is named in history, kept whole in the store.
+
+        Rewritten for the evidence-reference contract, and deliberately not
+        weakened: it protects strictly more than the truncation assertion it
+        replaces. History must carry a canonical reference with real identity
+        rather than the raw text, the full observation must still be recorded,
+        and the exact bytes must be restorable from the store.
+
+        Scope, stated precisely: restorability is asserted through the store's
+        own `reattest_exact`, so deleting the runtime's rehydration path would
+        not fail *here* -- `test_analysis_evidence_compaction` owns that, and
+        catches it. This test guards the persistence contract; that one guards
+        the retrieval contract.
+        """
         backend = ScriptedBackend(tool_response("print('A' * 60000)"))
         runtime = self.runtime(backend)
         result = runtime.step("emit a lot")
 
-        observation = runtime.messages[-1]["content"]
+        message = runtime.messages[-1]
+        reference = message["content"]
+
+        # History carries the reference, not the observation.
+        self.assertTrue(reference.startswith("tool_evidence_ref: true"))
         self.assertLessEqual(
-            len(observation), MAX_EVIDENCE_CHARS, "model-facing evidence must stay bounded"
+            len(reference), MAX_EVIDENCE_CHARS, "model-facing evidence must stay bounded"
         )
-        self.assertIn("truncated for prompt", observation)
+        self.assertNotIn(
+            "A" * 200, reference, "large raw output must not be embedded in history"
+        )
+
+        # Identity is real, not invented.
+        self.assertEqual(message["evidence_id"], result.evidence.evidence_id)
+        self.assertEqual(message["user_turn_id"], result.evidence.user_turn_id)
+
+        # The full observation is still recorded.
         metadata = result.evidence.metadata
         self.assertTrue(metadata["observation_truncated"])
         self.assertGreater(metadata["observation_full_chars"], MAX_EVIDENCE_CHARS)
+
+        # And the exact bytes come back, attested.
+        restored = runtime.evidence_store.reattest_exact(
+            message["evidence_id"], expected_reference=reference
+        )
+        self.assertIsNotNone(restored, "the persisted reference must re-attest")
+        self.assertIn("truncated for prompt", restored)
+
+    def test_small_output_keeps_its_inline_compatibility_content(self) -> None:
+        """Existing COMPAT_INLINE_CHARS policy is unchanged for small evidence."""
+        backend = ScriptedBackend(tool_response("print('tiny result')"))
+        runtime = self.runtime(backend)
+        runtime.step("emit a little")
+
+        reference = runtime.messages[-1]["content"]
+        self.assertTrue(reference.startswith("tool_evidence_ref: true"))
+        self.assertIn("tiny result", reference)
+
+    def test_tampered_or_missing_evidence_fails_closed(self) -> None:
+        backend = ScriptedBackend(tool_response("print('A' * 60000)"))
+        runtime = self.runtime(backend)
+        runtime.step("emit a lot")
+        message = runtime.messages[-1]
+
+        self.assertIsNone(
+            runtime.evidence_store.reattest_exact(
+                message["evidence_id"], expected_reference=message["content"] + "\nx"
+            ),
+            "a tampered reference must not re-attest",
+        )
+        self.assertIsNone(
+            runtime.evidence_store.reattest_exact("ev_000000000000_0000000000000000")
+        )
 
     def test_evidence_carries_full_provenance(self) -> None:
         backend = ScriptedBackend(tool_response("open('/workspace/work/out.txt','w').write('d')\nprint('ok')"))
