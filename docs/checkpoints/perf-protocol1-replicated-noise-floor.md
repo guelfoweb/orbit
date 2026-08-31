@@ -14,7 +14,7 @@ placebo, not an optimization test.
 
 **Two identical configurations differed by up to 21.9 % (prefill) and 12.3 %
 (generation) on paired runs.** The measured noise floor at n=3/arm is **~17 %
-for generation and ~16 % for prefill**. Every performance "win" this project has
+for generation and ~22 % for prefill**. Every performance "win" this project has
 measured — including PERF-OPT-2's +5.75 % — sits **inside** that floor.
 
 ## Protocol
@@ -34,7 +34,7 @@ reset → SHORT → reset → LONG → final capture. Every run asserted `thread
 `threads_batch`, ctx/batch/ubatch/slots, thinking mode, all three MTP flags and
 `cached_tokens == 0` before proceeding.
 
-**Parameter drift: NONE.** All 11 compared config fields identical across all
+**Parameter drift: NONE.** All 13 compared config fields identical across all
 six runs; `threads_batch` was 6 in every run.
 
 ## Raw per-run results
@@ -64,6 +64,25 @@ six runs; `threads_batch` was 6 in every run.
 Every LONG run: `prompt_tokens = 3716`, `reused_tokens = 0`,
 `evaluated_tokens = 3716`, `output_tokens = 8`. **All six runs VALID**; none
 excluded.
+
+### One discarded attempt, and what it would have changed
+
+A first B1 attempt was killed mid-run by a harness shell timeout, after its
+SHORT fixture but **before** its LONG fixture. It was discarded as incomplete —
+not for its value — and re-run. Since discarding data invites suspicion of
+selection, the counterfactual is published here rather than left implicit:
+
+| | aborted B1 | re-run B1 |
+|---|---:|---:|
+| SHORT gen tok/s | 9.449 | 10.337 |
+
+Substituting the aborted value changes the false A/B **median** delta from
++12.27 % to +2.62 % and the mean from +0.40 % to −2.69 %; pooled CV moves 10.49 %
+→ 9.91 %, max pairwise delta is unchanged at 30.72 %, and **the classification
+and every adopted threshold are unchanged**.
+
+The two values are themselves evidence for the finding: the *same server
+binary, same config, same fixture*, measured minutes apart, differed by 9.4 %.
 
 ### Host / thermal per run
 
@@ -102,7 +121,7 @@ noise on the actual machine**, not laboratory conditions.
 | Arm B | 3 | 28.418 | 29.549 | 25.136 | 30.569 | 2.888 | **10.2 %** |
 | **Pooled** | 6 | 27.615 | 28.088 | 24.245 | 30.569 | 2.635 | **9.5 %** |
 
-* max pairwise delta (identical configs): **21.6 %**
+* max pairwise delta (identical configs): **26.1 %**
 * max deviation from pooled median: **13.7 %**
 * **false A/B mean delta: +5.99 %; false A/B median delta: +10.97 %**
 
@@ -148,12 +167,22 @@ smallest:
 | max false A/B delta | 12.3 % | 11.0 % |
 | max paired identical-config delta | 12.3 % | 21.9 % |
 | 95 % band on a difference of two n=3 means | ±16.8 % | ±15.3 % |
-| **Adopted noise floor** | **17 %** | **16 %** |
+| **Adopted noise floor** | **17 %** | **22 %** |
 
-The single worst pairwise value (30.7 % SHORT) is excluded from the adopted
-floor as an extreme of the pooled distribution rather than a typical A/B
-comparison; the 95 % band, which is the quantity an A/B test actually competes
-against, drives the result instead.
+The rule is applied literally: the adopted floor is the **largest** estimator in
+each column. For SHORT that is the 95 % band (16.8 % → 17 %); for LONG it is the
+**paired identical-config delta of 21.9 % → 22 %**, not the band.
+
+Only one value is excluded, and the exclusion is narrow: the pooled
+max-pairwise (30.7 % SHORT, 26.1 % LONG) is a range statistic over all six runs,
+which is upward-biased with n=6 and is not what an A/B comparison measures. The
+*paired* deltas are kept precisely because they are that quantity — a single A
+measured against a single B.
+
+An earlier draft adopted 16 % for LONG, which was the band rather than the
+maximum, and separately misreported the LONG max-pairwise as 21.6 % (a
+non-maximal pair) instead of 26.1 %. Both errors made the machine look quieter
+than it is; correcting them raises the LONG floor.
 
 ## Decision rule for future A/B experiments
 
@@ -161,10 +190,13 @@ against, drives the result instead.
 minimum_meaningful_gain = max(practical_floor, noise_derived_threshold)
 ```
 
-* **`practical_floor` = 5 %.** Derived, not assumed: below this a change is not
-  distinguishable by a user on interactive workloads, and it is smaller than the
-  session-to-session drift this project has repeatedly observed (~13 % between
-  sessions on the same configuration).
+* **`practical_floor` = 5 %.** This is a **convention, not a measurement** — an
+  earlier draft called it "derived", which it is not. It is set at the level
+  below which a change is unlikely to matter to a user on interactive workloads.
+  Note the one hard datum nearby argues for a *higher* floor, not a lower one:
+  PERF-OPT-2 measured −11.84 % session-to-session drift on an unchanged
+  configuration. The practical floor is never the binding term here anyway,
+  since `max(5 %, 17 %) = 17 %`.
 * **`noise_derived_threshold`** = the 95 % band at the chosen replication count,
   from the CVs measured here (10.5 % SHORT / 9.5 % LONG).
 
@@ -198,7 +230,7 @@ n ≥ 28 (LONG) — 56–68 model loads, 4–5 hours of inference.**
 
 **C — BENCHMARK_ENVIRONMENT_TOO_NOISY.**
 
-At n=3/arm this machine cannot discriminate below ~16–17 %. No optimization axis
+At n=3/arm this machine cannot discriminate below ~17 % (generation) or ~22 % (prefill). No optimization axis
 under consideration offers a gain of that size — the best measured candidate to
 date was +5.75 %, which this A/A experiment reproduced as pure noise between
 identical configurations. Reaching a 5 % resolution needs 4–5 hours per
