@@ -57,8 +57,12 @@ auto-MTP off**, verified from `/props` before and after every phase:
 | Metric | Value |
 |---|---|
 | Process start → `/props` ready | **41.21 s** |
-| RSS after load (idle) | 37,355,268 kB = **34.79 GiB** |
-| Peak RSS (`VmHWM`, whole lifetime) | 37,433,472 kB = **34.86 GiB** |
+| RSS after load (idle) | 37,355,268 kB = **35.62 GiB** |
+| Peak RSS (`VmHWM`, whole lifetime) | 37,433,472 kB = **35.70 GiB** |
+
+`/proc/<pid>/status` labels these fields `kB` but the values are KiB, so the
+conversion is `value / 1024 / 1024`. The raw values above are the evidence; the
+GiB figures are derived from them.
 
 ## Warm-up (excluded from medians)
 
@@ -115,6 +119,8 @@ prefix is reused. Strict prefix reuse is intact after the refactor line.
 | 6 | 228 | 210 | 18 | 92.1 % | 2.733 s | 37,280,396 |
 | 7 | 270 | 252 | 18 | 93.3 % | 2.785 s | 37,280,396 |
 | 8 | 315 | 294 | 21 | 93.3 % | 2.903 s | 37,280,396 |
+
+RSS held at 37,280,396 kB = **35.55 GiB** on every turn.
 
 * **RSS: byte-identical across all 8 turns.** No growth.
 * **Evaluated tokens flat at 17–21** while the prompt grows 17 → 315.
