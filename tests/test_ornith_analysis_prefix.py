@@ -40,7 +40,7 @@ from orbit.native_llama.prefix_anchor import PrefixAnchorState
 from orbit.runtime.analysis_runtime import ANALYSIS_SYSTEM_PROMPT, ANALYSIS_TOOL_SCHEMA
 
 # Pinned literal: the prewarm captures this contract verbatim.
-ANALYSIS_SYSTEM_PROMPT_SHA256 = "88f234df8f26e55b0a7d380e1df4672d87a4a8e719c7342424a5ff4b819c122c"
+ANALYSIS_SYSTEM_PROMPT_SHA256 = "871cbcaaac7ff2ce6d113358377064dcef9d9649716ec33722c29b26252b101c"
 
 
 class AnalysisPrefixConfigTests(unittest.TestCase):
@@ -678,6 +678,17 @@ class AnalysisPromptUnchangedTests(unittest.TestCase):
         # reference is and how to read the exact bytes back. Without that the
         # compaction hides evidence, which is worse than the context ceiling it
         # removes. `test_evidence_authority` pins the exact clause.
+        #
+        # It moved a third time, again deliberately and with user
+        # authorization, for progress control: a live run spent all nine of its
+        # actions re-reading one file and never ran the decoder it had already
+        # identified. The runtime half of that fix stops re-executing an
+        # observation it has already made; this clause is the other half,
+        # telling the model that an identified deterministic transformation is
+        # worth more than another read of source it already holds. It names no
+        # technique -- no XOR, no base64, no format -- because choosing one is
+        # the model's job. `test_evidence_authority` pins the exact clause and
+        # its position.
         self.assertEqual(
             hashlib.sha256(ANALYSIS_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
             ANALYSIS_SYSTEM_PROMPT_SHA256,

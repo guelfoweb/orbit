@@ -1014,8 +1014,12 @@ class StrategyFingerprintTests(AutonomousTestBase):
         )
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
         self.assertTrue(run.progress[-1].repeated_strategy)
-        # It stops far short of the action bound it used to run to.
-        self.assertEqual(run.actions_executed, 3)
+        # It stops far short of the action bound it used to run to -- and the
+        # two repeats no longer reach the sandbox at all, so one useful action
+        # is spent where three used to be. The classification sequence above is
+        # unchanged: what moved is the cost of reaching it.
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(run.suppressed_duplicates, 2)
 
     def test_repeated_action_with_timestamp_output_is_not_progress(self) -> None:
         code = "import time\nprint('t', time.time(), end='')"
@@ -1285,7 +1289,11 @@ class BoundedReplanTests(AutonomousTestBase):
         action, so replans <= actions <= the hard ceiling.
         """
         script = []
-        for i in range(6):
+        # Longer than the trajectory needs. Duplicates are now answered from
+        # evidence instead of re-executed, so they no longer spend the action
+        # budget and the run reaches further into the script than it used to;
+        # a script sized to the old cost would run out mid-run.
+        for i in range(12):
             script.append(tool_response(emit(f"v{i}")))
             script.append(tool_response(emit(f"v{i}")))  # duplicate -> NO_PROGRESS
         backend = ScriptedBackend(*script)
@@ -1293,15 +1301,27 @@ class BoundedReplanTests(AutonomousTestBase):
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         classifications = [r.classification for r in run.progress]
-        self.assertEqual(classifications, [NEW_CONTENT, NO_PROGRESS] * (len(classifications) // 2))
+        # Strictly alternating. Asserted as the property rather than as an
+        # exact even-length list: the run now ends wherever the model-call
+        # ceiling falls, which may be on either phase of the alternation.
+        expected = [
+            NEW_CONTENT if i % 2 == 0 else NO_PROGRESS
+            for i in range(len(classifications))
+        ]
+        self.assertEqual(classifications, expected)
         stalls = classifications.count(NO_PROGRESS)
         # Every stall was a fresh one -- none followed another -- so each got
         # its own replan. This is the property; the exact count depends on
         # where the action budget cuts the trajectory off.
         self.assertGreater(run.replans, 1, "each fresh stall earns its own replan")
         self.assertEqual(run.replans, stalls)
+        # Each stall here is a suppressed duplicate, so it costs a model call
+        # and no action slot. The old invariant (replans <= actions) held only
+        # while every stall had to execute something first; what still bounds
+        # replans is the model-call ceiling.
+        self.assertEqual(run.suppressed_duplicates, stalls)
         self.assertLessEqual(
-            run.replans, run.actions_executed, "replans cannot outnumber actions"
+            run.replans, run.model_calls, "replans cannot outnumber model calls"
         )
         sent = [
             m["content"]
@@ -1309,10 +1329,15 @@ class BoundedReplanTests(AutonomousTestBase):
             for m in msgs[-1:]
             if m["role"] == "user"
         ]
-        # One fewer message than armings: the last stall arms a replan the run
-        # never gets to send, because the action budget ends it first. The
-        # counter records intent, the transcript records what the model saw.
-        self.assertEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans - 1)
+        # Every armed replan was also sent here, because the run now recovers
+        # from its last stall and ends on the model-call ceiling rather than
+        # being cut off mid-stall by the action budget. The invariant that
+        # survives either ending is that the transcript never shows more
+        # replans than were armed.
+        self.assertLessEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans)
+        self.assertGreaterEqual(
+            sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans - 1
+        )
         self.assertTrue(
             all(a == AUTONOMOUS_CONTINUATION_MESSAGE or a == AUTONOMOUS_REPLAN_MESSAGE
                 for a in sent[1:]),
@@ -1727,7 +1752,11 @@ class SoftActionBudgetTests(AutonomousTestBase):
         )
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
-        self.assertEqual(run.actions_executed, 3)
+        # The consecutive no-progress bound still ends the run at the same
+        # point; the repeated observations behind it are suppressed rather than
+        # re-executed, so they cost model calls but not action budget.
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(run.suppressed_duplicates, 2)
 
     def test_the_report_runs_exactly_once_after_a_soft_budget_stop(self) -> None:
         same = emit("repeat")

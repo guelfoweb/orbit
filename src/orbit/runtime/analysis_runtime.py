@@ -50,6 +50,7 @@ from orbit.runtime.analysis_progress import (
     NO_PROGRESS,
     ProgressLedger,
     ProgressRecord,
+    observation_fingerprint,
 )
 from orbit.runtime.analysis_sandbox import (
     WORK_MOUNT,
@@ -57,6 +58,7 @@ from orbit.runtime.analysis_sandbox import (
     SandboxUnavailable,
     execute_analysis,
     scratch_baseline,
+    validate_code,
 )
 from orbit.runtime.evidence import (
     EvidenceRecord,
@@ -139,6 +141,11 @@ ANALYSIS_SYSTEM_PROMPT = (
     "instead of their full text; that is the exact output, archived, not a summary. "
     "When you need those exact bytes again, name its id as `evidence:<evidence_id>` "
     "and they are restored verbatim. Never infer content from a reference alone.\n"
+    "When you have identified a deterministic transformation -- a decoder, "
+    "decompressor or decryption whose algorithm and concrete inputs you "
+    "already hold -- execute it and store its output before re-reading source "
+    "you have already collected. Reading the same bytes again cannot resolve "
+    "what only running the transformation can.\n"
     "Base every claim on the artifact or on output an action actually produced. "
     "State plainly when something is unresolved rather than filling the gap."
 )
@@ -354,6 +361,31 @@ AUTONOMOUS_REPLAN_MESSAGE = (
     "repeat an exhausted action, input or established finding."
 )
 
+# What the runtime returns instead of re-running an experiment the session has
+# already run against this exact state.
+#
+# It is deliberately a tool result, not a refusal: the model asked a question,
+# and this is the answer -- the observation exists, here is its identity, and
+# the exact bytes are one `evidence:<id>` away. Reporting it as an error would
+# be false (nothing failed) and would spend the consecutive-error budget on a
+# model that is behaving reasonably, just redundantly.
+#
+# It names no technique and no direction. What it does say is what the session
+# already knows and which kinds of step can still change that, because the
+# alternative -- "already seen" with no route forward -- is what produced a run
+# that re-read one file nine times.
+def _no_progress_observation(evidence_id: str) -> str:
+    return (
+        "NO_PROGRESS: this exact observation already exists as evidence "
+        f"{evidence_id}. It was not run again.\n"
+        f"Reuse it: name `evidence:{evidence_id}` to get its exact bytes back.\n"
+        "Do not repeat this observation. Choose a different unresolved target, "
+        "execute a deterministic transformation whose algorithm and inputs you "
+        "already have, verify existing evidence, or finish if the evidence is "
+        "sufficient."
+    )
+
+
 # Off until it has been measured on real work. Existing one-step behaviour --
 # one analyst line, one model call, control back -- is what every analysis does
 # unless this is set, so nothing about production changes by merging the loop.
@@ -514,6 +546,11 @@ class AnalysisStepResult:
     raw_output_evidence_id: str | None = None
     artifact_handles: tuple[str, ...] = ()
     diagnostics: StepDiagnostics | None = None
+    # Set when the runtime declined to re-run an experiment the session had
+    # already run against this exact state. The model call still happened --
+    # it is counted -- but no sandbox ran and no evidence was created, so this
+    # is neither an executed action nor a refusal of one.
+    suppressed_duplicate_of: str | None = None
 
     @property
     def control_returned(self) -> bool:
@@ -545,6 +582,10 @@ class AutonomousRunResult:
     actions_executed: int
     cancelled: bool = False
     replans: int = 0
+    # Observations the runtime answered from existing evidence instead of
+    # re-running. Each cost a model call and no action slot, which is the
+    # distinction this counter exists to make visible.
+    suppressed_duplicates: int = 0
     final_report: "AnalysisReport | None" = None
     # Diagnostics only. Nothing in the loop reads this back, and its verifier
     # calls are deliberately absent from `model_calls`: a shadow observation
@@ -711,6 +752,11 @@ class AnalysisRuntime:
     _synthetic_call_seq: int = 0
     context_tokens: int | None = None
     context_compactions: int = 0
+    # Experiment identity -> the evidence that experiment already produced.
+    # Session-scoped and in-memory: it records what this session ran, which is
+    # exactly the scope in which "already established" is answerable.
+    _observed_fingerprints: dict[str, str] = field(default_factory=dict)
+    suppressed_duplicates: int = 0
     last_context_plan: object | None = None
 
     def __post_init__(self) -> None:
@@ -1153,6 +1199,57 @@ class AnalysisRuntime:
         # delta rather than for everything earlier steps left behind.
         baseline_sizes = scratch_baseline(self.workspace.scratch_root)
         baseline_digests = self._scratch_digests()
+
+        # Identity of the experiment about to run, computed from the same three
+        # hashes the ledger uses to judge one that already ran. Asking before
+        # rather than after is the entire change: re-running a program over
+        # unchanged inputs cannot establish anything, so the expensive part is
+        # skipped and the model is told what already answers it.
+        #
+        # `validate_code` first, and by the same call the sandbox makes: an
+        # unparseable program has no stable identity and must reach the normal
+        # rejection path rather than be fingerprinted. It returns the code
+        # unchanged, so this hashes exactly the bytes `execute_analysis` would.
+        #
+        # The workspace digests are the pre-action ones already computed above,
+        # so an experiment repeated after the workspace changed is a different
+        # experiment and runs normally.
+        duplicate_of: str | None = None
+        try:
+            validated = validate_code(code)
+        except ValueError:
+            # Let the sandbox raise it, so the refusal wording stays the
+            # sandbox's own and this stays a pure fast path.
+            validated = None
+        if validated is not None:
+            fingerprint = observation_fingerprint(
+                hashlib.sha256(validated.encode("utf-8")).hexdigest(),
+                self.source.sha256,
+                baseline_digests,
+            )
+            duplicate_of = self._observed_fingerprints.get(fingerprint)
+
+        if duplicate_of is not None:
+            # No sandbox, no new evidence record, no new evidence id: the
+            # observation the model asked for already exists under its own
+            # identity, and creating a second copy of it is the duplication
+            # this exists to prevent. The prior id is returned instead, and
+            # remains exactly as re-attestable as it was.
+            self.suppressed_duplicates += 1
+            self._append_tool_result(
+                calls[0], _no_progress_observation(duplicate_of)
+            )
+            return AnalysisStepResult(
+                model_calls=1,
+                action_attempted=True,
+                # Not executed -- nothing ran -- and deliberately not a
+                # rejection either: `rejection` drives the consecutive-error
+                # bound, and nothing here failed.
+                action_executed=False,
+                assistant_text=response.content or "",
+                diagnostics=_diagnostics(None),
+                suppressed_duplicate_of=duplicate_of,
+            )
         try:
             result = execute_analysis(
                 source_path=self.source.snapshot_path,
@@ -1232,6 +1329,17 @@ class AnalysisRuntime:
                 ],
             },
         )
+        # Remember the experiment, keyed by the identity computed before it
+        # ran, so a later request for the same one is answerable without
+        # running it. Registered only on a real execution: a suppressed or
+        # refused step must not teach the session anything.
+        #
+        # Recorded against the pre-action workspace deliberately -- that is the
+        # state this program was actually run against, and it is the state a
+        # repeat would be judged against too.
+        if validated is not None:
+            self._observed_fingerprints.setdefault(fingerprint, record.evidence_id)
+
         # Appended before returning: step N+1 must find this already in place
         # rather than have it reconstructed later.
         self._append_tool_result(calls[0], observation, record=record)
@@ -1295,6 +1403,10 @@ class AnalysisRuntime:
         records: list[ProgressRecord] = []
         model_calls = 0
         actions = 0
+        # Counted per run, not read off the session: a second run in the same
+        # session must report what it suppressed, not what every run before it
+        # did. The session-level registry is what stays; this is the tally.
+        suppressed = 0
         consecutive_no_progress = 0
         consecutive_errors = 0
         replans = 0
@@ -1364,6 +1476,12 @@ class AnalysisRuntime:
             model_calls += step.model_calls
             if step.action_executed:
                 actions += 1
+            if step.suppressed_duplicate_of is not None:
+                # Deliberately not `actions`: a request the runtime answered
+                # from evidence it already had did no work that the action
+                # budget exists to bound. It still cost the model call counted
+                # above, so the run remains bounded.
+                suppressed += 1
 
             record = ledger.classify(len(records) + 1, step)
             records.append(record)
@@ -1533,6 +1651,7 @@ class AnalysisRuntime:
             actions_executed=actions,
             cancelled=cancelled,
             replans=replans,
+            suppressed_duplicates=suppressed,
             final_report=final_report,
             completion_shadow=shadow,
         )
