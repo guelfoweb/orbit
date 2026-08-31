@@ -174,7 +174,11 @@ class DecodeKvStateTests(unittest.TestCase):
         self.assertEqual(generation["iteration"], 3)
 
     def test_a_missing_native_symbol_degrades_to_null_not_an_exception(self) -> None:
-        """Diagnostics must never be able to break a run."""
+        """A shim without the seq-pos symbols must yield nulls, not an error.
+
+        Containment of the *emit* side is covered separately; this pins only the
+        native-query side.
+        """
         class Bare:
             def llama_get_memory(self, ctx):
                 return "memory-handle"
@@ -191,10 +195,37 @@ class DecodeKvStateTests(unittest.TestCase):
         self.assertIsNone(record["remaining_physical_positions"])
 
 
+class DiagnosticFailureContainmentTests(unittest.TestCase):
+    """A diagnostic must never abort the decode loop it observes."""
+
+    def test_an_unwritable_diagnostic_file_does_not_raise(self) -> None:
+        """The emitter sits between `llama_decode` and the caller's rc handling.
+
+        If a bad `ORBIT_KV_DIAG_FILE` propagated, a diagnostics-only
+        misconfiguration would abort the run AND skip the token commit that
+        follows the decode. Losing a diagnostic line is the correct failure.
+        """
+        lib = _CountingLib()
+        with mock.patch.dict(
+            os.environ,
+            {"ORBIT_KV_DIAG": "1",
+             "ORBIT_KV_DIAG_FILE": "/nonexistent-orbit-diag-dir/out.jsonl"},
+        ):
+            native_diag.emit_decode_kv_state(
+                stage="generation", ctx="c", lib=lib, ctx_capacity=8192,
+                batch_tokens=1, decode_rc=0,
+            )  # must not raise
+
+
 class DiagnosticsOffTests(unittest.TestCase):
     """Disabled diagnostics must cost nothing at all."""
 
     def test_disabled_diagnostics_issue_no_native_kv_query(self) -> None:
+        """Redundant with the AST guard test by design; kept as a runtime echo.
+
+        The AST test proves the guard exists at every call site; this shows what
+        that guard buys -- zero native queries -- without needing a live context.
+        """
         lib = _CountingLib()
         with mock.patch.dict(os.environ, {"ORBIT_KV_DIAG": ""}):
             self.assertFalse(native_diag.enabled())
@@ -242,20 +273,28 @@ class DiagnosticsOffTests(unittest.TestCase):
         import ast
 
         source = (ROOT / "src/orbit/native_llama/client.py").read_text(encoding="utf-8")
-        stages = []
-        for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.Call):
+        # Bind each literal to the function it sits in. Collecting the literals
+        # alone and sorting them would accept a SWAP -- prefill labelled
+        # "generation" and vice versa -- which is precisely the misdiagnosis
+        # this test exists to prevent, and which a green suite would hide.
+        stages: dict[str, str] = {}
+        for parent in ast.walk(ast.parse(source)):
+            if not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            func = node.func
-            if getattr(func, "id", None) != "emit_decode_kv_state":
-                continue
-            for keyword in node.keywords:
-                if keyword.arg == "stage" and isinstance(keyword.value, ast.Constant):
-                    stages.append(keyword.value.value)
+            for node in ast.walk(parent):
+                if not isinstance(node, ast.Call):
+                    continue
+                if getattr(node.func, "id", None) != "emit_decode_kv_state":
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg == "stage" and isinstance(keyword.value, ast.Constant):
+                        stages[parent.name] = keyword.value.value
 
         self.assertEqual(
-            sorted(stages), ["generation", "prefill"],
-            "exactly one generation site and one prefill site, each self-labelled",
+            stages,
+            {"_decode_prompt_range": "prefill",
+             "_generate_from_current_context": "generation"},
+            "each decode site must label itself with its own stage",
         )
 
     def test_instrument_backend_is_a_no_op_when_disabled(self) -> None:

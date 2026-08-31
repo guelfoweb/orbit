@@ -582,13 +582,19 @@ def emit_decode_kv_state(
 ) -> None:
     """Record the physical KV state around one `llama_decode` call.
 
-    Called immediately after the decode returns, with `seq_pos_min` / `seq_pos_max`
-    sampled BEFORE it so a failing batch still reports the state that rejected it
-    -- the native memory is restored on rc=1, so sampling afterwards would show a
-    frontier that never existed at admission time.
+    Called immediately after the decode returns. For **rc=1** specifically, the
+    reported frontier is the one that refused the batch: llama.cpp fails at slot
+    allocation before mutating the memory (`llama-context.cpp`, the
+    `FAILED_PREPARE` branch), so the post-call read equals the pre-call state.
+    That reasoning is rc=1-only -- for rc=2 (abort) and rc < -1 (fatal) the
+    header states processed ubatches REMAIN, so the read is post-mutation. The
+    return code is recorded alongside so a reader can tell which case applies.
 
     Strictly diagnostic: every caller guards on `enabled()` so that a disabled
-    run performs no extra native query and no extra work of any kind.
+    run performs no extra native query and no extra work of any kind. Emission
+    is additionally contained here -- a diagnostic must never be able to abort
+    the decode loop it is observing, and the shared `_emit` writes to a
+    caller-supplied path that may be unwritable.
     """
     request = _CURRENT_REQUEST.get()
     event = {
@@ -615,7 +621,13 @@ def emit_decode_kv_state(
     event["remaining_physical_positions"] = (
         ctx_capacity - frontier if isinstance(frontier, int) and isinstance(ctx_capacity, int) else None
     )
-    _emit(event)
+    try:
+        _emit(event)
+    except Exception:
+        # An unwritable ORBIT_KV_DIAG_FILE must not raise between `llama_decode`
+        # and the caller's handling of its return code. Losing a diagnostic line
+        # is the correct failure here; losing the run is not.
+        pass
 
 
 def _seq_pos(lib, ctx, symbol: str, seq_id: int) -> int | None:
