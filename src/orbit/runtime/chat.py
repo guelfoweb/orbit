@@ -37,12 +37,15 @@ from orbit.runtime.environments import (
     unsupported_tool_mode_result as _unsupported_tool_mode_result,
 )
 from orbit.runtime.evidence import (
+    EvidenceRehydrationError,
     EvidenceStore,
     build_compact_final_evidence_context,
     build_final_evidence_context,
     build_post_tool_route_evidence_context,
     build_route_evidence_context,
     build_web_final_evidence_context,
+    rehydrated_evidence_block,
+    requested_evidence_ids,
     render_cited_evidence,
     build_citation_policy_context,
     DeferredCitationSink,
@@ -1675,28 +1678,18 @@ class ChatRuntime:
         content = latest_user.get("content") if latest_user is not None else None
         if not isinstance(content, str):
             return messages, ()
-        evidence_ids = tuple(dict.fromkeys(re.findall(r"\bevidence:(ev_[0-9a-f]{12}_[0-9a-f]{16})\b", content)))
+        evidence_ids = requested_evidence_ids(content)
         if not evidence_ids:
             return messages, ()
-        parts = ["deterministic_evidence_rehydration: exact archived tool output"]
-        rehydrated: list[str] = []
-        for evidence_id in evidence_ids:
-            raw = self.evidence_store.reattest_exact(evidence_id)
-            record = self.evidence_store.records.get(evidence_id)
-            if raw is None or record is None or _unsafe_rehydrated_evidence(raw):
-                raise ContextAdmissionError(f"context admission failed: evidence-rehydration-unavailable:{evidence_id}")
-            delimiter = f"orbit-evidence-{record.raw_sha256}"
-            parts.extend(
-                [
-                    f"evidence_id: {evidence_id}",
-                    f"sha256: {record.raw_sha256}",
-                    f"exact_content_begin: {delimiter}",
-                    raw,
-                    f"exact_content_end: {delimiter}",
-                ]
+        try:
+            block = rehydrated_evidence_block(
+                self.evidence_store, evidence_ids, unsafe=_unsafe_rehydrated_evidence
             )
-            rehydrated.append(evidence_id)
-        return [*messages, {"role": "system", "content": "\n".join(parts)}], tuple(rehydrated)
+        except EvidenceRehydrationError as exc:
+            raise ContextAdmissionError(
+                f"context admission failed: evidence-rehydration-unavailable:{exc.args[0]}"
+            ) from exc
+        return [*messages, {"role": "system", "content": block}], tuple(evidence_ids)
 
 class _ThoughtOnlyDeltaFilter:
     _THOUGHT_START = "<|channel>thought\n"
