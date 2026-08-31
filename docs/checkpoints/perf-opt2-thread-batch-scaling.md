@@ -24,7 +24,17 @@ Proven from source before inference:
   → `ctx_params.n_threads_batch` (`client.py:677`)
 
 Separate flags, separate config fields, separate llama.cpp context parameters.
-They are independently configurable, so the experiment is **not confounded**.
+The backend honours the split at
+`vendor/source/llama.cpp/src/llama-context.cpp:2556`:
+
+```c
+int n_threads = batched ? cparams.n_threads_batch : cparams.n_threads;
+```
+
+Prefill is batched and therefore uses `n_threads_batch`; single-token decode
+uses `n_threads`. They are independently configurable, so the experiment is
+**not confounded** — and this is also why generation rate is excluded as a
+target here.
 
 Every run additionally *asserted* at runtime, from `/props`, that
 `threads == 6`, `threads_batch == <target>`, `mtp_enabled == false`,
@@ -54,6 +64,9 @@ The identical prompt SHA was printed by every run; all four report
 | challenger | 8 | 30.771 | 120,764.470 | 120,821.372 | 122.072 | 817.65 | 6.698 | 37,434,156 | 75→79 °C | 1.03 |
 | challenger | 12 | 29.440 | 126,221.777 | 126,275.643 | 127.254 | 1,256.51 | 9.874 | 37,435,188 | 67→83 °C | 2.32 |
 | confirm | 8 | 30.849 | 120,457.771 | 120,511.529 | 121.481 | 813.99 | 6.701 | 37,434,084 | 67→83 °C | 1.76 |
+
+The confirmation run's CPU cost is +5.67 % over control — so the ~6 % CPU
+premium for `tb = 8` is itself repeatable, not just its throughput.
 
 Generation rate is reported but not a target of this mission; `threads = 6`
 governs it and was never varied. The `tb=8` first run's 6.40 tok/s generation is
@@ -91,8 +104,8 @@ which exceeds the 8 % gate and required investigation before continuing.
 
 | Run | Prefill tok/s | Conditions |
 |---|---:|---|
-| PERF-BASELINE-1 medium_1 | 29.29 | ~96 °C |
-| PERF-BASELINE-1 medium_2 | 30.32 | ~96 °C |
+| PERF-BASELINE-1 medium_1 | 29.29 | 77 °C start → 96 °C end (series) |
+| PERF-BASELINE-1 medium_2 | 30.32 | same series, ended ~96 °C |
 | PERF-OPT-1 | 33.05 | 60 °C start, **load 0.48** |
 | PERF-OPT-2 control | 29.14 | 66 °C start, **load 1.12** |
 
@@ -104,8 +117,14 @@ itself cautioned when it recorded "n=1 cannot support a rate comparison" and
 "must not be used as a new baseline".
 
 The experiment is therefore not invalidated: the A/B denominator is the
-**same-mission control**, measured on the same machine within minutes of the
-challengers, not the historical figure. All four runs of this mission shared
+**same-mission control**, measured on the same machine within ~14 minutes of the
+challengers, not the historical figure. A uniformly depressed absolute rate
+cancels in a ratio.
+
+One limit this does *not* remove: if the whole mission ran under contention,
++5.75 % is the gain **under those conditions** and may not hold on an idle
+machine. That is one more reason the value is a candidate rather than a new
+default. All four runs of this mission shared
 comparable conditions (start 66–75 °C, end 79–83 °C).
 
 ## What the CPU numbers show
@@ -117,6 +136,21 @@ Extra logical threads are genuinely *used* — utilized cores rise 5.991 → 6.6
   gain per 1 % extra CPU.
 * `tb = 12`: **+63.12 % CPU buys +1.05 %** — 0.02 % gain per 1 % extra CPU.
 
+### Is the `tb = 12` rejection confounded by its higher start load (2.32)?
+
+No, and the run's own counters rule it out. If background contention had starved
+it, it would show *fewer* utilized cores and a *longer* wall time. It shows the
+opposite on both:
+
+* **Cores utilized 9.874** — the highest of any run, 64.8 % above control. It
+  received the threads it asked for and used them.
+* **Wall 127.254 s vs the control's 128.570 s** — marginally *faster* in wall
+  terms despite roughly double the background load.
+
+So `tb = 12` performed 63.1 % more CPU work and converted almost none of it into
+throughput. That is an efficiency collapse intrinsic to the thread count, not a
+symptom of being denied CPU.
+
 The measured conclusion is that **additional logical threads beyond ~8 do not
 improve this workload**. This document deliberately does *not* claim memory
 bandwidth is saturated: that mechanism was not measured, `perf` remains blocked
@@ -127,7 +161,7 @@ by `perf_event_paranoid = 4`, and the PERF-OPT-1 attribution limits still apply.
 | Check | Result |
 |---|---|
 | Peak RSS regression > 3 % | NO — +0.0010 % |
-| Thermal instability | NO — 75→79 °C vs control 66→81 °C |
+| Thermal instability | NO — `tb=8` runs 75→79 °C and 67→83 °C vs control 66→81 °C. The **hotter** `tb=8` run produced the **better** number (30.849 vs 30.771), which argues against throttling. |
 | Not repeatable | NO — 0.255 % between runs |
 | Token semantics differ | NO — 3,716 / 0 reused / 3,716 evaluated in all runs |
 | Other backend parameter differs | NO — asserted at runtime |
@@ -138,8 +172,14 @@ by `perf_event_paranoid = 4`, and the PERF-OPT-1 attribution limits still apply.
 **B — THREADS_BATCH_8_CANDIDATE.**
 **THREAD_BATCH SCALING: CANDIDATE 8.**
 
-`threads_batch = 12` is rejected on evidence: it costs 63 % more CPU and 2 °C
-more heat for a 1.05 % gain, well inside noise. `threads_batch = 8` delivers a
+`threads_batch = 12` is rejected on evidence: it costs **63 % more CPU for a
+1.05 % gain** — far below the 3 % reject band. Note 1.05 % is about 4× the only
+noise estimate this mission actually has (the 0.25 % spread between the two
+`tb = 8` runs), so it is most likely a real but negligible gain rather than
+noise. The CPU cost carries the rejection either way. End temperature is not
+cited as a cost: `tb = 8`'s confirmation run also ended at 83 °C at a fraction
+of the CPU, so end temperature tracks cumulative session heat, not thread
+count. `threads_batch = 8` delivers a
 confirmed, repeatable +5.75 % mean gain at ~6 % extra CPU with flat memory.
 
 **No default is changed here.** +5.75 % is a real but modest gain measured on a
