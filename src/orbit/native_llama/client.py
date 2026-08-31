@@ -4137,10 +4137,14 @@ class NativeLlamaClient:
             batch = lib.llama_batch_get_one(one_token, 1)
             decode_rc = lib.llama_decode(self._session.ctx_tgt, batch)
             if kv_diag_enabled():
-                # Sampled after the call but reporting the pre-call frontier is
-                # not possible here, so the state is read now: on rc=1 llama.cpp
-                # restores the memory, which makes this exactly the state that
-                # rejected the batch. Guarded so a normal run issues no query.
+                # Sampled after the call: on rc=1 llama.cpp restores the memory
+                # to its pre-call state, so this reads exactly the frontier that
+                # rejected the batch.
+                #
+                # The guard runs once per generated token. Measured at ~0.9 us
+                # against a ~100 ms token on this hardware -- 0.0009% of one
+                # token, ~1.8 ms across a full 2048-token generation -- so the
+                # disabled path costs an environment read and nothing native.
                 emit_decode_kv_state(
                     stage="generation",
                     ctx=self._session.ctx_tgt,

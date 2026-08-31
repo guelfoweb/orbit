@@ -232,6 +232,32 @@ class DiagnosticsOffTests(unittest.TestCase):
         self.assertEqual(unguarded, 0, "every decode diagnostic must be env-gated")
         self.assertEqual(guarded, 2, "generation and prefill sites are both guarded")
 
+    def test_each_call_site_reports_its_own_stage(self) -> None:
+        """The wiring, not just the emitter's parameters.
+
+        A single mislabelled `stage=` would make a generation failure read as a
+        prefill one -- which is exactly the misdiagnosis this instrumentation
+        exists to prevent, so the literal at each site is pinned.
+        """
+        import ast
+
+        source = (ROOT / "src/orbit/native_llama/client.py").read_text(encoding="utf-8")
+        stages = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if getattr(func, "id", None) != "emit_decode_kv_state":
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "stage" and isinstance(keyword.value, ast.Constant):
+                    stages.append(keyword.value.value)
+
+        self.assertEqual(
+            sorted(stages), ["generation", "prefill"],
+            "exactly one generation site and one prefill site, each self-labelled",
+        )
+
     def test_instrument_backend_is_a_no_op_when_disabled(self) -> None:
         class Raw:
             thinking = False
