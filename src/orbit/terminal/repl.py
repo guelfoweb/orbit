@@ -15,6 +15,7 @@ from orbit.runtime.analysis_runtime import (
     analysis_autonomy_enabled,
 )
 from orbit.runtime.context_manager import ContextAdmissionError
+from orbit.runtime.kv_diag import instrument_backend
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.messages import CHAT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.sessions import SessionStore
@@ -822,7 +823,7 @@ class Repl:
         try:
             runtime = open_confined_analysis_session(
                 artifact,
-                backend=self.backend,
+                backend=self._analysis_backend(),
                 workdir=self.config.workdir,
                 evidence_store_factory=self._analysis_evidence_store,
                 on_acquired=self._analysis_acquired_hook,
@@ -844,12 +845,27 @@ class Repl:
         )
         return True
 
+    def _analysis_backend(self):
+        """The backend an ANALYSIS session should call.
+
+        `ChatRuntime` wraps its backend with the KV diagnostic recorder, but the
+        REPL holds the raw `LlamaServerBackend` it was constructed with, and the
+        analysis session was being handed that one -- so ANALYSIS model calls
+        produced no `kv_diag` records at all while CHAT calls did.
+
+        `instrument_backend` returns the backend unchanged when diagnostics are
+        disabled and is idempotent when they are on, so this adds no wrapper and
+        no behaviour to an ordinary run; it only restores correlation (phase and
+        model_call_id) for the calls an analysis actually makes.
+        """
+        return instrument_backend(self.backend)
+
     def _handle_analysis_command(self, arguments: str) -> str:
         """Enter ANALYSIS on one artifact. No model call happens here."""
         try:
             runtime = open_analysis_session(
                 arguments,
-                backend=self.backend,
+                backend=self._analysis_backend(),
                 workdir=self.config.workdir,
                 evidence_store_factory=self._analysis_evidence_store,
             )

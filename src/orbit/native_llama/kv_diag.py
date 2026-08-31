@@ -567,6 +567,83 @@ def strict_append_miss(
     return payload
 
 
+def emit_decode_kv_state(
+    *,
+    stage: str,
+    ctx,
+    lib,
+    ctx_capacity: int,
+    batch_tokens: int,
+    decode_rc: int,
+    iteration: int | None = None,
+    range_start: int | None = None,
+    range_end: int | None = None,
+    seq_id: int = 0,
+) -> None:
+    """Record the physical KV state around one `llama_decode` call.
+
+    Called immediately after the decode returns. For **rc=1** specifically, the
+    reported frontier is the one that refused the batch: llama.cpp fails at slot
+    allocation before mutating the memory (`llama-context.cpp`, the
+    `FAILED_PREPARE` branch), so the post-call read equals the pre-call state.
+    That reasoning is rc=1-only -- for rc=2 (abort) and rc < -1 (fatal) the
+    header states processed ubatches REMAIN, so the read is post-mutation. The
+    return code is recorded alongside so a reader can tell which case applies.
+
+    Strictly diagnostic: every caller guards on `enabled()` so that a disabled
+    run performs no extra native query and no extra work of any kind. Emission
+    is additionally contained here -- a diagnostic must never be able to abort
+    the decode loop it is observing, and the shared `_emit` writes to a
+    caller-supplied path that may be unwritable.
+    """
+    request = _CURRENT_REQUEST.get()
+    event = {
+        "event": "kv_diag_decode_kv_state",
+        "backend_request_id": request.backend_request_id if request else None,
+        "phase": request.phase if request else None,
+        "tools_mode": request.tools_mode if request else None,
+        "stage": stage,
+        "iteration": iteration,
+        "ctx_capacity": ctx_capacity,
+        "seq_id": seq_id,
+        "seq_pos_min": _seq_pos(lib, ctx, "llama_memory_seq_pos_min", seq_id),
+        "seq_pos_max": _seq_pos(lib, ctx, "llama_memory_seq_pos_max", seq_id),
+        "batch_tokens": batch_tokens,
+        "range_start": range_start,
+        "range_end": range_end,
+        "decode_rc": decode_rc,
+    }
+    # `physical_frontier` is seq_pos_max + 1: llama.cpp positions are 0-based and
+    # inclusive, so a sequence holding positions 0..n-1 reports max = n-1.
+    seq_max = event["seq_pos_max"]
+    event["physical_frontier"] = (seq_max + 1) if isinstance(seq_max, int) and seq_max >= 0 else None
+    frontier = event["physical_frontier"]
+    event["remaining_physical_positions"] = (
+        ctx_capacity - frontier if isinstance(frontier, int) and isinstance(ctx_capacity, int) else None
+    )
+    try:
+        _emit(event)
+    except Exception:
+        # An unwritable ORBIT_KV_DIAG_FILE must not raise between `llama_decode`
+        # and the caller's handling of its return code. Losing a diagnostic line
+        # is the correct failure here; losing the run is not.
+        pass
+
+
+def _seq_pos(lib, ctx, symbol: str, seq_id: int) -> int | None:
+    """Read one native sequence-position bound, or None when unavailable."""
+    getter = getattr(lib, symbol, None)
+    if getter is None or not ctx:
+        return None
+    try:
+        memory = lib.llama_get_memory(ctx)
+        if not memory:
+            return None
+        return int(getter(memory, seq_id))
+    except Exception:
+        return None
+
+
 def emit_strict_append_miss(
     *,
     committed: list[int],

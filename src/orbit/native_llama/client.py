@@ -34,7 +34,7 @@ from .rolling_anchor_store import RollingAnchorStore
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
-from .kv_diag import build_prompt_component_tokens, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_strict_append_miss, enabled as kv_diag_enabled
+from .kv_diag import build_prompt_component_tokens, emit_decode_kv_state, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_strict_append_miss, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .artifact_capabilities import verified_artifact_supports
 from .model_profiles import (
@@ -2754,7 +2754,19 @@ class NativeLlamaClient:
             self._last_prompt_decode_batch_n_tokens = int(n)
             token_ptr = cast(byref(token_array, processed * sizeof(llama_token)), POINTER(llama_token))
             batch = lib.llama_batch_get_one(token_ptr, n)
+            range_start = processed
             decode_rc = lib.llama_decode(self._session.ctx_tgt, batch)
+            if kv_diag_enabled():
+                emit_decode_kv_state(
+                    stage="prefill",
+                    ctx=self._session.ctx_tgt,
+                    lib=lib,
+                    ctx_capacity=self.config.context_tokens,
+                    batch_tokens=int(n),
+                    decode_rc=int(decode_rc),
+                    range_start=range_start,
+                    range_end=range_start + int(n),
+                )
             processed += n
             if on_progress:
                 evaluated_current = max(0, processed - reused)
@@ -4124,6 +4136,24 @@ class NativeLlamaClient:
             one_token = (llama_token * 1)(token)
             batch = lib.llama_batch_get_one(one_token, 1)
             decode_rc = lib.llama_decode(self._session.ctx_tgt, batch)
+            if kv_diag_enabled():
+                # Sampled after the call: on rc=1 llama.cpp restores the memory
+                # to its pre-call state, so this reads exactly the frontier that
+                # rejected the batch.
+                #
+                # The guard runs once per generated token. Measured at ~0.9 us
+                # against a ~100 ms token on this hardware -- 0.0009% of one
+                # token, ~1.8 ms across a full 2048-token generation -- so the
+                # disabled path costs an environment read and nothing native.
+                emit_decode_kv_state(
+                    stage="generation",
+                    ctx=self._session.ctx_tgt,
+                    lib=lib,
+                    ctx_capacity=self.config.context_tokens,
+                    batch_tokens=1,
+                    decode_rc=int(decode_rc),
+                    iteration=generated,
+                )
             if decode_rc == 0:
                 self.last_committed_generated_tokens.append(int(token))
             generated += 1
