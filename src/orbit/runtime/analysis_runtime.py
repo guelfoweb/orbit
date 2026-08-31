@@ -738,6 +738,9 @@ class AnalysisRuntime:
         step uses.
         """
         normalized: list[dict] = []
+        # Ids already spoken for by this batch as well as by prior history: a
+        # backend id preserved one entry earlier must not be re-issued here.
+        claimed: set[str] = set()
         for call in calls:
             if not isinstance(call, dict):
                 # Not ours to repair: the structural gate rejects it downstream
@@ -746,13 +749,38 @@ class AnalysisRuntime:
                 continue
             existing = call.get("id")
             if isinstance(existing, str) and existing:
+                claimed.add(existing)
                 normalized.append(call)
                 continue
-            self._synthetic_call_seq += 1
             replacement = dict(call)
-            replacement["id"] = f"orbit_analysis_call_{self._synthetic_call_seq}"
+            replacement["id"] = self._next_synthetic_call_id(claimed)
+            claimed.add(replacement["id"])
             normalized.append(replacement)
         return normalized
+
+    def _next_synthetic_call_id(self, claimed: set[str]) -> str:
+        """A fresh id that no call in this conversation already claims.
+
+        The counter alone is not enough. A backend is free to return an id that
+        happens to match the generated form, and preserving it -- which is
+        correct -- would otherwise leave the next synthetic id colliding with
+        it. A duplicate silently breaks the assistant/result pairing the shared
+        planner depends on, so the sequence skips anything already in use,
+        whether it came from earlier history or from earlier in this batch.
+        """
+        taken = set(claimed)
+        taken |= {
+            call.get("id")
+            for message in self.messages
+            if message.get("role") == "assistant"
+            for call in (message.get("tool_calls") or [])
+            if isinstance(call, dict)
+        }
+        while True:
+            self._synthetic_call_seq += 1
+            candidate = f"orbit_analysis_call_{self._synthetic_call_seq}"
+            if candidate not in taken:
+                return candidate
 
     def _admit(self, messages: list[Message], *, max_tokens: int,
                tools: list[dict] | None, next_action_reserve: int | None = None) -> list[Message]:

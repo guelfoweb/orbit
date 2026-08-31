@@ -27,6 +27,7 @@ from orbit.runtime.context_manager import ContextBudget, plan_context  # noqa: E
 def _runtime() -> AnalysisRuntime:
     runtime = object.__new__(AnalysisRuntime)
     object.__setattr__(runtime, "_synthetic_call_seq", 0)
+    object.__setattr__(runtime, "messages", [])
     return runtime
 
 
@@ -94,6 +95,39 @@ class GeneratedIdTests(unittest.TestCase):
         """Not ours to repair: the structural gate rejects it with its own message."""
         out = _runtime()._with_canonical_call_ids(["not-a-call"])
         self.assertEqual(out, ["not-a-call"])
+
+
+class NoCollisionWithBackendIdsTests(unittest.TestCase):
+    """A generated id must never duplicate one already in use."""
+
+    def _runtime_with_history(self, history):
+        runtime = object.__new__(AnalysisRuntime)
+        object.__setattr__(runtime, "_synthetic_call_seq", 0)
+        object.__setattr__(runtime, "messages", history)
+        return runtime
+
+    def test_a_persisted_backend_id_in_the_generated_form_is_skipped(self) -> None:
+        """A backend may return an id shaped exactly like a generated one.
+
+        Preserving it is correct, but the next synthetic id must then skip it:
+        a duplicate silently breaks the assistant/result pairing the shared
+        planner depends on.
+        """
+        runtime = self._runtime_with_history([
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "orbit_analysis_call_1"}]},
+        ])
+        out = runtime._with_canonical_call_ids([_call()])
+        self.assertNotEqual(out[0]["id"], "orbit_analysis_call_1")
+
+    def test_an_id_preserved_earlier_in_the_same_batch_is_skipped(self) -> None:
+        runtime = self._runtime_with_history([])
+        out = runtime._with_canonical_call_ids(
+            [_call(id="orbit_analysis_call_1"), _call()]
+        )
+        ids = [c["id"] for c in out]
+        self.assertEqual(ids[0], "orbit_analysis_call_1", "the real id is kept")
+        self.assertEqual(len(set(ids)), len(ids), "and the generated one differs")
 
 
 class AssistantAndResultAgreeTests(unittest.TestCase):
