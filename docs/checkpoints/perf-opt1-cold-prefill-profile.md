@@ -25,6 +25,10 @@ conversion is `value / 1024 / 1024`. The original checkpoint divided by
 | 37,433,472 kB (peak `VmHWM`) | 34.86 GiB | **35.70 GiB** |
 | 37,280,396 kB (session) | not stated | **35.55 GiB** |
 
+These raw values are **PERF-BASELINE-1's process**, not this run's. This
+profiling run's own server measured `VmRSS 37,355,308` / `VmHWM 37,433,924` kB
+(35.62 / 35.70 GiB) — a separate model load, hence the small deltas.
+
 The error was confined to two summary lines; the comparison table already used
 the correct 35.70 GiB for the same raw value, so the document contradicted
 itself — which is how the bug surfaced. Peak RSS remains **35.70 GiB current vs
@@ -34,7 +38,10 @@ PERF-BASELINE-1 performance verdict is unchanged. Corrected in PR #290
 
 ## Protocol
 
-Identical artifact, backend and configuration to PERF-BASELINE-1.
+Identical artifact, backend and server configuration to PERF-BASELINE-1. The
+**output cap differs by design** — 8 tokens here versus 32 — because this
+mission profiles prefill, not generation. That cannot affect `prompt_ms`: `pf_ms`
+closes at `client.py:2658`, before generation starts at `:2681`.
 
 | Property | Value |
 |---|---|
@@ -55,11 +62,19 @@ Established by reading `client.py`, not assumed:
   (`client.py:2577`), which is **after** `self.tokenize(prompt)`. It therefore
   **excludes** tokenization and **includes** route-anchor planning, KV
   preparation, batching and native `llama_decode`. It is *not* pure matmul.
-* **`backend_ttft_ms`** comes from `_RequestTiming`, started at client entry
-  (`client.py:2566`) — so it **includes** tokenization and template work —
-  and marked at the first generated token.
-* Therefore `backend_ttft_ms − prompt_ms` isolates
-  tokenization + template + orchestration with no instrumentation.
+* **`backend_ttft_ms`** comes from `_RequestTiming`, started unconditionally at
+  **`client.py:1428`** in `complete_chat`, and marked at the first generated
+  token (`client.py:4107-4108`). The occurrences at `:2261`/`:2566` are
+  `or`-defaulted fallbacks that never fire on this path — the object is created
+  once at `:1428` and threaded through.
+* Therefore `backend_ttft_ms − prompt_ms` is an **upper bound** on all
+  Orbit-side pre-prefill work. That band is wider than tokenization alone: it
+  also covers `mark_unused` (`:1429`), multimodal preparation (`:1431`),
+  prompt-cache mode (`:1437`), chat-template rendering (`:1463`), four
+  anchor/segment planning calls (`:1472-1500`), MTP admission and rolling-route
+  eligibility (`:1517-1547`), and tokenization (`:2571`). Measuring it as one
+  band needs no instrumentation, and a bound is sufficient here because the
+  number turns out to be negligible.
 
 ## Measured decomposition
 
@@ -72,7 +87,12 @@ Established by reading `client.py`, not assumed:
 | — native prefill (`prompt_ms`) | **112.447 s** | **99.17 %** | MEASURED |
 | — tokenize + template + orchestration | **0.050 s** | **0.04 %** | DERIVED (`ttft − prompt_ms`) |
 | generation (8 tokens) | 0.895 s | 0.79 % | MEASURED |
-| HTTP/server residual | ~0.000 s | ~0.00 % | DERIVED |
+| HTTP/server residual | −0.0008 s | ~0.00 % | DERIVED |
+
+The residual is slightly **negative** because three clocks are involved: HTTP
+wall uses the client's `time.monotonic`, `backend_ttft_ms` uses
+`time.monotonic_ns()` in the server, and `prompt_ms`/`predicted_ms` use
+`llama_time_us()`. −0.8 ms is below their cross-clock resolution.
 
 Prefill rate 33.05 tok/s; generation 8.94 tok/s.
 
@@ -84,15 +104,24 @@ Prefill rate 33.05 tok/s; generation 8.94 tok/s.
 | CPU system | 0.08 s (**0.012 %**) |
 | CPU total | 679.45 s over 113.391 s wall |
 | **Cores utilized** | **5.99** of 6 configured threads |
-| Thread efficiency | 99.9 % |
+| Thread efficiency | 99.9 % of the configured 6 |
+| Machine capacity | 12 logical cores — this run used **49.9 %** of it |
 
-The prefill is **compute-saturated**: it uses essentially exactly the 6 threads
-it was given, for the entire duration, with negligible system time. It is not
-waiting on I/O, syscalls or a scheduler.
+`--threads 6` is the PERF-BASELINE-1 protocol constant, not a tuning finding.
+"5.99 of 6" is saturation of a **self-imposed limit**, not of the hardware: six
+hyperthreads sat idle by configuration. Whether raising the thread count would
+help is untested and depends on the unresolved question above — a
+memory-bandwidth-bound workload would not benefit.
+
+The prefill is **CPU-busy for its whole duration**, using essentially exactly
+the 6 threads it was given, with negligible system time. It is not waiting on
+I/O, syscalls or a scheduler. What those cycles are spent *on* is not resolved
+here — see the attribution limits below.
 
 ### Orbit-side overhead
 
-Non-model time (tokenization + template + orchestration + HTTP) is
+Non-model time (`wall − prompt_ms − predicted_ms` = 48.7 ms, the same band as
+the 49.5 ms row above minus generation-side overhead) is
 **0.049 s = 0.043 %** of the request — well inside the "negligible" (<2 %)
 category. Orbit's Python layer is not a measurable cost on this path.
 
@@ -125,14 +154,34 @@ here.
 | Thermal | PASS — 60 °C before, 81 °C after (limit 100 °C), cores at ~4.0 GHz |
 | Host contention | PASS — load 0.48 before |
 
-Thermal conditions were **better** than PERF-BASELINE-1 (81 °C vs 96 °C), which
-is consistent with this run's slightly higher prefill rate (33.05 vs 29.80
-tok/s). That difference is a run-condition artifact, not a change in the system,
-and is not claimed as an improvement.
+Thermal conditions were **better** than PERF-BASELINE-1 (60 °C before / 81 °C
+after, vs 96 °C), and this run measured 33.05 tok/s prefill against the
+baseline's 29.80 tok/s median — **+9.8 % against the median, +8.3 % against the
+baseline's own fastest run**, which exceeds that baseline's internal two-run
+spread of 3.5 %.
+
+The output cap is **not** a confound: `prompt_ms` is measured entirely before
+the first token is generated, so 8 vs 32 output tokens cannot causally affect
+it. The plausible explanation is the thermal difference, but with n=1 here that
+is **not established** — this mission ran one request by budget, which is enough
+to attribute *where* time goes and not enough to compare rates.
+
+**No improvement is claimed, and this number must not be used as a new
+baseline.** PERF-BASELINE-1's 29.80 tok/s median remains the reference figure;
+any future optimization must be measured against it under its own protocol.
 
 ## Causal classification
 
-**D — NATIVE_BACKEND_COMPUTE_DOMINATED.**
+**D — NATIVE_BACKEND_DOMINATED** (native prefill).
+
+The classification deliberately says *native backend*, not *native compute*.
+The CPU evidence rules out I/O-wait, syscall-bound and scheduler-starved
+execution, but ~100 % busy user time looks identical for useful arithmetic,
+memory-bandwidth stall, cache thrash and spin-waiting in a thread barrier. On a
+35.6 GiB Q4_K_M model on a 6-core CPU with no GPU, memory-bandwidth-bound is a
+live hypothesis, and `perf` — blocked here — is exactly the instrument that
+would separate it. Naming compute in the headline would assert the mechanism
+this document elsewhere marks UNRESOLVED.
 
 Native prefill is 99.17 % of wall time, Orbit-side work is 0.043 %, and the
 process holds 5.99 of 6 threads with 0.012 % system time. Since the native
