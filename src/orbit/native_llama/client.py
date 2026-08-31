@@ -852,11 +852,25 @@ class NativeLlamaClient:
         )
 
     def _initialize_self_mtp_session(self) -> bool:
-        """Construct the self-MTP session. True when it was actually built.
+        """Attempt the self-MTP session. True when the attempt is TERMINAL.
 
-        Returns False without touching session state when this artifact is not
-        qualified, so the caller can fall through to the external-draft path
-        exactly as it did before this existed.
+        The return value is a fall-through guard, not a success signal, and the
+        two readings genuinely differ: four of the five `True` sites below
+        build no runtime at all. Success is read from the lifecycle state
+        (`mtp_enabled` / `mtp_failed`), never from this boolean.
+
+        True
+            Self-MTP handled this initialization attempt and the caller must
+            NOT try external-draft -- whether it was built (`publish`) or it
+            failed closed (`record_failure`). A qualified artifact that fails
+            is a malfunction to report, not a reason to silently start the
+            other architecture on a model chosen for this one.
+
+        False
+            Self-MTP did not handle the request. Returned only when the
+            artifact is not qualified, and only WITHOUT touching session state,
+            so the caller may evaluate external-draft exactly as it did before
+            this path existed.
         """
         try:
             eligible = self._self_mtp_eligible()
