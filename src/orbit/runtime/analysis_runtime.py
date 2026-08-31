@@ -58,7 +58,15 @@ from orbit.runtime.analysis_sandbox import (
     execute_analysis,
     scratch_baseline,
 )
-from orbit.runtime.evidence import EvidenceRecord, EvidenceStore, final_card
+from orbit.runtime.evidence import (
+    EvidenceRecord,
+    EvidenceRehydrationError,
+    EvidenceStore,
+    final_card,
+    rehydrated_evidence_block,
+    requested_evidence_ids,
+    tool_evidence_ref,
+)
 from orbit.runtime.completion_shadow import (
     ANALYSIS_COMPLETION_SHADOW_PHASE,
     VERIFIER_MAX_TOKENS,
@@ -127,6 +135,10 @@ ANALYSIS_SYSTEM_PROMPT = (
     "`import orbit_tools` provides read_file(path, offset, limit).\n"
     "Write bounded files under /workspace/work to keep a derived artifact.\n"
     "Perform at most one execute_analysis action per turn, then stop and report what it produced.\n"
+    "Earlier results may appear as an evidence reference (`tool_evidence_ref: true`) "
+    "instead of their full text; that is the exact output, archived, not a summary. "
+    "When you need those exact bytes again, name its id as `evidence:<evidence_id>` "
+    "and they are restored verbatim. Never infer content from a reference alone.\n"
     "Base every claim on the artifact or on output an action actually produced. "
     "State plainly when something is unresolved rather than filling the gap."
 )
@@ -801,19 +813,20 @@ class AnalysisRuntime:
         `plan_exact_context`, called with THIS runtime's history.
 
         Scope of what this buys, stated precisely: for ANALYSIS this is
-        **admit-or-refuse**, not admit-or-compact. `plan_context` can only
-        externalise a tool turn whose evidence id is both available and covered,
-        and analysis tool messages carry no `evidence_id` -- so no turn is ever
-        eligible and the planner returns "unchanged" or "blocked", never
-        "compacted". The empty evidence sets passed below therefore describe
-        reality rather than discarding an option.
+        **admit, compact, or refuse**. A completed tool turn is externalisable
+        once its message carries real evidence identity and its content is
+        already a canonical reference -- both of which `_append_tool_result` now
+        persists -- so the sets built below are genuinely non-empty and the
+        planner can return "compacted" rather than only "unchanged" or
+        "blocked".
 
-        That still fixes the defect: an over-budget step now ends the run
-        explicitly, with the EvidenceStore and history intact and a stop reason
-        the analyst can act on, instead of driving the KV sequence into the
-        context wall and dying inside `llama_decode`. Making analysis history
-        genuinely compactable would mean giving its tool messages evidence
-        identity, which is a larger change than this defect warrants.
+        Refusal remains the floor, not the ceiling: when nothing eligible is
+        left the run still ends explicitly, with the EvidenceStore and history
+        intact and a stop reason the analyst can act on, rather than driving the
+        KV sequence into the context wall and dying inside `llama_decode`.
+        Evidence the current request just rehydrated is withheld from
+        compaction, so answering a question never discards the material that
+        answers it.
 
         Returns the admitted messages. Raises `ContextAdmissionError` when the
         request cannot be made to fit -- deliberately before the backend, so
@@ -833,6 +846,9 @@ class AnalysisRuntime:
         else:
             return messages
 
+        messages, rehydrated = self._with_evidence_rehydration(messages)
+        available, covered = self._compactable_evidence_sets(messages, rehydrated)
+
         plan = plan_exact_context(
             messages,
             backend=self.backend,
@@ -850,8 +866,8 @@ class AnalysisRuntime:
             # permissive direction -- reintroducing exactly the over-admission
             # this method exists to prevent.
             thinking=bool(getattr(self.backend, "thinking", False)),
-            available_evidence_ids=(),
-            covered_evidence_ids=(),
+            available_evidence_ids=available,
+            covered_evidence_ids=covered,
         )
         self.last_context_plan = plan
         if not plan.admitted:
@@ -861,6 +877,85 @@ class AnalysisRuntime:
         if plan.status == "compacted":
             self.context_compactions += 1
         return [dict(message) for message in plan.messages]
+
+    def _with_evidence_rehydration(
+        self, messages: list[Message]
+    ) -> tuple[list[Message], tuple[str, ...]]:
+        """Hand back exact archived output the analyst turn asked for by id.
+
+        This is the half that makes externalisation safe. Once a completed turn
+        is compacted its tool content is a reference, and a reference is not the
+        evidence -- so the model must be able to name an id and get the exact
+        bytes back. Same primitive CHAT uses, same attestation.
+
+        Only the latest USER message is scanned, exactly as CHAT does. Scanning
+        tool messages too would be self-defeating: a canonical reference names
+        its own id in `exact_content_ref`, so every compacted turn would
+        immediately re-inline itself and undo the compaction that just happened.
+        Retrieval is something the model asks for, never something a reference
+        triggers by existing.
+        """
+        latest = None
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                latest = message
+                break
+        evidence_ids = requested_evidence_ids(
+            latest.get("content") if latest is not None else None
+        )
+        if not evidence_ids:
+            return messages, ()
+        try:
+            block = rehydrated_evidence_block(self.evidence_store, evidence_ids)
+        except EvidenceRehydrationError as exc:
+            # Fail closed: an analysis that cannot re-attest the evidence it
+            # asked for must say so, never continue on an approximation.
+            raise ContextAdmissionError(
+                f"context admission failed: evidence-rehydration-unavailable:{exc.args[0]}"
+            ) from exc
+        return [*messages, {"role": "system", "content": block}], evidence_ids
+
+    def _compactable_evidence_sets(
+        self, messages: list[Message], rehydrated: tuple[str, ...]
+    ) -> tuple[set[str], set[str]]:
+        """Which evidence ids in this history may be externalised.
+
+        `available` is every id whose record still re-attests exactly against
+        the reference actually persisted, so a turn is only ever collapsed onto
+        evidence that can be read back. `covered` withholds anything this
+        request just rehydrated: that content is in use right now, and
+        externalising it in the same breath would drop what the model asked for.
+        """
+        available: set[str] = set()
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            evidence_id = message.get("evidence_id")
+            reference = message.get("content")
+            if not isinstance(evidence_id, str) or not isinstance(reference, str):
+                continue
+            record = self.evidence_store.records.get(evidence_id)
+            if record is None:
+                continue
+            # The same cross-checks CHAT makes before trusting a pairing
+            # (`_context_evidence_sets`): the record must agree with the message
+            # that claims it. ANALYSIS builds both from one record so a mismatch
+            # cannot arise today -- these are here so it stays that way if the
+            # history is ever reloaded or assembled elsewhere, and so the two
+            # implementations do not silently diverge.
+            if (
+                record.tool_call_id != message.get("tool_call_id")
+                or record.tool_name != message.get("name")
+                or record.user_turn_id != message.get("user_turn_id")
+            ):
+                continue
+            if self.evidence_store.reattest_exact(
+                evidence_id, expected_reference=reference
+            ) is None:
+                continue
+            available.add(evidence_id)
+        covered = available - set(rehydrated)
+        return available, covered
 
     def _context_tokens(self) -> int | None:
         """The backend's own context size, or None when it cannot say.
@@ -1139,7 +1234,7 @@ class AnalysisRuntime:
         )
         # Appended before returning: step N+1 must find this already in place
         # rather than have it reconstructed later.
-        self._append_tool_result(calls[0], observation)
+        self._append_tool_result(calls[0], observation, record=record)
         return AnalysisStepResult(
             model_calls=1,
             action_attempted=True,
@@ -1837,12 +1932,43 @@ class AnalysisRuntime:
             return "tool call contains characters that cannot be encoded"
         return None
 
-    def _append_tool_result(self, call: dict[str, Any], content: str) -> None:
-        self.messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": call.get("id") or "",
-                "name": ANALYSIS_TOOL_NAME,
-                "content": content,
-            }
-        )
+    def _append_tool_result(
+        self,
+        call: dict[str, Any],
+        content: str,
+        *,
+        record: EvidenceRecord | None = None,
+    ) -> None:
+        """Persist one tool result, carrying its evidence identity when it has one.
+
+        A result backed by an attestable record is stored as the canonical
+        evidence reference rather than raw text, and tagged with the record's
+        own `evidence_id` / `user_turn_id`. Those three things together are what
+        make the turn compactable: `plan_context` externalises a completed tool
+        turn only when the identity is present AND the content is already a
+        reference, so identity alone would achieve nothing -- that was measured,
+        not assumed.
+
+        Results with no record -- a refused action, a capacity message -- keep
+        their literal text and carry no identity, because inventing one would
+        claim evidence that does not exist.
+        """
+        message: Message = {
+            "role": "tool",
+            "tool_call_id": call.get("id") or "",
+            "name": ANALYSIS_TOOL_NAME,
+            "content": content,
+        }
+        if record is not None:
+            # The canonical reference is the shared one CHAT already uses, and
+            # ANALYSIS inherits its excerpt rules unchanged -- including that an
+            # observation of roughly 1020-1200 chars is inlined head-only, with
+            # no truncation marker. Accepted rather than forked: the reference
+            # always carries the true `size:` and the exact bytes stay one
+            # `evidence:<id>` request away, and diverging here would give the
+            # two runtimes different evidence rendering.
+            message["content"] = tool_evidence_ref(record)
+            message["evidence_id"] = record.evidence_id
+            if record.user_turn_id:
+                message["user_turn_id"] = record.user_turn_id
+        self.messages.append(message)

@@ -40,7 +40,7 @@ from orbit.native_llama.prefix_anchor import PrefixAnchorState
 from orbit.runtime.analysis_runtime import ANALYSIS_SYSTEM_PROMPT, ANALYSIS_TOOL_SCHEMA
 
 # Pinned literal: the prewarm captures this contract verbatim.
-ANALYSIS_SYSTEM_PROMPT_SHA256 = "fad4cd857bfb631058a7f5279f81573d800fe56013d82f3e4abab5fb50e2a2c8"
+ANALYSIS_SYSTEM_PROMPT_SHA256 = "88f234df8f26e55b0a7d380e1df4672d87a4a8e719c7342424a5ff4b819c122c"
 
 
 class AnalysisPrefixConfigTests(unittest.TestCase):
@@ -671,6 +671,13 @@ class AnalysisPromptUnchangedTests(unittest.TestCase):
         # pin moved once, with the input-contract fix that told the model
         # /workspace/input is the artifact file rather than a directory, and
         # only alongside the prefix requalification that change forced.
+        #
+        # It moved a second time, deliberately and with user authorization, for
+        # evidence-aware compaction: a compacted turn shows the model a
+        # reference instead of the observation, so the prompt has to say what a
+        # reference is and how to read the exact bytes back. Without that the
+        # compaction hides evidence, which is worse than the context ceiling it
+        # removes. `test_evidence_authority` pins the exact clause.
         self.assertEqual(
             hashlib.sha256(ANALYSIS_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
             ANALYSIS_SYSTEM_PROMPT_SHA256,

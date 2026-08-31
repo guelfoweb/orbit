@@ -338,6 +338,25 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
         "AUTONOMOUS_REPLAN_MESSAGE",
     )
 
+    # One intentional, user-authorized revision to the analysis contract, not
+    # accidental drift. Evidence-aware compaction replaces a large observation
+    # in history with its canonical reference, so the model has to be told what
+    # a reference is and how to read the exact bytes back -- without that
+    # sentence the compaction silently hides evidence, which is worse than the
+    # context ceiling it removes. The clause is pinned verbatim here so the
+    # protection still fires on any OTHER prompt change, including a later edit
+    # to this same clause.
+    AUTHORIZED_PROMPT_ADDITION = (
+        '    "Earlier results may appear as an evidence reference '
+        '(`tool_evidence_ref: true`) "\n'
+        '    "instead of their full text; that is the exact output, archived, '
+        'not a summary. "\n'
+        '    "When you need those exact bytes again, name its id as '
+        '`evidence:<evidence_id>` "\n'
+        '    "and they are restored verbatim. Never infer content from a '
+        'reference alone.\\n"\n'
+    )
+
     def _constant(self, text: str, name: str) -> str | None:
         import re
 
@@ -363,10 +382,28 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
             with self.subTest(constant=name):
                 before = self._constant(baseline, name)
                 self.assertIsNotNone(before, f"{name} not found in baseline")
+                expected = before
+                if name == "ANALYSIS_SYSTEM_PROMPT":
+                    # Baseline plus exactly the authorized clause, in place.
+                    # Anything else -- a reworded clause, a second sentence, an
+                    # unrelated edit elsewhere in the prompt -- still fails.
+                    self.assertNotIn(
+                        self.AUTHORIZED_PROMPT_ADDITION, before,
+                        "the authorized clause must not already be in the baseline",
+                    )
+                    anchor = (
+                        '    "Perform at most one execute_analysis action per turn, '
+                        'then stop and report what it produced.\\n"\n'
+                    )
+                    self.assertIn(anchor, before, "prompt anchor moved")
+                    expected = before.replace(
+                        anchor, anchor + self.AUTHORIZED_PROMPT_ADDITION, 1
+                    )
                 self.assertEqual(
-                    before,
+                    expected,
                     self._constant(current, name),
-                    f"{name} changed; this fix must not alter model-facing text",
+                    f"{name} changed beyond the authorized revision; model-facing "
+                    "text must not drift",
                 )
 
     def test_the_tool_schema_is_unchanged(self) -> None:
