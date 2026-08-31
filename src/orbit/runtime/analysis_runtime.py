@@ -717,7 +717,7 @@ class AnalysisRuntime:
             )
 
     def _admit(self, messages: list[Message], *, max_tokens: int,
-               tools: list[dict] | None) -> list[Message]:
+               tools: list[dict] | None, next_action_reserve: int | None = None) -> list[Message]:
         """Plan one ANALYSIS request through Orbit's shared context admission.
 
         ANALYSIS had none. Prompts grew 581 -> 2898 -> 5241 -> 6105 -> 6991
@@ -733,10 +733,24 @@ class AnalysisRuntime:
         the budget arithmetic and the compaction all stay in
         `plan_exact_context`, called with THIS runtime's history.
 
-        Returns the admitted messages, which may be a compacted projection.
-        Raises `ContextAdmissionError` when the request cannot be made to fit --
-        deliberately before the backend, so nothing reaches `llama_decode` that
-        is already known not to fit.
+        Scope of what this buys, stated precisely: for ANALYSIS this is
+        **admit-or-refuse**, not admit-or-compact. `plan_context` can only
+        externalise a tool turn whose evidence id is both available and covered,
+        and analysis tool messages carry no `evidence_id` -- so no turn is ever
+        eligible and the planner returns "unchanged" or "blocked", never
+        "compacted". The empty evidence sets passed below therefore describe
+        reality rather than discarding an option.
+
+        That still fixes the defect: an over-budget step now ends the run
+        explicitly, with the EvidenceStore and history intact and a stop reason
+        the analyst can act on, instead of driving the KV sequence into the
+        context wall and dying inside `llama_decode`. Making analysis history
+        genuinely compactable would mean giving its tool messages evidence
+        identity, which is a larger change than this defect warrants.
+
+        Returns the admitted messages. Raises `ContextAdmissionError` when the
+        request cannot be made to fit -- deliberately before the backend, so
+        nothing reaches `llama_decode` that is already known not to fit.
         """
         capability = getattr(self.backend, "supports_exact_context_admission", None)
         if callable(capability):
@@ -756,10 +770,19 @@ class AnalysisRuntime:
             messages,
             backend=self.backend,
             output_reserve=max_tokens,
-            next_action_reserve=DEFAULT_NEXT_ACTION_RESERVE,
+            next_action_reserve=(
+                DEFAULT_NEXT_ACTION_RESERVE
+                if next_action_reserve is None
+                else next_action_reserve
+            ),
             configured_context_tokens=self._context_tokens(),
             tools=tools,
-            thinking=False,
+            # The render counted must be the render submitted. `chat_stream`
+            # sends `backend.thinking`, which the REPL sets from `--think`, so
+            # hardcoding False here would under-count a thinking template in the
+            # permissive direction -- reintroducing exactly the over-admission
+            # this method exists to prevent.
+            thinking=bool(getattr(self.backend, "thinking", False)),
             available_evidence_ids=(),
             covered_evidence_ids=(),
         )
@@ -1573,7 +1596,13 @@ class AnalysisRuntime:
 
         started = time.monotonic()
         admitted = self._admit(
-            messages, max_tokens=self.effective_max_tokens, tools=[]
+            messages,
+            max_tokens=self.effective_max_tokens,
+            tools=[],
+            # The report runs with tools off and cannot issue a next action, so
+            # withholding that reserve would only narrow the path most likely to
+            # block. Chat makes the same phase-dependent choice.
+            next_action_reserve=0,
         )
         with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(

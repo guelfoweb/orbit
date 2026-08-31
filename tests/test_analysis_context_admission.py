@@ -20,7 +20,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from orbit.backend.base import ChatResult, TokenCount  # noqa: E402
-from orbit.runtime.analysis_runtime import AnalysisRuntime  # noqa: E402
+from orbit.runtime.analysis_runtime import (  # noqa: E402
+    AnalysisRuntime,
+    acquire_analysis_source,
+)
+from orbit.runtime.evidence import EvidenceStore  # noqa: E402
 from orbit.runtime.context_manager import ContextAdmissionError  # noqa: E402
 
 CTX = 8192
@@ -47,6 +51,8 @@ class _Backend:
         )
         self.chat_stream_calls: list[list[dict]] = []
         self.count_calls = 0
+        self.counted_thinking: list[bool] = []
+        self.thinking = False
 
     def supports_exact_context_admission(self) -> bool:
         return True
@@ -58,6 +64,7 @@ class _Backend:
 
     def count_chat_tokens(self, messages, *, tools=None, thinking=False):
         self.count_calls += 1
+        self.counted_thinking.append(bool(thinking))
         return self._count
 
     def chat_stream(self, messages, **kwargs):
@@ -127,6 +134,38 @@ class MeasuredPromptSizeTests(unittest.TestCase):
         with self.assertRaises(ContextAdmissionError):
             _runtime(over)._admit([{"role": "user", "content": "x"}],
                                   max_tokens=2048, tools=[])
+
+
+class AdmitOrRefuseContractTests(unittest.TestCase):
+    """ANALYSIS admission is admit-or-refuse, and that is deliberate."""
+
+    def test_analysis_history_is_never_compacted_only_refused(self) -> None:
+        """Pins the real contract so a future reader is not misled.
+
+        `plan_context` externalises only tool turns whose evidence is available
+        AND covered; analysis tool messages carry no `evidence_id`, so no turn
+        is eligible. The planner can return "unchanged" or "blocked" and never
+        "compacted". This is not a lost opportunity being hidden -- it is the
+        shape of analysis history -- but it must not be described as compaction.
+        """
+        from orbit.runtime.context_manager import ContextBudget, plan_context
+
+        budget = ContextBudget(context_tokens=CTX, output_reserve=2048,
+                               next_action_reserve=256, safety_margin=256)
+        analysis_shaped = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "artifact"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1",
+             "name": "execute_analysis", "content": "result"},
+            {"role": "assistant", "content": "finding"},
+            {"role": "user", "content": "continue"},
+        ]
+        plan = plan_context(analysis_shaped, budget=budget, count_tokens=lambda m: 6991)
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.compacted_turns, 0)
+        self.assertEqual(plan.externalized_evidence_ids, ())
 
 
 class AdmissionUsesAnalysisHistoryTests(unittest.TestCase):
@@ -212,6 +251,82 @@ class SinglePlanningTests(unittest.TestCase):
         self.assertLessEqual(
             backend.count_calls, 2,
             "a stacked second admission would re-count the same request",
+        )
+
+
+class CountedRenderMatchesSubmittedRenderTests(unittest.TestCase):
+    """The render counted must be the render submitted."""
+
+    def test_thinking_mode_is_taken_from_the_backend_not_assumed(self) -> None:
+        """`chat_stream` sends `backend.thinking`; admission must count it.
+
+        The REPL sets `backend.thinking` from `--think`, and ANALYSIS shares that
+        backend object. Counting with `thinking=False` while submitting a
+        thinking template under-counts in the permissive direction -- which is
+        the over-admission this whole mechanism exists to prevent.
+        """
+        backend = _Backend(100)
+        backend.thinking = True
+        _runtime(backend)._admit(
+            [{"role": "user", "content": "x"}], max_tokens=2048, tools=[]
+        )
+        self.assertEqual(
+            set(backend.counted_thinking), {True},
+            "admission counted a different render than chat_stream would send",
+        )
+
+    def test_thinking_off_is_counted_as_off(self) -> None:
+        backend = _Backend(100)
+        backend.thinking = False
+        _runtime(backend)._admit(
+            [{"role": "user", "content": "x"}], max_tokens=2048, tools=[]
+        )
+        self.assertEqual(set(backend.counted_thinking), {False})
+
+
+class AdmittedMessagesReachTheBackendTests(unittest.TestCase):
+    """Built with the real constructor: what `_admit` returns is what is sent.
+
+    The AST wiring test proves `_admit` and `chat_stream` co-occur; it cannot
+    prove the admitted result is the object actually submitted. Two mutations --
+    sending `list(self.messages)` instead of `admitted`, and returning the input
+    instead of `plan.messages` -- are equivalent while analysis can never
+    compact, and would become silent defects the moment it can. This closes that
+    data-flow gap behaviourally.
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._dir = tempfile.TemporaryDirectory(prefix="orbit-admission-rt-")
+        self.addCleanup(self._dir.cleanup)
+        tmp = pathlib.Path(self._dir.name)
+        artifact = tmp / "artifact.txt"
+        artifact.write_text("payload", encoding="utf-8")
+        self.source = acquire_analysis_source(artifact, tmp / "owned")
+        self.store = EvidenceStore(root=tmp / "evidence")
+
+    def test_the_object_returned_by_admission_is_the_one_submitted(self) -> None:
+        marker = {"role": "user", "content": "ADMITTED-PROJECTION-MARKER"}
+
+        class Backend(_Backend):
+            def __init__(self) -> None:
+                super().__init__(100)
+
+        backend = Backend()
+        runtime = AnalysisRuntime(
+            backend=backend, source=self.source, evidence_store=self.store
+        )
+        self.addCleanup(runtime.close)
+        # Force admission to return a distinguishable projection.
+        runtime._admit = lambda messages, **kwargs: [marker]  # type: ignore[assignment]
+
+        runtime.step("go")
+
+        self.assertTrue(backend.chat_stream_calls, "the backend must be called")
+        self.assertEqual(
+            backend.chat_stream_calls[-1], [marker],
+            "the messages sent must be exactly what admission returned",
         )
 
 
