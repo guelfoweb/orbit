@@ -43,6 +43,7 @@ def open_analysis_session(
     backend: ChatBackend,
     workdir: Path,
     evidence_store_factory: Callable[[Path], EvidenceStore],
+    context_tokens: int | None = None,
 ) -> AnalysisRuntime:
     """Snapshot the artifact and return a runtime bound to it.
 
@@ -67,6 +68,7 @@ def open_analysis_session(
         source=source,
         evidence_store=evidence_store,
         workspace=workspace,
+        context_tokens=context_tokens,
     )
 
 
@@ -76,6 +78,7 @@ def open_confined_analysis_session(
     backend: ChatBackend,
     workdir: Path,
     evidence_store_factory: Callable[[Path], EvidenceStore],
+    context_tokens: int | None = None,
     on_acquired: Callable[[], None] | None = None,
 ) -> AnalysisRuntime:
     """Open a session on a path the model chose, acquiring it safely.
@@ -113,6 +116,7 @@ def open_confined_analysis_session(
         source=source,
         evidence_store=evidence_store,
         workspace=workspace,
+        context_tokens=context_tokens,
     )
 
 

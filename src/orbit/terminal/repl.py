@@ -824,6 +824,7 @@ class Repl:
             runtime = open_confined_analysis_session(
                 artifact,
                 backend=self._analysis_backend(),
+                context_tokens=self.runtime.context_tokens,
                 workdir=self.config.workdir,
                 evidence_store_factory=self._analysis_evidence_store,
                 on_acquired=self._analysis_acquired_hook,
@@ -866,6 +867,7 @@ class Repl:
             runtime = open_analysis_session(
                 arguments,
                 backend=self._analysis_backend(),
+                context_tokens=self.runtime.context_tokens,
                 workdir=self.config.workdir,
                 evidence_store_factory=self._analysis_evidence_store,
             )
