@@ -54,7 +54,7 @@ hypothesis was wrong" below.
 | **D** KV reuse | identical semantics | identical, all turns | PASS |
 | **E** bounded session | no instability | reuse identical, RSS flat | PASS |
 | **F** peak RSS | < 3 % regression | +0.0068 % | PASS |
-| **G** thermals | no pathology | 89–97 °C both, limit 100 °C | PASS |
+| **G** thermals | no pathology | control 92–97 °C, candidates 89–97 °C (limit 100) | PASS |
 | **H** reliability | no errors/drift | 0 errors | PASS |
 
 Thresholds were fixed before the runs and are applied exactly as written.
@@ -87,26 +87,81 @@ denominator is the same-mission control, so the *gain* remains valid.
 Both candidate runs regress on both gates. Even the most favourable candidate
 number, −12.24 %, is four times the 3 % allowance.
 
+### Gates B and C are one effect, not two
+
+Decomposing the short prompt shows the regression is dominated by generation
+time, not prefill:
+
+| Run | `prompt_ms` | `predicted_ms` |
+|---|---:|---:|
+| cand 1 | 662 → 737 (+11.2 %) | 2,993 → 3,610 (**+20.6 %**) |
+| cand 2 | 662 → 843 (+27.2 %) | 2,993 → 4,182 (**+39.7 %**) |
+
+So B and C are the same underlying slowdown observed through two fixtures. This
+document does **not** treat them as independent corroborating failures; the
+rejection rests on one reproduced effect, measured two ways.
+
+### The spread is wide, and that is stated plainly
+
+The per-workload generation deltas swing in both directions, and the two
+candidate runs disagree with each other:
+
+| Statistic | Cand run 1 | Cand run 2 |
+|---|---:|---:|
+| dedicated generation fixture | −21.37 % | −12.24 % |
+| mean across 13 workloads | −5.11 % | −8.98 % |
+| **8-turn session only** | **+0.34 %** | **−6.41 %** |
+
+Run 1's session mean is essentially neutral. Taken alone it would not fail the
+gate — and that is reported here rather than omitted. What survives every
+framing is the direction and the core count: no statistic in either run shows
+the candidate *faster* on generation overall, and both runs independently land
+at ~5.41 utilized cores against the control's ~5.91.
+
+The short-prompt and dedicated-generation fixtures are also each n=1 per arm.
+That is a genuine limitation of this protocol, which spent its load budget on
+breadth across workloads rather than repetition within one. It is why the
+rejection leans on the reproduced core-utilization signal rather than on any
+single latency number.
+
 ### The contention hypothesis was wrong
 
 The first candidate run showed ~5.41 utilized cores on generation-dominated
 workloads against the control's ~5.91 — **at identical `threads = 6`**. Since
 `threads_batch` cannot reduce core usage on non-batched decode, I attributed
-this to external CPU load (unrelated desktop processes were briefly at 118 %
-CPU) and used the §3 allowance to re-test on a quiet host.
+this to external CPU load and used the §3 allowance to re-test. (That
+attribution was itself uninstrumented: run 1's recorded pre-run load was 0.92,
+the *lowest* of the three runs, which argues against run 1 having been the
+contended one.)
 
-**The re-test refuted that explanation.** Under a quiet host (top process 7 %,
-load 1.35, matching the control's 1.39) the candidate reproduced the effect
-almost exactly:
+**The re-test refuted that explanation.** The instrumented pre-run state was
+`temp=77 load=1.24 mem_gb=55`, against the control's `temp=68 load=1.39
+mem_gb=56` — comparable or quieter by the one contention proxy actually
+recorded. (An earlier draft of this document also cited a "top process 7 %" and
+a load of 1.35. Neither is instrumented: `run_q.sh` records only temp, load and
+free memory. Those figures were uninstrumented recollection and are withdrawn.)
+The candidate reproduced the effect almost exactly:
 
 | | Control | Cand run 1 | Cand run 2 |
 |---|---:|---:|---:|
 | mean cores, 13 gen-dominated workloads | **5.910** | 5.408 | **5.404** |
 
-5.408 vs 5.404 across independent runs is reproduction, not noise. The
-generation regression is a **real, reproducible property of the configuration**,
-not a measurement artifact — so §9's escape clause does not apply and the gate
-stands as failed.
+5.408 vs 5.404 across independent runs is reproduction, not noise. The control's
+*minimum* (5.872) exceeds both candidates' *maxima* (5.477 / 5.469): all 13
+workloads separate in the same direction with **zero overlap**.
+
+The decisive evidence is internal to each run. In the *same server process,
+minutes apart*, the candidate's long-prompt row shows **6.773 and 6.763
+utilized cores** — 13 % *more* than the control's 5.982. A host contended enough
+to deny the decode phase half a core could not simultaneously grant the prefill
+phase more cores than the control received. The CPU accounting agrees: over the
+13 workloads candidate run 1 did **less** CPU work (−1.9 %) in **more** wall time
+(+7.4 %). Starvation shows as the same CPU spread over longer wall; this process
+is not being denied CPU, it is not asking for it.
+
+The generation regression is therefore a **real, reproducible property of the
+configuration**, not a measurement artifact — so §9's escape clause does not
+apply and the gate stands as failed.
 
 What the audit predicted was that `threads_batch` would not affect *generation
 throughput*, because `llama-context.cpp:2556` selects
@@ -151,6 +206,6 @@ exactly why qualification exists.
 
 ## Budget
 
-3 model loads, ~7.5 minutes of measured inference, 1,173 generated tokens
-across all three suites (391 per suite: 3 warm-up + 3x32 + 3x64 + 3x8 + reuse
-and session turns).
+3 model loads, ~7.5 minutes of measured inference, **1,173 generated tokens**
+(391 per suite × 3): 1 warm-up + 32 short + 64 generation + 8 long + 94 reuse +
+192 session.
