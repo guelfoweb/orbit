@@ -44,7 +44,7 @@ through the selection at `:2556`.
    `omp_get_thread_num`; `libllama.so` links `libgomp.so.1`. The
    `GGML_USE_OPENMP` branch at `ggml-cpu.c:3781` is the live path, not the
    disposable-threadpool `#else` branch at `:3805`. The build cache settles it
-   outright: `vendor/build/llama.cpp/CMakeCache.txt` carries
+   outright: `src/orbit/native_llama/vendor/build/llama.cpp/CMakeCache.txt` carries
    `GGML_OPENMP:BOOL=ON` and `OpenMP_C_FLAGS:STRING=-fopenmp`.
 
 3. **That branch delegates thread supply to libgomp:**
@@ -56,8 +56,13 @@ through the selection at `:2556`.
    `num_threads` is a per-region *request*. The workers come from libgomp's
    process-wide pool, which **persists between parallel regions** and is sized
    by the largest region seen. Orbit sets no `OMP_NUM_THREADS`,
-   `OMP_WAIT_POLICY` or `GOMP_SPINCOUNT`, so libgomp defaults apply: threads are
-   retained after a region ends, and idle workers busy-wait before parking.
+   `OMP_WAIT_POLICY` or `GOMP_SPINCOUNT`, so libgomp's untuned defaults apply and
+   threads are retained after a region ends. What those idle workers do between
+   regions — spin, park, or both — is **not established here**: llama.cpp's own
+   spin tuning is inert on this build, since `ggml-cpu.c:4254-4257` leaves
+   `OMP_WAIT_POLICY` commented out and `:4259-4266` sets `KMP_BLOCKTIME`, an
+   Intel/LLVM-OpenMP variable that libgomp does not read (verified: zero `KMP_`
+   strings in `libgomp.so.1`).
 
 4. **A batched compute runs at startup, before the socket binds.**
    `run_server` calls `prewarm_startup_route_prefix(client)` at `app.py:867` /
@@ -181,13 +186,15 @@ recording"* at `perf_event_paranoid = 4`. `sudo -n true` returns *"a password is
 required"*, so the authorized one-shot privileged attach could not run
 non-interactively. **No sysctl was modified, no capability granted, no tool
 installed, and Orbit was not run as root.** Per-thread `/proc` accounting was
-used instead; the per-TID delta collector returned no rows (a `/proc/<pid>/task`
-parsing defect in the harness), so the thread-level evidence here is the total
-count plus process CPU accounting, not a per-worker breakdown. The cause of that
-failure is **not established**: the field offsets are correct and the identical
-parse works for the process totals, so a bare `except Exception: pass` in the
-collector is masking the real error. An earlier draft called it a parsing
-defect; that was a guess and is withdrawn.
+used instead; the per-TID delta collector returned no rows, so the thread-level
+evidence here is the total count plus process CPU accounting, not a per-worker
+breakdown. **The cause of that failure is not established.** The field offsets
+are correct and the identical parse works for the process totals, so it is not a
+parsing defect — an earlier draft said it was, and that guess is withdrawn. No
+replacement cause is asserted either: the collector's bare
+`except Exception: pass` meant the real error was never surfaced, and it was not
+pursued because the load-bearing datum (`THREADS_AT_IDLE`) comes from a
+separate, working read.
 
 ## Classification
 
