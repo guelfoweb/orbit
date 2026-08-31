@@ -20,8 +20,17 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from orbit.runtime.analysis_runtime import AnalysisRuntime  # noqa: E402
-from orbit.runtime.context_manager import ContextBudget, plan_context  # noqa: E402
+from orbit.backend.base import ChatResult, TokenCount  # noqa: E402
+from orbit.runtime.analysis_runtime import (  # noqa: E402
+    AnalysisRuntime,
+    acquire_analysis_source,
+)
+from orbit.runtime.evidence import EvidenceStore  # noqa: E402
+from orbit.runtime.context_manager import (  # noqa: E402
+    ContextBudget,
+    conversation_structure_error,
+    plan_context,
+)
 
 
 def _runtime() -> AnalysisRuntime:
@@ -179,6 +188,96 @@ class PlannerAcceptsAnalysisHistoryTests(unittest.TestCase):
         plan = self._plan(self._history(_call()))
         self.assertFalse(plan.admitted)
         self.assertEqual(plan.reason, "invalid-message-structure:missing-tool-call-id")
+
+
+class RealStepProducesParsableHistoryTests(unittest.TestCase):
+    """The outcome, not the shape: run real steps and check what they left.
+
+    The AST test pins that `step()` mentions the normalizer; it cannot see
+    whether the normalized calls are the ones persisted. Two mutations slip past
+    it -- persisting a separate raw list, and writing a different id into the
+    tool result -- and each silently restores the exact regression this change
+    exists to remove. Asserting on `conversation_structure_error` of the real
+    resulting history catches both, because that is the same grammar admission
+    itself applies.
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._dir = tempfile.TemporaryDirectory(prefix="orbit-idflow-")
+        self.addCleanup(self._dir.cleanup)
+        tmp = pathlib.Path(self._dir.name)
+        artifact = tmp / "artifact.txt"
+        artifact.write_text("payload", encoding="utf-8")
+        self.source = acquire_analysis_source(artifact, tmp / "owned")
+        self.store = EvidenceStore(root=tmp / "evidence")
+
+    def _runtime(self):
+        class Backend:
+            """Returns tool calls with NO id -- the shape that regressed main."""
+
+            thinking = False
+
+            def supports_exact_context_admission(self) -> bool:
+                return True
+
+            def model_info(self):
+                class _Info:
+                    context_length = 8192
+                return _Info()
+
+            def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+                return TokenCount(tokens=900, context_tokens=8192,
+                                  rendered_hash="a" * 64, token_hash="b" * 64)
+
+            def chat_stream(self, messages, **kwargs):
+                return ChatResult(
+                    content="", model="m", finish_reason="tool_calls",
+                    tool_calls=[{"function": {"name": "execute_analysis",
+                                              "arguments": '{"code": "pass"}'}}],
+                    prompt_tokens=900, completion_tokens=5, cached_tokens=0,
+                    prompt_tokens_per_second=None, generation_tokens_per_second=None,
+                )
+
+        runtime = AnalysisRuntime(
+            backend=Backend(), source=self.source, evidence_store=self.store
+        )
+        self.addCleanup(runtime.close)
+        return runtime
+
+    def test_two_real_steps_leave_a_history_admission_can_parse(self) -> None:
+        """Step 2 is where the reverted change died. It must run."""
+        runtime = self._runtime()
+        runtime.step("analyze this")
+        runtime.step("continue")
+
+        self.assertIsNone(
+            conversation_structure_error(runtime.messages),
+            "the persisted history must satisfy the same grammar admission uses",
+        )
+
+    def test_the_persisted_ids_pair_up_and_are_unique(self) -> None:
+        runtime = self._runtime()
+        runtime.step("analyze this")
+        runtime.step("continue")
+
+        assistant_ids = [
+            call.get("id")
+            for message in runtime.messages
+            if message.get("role") == "assistant"
+            for call in (message.get("tool_calls") or [])
+        ]
+        result_ids = [
+            message.get("tool_call_id")
+            for message in runtime.messages
+            if message.get("role") == "tool"
+        ]
+
+        self.assertTrue(assistant_ids, "the run must have produced tool calls")
+        self.assertEqual(assistant_ids, result_ids, "assistant and result must agree")
+        self.assertTrue(all(assistant_ids), "no persisted id may be empty")
+        self.assertEqual(len(set(assistant_ids)), len(assistant_ids), "ids must be unique")
 
 
 class StepUsesNormalizedCallsTests(unittest.TestCase):

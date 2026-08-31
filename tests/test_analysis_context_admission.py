@@ -84,6 +84,7 @@ def _runtime(backend) -> AnalysisRuntime:
     ])
     object.__setattr__(runtime, "context_compactions", 0)
     object.__setattr__(runtime, "last_context_plan", None)
+    object.__setattr__(runtime, "context_tokens", None)
     return runtime
 
 
@@ -205,13 +206,45 @@ class ConfiguredContextIsAppliedTests(unittest.TestCase):
                     context_length = CTX  # what the model was really loaded with
                 return _Info()
 
-        # The backend attests a much larger window than it was loaded with.
+        # The backend attests a larger window than `model_info` reports; the
+        # configured value must clamp it back down.
         backend = Roomy(6991, context_tokens=32768)
         with self.assertRaises(ContextAdmissionError):
             _runtime(backend)._admit(
                 [{"role": "user", "content": "x"}], max_tokens=2048, tools=[]
             )
         self.assertEqual(backend.chat_stream_calls, [])
+
+
+class OperatorContextOverrideTests(unittest.TestCase):
+    """`--context-tokens` must narrow ANALYSIS as it narrows CHAT."""
+
+    def test_a_configured_context_narrower_than_the_backend_wins(self) -> None:
+        """CHAT resolves configured-first (`cli.py`); ANALYSIS must match.
+
+        An operator who narrows the window gets that narrowing in CHAT. If
+        ANALYSIS kept using the backend's larger report it would admit prompts
+        the operator meant to exclude -- a silent divergence in the permissive
+        direction, in exactly the dimension this admission governs.
+        """
+        backend = _Backend(3000)  # attests ctx 8192 -> budget 5632, would admit
+        runtime = _runtime(backend)
+        object.__setattr__(runtime, "context_tokens", 4096)  # operator narrows
+
+        # 4096 - 2048 - 256 - 256 = 1536, so 3000 no longer fits.
+        with self.assertRaises(ContextAdmissionError):
+            runtime._admit([{"role": "user", "content": "x"}],
+                           max_tokens=2048, tools=[])
+        self.assertEqual(backend.chat_stream_calls, [])
+
+    def test_without_a_configured_value_the_backend_report_is_used(self) -> None:
+        backend = _Backend(3000)
+        runtime = _runtime(backend)
+        object.__setattr__(runtime, "context_tokens", None)
+        self.assertTrue(
+            runtime._admit([{"role": "user", "content": "x"}],
+                           max_tokens=2048, tools=[])
+        )
 
 
 class AdmissionCapabilityTests(unittest.TestCase):

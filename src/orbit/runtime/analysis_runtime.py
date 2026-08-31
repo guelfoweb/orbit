@@ -697,6 +697,7 @@ class AnalysisRuntime:
     actions_executed: int = 0
     analyst_turns: int = 0
     _synthetic_call_seq: int = 0
+    context_tokens: int | None = None
     context_compactions: int = 0
     last_context_plan: object | None = None
 
@@ -867,6 +868,12 @@ class AnalysisRuntime:
         Read from the backend rather than configured here so ANALYSIS cannot
         drift from the context the model was actually loaded with.
         """
+        if isinstance(self.context_tokens, int) and self.context_tokens > 0:
+            # An operator who narrowed the window with `--context-tokens` means
+            # it here too. CHAT resolves the same way (`cli.py`: configured value
+            # first, backend report as the fallback), and ANALYSIS silently
+            # ignoring it would be a divergence in the permissive direction.
+            return self.context_tokens
         info = getattr(self.backend, "model_info", None)
         if not callable(info):
             return None
