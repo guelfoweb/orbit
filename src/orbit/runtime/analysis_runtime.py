@@ -35,10 +35,14 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from orbit.backend.base import ChatBackend, Message, RecoverableBackendError
-from orbit.runtime.context_manager import ContextAdmissionError
+from orbit.runtime.context_manager import (
+    ContextAdmissionError,
+    DEFAULT_NEXT_ACTION_RESERVE,
+    plan_exact_context,
+)
 from orbit.runtime.analysis_progress import (
     COMPLETE,
     ERROR,
@@ -692,6 +696,9 @@ class AnalysisRuntime:
     model_calls: int = 0
     actions_executed: int = 0
     analyst_turns: int = 0
+    _synthetic_call_seq: int = 0
+    context_compactions: int = 0
+    last_context_plan: object | None = None
 
     def __post_init__(self) -> None:
         if self.workspace is None:
@@ -709,6 +716,137 @@ class AnalysisRuntime:
                     ),
                 }
             )
+
+    def _with_canonical_call_ids(self, calls: Iterable[dict]) -> list[dict]:
+        """Give every accepted tool call a non-empty id, preserving real ones.
+
+        Backends may return tool calls without an `id`. ANALYSIS tolerated that
+        by writing `call.get("id") or ""` into the matching tool result, which
+        is self-consistent but structurally invalid: Orbit's shared context
+        planner requires a non-empty id on every assistant tool call
+        (`context_manager._tool_call_id`), and refuses the whole history
+        without one. That is what blocked exact-context admission for ANALYSIS.
+
+        Normalizing here -- at the single point where a step accepts the
+        backend's calls, before anything is persisted -- means the assistant
+        message and its tool result are built from the same objects and cannot
+        disagree. A backend-supplied id is never replaced; only a missing or
+        empty one is filled.
+
+        Ids are unique per runtime and stable for the call object they were
+        assigned to, because the returned dicts are the ones every downstream
+        step uses.
+        """
+        normalized: list[dict] = []
+        for call in calls:
+            if not isinstance(call, dict):
+                # Not ours to repair: the structural gate rejects it downstream
+                # with its own message rather than being handed a fabricated id.
+                normalized.append(call)
+                continue
+            existing = call.get("id")
+            if isinstance(existing, str) and existing:
+                normalized.append(call)
+                continue
+            self._synthetic_call_seq += 1
+            replacement = dict(call)
+            replacement["id"] = f"orbit_analysis_call_{self._synthetic_call_seq}"
+            normalized.append(replacement)
+        return normalized
+
+    def _admit(self, messages: list[Message], *, max_tokens: int,
+               tools: list[dict] | None, next_action_reserve: int | None = None) -> list[Message]:
+        """Plan one ANALYSIS request through Orbit's shared context admission.
+
+        ANALYSIS had none. Prompts grew 581 -> 2898 -> 5241 -> 6105 -> 6991
+        against a budget of 5632, and the two over-budget calls were submitted
+        anyway; the resident sequence then reached ctx and generation died with
+        `llama_decode == 1` ("could not find a KV slot") at physical frontier
+        8192 of 8192. The cause was logical over-admission, so the fix is the
+        admission CHAT already runs -- not a physical-frontier check, which
+        would only notice one token too late.
+
+        `ChatRuntime`'s wrapper cannot be reused directly: its `prepare` is
+        bound to chat's message list. Only the binding is new here; the policy,
+        the budget arithmetic and the compaction all stay in
+        `plan_exact_context`, called with THIS runtime's history.
+
+        Scope of what this buys, stated precisely: for ANALYSIS this is
+        **admit-or-refuse**, not admit-or-compact. `plan_context` can only
+        externalise a tool turn whose evidence id is both available and covered,
+        and analysis tool messages carry no `evidence_id` -- so no turn is ever
+        eligible and the planner returns "unchanged" or "blocked", never
+        "compacted". The empty evidence sets passed below therefore describe
+        reality rather than discarding an option.
+
+        That still fixes the defect: an over-budget step now ends the run
+        explicitly, with the EvidenceStore and history intact and a stop reason
+        the analyst can act on, instead of driving the KV sequence into the
+        context wall and dying inside `llama_decode`. Making analysis history
+        genuinely compactable would mean giving its tool messages evidence
+        identity, which is a larger change than this defect warrants.
+
+        Returns the admitted messages. Raises `ContextAdmissionError` when the
+        request cannot be made to fit -- deliberately before the backend, so
+        nothing reaches `llama_decode` that is already known not to fit.
+        """
+        capability = getattr(self.backend, "supports_exact_context_admission", None)
+        if callable(capability):
+            status = capability()
+            if status is False:
+                # A non-Orbit endpoint cannot attest exact tokens; admission is
+                # skipped exactly as it is for CHAT rather than guessed at.
+                return messages
+            if status is not True:
+                raise ContextAdmissionError(
+                    "context admission failed: exact-token-capability-unavailable"
+                )
+        else:
+            return messages
+
+        plan = plan_exact_context(
+            messages,
+            backend=self.backend,
+            output_reserve=max_tokens,
+            next_action_reserve=(
+                DEFAULT_NEXT_ACTION_RESERVE
+                if next_action_reserve is None
+                else next_action_reserve
+            ),
+            configured_context_tokens=self._context_tokens(),
+            tools=tools,
+            # The render counted must be the render submitted. `chat_stream`
+            # sends `backend.thinking`, which the REPL sets from `--think`, so
+            # hardcoding False here would under-count a thinking template in the
+            # permissive direction -- reintroducing exactly the over-admission
+            # this method exists to prevent.
+            thinking=bool(getattr(self.backend, "thinking", False)),
+            available_evidence_ids=(),
+            covered_evidence_ids=(),
+        )
+        self.last_context_plan = plan
+        if not plan.admitted:
+            raise ContextAdmissionError(
+                f"context admission failed: {plan.reason or 'required-context-does-not-fit'}"
+            )
+        if plan.status == "compacted":
+            self.context_compactions += 1
+        return [dict(message) for message in plan.messages]
+
+    def _context_tokens(self) -> int | None:
+        """The backend's own context size, or None when it cannot say.
+
+        Read from the backend rather than configured here so ANALYSIS cannot
+        drift from the context the model was actually loaded with.
+        """
+        info = getattr(self.backend, "model_info", None)
+        if not callable(info):
+            return None
+        try:
+            resolved = info()
+        except Exception:
+            return None
+        return getattr(resolved, "context_length", None)
 
     @property
     def effective_max_tokens(self) -> int:
@@ -780,9 +918,14 @@ class AnalysisRuntime:
         # step already makes, so the backend can continue the analysis chain's
         # own KV instead of prefilling it again.
         call_started = time.monotonic()
+        admitted = self._admit(
+            list(self.messages),
+            max_tokens=self.effective_max_tokens,
+            tools=[ANALYSIS_TOOL_SCHEMA],
+        )
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
             response = self.backend.chat_stream(
-                list(self.messages),
+                admitted,
                 temperature=self.temperature,
                 max_tokens=self.effective_max_tokens,
                 tools=[ANALYSIS_TOOL_SCHEMA],
@@ -792,7 +935,7 @@ class AnalysisRuntime:
         self.model_calls += 1
         call_seconds = time.monotonic() - call_started
 
-        calls = list(response.tool_calls or [])
+        calls = self._with_canonical_call_ids(response.tool_calls or [])
         content = response.content or ""
         if _unencodable(content):
             # Decoding makes this practically unreachable, but the cost of
@@ -1490,9 +1633,18 @@ class AnalysisRuntime:
                 on_delta(text)
 
         started = time.monotonic()
+        admitted = self._admit(
+            messages,
+            max_tokens=self.effective_max_tokens,
+            tools=[],
+            # The report runs with tools off and cannot issue a next action, so
+            # withholding that reserve would only narrow the path most likely to
+            # block. Chat makes the same phase-dependent choice.
+            next_action_reserve=0,
+        )
         with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(
-                messages,
+                admitted,
                 temperature=self.temperature,
                 max_tokens=self.effective_max_tokens,
                 tools=[],
