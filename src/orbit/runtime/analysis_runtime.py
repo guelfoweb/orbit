@@ -38,7 +38,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from orbit.backend.base import ChatBackend, Message, RecoverableBackendError
-from orbit.runtime.context_manager import ContextAdmissionError
+from orbit.runtime.context_manager import (
+    ContextAdmissionError,
+    DEFAULT_NEXT_ACTION_RESERVE,
+    plan_exact_context,
+)
 from orbit.runtime.analysis_progress import (
     COMPLETE,
     ERROR,
@@ -692,6 +696,8 @@ class AnalysisRuntime:
     model_calls: int = 0
     actions_executed: int = 0
     analyst_turns: int = 0
+    context_compactions: int = 0
+    last_context_plan: object | None = None
 
     def __post_init__(self) -> None:
         if self.workspace is None:
@@ -709,6 +715,77 @@ class AnalysisRuntime:
                     ),
                 }
             )
+
+    def _admit(self, messages: list[Message], *, max_tokens: int,
+               tools: list[dict] | None) -> list[Message]:
+        """Plan one ANALYSIS request through Orbit's shared context admission.
+
+        ANALYSIS had none. Prompts grew 581 -> 2898 -> 5241 -> 6105 -> 6991
+        against a budget of 5632, and the two over-budget calls were submitted
+        anyway; the resident sequence then reached ctx and generation died with
+        `llama_decode == 1` ("could not find a KV slot") at physical frontier
+        8192 of 8192. The cause was logical over-admission, so the fix is the
+        admission CHAT already runs -- not a physical-frontier check, which
+        would only notice one token too late.
+
+        `ChatRuntime`'s wrapper cannot be reused directly: its `prepare` is
+        bound to chat's message list. Only the binding is new here; the policy,
+        the budget arithmetic and the compaction all stay in
+        `plan_exact_context`, called with THIS runtime's history.
+
+        Returns the admitted messages, which may be a compacted projection.
+        Raises `ContextAdmissionError` when the request cannot be made to fit --
+        deliberately before the backend, so nothing reaches `llama_decode` that
+        is already known not to fit.
+        """
+        capability = getattr(self.backend, "supports_exact_context_admission", None)
+        if callable(capability):
+            status = capability()
+            if status is False:
+                # A non-Orbit endpoint cannot attest exact tokens; admission is
+                # skipped exactly as it is for CHAT rather than guessed at.
+                return messages
+            if status is not True:
+                raise ContextAdmissionError(
+                    "context admission failed: exact-token-capability-unavailable"
+                )
+        else:
+            return messages
+
+        plan = plan_exact_context(
+            messages,
+            backend=self.backend,
+            output_reserve=max_tokens,
+            next_action_reserve=DEFAULT_NEXT_ACTION_RESERVE,
+            configured_context_tokens=self._context_tokens(),
+            tools=tools,
+            thinking=False,
+            available_evidence_ids=(),
+            covered_evidence_ids=(),
+        )
+        self.last_context_plan = plan
+        if not plan.admitted:
+            raise ContextAdmissionError(
+                f"context admission failed: {plan.reason or 'required-context-does-not-fit'}"
+            )
+        if plan.status == "compacted":
+            self.context_compactions += 1
+        return [dict(message) for message in plan.messages]
+
+    def _context_tokens(self) -> int | None:
+        """The backend's own context size, or None when it cannot say.
+
+        Read from the backend rather than configured here so ANALYSIS cannot
+        drift from the context the model was actually loaded with.
+        """
+        info = getattr(self.backend, "model_info", None)
+        if not callable(info):
+            return None
+        try:
+            resolved = info()
+        except Exception:
+            return None
+        return getattr(resolved, "context_length", None)
 
     @property
     def effective_max_tokens(self) -> int:
@@ -780,9 +857,14 @@ class AnalysisRuntime:
         # step already makes, so the backend can continue the analysis chain's
         # own KV instead of prefilling it again.
         call_started = time.monotonic()
+        admitted = self._admit(
+            list(self.messages),
+            max_tokens=self.effective_max_tokens,
+            tools=[ANALYSIS_TOOL_SCHEMA],
+        )
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
             response = self.backend.chat_stream(
-                list(self.messages),
+                admitted,
                 temperature=self.temperature,
                 max_tokens=self.effective_max_tokens,
                 tools=[ANALYSIS_TOOL_SCHEMA],
@@ -1490,9 +1572,12 @@ class AnalysisRuntime:
                 on_delta(text)
 
         started = time.monotonic()
+        admitted = self._admit(
+            messages, max_tokens=self.effective_max_tokens, tools=[]
+        )
         with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(
-                messages,
+                admitted,
                 temperature=self.temperature,
                 max_tokens=self.effective_max_tokens,
                 tools=[],
