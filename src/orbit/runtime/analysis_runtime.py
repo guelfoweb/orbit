@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -43,6 +44,7 @@ from orbit.runtime.context_manager import (
     DEFAULT_NEXT_ACTION_RESERVE,
     plan_exact_context,
 )
+from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
 from orbit.runtime.analysis_progress import (
     COMPLETE,
     ERROR,
@@ -98,6 +100,49 @@ class _TokenCountUnavailable(RuntimeError):
 # call, not a mode: the backend uses it the way it already uses "route", to know
 # which rolling checkpoint this prompt continues, and learns nothing about CHAT
 # or ANALYSIS from it.
+ANALYSIS_TRANSFORM_PHASE = "analysis_transform"
+
+# How much of a decoded stage the report shows verbatim. Short stages are the
+# point -- an exact string is the whole value of an exact transformation -- so
+# the bound is generous relative to what a decoded moniker or command runs to,
+# and a stage past it is named by type, length and digest instead.
+TRANSFORM_INLINE_CHARS = 400
+TRANSFORM_PREFIX_CHARS = 120
+
+# Absolute URIs in decoded text, so an indicator survives a stage too long to
+# inline. Deliberately syntactic: it extracts what is written, and says
+# nothing about what the address is for -- that is the analysis's conclusion.
+_URI_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"'<>()\\]+")
+
+
+def _uris_in(text: str) -> list[str]:
+    """Absolute URIs in `text`, in first-seen order, without duplicates."""
+    return list(dict.fromkeys(_URI_PATTERN.findall(text)))
+
+
+# What the model is told before its first call, when the runtime has already
+# computed something the artifact determines.
+#
+# It states what exists and how to read it, and nothing about what any of it
+# means: naming a stage a decoder, a payload or an indicator would be the
+# runtime interpreting the artifact, which is the model's work. The exact
+# bytes stay behind the evidence mechanism that already exists, so a large
+# stage costs an id here rather than a prompt.
+def _transform_preamble(stages: "list[tuple[TransformStage, EvidenceRecord]]") -> str:
+    lines = [
+        "Deterministic transformations were computed from the artifact before "
+        "this analysis began. Each is an exact literal transformation of bytes "
+        "in the file -- no code was executed -- and each is stored as evidence:",
+    ]
+    for stage, record in stages:
+        lines.append(f"- {record.evidence_id}: {stage.summary}")
+    lines.append(
+        "Name an id as `evidence:<evidence_id>` to read its exact output. "
+        "These are established facts about the artifact; do not recompute them."
+    )
+    return "\n".join(lines)
+
+
 ANALYSIS_STEP_PHASE = "analysis_step"
 
 # The phase a report declares. Distinct from a step because it is a different
@@ -822,6 +867,15 @@ class AnalysisRuntime:
     _observed_fingerprints: dict[str, str] = field(default_factory=dict)
     suppressed_duplicates: int = 0
     last_context_plan: object | None = None
+    # Stages the deterministic pass recovered, paired with the evidence each
+    # became. Computed once per artifact snapshot and read thereafter.
+    transform_stages: list[tuple[TransformStage, EvidenceRecord]] = field(
+        default_factory=list
+    )
+    # The snapshot the pass ran against. Its presence -- not the emptiness of
+    # the list -- is what makes the pass once-only: an artifact with nothing to
+    # decode must not be rescanned on every step.
+    _transform_snapshot: str | None = None
 
     def __post_init__(self) -> None:
         if self.workspace is None:
@@ -839,6 +893,112 @@ class AnalysisRuntime:
                     ),
                 }
             )
+            # Before the first model call, and only here: what the artifact
+            # already determines is not a question to put to a model. A
+            # session that finds nothing appends nothing and is byte-identical
+            # to one built before this existed.
+            self._run_transform_preflight()
+
+    def _run_transform_preflight(self) -> None:
+        """Compute what the artifact determines, once, before any model call.
+
+        Static enrichment, not an action: it runs no sandbox, spends no model
+        call and consumes no action budget, so every bound that makes a run
+        terminate is untouched. It reads the acquired artifact bytes -- the
+        same snapshot the session is pinned to -- and writes one evidence
+        record per stage, each carrying enough provenance to be recomputed
+        from the file by hand.
+
+        Guarded by the snapshot digest rather than by the result, so an
+        artifact with nothing to decode is scanned once and never again.
+
+        Failure here is not failure of the analysis. A malformed artifact, an
+        unreadable file or an evidence store that cannot write must leave the
+        session exactly as it would have been without this pass, which is why
+        the whole thing is wrapped: an enrichment that could abort an analysis
+        would be worse than one that occasionally finds nothing.
+        """
+        if self._transform_snapshot == self.source.sha256:
+            return
+        self._transform_snapshot = self.source.sha256
+        try:
+            text = self.source.snapshot_path.read_text(encoding="utf-8", errors="replace")
+            stages = deobfuscate(text)
+        except (OSError, ValueError):
+            return
+        for index, stage in enumerate(stages, 1):
+            try:
+                record = self.evidence_store.add(
+                    ANALYSIS_TOOL_NAME,
+                    stage.output,
+                    metadata={
+                        # Provenance sufficient to reproduce the value: which
+                        # bytes, which rule, which parameters, and what came
+                        # out. A reader with the artifact can redo it by hand.
+                        "analysis_source_sha256": self.source.sha256,
+                        "original_path": self.source.original_path,
+                        "transform_kind": stage.kind,
+                        "transform_key": stage.key,
+                        "transform_delimiter": stage.delimiter,
+                        "transform_line": stage.line,
+                        "transform_offset": stage.offset,
+                        "transform_depth": stage.depth,
+                        "input_sha256": stage.input_sha256,
+                        "output_sha256": stage.output_sha256,
+                        # Attestation requires all three; the ids are stable
+                        # and name the pass rather than a tool call, because
+                        # no tool call produced this.
+                        "tool_call_id": f"transform_{index}",
+                        "user_turn_id": "turn_0",
+                        "produced_by_phase": ANALYSIS_TRANSFORM_PHASE,
+                    },
+                )
+            except (OSError, ValueError):
+                continue
+            self.transform_stages.append((stage, record))
+        if self.transform_stages:
+            self.messages.append(
+                {"role": "user", "content": _transform_preamble(self.transform_stages)}
+            )
+
+    def transform_appendix(self) -> str:
+        """Exact rendering of the deterministic stages. No model involved.
+
+        A report is model prose about evidence, and prose can omit things. A
+        value the runtime computed exactly should not depend on the model
+        choosing to mention it, so it is rendered here from the records
+        themselves.
+
+        Short outputs are given verbatim, because that is the whole value of
+        an exact result. Long ones are given by type, length, digest and id --
+        enough to recognise and retrieve, without turning a report into a
+        transcript. Any URI a stage produced is listed verbatim regardless of
+        the length of the stage that produced it, since a truncated indicator
+        is useless. Nothing here is labelled: what a decoded string means is
+        the analysis's conclusion, not the renderer's.
+        """
+        if not self.transform_stages:
+            return ""
+        lines = ["## Deterministic transformations", ""]
+        for stage, record in self.transform_stages:
+            lines.append(
+                f"- {stage.kind} | line {stage.line} (offset {stage.offset}) | "
+                f"key {stage.key} | delimiter {stage.delimiter!r} | depth {stage.depth}"
+            )
+            lines.append(f"  evidence: {record.evidence_id}")
+            lines.append(f"  output sha256: {stage.output_sha256}")
+            if len(stage.output) <= TRANSFORM_INLINE_CHARS:
+                lines.append(f"  output: {stage.output}")
+            else:
+                lines.append(
+                    f"  output: {len(stage.output)} chars, begins "
+                    f"{stage.output[:TRANSFORM_PREFIX_CHARS]!r}"
+                )
+            for uri in _uris_in(stage.output):
+                # Verbatim even from a long stage: a truncated indicator is
+                # not an indicator.
+                lines.append(f"  decoded URI: {uri}")
+        return "\n".join(lines)
 
     def _with_canonical_call_ids(self, calls: Iterable[dict]) -> list[dict]:
         """Give every accepted tool call a non-empty id, preserving real ones.
@@ -2083,6 +2243,12 @@ class AnalysisRuntime:
             # Truthful rather than silent, and no repair call: a second
             # invocation would cross the boundary this runtime holds.
             text = "the report call produced no usable text"
+        # Appended after the model's prose, not merged into it: this is
+        # evidence rendering, and keeping it separate is what makes it
+        # independent of whether the model chose to mention any of it.
+        appendix = self.transform_appendix()
+        if appendix:
+            text = f"{text}\n\n{appendix}"
         return AnalysisReport(
             text=text,
             model_calls=1,
@@ -2117,6 +2283,18 @@ class AnalysisRuntime:
             record
             for record in self.evidence_store.records.values()
             if record.tool_name == ANALYSIS_TOOL_NAME
+            # Deterministic stages are excluded from the citation budget, not
+            # from the report: `transform_appendix` renders every one of them
+            # exactly and unconditionally, so a place spent here would buy
+            # nothing. It would also be an artifact's to spend -- the stage
+            # count comes from the file, so a crafted sample with many decoy
+            # call sites could otherwise fill the budget before the analysis
+            # produced a single finding of its own.
+            # `getattr`, because this view is required to tolerate a record
+            # that does not carry the field at all -- `superseded_records`
+            # makes the same allowance, and the two must agree about how
+            # defensive to be or a record one accepts breaks the other.
+            and getattr(record, "produced_by_phase", None) != ANALYSIS_TRANSFORM_PHASE
         ]
         return active_records(records)[-MAX_REPORT_EVIDENCE_RECORDS:]
 
