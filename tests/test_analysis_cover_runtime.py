@@ -295,6 +295,74 @@ class CompactionGuardTests(_Case):
         self.assertEqual(runtime.context_compactions, 7)
 
 
+class PlanMatchesSendTests(_Case):
+    """A plan that says "complete" must survive being sent.
+
+    The defect this pins: the sizing probe rendered the header with an assumed
+    part count while the send used the real one, so the measured message was
+    shorter than the submitted one and admission refused it -- after the turn
+    had already been appended, leaving the model told that parts were coming
+    which never arrived.
+    """
+
+    def test_no_admitted_plan_is_refused_at_send(self) -> None:
+        import random
+
+        random.seed(11)
+        sent = refused = 0
+        for _ in range(60):
+            size = random.randint(1, 9000)
+            per_char = random.choice([0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5])
+            raw = bytes(random.choice(b"abcxyz \n;{}") for _ in range(size))
+            runtime = _runtime(pathlib.Path("."), raw, _Backend(per_char=per_char))
+            self.addCleanup(runtime.close)
+            plan = runtime.plan_source_coverage()
+            if not plan.covered:
+                continue
+            # Each part carries the total it was measured with.
+            self.assertTrue(all(c.total == len(plan.chunks) for c in plan.chunks))
+            self.assertEqual(
+                b"".join(c.text.encode() for c in plan.chunks), raw
+            )
+            try:
+                runtime.cover_source(plan)
+                sent += 1
+            except ContextAdmissionError:  # pragma: no cover - the defect
+                refused += 1
+        self.assertGreater(sent, 0, "the sweep must actually cover something")
+        self.assertEqual(refused, 0, "an admitted plan was refused at send")
+
+    def test_a_refusal_at_send_leaves_no_turn_behind(self) -> None:
+        """Admission happens before the turn is appended."""
+        raw = b"".join(b"stmt %03d;\n" % n for n in range(200))
+        runtime = self._runtime(raw, backend=_Backend(per_char=0.25))
+        plan = runtime.plan_source_coverage()
+        self.assertTrue(plan.covered)
+        before = list(runtime.messages)
+
+        def refuse(messages, **kwargs):
+            raise ContextAdmissionError("context admission failed: test")
+
+        runtime._admit = refuse
+        with self.assertRaises(ContextAdmissionError):
+            runtime.cover_source(plan)
+        self.assertEqual(runtime.messages, before)
+        self.assertFalse(runtime.source_covered)
+
+    def test_planning_settles_on_the_part_count_it_reports(self) -> None:
+        for per_char in (0.05, 0.25, 1.0):
+            for size in (200, 2000, 6000):
+                runtime = _runtime(
+                    pathlib.Path("."), b"q" * size, _Backend(per_char=per_char)
+                )
+                self.addCleanup(runtime.close)
+                plan = runtime.plan_source_coverage()
+                if plan.covered:
+                    self.assertTrue(
+                        all(c.total == len(plan.chunks) for c in plan.chunks)
+                    )
+
+
 class CoverMessageTests(_Case):
     """4. What COVER says, and what it must never say."""
 
