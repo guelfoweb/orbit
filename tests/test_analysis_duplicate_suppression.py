@@ -284,6 +284,97 @@ class NotSuppressedTests(AutonomousTestBase):
         )
 
 
+class WorkspaceStateIsTotalTests(AutonomousTestBase):
+    """A probe must not be suppressed after the thing it probes has moved.
+
+    The fingerprint's workspace component decides whether an experiment would
+    be repeated, so it has to cover what a program can actually observe -- not
+    only the regular-file contents the sandbox needs for artifact capture. A
+    review found directory existence and permission changes invisible to it: a
+    probe re-run after a `mkdir` was suppressed and the model was told stale
+    bytes were the current answer, with the reference asserting "this exact
+    observation already exists". It did not.
+    """
+
+    def _probe_around(self, seed, probe, mutate):
+        backend = ScriptedBackend(
+            *([tool_response(seed)] if seed else []),
+            tool_response(probe),
+            tool_response(mutate),
+            tool_response(probe),
+            prose_response("done"),
+        )
+        run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
+        return run, [s.result.stdout for s in run.steps if s.action_executed]
+
+    def test_a_directory_probe_re_runs_after_the_directory_appears(self) -> None:
+        run, outputs = self._probe_around(
+            None,
+            "import os;print(os.path.isdir('/workspace/work/stage2'), end='')",
+            "import os;os.makedirs('/workspace/work/stage2', exist_ok=True)\n"
+            "print('made', end='')",
+        )
+        self.assertEqual(run.suppressed_duplicates, 0, "the state it probed moved")
+        self.assertEqual(
+            [outputs[0], outputs[-1]], ["False", "True"],
+            "the second probe must observe the change, not a stale copy",
+        )
+
+    def test_a_mode_probe_re_runs_after_a_chmod(self) -> None:
+        run, outputs = self._probe_around(
+            "open('/workspace/work/f', 'w').write('x')\nprint('seeded', end='')",
+            "import os\n"
+            "print(oct(os.stat('/workspace/work/f').st_mode & 0o777), end='')",
+            "import os;os.chmod('/workspace/work/f', 0o600)\nprint('chmod', end='')",
+        )
+        self.assertEqual(run.suppressed_duplicates, 0)
+        self.assertNotEqual(
+            outputs[1], outputs[-1], "the permission change must be observable"
+        )
+
+    def test_the_sandbox_scaffolding_directory_does_not_defeat_suppression(
+        self,
+    ) -> None:
+        """`work/tmp` appears on the first run whatever the program did.
+
+        Counting it would make the first two workspace states differ in every
+        session, so nothing would ever be suppressed -- the mechanism would be
+        silently dead while every test that checks a single repeat still
+        passed. This is the test that would have caught that.
+        """
+        run = self.runtime(
+            ScriptedBackend(*[tool_response(READ_X)] * 3, prose_response("done"))
+        ).run_autonomous("inspect it", finalize=False)
+
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(run.suppressed_duplicates, 2, "both repeats, not just one")
+
+
+class PerRunAccountingTests(AutonomousTestBase):
+    def test_each_run_reports_only_its_own_suppressions(self) -> None:
+        """A second run in one session reports what it suppressed, not the total."""
+        runtime = self.runtime(
+            ScriptedBackend(
+                tool_response(READ_X),
+                tool_response(READ_X),
+                prose_response("done"),
+                tool_response(READ_X),
+                tool_response(READ_X),
+                prose_response("done"),
+            )
+        )
+        first = runtime.run_autonomous("inspect it", finalize=False)
+        second = runtime.run_autonomous("inspect it again", finalize=False)
+
+        self.assertEqual(first.suppressed_duplicates, 1)
+        self.assertEqual(
+            second.suppressed_duplicates, 2,
+            "the second run's own count, not the session running total",
+        )
+        # The session-level registry is what persists across runs.
+        self.assertGreaterEqual(runtime.suppressed_duplicates, 3)
+
+
 class NonDeterministicOutputTests(AutonomousTestBase):
     """Random or time-varying stdout does not make a repeat into discovery."""
 

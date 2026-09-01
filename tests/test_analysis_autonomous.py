@@ -1315,13 +1315,13 @@ class BoundedReplanTests(AutonomousTestBase):
         # where the action budget cuts the trajectory off.
         self.assertGreater(run.replans, 1, "each fresh stall earns its own replan")
         self.assertEqual(run.replans, stalls)
-        # Each stall here is a suppressed duplicate, so it costs a model call
-        # and no action slot. The old invariant (replans <= actions) held only
-        # while every stall had to execute something first; what still bounds
-        # replans is the model-call ceiling.
+        # Each stall here is a suppressed duplicate: a model call, no action
+        # slot. Both bounds still hold and are asserted at their tightest --
+        # a suppressed stall follows a step that did consume an action, so
+        # replans cannot outnumber actions any more than before.
         self.assertEqual(run.suppressed_duplicates, stalls)
         self.assertLessEqual(
-            run.replans, run.model_calls, "replans cannot outnumber model calls"
+            run.replans, run.actions_executed, "replans cannot outnumber actions"
         )
         sent = [
             m["content"]
@@ -1329,15 +1329,10 @@ class BoundedReplanTests(AutonomousTestBase):
             for m in msgs[-1:]
             if m["role"] == "user"
         ]
-        # Every armed replan was also sent here, because the run now recovers
-        # from its last stall and ends on the model-call ceiling rather than
-        # being cut off mid-stall by the action budget. The invariant that
-        # survives either ending is that the transcript never shows more
-        # replans than were armed.
-        self.assertLessEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans)
-        self.assertGreaterEqual(
-            sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans - 1
-        )
+        # Every armed replan was also sent: the run now recovers from its last
+        # stall and ends on the model-call ceiling, rather than being cut off
+        # mid-stall by the action budget with one replan armed but unsent.
+        self.assertEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans)
         self.assertTrue(
             all(a == AUTONOMOUS_CONTINUATION_MESSAGE or a == AUTONOMOUS_REPLAN_MESSAGE
                 for a in sent[1:]),

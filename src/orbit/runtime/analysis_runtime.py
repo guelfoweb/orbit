@@ -1199,6 +1199,10 @@ class AnalysisRuntime:
         # delta rather than for everything earlier steps left behind.
         baseline_sizes = scratch_baseline(self.workspace.scratch_root)
         baseline_digests = self._scratch_digests()
+        # Separate from the digests above, and deliberately so: the sandbox
+        # wants the regular files it may have to diff, the fingerprint wants
+        # everything a program could have observed.
+        workspace_state = self._workspace_state()
 
         # Identity of the experiment about to run, computed from the same three
         # hashes the ledger uses to judge one that already ran. Asking before
@@ -1225,7 +1229,7 @@ class AnalysisRuntime:
             fingerprint = observation_fingerprint(
                 hashlib.sha256(validated.encode("utf-8")).hexdigest(),
                 self.source.sha256,
-                baseline_digests,
+                workspace_state,
             )
             duplicate_of = self._observed_fingerprints.get(fingerprint)
 
@@ -1831,6 +1835,64 @@ class AnalysisRuntime:
             "user_turn_id": f"turn_{self.analyst_turns}",
             "produced_by_phase": "analysis_action",
         }
+
+    def _workspace_state(self) -> dict[str, str]:
+        """Every scratch entry, not only the ones with hashable contents.
+
+        `_scratch_digests` exists to tell the sandbox which regular files
+        changed, so it skips everything that is not one. That projection is
+        right for artifact capture and wrong for deciding whether an experiment
+        would be repeated: a program that probes for a directory, a mode or a
+        timestamp is answering a question about state this projection cannot
+        see, and suppressing its re-run after that state moved would hand the
+        model stale bytes as the current answer.
+
+        So this is total over the tree. Regular files contribute their content
+        digest, and everything else -- directories, symlinks, sockets, devices
+        -- contributes its type and mode, which is what a probe of a
+        non-regular entry can actually observe. An unreadable or vanished entry
+        contributes the fact that it could not be read, which is itself a state
+        distinct from any successful reading of it.
+        """
+        state: dict[str, str] = {}
+        root = self.workspace.scratch_root
+        for path in sorted(root.rglob("*")):
+            key = str(path.relative_to(root))
+            # `work/tmp` is the sandbox's own scaffolding: it materialises on
+            # the first run whatever the program did, so counting it would make
+            # the first two states differ for every session and suppress
+            # nothing. The size-baseline accounting excludes it for the same
+            # reason (`analysis_sandbox.py`, "the sandbox itself creates
+            # work/tmp"). Nothing under it is analysis state.
+            if key == "tmp" or key.startswith("tmp/"):
+                continue
+            try:
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode):
+                    # Contents and mode. Contents alone would miss a chmod,
+                    # which a program is entitled to observe.
+                    #
+                    # Not mtime, deliberately. Including it was measured to
+                    # break duplicate detection outright: the sandbox's own
+                    # activity perturbs timestamps between steps, so every
+                    # fingerprint became unique and nothing was ever suppressed.
+                    # A program that probes only a timestamp -- and not the
+                    # contents, mode or existence of anything -- is therefore
+                    # still re-suppressible. That is the one blind spot left
+                    # standing, and it is the right trade: the alternative
+                    # disables the mechanism for every real case to serve a
+                    # case no observed run has produced.
+                    state[key] = (
+                        f"{hashlib.sha256(path.read_bytes()).hexdigest()}"
+                        f":{info.st_mode:o}"
+                    )
+                else:
+                    # Type and permissions: what is observable about an entry
+                    # that has no contents to hash.
+                    state[key] = f"mode:{info.st_mode:o}"
+            except OSError as exc:
+                state[key] = f"unreadable:{exc.errno}"
+        return state
 
     def _scratch_digests(self) -> dict[str, str]:
         """Hash each retained file so a rewrite is distinguishable from a keep."""
