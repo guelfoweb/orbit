@@ -364,6 +364,32 @@ AUTONOMOUS_REPLAN_MESSAGE = (
     "repeat an exhausted action, input or established finding."
 )
 
+# Sent once after an execution that ran and raised.
+#
+# A program that failed on its own defect is not the same situation as one
+# that produced nothing useful: the model already holds the two things a fix
+# needs -- the exact source it submitted, still in its own preceding message,
+# and the interpreter's verbatim diagnosis, already inlined in the tool
+# result. What it was missing is an invitation to use them. Without one the
+# observed behaviour is to abandon the attempt and resume reading source,
+# which spends the budget re-establishing what was already known.
+#
+# It names no technique, no error class and no correction. Deciding whether a
+# failure is locally correctable, and what the correction is, is the model's
+# work; the runtime only declines to change the subject for one call.
+#
+# The final clause is what keeps this honest. A traceback sometimes proves the
+# opposite of a typo -- that an assumption about the artifact was wrong, and
+# more evidence really is required -- and a runtime that insisted on a retry
+# there would be arguing with a model that had correctly changed its mind.
+AUTONOMOUS_REPAIR_MESSAGE = (
+    "The previous analysis execution failed. Review the submitted action and "
+    "its traceback above. If it is locally correctable, submit one corrected "
+    "execution now. Do not return to source observation unless the error "
+    "proves more evidence is required."
+)
+
+
 # What the runtime returns instead of re-running an experiment the session has
 # already run against this exact state.
 #
@@ -589,6 +615,10 @@ class AutonomousRunResult:
     # re-running. Each cost a model call and no action slot, which is the
     # distinction this counter exists to make visible.
     suppressed_duplicates: int = 0
+    # Failed executions this run invited a correction for. At most one per
+    # failure and never two consecutively, so this also bounds how many of
+    # `model_calls` were spent on repair rather than new direction.
+    repairs: int = 0
     final_report: "AnalysisReport | None" = None
     # Diagnostics only. Nothing in the loop reads this back, and its verifier
     # calls are deliberately absent from `model_calls`: a shadow observation
@@ -692,6 +722,37 @@ def _rejected_action_text(assistant_text: str, rejection: str) -> str:
     note = f"[action refused: {rejection}]"
     text = assistant_text.strip()
     return f"{text}\n\n{note}" if text else note
+
+
+def _is_locally_repairable(step: "AnalysisStepResult") -> bool:
+    """Whether one step failed in a way its own author could plausibly fix.
+
+    Narrow on purpose. The offer is worth making exactly when the model has
+    both halves of a fix in hand: a program it wrote, and the interpreter's
+    verbatim reason for rejecting it. That is the sandbox's `error` status --
+    the process ran and exited non-zero -- and nothing else.
+
+    Everything the sandbox can report instead is excluded because resubmitting
+    could not help. `ok` did not fail. `timeout` and `bounded` are resource
+    ceilings, not defects: the same program is the wrong answer there, and
+    inviting a retry would spend a call re-hitting the same wall. A step that
+    never executed -- a malformed call, a refused action, a capacity stop --
+    has no traceback to reason from, and one the runtime suppressed as a
+    duplicate did not fail at all. Backend failures, cancellations and
+    admission stops never reach here: the loop breaks on those before any step
+    is classified.
+    """
+    if not step.action_executed or step.suppressed_duplicate_of is not None:
+        return False
+    result = step.result
+    # `error` alone: the process ran and exited non-zero, and `stderr` is what
+    # a correction would be reasoned from. A failure that said nothing gives
+    # the model no more than "try again", which is what this exists to avoid.
+    return (
+        result is not None
+        and result.status == "error"
+        and bool(result.stderr.strip())
+    )
 
 
 def _raw_action_output(result: AnalysisResult) -> str:
@@ -1389,11 +1450,18 @@ class AnalysisRuntime:
         what a step may do changes. The model still chooses what to examine;
         the runtime only decides whether it is worth asking again.
 
-        The loop stops the moment a step stops adding state. It never repairs,
-        never retries, never re-runs a rejected action, and never makes a
-        second kind of model call: there is no finalisation pass and no
-        classifier, because both would be the runtime forming an opinion about
-        an analysis it is not qualified to judge.
+        The loop stops the moment a step stops adding state. It never re-runs
+        a rejected action and never makes a second kind of model call: there
+        is no finalisation pass and no classifier, because both would be the
+        runtime forming an opinion about an analysis it is not qualified to
+        judge.
+
+        One exception, and it is an ordinary step rather than a new kind of
+        call: an execution that ran and raised earns a single repair message
+        instead of the generic continuation, because the model already holds
+        its own source and the interpreter's reason and is one edit from
+        useful work. The runtime supplies no correction and never re-runs the
+        failed code itself; a repair that fails again gets no second offer.
 
         Cancellation propagates: `KeyboardInterrupt` from the backend ends the
         run and returns what has already been established, with the workspace
@@ -1418,6 +1486,14 @@ class AnalysisRuntime:
         consecutive_errors = 0
         replans = 0
         replan_pending = False
+        # One repair opportunity per failed execution, and never two in a row.
+        # `repair_pending` is what the next iteration will send; `repairing`
+        # remembers that the step about to run IS the repair, so a correction
+        # that fails again falls back to the ordinary loop instead of being
+        # offered a second chance at the same defect.
+        repair_pending = False
+        repairing = False
+        repairs = 0
         message = analyst_message
         stop_reason = STOP_MAX_MODEL_CALLS
         cancelled = False
@@ -1514,6 +1590,13 @@ class AnalysisRuntime:
                 stop_reason = STOP_COMPLETE
                 break
 
+            # Decided before the stop checks, so the flag reflects this step
+            # rather than surviving from the previous one, and cleared on
+            # every path -- a step that is not an eligible failure must not
+            # inherit an offer armed earlier.
+            was_repairing, repairing = repairing, False
+            repair_pending = _is_locally_repairable(step) and not was_repairing
+
             if record.classification == ERROR:
                 consecutive_errors += 1
                 consecutive_no_progress = 0
@@ -1543,7 +1626,6 @@ class AnalysisRuntime:
                 # that recovers and stalls again is told again, because that is
                 # a different stall.
                 replan_pending = True
-                replans += 1
             else:
                 consecutive_no_progress = 0
                 consecutive_errors = 0
@@ -1575,9 +1657,37 @@ class AnalysisRuntime:
                 stop_reason = STOP_SOFT_MAX_ACTIONS
                 break
 
-            if replan_pending:
+            if repair_pending:
+                # Ahead of the replan: a step that raised is a more specific
+                # situation than one that merely added nothing, and the replan
+                # would send the model looking for a *different* strategy --
+                # the opposite of what a fixable program needs. Costs one
+                # model call from the existing ceiling and no extra action
+                # budget; the correction itself is an ordinary action.
+                message = AUTONOMOUS_REPAIR_MESSAGE
+                repair_pending = False
+                repairing = True
+                repairs += 1
+                # Reachable, and load-bearing. A failing program writes its
+                # traceback as evidence, so the FIRST such failure is
+                # NEW_CONTENT -- but a later failure with byte-identical
+                # stderr produces the same evidence hash, adds no state, and
+                # is classified NO_PROGRESS while the sandbox still reports a
+                # diagnosed error. Both flags arm on that step. The repair is
+                # the more specific instruction, so it wins and the replan is
+                # dropped rather than queued: sending both would put two
+                # directives about one step in front of the model, one asking
+                # it to fix this program and the other to abandon it.
+                replan_pending = False
+            elif replan_pending:
                 message = AUTONOMOUS_REPLAN_MESSAGE
                 replan_pending = False
+                # Counted here rather than where the stall is detected: a
+                # replan can be armed and then dropped when the same step also
+                # earns a repair, and a counter that recorded the intention
+                # would report a replan the model was never sent. The analyst
+                # reads this figure, so it counts messages.
+                replans += 1
             else:
                 message = AUTONOMOUS_CONTINUATION_MESSAGE
 
@@ -1659,6 +1769,7 @@ class AnalysisRuntime:
             cancelled=cancelled,
             replans=replans,
             suppressed_duplicates=suppressed,
+            repairs=repairs,
             final_report=final_report,
             completion_shadow=shadow,
         )
