@@ -81,8 +81,11 @@ def runtime_status(
     backend: LlamaServerBackend,
     *,
     tools_mode: ToolSpec | None = None,
+    autonomous: bool = False,
 ) -> str:
-    status = collect_runtime_status(runtime, config, backend, tools_mode=tools_mode)
+    status = collect_runtime_status(
+        runtime, config, backend, tools_mode=tools_mode, autonomous=autonomous
+    )
     return format_status_panel(status)
 
 

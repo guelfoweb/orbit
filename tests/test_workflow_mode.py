@@ -1570,11 +1570,14 @@ class PromptMarkerTest(ModeTestBase):
 
         with mock.patch("orbit.terminal.repl_input.sys.stdout") as stdout:
             stdout.isatty.return_value = False
-            self.assertEqual(input_prompt("chat"), "chat> ")
-            self.assertEqual(input_prompt("analysis"), "analysis> ")
+            self.assertEqual(input_prompt("chat"), "chat [auto:off]> ")
+            self.assertEqual(input_prompt("analysis"), "analysis [auto:off]> ")
         with mock.patch("orbit.terminal.repl_input.sys.stdout") as stdout:
             stdout.isatty.return_value = True
-            self.assertIn("analysis> ", input_prompt("analysis"))
+            # The visible text is the marker; the escapes around it are
+            # readline's, and sit inside its ignore markers.
+            self.assertIn("analysis [auto:", input_prompt("analysis"))
+            self.assertIn("]> ", input_prompt("analysis"))
 
 
 class ActionCauseRenderingTest(unittest.TestCase):
@@ -2308,7 +2311,11 @@ class AmberAnalysisPromptTest(ModeTestBase):
 
         with mock.patch.object(repl_input.sys, "stdout") as stdout:
             stdout.isatty.return_value = True
-            self.assertNotIn(RED, repl_input.input_prompt("analysis"))
+            # Red is now a legitimate colour on the autonomy token, so this
+            # asserts about the mode marker: amber, never red.
+            rendered = repl_input.input_prompt("analysis", autonomous=True)
+            self.assertNotIn(RED, rendered)
+            self.assertIn("\033[33m", rendered)
 
     def test_no_ansi_in_non_tty(self) -> None:
         from orbit.terminal import repl_input
@@ -2316,7 +2323,7 @@ class AmberAnalysisPromptTest(ModeTestBase):
         with mock.patch.object(repl_input.sys, "stdout") as stdout:
             stdout.isatty.return_value = False
             for label in ("chat", "analysis"):
-                self.assertEqual(repl_input.input_prompt(label), f"{label}> ")
+                self.assertEqual(repl_input.input_prompt(label), f"{label} [auto:off]> ")
 
 
 class WorkdirReminderTest(ModeTestBase):

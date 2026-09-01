@@ -85,7 +85,9 @@ class HelpTests(unittest.TestCase):
             self.assertIn(usage, analysis_block)
 
     def test_help_describes_the_autonomy_control(self) -> None:
-        self.assertIn("autonomous analysis for this session", help_text().lower())
+        text = help_text().lower()
+        self.assertIn("control how analysis advances", text)
+        self.assertIn("does not enter analysis mode by itself", text)
 
 
 class SessionStateTests(ModeTestBase):

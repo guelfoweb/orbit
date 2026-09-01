@@ -12,6 +12,7 @@ from orbit.native_llama.model_registry import load_registry
 from orbit.runtime.session_memory import DEFAULT_CONTEXT_TOKENS, SOFT_MEMORY_RATIO, estimate_message_tokens
 from orbit.runtime.tools import tool_names
 from orbit.terminal.config import AppConfig
+from orbit.terminal.theme import on_off
 from orbit.terminal.tool_mode import ToolSpec
 
 
@@ -83,6 +84,11 @@ class RuntimeStatus:
     host: HostInfo
     acceleration: AccelerationInfo
     banner_model: str | None = None
+    # Shown on the banner so the analyst starts the session knowing
+    # whether an analysis will advance itself. Defaulted, because every
+    # existing caller built a status without it and none are about
+    # analysis.
+    autonomous: str = "off"
 
 
 def collect_host_info() -> HostInfo:
@@ -104,6 +110,7 @@ def collect_runtime_status(
     *,
     tools_mode: ToolSpec | None = None,
     host_info: HostInfo | None = None,
+    autonomous: bool = False,
 ) -> RuntimeStatus:
     info = _safe_call(getattr(backend, "model_info", None))
     props = _safe_call(getattr(backend, "backend_props", None)) or {}
@@ -123,6 +130,7 @@ def collect_runtime_status(
         mmproj=_loaded_missing(props.get("multimodal_available")),
         tools=_tools_mode(tools_mode if tools_mode is not None else config.tools),
         think="on" if config.think else "off",
+        autonomous="on" if autonomous else "off",
         max_tokens=str(config.max_tokens),
         temperature=str(config.temperature),
         messages=str(len(runtime.messages)),
@@ -140,13 +148,32 @@ def collect_runtime_status(
     )
 
 
+def _state(value: str) -> str:
+    """Colour an already-rendered on/off token, leaving anything else alone.
+
+    `tools` can also read `restricted`, and a value that is not a plain
+    boolean has no green-or-red answer -- so it is passed through rather than
+    forced into one.
+    """
+    if value == "on":
+        return on_off(True)
+    if value == "off":
+        return on_off(False)
+    return value
+
+
 def format_startup_banner(status: RuntimeStatus) -> str:
     version = status.version if status.version.startswith("v") else f"v{status.version}"
     backend = "native" if status.backend in {"native llama.cpp", "orbit-native"} else status.backend
     return "\n".join(
         [
             f"Orbit {version} · {status.banner_model or status.model} · {backend}",
-            f"workdir {status.workdir} · tools {status.tools} · think {status.think} · ctx {status.context_window}",
+            # Only the state tokens are coloured. The labels around them carry
+            # no state, and colouring a whole line would make one setting look
+            # like a verdict on the run.
+            f"workdir {status.workdir} · tools {_state(status.tools)} · "
+            f"think {_state(status.think)} · autonomous {_state(status.autonomous)} · "
+            f"ctx {status.context_window}",
             "/help for commands · /status for details",
         ]
     )
@@ -164,6 +191,9 @@ def format_status_panel(status: RuntimeStatus) -> str:
         ("MTP", f"{status.mtp}, mmproj {status.mmproj}"),
         ("Tools", status.tools),
         ("Think", status.think),
+        # The banner points at `/status` for details, so the two must agree
+        # about a setting the banner shows.
+        ("Autonomous", status.autonomous),
         ("Max tokens", status.max_tokens),
         ("Workdir", status.workdir),
         ("separator", "Host"),
