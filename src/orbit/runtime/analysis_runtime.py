@@ -342,6 +342,9 @@ AUTONOMOUS_CONTINUATION_MESSAGE = (
     "Continue from the current evidence. Choose one new useful "
     "evidence-producing step. Do not repeat established actions, inputs or "
     "findings."
+    " If you have already identified a deterministic transformation "
+    "and hold its concrete inputs, run it now rather than inspecting "
+    "the source further."
 )
 
 # Sent on the first unproductive step of a streak. The previous instruction

@@ -351,7 +351,7 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
     # pin, so relocating a sanctioned clause fails just as an unsanctioned one
     # does. Appending to this tuple is the only way to sanction a change, and
     # it is a reviewed, user-authorized act each time.
-    AUTHORIZED_PROMPT_ADDITIONS = (
+    AUTHORIZED_ADDITIONS = {"ANALYSIS_SYSTEM_PROMPT": (
         # ANALYSIS-COMPACTION-1: evidence references and exact rehydration.
         (
             '    "Perform at most one execute_analysis action per turn, '
@@ -380,7 +380,23 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
             'cannot resolve "\n'
             '    "what only running the transformation can.\\n"\n',
         ),
-    )
+    ),
+    # ANALYSIS-PROGRESS-1, authorized under the mission's clause 22. The live
+    # run proved the runtime side worked -- 12 actions, 12 distinct programs,
+    # nothing to suppress -- while the model still spent its last action on a
+    # further read of source whose decoder inputs it had already extracted.
+    # This is the instruction it reads before every autonomous step, so it is
+    # where a priority between two legitimate next steps has to be stated. It
+    # names no technique, and the generic-language test still enforces that.
+    "AUTONOMOUS_CONTINUATION_MESSAGE": (
+        (
+            '    "findings."\n',
+            '    " If you have already identified a deterministic transformation "\n'
+            '    "and hold its concrete inputs, run it now rather than inspecting "\n'
+            '    "the source further."\n',
+        ),
+    ),
+    }
 
     def _constant(self, text: str, name: str) -> str | None:
         import re
@@ -408,13 +424,13 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
                 before = self._constant(baseline, name)
                 self.assertIsNotNone(before, f"{name} not found in baseline")
                 expected = before
-                if name == "ANALYSIS_SYSTEM_PROMPT":
+                if name in self.AUTHORIZED_ADDITIONS:
                     # Baseline plus exactly the authorized clauses, each at its
                     # own anchor. Anything else -- a reworded clause, a second
                     # sentence, a sanctioned clause moved elsewhere, an
                     # unrelated edit -- still fails.
                     expected = before
-                    for anchor, addition in self.AUTHORIZED_PROMPT_ADDITIONS:
+                    for anchor, addition in self.AUTHORIZED_ADDITIONS[name]:
                         self.assertNotIn(
                             addition, expected,
                             "the authorized clause must not already be present",
