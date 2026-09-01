@@ -2204,12 +2204,16 @@ class AnalysisRuntime:
         report is not evidence: the prose it produces is an answer about the
         record, never part of it.
         """
+        appendix = self.transform_appendix()
         records = self._reportable_records()
         if not records:
             # Deterministic, and free: there is nothing to ground a report in,
             # and asking a model to say so would be a call spent on a fact the
-            # runtime already knows.
-            return AnalysisReport(text=NO_EVIDENCE_REPORT, model_calls=0, evidence_ids=())
+            # runtime already knows. The appendix still stands: what the
+            # artifact determines does not depend on there being findings
+            # about it.
+            text = f"{NO_EVIDENCE_REPORT}\n\n{appendix}" if appendix else NO_EVIDENCE_REPORT
+            return AnalysisReport(text=text, model_calls=0, evidence_ids=())
 
         messages = self._report_messages(question, records)
 
@@ -2218,15 +2222,37 @@ class AnalysisRuntime:
                 on_delta(text)
 
         started = time.monotonic()
-        admitted = self._admit(
-            messages,
-            max_tokens=self.effective_max_tokens,
-            tools=[],
-            # The report runs with tools off and cannot issue a next action, so
-            # withholding that reserve would only narrow the path most likely to
-            # block. Chat makes the same phase-dependent choice.
-            next_action_reserve=0,
-        )
+        # A refused report must not take the deterministic evidence down with
+        # it. Admission fails exactly when the history is most crowded, which
+        # is exactly when a run has the most to say -- and the appendix is not
+        # model output: it is a rendering of records already on disk, and it
+        # costs nothing to produce. Losing it there would mean the values the
+        # runtime computed with certainty are the ones a full context discards
+        # first.
+        try:
+            admitted = self._admit(
+                messages,
+                max_tokens=self.effective_max_tokens,
+                tools=[],
+                # The report runs with tools off and cannot issue a next
+                # action, so withholding that reserve would only narrow the
+                # path most likely to block. Chat makes the same
+                # phase-dependent choice.
+                next_action_reserve=0,
+            )
+        except ContextAdmissionError:
+            if not appendix:
+                raise
+            return AnalysisReport(
+                text=(
+                    "The report could not be composed: the collected evidence "
+                    "no longer fits the context window. The deterministic "
+                    "transformations below are unaffected.\n\n"
+                    f"{appendix}"
+                ),
+                model_calls=0,
+                evidence_ids=tuple(r.evidence_id for r in records),
+            )
         with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(
                 admitted,

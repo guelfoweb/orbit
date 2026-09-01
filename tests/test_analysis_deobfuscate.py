@@ -546,6 +546,61 @@ class ReportIntegrationTests(unittest.TestCase):
         for _stage, record in runtime.transform_stages:
             self.assertIn(record.evidence_id, appendix)
 
+    def test_the_appendix_survives_a_refused_report(self) -> None:
+        """Admission fails when the history is most crowded -- which is when a
+        run has the most to say. The appendix is not model output: it renders
+        records already on disk, so losing it there would discard exactly the
+        values the runtime computed with certainty.
+        """
+        from orbit.runtime.context_manager import ContextAdmissionError
+
+        uri = "http://synthetic.invalid/beacon?id=REFUSED"
+        runtime = self._runtime(decoder() + f'dec("{encode(uri, 31, ",")}", 31, ",");\n')
+        runtime.evidence_store.add(
+            "execute_analysis", "an action finding",
+            metadata={"tool_call_id": "c1", "user_turn_id": "t1",
+                      "produced_by_phase": "analysis_action"},
+        )
+
+        def _refuse(*_args, **_kwargs):
+            raise ContextAdmissionError("required-context-does-not-fit")
+
+        runtime._admit = _refuse
+        report = runtime.report("summarise")
+
+        self.assertEqual(report.model_calls, 0)
+        self.assertIn("## Deterministic transformations", report.text)
+        self.assertIn(uri, report.text)
+
+    def test_a_refused_report_still_raises_when_there_is_nothing_to_render(self) -> None:
+        """The guard rescues the appendix; it does not hide the failure."""
+        from orbit.runtime.context_manager import ContextAdmissionError
+
+        runtime = self._runtime("var x = 1;\n")
+        runtime.evidence_store.add(
+            "execute_analysis", "an action finding",
+            metadata={"tool_call_id": "c1", "user_turn_id": "t1",
+                      "produced_by_phase": "analysis_action"},
+        )
+
+        def _refuse(*_args, **_kwargs):
+            raise ContextAdmissionError("required-context-does-not-fit")
+
+        runtime._admit = _refuse
+        self.assertEqual(runtime.transform_stages, [])
+        with self.assertRaises(ContextAdmissionError):
+            runtime.report("summarise")
+
+    def test_the_appendix_stands_without_any_action_findings(self) -> None:
+        """What the artifact determines does not depend on findings about it."""
+        uri = "http://synthetic.invalid/only-transform"
+        runtime = self._runtime(decoder() + f'dec("{encode(uri, 13, ",")}", 13, ",");\n')
+        report = runtime.report("summarise")
+
+        self.assertEqual(report.model_calls, 0)
+        self.assertIn("## Deterministic transformations", report.text)
+        self.assertIn(uri, report.text)
+
     def test_the_appendix_is_appended_to_the_report_text(self) -> None:
         """Evidence rendering, not model prose -- so it cannot be omitted."""
         from orbit.backend.base import ChatResult
