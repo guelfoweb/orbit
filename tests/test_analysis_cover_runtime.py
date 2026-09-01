@@ -272,6 +272,48 @@ class DownstreamHeadroomTests(_Case):
             found, "expected a size admissible alone but refused with headroom"
         )
 
+    def test_every_covered_run_can_still_take_an_action(self) -> None:
+        """The guarantee the reserve exists for, swept rather than sampled.
+
+        A covered run that cannot then act is the regression this whole
+        reserve prevents: it would spend the ceiling supplying a source and
+        leave the analysis unable to investigate it.
+        """
+        from orbit.runtime.context_manager import ContextAdmissionError
+
+        covered = 0
+        for per_char in (0.1, 0.25, 0.5, 1.0):
+            for size in range(200, 12000, 800):
+                runtime = _build(b"q" * size, _Backend(per_char=per_char))
+                self.addCleanup(runtime.close)
+                coverage = runtime.plan_source_coverage()
+                if not coverage.covered:
+                    continue
+                runtime.cover_source(coverage)
+                try:
+                    runtime.step("Now investigate.")
+                except ContextAdmissionError:  # pragma: no cover - the defect
+                    self.fail(f"covered {size}B at {per_char} but cannot act")
+                covered += 1
+        self.assertGreater(covered, 0, "the sweep must actually cover something")
+
+    def test_the_reserve_is_deliberately_conservative(self) -> None:
+        """Over-reserving is the safe error, and it is chosen on purpose.
+
+        An over-reserve falls back to the ordinary path -- today's behaviour,
+        losing nothing that exists. An under-reserve produces a run holding the
+        source and unable to act on it. The comment beside the constant has to
+        keep saying so, because a future reader measuring only the coverage
+        rate would otherwise "fix" it in the dangerous direction.
+        """
+        import inspect
+
+        import orbit.runtime.analysis_runtime as module
+
+        source = inspect.getsource(module)
+        marker = source[: source.index("COVER_DOWNSTREAM_RESERVE = (")]
+        self.assertIn("not symmetric", marker)
+
     def test_a_covered_run_can_still_take_an_action(self) -> None:
         """The point of the reserve: RESOLVE must remain possible."""
         runtime = self._runtime(b"".join(b"stmt %03d;\n" % n for n in range(200)))

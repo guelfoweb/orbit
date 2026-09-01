@@ -515,9 +515,16 @@ def _evidence_first_instruction(
 # at a comfortable one, so the reserve holds for the content most likely to
 # blow through it.
 #
-# Reserved conservatively and refused rather than negotiated: an artifact that
-# fits only by shrinking this is one whose analysis cannot proceed, and
-# discovering that at the first action is worse than declining up front.
+# Deliberately the worst case on both terms at once -- a maximum-size
+# observation at the densest ratio -- and that costs real coverage: artifacts
+# are refused here that would in fact have covered and still had room to act.
+# That trade is taken knowingly, because the two errors are not symmetric. An
+# over-reserve falls back to the ordinary autonomous path, which is exactly
+# today's behaviour and loses nothing that exists. An under-reserve produces a
+# run holding the whole source and unable to act on it -- a regression, and
+# one discovered only at the first action, after the budget has been spent.
+# Coverage is an optimisation; being unable to investigate is not a tradeoff
+# an optimisation may make.
 COVER_DOWNSTREAM_RESERVE = (
     int(MAX_EVIDENCE_CHARS / 1.123)  # the observation the action returns
     + 512  # the tool schema and the assistant turn that carries the call
