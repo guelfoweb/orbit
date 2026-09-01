@@ -851,6 +851,22 @@ class SendGuardTests(_Case):
         self.assertEqual(self.backend.chat_calls, [])
         self.assertFalse(runtime.source_covered)
 
+    def test_a_refused_status_blocks_even_correct_bytes(self) -> None:
+        """Status is an independent gate, not a formality.
+
+        The digest check below would accept these exact bytes -- they ARE the
+        artifact. What must still stop them is the refusal itself: coverage the
+        planner declined has not been shown to fit, so sending it anyway would
+        put back the admission failure the refusal exists to avoid.
+        """
+        runtime = self._runtime(b"0123456789")
+        refused = SourceCoverage(
+            "0123456789", COVERAGE_TOO_LARGE, runtime.source.sha256, 10
+        )
+        self.assertEqual(runtime.cover_source(refused), 0)
+        self.assertEqual(self.backend.chat_calls, [])
+        self.assertFalse(runtime.source_covered)
+
     def test_only_the_artifacts_own_bytes_are_sent(self) -> None:
         runtime = self._runtime(b"0123456789")
         correct = SourceCoverage(
