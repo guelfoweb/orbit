@@ -1984,6 +1984,10 @@ class AnalysisRuntime:
             # artifact's own size and says "supplied complete", so text that
             # does not account for the artifact would make that claim false --
             # and the attestation is already computed, so checking it is free.
+            #
+            # `covered` is redundant with that attestation, which requires the
+            # same status; it is kept because it states the gate at the point
+            # of use rather than leaving it to be found one call away.
             return 0
         if hashlib.sha256(coverage.text.encode("utf-8")).hexdigest() != (
             self.source.sha256
