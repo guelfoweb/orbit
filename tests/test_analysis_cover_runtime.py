@@ -173,6 +173,38 @@ class EligibilityTests(_Case):
         self.assertEqual(runtime.context_compactions, 7)
 
 
+class CompactionGuardTests(_Case):
+    """Coverage must not buy room by discarding the evidence the run needs.
+
+    A message that only fits because history was compacted away is not one that
+    fits: the source would be supplied at the cost of the material the analysis
+    depends on, leaving the model with less than it had.
+    """
+
+    def test_a_coverage_admitted_only_by_compaction_is_refused(self) -> None:
+        runtime = self._runtime(b"".join(b"line %04d\n" % n for n in range(150)))
+        self.assertTrue(runtime.plan_source_coverage().covered)
+
+        class _Compacted:
+            status = "compacted"
+            admitted = True
+            messages = ()
+
+        real = runtime._admit
+
+        def admit(messages, **kwargs):
+            result = real(messages, **kwargs)
+            runtime.last_context_plan = _Compacted()
+            return result
+
+        runtime._admit = admit
+        self.assertFalse(runtime.plan_source_coverage().covered)
+
+    def test_an_unchanged_admission_is_accepted(self) -> None:
+        runtime = self._runtime(b"small body\n")
+        self.assertTrue(runtime.plan_source_coverage().covered)
+
+
 class DownstreamHeadroomTests(_Case):
     """4. A COVER call is not safe merely because that call fits.
 
