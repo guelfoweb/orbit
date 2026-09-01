@@ -438,6 +438,30 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
         ),
     }
 
+    # ANALYSIS-EVIDENCE-FIRST-1. Model-facing text that lives in a function
+    # rather than a constant, so `_constant()` cannot see it and the diff
+    # guard above would never fire on a reworded clause. Pinned by rendering
+    # with fixed placeholders: the digest covers the wording, not the ids.
+    #
+    # The sentence that matters most is the last one -- it is what allows a
+    # run to end at one model call and no actions -- and without this pin it
+    # could be deleted with the whole suite still green.
+    EVIDENCE_FIRST_DIGEST = (
+        "e65ae0bc02b73ee1a532a1268c81c8f19fb03ecbf3a305b5f7895a27508ac85a"
+    )
+
+    def test_the_evidence_first_instruction_is_pinned(self) -> None:
+        import hashlib
+
+        from orbit.runtime.analysis_runtime import _evidence_first_instruction
+
+        rendered = _evidence_first_instruction("<ANALYST>", ["<ID1>", "<ID2>"])
+        self.assertEqual(
+            hashlib.sha256(rendered.encode()).hexdigest(),
+            self.EVIDENCE_FIRST_DIGEST,
+            "_evidence_first_instruction changed; model-facing text must not drift",
+        )
+
     def test_post_baseline_constants_are_pinned(self) -> None:
         """A constant younger than the baseline still cannot drift silently."""
         import hashlib
