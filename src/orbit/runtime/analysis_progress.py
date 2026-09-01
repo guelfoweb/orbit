@@ -54,6 +54,36 @@ ERROR = "ERROR"
 COMPLETE = "COMPLETE"
 
 
+def observation_fingerprint(
+    code_sha256: str | None,
+    source_sha256: str | None,
+    workspace_digests: "dict[str, str] | None" = None,
+) -> str:
+    """Identity of one deterministic experiment, before or after it runs.
+
+    The same program, over the same input, against the same workspace, is the
+    same experiment -- so running it again cannot establish anything the
+    session does not already hold. Three hashes the runtime already has; no
+    normalisation of code or output, and nothing that inspects what any of it
+    means.
+
+    Pure and side-effect free precisely so the loop can ask the question in
+    both directions: `ProgressLedger` asks it after an action to classify what
+    happened, and the runtime asks it before an action to decide whether
+    executing it could tell anyone anything. Both must agree on what "the same
+    experiment" is, which is why there is one definition rather than two.
+    """
+    workspace = ";".join(f"{h}={d}" for h, d in sorted((workspace_digests or {}).items()))
+    components = "\x00".join([code_sha256 or "", str(source_sha256 or ""), workspace])
+    # `surrogatepass`, because a scratch filename is whatever the filesystem
+    # holds: a name with undecodable bytes reaches Python as lone surrogates,
+    # which plain UTF-8 encoding refuses. This is a hash of state, so any
+    # total, injective encoding will do -- and refusing to compute one would
+    # turn an unreadable filename into a failed analysis step, which is the
+    # recovery path this runtime already handles by design.
+    return hashlib.sha256(components.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ProgressRecord:
     """What one step contributed, judged against everything before it."""
@@ -108,6 +138,24 @@ class ProgressLedger:
             # has nothing further it wants to run, so control returns.
             return self._append(
                 ProgressRecord(index=index, classification=COMPLETE)
+            )
+
+        suppressed = getattr(step, "suppressed_duplicate_of", None)
+        if suppressed:
+            # The runtime declined to re-run an experiment already run against
+            # this exact state. Nothing failed, so this is not an ERROR -- it
+            # must not spend the consecutive-error budget on a model that is
+            # behaving reasonably. It is the clearest possible NO_PROGRESS: not
+            # "this added nothing" inferred after the fact, but "this could not
+            # have added anything", known before it ran.
+            return self._append(
+                ProgressRecord(
+                    index=index,
+                    classification=NO_PROGRESS,
+                    repeated_action=True,
+                    repeated_strategy=True,
+                    detail=f"duplicate observation suppressed: {suppressed}",
+                )
             )
 
         if not executed:
@@ -197,9 +245,7 @@ class ProgressLedger:
         source = getattr(result, "input_sha256", None)
         if not source and isinstance(metadata, dict):
             source = metadata.get("input_sha256") or metadata.get("analysis_source_sha256")
-        workspace = ";".join(f"{h}={d}" for h, d in sorted(self.artifacts.items()))
-        components = "\x00".join([code_sha or "", str(source or ""), workspace])
-        return hashlib.sha256(components.encode("utf-8")).hexdigest()
+        return observation_fingerprint(code_sha, source, self.artifacts)
 
     def _append(self, record: ProgressRecord) -> ProgressRecord:
         self.history.append(record)
@@ -255,4 +301,5 @@ __all__ = [
     "NO_PROGRESS",
     "ProgressLedger",
     "ProgressRecord",
+    "observation_fingerprint",
 ]

@@ -346,15 +346,40 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
     # context ceiling it removes. The clause is pinned verbatim here so the
     # protection still fires on any OTHER prompt change, including a later edit
     # to this same clause.
-    AUTHORIZED_PROMPT_ADDITION = (
-        '    "Earlier results may appear as an evidence reference '
-        '(`tool_evidence_ref: true`) "\n'
-        '    "instead of their full text; that is the exact output, archived, '
-        'not a summary. "\n'
-        '    "When you need those exact bytes again, name its id as '
-        '`evidence:<evidence_id>` "\n'
-        '    "and they are restored verbatim. Never infer content from a '
-        'reference alone.\\n"\n'
+    # Each authorized revision is pinned as (anchor, addition): the exact text
+    # added, and the exact line it was added after. Position is part of the
+    # pin, so relocating a sanctioned clause fails just as an unsanctioned one
+    # does. Appending to this tuple is the only way to sanction a change, and
+    # it is a reviewed, user-authorized act each time.
+    AUTHORIZED_PROMPT_ADDITIONS = (
+        # ANALYSIS-COMPACTION-1: evidence references and exact rehydration.
+        (
+            '    "Perform at most one execute_analysis action per turn, '
+            'then stop and report what it produced.\\n"\n',
+            '    "Earlier results may appear as an evidence reference '
+            '(`tool_evidence_ref: true`) "\n'
+            '    "instead of their full text; that is the exact output, archived, '
+            'not a summary. "\n'
+            '    "When you need those exact bytes again, name its id as '
+            '`evidence:<evidence_id>` "\n'
+            '    "and they are restored verbatim. Never infer content from a '
+            'reference alone.\\n"\n',
+        ),
+        # ANALYSIS-PROGRESS-1: prefer executing an identified deterministic
+        # transformation over re-reading source already collected.
+        (
+            '    "and they are restored verbatim. Never infer content from a '
+            'reference alone.\\n"\n',
+            '    "When you have identified a deterministic transformation -- a '
+            'decoder, "\n'
+            '    "decompressor or decryption whose algorithm and concrete inputs '
+            'you "\n'
+            '    "already hold -- execute it and store its output before '
+            're-reading source "\n'
+            '    "you have already collected. Reading the same bytes again '
+            'cannot resolve "\n'
+            '    "what only running the transformation can.\\n"\n',
+        ),
     )
 
     def _constant(self, text: str, name: str) -> str | None:
@@ -384,21 +409,18 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
                 self.assertIsNotNone(before, f"{name} not found in baseline")
                 expected = before
                 if name == "ANALYSIS_SYSTEM_PROMPT":
-                    # Baseline plus exactly the authorized clause, in place.
-                    # Anything else -- a reworded clause, a second sentence, an
-                    # unrelated edit elsewhere in the prompt -- still fails.
-                    self.assertNotIn(
-                        self.AUTHORIZED_PROMPT_ADDITION, before,
-                        "the authorized clause must not already be in the baseline",
-                    )
-                    anchor = (
-                        '    "Perform at most one execute_analysis action per turn, '
-                        'then stop and report what it produced.\\n"\n'
-                    )
-                    self.assertIn(anchor, before, "prompt anchor moved")
-                    expected = before.replace(
-                        anchor, anchor + self.AUTHORIZED_PROMPT_ADDITION, 1
-                    )
+                    # Baseline plus exactly the authorized clauses, each at its
+                    # own anchor. Anything else -- a reworded clause, a second
+                    # sentence, a sanctioned clause moved elsewhere, an
+                    # unrelated edit -- still fails.
+                    expected = before
+                    for anchor, addition in self.AUTHORIZED_PROMPT_ADDITIONS:
+                        self.assertNotIn(
+                            addition, expected,
+                            "the authorized clause must not already be present",
+                        )
+                        self.assertIn(anchor, expected, "prompt anchor moved")
+                        expected = expected.replace(anchor, anchor + addition, 1)
                 self.assertEqual(
                     expected,
                     self._constant(current, name),
