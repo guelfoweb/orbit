@@ -575,6 +575,15 @@ AUTONOMOUS_REPLAN_MESSAGE = (
 # at a comfortable one, so the reserve holds for the content most likely to
 # blow through it.
 #
+# 3200 is the transient peak rather than the resting size, and the difference
+# is worth naming because it is the honest lever if this ever needs loosening.
+# A SUCCESSFUL action's observation is replaced by `tool_evidence_ref` once the
+# turn completes (`_append_tool_result`), bounded by `COMPAT_INLINE_CHARS`
+# (1200) -- roughly 2.7x smaller. `MAX_EVIDENCE_CHARS` is the true bound only
+# while the turn is in flight, and for a refused action whose output is
+# inlined. The peak is reserved anyway, because admission happens exactly when
+# the turn IS in flight, which is the moment the run would die.
+#
 # Deliberately the worst case on both terms at once -- a maximum-size
 # observation at the densest ratio -- and that costs real coverage: artifacts
 # are refused here that would in fact have covered and still had room to act.
