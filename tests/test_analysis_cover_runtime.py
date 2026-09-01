@@ -213,19 +213,68 @@ class DownstreamHeadroomTests(_Case):
     handed the source and cannot proceed, which is worse than not covering.
     """
 
-    def test_the_reserve_covers_what_a_resolve_step_adds(self) -> None:
-        """The observation plus the turn that asks for it.
+    def test_the_reserve_buys_the_headroom_it_names(self) -> None:
+        """Measured against admission, not asserted against its own formula.
 
-        Not the step's generation: `output_reserve` already reserves that
-        separately, and counting it twice would refuse artifacts that fit.
+        Admission subtracts `next_action_reserve` here, and the following call
+        subtracts its own default in turn -- so reserving R buys only
+        R - DEFAULT_NEXT_ACTION_RESERVE unless the default is added back. This
+        measures the two input limits rather than restating the constant, which
+        is the only way the shortfall becomes visible.
         """
-        self.assertGreaterEqual(
-            COVER_DOWNSTREAM_RESERVE, int(MAX_EVIDENCE_CHARS / 1.123)
+        from orbit.runtime.context_manager import ContextBudget
+
+        cover = ContextBudget(
+            context_tokens=CTX, output_reserve=QUALIFIED_ANALYSIS_MAX_TOKENS,
+            next_action_reserve=COVER_DOWNSTREAM_RESERVE,
         )
-        self.assertLess(COVER_DOWNSTREAM_RESERVE, QUALIFIED_ANALYSIS_MAX_TOKENS * 2)
-        # An order of magnitude above the default next-action reserve of 256,
-        # which is what made this unsafe.
-        self.assertGreater(COVER_DOWNSTREAM_RESERVE, 256 * 10)
+        ordinary = ContextBudget(
+            context_tokens=CTX, output_reserve=QUALIFIED_ANALYSIS_MAX_TOKENS,
+        )
+        bought = ordinary.input_limit - cover.input_limit
+        self.assertGreaterEqual(bought, int(MAX_EVIDENCE_CHARS / 1.123) + 512)
+
+    def test_a_maximal_coverage_still_admits_a_full_resolve_turn(self) -> None:
+        """The end-to-end guarantee, at the worst artifact for each density.
+
+        Not a sampled size: the largest artifact coverage will accept, followed
+        by the largest observation an action may return. If the reserve is
+        short by even a little, this is where it shows.
+        """
+        from orbit.runtime.analysis_runtime import ANALYSIS_TOOL_SCHEMA
+
+        observation = "x" * MAX_EVIDENCE_CHARS
+        checked = 0
+        for per_char in (0.25, 0.5, 0.8905):  # 0.8905 = the measured 1.123 c/t
+            largest = None
+            for size in range(50, 20000, 50):
+                runtime = _build(b"q" * size, _Backend(per_char=per_char))
+                covered = runtime.plan_source_coverage().covered
+                runtime.close()
+                if not covered:
+                    break
+                largest = size
+            if largest is None:
+                continue
+            runtime = _build(b"q" * largest, _Backend(per_char=per_char))
+            self.addCleanup(runtime.close)
+            runtime.cover_source(runtime.plan_source_coverage())
+            runtime.messages.extend([
+                {"role": "user", "content": "investigate"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "t", "type": "function",
+                     "function": {"name": "execute_analysis", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "content": observation,
+                 "tool_call_id": "t", "name": "execute_analysis"},
+            ])
+            runtime._admit(
+                list(runtime.messages),
+                max_tokens=runtime.effective_max_tokens,
+                tools=[ANALYSIS_TOOL_SCHEMA],
+            )
+            checked += 1
+        self.assertGreater(checked, 0, "the sweep must cover something")
 
     def test_coverage_is_admitted_with_the_downstream_reserve(self) -> None:
         runtime = self._runtime(b"body\n")
@@ -652,6 +701,80 @@ class CoverageIsNotCompletionTests(_Case):
         for name in dir(module):
             if name.startswith("STOP_"):
                 self.assertNotIn("cover", getattr(module, name).lower())
+
+
+class TrackedSampleRuntimeTests(_Case):
+    """End-to-end on a sample that ships with the repository.
+
+    The pinned malware sample is git-ignored, so tests bound to it skip on a
+    clean checkout. These exercise the same seam on a tracked file, and this
+    one is also the live-validation candidate: 46 lines of real, analysable
+    behaviour rather than a synthetic fixture.
+    """
+
+    SAMPLE = ROOT / "workdir" / "samples" / "vulnerable_service.py"
+
+    def setUp(self) -> None:
+        if not self.SAMPLE.exists():
+            self.skipTest("tracked sample missing")
+        self.raw = self.SAMPLE.read_bytes()
+
+    def test_it_is_eligible_and_supplied_whole(self) -> None:
+        runtime = self._runtime(self.raw, backend=_Backend(per_char=0.25))
+        coverage = runtime.plan_source_coverage()
+        self.assertTrue(coverage.covered)
+        runtime.cover_source(coverage)
+        sent = "".join(
+            str(m.get("content"))
+            for m in self.backend.chat_calls[0]["messages"]
+        )
+        self.assertIn(self.raw.decode(), sent)
+
+    def test_a_covered_run_can_still_resolve(self) -> None:
+        runtime = self._runtime(self.raw, backend=_Backend(per_char=0.25))
+        runtime.cover_source(runtime.plan_source_coverage())
+        runtime.step("Now investigate.")
+        self.assertTrue(self.backend.chat_calls[-1]["tools"])
+
+    def test_covering_it_costs_no_analysis_action(self) -> None:
+        runtime = self._runtime(self.raw, backend=_Backend(per_char=0.25))
+        result = runtime.run_autonomous("Go.", max_model_calls=3, finalize=False)
+        self.assertEqual(result.cover_calls, 1)
+        self.assertEqual(result.actions_executed, 0)
+
+
+class SendGuardTests(_Case):
+    """What authorises a send: an attested coverage of THIS artifact."""
+
+    def test_unattested_text_is_never_sent(self) -> None:
+        """Status alone is not the proof; the message claims completeness."""
+        runtime = self._runtime(b"0123456789")
+        forged = SourceCoverage("abc", COVERAGE_COMPLETE, runtime.source.sha256, 10)
+        self.assertEqual(runtime.cover_source(forged), 0)
+        self.assertEqual(self.backend.chat_calls, [])
+        self.assertFalse(runtime.source_covered)
+
+    def test_coverage_of_another_artifact_is_never_sent(self) -> None:
+        runtime = self._runtime(b"abcd")
+        other = SourceCoverage("abcd", COVERAGE_COMPLETE, "f" * 64, 4)
+        self.assertEqual(runtime.cover_source(other), 0)
+        self.assertEqual(self.backend.chat_calls, [])
+
+
+class CeilingTests(_Case):
+    """5. Coverage must leave a call for the work it exists to make cheaper."""
+
+    def test_a_one_call_ceiling_is_spent_investigating_not_covering(self) -> None:
+        runtime = self._runtime(b"body\n")
+        result = runtime.run_autonomous("Go.", max_model_calls=1, finalize=False)
+        self.assertEqual(result.cover_calls, 0)
+        self.assertEqual(len(result.steps), 1)
+
+    def test_two_calls_allow_coverage_and_a_step(self) -> None:
+        runtime = self._runtime(b"body\n")
+        result = runtime.run_autonomous("Go.", max_model_calls=2, finalize=False)
+        self.assertEqual(result.cover_calls, 1)
+        self.assertEqual(len(result.steps), 1)
 
 
 class PinnedArtifactTests(_Case):

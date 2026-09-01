@@ -48,7 +48,6 @@ from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
 from orbit.runtime.analysis_coverage import (
     COVERAGE_COMPLETE,
     COVERAGE_NOT_ELIGIBLE,
-    COVERAGE_TOO_LARGE,
     COVERAGE_UNADMISSIBLE,
     SourceCoverage,
     decode_artifact,
@@ -527,7 +526,8 @@ def _evidence_first_instruction(
 # an optimisation may make.
 COVER_DOWNSTREAM_RESERVE = (
     int(MAX_EVIDENCE_CHARS / 1.123)  # the observation the action returns
-    + 512  # the tool schema and the assistant turn that carries the call
+    + 512  # the assistant turn that carries the call
+    + DEFAULT_NEXT_ACTION_RESERVE  # what the next call subtracts for itself
 )
 
 # What COVER says. It is deliberately about the transaction, not the artifact:
@@ -1972,7 +1972,14 @@ class AnalysisRuntime:
         Admission happens before the append: a refusal must not leave a turn
         behind claiming the source was supplied when it was not.
         """
-        if not coverage.covered:
+        if not coverage.covered or not coverage.attest().complete:
+            # Status alone is not the proof. The message announces the
+            # artifact's own size and says "supplied complete", so text that
+            # does not account for the artifact would make that claim false --
+            # and the attestation is already computed, so checking it is free.
+            return 0
+        if coverage.sha256 != self.source.sha256:
+            # Coverage of a different artifact than the session is pinned to.
             return 0
         rendered = _cover_message(coverage, self.source, self._cover_preamble())
         admitted = self._admit(
@@ -2120,7 +2127,10 @@ class AnalysisRuntime:
         if cover and not self.source_covered:
             try:
                 coverage = self.plan_source_coverage()
-                if coverage.covered and max_model_calls > 0:
+                # A call must remain for investigating. Spending the whole
+                # ceiling on coverage would supply the source and then stop,
+                # which is strictly worse than not covering at all.
+                if coverage.covered and max_model_calls > 1:
                     covered_calls = self.cover_source(
                         coverage, on_progress=on_progress, on_delta=on_delta
                     )

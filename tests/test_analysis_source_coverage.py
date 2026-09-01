@@ -125,12 +125,27 @@ class ChunkingIsNotSupportedTests(unittest.TestCase):
     chunking machinery to exercise, and its absence is deliberate.
     """
 
-    def test_the_module_offers_no_chunked_coverage(self) -> None:
+    def test_no_public_entry_point_accepts_a_part_count(self) -> None:
+        """Chunking would have to enter through a parameter; none exists.
+
+        Checked against the real signatures and the returned type rather than
+        against `dir()`, which could not fail for any module lacking chunking
+        and so pinned nothing.
+        """
+        import inspect
+
         import orbit.runtime.analysis_coverage as module
 
-        names = " ".join(dir(module)).lower()
-        for absent in ("chunk", "part", "split", "range", "max_chunks"):
-            self.assertNotIn(absent, names, absent)
+        for name in ("plan_coverage", "attest_coverage", "decode_artifact"):
+            parameters = inspect.signature(getattr(module, name)).parameters
+            for banned in ("chunk", "part", "max_chunks", "index", "total"):
+                self.assertNotIn(banned, parameters, f"{name}({banned})")
+        # The coverage object holds one text, not a sequence of pieces.
+        fields = module.SourceCoverage.__dataclass_fields__
+        self.assertIn("text", fields)
+        self.assertEqual(
+            [f for f in fields if "chunk" in f or "part" in f or "range" in f], []
+        )
 
     def test_coverage_is_all_or_nothing(self) -> None:
         """There is no state between covered and refused."""
@@ -302,6 +317,39 @@ class PinnedArtifactTests(unittest.TestCase):
 
     def test_no_action_is_needed_to_acquire_the_source(self) -> None:
         self.assertEqual(_cover(self.raw).text.encode("utf-8"), self.raw)
+
+
+class TrackedSampleTests(unittest.TestCase):
+    """The guarantees, on a sample that is in the repository.
+
+    The pinned malware sample is deliberately git-ignored, so every test that
+    depends on it skips on a clean checkout -- which would leave the real-file
+    behaviour unexercised for anyone but this machine. These run everywhere.
+    """
+
+    SAMPLE = ROOT / "workdir" / "samples" / "vulnerable_service.py"
+
+    def setUp(self) -> None:
+        if not self.SAMPLE.exists():
+            self.skipTest("tracked sample missing")
+        self.raw = self.SAMPLE.read_bytes()
+
+    def test_a_tracked_textual_sample_is_covered_whole(self) -> None:
+        coverage = _cover(self.raw)
+        self.assertTrue(coverage.covered)
+        self.assertEqual(coverage.text.encode("utf-8"), self.raw)
+        self.assertTrue(coverage.attest().complete)
+
+    def test_its_behaviour_survives_into_the_coverage(self) -> None:
+        """Real analysable content, not a one-line fixture."""
+        coverage = _cover(self.raw)
+        for needle in ("pickle.loads", "shell=True", "sqlite3.connect"):
+            self.assertIn(needle, coverage.text, needle)
+
+    def test_it_is_refused_when_the_budget_is_smaller_than_the_file(self) -> None:
+        coverage = _cover(self.raw, limit=len(self.raw) - 1)
+        self.assertFalse(coverage.covered)
+        self.assertEqual(coverage.status, COVERAGE_TOO_LARGE)
 
 
 class ArtifactWithoutTransformsTests(unittest.TestCase):
