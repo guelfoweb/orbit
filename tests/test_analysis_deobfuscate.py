@@ -14,10 +14,18 @@ import hashlib
 import unittest
 
 from orbit.runtime.analysis_deobfuscate import (
+    COMPLETE,
+    DEPTH_LIMIT,
+    INPUT_LIMIT,
     JSCRIPT_XOR,
     MAX_DEPTH,
+    MAX_INPUT_CHARS,
+    MAX_STAGES,
+    OUTPUT_LIMIT,
     POWERSHELL_XOR,
+    STAGE_LIMIT,
     deobfuscate,
+    deobfuscate_with_status,
     find_jscript_stages,
     find_powershell_stages,
 )
@@ -276,6 +284,300 @@ class RecursionAndBoundTests(unittest.TestCase):
         payload = encode("SAME", 6, ",")
         src = decoder() + f'dec("{payload}", 6, ",");\n' + f'dec("{payload}", 6, ",");\n'
         self.assertEqual([s.output for s in deobfuscate(src)], ["SAME"])
+
+
+class TruncationStatusTests(unittest.TestCase):
+    """A bound reached must never be reported as a finished traversal.
+
+    The stages found are still exact either way -- what changes is whether
+    they are all of them. A caller reasoning about completeness has to be able
+    to tell "nothing further exists" from "something further was not looked
+    at", and a truncation that reports itself as a fixed point makes those
+    indistinguishable.
+    """
+
+    def test_a_clean_artifact_is_complete(self) -> None:
+        source = decoder() + f'dec("{encode("OK", 5, ",")}", 5, ",");\n'
+        result = deobfuscate_with_status(source)
+
+        self.assertEqual(result.status, COMPLETE)
+        self.assertTrue(result.complete)
+        self.assertEqual([s.output for s in result.stages], ["OK"])
+
+    def test_an_artifact_with_nothing_to_decode_is_complete(self) -> None:
+        """Nothing found is a finished answer, not a truncated one."""
+        result = deobfuscate_with_status("var x = 1;\n")
+
+        self.assertEqual(result.status, COMPLETE)
+        self.assertEqual(result.stages, [])
+
+    def test_the_stage_bound_is_reported(self) -> None:
+        source = decoder() + "".join(
+            f'dec("{encode(f"D{i}", 7, ",")}", 7, ",");\n' for i in range(MAX_STAGES * 3)
+        )
+        result = deobfuscate_with_status(source)
+
+        self.assertEqual(result.status, STAGE_LIMIT)
+        self.assertFalse(result.complete)
+        self.assertEqual(len(result.stages), MAX_STAGES)
+
+    def test_the_depth_bound_is_reported(self) -> None:
+        chain = "TERMINAL"
+        for key in (11, 13, 17, 19, 23, 29):
+            chain = decoder() + f'dec("{encode(chain, key, ",")}", {key}, ",");\n'
+        result = deobfuscate_with_status(chain)
+
+        self.assertEqual(result.status, DEPTH_LIMIT)
+        self.assertFalse(result.complete)
+
+    def test_the_whole_input_bound_is_reported(self) -> None:
+        result = deobfuscate_with_status("x" * (MAX_INPUT_CHARS + 1))
+
+        self.assertEqual(result.status, INPUT_LIMIT)
+        self.assertEqual(result.stages, [])
+
+    def test_a_call_site_dropped_for_its_output_size_is_reported(self) -> None:
+        """The case that motivated this.
+
+        A recognised call site whose decoded output exceeds the per-stage cap
+        is skipped. The frontier still drains and no traversal bound trips, so
+        the loop looks finished from the outside -- but the artifact holds a
+        transformation nobody ran, and saying `complete` would call that a
+        fixed point.
+        """
+        import orbit.runtime.analysis_deobfuscate as module
+
+        source = decoder()
+        source += f'dec("{encode("SMALL", 7, ",")}", 7, ",");\n'
+        source += f'dec("{encode("Y" * 300, 7, ",")}", 7, ",");\n'
+
+        original = module.MAX_OUTPUT_CHARS
+        try:
+            module.MAX_OUTPUT_CHARS = 100
+            result = deobfuscate_with_status(source)
+        finally:
+            module.MAX_OUTPUT_CHARS = original
+
+        self.assertEqual(result.status, OUTPUT_LIMIT)
+        self.assertFalse(result.complete)
+        # The stage that did fit is still exact and still returned.
+        self.assertEqual([s.output for s in result.stages], ["SMALL"])
+
+    def test_the_same_artifact_is_complete_when_nothing_is_dropped(self) -> None:
+        """The bound, not the shape of the artifact, is what changes it."""
+        source = decoder()
+        source += f'dec("{encode("SMALL", 7, ",")}", 7, ",");\n'
+        source += f'dec("{encode("Y" * 300, 7, ",")}", 7, ",");\n'
+
+        result = deobfuscate_with_status(source)
+
+        self.assertEqual(result.status, COMPLETE)
+        self.assertEqual(len(result.stages), 2)
+
+    def test_a_powershell_call_site_dropped_for_size_is_reported(self) -> None:
+        """Both finders report, not just the one that was easiest to reach."""
+        import orbit.runtime.analysis_deobfuscate as module
+
+        tokens = ",".join(str(ord(c) ^ 34) for c in "Y" * 300)
+        script = (
+            f"$d='{tokens}';$k=34;$o='';\n"
+            "$p=$d -split ',';\n"
+            "foreach($t in $p){$o=$o+[char]($t -bxor $k);}\n"
+        )
+
+        original = module.MAX_OUTPUT_CHARS
+        try:
+            module.MAX_OUTPUT_CHARS = 100
+            result = deobfuscate_with_status(script)
+        finally:
+            module.MAX_OUTPUT_CHARS = original
+
+        self.assertEqual(result.status, OUTPUT_LIMIT)
+
+    def test_no_bound_ever_reports_complete(self) -> None:
+        """The invariant itself, across every way a traversal can stop."""
+        for status in (STAGE_LIMIT, DEPTH_LIMIT, INPUT_LIMIT, OUTPUT_LIMIT):
+            with self.subTest(status=status):
+                self.assertNotEqual(status, COMPLETE)
+
+
+class BoundBoundaryTests(unittest.TestCase):
+    """A ceiling reached is not the same as a ceiling that cost something.
+
+    The mirror of the bug this change fixes: reporting incompleteness for a
+    traversal that actually finished is as wrong as reporting completeness for
+    one that did not, and it is the easier mistake to make, because the loop
+    knows it stopped without knowing whether stopping mattered.
+    """
+
+    def test_exactly_the_stage_ceiling_with_inert_outputs_is_complete(self) -> None:
+        source = decoder() + "".join(
+            f'dec("{encode(f"D{i}", 7, ",")}", 7, ",");\n' for i in range(MAX_STAGES)
+        )
+        result = deobfuscate_with_status(source)
+
+        self.assertEqual(len(result.stages), MAX_STAGES)
+        for stage in result.stages:
+            self.assertEqual(deobfuscate_with_status(stage.output).stages, [])
+        self.assertEqual(result.status, COMPLETE)
+
+    def test_more_than_the_stage_ceiling_is_reported(self) -> None:
+        source = decoder() + "".join(
+            f'dec("{encode(f"D{i}", 7, ",")}", 7, ",");\n'
+            for i in range(MAX_STAGES * 3)
+        )
+        self.assertEqual(deobfuscate_with_status(source).status, STAGE_LIMIT)
+
+    def test_a_recorded_stage_with_an_unscanned_output_is_reported(self) -> None:
+        """The stage ceiling can stop the walk after recording a stage but
+        before scanning what it decoded to. That output is a real hole even
+        though the ceiling was reached rather than exceeded."""
+        nested = decoder() + f'dec("{encode("DEEP", 3, ",")}", 3, ",");\n'
+        source = decoder() + "".join(
+            f'dec("{encode(f"D{i}", 7, ",")}", 7, ",");\n'
+            for i in range(MAX_STAGES - 1)
+        )
+        source += f'dec("{encode(nested, 23, "<")}", 23, "<");\n'
+
+        result = deobfuscate_with_status(source)
+
+        self.assertEqual(len(result.stages), MAX_STAGES)
+        self.assertEqual(result.status, STAGE_LIMIT)
+
+    def test_a_chain_ending_exactly_at_the_depth_ceiling_is_complete(self) -> None:
+        """The last text was refused for depth and would have yielded
+        nothing, so the ceiling cost nothing."""
+        chain = "TERMINAL"
+        for key in (11, 13, 17, 19)[:MAX_DEPTH]:
+            chain = decoder() + f'dec("{encode(chain, key, ",")}", {key}, ",");\n'
+
+        self.assertEqual(deobfuscate_with_status(chain).status, COMPLETE)
+
+    def test_a_chain_deeper_than_the_ceiling_is_reported(self) -> None:
+        chain = "TERMINAL"
+        for key in (11, 13, 17, 19, 23, 29):
+            chain = decoder() + f'dec("{encode(chain, key, ",")}", {key}, ",");\n'
+
+        self.assertEqual(deobfuscate_with_status(chain).status, DEPTH_LIMIT)
+
+    def test_an_input_ceiling_drop_is_named_as_such(self) -> None:
+        """Not folded into the output ceiling: they are different refusals."""
+        import orbit.runtime.analysis_deobfuscate as module
+
+        payload = encode("A" * 40, 7, ",")
+        source = decoder() + f'dec("{payload}", 7, ",");\n'
+        original = module.MAX_INPUT_CHARS
+        try:
+            # Below the encoded literal, so this call site is refused for its
+            # input rather than for what it would produce.
+            module.MAX_INPUT_CHARS = len(payload) - 1
+            recorder = module._Truncation()
+            module.find_jscript_stages(source, 0, recorder)
+        finally:
+            module.MAX_INPUT_CHARS = original
+
+        self.assertTrue(recorder.dropped_input)
+        self.assertFalse(recorder.dropped_output)
+        self.assertEqual(recorder.status, INPUT_LIMIT)
+
+    def test_a_traversal_bound_outranks_a_size_drop(self) -> None:
+        """Both can happen; the traversal bound is the larger statement."""
+        import orbit.runtime.analysis_deobfuscate as module
+
+        source = decoder() + "".join(
+            f'dec("{encode(f"D{i}", 7, ",")}", 7, ",");\n'
+            for i in range(MAX_STAGES * 3)
+        )
+        source += f'dec("{encode("Y" * 300, 7, ",")}", 7, ",");\n'
+
+        original = module.MAX_OUTPUT_CHARS
+        try:
+            module.MAX_OUTPUT_CHARS = 100
+            result = deobfuscate_with_status(source)
+        finally:
+            module.MAX_OUTPUT_CHARS = original
+
+        self.assertEqual(result.status, STAGE_LIMIT)
+
+
+class AmbiguityIsNotTruncationTests(unittest.TestCase):
+    """Refusing a non-literal call site is the contract, not a limit.
+
+    This pass handles literals and declines everything else. Reporting a bound
+    for a declined call site would say a resource ran out when none did, and
+    would make every artifact containing one dynamic expression look truncated
+    -- which is most of them.
+    """
+
+    def _status(self, tail: str) -> str:
+        source = decoder() + f'dec("{encode("OK", 5, ",")}", 5, ",");\n' + tail
+        return deobfuscate_with_status(source).status
+
+    def test_ambiguous_call_sites_stay_complete(self) -> None:
+        for label, tail in (
+            ("malformed token", 'dec("72,NOPE,74", 0, ",");\n'),
+            ("dynamic key", 'dec("1,2,3", someKey, ",");\n'),
+            ("dynamic delimiter", 'dec("1,2,3", 5, sep);\n'),
+            ("dynamic input", "dec(buildPayload(), 5, \",\");\n"),
+            ("single token", 'dec("72", 0, ",");\n'),
+        ):
+            with self.subTest(case=label):
+                self.assertEqual(self._status(tail), COMPLETE)
+
+    def test_a_repeated_output_stays_complete(self) -> None:
+        """A cycle recovers nothing new because it has nothing new: the
+        output is already held."""
+        repeated = f'dec("{encode("OK", 5, ",")}", 5, ",");\n'
+        source = decoder() + repeated + repeated
+
+        result = deobfuscate_with_status(source)
+
+        self.assertEqual(result.status, COMPLETE)
+        self.assertEqual(len(result.stages), 1)
+
+    def test_only_a_size_ceiling_reports_truncation(self) -> None:
+        """The same artifact, complete or truncated depending only on the
+        bound -- which is what makes this a statement about limits rather
+        than about the artifact."""
+        import orbit.runtime.analysis_deobfuscate as module
+
+        source = decoder()
+        source += f'dec("{encode("SMALL", 7, ",")}", 7, ",");\n'
+        source += f'dec("{encode("Y" * 300, 7, ",")}", 7, ",");\n'
+
+        self.assertEqual(deobfuscate_with_status(source).status, COMPLETE)
+
+        original = module.MAX_OUTPUT_CHARS
+        try:
+            module.MAX_OUTPUT_CHARS = 100
+            self.assertEqual(deobfuscate_with_status(source).status, OUTPUT_LIMIT)
+        finally:
+            module.MAX_OUTPUT_CHARS = original
+
+
+class DeobfuscateCompatibilityTests(unittest.TestCase):
+    """`deobfuscate()` keeps its contract: stages, and nothing else."""
+
+    def _cases(self) -> tuple[str, ...]:
+        return (
+            "var x = 1;\n",
+            decoder() + f'dec("{encode("OK", 5, ",")}", 5, ",");\n',
+            decoder() + "".join(
+                f'dec("{encode(f"D{i}", 7, ",")}", 7, ",");\n'
+                for i in range(MAX_STAGES * 3)
+            ),
+        )
+
+    def test_it_returns_the_same_stages_as_the_status_form(self) -> None:
+        for source in self._cases():
+            with self.subTest(source=source[:40]):
+                self.assertEqual(
+                    [s.output_sha256 for s in deobfuscate(source)],
+                    [s.output_sha256 for s in deobfuscate_with_status(source).stages],
+                )
+
+    def test_it_still_returns_a_plain_list(self) -> None:
+        self.assertIsInstance(deobfuscate("var x = 1;\n"), list)
 
 
 class GenericityTests(unittest.TestCase):
