@@ -45,6 +45,7 @@ from orbit.runtime.context_manager import (
     plan_exact_context,
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
+from orbit.runtime.analysis_indicators import extract_indicators, render_indicators
 from orbit.runtime.analysis_progress import (
     COMPLETE,
     ERROR,
@@ -165,6 +166,18 @@ ANALYSIS_REPORT_INSTRUCTION = (
     "Cover, briefly and only where the evidence supports it: confirmed "
     "findings; indicators; artifacts produced; behaviour established; what "
     "remains unresolved; and the single next step most worth taking."
+    "\nName a behaviour only when the evidence shows it: repeated or "
+    "call-back contact before calling something beaconing, and a mechanism "
+    "for future or recurrent execution before calling something persistence "
+    "-- writing or copying a file is staging until something makes it run "
+    "again, unless where it is written is itself what runs it. Describe "
+    "timing and file deletion as what they do; call them "
+    "evasion or anti-forensic only where a purpose is evidenced. Prefer a "
+    "plain description to a technique label when intent is not established.\n"
+    "This analysis is offline and isolated: the next step must be one that "
+    "can be taken here, on the artifact and the evidence. Retrieving a "
+    "remote resource is not that step, though it may be named as separately "
+    "authorised follow-up."
 )
 
 NO_EVIDENCE_REPORT = "No analysis evidence has been collected yet."
@@ -769,6 +782,51 @@ def _rejected_action_text(assistant_text: str, rejection: str) -> str:
     return f"{text}\n\n{note}" if text else note
 
 
+def _decoded_views(raw: bytes) -> "list[tuple[str, str]]":
+    """Readings of the artifact an exact indicator may be found in.
+
+    Strict UTF-8 first, and only strict: decoding with `errors="replace"`
+    would put U+FFFD into a string this then calls verified, and a character
+    that is not in the artifact must never appear in an indicator -- the
+    digest beside it would attest the corruption.
+
+    When the bytes are not UTF-8 they are read as UTF-16, in both byte
+    orders, because an address embedded in a UTF-16 artifact is exact too and
+    would otherwise be silently invisible rather than merely unread. Each
+    reading is labelled, so provenance says which one produced a value.
+
+    A file that decodes cleanly under none of them yields nothing. That is
+    the honest answer: this reads text, and those bytes are not text it can
+    read.
+    """
+    if not raw:
+        return []
+    views: list[tuple[str, str]] = []
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = None
+    # UTF-16 text is valid UTF-8 whenever every character is ASCII -- each
+    # one becomes a byte plus a NUL -- so the strict decode succeeds and
+    # yields `h\x00t\x00t\x00p`, in which no URI can be found. An embedded
+    # NUL is what distinguishes that from real UTF-8 text.
+    if decoded is not None and "\x00" not in decoded:
+        views.append(("artifact", decoded))
+    else:
+        for label, encoding in (("artifact utf-16le", "utf-16-le"),
+                                ("artifact utf-16be", "utf-16-be")):
+            try:
+                decoded = raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+            # A UTF-16 reading of ordinary 8-bit text succeeds but produces
+            # CJK noise; requiring the reading to contain a scheme separator
+            # keeps a spurious view from being searched at all.
+            if "://" in decoded:
+                views.append((label, decoded))
+    return views
+
+
 def _is_locally_repairable(step: "AnalysisStepResult") -> bool:
     """Whether one step failed in a way its own author could plausibly fix.
 
@@ -960,6 +1018,51 @@ class AnalysisRuntime:
             self.messages.append(
                 {"role": "user", "content": _transform_preamble(self.transform_stages)}
             )
+
+    def deterministic_sections(self) -> str:
+        """Everything the runtime renders exactly, in reading order.
+
+        Indicators first: they are the shortest, the most often acted on, and
+        the most costly to get wrong. The transformation appendix follows,
+        showing the work the indicators may have come from.
+        """
+        return "\n\n".join(
+            section
+            for section in (self.verified_indicators(), self.transform_appendix())
+            if section
+        )
+
+    def verified_indicators(self) -> str:
+        """Exact indicators the runtime can read, rendered for the report.
+
+        Sourced from the artifact snapshot and from every deterministic stage,
+        because an address may be written plainly or may only appear once a
+        transformation has run, and both are equally exact once they exist.
+
+        This is the same argument as the transform appendix: a value the
+        runtime can read to the character should not depend on a model
+        retyping it from an evidence card several steps back. A hostname
+        differing by one letter is not a weaker finding -- it is a different
+        finding, and it sends an analyst somewhere else.
+
+        Nothing is fetched and nothing is labelled. What an address is for is
+        the analysis's conclusion, not this method's.
+        """
+        sources: list[tuple[str, str, str]] = []
+        # The artifact snapshot first, so a plainly written address keeps the
+        # plainest provenance: the session's own pinned copy, named by its
+        # digest. Read from the snapshot rather than from an evidence record
+        # because the artifact is not stored as evidence -- the snapshot IS
+        # the durable, hash-identified copy the whole session is bound to.
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            raw = b""
+        for label, text in _decoded_views(raw):
+            sources.append((label, f"sha256:{self.source.sha256}", text))
+        for stage, record in self.transform_stages:
+            sources.append((stage.kind, record.evidence_id, stage.output))
+        return render_indicators(extract_indicators(sources))
 
     def transform_appendix(self) -> str:
         """Exact rendering of the deterministic stages. No model involved.
@@ -2204,7 +2307,7 @@ class AnalysisRuntime:
         report is not evidence: the prose it produces is an answer about the
         record, never part of it.
         """
-        appendix = self.transform_appendix()
+        appendix = self.deterministic_sections()
         records = self._reportable_records()
         if not records:
             # Deterministic, and free: there is nothing to ground a report in,

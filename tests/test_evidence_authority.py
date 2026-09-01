@@ -388,6 +388,30 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
     # This is the instruction it reads before every autonomous step, so it is
     # where a priority between two legitimate next steps has to be stated. It
     # names no technique, and the generic-language test still enforces that.
+    # ANALYSIS-IOC-1. A live report on a PowerShell downloader called a
+    # single fetch "beaconing", called a written-and-run staging file
+    # "persistence", read dead time arithmetic as evasion, and proposed
+    # retrieving the remote payload as the next step of an offline analysis.
+    # None of those were in the evidence. The clause states when a label is
+    # earned and what "next step" means in an isolated session; it names no
+    # artifact and no technique, and the generic-language test still applies.
+    "ANALYSIS_REPORT_INSTRUCTION": (
+        (
+            '    "remains unresolved; and the single next step most worth taking."\n',
+            '    "\\nName a behaviour only when the evidence shows it: repeated or "\n'
+            '    "call-back contact before calling something beaconing, and a mechanism "\n'
+            '    "for future or recurrent execution before calling something persistence "\n'
+            '    "-- writing or copying a file is staging until something makes it run "\n'
+            '    "again, unless where it is written is itself what runs it. Describe "\n'
+            '    "timing and file deletion as what they do; call them "\n'
+            '    "evasion or anti-forensic only where a purpose is evidenced. Prefer a "\n'
+            '    "plain description to a technique label when intent is not established.\\n"\n'
+            '    "This analysis is offline and isolated: the next step must be one that "\n'
+            '    "can be taken here, on the artifact and the evidence. Retrieving a "\n'
+            '    "remote resource is not that step, though it may be named as separately "\n'
+            '    "authorised follow-up."\n',
+        ),
+    ),
     "AUTONOMOUS_CONTINUATION_MESSAGE": (
         (
             '    "findings."\n',

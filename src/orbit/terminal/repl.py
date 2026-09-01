@@ -520,7 +520,7 @@ class Repl:
                 # computes it, attests it, and never tells anyone. Sanitized
                 # for the same reason as the branch above: this print does not
                 # pass the renderer, and the content is decoded artifact bytes.
-                appendix = self.analysis.transform_appendix()
+                appendix = self.analysis.deterministic_sections()
                 if appendix:
                     print("\n")
                     print(
@@ -1005,7 +1005,7 @@ class Repl:
             # anything. Printing `report.text` here instead would repeat the
             # prose the analyst has already watched arrive, so only the part
             # that was never shown is printed.
-            appendix = self.analysis.transform_appendix()
+            appendix = self.analysis.deterministic_sections()
             if appendix:
                 # Two breaks, not one: streamed deltas leave the cursor
                 # mid-line, so a single newline only closes it and the heading
