@@ -126,7 +126,9 @@ class EvidenceStore:
             return None
         if record.raw_ref != f"{RAW_REF_PREFIX}{evidence_id}":
             return None
-        if expected_reference is not None and expected_reference != tool_evidence_ref(record):
+        if expected_reference is not None and not _reference_matches(
+            expected_reference, record
+        ):
             return None
         if not record.tool_call_id or not record.user_turn_id or not record.produced_by_phase:
             return None
@@ -390,6 +392,43 @@ def rehydrated_evidence_block(
     return "\n".join(parts)
 
 
+def _withheld_notice_lines(record: EvidenceRecord) -> tuple[str, ...]:
+    """The two lines naming an omission, so renderer and matcher share them."""
+    return (
+        "content_withheld: true",
+        f"exact_content_ref: {record.raw_ref} "
+        f"({record.raw_chars} chars archived, not lost)",
+    )
+
+
+def _reference_matches(expected: str, record: EvidenceRecord) -> bool:
+    """Whether `expected` is this record's canonical reference, now or before.
+
+    The current rendering is the only one produced from here on. The prior one
+    is still accepted because a persisted reference is never rewritten: CHAT
+    saves tool messages to a session file and reloads them verbatim, so a
+    session written before the withheld-notice existed comes back carrying the
+    older string. Rejecting it would not fail loudly -- the caller treats a
+    failed re-attestation as `continue` -- it would quietly make that turn
+    permanently non-compactable, and the context it pins is exactly the large
+    output the notice is about.
+
+    This is a tolerance, not a relaxation. Both accepted forms are generated
+    here from the same record, so neither can be supplied by a caller that did
+    not already hold the true identity: every other check in `reattest_exact`
+    (raw_ref, provenance, O_NOFOLLOW open, dev/ino/size stability, digest,
+    char and line count) is untouched and still has to pass.
+    """
+    current = tool_evidence_ref(record)
+    if expected == current:
+        return True
+    notice = _withheld_notice_lines(record)
+    if not current.endswith("\n".join(notice)):
+        return False
+    # The pre-notice rendering is exactly the current one without those lines.
+    return expected == current[: -(len("\n".join(notice)) + 1)]
+
+
 def tool_evidence_ref(record: EvidenceRecord) -> str:
     lines = [
         "tool_evidence_ref: true",
@@ -405,6 +444,34 @@ def tool_evidence_ref(record: EvidenceRecord) -> str:
     if compat:
         lines.append("compat_excerpt:")
         lines.append(compat)
+    elif record.raw_chars > COMPAT_INLINE_CHARS:
+        # Above COMPAT_INLINE_CHARS there is no excerpt at all -- no head, no
+        # tail, and until now nothing saying so. `size:` was the only hint, so
+        # a reader had to infer from a number that bytes it never saw exist.
+        #
+        # That silence is worst exactly where it costs most. An action printing
+        # a large encoded blob -- the step that precedes transforming it --
+        # comes back empty, while a small summarising step comes back whole.
+        # Nothing said the bytes were one request away, so the cheapest
+        # apparent next move was to observe something smaller instead.
+        #
+        # This states the omission and names the retrieval that already works.
+        # It carries no content: the inline bound, the archive and the
+        # rendering of everything else are untouched, and because it is part
+        # of the canonical reference both runtimes stay identical.
+        #
+        # It does change what a re-attested reference looks like, though, and
+        # a reference already written to a session file is never rewritten --
+        # so `_reference_matches` accepts the pre-notice rendering too. Without
+        # that, resuming an older CHAT session would silently pin its largest
+        # turn in context forever.
+        #
+        # Gated on the size rather than written as a bare `else`, because
+        # `_compat_excerpt` also returns "" for a result that genuinely has no
+        # text -- an action that printed nothing, or whose excerpt metadata is
+        # absent. Claiming withheld bytes there would assert evidence that does
+        # not exist, which is the one thing this reference must never do.
+        lines.extend(_withheld_notice_lines(record))
     return "\n".join(lines)
 
 
