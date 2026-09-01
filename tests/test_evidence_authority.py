@@ -398,6 +398,37 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
     ),
     }
 
+    # Model-facing constants introduced AFTER the baseline revision, which the
+    # diff above cannot protect: there is nothing to compare them against. They
+    # are pinned by digest instead, so the protection is the same in substance
+    # -- the text cannot drift without a reviewed, user-authorized edit here.
+    #
+    # ANALYSIS-REPAIR-1: sent once after an execution that ran and raised. The
+    # live run proved the model attempts the transformation, receives its own
+    # source and a full traceback, and then abandons the attempt to resume
+    # reading source. This is the one instruction that declines to change the
+    # subject for a single call. It names no error class and no correction.
+    POST_BASELINE_DIGESTS = {
+        "AUTONOMOUS_REPAIR_MESSAGE": (
+            "5358c64e548cf4ad2c22fc8ca2ffa252ee490ae21e33de616dc8be00a46b5c81"
+        ),
+    }
+
+    def test_post_baseline_constants_are_pinned(self) -> None:
+        """A constant younger than the baseline still cannot drift silently."""
+        import hashlib
+
+        from orbit.runtime import analysis_runtime
+
+        for name, digest in self.POST_BASELINE_DIGESTS.items():
+            with self.subTest(constant=name):
+                value = getattr(analysis_runtime, name)
+                self.assertEqual(
+                    hashlib.sha256(value.encode()).hexdigest(),
+                    digest,
+                    f"{name} changed; model-facing text must not drift",
+                )
+
     def _constant(self, text: str, name: str) -> str | None:
         import re
 
