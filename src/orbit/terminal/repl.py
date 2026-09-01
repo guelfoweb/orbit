@@ -488,6 +488,22 @@ class Repl:
                     ),
                     flush=True,
                 )
+            elif run.final_report is not None:
+                # The prose streamed, so `final_report.text` would repeat it --
+                # but the deterministic appendix is attached after the stream
+                # finishes and so has never been shown. Same omission the
+                # `/report` path had, on the path that produces the most
+                # evidence: without this, a run that decodes an address
+                # computes it, attests it, and never tells anyone. Sanitized
+                # for the same reason as the branch above: this print does not
+                # pass the renderer, and the content is decoded artifact bytes.
+                appendix = self.analysis.transform_appendix()
+                if appendix:
+                    print("\n")
+                    print(
+                        sanitize_terminal_text(appendix, allow_newlines=True),
+                        flush=True,
+                    )
             replans = f" | replans: {run.replans}" if run.replans else ""
             summary = (
                 f"analysis | mode: ANALYSIS | model calls: {run.model_calls} | "
@@ -921,11 +937,28 @@ class Repl:
             return
         renderer.finish()
         if report.model_calls == 0:
-            # Today this branch can only carry NO_EVIDENCE_REPORT, a constant.
-            # It is sanitized anyway because it is a print that never passed
-            # the renderer's boundary: if the branch ever comes to carry model
-            # prose, it is already safe rather than newly vulnerable.
+            # Nothing was streamed, so this branch carries the whole report --
+            # NO_EVIDENCE_REPORT, a refusal notice, or either of those with the
+            # deterministic appendix already attached by `report()`. Sanitized
+            # because it is a print that never passed the renderer's boundary.
             print(sanitize_terminal_text(report.text, allow_newlines=True), flush=True)
+        else:
+            # The model's prose reached the terminal through `on_delta` as it
+            # was generated. The appendix did not: `report()` attaches it to
+            # `report.text` after the stream has finished, so printing only
+            # what was streamed drops it silently -- and it is the half of the
+            # report that does not depend on the model having mentioned
+            # anything. Printing `report.text` here instead would repeat the
+            # prose the analyst has already watched arrive, so only the part
+            # that was never shown is printed.
+            appendix = self.analysis.transform_appendix()
+            if appendix:
+                # Two breaks, not one: streamed deltas leave the cursor
+                # mid-line, so a single newline only closes it and the heading
+                # would butt against the prose. `report.text` joins the two
+                # halves with a blank line, and the terminal should match.
+                print("\n")
+                print(sanitize_terminal_text(appendix, allow_newlines=True), flush=True)
         elapsed = time.monotonic() - started
         summary = (
             f"report | mode: ANALYSIS | model calls: {report.model_calls} | "
