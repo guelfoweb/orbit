@@ -496,39 +496,6 @@ def _evidence_first_instruction(
     )
 
 
-# What the RESOLVE step ADDS to the history, in tokens, and why coverage must
-# reserve it rather than only fitting itself.
-#
-# The source stays resident: ANALYSIS history is append-only, so every call
-# after COVER inherits the whole artifact. A COVER call that merely fits is
-# therefore not safe -- it can leave an analysis holding the source and unable
-# to act on it. What has to still fit afterwards is what one RESOLVE step
-# *adds*: the tool schema, the assistant turn carrying the call, and the
-# observation that comes back. Its generation is already reserved separately
-# by `output_reserve`, so counting it here as well would reserve the same
-# tokens twice and refuse artifacts that fit comfortably.
-#
-# The observation is the large term, and it is bounded in characters
-# (`MAX_EVIDENCE_CHARS`) rather than tokens; converted at the densest ratio
-# this repo has measured (1.123 chars/token on obfuscated content) rather than
-# at a comfortable one, so the reserve holds for the content most likely to
-# blow through it.
-#
-# Deliberately the worst case on both terms at once -- a maximum-size
-# observation at the densest ratio -- and that costs real coverage: artifacts
-# are refused here that would in fact have covered and still had room to act.
-# That trade is taken knowingly, because the two errors are not symmetric. An
-# over-reserve falls back to the ordinary autonomous path, which is exactly
-# today's behaviour and loses nothing that exists. An under-reserve produces a
-# run holding the whole source and unable to act on it -- a regression, and
-# one discovered only at the first action, after the budget has been spent.
-# Coverage is an optimisation; being unable to investigate is not a tradeoff
-# an optimisation may make.
-COVER_DOWNSTREAM_RESERVE = (
-    int(MAX_EVIDENCE_CHARS / 1.123)  # the observation the action returns
-    + 512  # the assistant turn that carries the call
-    + DEFAULT_NEXT_ACTION_RESERVE  # what the next call subtracts for itself
-)
 
 # What COVER says. It is deliberately about the transaction, not the artifact:
 # it names no language, no file type, no technique and no finding, because the
@@ -588,6 +555,46 @@ AUTONOMOUS_REPLAN_MESSAGE = (
     "The previous action produced no new evidence. Choose a different "
     "deterministic strategy using the current evidence and artifacts. Do not "
     "repeat an exhausted action, input or established finding."
+)
+
+# What the RESOLVE step ADDS to the history, in tokens, and why coverage must
+# reserve it rather than only fitting itself.
+#
+# The source stays resident: ANALYSIS history is append-only, so every call
+# after COVER inherits the whole artifact. A COVER call that merely fits is
+# therefore not safe -- it can leave an analysis holding the source and unable
+# to act on it. What has to still fit afterwards is what one RESOLVE step
+# *adds*: the tool schema, the assistant turn carrying the call, and the
+# observation that comes back. Its generation is already reserved separately
+# by `output_reserve`, so counting it here as well would reserve the same
+# tokens twice and refuse artifacts that fit comfortably.
+#
+# The observation is the large term, and it is bounded in characters
+# (`MAX_EVIDENCE_CHARS`) rather than tokens; converted at the densest ratio
+# this repo has measured (1.123 chars/token on obfuscated content) rather than
+# at a comfortable one, so the reserve holds for the content most likely to
+# blow through it.
+#
+# Deliberately the worst case on both terms at once -- a maximum-size
+# observation at the densest ratio -- and that costs real coverage: artifacts
+# are refused here that would in fact have covered and still had room to act.
+# That trade is taken knowingly, because the two errors are not symmetric. An
+# over-reserve falls back to the ordinary autonomous path, which is exactly
+# today's behaviour and loses nothing that exists. An under-reserve produces a
+# run holding the whole source and unable to act on it -- a regression, and
+# one discovered only at the first action, after the budget has been spent.
+# Coverage is an optimisation; being unable to investigate is not a tradeoff
+# an optimisation may make.
+COVER_DOWNSTREAM_RESERVE = (
+    int(MAX_EVIDENCE_CHARS / 1.123)  # the observation, at its transient peak
+    + 512  # the assistant turn that carries the call
+    # The turn that ASKS for the action. `step()` appends an analyst message
+    # before every call, and in an autonomous run that is the standing
+    # continuation line -- so the step this reserve exists for cannot happen
+    # without it. Measured from the message itself rather than guessed, at the
+    # same dense ratio, so it tracks the text if the text is ever reworded.
+    + int(len(AUTONOMOUS_CONTINUATION_MESSAGE) / 1.123)
+    + DEFAULT_NEXT_ACTION_RESERVE  # what the next call subtracts for itself
 )
 
 # Sent once after an execution that ran and raised.
@@ -1978,8 +1985,15 @@ class AnalysisRuntime:
             # does not account for the artifact would make that claim false --
             # and the attestation is already computed, so checking it is free.
             return 0
-        if coverage.sha256 != self.source.sha256:
-            # Coverage of a different artifact than the session is pinned to.
+        if hashlib.sha256(coverage.text.encode("utf-8")).hexdigest() != (
+            self.source.sha256
+        ):
+            # The bytes must BE the artifact, not merely be the right length of
+            # it. The attestation above compares sizes, so text of the correct
+            # length but different content would pass it and then be sent under
+            # a digest that does not describe it. Hashing what is about to be
+            # sent is the only check that cannot be satisfied by coincidence,
+            # and it subsumes the "coverage of a different artifact" case.
             return 0
         rendered = _cover_message(coverage, self.source, self._cover_preamble())
         admitted = self._admit(

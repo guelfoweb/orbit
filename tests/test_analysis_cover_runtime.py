@@ -214,14 +214,18 @@ class DownstreamHeadroomTests(_Case):
     """
 
     def test_the_reserve_buys_the_headroom_it_names(self) -> None:
-        """Measured against admission, not asserted against its own formula.
+        """Measured against admission, and against the FULL downstream need.
 
         Admission subtracts `next_action_reserve` here, and the following call
         subtracts its own default in turn -- so reserving R buys only
-        R - DEFAULT_NEXT_ACTION_RESERVE unless the default is added back. This
-        measures the two input limits rather than restating the constant, which
-        is the only way the shortfall becomes visible.
+        R - DEFAULT_NEXT_ACTION_RESERVE unless the default is added back.
+
+        The need counted is everything a RESOLVE step puts in the history: the
+        observation, the assistant turn carrying the call, and the analyst
+        message that asks for it. Leaving that last term out is what made an
+        earlier version of this assertion true by construction and blind.
         """
+        from orbit.runtime.analysis_runtime import AUTONOMOUS_CONTINUATION_MESSAGE
         from orbit.runtime.context_manager import ContextBudget
 
         cover = ContextBudget(
@@ -232,48 +236,60 @@ class DownstreamHeadroomTests(_Case):
             context_tokens=CTX, output_reserve=QUALIFIED_ANALYSIS_MAX_TOKENS,
         )
         bought = ordinary.input_limit - cover.input_limit
-        self.assertGreaterEqual(bought, int(MAX_EVIDENCE_CHARS / 1.123) + 512)
+        need = (
+            int(MAX_EVIDENCE_CHARS / 1.123)
+            + 512
+            + int(len(AUTONOMOUS_CONTINUATION_MESSAGE) / 1.123)
+        )
+        self.assertGreaterEqual(bought, need)
 
     def test_a_maximal_coverage_still_admits_a_full_resolve_turn(self) -> None:
         """The end-to-end guarantee, at the worst artifact for each density.
 
-        Not a sampled size: the largest artifact coverage will accept, followed
-        by the largest observation an action may return. If the reserve is
-        short by even a little, this is where it shows.
+        Not a sampled size: for each density, EVERY artifact coverage accepts,
+        followed by the complete turn a RESOLVE step actually produces -- the
+        analyst message that asks for it, the assistant turn carrying the call,
+        the largest observation an action may return, AND the continuation
+        message the next step will append. An earlier version of this test
+        omitted that last message and passed while the run was in fact
+        stranded, which is exactly how the missing reserve term survived.
         """
-        from orbit.runtime.analysis_runtime import ANALYSIS_TOOL_SCHEMA
+        from orbit.runtime.analysis_runtime import (
+            ANALYSIS_TOOL_SCHEMA, AUTONOMOUS_CONTINUATION_MESSAGE,
+        )
 
         observation = "x" * MAX_EVIDENCE_CHARS
         checked = 0
-        for per_char in (0.25, 0.5, 0.8905):  # 0.8905 = the measured 1.123 c/t
-            largest = None
-            for size in range(50, 20000, 50):
+        for per_char in (0.25, 0.5, 0.8, 0.85, 0.87, 0.8905, 0.95, 1.0):
+            for size in range(1, 4000, 37):
                 runtime = _build(b"q" * size, _Backend(per_char=per_char))
-                covered = runtime.plan_source_coverage().covered
-                runtime.close()
-                if not covered:
-                    break
-                largest = size
-            if largest is None:
-                continue
-            runtime = _build(b"q" * largest, _Backend(per_char=per_char))
-            self.addCleanup(runtime.close)
-            runtime.cover_source(runtime.plan_source_coverage())
-            runtime.messages.extend([
-                {"role": "user", "content": "investigate"},
-                {"role": "assistant", "content": "", "tool_calls": [
-                    {"id": "t", "type": "function",
-                     "function": {"name": "execute_analysis", "arguments": "{}"}}
-                ]},
-                {"role": "tool", "content": observation,
-                 "tool_call_id": "t", "name": "execute_analysis"},
-            ])
-            runtime._admit(
-                list(runtime.messages),
-                max_tokens=runtime.effective_max_tokens,
-                tools=[ANALYSIS_TOOL_SCHEMA],
-            )
-            checked += 1
+                self.addCleanup(runtime.close)
+                coverage = runtime.plan_source_coverage()
+                if not coverage.covered:
+                    continue
+                runtime.cover_source(coverage)
+                runtime.messages.extend([
+                    {"role": "user", "content": "investigate"},
+                    {"role": "assistant", "content": "", "tool_calls": [
+                        {"id": "t", "type": "function",
+                         "function": {"name": "execute_analysis",
+                                      "arguments": "{}"}}
+                    ]},
+                    {"role": "tool", "content": observation,
+                     "tool_call_id": "t", "name": "execute_analysis"},
+                    {"role": "user", "content": AUTONOMOUS_CONTINUATION_MESSAGE},
+                ])
+                try:
+                    runtime._admit(
+                        list(runtime.messages),
+                        max_tokens=runtime.effective_max_tokens,
+                        tools=[ANALYSIS_TOOL_SCHEMA],
+                    )
+                except ContextAdmissionError as exc:  # pragma: no cover
+                    self.fail(
+                        f"covered {size}B at {per_char} then stranded: {exc}"
+                    )
+                checked += 1
         self.assertGreater(checked, 0, "the sweep must cover something")
 
     def test_coverage_is_admitted_with_the_downstream_reserve(self) -> None:
@@ -743,6 +759,69 @@ class TrackedSampleRuntimeTests(_Case):
         self.assertEqual(result.actions_executed, 0)
 
 
+class PreambleTests(_Case):
+    """Deterministic evidence accompanies coverage, on a built fixture.
+
+    The transform-preflight path was otherwise exercised only through the
+    git-ignored malware sample, so it went unrun on a clean checkout. This
+    fixture is synthesised here rather than committed: it decodes to a benign
+    string, and it exists to exercise the seam, not to represent any artifact.
+    """
+
+    # A decoder shaped the way the deterministic pass recognises -- three
+    # parameters, literal arguments, an integer key. Nothing about it is
+    # specific to any real sample; the decoded value is "hello world".
+    FIXTURE = (
+        b"function decodeParts(data, k, sep) {\n"
+        b"  return data.split(sep).map(function (n) {\n"
+        b"    return String.fromCharCode(n ^ k);\n"
+        b"  }).join(\"\");\n"
+        b"}\n"
+        b'var text = decodeParts("111|98|107|107|104|39|112|104|117|107|99", 7, "|");\n'
+    )
+
+    def test_the_fixture_produces_deterministic_evidence(self) -> None:
+        runtime = self._runtime(self.FIXTURE)
+        self.assertEqual(len(runtime.transform_stages), 1)
+        stage, _record = runtime.transform_stages[0]
+        self.assertEqual(stage.output, "hello world")
+
+    def test_coverage_carries_the_evidence_preamble(self) -> None:
+        runtime = self._runtime(self.FIXTURE)
+        self.assertTrue(runtime._cover_preamble())
+        runtime.cover_source(runtime.plan_source_coverage())
+        sent = [str(m.get("content")) for m in self.backend.chat_calls[0]["messages"]]
+        # The COVER turn names the evidence; admission then rehydrates it into
+        # a system block carrying the exact archived bytes. Both halves have to
+        # be present, and the second is what makes the reference useful.
+        fence = f"orbit-artifact-{runtime.source.sha256}"
+        cover_turn = next(t for t in sent if fence in t)
+        self.assertIn("evidence:", cover_turn)
+        self.assertIn(self.FIXTURE.decode(), cover_turn)
+        self.assertTrue(
+            any("deterministic_evidence_rehydration" in t for t in sent),
+            "the named evidence must be restored verbatim",
+        )
+        self.assertTrue(any("hello world" in t for t in sent))
+
+    def test_the_preamble_is_measured_during_planning(self) -> None:
+        """Eligibility must account for what the message actually carries."""
+        runtime = self._runtime(self.FIXTURE)
+        rendered = _cover_message(
+            runtime.plan_source_coverage(), runtime.source, runtime._cover_preamble()
+        )
+        self.assertIn("evidence:", rendered)
+
+    def test_an_artifact_without_transforms_has_no_preamble(self) -> None:
+        """Scoped to the COVER turn: the system prompt names `evidence:` too."""
+        runtime = self._runtime(b"var a = 1;\n")
+        self.assertEqual(runtime._cover_preamble(), "")
+        runtime.cover_source(runtime.plan_source_coverage())
+        cover_turn = str(self.backend.chat_calls[0]["messages"][-1]["content"])
+        self.assertIn(runtime.source.sha256, cover_turn)
+        self.assertNotIn("evidence:", cover_turn)
+
+
 class SendGuardTests(_Case):
     """What authorises a send: an attested coverage of THIS artifact."""
 
@@ -755,10 +834,31 @@ class SendGuardTests(_Case):
         self.assertFalse(runtime.source_covered)
 
     def test_coverage_of_another_artifact_is_never_sent(self) -> None:
-        runtime = self._runtime(b"abcd")
-        other = SourceCoverage("abcd", COVERAGE_COMPLETE, "f" * 64, 4)
-        self.assertEqual(runtime.cover_source(other), 0)
+        """Different bytes of the same length pass a size check, not a digest.
+
+        This is the case a length-only attestation cannot catch: the coverage
+        accounts for exactly as many bytes as the artifact has, so the sizes
+        agree, while the text is not the artifact at all -- and the message
+        would announce it under the artifact's own sha256.
+        """
+        runtime = self._runtime(b"0123456789")
+        substituted = SourceCoverage(
+            "abcdefghij", COVERAGE_COMPLETE, runtime.source.sha256, 10
+        )
+        # It passes the size attestation, which is why the digest check exists.
+        self.assertTrue(substituted.attest().complete)
+        self.assertEqual(runtime.cover_source(substituted), 0)
         self.assertEqual(self.backend.chat_calls, [])
+        self.assertFalse(runtime.source_covered)
+
+    def test_only_the_artifacts_own_bytes_are_sent(self) -> None:
+        runtime = self._runtime(b"0123456789")
+        correct = SourceCoverage(
+            "0123456789", COVERAGE_COMPLETE, runtime.source.sha256, 10
+        )
+        self.assertEqual(runtime.cover_source(correct), 1)
+        sent = str(self.backend.chat_calls[0]["messages"][-1]["content"])
+        self.assertIn("0123456789", sent)
 
 
 class CeilingTests(_Case):
