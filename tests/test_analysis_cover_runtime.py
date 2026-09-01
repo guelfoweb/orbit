@@ -109,8 +109,8 @@ class CoverPlanningTests(_Case):
         self.assertTrue(plan.covered)
         self.assertEqual(len(plan.chunks), 1)
 
-    def test_multi_chunk_plan_reconstructs_the_artifact(self) -> None:
-        """When several parts do fit, they cover the artifact exactly."""
+    def test_a_covered_plan_reconstructs_the_artifact(self) -> None:
+        """Whatever the part count, the plan reproduces the artifact exactly."""
         runtime = self._runtime(b"".join(b"line %04d\n" % n for n in range(400)),
                                 backend=_Backend(per_char=0.25))
         plan = runtime.plan_source_coverage()
@@ -156,7 +156,26 @@ class CoverPlanningTests(_Case):
 
 
 class CoverExecutionTests(_Case):
-    def test_cover_sends_every_chunk_with_no_tools(self) -> None:
+    def test_multi_chunk_is_unreachable_through_the_real_seam(self) -> None:
+        """Every real plan is one part or a refusal -- never two.
+
+        Append-only history is why: the last part is admitted against every
+        part before it, so if the whole artifact does not fit as one message it
+        does not fit as several. `MAX_COVER_CALLS` therefore only ever
+        distinguishes "no coverage" from "coverage"; it is kept because it is
+        the honest bound on what coverage may spend, not because the values
+        between 1 and 4 are reachable today.
+        """
+        counts = set()
+        for per_char in (0.05, 0.1, 0.25, 0.5, 1.0):
+            for lines in (50, 200, 800, 3200):
+                raw = b"".join(b"line %04d\n" % n for n in range(lines))
+                runtime = _runtime(pathlib.Path("."), raw, _Backend(per_char=per_char))
+                self.addCleanup(runtime.close)
+                counts.add(len(runtime.plan_source_coverage().chunks))
+        self.assertTrue(counts <= {0, 1}, f"unexpected part counts: {counts}")
+
+    def test_cover_sends_every_part_with_no_tools(self) -> None:
         runtime = self._runtime(b"".join(b"row %03d\n" % n for n in range(600)))
         plan = runtime.plan_source_coverage()
         calls = runtime.cover_source(plan)
@@ -221,7 +240,8 @@ class CoverExecutionTests(_Case):
             m["content"]
             for call in self.backend.chat_calls
             for m in call["messages"]
-            if m.get("role") == "user" and "ARTIFACT SOURCE" in str(m.get("content"))
+            if m.get("role") == "user"
+            and runtime.source.sha256 in str(m.get("content"))
         )
         for chunk in plan.chunks:
             self.assertIn(chunk.text, sent)
@@ -344,7 +364,7 @@ class UntrustedContentTests(_Case):
             message
             for call in self.backend.chat_calls
             for message in call["messages"]
-            if "ARTIFACT SOURCE" in str(message.get("content"))
+            if f"orbit-artifact-{runtime.source.sha256}" in str(message.get("content"))
         ]
         self.assertTrue(carrying)
         self.assertEqual({m["role"] for m in carrying}, {"user"})
@@ -356,7 +376,7 @@ class UntrustedContentTests(_Case):
             str(m["content"])
             for call in self.backend.chat_calls
             for m in call["messages"]
-            if "ARTIFACT SOURCE" in str(m.get("content"))
+            if f"orbit-artifact-{runtime.source.sha256}" in str(m.get("content"))
         )
         # Verbatim: coverage must not sanitise the artifact, or the bytes the
         # model reasons about would not be the artifact's bytes.
@@ -667,24 +687,32 @@ class CompactionTests(_Case):
         self.assertEqual(again.cover_calls, 0)
 
     def test_admission_failure_during_cover_leaves_the_run_usable(self) -> None:
-        """A backend that refuses mid-coverage must not end the session."""
+        """A backend that refuses coverage must not end the session.
+
+        The refusal is injected at the send, after planning has succeeded --
+        the case the planner cannot foresee, such as a backend whose answer
+        changes between measuring and sending. Coverage is then abandoned
+        entirely and the ordinary loop runs with tools.
+        """
         raw = b"".join(b"stmt %03d;\n" % n for n in range(300))
-        runtime = self._runtime(raw)
+        runtime = self._runtime(raw, backend=_Backend(per_char=0.25))
+        planned = runtime.plan_source_coverage()
+        self.assertTrue(planned.covered)
 
-        original = runtime.backend.count_chat_tokens
-        state = {"calls": 0}
+        real = runtime._admit
+        sending = {"now": False}
 
-        def refusing(messages, *, tools=None, thinking=False):
-            state["calls"] += 1
-            if state["calls"] > 200:
-                return TokenCount(tokens=CTX * 4, context_tokens=CTX,
-                                  rendered_hash="a" * 64, token_hash="b" * 64)
-            return original(messages, tools=tools, thinking=thinking)
+        def refuse_on_send(messages, **kwargs):
+            if sending["now"]:
+                raise ContextAdmissionError("context admission failed: test")
+            return real(messages, **kwargs)
 
-        runtime.backend.count_chat_tokens = refusing
+        runtime._admit = refuse_on_send
+        sending["now"] = True
         result = runtime.run_autonomous("Go.", max_model_calls=3, finalize=False)
-        # Whatever happened, the run returned control with a reason.
-        self.assertTrue(result.stop_reason)
+        self.assertFalse(runtime.source_covered)
+        self.assertEqual(result.cover_calls, 0)
+        self.assertNotIn("cover", result.stop_reason.lower())
 
 
 class PinnedArtifactRuntimeTests(_Case):

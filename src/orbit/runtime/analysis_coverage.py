@@ -125,11 +125,11 @@ class CoverageAttestation:
         The gap and overlap checks are load-bearing as a pair rather than
         individually: on a fixed artifact size a gap forces a compensating
         overlap and vice versa, so the byte total plus either one already
-        decides every case. Verified exhaustively over every range-set of up to
-        three chunks on a six-byte artifact -- 9723 of them -- removing either
-        check alone changed no verdict, and removing both changed 1224. All
-        three conditions stay because the pair is what makes the byte total
-        insufficient to fake.
+        decides every case. All three conditions stay because the pair is what
+        makes the byte total insufficient to fake -- a duplicated range and a
+        missing one of the same size leave `covered_bytes == size_bytes`.
+        `test_gap_and_overlap_checks_are_jointly_load_bearing` pins exactly
+        that case.
         """
         return (
             self.status == COVERAGE_COMPLETE

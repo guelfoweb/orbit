@@ -47,7 +47,8 @@ from orbit.runtime.context_manager import (
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
 from orbit.runtime.analysis_coverage import (
     COVERAGE_BUDGET_EXCEEDED,
-    COVERAGE_COMPLETE,
+    COVERAGE_NOT_ELIGIBLE,
+    COVERAGE_UNADMISSIBLE,
     CoveragePlan,
     SourceChunk,
     decode_artifact,
@@ -549,15 +550,14 @@ def _cover_message(
     again. The source is fenced so the boundary between Orbit's words and the
     artifact's bytes is ordinarily unambiguous.
 
-    The fence is a reading aid, not a security boundary, and the difference
-    matters: analysis input is attacker-supplied by definition, so an artifact
-    can contain text imitating the delimiters or a system turn. What actually
-    holds is elsewhere -- the bytes arrive in a user turn, never a system one;
-    they are supplied verbatim rather than sanitised, so the model reasons
-    about the artifact and not a cleaned-up version of it; the instruction to
-    treat them as data is stated before they appear; and Orbit never evaluates
-    them. A model that is deceived by embedded text was deceived by the
-    artifact, which is the same exposure every reading of the source carries.
+    Analysis input is attacker-supplied by definition, so the fence is derived
+    from the artifact's own digest rather than being a fixed literal the bytes
+    could contain: closing it early would require the artifact to embed a hash
+    of itself. The rest is unchanged by that -- the bytes arrive in a user
+    turn, never a system one; they are supplied verbatim rather than
+    sanitised, so the model reasons about the artifact and not a cleaned-up
+    version of it; the instruction to treat them as data is stated before they
+    appear; and Orbit never evaluates them.
     """
     header = (
         COVER_INSTRUCTION.format(total=chunk.total)
@@ -565,13 +565,21 @@ def _cover_message(
         else f"Source coverage continues: part {chunk.index} of {chunk.total}."
     )
     lead = f"{header}\n\n{preamble}\n" if preamble else f"{header}\n"
+    # The delimiter is derived from the artifact's own digest, exactly as
+    # `rehydrated_evidence_block` derives one from a record's -- so nothing in
+    # the content can close the fence early. A fixed literal would be
+    # forgeable: analysis input is attacker-supplied by definition, and an
+    # artifact that contained the marker could place text outside the data
+    # region. The artifact cannot contain its own hash's fence without knowing
+    # it in advance.
+    delimiter = f"orbit-artifact-{source.sha256}"
     body = (
         f"Artifact sha256 {source.sha256}, {source.size_bytes} bytes.\n"
         f"Part {chunk.index} of {chunk.total}, bytes {chunk.start}-{chunk.end} "
         f"of {source.size_bytes}.\n\n"
-        f"<<<ARTIFACT SOURCE part {chunk.index}/{chunk.total}>>>\n"
+        f"{delimiter} part {chunk.index}/{chunk.total}\n"
         f"{chunk.text}\n"
-        f"<<<END part {chunk.index}/{chunk.total}>>>"
+        f"{delimiter} end part {chunk.index}/{chunk.total}"
     )
     trailer = f"\n\n{COVER_FINAL_NOTE}" if chunk.is_final else ""
     return f"{lead}\n{body}{trailer}"
@@ -1894,64 +1902,95 @@ class AnalysisRuntime:
         """
         raw = self.source.snapshot_path.read_bytes()
         if decode_artifact(raw) is None:
-            return plan_coverage(raw, fits=lambda text, index: False,
-                                 sha256=self.source.sha256, max_chunks=max_chunks)
+            # Not text this can cover. Answered directly rather than by handing
+            # `plan_coverage` an oracle it would never call: routing a decided
+            # question through the planner invites the two paths to disagree
+            # about which refusal this is, and operators read that status.
+            return CoveragePlan((), COVERAGE_NOT_ELIGIBLE,
+                                self.source.sha256, len(raw))
 
         capability = getattr(self.backend, "supports_exact_context_admission", None)
         if not callable(capability) or capability() is not True:
             # No exact count available: refuse rather than approximate. The
-            # ordinary workflow still runs, exactly as it does today.
-            return CoveragePlan((), COVERAGE_BUDGET_EXCEEDED,
+            # ordinary workflow still runs, exactly as it does today. Reported
+            # as unadmissible, not budget-exceeded -- nothing was measured, so
+            # nothing outgrew anything, and the two say different things to
+            # whoever reads them.
+            return CoveragePlan((), COVERAGE_UNADMISSIBLE,
                                 self.source.sha256, len(raw))
 
-        # Every COVER turn is appended to the history, so each chunk is
-        # admitted against a history already carrying the parts before it. The
-        # planner supplies those parts, so the message measured here is the
-        # message that will actually be sent.
-        widest = max(max_chunks, 1)
+        # Every COVER turn is appended to the history, so each part is
+        # admitted against a history already carrying the parts before it --
+        # and the header names the real part numbers, whose width the message
+        # size depends on. Both are supplied here, so the message measured is
+        # the message that will be sent.
+        #
+        # `total` is not known until the plan is finished, and the header
+        # names it -- so a probe rendered with the wrong total measures a
+        # different message than the one sent, which is how a plan that "fits"
+        # becomes a call that is refused. This therefore runs to a fixed
+        # point: plan with an assumed total, and if the plan comes out a
+        # different size, plan again with that size. It terminates because the
+        # attempts are bounded by `max_chunks`, and a plan that has not settled
+        # by then is refused rather than shipped.
+        def plan_with_total(assumed_total: int) -> CoveragePlan:
+            def fits(text: str, index: int, preceding: "tuple[str, ...]") -> bool:
+                def rendered(body: str, position: int) -> str:
+                    return _cover_message(
+                        SourceChunk(
+                            index=position, total=assumed_total,
+                            start=self.source.size_bytes,
+                            end=self.source.size_bytes, text=body,
+                        ),
+                        self.source,
+                        preamble,
+                    )
 
-        def fits(text: str, index: int, preceding: "tuple[str, ...]") -> bool:
-            def rendered(body: str, position: int) -> str:
-                return _cover_message(
-                    SourceChunk(
-                        index=position, total=widest,
-                        start=self.source.size_bytes, end=self.source.size_bytes,
-                        text=body,
-                    ),
-                    self.source,
-                    preamble,
-                )
+                candidate: list[Message] = list(self.messages)
+                for position, body in enumerate(preceding, 1):
+                    candidate.append(
+                        {"role": "user", "content": rendered(body, position)}
+                    )
+                    # The reply is not known when planning. Its absence is the
+                    # one thing measured optimistically here, which is why the
+                    # sizes leave the ordinary output reserve untouched.
+                    candidate.append({"role": "assistant", "content": ""})
+                candidate.append({"role": "user", "content": rendered(text, index)})
+                # The oracle is `_admit` itself, not a reimplementation of it.
+                # Anything less measures a different message than the one sent
+                # -- which is how a plan that "fits" becomes a call that is
+                # refused -- and `_admit` is also where rehydration and
+                # compaction live.
+                try:
+                    self._admit(
+                        candidate, max_tokens=self.effective_max_tokens, tools=[]
+                    )
+                except Exception:  # noqa: BLE001 - unmeasurable is not admissible
+                    return False
+                # A chunk that only fits because history was compacted away is
+                # not a chunk that fits: coverage must not buy room by
+                # discarding the evidence the run depends on.
+                return getattr(self.last_context_plan, "status", None) == "unchanged"
 
-            candidate: list[Message] = list(self.messages)
-            for position, body in enumerate(preceding, 1):
-                candidate.append({"role": "user", "content": rendered(body, position)})
-                # The reply is not known when planning. Its absence is the one
-                # thing measured optimistically here, which is why the chunk
-                # sizes leave the ordinary output reserve untouched.
-                candidate.append({"role": "assistant", "content": ""})
-            candidate.append({"role": "user", "content": rendered(text, index)})
-            # The oracle is `_admit` itself, not a reimplementation of it.
-            # Anything less measures a different message than the one sent --
-            # which is how a plan that "fits" becomes a call that is refused --
-            # and `_admit` is also where rehydration and compaction live.
-            try:
-                self._admit(
-                    candidate, max_tokens=self.effective_max_tokens, tools=[]
-                )
-            except Exception:  # noqa: BLE001 - an unmeasurable chunk is not admissible
-                return False
-            # A chunk that only fits because history was compacted away is not
-            # a chunk that fits: coverage must not buy room by discarding the
-            # evidence the run depends on.
-            return getattr(self.last_context_plan, "status", None) == "unchanged"
+            return plan_coverage(
+                raw, fits=fits, sha256=self.source.sha256, max_chunks=max_chunks
+            )
 
         # Probing runs `_admit`, which records its plan. Planning is a
         # measurement, not a call, so the runtime's last real plan is put back.
         saved_plan = self.last_context_plan
         saved_compactions = self.context_compactions
         try:
-            return plan_coverage(raw, fits=fits, sha256=self.source.sha256,
-                                 max_chunks=max_chunks)
+            assumed = 1
+            for _ in range(max(max_chunks, 1)):
+                plan = plan_with_total(assumed)
+                if not plan.covered or len(plan.chunks) == assumed:
+                    return plan
+                assumed = len(plan.chunks)
+            # Did not settle within the permitted parts: refuse rather than
+            # ship a plan measured against a header it will not carry.
+            return CoveragePlan((), COVERAGE_BUDGET_EXCEEDED,
+                                self.source.sha256, len(raw))
         finally:
             self.last_context_plan = saved_plan
             self.context_compactions = saved_compactions
@@ -1981,6 +2020,20 @@ class AnalysisRuntime:
             return 0
         calls = 0
         for chunk in plan.chunks:
+            # Admitted before it is appended. Appending first would leave an
+            # orphan COVER turn in the append-only history when the call is
+            # refused -- a turn telling the model that parts are coming which
+            # never arrive.
+            pending: list[Message] = [
+                *self.messages,
+                {
+                    "role": "user",
+                    "content": _cover_message(chunk, self.source, preamble),
+                },
+            ]
+            admitted = self._admit(
+                pending, max_tokens=self.effective_max_tokens, tools=[]
+            )
             self.messages.append(
                 {
                     "role": "user",
@@ -2005,9 +2058,6 @@ class AnalysisRuntime:
                 if on_delta is not None and text:
                     on_delta(text)
 
-            admitted = self._admit(
-                list(self.messages), max_tokens=self.effective_max_tokens, tools=[]
-            )
             with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="off"):
                 response = self.backend.chat_stream(
                     admitted,
