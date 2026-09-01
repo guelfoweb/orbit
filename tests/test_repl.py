@@ -256,7 +256,7 @@ class ReplTests(unittest.TestCase):
         self.assertIn("Orbit v0.0.1", output)
         self.assertIn("· unknown · unknown", output)
         self.assertIn("workdir ", output)
-        self.assertIn("tools on · think off · ctx 8192", output)
+        self.assertIn("tools on · think off · autonomous off · ctx 8192", output)
         self.assertIn("/help for commands · /status for details", output)
         self.assertNotIn("Machine", output)
         self.assertNotIn("warning: tools on", output)
@@ -668,7 +668,7 @@ class ReplTests(unittest.TestCase):
 
     def test_input_prompt_is_plain_without_tty(self) -> None:
         with mock.patch("sys.stdout.isatty", return_value=False):
-            self.assertEqual(input_prompt(), "> ")
+            self.assertEqual(input_prompt(), " [auto:off]> ")
 
     def test_input_prompt_uses_readline_safe_color_on_tty(self) -> None:
         with mock.patch("sys.stdout.isatty", return_value=True):
@@ -717,7 +717,7 @@ class ReplTests(unittest.TestCase):
         ):
             self.assertEqual(read_prompt_input(redisplay=True), "hello")
 
-        input_mock.assert_called_once_with("> ")
+        input_mock.assert_called_once_with(" [auto:off]> ")
         readline.set_pre_input_hook.assert_not_called()
         readline.redisplay.assert_not_called()
 
@@ -882,7 +882,7 @@ class ReplTests(unittest.TestCase):
                 responses = iter(("", "next"))
                 stdout = io.StringIO()
 
-                def fake_read(*, label: str = "") -> str:
+                def fake_read(*, label: str = "", autonomous: bool = False) -> str:
                     print("> ")
                     return next(responses)
 
@@ -921,7 +921,7 @@ class ReplTests(unittest.TestCase):
 
             redisplays: list[bool] = []
 
-            def fake_read(*, redisplay: bool = False, label: str = "") -> str:
+            def fake_read(*, redisplay: bool = False, label: str = "", autonomous: bool = False) -> str:
                 nonlocal reads
                 reads += 1
                 redisplays.append(redisplay)
@@ -957,7 +957,7 @@ class ReplTests(unittest.TestCase):
             )
             redisplays: list[bool] = []
 
-            def fake_read(*, redisplay: bool = False, label: str = "") -> str:
+            def fake_read(*, redisplay: bool = False, label: str = "", autonomous: bool = False) -> str:
                 redisplays.append(redisplay)
                 try:
                     return next(prompts)
@@ -992,7 +992,7 @@ class ReplTests(unittest.TestCase):
             prompts = iter(("/read note.txt summarize",))
             redisplays: list[bool] = []
 
-            def fake_read(*, redisplay: bool = False, label: str = "") -> str:
+            def fake_read(*, redisplay: bool = False, label: str = "", autonomous: bool = False) -> str:
                 redisplays.append(redisplay)
                 try:
                     return next(prompts)

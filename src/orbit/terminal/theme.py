@@ -8,6 +8,7 @@ from typing import TextIO
 DIM = "\033[2m"
 CYAN = "\033[36m"
 RED = "\033[31m"
+GREEN = "\033[32m"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
 
@@ -40,6 +41,27 @@ def yellow_dim(text: str) -> str:
 
 def danger(text: str) -> str:
     return _styled(text, RED)
+
+
+def on_off(enabled: object, *, on: str = "on", off: str = "off") -> str:
+    """One rendering of a boolean state, coloured where colour is allowed.
+
+    Used wherever a bare on/off state is shown -- the banner's tokens, the
+    `/autonomous` state reply -- so those cannot drift into saying the same
+    thing several ways. Green for on and red for off is the whole convention.
+
+    Two callers deliberately do not use it. The interactive prompt renders its
+    own, because every escape there must sit inside readline's ignore markers
+    or the cursor arithmetic breaks. And a reply that explains a setting in a
+    sentence keeps its plain word, because colouring one word mid-sentence
+    reads as emphasis rather than as state.
+
+    Colour is decided by `_styled`, which is the single place that asks
+    whether ANSI is permitted -- so NO_COLOR, a dumb terminal and a
+    redirected stream all produce bare `on`/`off` here without this function
+    knowing why.
+    """
+    return _styled(on, GREEN) if enabled else _styled(off, RED)
 
 
 def warning_text(value: object) -> str:

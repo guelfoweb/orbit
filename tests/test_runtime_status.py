@@ -34,7 +34,7 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
         self.assertEqual(
             banner,
             "Orbit v0.0.1 · Gemma 4 12B · native\n"
-            "workdir /tmp/orbit · tools on · think off · ctx 8192\n"
+            "workdir /tmp/orbit · tools on · think off · autonomous off · ctx 8192\n"
             "/help for commands · /status for details",
         )
         self.assertNotIn("Machine", banner)

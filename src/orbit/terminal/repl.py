@@ -51,9 +51,17 @@ from orbit.terminal.status import (
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_activity_label, format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
-from orbit.terminal.theme import dim, runtime_error_text, sanitize_terminal_text
+from orbit.terminal.theme import dim, on_off, runtime_error_text, sanitize_terminal_text
 from orbit.runtime.thinking_mode import ThinkingMode
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
+
+
+# What an autonomous run is asked to do when the analyst named an artifact and
+# nothing else. It is the analyst's opening line, not a runtime instruction to
+# the model: the same words a person types to begin, so an autonomous session
+# and a guided one start from the same request. Deliberately general -- naming
+# a technique here would be the terminal doing analysis.
+ANALYSIS_OPENING_INSTRUCTION = "Analyse this artifact and report what it does."
 
 
 def _abbreviate_home(path: Path) -> str:
@@ -153,7 +161,15 @@ class Repl:
     def run(self) -> int:
         if self.history:
             self.history.load()
-        status = collect_runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode)
+        status = collect_runtime_status(
+            self.runtime,
+            self.config,
+            self.backend,
+            tools_mode=self.tools_mode,
+            # From the Repl's own state, so the banner cannot claim an
+            # autonomy setting the session does not actually hold.
+            autonomous=bool(self.autonomous_analysis),
+        )
         for line in format_startup_banner(status).splitlines():
             print(dim(line))
         self._announce_workdir()
@@ -174,8 +190,9 @@ class Repl:
             # change the mode, so re-deriving it after the fact would erase
             # the wrong number of rows.
             echo_label = self._prompt_label()
+            echo_auto = bool(self.autonomous_analysis)
             if prompt.startswith("/"):
-                clear_input_echo(prompt, echo_label)
+                clear_input_echo(prompt, echo_label, autonomous=echo_auto)
                 self.prompt_redisplay_pending = True
                 if self._handle_command(prompt):
                     self.prompt_gap_pending = True
@@ -190,9 +207,9 @@ class Repl:
                 if resolution.prompt != prompt:
                     prompt = resolution.prompt
                 else:
-                    replace_input_echo(prompt, echo_label)
+                    replace_input_echo(prompt, echo_label, autonomous=echo_auto)
             else:
-                replace_input_echo(prompt, echo_label)
+                replace_input_echo(prompt, echo_label, autonomous=echo_auto)
             if self.history:
                 self.history.add(prompt)
                 self.history.save()
@@ -219,9 +236,13 @@ class Repl:
     def _prompt_label(self) -> str:
         """The marker for the runtime that owns the next line.
 
-        Read straight off `workflow_mode`, the state the Repl already keeps,
-        so the marker cannot drift from the mode it names. Display only: it
-        is never appended to history and never reaches the backend.
+        Read straight off `workflow_mode`, so the marker cannot drift from the
+        mode it names. The autonomy state shown beside it is passed separately
+        to `input_prompt`, which owns every escape the prompt emits: a label
+        carrying its own colour would land outside readline's ignore markers
+        and corrupt the cursor arithmetic on every edited line.
+
+        Display only: never appended to history, never sent to the backend.
         """
         return "analysis" if self.workflow_mode is WorkflowMode.ANALYSIS else "chat"
 
@@ -232,8 +253,10 @@ class Repl:
         label = self._prompt_label()
         if self.prompt_redisplay_pending:
             self.prompt_redisplay_pending = False
-            return read_prompt_input(redisplay=True, label=label)
-        return read_prompt_input(label=label)
+            return read_prompt_input(
+                redisplay=True, label=label, autonomous=bool(self.autonomous_analysis)
+            )
+        return read_prompt_input(label=label, autonomous=bool(self.autonomous_analysis))
 
     def _ask(self, prompt: str, *, command_action: CommandAction | None = None) -> None:
         # The mode decides which runtime owns this line before anything else
@@ -699,7 +722,15 @@ class Repl:
             print(self._handle_think_command(f"/think {arguments}".rstrip()))
             return True
         if handler == "status" and not arguments:
-            print(runtime_status(self.runtime, self.config, self.backend, tools_mode=self.tools_mode))
+            print(
+                runtime_status(
+                    self.runtime,
+                    self.config,
+                    self.backend,
+                    tools_mode=self.tools_mode,
+                    autonomous=bool(self.autonomous_analysis),
+                )
+            )
             print(format_session_token_usage(self.session_token_usage.snapshot()))
             return True
         if handler == "status" and arguments in {"ctx", "context"}:
@@ -718,7 +749,30 @@ class Repl:
             print(self._handle_tools_command(f"/tools {arguments}".rstrip()))
             return True
         if handler == "analysis":
+            opened = self.analysis
             print(self._handle_analysis_command(arguments))
+            # Naming an artifact with autonomy already on is a complete
+            # instruction: the analyst has said what to analyse and how it
+            # should advance, and asking them to type a further line to begin
+            # is asking twice.
+            #
+            # The condition is that THIS command opened a session, not that a
+            # session exists. A refused path leaves the mode and the previous
+            # session deliberately untouched -- "a typo must not silently drop
+            # the analyst out of the session they were in" -- so testing the
+            # mode would let a mistyped name launch a run against the artifact
+            # that was already open. Identity of the session object is what
+            # actually distinguishes the two.
+            #
+            # Toggling autonomy still starts nothing by itself: `/autonomous`
+            # never reaches here. Guided mode is untouched, because the
+            # condition is the setting the analyst chose.
+            if (
+                self.autonomous_analysis
+                and self.analysis is not None
+                and self.analysis is not opened
+            ):
+                self._ask_analysis(ANALYSIS_OPENING_INSTRUCTION)
             return True
         if handler == "report":
             self._handle_report_command(arguments)
@@ -809,7 +863,7 @@ class Repl:
         """
         value = arguments.strip().lower()
         if not value:
-            return f"autonomous analysis: {'on' if self.autonomous_analysis else 'off'}"
+            return f"autonomous analysis: {on_off(self.autonomous_analysis)}"
         if value not in {"on", "off"}:
             # The state is left exactly as it was: a mistyped argument must not
             # decide whether an analysis runs itself.
