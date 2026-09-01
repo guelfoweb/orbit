@@ -53,28 +53,34 @@ COMMANDS = (
         "Show tool access or local capabilities.",
         "tools",
     ),
+    # Ordered by what each one does, not alphabetically: start, control how it
+    # advances, report on what it found, leave. The four were previously easy
+    # to confuse -- `/autonomous` in particular reads like it begins something,
+    # and it does not.
     CommandSpec(
         "/analysis",
         "Analysis",
         "/analysis <path>",
-        "Analyse one local artifact in an isolated workspace.",
+        "Start analysis of a local artifact and collect evidence.",
         "analysis",
-    ),
-    CommandSpec(
-        "/report",
-        "Analysis",
-        "/report [question]",
-        "Report on the evidence already collected, running no analysis action.",
-        "report",
     ),
     CommandSpec(
         "/autonomous",
         "Analysis",
         "/autonomous [off|on]",
-        "Show or set autonomous analysis for this session.",
+        "Control how ANALYSIS advances. off = one evidence step at a time. "
+        "on = continue automatically until completion or a runtime stop. "
+        "Does not enter analysis mode by itself.",
         "autonomous",
     ),
-    CommandSpec("/chat", "Analysis", "/chat", "Return to normal chat mode.", "chat"),
+    CommandSpec(
+        "/report",
+        "Analysis",
+        "/report [question]",
+        "Answer from evidence already collected. Runs no new analysis action.",
+        "report",
+    ),
+    CommandSpec("/chat", "Analysis", "/chat", "Leave ANALYSIS and return to normal chat.", "chat"),
     CommandSpec("/help", "Help", "/help", "Show command help.", "help"),
 )
 
