@@ -291,7 +291,9 @@ def _resolve_argument(
     return _unescape(literal if literal is not None else (alt or ""))
 
 
-def find_jscript_stages(source: str, depth: int = 0) -> list[TransformStage]:
+def find_jscript_stages(
+    source: str, depth: int = 0, truncation: "_Truncation | None" = None
+) -> list[TransformStage]:
     """Every call site of a structural decoder whose arguments are literal."""
     stages: list[TransformStage] = []
     names = _decoder_names(source)
@@ -321,9 +323,16 @@ def find_jscript_stages(source: str, depth: int = 0) -> list[TransformStage]:
             if encoded is None or delimiter is None:
                 continue
             if len(encoded) > MAX_INPUT_CHARS:
+                # A call site this pass could have decoded and did not.
+                if truncation is not None:
+                    truncation.dropped_input = True
                 continue
             decoded = _decode_tokens(encoded, int(key_text), delimiter)
-            if decoded is None or len(decoded) > MAX_OUTPUT_CHARS:
+            if decoded is None:
+                continue
+            if len(decoded) > MAX_OUTPUT_CHARS:
+                if truncation is not None:
+                    truncation.dropped_output = True
                 continue
             stages.append(
                 TransformStage(
@@ -386,7 +395,9 @@ def _reaches_bxor(name: str, source: str) -> bool:
     return False
 
 
-def find_powershell_stages(source: str, depth: int = 0) -> list[TransformStage]:
+def find_powershell_stages(
+    source: str, depth: int = 0, truncation: "_Truncation | None" = None
+) -> list[TransformStage]:
     """Literal `-bxor` reconstructions over a quoted numeric token list."""
     stages: list[TransformStage] = []
     # Matches rather than groups, so each list keeps the position it was
@@ -414,6 +425,8 @@ def find_powershell_stages(source: str, depth: int = 0) -> list[TransformStage]:
     for match in matches:
         name, tokens = match.group(1), match.group(2)
         if len(tokens) > MAX_INPUT_CHARS:
+            if truncation is not None:
+                truncation.dropped_input = True
             continue
         if not _reaches_bxor(name, source):
             # This list is never fed to the operator. A version string or a
@@ -425,7 +438,11 @@ def find_powershell_stages(source: str, depth: int = 0) -> list[TransformStage]:
             continue
         delimiter = delimiters.get(name, ",")
         decoded = _decode_tokens(tokens, key, delimiter)
-        if decoded is None or len(decoded) > MAX_OUTPUT_CHARS:
+        if decoded is None:
+            continue
+        if len(decoded) > MAX_OUTPUT_CHARS:
+            if truncation is not None:
+                truncation.dropped_output = True
             continue
         offset = match.start(2)
         stages.append(
@@ -445,26 +462,107 @@ def find_powershell_stages(source: str, depth: int = 0) -> list[TransformStage]:
     return stages
 
 
-def deobfuscate(source: str) -> list[TransformStage]:
-    """Every exact literal stage reachable from `source`, breadth-first.
+# Why a traversal stopped.
+#
+# The distinction that matters is between a walk that ended because there was
+# nothing left, and one that ended because a ceiling stopped it -- the second
+# leaves the artifact holding a transformation nobody ran, and a caller
+# reasoning about completeness must be able to tell them apart.
+#
+# Refusing an ambiguous call site is neither. A dynamic key, a dynamic
+# delimiter, a reassigned variable, a malformed token, an ambiguous operand:
+# this pass handles literals and declines everything else, and declining is
+# the contract rather than a limit. Those stay COMPLETE, because nothing ran
+# out. So does a cycle: its output is already recovered, so nothing is
+# missing. Only a call site this pass could have decoded, and did not because
+# of a size ceiling, is a truncation.
+COMPLETE = "complete"
+STAGE_LIMIT = "stage_limit"
+DEPTH_LIMIT = "depth_limit"
+INPUT_LIMIT = "input_limit"
+OUTPUT_LIMIT = "output_limit"
 
-    Bounded on all four axes that could otherwise run away: depth, stage
-    count, per-stage size, and repetition. Cycles are detected by content
-    digest rather than by shape, so a chain that decodes back to something
-    already seen stops whatever route it took to get there.
+
+class _Truncation:
+    """Whether a finder dropped a call site for exceeding a per-stage bound.
+
+    The finders return a list, which has no room to say "and one more was
+    skipped". A skipped call site is a real gap -- the artifact holds a
+    transformation nobody ran -- and a traversal that reported a fixed point
+    while one existed would be calling a truncation a completed result.
+
+    Deliberately a small mutable passed down rather than a changed return
+    type: both finders are called directly elsewhere, and widening their
+    contract to carry a flag would complicate every caller for the benefit of
+    the one that needs it.
+    """
+
+    def __init__(self) -> None:
+        self.dropped_input = False
+        self.dropped_output = False
+
+    @property
+    def dropped(self) -> bool:
+        return self.dropped_input or self.dropped_output
+
+    @property
+    def status(self) -> str:
+        """Which ceiling to name. Input first: it is the earlier refusal."""
+        return INPUT_LIMIT if self.dropped_input else OUTPUT_LIMIT
+
+
+@dataclass(frozen=True)
+class TransformResult:
+    """Stages, and whether the traversal that found them finished."""
+
+    stages: "list[TransformStage]"
+    status: str
+
+    @property
+    def complete(self) -> bool:
+        return self.status == COMPLETE
+
+
+def deobfuscate_with_status(source: str) -> TransformResult:
+    """`deobfuscate`, plus why it stopped.
+
+    Separate from `deobfuscate` rather than replacing it: every existing
+    caller wants the stages and nothing else, and the status only matters to
+    a decision about whether the recovered chain is the whole chain.
+
+    A bound reached is not a failure -- the stages found are still exact --
+    but it means something was not looked at, and a caller reasoning about
+    completeness has to be able to tell the difference.
     """
     if len(source) > MAX_INPUT_CHARS:
-        return []
+        return TransformResult([], INPUT_LIMIT)
     stages: list[TransformStage] = []
     seen: set[str] = {_sha(source)}
     frontier = [(source, 0)]
+    status = COMPLETE
+    # Text a ceiling stopped the walk from scanning. Whether that is a
+    # truncation or an irrelevance is decided after the loop, by asking what
+    # it would have produced -- a bound reached over inert text cost nothing,
+    # and reporting it as incomplete would be the mirror of the bug this
+    # function exists to prevent.
+    unexamined: list[str] = []
+    truncation = _Truncation()
     while frontier and len(stages) < MAX_STAGES:
         text, depth = frontier.pop(0)
         if depth >= MAX_DEPTH:
+            # Not followed, and not yet known to matter: whether the ceiling
+            # cost anything depends on what this text would have yielded, and
+            # that is settled once, below.
+            unexamined.append(text)
             continue
-        found = find_jscript_stages(text, depth) + find_powershell_stages(text, depth)
+        found = find_jscript_stages(
+            text, depth, truncation
+        ) + find_powershell_stages(text, depth, truncation)
         for stage in found:
             if len(stages) >= MAX_STAGES:
+                # A stage this walk found and could not record: unlike an
+                # unscanned output, this one is known to exist.
+                status = STAGE_LIMIT
                 break
             if stage.output_sha256 in seen:
                 continue
@@ -473,4 +571,44 @@ def deobfuscate(source: str) -> list[TransformStage]:
             # Decoded text is inert data that may itself contain a literal
             # stage. It is scanned, never executed.
             frontier.append((stage.output, depth + 1))
-    return stages
+    if status == COMPLETE:
+        # Anything the ceilings left unscanned: outputs still on the frontier
+        # when the stage ceiling stopped the walk, plus text refused for
+        # depth. Scanning them here does not extend the result -- no stage is
+        # added -- it only answers whether stopping cost anything. A ceiling
+        # reached over text that yields nothing is not a truncation, and a
+        # traversal that ended with nothing left to find is complete however
+        # close to a bound it came.
+        for text in [entry for entry, _depth in frontier] + unexamined:
+            probe = _Truncation()
+            if find_jscript_stages(text, 0, probe) or find_powershell_stages(
+                text, 0, probe
+            ):
+                status = STAGE_LIMIT if frontier else DEPTH_LIMIT
+                break
+            if probe.dropped:
+                status = probe.status
+                break
+    if truncation.dropped and status == COMPLETE:
+        # A call site was recognised and not decoded because its input or its
+        # output exceeded a per-stage bound. The frontier may have drained and
+        # no traversal bound may have tripped, but the artifact still holds a
+        # transformation nobody ran -- and a result with a hole in it is not a
+        # fixed point, whatever the loop looked like from the outside.
+        status = truncation.status
+    return TransformResult(stages, status)
+
+
+def deobfuscate(source: str) -> list[TransformStage]:
+    """Every exact literal stage reachable from `source`, breadth-first.
+
+    Bounded on all four axes that could otherwise run away: depth, stage
+    count, per-stage size, and repetition. Cycles are detected by content
+    digest rather than by shape, so a chain that decodes back to something
+    already seen stops whatever route it took to get there.
+
+    Kept as the plain form because every caller of it wants the stages and
+    nothing else. It delegates rather than repeating the traversal: two copies
+    of a bounded breadth-first walk would be two places for a bound to drift.
+    """
+    return deobfuscate_with_status(source).stages
