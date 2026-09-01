@@ -13,6 +13,7 @@ resident and a multi-part coverage would carry the whole artifact anyway.
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import unittest
@@ -361,6 +362,64 @@ class DownstreamHeadroomTests(_Case):
                     self.fail(f"covered {size}B at {per_char} but cannot act")
                 covered += 1
         self.assertGreater(covered, 0, "the sweep must actually cover something")
+
+    def test_the_unreserved_terms_are_out_of_reach_at_real_densities(self) -> None:
+        """The documented limit, measured rather than asserted.
+
+        Two terms are deliberately unreserved: the program the model writes
+        into the assistant turn, and the analyst's own line on the first
+        covered step. Both are reachable only in the dense band where coverage
+        already accepts almost nothing. This pins the claim that at the density
+        ordinary source tokenises at, a realistic RESOLVE turn -- a real
+        program in the call, a long analyst line -- still admits.
+        """
+        from orbit.runtime.analysis_runtime import (
+            ANALYSIS_TOOL_SCHEMA, AUTONOMOUS_CONTINUATION_MESSAGE,
+        )
+
+        program = "x = 1\n" * 300          # ~1800 chars of generated code
+        analyst = "please investigate. " * 40  # a long opening line
+        checked = 0
+        for per_char in (0.2, 0.25, 0.3):   # 5.0, 4.0, 3.3 chars/token
+            for size in range(200, 6000, 400):
+                runtime = _build(b"q" * size, _Backend(per_char=per_char))
+                self.addCleanup(runtime.close)
+                coverage = runtime.plan_source_coverage()
+                if not coverage.covered:
+                    continue
+                runtime.cover_source(coverage)
+                runtime.messages.extend([
+                    {"role": "user", "content": analyst},
+                    {"role": "assistant", "content": program, "tool_calls": [
+                        {"id": "t", "type": "function",
+                         "function": {"name": "execute_analysis",
+                                      "arguments": json.dumps({"code": program})}}
+                    ]},
+                    {"role": "tool", "content": "x" * MAX_EVIDENCE_CHARS,
+                     "tool_call_id": "t", "name": "execute_analysis"},
+                    {"role": "user", "content": AUTONOMOUS_CONTINUATION_MESSAGE},
+                ])
+                try:
+                    runtime._admit(
+                        list(runtime.messages),
+                        max_tokens=runtime.effective_max_tokens,
+                        tools=[ANALYSIS_TOOL_SCHEMA],
+                    )
+                except ContextAdmissionError as exc:  # pragma: no cover
+                    self.fail(
+                        f"covered {size}B at {per_char} then stranded by a "
+                        f"realistic turn: {exc}"
+                    )
+                checked += 1
+        self.assertGreater(checked, 0, "the sweep must cover something")
+
+    def test_the_unreserved_terms_are_named(self) -> None:
+        """The limit is written down, not merely known."""
+        from orbit.runtime.analysis_runtime import COVER_UNRESERVED_TERMS
+
+        named = " ".join(COVER_UNRESERVED_TERMS).lower()
+        self.assertIn("assistant", named)
+        self.assertIn("analyst", named)
 
     def test_the_reserve_is_deliberately_conservative(self) -> None:
         """Over-reserving is the safe error, and it is chosen on purpose.

@@ -606,6 +606,31 @@ COVER_DOWNSTREAM_RESERVE = (
     + DEFAULT_NEXT_ACTION_RESERVE  # what the next call subtracts for itself
 )
 
+# What this reserve does NOT cover, stated because the omission is deliberate
+# and the alternative was measured.
+#
+# The 512 above budgets the tool schema and the STRUCTURE of the assistant
+# turn, not the program the model writes into it, and the first step after
+# coverage carries the analyst's own line rather than the continuation
+# measured above. Both are therefore unreserved, and both are reachable -- but
+# only at roughly 1.43 chars/token and denser, where the largest artifact
+# coverage accepts is a few hundred bytes and the feature has almost nothing
+# left to buy. At the density ordinary source actually tokenises at, there is
+# several thousand tokens of slack and neither term is reachable.
+#
+# Closing them was tried and rejected on measurement. Reserving the generation
+# cap (2048) leaves 483 tokens for source; reserving the largest action this
+# repo has measured (1953) plus the schema leaves 66. Either makes COVER inert
+# on every artifact, including the ones it handles correctly today. The reason
+# is that these maxima do not co-occur: the 1953-token program was one of nine
+# actions whose observations ran 60-2044 tokens, so reserving the peak of each
+# independent term at once describes a turn that has never happened. Buying a
+# band where the feature is already nearly inert, by disabling it everywhere
+# else, is the wrong trade.
+COVER_UNRESERVED_TERMS = (
+    "assistant program body; first-step analyst line",
+)
+
 # Sent once after an execution that ran and raised.
 #
 # A program that failed on its own defect is not the same situation as one
