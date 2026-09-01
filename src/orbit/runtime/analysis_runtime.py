@@ -2272,7 +2272,8 @@ class AnalysisRuntime:
         # Appended after the model's prose, not merged into it: this is
         # evidence rendering, and keeping it separate is what makes it
         # independent of whether the model chose to mention any of it.
-        appendix = self.transform_appendix()
+        # Computed once at the top of the call and reused here, so the object
+        # a caller receives and the text a terminal prints cannot diverge.
         if appendix:
             text = f"{text}\n\n{appendix}"
         return AnalysisReport(
