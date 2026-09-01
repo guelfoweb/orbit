@@ -416,6 +416,78 @@ AUTONOMOUS_CONTINUATION_MESSAGE = (
 # consecutive unproductive step ends the run, because a runtime that kept
 # asking would be arguing with the model. The total is bounded by the action
 # ceiling regardless, since every replan follows a step that consumed one.
+# What an autonomous run is told when the runtime already established facts
+# before the model was asked anything.
+#
+# The preamble lists what exists -- ids, kinds, sizes, digests -- but not what
+# any of it says, and a model that knows five facts exist without knowing any
+# of them has exactly one way to learn something: read the source. So it read
+# the source, in one rendering after another, until the action budget stopped
+# it, while the answer sat in evidence it had been handed.
+#
+# This closes that gap without copying the evidence into the prompt. It names
+# the ids, which is what the existing rehydration path already responds to:
+# naming an id in an analyst message restores its exact attested bytes, once,
+# through the mechanism CHAT and ANALYSIS both use. Prompt cost is a list of
+# ids, not a second copy of the outputs.
+#
+# It does not forbid an action. Deterministic evidence establishes what a
+# transformation produced, never how the artifact uses it, and asking about
+# that is the analysis the model is for. What it changes is where the model
+# starts: from what is known, rather than from the file.
+# How much decoded evidence the opening may pull into the first call.
+#
+# Naming an id restores its exact bytes, which is the point -- but the cost is
+# the size of what was decoded, and that is the artifact's to choose. Sixteen
+# stages of a quarter-megabyte each would be four megabytes of prompt, turning
+# a run that was merely slow into one that cannot start at all.
+#
+# 8000 characters is roughly 2000 tokens on this profile: a quarter of an 8k
+# window, comfortably above the 2816 the real measured artifact needs, and far
+# below anything that could displace the analysis itself. Stages past the
+# budget are still listed in the preamble and still readable on request -- the
+# model asks for them by id, as it always could. What this bounds is what
+# arrives unasked.
+MAX_EVIDENCE_FIRST_CHARS = 8000
+
+
+def _evidence_first_ids(
+    stages: "list[tuple[TransformStage, EvidenceRecord]]",
+) -> list[str]:
+    """The ids worth restoring up front, smallest first, within the budget.
+
+    Smallest first: a short decoded string is usually the fact an analysis
+    turns on, and spending the budget on one large stage would crowd out
+    several small ones that answer more.
+    """
+    ordered = sorted(stages, key=lambda pair: len(pair[0].output))
+    chosen: list[str] = []
+    spent = 0
+    for stage, record in ordered:
+        cost = len(stage.output)
+        if spent + cost > MAX_EVIDENCE_FIRST_CHARS:
+            continue
+        chosen.append(record.evidence_id)
+        spent += cost
+    return chosen
+
+
+def _evidence_first_instruction(
+    analyst_message: str, evidence_ids: "list[str]"
+) -> str:
+    if not evidence_ids:
+        return analyst_message
+    return (
+        f"{analyst_message}\n"
+        "Verified deterministic evidence is already available: "
+        + ", ".join(f"evidence:{eid}" for eid in evidence_ids)
+        + ".\n"
+        "Treat it as established and reason from it before acquiring more "
+        "source evidence. Take an action only for a concrete question the "
+        "existing evidence cannot answer. If it is sufficient, report now."
+    )
+
+
 AUTONOMOUS_REPLAN_MESSAGE = (
     "The previous action produced no new evidence. Choose a different "
     "deterministic strategy using the current evidence and artifacts. Do not "
@@ -1757,7 +1829,18 @@ class AnalysisRuntime:
         repair_pending = False
         repairing = False
         repairs = 0
-        message = analyst_message
+        # Autonomous only, and only when the runtime actually established
+        # something: a session with no deterministic evidence sends the
+        # analyst's line unchanged, so nothing about an ordinary run moves.
+        # Guided ANALYSIS never reaches here -- it calls `step()` directly --
+        # so it stays guided.
+        message = (
+            _evidence_first_instruction(
+                analyst_message, _evidence_first_ids(self.transform_stages)
+            )
+            if self.transform_stages
+            else analyst_message
+        )
         stop_reason = STOP_MAX_MODEL_CALLS
         cancelled = False
         final_report: "AnalysisReport | None" = None
@@ -1813,6 +1896,33 @@ class AnalysisRuntime:
                 # crashes and leak the temporary workspace. `RecoverableBackendError`
                 # lives in the backend base module so this can name exactly the
                 # recoverable case without importing upward.
+                # One exception, and only for the opening: the evidence-first
+                # instruction restores decoded bytes into the first call, and
+                # how many tokens those bytes are is the artifact's to decide.
+                # A character budget cannot bound them -- density on this
+                # tokenizer runs from 4 characters per token down to about
+                # 1.1 on exactly the obfuscated content this decodes, a range
+                # already measured beside `MAX_EVIDENCE_CHARS`. So the opening
+                # is attempted, and a refusal withdraws it rather than ending
+                # the run: the analysis reverts to the behaviour it had before
+                # this existed, which is slower but correct, instead of being
+                # unable to begin at all on an artifact it used to handle.
+                #
+                # Every other refusal still ends the run, including a second
+                # one on the plain line -- retrying that would spend the
+                # ceiling on a request already known not to fit.
+                if (
+                    isinstance(exc, ContextAdmissionError)
+                    and message is not analyst_message
+                ):
+                    # Bounded by identity, not by a counter: the retry sets
+                    # `message` to the analyst line itself, so this condition
+                    # is false on any later pass and the loop cannot spin. A
+                    # second refusal is a real one and ends the run below --
+                    # retrying it would spend the ceiling on a request already
+                    # known not to fit.
+                    message = analyst_message
+                    continue
                 error = f"{type(exc).__name__}: {exc}"
                 stop_reason = f"{STOP_BACKEND_ERROR}: {error}"
                 self._close_incomplete_turn()
