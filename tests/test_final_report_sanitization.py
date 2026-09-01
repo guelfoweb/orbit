@@ -75,15 +75,51 @@ class ProductionCallSiteTests(unittest.TestCase):
         source = inspect.getsource(repl.Repl._ask_analysis)
         marker = "if run.final_report is not None and not renderer.rendered_visible_text:"
         self.assertIn(marker, source)
-        branch = source[source.index(marker) : source.index(marker) + 260]
+        # To the end of this branch rather than a fixed character count: the
+        # comment explaining the branch may grow, and a window measured in
+        # characters would then stop short of the print it exists to check.
+        start = source.index(marker)
+        rest = source[start:]
+        end = rest.index("\n            elif ") if "\n            elif " in rest else len(rest)
+        branch = rest[:end]
 
-        # Matched on the two facts that matter -- the report text is passed to
-        # the sanitizer, and nothing in this branch prints it raw -- rather
-        # than on one exact spelling, so wrapping the call over lines or
+        # Matched on the two facts that matter -- the report text goes through
+        # a sanitizing renderer, and nothing in this branch prints it raw --
+        # rather than on one exact spelling, so wrapping the call over lines or
         # binding it to a local does not fail this spuriously.
-        self.assertIn("sanitize_terminal_text(", branch)
+        #
+        # `render_report` is accepted alongside the bare sanitizer because it
+        # sanitizes before it styles; `test_the_markdown_renderer_sanitizes`
+        # below is what holds it to that, so this is not a widened hole.
+        self.assertTrue(
+            "sanitize_terminal_text(" in branch or "render_report(" in branch,
+            "the report text must reach a sanitizing renderer",
+        )
         self.assertIn("run.final_report.text", branch)
         self.assertNotIn("print(run.final_report.text", branch)
+
+    def test_the_markdown_renderer_sanitizes(self) -> None:
+        """What licenses `render_report` at the call sites above.
+
+        Behavioural, not textual: the renderer is handed every control
+        sequence a decoded artifact might carry, in both styled and plain
+        mode, and none may survive.
+        """
+        from orbit.terminal.markdown_report import render_report
+
+        hostile = (
+            "## \x1b[2J\x1b[H heading\n"
+            "- \x1b]0;title\x07 bullet\n"
+            "**\rforged**\n"
+            "`\x1b]52;c;ZXZpbA==\x07`\n"
+            "\x9b2J \x9dpayload\x07\n"
+        )
+        for styled in (True, False):
+            rendered = render_report(hostile, force_style=styled)
+            for control in ("\x1b[2J", "\x1b[H", "\x1b]0;", "\x1b]52;",
+                            "\r", "\x07", "\x9b", "\x9d"):
+                with self.subTest(styled=styled, control=repr(control)):
+                    self.assertNotIn(control, rendered)
 
     def test_all_three_final_output_paths_sanitize(self) -> None:
         """Streamed, non-streaming and empty must agree.
@@ -104,7 +140,13 @@ class ProductionCallSiteTests(unittest.TestCase):
         self.assertNotIn("print(run.final_report.text", repl_source)
         self.assertNotIn("print(report.text", repl_source)
         self.assertIn("run.final_report.text", repl_source)
-        self.assertIn("sanitize_terminal_text(report.text", repl_source)
+        # Either the bare sanitizer or the renderer that wraps it; the test
+        # above proves the renderer really does sanitize.
+        self.assertTrue(
+            "sanitize_terminal_text(report.text" in repl_source
+            or "render_report(report.text" in repl_source,
+            "the report text must reach a sanitizing renderer",
+        )
 
 
 class ControlSequenceTests(unittest.TestCase):

@@ -9,6 +9,7 @@ DIM = "\033[2m"
 CYAN = "\033[36m"
 RED = "\033[31m"
 GREEN = "\033[32m"
+BOLD = "\033[1m"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
 

@@ -51,6 +51,7 @@ from orbit.terminal.status import (
 from orbit.terminal.streaming import StreamRenderer
 from orbit.terminal.tool_events import format_tool_activity_label, format_tool_call_event, format_tool_result_event
 from orbit.terminal.tool_mode import USAGE, ToolSpec, allowed_tool_names_for_spec, normalize_tool_spec, tools_are_enabled
+from orbit.terminal.markdown_report import render_report
 from orbit.terminal.theme import dim, on_off, runtime_error_text, sanitize_terminal_text
 from orbit.runtime.thinking_mode import ThinkingMode
 from orbit.runtime.turn_trace import ModelPhaseStart, ModelStepMetrics
@@ -505,12 +506,10 @@ class Repl:
             # text itself is untouched: `run.final_report.text` still holds
             # what the model wrote.
             if run.final_report is not None and not renderer.rendered_visible_text:
-                print(
-                    sanitize_terminal_text(
-                        run.final_report.text, allow_newlines=True
-                    ),
-                    flush=True,
-                )
+                # Nothing streamed, so this is the whole report -- a complete
+                # text, which is the only thing that may be rendered as
+                # Markdown. `render_report` sanitises before it styles.
+                print(render_report(run.final_report.text), flush=True)
             elif run.final_report is not None:
                 # The prose streamed, so `final_report.text` would repeat it --
                 # but the deterministic appendix is attached after the stream
@@ -523,10 +522,11 @@ class Repl:
                 appendix = self.analysis.deterministic_sections()
                 if appendix:
                     print("\n")
-                    print(
-                        sanitize_terminal_text(appendix, allow_newlines=True),
-                        flush=True,
-                    )
+                    # `render_report` sanitises before it styles, so this is
+                    # the same protection the plain print had, with the
+                    # Markdown structure shown instead of spelled. Off a
+                    # terminal it returns the sanitised text unchanged.
+                    print(render_report(appendix), flush=True)
             replans = f" | replans: {run.replans}" if run.replans else ""
             summary = (
                 f"analysis | mode: ANALYSIS | model calls: {run.model_calls} | "
@@ -995,7 +995,7 @@ class Repl:
             # NO_EVIDENCE_REPORT, a refusal notice, or either of those with the
             # deterministic appendix already attached by `report()`. Sanitized
             # because it is a print that never passed the renderer's boundary.
-            print(sanitize_terminal_text(report.text, allow_newlines=True), flush=True)
+            print(render_report(report.text), flush=True)
         else:
             # The model's prose reached the terminal through `on_delta` as it
             # was generated. The appendix did not: `report()` attaches it to
@@ -1012,7 +1012,7 @@ class Repl:
                 # would butt against the prose. `report.text` joins the two
                 # halves with a blank line, and the terminal should match.
                 print("\n")
-                print(sanitize_terminal_text(appendix, allow_newlines=True), flush=True)
+                print(render_report(appendix), flush=True)
         elapsed = time.monotonic() - started
         summary = (
             f"report | mode: ANALYSIS | model calls: {report.model_calls} | "
