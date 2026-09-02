@@ -323,6 +323,91 @@ class FailClosedTests(unittest.TestCase):
                 self.assertIsNone(classify_dominated(output, SOURCE))
 
 
+class TrailingByteFidelityTests(unittest.TestCase):
+    """A listing must show every line, including ones made of whitespace.
+
+    `rstrip()` would treat form feeds, carriage returns, vertical tabs, spaces
+    and tabs as absent -- they are ordinary bytes of a source file, and a
+    listing that never showed the lines they belong to is incomplete. Only the
+    single trailing newline a line-wise print drops may be tolerated.
+    """
+
+    def test_a_listing_omitting_whitespace_only_tail_lines_is_useful(self) -> None:
+        for tail in ("\x0c\r\x0b", " \t \n \t \n", "\x0c\n", "   ", "\t\t"):
+            with self.subTest(tail=tail):
+                source = "a = 1\nb = 2\n" + tail
+                listing = "1: a = 1\n2: b = 2"
+                self.assertIsNone(
+                    classify_dominated(
+                        f"{listing}\nLEN: {len(source)}\n", source
+                    )
+                )
+
+    def test_extra_trailing_newlines_are_not_stripped_away(self) -> None:
+        source = "a\nb\n\n\n"
+        listing = "1: a\n2: b"
+        self.assertIsNone(
+            classify_dominated(f"{listing}\nLEN: {len(source)}\n", source)
+        )
+
+    def test_one_trailing_newline_is_still_tolerated(self) -> None:
+        """The control: the newline `splitlines()` drops is not a missing line."""
+        source = "a\nb\n"
+        listing = "1: a\n2: b"
+        self.assertIsNotNone(
+            classify_dominated(f"{listing}\nLEN: {len(source)}\n", source)
+        )
+
+    def test_blank_lines_between_properties_are_unexplained(self) -> None:
+        """Tolerant parsing in a module that claims none."""
+        for observed in (
+            f"{SOURCE}\n\nLEN: {len(SOURCE)}\n",
+            f"{SOURCE}\nLEN: {len(SOURCE)}\n\n\n",
+            f"{SOURCE}\nLEN: {len(SOURCE)}\n\nsha256: {_sha(SOURCE)}\n",
+        ):
+            with self.subTest(observed=observed[-30:]):
+                self.assertIsNone(classify_dominated(observed, SOURCE))
+
+
+class ComplexityTests(unittest.TestCase):
+    """Bounded host CPU: the sandbox timeout does not cover this code.
+
+    `_split_numbered` once retried every shorter prefix, re-joining and
+    re-stripping each -- quadratic, and reachable from ordinary output: a model
+    printing a numbered listing with one trailing line paid it, in the host
+    process, after the sandbox had already returned and with no timeout around
+    it.
+    """
+
+    def test_numbered_shaped_output_is_classified_in_linear_time(self) -> None:
+        import time
+
+        source = "x = 1\n" * 50
+        timings = []
+        for count in (2000, 8000, 32000):
+            candidate = (
+                "\n".join(f"{i}: line {i} of output" for i in range(count))
+                + "\nTRAILING"
+            )
+            started = time.monotonic()
+            classify_dominated(candidate, source)
+            timings.append(time.monotonic() - started)
+        # Well under a second even at 16x the smallest input; a quadratic
+        # implementation took minutes here.
+        self.assertLess(max(timings), 2.0)
+
+    def test_a_real_listing_is_still_recognised(self) -> None:
+        source = "x = 1\n" * 50
+        listing = "\n".join(
+            f"{i:3}: {line}" for i, line in enumerate(source.splitlines())
+        )
+        self.assertIsNotNone(
+            classify_dominated(
+                f"{listing}\nTOTAL_LINES: {len(source.splitlines())}\n", source
+            )
+        )
+
+
 class SecurityTests(unittest.TestCase):
     """R. Bounded, deterministic, non-executing."""
 

@@ -41,7 +41,6 @@ from orbit.runtime.analysis_source_identity import (
     NUMBERED,
     RAW,
     REPR,
-    decode_repr_literal,
     strip_line_numbers,
 )
 
@@ -230,20 +229,54 @@ def _split_representation(candidate: str, source: str) -> "tuple[str, str] | Non
 def _split_numbered(candidate: str, source: str) -> "tuple[str, str] | None":
     """Peel a complete numbered listing off the front, if there is one.
 
-    Handled separately because a listing has no fixed length to slice: the
-    boundary is found by trying successively shorter line prefixes, and the
-    first that reconstructs to the source exactly is the listing. Bounded by
-    the number of lines, and every candidate still ends in an exact comparison.
+    The listing is exactly as many lines as the source has, so the boundary is
+    computed rather than searched for: both spellings of the source's line count
+    are tried, each in constant time, and the prefix is stripped once. An
+    earlier version tried successively shorter prefixes and re-stripped each
+    one, which is quadratic -- 4000 numbered lines of ordinary model output
+    cost ten seconds of host CPU after the sandbox had already returned, with
+    no timeout around it.
+
+    Trailing newlines are dropped one at a time rather than with `rstrip`,
+    which would also eat form feeds, carriage returns and spaces: those are
+    ordinary source bytes, and treating them as absent would let a listing that
+    omits real trailing lines pass as complete.
     """
     lines = candidate.split("\n")
-    for count in range(len(lines), 1, -1):
-        head = "\n".join(lines[:count])
+    for expected in _candidate_line_counts(source):
+        if expected < 2 or expected > len(lines):
+            continue
+        head = "\n".join(lines[:expected])
         stripped = strip_line_numbers(head)
         if stripped is None:
             continue
-        if stripped == source or stripped == source.rstrip("\n"):
-            return NUMBERED, "\n".join(lines[count:])
+        if stripped == source or stripped == _drop_one_newline(source):
+            # The remainder keeps its leading newline, exactly as the raw and
+            # repr paths leave it, so the caller sees one shape rather than
+            # two and cannot tolerate a blank line on one path only.
+            return NUMBERED, candidate[len(head) :]
     return None
+
+
+def _drop_one_newline(text: str) -> str:
+    """Exactly one trailing newline, the one a line-wise print drops.
+
+    Deliberately not `rstrip`: `\x0c`, `\r`, `\x0b`, spaces and tabs are
+    ordinary bytes of a source file, and removing them would accept a listing
+    that never showed the lines they belong to.
+    """
+    return text[:-1] if text.endswith("\n") else text
+
+
+def _candidate_line_counts(source: str) -> "tuple[int, ...]":
+    """How many lines a complete listing of this source would have.
+
+    The two counting rules a listing can be built from, de-duplicated. Both are
+    recomputable from the source, so trying both proves nothing extra -- it
+    only avoids guessing which one the program used.
+    """
+    counts = (len(source.split("\n")), len(source.splitlines()))
+    return counts if counts[0] != counts[1] else (counts[0],)
 
 
 def classify_dominated(candidate: str, source: str) -> SourceDominance | None:
@@ -271,8 +304,19 @@ def classify_dominated(candidate: str, source: str) -> SourceDominance | None:
     if not rest.strip():
         return None
 
-    lines = [line for line in rest.split("\n") if line]
-    if not lines or len(lines) > MAX_PROPERTIES:
+    # Exactly one leading newline is expected -- the separator between the
+    # source and the first property -- and nothing else may be blank. Dropping
+    # empty lines would be tolerant parsing: a run of them is bytes the program
+    # printed that this grammar does not name.
+    if not rest.startswith("\n"):
+        return None
+    body = rest[1:]
+    if body.endswith("\n"):
+        body = body[:-1]  # the newline the last `print` appended
+    lines = body.split("\n")
+    if not lines or any(not line for line in lines):
+        return None
+    if len(lines) > MAX_PROPERTIES:
         return None
 
     kinds: list[str] = []
