@@ -45,6 +45,12 @@ from orbit.runtime.context_manager import (
     plan_exact_context,
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
+from orbit.runtime.analysis_source_identity import (
+    SOURCE_REACQUISITION,
+    SourceEquivalence,
+    classify_artifacts,
+    classify_output,
+)
 from orbit.runtime.analysis_coverage import (
     COVERAGE_COMPLETE,
     COVERAGE_NOT_ELIGIBLE,
@@ -670,6 +676,61 @@ AUTONOMOUS_REPAIR_MESSAGE = (
 # already knows and which kinds of step can still change that, because the
 # alternative -- "already seen" with no route forward -- is what produced a run
 # that re-read one file nine times.
+def _source_reacquisition(
+    result: AnalysisResult, source: "AnalysisSource", covered_text: str | None
+) -> "SourceEquivalence | None":
+    """Whether this execution only handed back the source already supplied.
+
+    Gated on coverage: without it the model was never given the source, so
+    reading it is how the session learns what the artifact is -- ordinary,
+    necessary work. `covered_text` is None then and this returns None, leaving
+    every path below byte-identical to a run before this existed.
+
+    A successful action only. A failure has to reach the model as a failure,
+    and an action that was bounded or errored has not proven anything about
+    what it would have produced.
+
+    stderr must be empty and there must be nothing else printed: the proof is
+    "this output is the source and nothing else", so a warning or a computed
+    line means the observation carries something the session does not hold.
+    """
+    if covered_text is None or not result.ok or result.stderr:
+        return None
+    equivalence = classify_output(result.stdout, covered_text)
+    if equivalence is not None:
+        # Output proven to be only the source. An artifact alongside it would
+        # be new state regardless of what it holds, so it defeats the proof.
+        return equivalence if not result.artifacts else None
+    if result.stdout.strip():
+        # Something was printed that is not the source. Whatever else the
+        # action did, this observation is not a bare reacquisition.
+        return None
+    return classify_artifacts(
+        list(result.artifacts), source.sha256, source.size_bytes
+    )
+
+
+# What the model is told when an execution only recovered the covered source.
+#
+# Deliberately a tool result rather than a refusal: the program ran, this is
+# what it produced, and reporting an error would be false. It names the
+# recognizer so the model can see WHY the output added nothing -- and says
+# where the source already is, because "you already have this" without a
+# pointer is what produced the re-reading in the first place.
+#
+# It does not say the analysis is finished, and does not suggest a direction:
+# what to do instead is the model's decision, not the runtime's.
+def _source_reacquisition_observation(equivalence: "SourceEquivalence") -> str:
+    return (
+        f"{SOURCE_REACQUISITION.upper()}: this output is the complete artifact "
+        f"source, which Orbit already supplied in full earlier in this "
+        f"conversation ({equivalence.detail}). It was executed, and it "
+        "established nothing the session did not already hold.\n"
+        "The source above is the same bytes; re-read it there rather than "
+        "running another program to produce it."
+    )
+
+
 def _no_progress_observation(evidence_id: str) -> str:
     return (
         "NO_PROGRESS: this exact observation already exists as evidence "
@@ -1168,6 +1229,24 @@ class AnalysisRuntime:
             for message in self.messages
             if message.get("role") == "user"
         )
+
+    @property
+    def covered_source_text(self) -> str | None:
+        """The source Orbit supplied, or None when it supplied none.
+
+        Read from the snapshot rather than parsed back out of the message: the
+        artifact is the authority for its own bytes, and re-deriving them from
+        a rendered prompt would compare the model's view against itself. The
+        history only decides WHETHER coverage happened; the snapshot decides
+        what was covered.
+        """
+        if not self.source_covered:
+            return None
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            return None
+        return decode_artifact(raw)
 
     def __post_init__(self) -> None:
         if self.workspace is None:
@@ -1841,58 +1920,61 @@ class AnalysisRuntime:
                 diagnostics=_diagnostics(detail),
             )
 
+        equivalence = _source_reacquisition(
+            result, self.source, self.covered_source_text
+        )
+        if equivalence is not None:
+            # The program ran; what it produced is the source the session was
+            # already given. Recorded as evidence like any other execution --
+            # nothing is hidden, and the raw output stays re-attestable -- but
+            # it does not count as a useful action and it feeds the existing
+            # NO_PROGRESS path, because an observation that establishes nothing
+            # new is exactly what that path is for.
+            #
+            # `actions_executed` is deliberately not incremented: the action
+            # budget bounds work that can advance an analysis, and this cannot.
+            # The model call it cost is still counted, so the run stays bounded.
+            self.suppressed_duplicates += 1
+            record, _raw = self._record_action_evidence(
+                calls[0],
+                result,
+                _source_reacquisition_observation(equivalence),
+                extra={
+                    "suppressed_as": SOURCE_REACQUISITION,
+                    "suppression_recognizer": equivalence.recognizer,
+                    "suppression_detail": equivalence.detail,
+                },
+            )
+            # Appended like any other tool result: the model made a call and
+            # the history must answer it. Skipping this would leave an
+            # assistant turn with no matching result, which admission refuses
+            # outright -- the turn would be structurally invalid, not merely
+            # unhelpful.
+            self._append_tool_result(
+                calls[0],
+                _source_reacquisition_observation(equivalence),
+                record=record,
+            )
+            return AnalysisStepResult(
+                model_calls=1,
+                action_attempted=True,
+                # It executed -- saying otherwise would misreport what the
+                # sandbox did -- but it produced no useful evidence, which
+                # `suppressed_duplicate_of` is what the ledger reads.
+                action_executed=False,
+                assistant_text=response.content or "",
+                result=result,
+                evidence=record,
+                diagnostics=_diagnostics(None),
+                suppressed_duplicate_of=record.evidence_id,
+            )
+
         self.actions_executed += 1
         observation, truncated, full_chars = _bounded_observation(result)
 
-        # The full output goes to the evidence sidecar, which lives on disk and
-        # is only ever surfaced to a prompt through bounded excerpts. Recording
-        # the truncated text here instead would leave `observation_full_chars`
-        # describing bytes that no longer exist anywhere.
-        # Provenance is what `reattest_exact` checks before it will hand back
-        # durable evidence: without all three fields a record is stored but
-        # can never be re-attested. The identity is the model's own call id
-        # and this analyst turn -- nothing synthesised to satisfy the check.
-        provenance = self._provenance(calls[0])
-        raw_record = self.evidence_store.add(
-            f"{ANALYSIS_TOOL_NAME}_raw",
-            _raw_action_output(result),
-            metadata={
-                **provenance,
-                "analysis_source_sha256": self.source.sha256,
-                "code_sha256": result.code_sha256,
-                "kind": "raw_action_output",
-                "full_chars": full_chars,
-                "produced_by_phase": "analysis_action_raw",
-            },
-        )
-        record = self.evidence_store.add(
-            ANALYSIS_TOOL_NAME,
-            observation,
-            metadata={
-                **provenance,
-                "analysis_source_sha256": self.source.sha256,
-                "analysis_source_bytes": self.source.size_bytes,
-                "original_path": self.source.original_path,
-                "code_sha256": result.code_sha256,
-                "input_sha256": result.input_sha256,
-                "status": result.status,
-                "exit_status": result.exit_status,
-                "bound_exceeded": result.bound_exceeded,
-                "observation_truncated": truncated,
-                "observation_full_chars": full_chars,
-                "raw_output_evidence_id": raw_record.evidence_id,
-                "artifacts": [
-                    {
-                        "name": a.name,
-                        "size_bytes": a.size_bytes,
-                        "sha256": a.sha256,
-                        # Stable virtual handle: the host path stays an
-                        # implementation detail and never reaches the model.
-                        "handle": f"{WORK_MOUNT}/{a.name}",
-                    }
-                    for a in result.artifacts
-                ],
-            },
+        record, raw_record = self._record_action_evidence(
+            calls[0], result, observation,
+            truncated=truncated, full_chars=full_chars,
         )
         # Remember the experiment, keyed by the identity computed before it
         # ran, so a later request for the same one is answerable without
@@ -1919,6 +2001,80 @@ class AnalysisRuntime:
             artifact_handles=tuple(f"{WORK_MOUNT}/{a.name}" for a in result.artifacts),
             diagnostics=_diagnostics(None),
         )
+
+    def _record_action_evidence(
+        self,
+        call: dict[str, Any],
+        result: AnalysisResult,
+        observation: str,
+        *,
+        truncated: bool = False,
+        full_chars: int | None = None,
+        extra: "dict[str, object] | None" = None,
+    ) -> "tuple[EvidenceRecord, EvidenceRecord]":
+        """Persist one execution's evidence, and return the model-facing record.
+
+        Shared by the ordinary path and by a suppressed source reacquisition,
+        so a suppressed action is recorded exactly as completely as any other:
+        the raw output keeps its own re-attestable record, the provenance is
+        the model's real call id and this analyst turn, and the artifacts are
+        listed. Suppression changes what the model is TOLD, never what the
+        store holds -- an audit has to be able to see what was suppressed and
+        check the claim.
+
+        The full output goes to the sidecar, which lives on disk and is only
+        ever surfaced to a prompt through bounded excerpts. Recording the
+        truncated text instead would leave `observation_full_chars` describing
+        bytes that no longer exist anywhere.
+        """
+        provenance = self._provenance(call)
+        raw_record = self.evidence_store.add(
+            f"{ANALYSIS_TOOL_NAME}_raw",
+            _raw_action_output(result),
+            metadata={
+                **provenance,
+                "analysis_source_sha256": self.source.sha256,
+                "code_sha256": result.code_sha256,
+                "kind": "raw_action_output",
+                "full_chars": (
+                    len(observation) if full_chars is None else full_chars
+                ),
+                "produced_by_phase": "analysis_action_raw",
+            },
+        )
+        record = self.evidence_store.add(
+            ANALYSIS_TOOL_NAME,
+            observation,
+            metadata={
+                **provenance,
+                "analysis_source_sha256": self.source.sha256,
+                "analysis_source_bytes": self.source.size_bytes,
+                "original_path": self.source.original_path,
+                "code_sha256": result.code_sha256,
+                "input_sha256": result.input_sha256,
+                "status": result.status,
+                "exit_status": result.exit_status,
+                "bound_exceeded": result.bound_exceeded,
+                "observation_truncated": truncated,
+                "observation_full_chars": (
+                    len(observation) if full_chars is None else full_chars
+                ),
+                "raw_output_evidence_id": raw_record.evidence_id,
+                "artifacts": [
+                    {
+                        "name": a.name,
+                        "size_bytes": a.size_bytes,
+                        "sha256": a.sha256,
+                        # Stable virtual handle: the host path stays an
+                        # implementation detail and never reaches the model.
+                        "handle": f"{WORK_MOUNT}/{a.name}",
+                    }
+                    for a in result.artifacts
+                ],
+                **(extra or {}),
+            },
+        )
+        return record, raw_record
 
     def plan_source_coverage(self) -> SourceCoverage:
         """Decide whether the whole artifact can be supplied in one call.
