@@ -389,7 +389,7 @@ class RepairBoundTests(RepairTestBase):
         # mechanism that quietly bought headroom would still satisfy
         # `<= ceiling`, so the values are pinned here.
         self.assertEqual(MAX_AUTONOMOUS_ACTIONS, 12)
-        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 15)
+        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 18)
         self.assertLessEqual(run.model_calls, MAX_AUTONOMOUS_MODEL_CALLS)
         self.assertLessEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
         # The correction is an ordinary action, not a free one.

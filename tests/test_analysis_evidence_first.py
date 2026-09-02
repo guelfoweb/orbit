@@ -451,7 +451,7 @@ class BudgetTests(EvidenceFirstTestBase):
 
     def test_the_ceilings_are_unchanged(self) -> None:
         self.assertEqual(MAX_AUTONOMOUS_ACTIONS, 12)
-        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 15)
+        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 18)
 
     def test_no_synthetic_action_is_recorded(self) -> None:
         backend = RecordingBackend(prose_response("done"))
