@@ -166,10 +166,17 @@ def format_analysis_step(
         lines.append(f"action refused: {result.rejection}")
     elif result.action_executed and result.result is not None:
         lines.append(_action_summary(result))
+    elif result.suppressed_duplicate_of is not None and result.result is not None:
+        # A suppressed reacquisition DID run: it produced no useful evidence,
+        # which is a different thing from not having executed. Summarised like
+        # any other execution so the analyst sees what it wrote and can reach
+        # its evidence, with the suppression stated rather than implied.
+        lines.append(_action_summary(result))
+        lines.append(f"no new evidence: {result.suppressed_duplicate_of}")
     elif result.action_attempted:
         lines.append("action attempted but not executed")
     if result.artifact_handles and not (
-        result.action_executed and result.result is not None and result.result.artifacts
+        result.result is not None and result.result.artifacts
     ):
         # Only when the preview did not already list them with size and digest;
         # printing both says the same thing twice.
