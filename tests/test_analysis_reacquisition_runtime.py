@@ -99,6 +99,15 @@ def _result(stdout="", stderr="", status="ok", artifacts=()):
     )
 
 
+def _replaced_result(stdout: str) -> AnalysisResult:
+    """An `ok` result whose decode had to substitute U+FFFD."""
+    return AnalysisResult(
+        status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+        stdout=stdout, stderr="", exit_status=0, duration_seconds=0.1,
+        output_replaced=True,
+    )
+
+
 def _truncated_result(stdout: str) -> AnalysisResult:
     """An `ok` result the sandbox had to cut. Truncation alone is not `bounded`."""
     return AnalysisResult(
@@ -257,6 +266,40 @@ class FailClosedRuntimeTests(_Case):
         self.assertIsNone(step.suppressed_duplicate_of)
         self.assertTrue(step.action_executed)
         self.assertEqual(runtime.actions_executed, before + 1)
+
+    def test_replaced_output_is_never_suppressed(self) -> None:
+        """Decoding substituted U+FFFD, so the text is not what was printed.
+
+        The same defect as truncation by a different route. `errors="replace"`
+        turns non-UTF-8 bytes into U+FFFD, and an artifact that itself contains
+        U+FFFD -- legal UTF-8, so coverable -- would then compare equal to
+        output whose bytes never matched it. The comparison would be over an
+        altered view of what the action produced.
+        """
+        source = "he\ufffdlo\n"
+        runtime = self._runtime(source.encode())
+        self._cover(runtime)
+        before = runtime.actions_executed
+        step = self._step(runtime, _replaced_result(source))
+        self.assertIsNone(step.suppressed_duplicate_of)
+        self.assertTrue(step.action_executed)
+        self.assertEqual(runtime.actions_executed, before + 1)
+
+    def test_the_same_output_without_replacement_is_suppressed(self) -> None:
+        """The control: only the substitution changes the verdict."""
+        source = "he\ufffdlo\n"
+        runtime = self._runtime(source.encode())
+        self._cover(runtime)
+        step = self._step(runtime, _result(stdout=source))
+        self.assertIsNotNone(step.suppressed_duplicate_of)
+
+    def test_the_sandbox_detects_substitution_by_round_trip(self) -> None:
+        """Lossless re-encoding is exactly the absence of replacement."""
+        for raw, expected in ((b"he\xfflo\n", True), (b"hello\n", False),
+                              ("héllo\n".encode(), False)):
+            with self.subTest(raw=raw):
+                decoded = raw.decode("utf-8", "replace")
+                self.assertEqual(decoded.encode("utf-8") != raw, expected)
 
     def test_the_same_output_untruncated_is_suppressed(self) -> None:
         """The control: only truncation changes the verdict."""

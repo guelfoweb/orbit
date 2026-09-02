@@ -696,6 +696,13 @@ def _source_reacquisition(
     """
     if covered_text is None or not result.ok or result.stderr:
         return None
+    if result.output_replaced:
+        # Decoding substituted U+FFFD for bytes that were not UTF-8, so the
+        # recorded text is not what the program printed. An artifact that
+        # itself contains U+FFFD would then compare equal to output that never
+        # matched it -- the same defect as truncation, arriving by a different
+        # route: the comparison is over an altered view of the output.
+        return None
     if result.truncated:
         # The sandbox cut this output at its byte cap, so what is being
         # compared is a PREFIX, not the output. A program that printed the

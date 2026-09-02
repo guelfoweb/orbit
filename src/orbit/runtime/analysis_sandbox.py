@@ -95,6 +95,11 @@ class AnalysisResult:
     exit_status: int | None
     duration_seconds: float
     truncated: bool = False
+    # Whether decoding stdout/stderr had to substitute U+FFFD for bytes that
+    # were not UTF-8. The recorded text is then not what the program printed,
+    # so anything comparing it against other bytes is comparing an altered
+    # view and must decline rather than conclude.
+    output_replaced: bool = False
     bound_exceeded: str | None = None
     artifacts: tuple[DerivedArtifact, ...] = field(default_factory=tuple)
 
@@ -548,6 +553,17 @@ def execute_analysis(
         truncated = len(stdout_raw) + len(stderr_raw) > MAX_OUTPUT_BYTES
         stdout = stdout_raw[:MAX_OUTPUT_BYTES].decode("utf-8", "replace")
         stderr = stderr_raw[:MAX_OUTPUT_BYTES].decode("utf-8", "replace")
+        # Whether the decode above had to substitute. `errors="replace"` turns
+        # bytes that are not UTF-8 into U+FFFD, so the recorded text is not
+        # what the program printed -- and a caller comparing that text against
+        # something else would be comparing an altered view. Detected by
+        # re-encoding: the round trip is lossless exactly when nothing was
+        # replaced. Reported rather than repaired, because the raw bytes are
+        # genuinely not text and the honest answer is to say so.
+        replaced = (
+            stdout.encode("utf-8") != stdout_raw[:MAX_OUTPUT_BYTES]
+            or stderr.encode("utf-8") != stderr_raw[:MAX_OUTPUT_BYTES]
+        )
 
         if timed_out:
             status = "timeout"
@@ -567,6 +583,7 @@ def execute_analysis(
             exit_status=exit_status,
             duration_seconds=time.monotonic() - started,
             truncated=truncated,
+            output_replaced=replaced,
             bound_exceeded=bound_error,
             artifacts=artifacts,
         )
