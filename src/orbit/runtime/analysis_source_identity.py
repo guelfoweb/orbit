@@ -94,7 +94,10 @@ def _match_raw(candidate: str, source: str) -> bool:
 # A Python string literal, single- or double-quoted, with no adjacent
 # concatenation and no prefix (no f, r, b, u): exactly what `repr()` of a
 # `str` produces. Anything else is not a repr this will attempt.
-_REPR_LITERAL = re.compile(r"^(?P<quote>'|\")(?P<body>.*)(?P=quote)$", re.S)
+# `\A` and `\Z`, never `^`/`$`: with `re.S` a `$` also matches just BEFORE a
+# final newline, so `repr(x) + "\n"` would match with the newline silently
+# tolerated -- accepting a candidate that is the repr plus something else.
+_REPR_LITERAL = re.compile(r"\A(?P<quote>'|\")(?P<body>.*)(?P=quote)\Z", re.S)
 
 # The escapes `repr` actually emits for a `str`, and nothing else. A form this
 # does not list is not decoded -- it is a reason to refuse.
@@ -191,6 +194,13 @@ def _match_repr(candidate: str, source: str) -> bool:
 # line. The separator forms are fixed here rather than inferred, so a file
 # whose own lines begin with digits cannot make an arbitrary prefix look like
 # numbering -- the reconstruction below is what actually decides.
+#
+# The leading `[ \t]*` absorbs the right-alignment padding a formatter emits
+# (`f"{i:3}"`), and only that: it is whitespace that belongs to the number, not
+# to the line. Any non-whitespace character before the digits stops the line
+# matching at all, so nothing with real content can hide in front of a
+# listing -- verified for prefixes like `x`, `0`, `#` and ` 0: `, each of which
+# leaves the observation as ordinary evidence.
 _NUMBERED_LINE = re.compile(r"^[ \t]*(?P<number>\d+)(?P<sep>: | \| |\t|: |\. |  | )")
 
 

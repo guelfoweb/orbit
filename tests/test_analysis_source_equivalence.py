@@ -85,6 +85,19 @@ class ReprRecognizerTests(unittest.TestCase):
         awkward = "a\\b\tc\nd\re'f\"g\x00h\x1biéj\U0001f600k"
         self.assertEqual(decode_repr_literal(repr(awkward)), awkward)
 
+    def test_a_repr_with_more_than_one_trailing_newline_is_refused(self) -> None:
+        """`$` under `re.S` also matches before a final newline.
+
+        That made `repr(source) + "\\n\\n"` match with the extra newline
+        silently tolerated -- accepting a candidate that is the repr plus
+        something else. The pattern is anchored with `\\A`/`\\Z` instead.
+        """
+        self.assertIsNone(classify_output(repr(SOURCE) + "\n\n", SOURCE))
+        self.assertIsNone(classify_output(repr(SOURCE) + "\n \n", SOURCE))
+        self.assertIsNone(classify_output(repr(SOURCE) + " ", SOURCE))
+        # The single newline `print` adds is still accepted.
+        self.assertIsNotNone(classify_output(repr(SOURCE) + "\n", SOURCE))
+
     def test_a_repr_of_different_text_is_not_recognised(self) -> None:
         self.assertIsNone(classify_output(repr(SOURCE + "x") + "\n", SOURCE))
 
@@ -175,6 +188,24 @@ class NumberedRecognizerTests(unittest.TestCase):
             for n, line in zip(range(7, -1, -1), SOURCE.splitlines())
         )
         self.assertIsNone(classify_output(candidate, SOURCE))
+
+    def test_only_number_padding_is_absorbed_before_a_listing(self) -> None:
+        """Alignment whitespace belongs to the number; content does not.
+
+        `f"{i:3}"` right-aligns, so leading spaces are part of the number's own
+        rendering and absorbing them is reversible. Anything else in front --
+        a heading, a marker, a digit that is not the line number -- stops the
+        line matching and leaves the observation as evidence.
+        """
+        listing = "\n".join(
+            f"{i:3}: {line}" for i, line in enumerate(SOURCE.splitlines())
+        )
+        for padding in (" ", "\t", "  "):
+            with self.subTest(padding=padding):
+                self.assertIsNotNone(classify_output(padding + listing, SOURCE))
+        for content in ("x", " x", "0", " 0: ", "#", "== source ==\n"):
+            with self.subTest(content=content):
+                self.assertIsNone(classify_output(content + listing, SOURCE))
 
     def test_stripping_returns_none_rather_than_guessing(self) -> None:
         self.assertIsNone(strip_line_numbers("no numbers here\nat all"))
