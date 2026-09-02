@@ -151,6 +151,31 @@ class NumberedRecognizerTests(unittest.TestCase):
         lines.append("summary: 8 lines")
         self.assertIsNone(classify_output("\n".join(lines), SOURCE))
 
+    def test_wrong_numbers_are_refused_even_when_the_bodies_reconstruct(self) -> None:
+        """Consecutiveness is load-bearing on its own.
+
+        A deleted line changes the bodies too, so the equality check catches it
+        independently -- which means only numbers that are wrong while the text
+        is right can show that the consecutiveness check does any work. A
+        listing whose numbers do not count is not a listing of a whole file:
+        it could be a filtered view whose selection is itself the finding.
+        """
+        for numbers in ((0, 0, 0, 0, 0, 0, 0, 0), (0, 5, 9, 2, 1, 3, 4, 6),
+                        (1, 1, 1, 1, 1, 1, 1, 1)):
+            with self.subTest(numbers=numbers):
+                candidate = "\n".join(
+                    f"{n}: {line}"
+                    for n, line in zip(numbers, SOURCE.splitlines())
+                )
+                self.assertIsNone(classify_output(candidate, SOURCE))
+
+    def test_descending_numbers_are_refused(self) -> None:
+        candidate = "\n".join(
+            f"{n}: {line}"
+            for n, line in zip(range(7, -1, -1), SOURCE.splitlines())
+        )
+        self.assertIsNone(classify_output(candidate, SOURCE))
+
     def test_stripping_returns_none_rather_than_guessing(self) -> None:
         self.assertIsNone(strip_line_numbers("no numbers here\nat all"))
         self.assertIsNone(strip_line_numbers("single line"))

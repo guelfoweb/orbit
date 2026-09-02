@@ -275,6 +275,26 @@ class WithoutCoverageTests(_Case):
         self.assertTrue(step.action_executed)
         self.assertEqual(runtime.actions_executed, before + 1)
 
+    def test_a_copied_file_is_not_suppressed_without_coverage(self) -> None:
+        """The artifact recognizer compares digests, not covered text.
+
+        It never consults `covered_source_text`, so only the coverage gate
+        stops it firing on a session that was never given the source -- where
+        copying the artifact is ordinary, useful work. This is the case the
+        stdout recognizers cannot cover for, because they refuse a None source
+        on their own.
+        """
+        runtime = self._runtime()
+        copy = DerivedArtifact(
+            name="copy.py", size_bytes=len(SOURCE.encode()),
+            sha256=hashlib.sha256(SOURCE.encode()).hexdigest(),
+        )
+        before = runtime.actions_executed
+        step = self._step(runtime, _result(stdout="", artifacts=[copy]))
+        self.assertIsNone(step.suppressed_duplicate_of)
+        self.assertTrue(step.action_executed)
+        self.assertEqual(runtime.actions_executed, before + 1)
+
     def test_suppression_starts_only_after_coverage(self) -> None:
         runtime = self._runtime()
         first = self._step(runtime, _result(stdout=SOURCE + "\n"))
