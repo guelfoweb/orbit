@@ -651,11 +651,21 @@ class AutonomousLoopTests(_Case):
     """The loop ends on repeated no-progress rather than spending the budget."""
 
     def test_a_run_of_reacquisitions_stops_early(self) -> None:
+        """Suppression still bites on the uncontrolled path.
+
+        Planning is off here: this backend answers with prose and never
+        submits a control plan, so with the controller on the run would stop
+        as unsupported before any action -- which is correct, but it is a
+        different property. What this test is about is that a re-read produces
+        no useful progress, so it drives the path where actions actually run.
+        """
         runtime = self._runtime()
         with mock.patch.object(
             module, "execute_analysis", lambda **kw: _result(stdout=SOURCE + "\n")
         ):
-            run = runtime.run_autonomous("analyse", max_model_calls=8, finalize=False)
+            run = runtime.run_autonomous(
+                "analyse", max_model_calls=8, plan=False, finalize=False
+            )
         self.assertEqual(run.cover_calls, 1)
         self.assertEqual(run.actions_executed, 0)
         self.assertGreater(run.suppressed_duplicates, 0)
