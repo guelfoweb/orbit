@@ -45,6 +45,11 @@ from orbit.runtime.context_manager import (
     plan_exact_context,
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
+from orbit.runtime.analysis_source_dominance import (
+    SOURCE_DOMINATED,
+    SourceDominance,
+    classify_dominated,
+)
 from orbit.runtime.analysis_source_identity import (
     SOURCE_REACQUISITION,
     # Referenced only in quoted annotations, which `from __future__ import
@@ -681,7 +686,7 @@ AUTONOMOUS_REPAIR_MESSAGE = (
 # that re-read one file nine times.
 def _source_reacquisition(
     result: AnalysisResult, source: "AnalysisSource", covered_text: str | None
-) -> "SourceEquivalence | None":
+) -> "SourceEquivalence | SourceDominance | None":
     """Whether this execution only handed back the source already supplied.
 
     Gated on coverage: without it the model was never given the source, so
@@ -720,8 +725,14 @@ def _source_reacquisition(
         # be new state regardless of what it holds, so it defeats the proof.
         return equivalence if not result.artifacts else None
     if result.stdout.strip():
-        # Something was printed that is not the source. Whatever else the
-        # action did, this observation is not a bare reacquisition.
+        # Not the source alone. It may still be the source plus properties
+        # Orbit can recompute from it, which establishes nothing either -- but
+        # only when every component is explained and nothing was written.
+        dominated = classify_dominated(result.stdout, covered_text)
+        if dominated is not None and not result.artifacts:
+            return dominated
+        # Something was printed that is neither, so whatever else the action
+        # did, this observation is not a bare reacquisition.
         return None
     return classify_artifacts(
         list(result.artifacts), source.sha256, source.size_bytes
@@ -738,11 +749,33 @@ def _source_reacquisition(
 #
 # It does not say the analysis is finished, and does not suggest a direction:
 # what to do instead is the model's decision, not the runtime's.
-def _source_reacquisition_observation(equivalence: "SourceEquivalence") -> str:
+def _source_reacquisition_observation(
+    verdict: "SourceEquivalence | SourceDominance",
+) -> str:
+    """What the model is told when its output added nothing.
+
+    Two shapes, and the difference is worth stating: the output was the source
+    itself, or it was the source plus values Orbit recomputed from that same
+    source and found to match. In both cases the program ran and produced
+    exactly what it produced -- the note reports that, and says where those
+    bytes already are, because "you already have this" without a pointer is
+    what produced the re-reading in the first place.
+
+    It does not say the analysis is finished and does not suggest a direction:
+    what to do instead is the model's decision, not the runtime's.
+    """
+    dominated = isinstance(verdict, SourceDominance)
+    lead = (
+        "this output is the complete artifact source together with values "
+        "computed from it, all of which Orbit recomputed from the bytes it "
+        "already supplied and confirmed"
+        if dominated
+        else "this output is the complete artifact source, which Orbit "
+        "already supplied in full earlier in this conversation"
+    )
+    name = SOURCE_DOMINATED if dominated else SOURCE_REACQUISITION
     return (
-        f"{SOURCE_REACQUISITION.upper()}: this output is the complete artifact "
-        f"source, which Orbit already supplied in full earlier in this "
-        f"conversation ({equivalence.detail}). It was executed, and it "
+        f"{name.upper()}: {lead} ({verdict.detail}). It was executed, and it "
         "established nothing the session did not already hold.\n"
         "The source above is the same bytes; re-read it there rather than "
         "running another program to produce it."
@@ -1968,9 +2001,24 @@ class AnalysisRuntime:
                 result,
                 _source_reacquisition_observation(equivalence),
                 extra={
-                    "suppressed_as": SOURCE_REACQUISITION,
-                    "suppression_recognizer": equivalence.recognizer,
+                    "suppressed_as": (
+                        SOURCE_DOMINATED
+                        if isinstance(equivalence, SourceDominance)
+                        else SOURCE_REACQUISITION
+                    ),
+                    "suppression_recognizer": (
+                        equivalence.representation
+                        if isinstance(equivalence, SourceDominance)
+                        else equivalence.recognizer
+                    ),
                     "suppression_detail": equivalence.detail,
+                    # Which recomputed properties were verified, so an audit can
+                    # redo each one against the artifact rather than trust the
+                    # verdict. Empty for exact equivalence, which proves no
+                    # properties.
+                    "verified_properties": list(
+                        getattr(equivalence, "properties", ())
+                    ),
                 },
             )
             # Appended like any other tool result: the model made a call and
