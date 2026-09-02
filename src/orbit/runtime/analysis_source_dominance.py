@@ -304,13 +304,19 @@ def classify_dominated(candidate: str, source: str) -> SourceDominance | None:
     if not rest.strip():
         return None
 
-    # Exactly one leading newline is expected -- the separator between the
-    # source and the first property -- and nothing else may be blank. Dropping
-    # empty lines would be tolerant parsing: a run of them is bytes the program
-    # printed that this grammar does not name.
-    if not rest.startswith("\n"):
+    # A property must begin on its own line, and exactly one newline may
+    # separate it from the source. Two spellings produce that: `print(data)`
+    # appends a newline of its own, and `sys.stdout.write(data)` on a source
+    # that already ends in one does not -- both leave the property at the start
+    # of a line, and requiring the extra newline would silently miss the second,
+    # which is a form the model actually uses. Anything else, a space or a tab
+    # or no separator at all, leaves the boundary to whatever the text allows.
+    if rest.startswith("\n"):
+        body = rest[1:]
+    elif source.endswith("\n"):
+        body = rest
+    else:
         return None
-    body = rest[1:]
     if body.endswith("\n"):
         body = body[:-1]  # the newline the last `print` appended
     lines = body.split("\n")

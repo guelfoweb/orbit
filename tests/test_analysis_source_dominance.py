@@ -446,6 +446,105 @@ class ComplexityTests(unittest.TestCase):
         )
 
 
+class PrefixValueTests(unittest.TestCase):
+    """A value that is a proper PREFIX of the right one is a different value.
+
+    The comparison must be equality. `startswith` is a plausible slip and a
+    dangerous one: a truncated digest and a shortened count are facts the
+    session does not hold, so accepting them suppresses real information. The
+    existing near-miss tests all use wrong-by-delta or wrong-shaped values,
+    which a prefix comparison still rejects -- only a genuine prefix shows the
+    difference.
+    """
+
+    def test_a_truncated_digest_is_useful(self) -> None:
+        digest = _sha(SOURCE)
+        for width in (1, 8, 16, 32, len(digest) - 1):
+            with self.subTest(width=width):
+                self.assertIsNone(
+                    classify_dominated(f"{SOURCE}\nsha256: {digest[:width]}\n", SOURCE)
+                )
+
+    def test_a_truncated_length_is_useful(self) -> None:
+        length = str(len(SOURCE))
+        self.assertGreater(len(length), 1)
+        for width in range(1, len(length)):
+            with self.subTest(width=width):
+                self.assertIsNone(
+                    classify_dominated(f"{SOURCE}\nLEN: {length[:width]}\n", SOURCE)
+                )
+
+    def test_a_truncated_line_count_is_useful(self) -> None:
+        source = "\n".join(f"line {i}" for i in range(120)) + "\n"
+        count = str(len(source.split("\n")))
+        self.assertGreater(len(count), 1)
+        for width in range(1, len(count)):
+            with self.subTest(width=width):
+                self.assertIsNone(
+                    classify_dominated(
+                        f"{source}\nTOTAL_LINES: {count[:width]}\n", source
+                    )
+                )
+
+    def test_a_truncated_hex_range_is_useful(self) -> None:
+        hexed = SOURCE[:20].encode("utf-8").hex()
+        for width in (2, 10, len(hexed) - 2):
+            with self.subTest(width=width):
+                self.assertIsNone(
+                    classify_dominated(f"{SOURCE}\nHEX20: {hexed[:width]}\n", SOURCE)
+                )
+
+    def test_an_empty_value_is_useful(self) -> None:
+        """The degenerate prefix, which every value starts with."""
+        for label in ("LEN", "TOTAL_LINES", "sha256"):
+            with self.subTest(label=label):
+                self.assertIsNone(
+                    classify_dominated(f"{SOURCE}\n{label}: \n", SOURCE)
+                )
+
+
+class SeparatorTests(unittest.TestCase):
+    """Exactly one newline between the source and the first property.
+
+    Two spellings produce it: `print(data)` appends a newline of its own, and
+    `sys.stdout.write(data)` on a source that already ends in one does not.
+    Both leave the property at the start of a line; requiring the extra newline
+    would miss the second, which is a form the model actually uses.
+    """
+
+    SOURCE_NL = "import os\nprint(1)\n"
+    SOURCE_NO_NL = "import os\nprint(1)"
+
+    def test_print_style_and_write_style_are_both_accepted(self) -> None:
+        source = self.SOURCE_NL
+        self.assertIsNotNone(
+            classify_dominated(f"{source}\nLEN: {len(source)}\n", source)
+        )
+        self.assertIsNotNone(
+            classify_dominated(f"{source}LEN: {len(source)}\n", source)
+        )
+
+    def test_a_source_without_a_newline_needs_the_separator(self) -> None:
+        """Nothing put the property on its own line, so the boundary is unproven."""
+        source = self.SOURCE_NO_NL
+        self.assertIsNone(
+            classify_dominated(f"{source}LEN: {len(source)}\n", source)
+        )
+        self.assertIsNotNone(
+            classify_dominated(f"{source}\nLEN: {len(source)}\n", source)
+        )
+
+    def test_other_separators_stay_useful(self) -> None:
+        for source in (self.SOURCE_NL, self.SOURCE_NO_NL):
+            for gap in (" ", "\t", "  ", " \n"):
+                with self.subTest(source=source[-6:], gap=repr(gap)):
+                    self.assertIsNone(
+                        classify_dominated(
+                            f"{source}{gap}LEN: {len(source)}\n", source
+                        )
+                    )
+
+
 class SecurityTests(unittest.TestCase):
     """R. Bounded, deterministic, non-executing."""
 
