@@ -247,12 +247,21 @@ class FailClosedRuntimeTests(_Case):
         self._cover(runtime)
         self._assert_useful(runtime, _result(stdout=SOURCE.replace("os", "0s", 1)))
 
-    def test_source_plus_a_computed_line_stays_useful(self) -> None:
-        """The live pattern: the source AND something worked out."""
+    def test_source_plus_a_semantic_line_stays_useful(self) -> None:
+        """The source AND something Orbit cannot recompute from it.
+
+        A count of functions requires parsing the language, which is analysis.
+        It stays useful however trivially true the number is -- the boundary is
+        what Orbit can derive from bytes, not whether the value is correct.
+
+        The narrower case -- the source plus a value Orbit CAN recompute, such
+        as its length -- is dominated rather than useful, and is covered by
+        `test_analysis_source_dominance`.
+        """
         runtime = self._runtime()
         self._cover(runtime)
         self._assert_useful(
-            runtime, _result(stdout=f"{SOURCE}\nLEN: {len(SOURCE)}")
+            runtime, _result(stdout=f"{SOURCE}\nFUNCTIONS: 1")
         )
 
     def test_partial_source_stays_useful(self) -> None:
