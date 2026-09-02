@@ -291,6 +291,26 @@ class FailClosedTests(unittest.TestCase):
             classify_dominated(f"=== source ===\n{SOURCE}\nLEN: {len(SOURCE)}\n", SOURCE)
         )
 
+    def test_a_property_must_begin_on_its_own_line(self) -> None:
+        """The separator is part of the grammar, not incidental formatting.
+
+        `print(data)` then `print("LEN:", n)` puts a newline between them.
+        Without requiring it, output where the property is merely appended --
+        after a space, or with no separator that the source itself did not
+        supply -- would be accepted, and the boundary between the source and
+        what follows it would be whatever the text happened to allow.
+        """
+        for observed in (
+            f"{SOURCE} LEN: {len(SOURCE)}\n",
+            f"{SOURCE}\tLEN: {len(SOURCE)}\n",
+            f"{SOURCE}  LEN: {len(SOURCE)}\n",
+        ):
+            with self.subTest(observed=observed[-24:]):
+                self.assertIsNone(classify_dominated(observed, SOURCE))
+        self.assertIsNotNone(
+            classify_dominated(f"{SOURCE}\nLEN: {len(SOURCE)}\n", SOURCE)
+        )
+
     def test_a_property_without_the_source_is_useful(self) -> None:
         self.assertIsNone(classify_dominated(f"LEN: {len(SOURCE)}\n", SOURCE))
 
@@ -359,14 +379,26 @@ class TrailingByteFidelityTests(unittest.TestCase):
         )
 
     def test_blank_lines_between_properties_are_unexplained(self) -> None:
-        """Tolerant parsing in a module that claims none."""
+        """Tolerant parsing in a module that claims none.
+
+        A blank line is a byte the program printed. Discarding it would mean
+        the observation contained something the grammar never accounted for,
+        which is the one thing a total proof cannot do -- and it is the seam
+        through which a line could later be smuggled.
+        """
         for observed in (
             f"{SOURCE}\n\nLEN: {len(SOURCE)}\n",
             f"{SOURCE}\nLEN: {len(SOURCE)}\n\n\n",
             f"{SOURCE}\nLEN: {len(SOURCE)}\n\nsha256: {_sha(SOURCE)}\n",
+            f"{SOURCE}\nLEN: {len(SOURCE)}\n\n",
         ):
             with self.subTest(observed=observed[-30:]):
                 self.assertIsNone(classify_dominated(observed, SOURCE))
+        # The control: exactly one separator and one trailing newline is the
+        # shape `print` produces, and it is accepted.
+        self.assertIsNotNone(
+            classify_dominated(f"{SOURCE}\nLEN: {len(SOURCE)}\n", SOURCE)
+        )
 
 
 class ComplexityTests(unittest.TestCase):
@@ -380,21 +412,27 @@ class ComplexityTests(unittest.TestCase):
     """
 
     def test_numbered_shaped_output_is_classified_in_linear_time(self) -> None:
+        """The costly shape: every prefix parses, none of them matches.
+
+        A trailing non-numbered line is cheap -- the strip fails at once on
+        every prefix. What is expensive is output that is numbered
+        consecutively all the way down and simply is not this source: each
+        prefix parses successfully and only the final comparison rejects it,
+        so a search over prefixes does the full parse once per line. The
+        candidate is kept inside `_too_large` so the search is genuinely
+        reached rather than short-circuited.
+        """
         import time
 
-        source = "x = 1\n" * 50
         timings = []
-        for count in (2000, 8000, 32000):
-            candidate = (
-                "\n".join(f"{i}: line {i} of output" for i in range(count))
-                + "\nTRAILING"
-            )
+        for count in (1000, 2000, 4000):
+            source = "\n".join(f"other {i}" for i in range(count)) + "\n"
+            candidate = "\n".join(f"{i}: line {i}" for i in range(count))
             started = time.monotonic()
-            classify_dominated(candidate, source)
+            self.assertIsNone(classify_dominated(candidate, source))
             timings.append(time.monotonic() - started)
-        # Well under a second even at 16x the smallest input; a quadratic
-        # implementation took minutes here.
-        self.assertLess(max(timings), 2.0)
+        # Quadratic here measured 0.8s / 2.2s / 9.9s; linear is milliseconds.
+        self.assertLess(max(timings), 1.0)
 
     def test_a_real_listing_is_still_recognised(self) -> None:
         source = "x = 1\n" * 50
