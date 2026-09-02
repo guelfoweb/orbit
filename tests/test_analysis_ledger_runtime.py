@@ -599,6 +599,73 @@ class TerminationAgainstAnInsatiableModelTests(_Case):
         self.assertLess(bounded.actions_executed, unbounded.actions_executed)
 
 
+class CapturedLivePlanReplayTests(_Case):
+    """The captured plan driving a real run, end to end.
+
+    Parsing the fixture proves the cap was the cause. This proves the
+    consequence: with the same reply the model actually sent, the ledger
+    engages, no repair round is spent, and the run converges to a report
+    instead of falling back to the unbounded loop.
+    """
+
+    FIXTURES = ROOT / "tests" / "fixtures"
+
+    def _captured(self, index: int) -> str:
+        path = self.FIXTURES / f"live_plan_{index}.json"
+        if not path.exists():
+            self.skipTest(f"captured plan {index} missing")
+        return path.read_text()
+
+    def _run_with(self, plan_text: str):
+        from orbit.runtime.analysis_sandbox import AnalysisResult
+
+        script = [("noted", None), (plan_text, None)]
+        for index in range(3):
+            script += [
+                (f"question: Q{index + 1}\nrunning", f"print({index})"),
+                (_resolved(f"Q{index + 1}", f"ev_{index}"), None),
+            ]
+        runtime = self._runtime(_Script(script))
+        counter = {"n": 0}
+
+        def distinct(**kwargs):
+            counter["n"] += 1
+            return AnalysisResult(
+                status="ok", code_sha256=f"{counter['n']:064d}",
+                input_sha256="i" * 64, stdout=f"FINDING {counter['n']}",
+                stderr="", exit_status=0, duration_seconds=0.1,
+            )
+
+        with mock.patch.object(module, "execute_analysis", distinct):
+            return runtime.run_autonomous("Analyse it.", finalize=False)
+
+    def test_the_first_captured_plan_engages_the_ledger(self) -> None:
+        run = self._run_with(self._captured(1))
+        self.assertEqual(run.cover_calls, 1)
+        self.assertEqual(run.plan_calls, 1, "no repair round should be spent")
+        self.assertEqual(run.initial_questions, 3)
+        self.assertEqual(run.actions_executed, 3)
+        self.assertEqual(run.rejected_free_actions, 0)
+        self.assertEqual(run.stop_reason, STOP_LEDGER_EXHAUSTED)
+
+    def test_the_second_captured_plan_engages_the_ledger(self) -> None:
+        run = self._run_with(self._captured(2))
+        self.assertEqual(run.plan_calls, 1)
+        self.assertEqual(run.initial_questions, 3)
+        self.assertEqual(run.stop_reason, STOP_LEDGER_EXHAUSTED)
+
+    def test_the_captured_plans_do_not_fall_back(self) -> None:
+        """The failure of live run #1, stated as the thing that must not recur."""
+        for index in (1, 2):
+            with self.subTest(plan=index):
+                run = self._run_with(self._captured(index))
+                self.assertGreater(run.initial_questions, 0)
+                self.assertNotEqual(run.stop_reason, module.STOP_MAX_ACTIONS)
+                self.assertNotEqual(
+                    run.stop_reason, module.STOP_MAX_MODEL_CALLS
+                )
+
+
 class LedgerDoesNotEraseKnowledgeTests(_Case):
     """§8. The ledger controls tool use, never what the model knows.
 
