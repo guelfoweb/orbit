@@ -1264,6 +1264,16 @@ class AnalysisRuntime:
             raw = self.source.snapshot_path.read_bytes()
         except OSError:
             return None
+        if hashlib.sha256(raw).hexdigest() != self.source.sha256:
+            # The bytes on disk are no longer the ones the session is pinned
+            # to, so they are not what the model was shown. The snapshot is
+            # 0400 inside a 0700 session directory and the sandbox refuses a
+            # changed read-only input, so this should be unreachable -- which
+            # is the reason to check it here rather than rely on that: the
+            # digest is already in hand, and comparing against the wrong bytes
+            # would suppress an observation on the strength of a file nobody
+            # covered.
+            return None
         return decode_artifact(raw)
 
     def __post_init__(self) -> None:

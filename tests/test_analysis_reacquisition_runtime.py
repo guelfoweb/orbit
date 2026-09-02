@@ -165,6 +165,32 @@ class CoveredSourceTextTests(_Case):
         del runtime.messages[checkpoint:]
         self.assertIsNone(runtime.covered_source_text)
 
+    def test_a_changed_snapshot_withdraws_the_covered_text(self) -> None:
+        """Compare against what was covered, not against whatever is on disk.
+
+        The snapshot is 0400 in a 0700 directory and the sandbox refuses a
+        changed read-only input, so this is not reachable from artifact
+        content -- which is exactly why it is checked by digest rather than
+        left to filesystem permissions.
+        """
+        runtime = self._runtime()
+        self._cover(runtime)
+        self.assertIsNotNone(runtime.covered_source_text)
+        path = runtime.source.snapshot_path
+        path.chmod(0o600)
+        path.write_bytes(b"import os\nsecret = 'BBBB'\n")
+        self.assertIsNone(runtime.covered_source_text)
+
+    def test_output_matching_a_swapped_snapshot_is_not_suppressed(self) -> None:
+        runtime = self._runtime()
+        self._cover(runtime)
+        swapped = "import os\nsecret = 'BBBB'\n"
+        path = runtime.source.snapshot_path
+        path.chmod(0o600)
+        path.write_bytes(swapped.encode())
+        step = self._step(runtime, _result(stdout=swapped))
+        self.assertIsNone(step.suppressed_duplicate_of)
+
     def test_a_binary_artifact_has_no_covered_text(self) -> None:
         runtime = self._runtime(b"\x00\xffbinary")
         self.assertIsNone(runtime.covered_source_text)
@@ -308,17 +334,71 @@ class FailClosedRuntimeTests(_Case):
                 decoded = raw.decode("utf-8", "replace")
                 self.assertEqual(decoded.encode("utf-8") != raw, expected)
 
-    def test_replacement_on_stdout_alone_is_detected(self) -> None:
-        """The stream the recognizers read must be guarded by itself."""
-        import inspect
+    def test_replacement_on_stdout_alone_blocks_suppression(self) -> None:
+        """Behaviour, not source text: stdout must be guarded by itself.
 
-        from orbit.runtime import analysis_sandbox
+        An implementation joining the two streams with `and` misses the case
+        that matters -- stdout replaced while stderr is clean -- and my earlier
+        test read the source rather than running it, so it did not notice.
+        This drives the real sandbox and asserts the gate's verdict.
+        """
+        source = "he\ufffdlo\n"
+        runtime = self._runtime(source.encode())
+        self._cover(runtime)
+        replaced_stdout_only = AnalysisResult(
+            status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+            stdout=source, stderr="", exit_status=0, duration_seconds=0.1,
+            output_replaced=True,
+        )
+        step = self._step(runtime, replaced_stdout_only)
+        self.assertIsNone(step.suppressed_duplicate_of)
 
-        source = inspect.getsource(analysis_sandbox)
-        marker = source[source.index("replaced = ("):]
-        marker = marker[: marker.index(")\n")]
-        self.assertIn("stdout.encode", marker)
-        self.assertIn("stderr.encode", marker)
+    def test_the_sandbox_itself_sets_the_replacement_flag(self) -> None:
+        """The flag must be computed, not merely honoured.
+
+        Asserting only on a hand-built result leaves the sandbox side unpinned:
+        an implementation that never sets the flag would pass while the defect
+        it guards returns.
+        """
+        from orbit.runtime.analysis_sandbox import execute_analysis
+
+        workspace = AnalysisWorkspace.create()
+        self.addCleanup(workspace.close)
+        artifact = workspace.source_root / "a.txt"
+        artifact.write_bytes(b"x\n")
+        result = execute_analysis(
+            source_path=artifact,
+            code="import sys\nsys.stdout.buffer.write(b'he\\xfflo\\n')\n",
+            scratch_dir=workspace.scratch_root,
+        )
+        if result.status != "ok":
+            self.skipTest(f"sandbox unavailable: {result.status}")
+        self.assertTrue(result.output_replaced)
+
+        clean = execute_analysis(
+            source_path=artifact,
+            code="print('hello')\n",
+            scratch_dir=workspace.scratch_root,
+        )
+        self.assertFalse(clean.output_replaced)
+
+    def test_the_sandbox_itself_sets_the_truncation_flag(self) -> None:
+        """Same reasoning: the BLOCKER's guard needs its producer pinned too."""
+        from orbit.runtime.analysis_sandbox import MAX_OUTPUT_BYTES, execute_analysis
+
+        workspace = AnalysisWorkspace.create()
+        self.addCleanup(workspace.close)
+        artifact = workspace.source_root / "a.txt"
+        artifact.write_bytes(b"x\n")
+        result = execute_analysis(
+            source_path=artifact,
+            code=f"print('x' * {MAX_OUTPUT_BYTES + 1000})\n",
+            scratch_dir=workspace.scratch_root,
+        )
+        if result.status not in ("ok", "bounded"):
+            self.skipTest(f"sandbox unavailable: {result.status}")
+        self.assertTrue(result.truncated)
+        self.assertLessEqual(len(result.stdout), MAX_OUTPUT_BYTES)
 
     def test_the_same_output_untruncated_is_suppressed(self) -> None:
         """The control: only truncation changes the verdict."""

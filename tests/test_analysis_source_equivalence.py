@@ -145,6 +145,34 @@ class NumberedRecognizerTests(unittest.TestCase):
             classify_output(self._numbered(SOURCE, start=1) + "\n", SOURCE)
         )
 
+    def test_a_partial_listing_is_refused_not_merely_unequal(self) -> None:
+        """The comparison must be equality, never containment.
+
+        A listing of the first two lines of a three-line file reconstructs to a
+        PREFIX of the source. An implementation testing `stripped in source`
+        would suppress it -- discarding the fact that the third line, which may
+        be the whole finding, was never shown.
+        """
+        source = "alpha\nbeta\nSECRET=evil.example.com\n"
+        partial = "1: alpha\n2: beta"
+        self.assertIsNone(classify_output(partial, source))
+        # And the same for a suffix, which containment would also accept.
+        self.assertIsNone(classify_output("1: beta\n2: SECRET=evil.example.com",
+                                          source))
+
+    def test_a_listing_starting_at_two_is_refused(self) -> None:
+        """Starting at 2 says line 1 was not shown: a filtered view.
+
+        Pinned separately from "any start" because the off-by-one is the
+        plausible mistake -- a recognizer accepting 0, 1 or 2 looks reasonable
+        and silently admits a listing that is missing its first line.
+        """
+        listing = "\n".join(
+            f"{i + 2:3}: {line}" for i, line in enumerate(SOURCE.splitlines())
+        )
+        self.assertIsNone(classify_output(listing, SOURCE))
+        self.assertIsNone(strip_line_numbers(listing))
+
     def test_a_listing_starting_elsewhere_is_refused(self) -> None:
         """Starting at 7 means this is a slice, not the whole file."""
         self.assertIsNone(classify_output(self._numbered(SOURCE, start=7), SOURCE))
