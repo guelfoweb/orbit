@@ -643,7 +643,7 @@ class AccountingTests(_Case):
         """O. No bound moved."""
         self.assertEqual(module.MAX_AUTONOMOUS_ACTIONS, 12)
         self.assertEqual(module.SOFT_MAX_AUTONOMOUS_ACTIONS, 8)
-        self.assertEqual(module.MAX_AUTONOMOUS_MODEL_CALLS, 15)
+        self.assertEqual(module.MAX_AUTONOMOUS_MODEL_CALLS, 18)
         self.assertEqual(module.MAX_CONSECUTIVE_NO_PROGRESS, 2)
 
 

@@ -45,6 +45,17 @@ from orbit.runtime.context_manager import (
     plan_exact_context,
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
+from orbit.runtime.analysis_question_ledger import (
+    MAX_CHILD_DEPTH,
+    _extract_json_object,
+    parse_resolution,
+    MAX_INITIAL_QUESTIONS,
+    RESOLVED,
+    LedgerError,
+    Question,
+    QuestionLedger,
+    parse_plan,
+)
 from orbit.runtime.analysis_source_dominance import (
     SOURCE_DOMINATED,
     SourceDominance,
@@ -403,8 +414,32 @@ MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS = 2
 # The closing report is not counted here: it is made outside the loop, is not
 # part of the investigation, and its exclusion is what keeps this number a
 # statement about analysis rather than about bookkeeping.
+#
+# The one-call-per-iteration premise above holds only for a run without a
+# question ledger. On the ledger path an executing iteration costs two -- the
+# step and the call that classifies its question -- and coverage and planning
+# cost one each up front, so the derivation needs a term for that overhead or
+# the action ceiling becomes unreachable and runs end on arithmetic rather than
+# on the action policy. That is the failure this constant's own history records:
+# 13 was raised to 15 precisely because a ceiling no run can hit makes its test
+# vacuous.
+#
+# The added term is a correction to a derived number, not a loosening of a
+# bound. The ledger path is still bounded first by its own finite question
+# count; the unledgered path is unaffected, because it spends none of this
+# overhead and still stops on the same action budget it always did.
+# Coverage, planning, and the classification each ledger action costs. Added
+# so the action policy decides when a run ends rather than arithmetic: measured
+# on the ledger path, 15 stops at 7 actions with "model call bound reached",
+# while 18 reaches the same 8 actions the unledgered path reaches and then
+# stops on the action budget. Raising further buys nothing.
+MAX_LEDGER_OVERHEAD_CALLS = 3
+
 MAX_AUTONOMOUS_MODEL_CALLS = (
-    MAX_AUTONOMOUS_ACTIONS + 1 + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS
+    MAX_AUTONOMOUS_ACTIONS
+    + 1
+    + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS
+    + MAX_LEDGER_OVERHEAD_CALLS
 )
 
 MAX_CONSECUTIVE_NO_PROGRESS = 2
@@ -562,6 +597,108 @@ def _cover_message(
         f"{delimiter}\n"
         f"{coverage.text}\n"
         f"{delimiter} end"
+    )
+
+
+# What the planning call asks for.
+#
+# One tools-free call, after the whole source has been supplied and before any
+# action runs. It asks for the questions the model CANNOT answer from what it
+# was given -- not for a plan of analysis, and not for findings. A finding
+# visible in the source needs no question and belongs in the report directly;
+# putting it here would turn the ledger into a work list and spend actions
+# re-deriving what is already known, which is the behaviour this exists to end.
+#
+# The empty answer is stated as legitimate and first, because it is the honest
+# reply for an artifact the source already explains, and a model that felt
+# obliged to name something would invent work.
+ANALYSIS_PLAN_INSTRUCTION = (
+    "You now have the complete source of this artifact. Before running "
+    "anything, list only the questions you CANNOT answer from that source and "
+    "the evidence already provided -- questions that need a program to be "
+    "executed to settle.\n"
+    "Reply with JSON: {\"questions\": [{\"id\": \"Q1\", \"question\": "
+    "\"...\", \"why\": \"...\"}]}\n"
+    "`why` states what fact is missing that only execution can supply.\n"
+    "If the source answers everything, reply {\"questions\": []} -- that is a "
+    "complete and correct answer, not a failure. Do not list analysis steps, "
+    "and do not list anything you can already conclude by reading the source: "
+    "you will report those directly, and they do not need a question.\n"
+    f"At most {MAX_INITIAL_QUESTIONS} questions."
+)
+
+# Sent when a planning reply could not be parsed. One attempt, then the run
+# falls back to the behaviour it had before this existed.
+ANALYSIS_PLAN_REPAIR = (
+    "That reply could not be read as the required JSON. Reply with exactly "
+    "one JSON object and nothing else: {\"questions\": [{\"id\": \"Q1\", "
+    "\"question\": \"...\", \"why\": \"...\"}]}, or {\"questions\": []} "
+    "if the source answers everything."
+)
+
+
+# `question: Q1` at the head of the reply, which is how an action names the
+# question it belongs to. Read from the assistant's own prose rather than added
+# to the tool schema: the schema is what the sandbox validates, and widening it
+# would change every action's shape for a bookkeeping field.
+_QUESTION_TAG = re.compile(r"question\s*[:=]\s*([A-Za-z][A-Za-z0-9_.-]{0,15})", re.I)
+
+
+def _named_question(assistant_text: str) -> str | None:
+    """The question id this reply claims, or None.
+
+    Only the first few lines are scanned. A model that mentions a question id
+    in passing halfway through its reasoning has not named the question its
+    action belongs to, and treating that as an association would let any
+    mention stand in for a declaration.
+    """
+    head = "\n".join((assistant_text or "").splitlines()[:4])
+    match = _QUESTION_TAG.search(head)
+    return match.group(1) if match else None
+
+
+def _ledger_instruction(ledger: "QuestionLedger") -> str:
+    """What the model is told before each RESOLVE step.
+
+    It names the open questions and requires the next action to belong to one
+    of them. The alternative -- letting an action be untethered -- is what the
+    live run did: seven actions, four of them re-deriving the source, none of
+    them caused by anything earlier.
+
+    It also says plainly what the ledger does not mean. A model told "only
+    these questions" could reasonably infer that nothing else may be reported,
+    which would trade an efficiency problem for a correctness one.
+    """
+    return (
+        "Open questions:\n"
+        f"{ledger.render()}\n"
+        "Run one execution for ONE open question. Begin your reply with "
+        "`question: <id>` naming it, then make the call.\n"
+        "After it runs you will be asked whether that question is resolved.\n"
+        "This list bounds only what you may RUN. Everything you can already "
+        "conclude from the source stays yours to report, whether or not it "
+        "appears here."
+    )
+
+
+# Asked after an action that belonged to a question.
+#
+# The classification is the model's, always. The runtime records it and never
+# infers it: a question the model could not settle stays open and is reported
+# open, which is the honest outcome and the one that keeps an unresolved fact
+# from disappearing.
+def _resolution_instruction(question_id: str) -> str:
+    return (
+        f"Did that resolve {question_id}? Reply with exactly one JSON object: "
+        f'{{"question": "{question_id}", "state": "resolved"|"still_open", '
+        '"evidence": "<evidence id from the result above>"}\n'
+        "Answer `still_open` if it did not settle the question -- that is a "
+        "real answer and the report will say so.\n"
+        "If the result raised a further question that must be settled to "
+        "answer this one, add "
+        '"child": {"id": "...", "question": "...", "why": "...", '
+        '"caused_by": "<evidence id>"} -- only when the evidence you just '
+        "obtained forced it, never for something merely interesting."
     )
 
 
@@ -801,6 +938,9 @@ ANALYSIS_AUTONOMY_ENV = "ORBIT_ANALYSIS_AUTONOMOUS"
 
 # Why a run stopped. Reported verbatim to the analyst.
 STOP_COMPLETE = "model returned prose with no action"
+# Every declared question answered or given up on. Says nothing about the
+# analysis being complete -- only that nothing left open needs a tool.
+STOP_LEDGER_EXHAUSTED = "no open question requires an action"
 STOP_NO_PROGRESS = "no new evidence"
 STOP_ERROR = "repeated action failures"
 STOP_MAX_ACTIONS = "action bound reached"
@@ -1008,6 +1148,15 @@ class AutonomousRunResult:
     # fell back to the ordinary workflow, which is the honest report of a
     # coverage attempt that could not be made complete.
     cover_calls: int = 0
+    # The planning call, and what the ledger ended up holding. Diagnostics for
+    # the analyst: `open_questions` is what the run could not settle, and it is
+    # deliberately not hidden -- a question nobody answered is a result.
+    plan_calls: int = 0
+    initial_questions: int = 0
+    child_questions: int = 0
+    resolved_questions: "tuple[str, ...]" = ()
+    open_questions: "tuple[str, ...]" = ()
+    rejected_free_actions: int = 0
 
     @property
     def source_covered(self) -> bool:
@@ -1265,6 +1414,10 @@ class AnalysisRuntime:
     # the list -- is what makes the pass once-only: an artifact with nothing to
     # decode must not be rescanned on every step.
     _transform_snapshot: str | None = None
+    # The question the action of the step in flight belongs to, set when the
+    # association is checked and read when its result is classified. Per-step
+    # scratch, not session state.
+    _pending_question: str | None = None
 
     @property
     def source_covered(self) -> bool:
@@ -1772,6 +1925,7 @@ class AnalysisRuntime:
         *,
         on_progress: Callable[[Any], None] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        ledger: "QuestionLedger | None" = None,
     ) -> AnalysisStepResult:
         """Run exactly one analyst-driven step and return control.
 
@@ -1844,6 +1998,31 @@ class AnalysisRuntime:
             )
 
         rejection = self._structural_rejection(calls) if calls else None
+        if rejection is None and calls and ledger is not None:
+            # An action must belong to a declared open question. Refused here,
+            # with the other structural refusals, because an untethered action
+            # is exactly the unbounded exploration the ledger exists to stop --
+            # and because refusing before the sandbox means nothing runs.
+            #
+            # This is a refusal, not a suppression: the model is told which
+            # questions are open and asked again. Nothing is hidden and no
+            # finding is lost, because the ledger governs what may RUN and
+            # never what may be concluded or reported.
+            named = _named_question(content)
+            if named is None:
+                ledger.rejected_free_actions += 1
+                rejection = (
+                    "no question named; begin the reply with `question: <id>` "
+                    f"for one of: {', '.join(ledger.open_ids) or 'none open'}"
+                )
+            elif not ledger.is_open(named):
+                ledger.rejected_free_actions += 1
+                rejection = (
+                    f"{named} is not an open question; open: "
+                    f"{', '.join(ledger.open_ids) or 'none'}"
+                )
+            else:
+                self._pending_question = named
         if rejection is not None and _stopped_at_generation_limit(response):
             # Same refusal path, a truer reason. The call is unparseable
             # because generation ended mid-JSON, not because the model
@@ -2317,6 +2496,179 @@ class AnalysisRuntime:
         self.messages.append({"role": "assistant", "content": content})
         return 1
 
+    def plan_questions(
+        self,
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> "tuple[QuestionLedger | None, int]":
+        """One tools-free call asking what still needs a tool. Returns (ledger, calls).
+
+        `None` means the run should proceed exactly as it did before this
+        existed: the reply could not be read even after one repair, or the
+        backend refused. That is the fail-closed direction, and it is the right
+        one -- a ledger nobody could parse is not a bound, and forcing a report
+        from an unreadable plan would end an analysis on a formatting error.
+
+        An empty ledger is not `None`. It is the model saying the source
+        answered everything, which is a legitimate reply and leads straight to
+        the report.
+        """
+        calls = 0
+        message = ANALYSIS_PLAN_INSTRUCTION
+        for attempt in range(2):
+            self.messages.append({"role": "user", "content": message})
+
+            def _capture(text: str) -> None:
+                if on_delta is not None and text:
+                    on_delta(text)
+
+            admitted = self._admit(
+                list(self.messages), max_tokens=self.effective_max_tokens, tools=[]
+            )
+            with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="off"):
+                response = self.backend.chat_stream(
+                    admitted,
+                    temperature=self.temperature,
+                    max_tokens=self.effective_max_tokens,
+                    tools=[],
+                    on_delta=_capture,
+                    on_progress=on_progress,
+                )
+            self.model_calls += 1
+            calls += 1
+            content = response.content or ""
+            if _unencodable(content):
+                content = content.encode("utf-8", "replace").decode("utf-8")
+            self.messages.append({"role": "assistant", "content": content})
+            try:
+                questions = parse_plan(content)
+            except LedgerError:
+                if attempt == 0:
+                    # One bounded repair. A second failure is a real one: the
+                    # model cannot produce the format, and retrying would spend
+                    # the ceiling learning that again.
+                    message = ANALYSIS_PLAN_REPAIR
+                    continue
+                return None, calls
+            ledger = QuestionLedger()
+            for question in questions:
+                try:
+                    ledger.add(question)
+                except LedgerError:
+                    return None, calls
+            return ledger, calls
+        return None, calls
+
+    def _classify_question(
+        self,
+        ledger: "QuestionLedger",
+        question_id: str,
+        step: "AnalysisStepResult",
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> int:
+        """Ask whether the action just run settled its question. Returns calls.
+
+        Tools off: this is bookkeeping about what happened, not another chance
+        to act. A reply that cannot be read leaves the question open, which is
+        the fail-closed direction -- an unreadable classification must never
+        close a question, and the run simply asks about it again or moves on
+        when the ceiling is reached.
+        """
+        self.messages.append(
+            {"role": "user", "content": _resolution_instruction(question_id)}
+        )
+
+        def _capture(text: str) -> None:
+            if on_delta is not None and text:
+                on_delta(text)
+
+        try:
+            admitted = self._admit(
+                list(self.messages), max_tokens=self.effective_max_tokens, tools=[]
+            )
+            with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="off"):
+                response = self.backend.chat_stream(
+                    admitted,
+                    temperature=self.temperature,
+                    max_tokens=self.effective_max_tokens,
+                    tools=[],
+                    on_delta=_capture,
+                    on_progress=on_progress,
+                )
+        except (ContextAdmissionError, TimeoutError, RecoverableBackendError):
+            # The question stays open and the turn is closed cleanly.
+            self._close_incomplete_turn()
+            return 0
+        self.model_calls += 1
+        content = response.content or ""
+        if _unencodable(content):
+            content = content.encode("utf-8", "replace").decode("utf-8")
+        self.messages.append({"role": "assistant", "content": content})
+
+        evidence_id = getattr(step.evidence, "evidence_id", "") or ""
+        try:
+            named, state, cited = parse_resolution(content, ledger)
+        except LedgerError:
+            return 1  # unreadable: the question stays open
+        if named != question_id:
+            return 1  # about a different question: not something to act on
+        if state == RESOLVED:
+            try:
+                ledger.resolve(question_id, cited or evidence_id)
+            except LedgerError:
+                return 1
+        self._accept_child_question(ledger, content, question_id, evidence_id)
+        return 1
+
+    def _accept_child_question(
+        self,
+        ledger: "QuestionLedger",
+        content: str,
+        parent_id: str,
+        evidence_id: str,
+    ) -> None:
+        """Admit a question the result forced, if it really was forced.
+
+        Every rejection here is silent by design: a child that does not qualify
+        simply is not added, and the run continues with the questions it had.
+        Telling the model why would invite it to rephrase until something
+        stuck, which is the unbounded growth this is meant to prevent.
+        """
+        try:
+            payload = _extract_json_object(content)
+        except LedgerError:
+            return
+        if not isinstance(payload, dict):
+            return
+        raw = payload.get("child")
+        if not isinstance(raw, dict):
+            return
+        parent = ledger.questions.get(parent_id)
+        if parent is None:
+            return
+        qid = raw.get("id")
+        text = raw.get("question")
+        why = raw.get("why")
+        caused_by = raw.get("caused_by") or evidence_id
+        if not all(isinstance(v, str) and v.strip() for v in (qid, text, why)):
+            return
+        try:
+            ledger.accept_child(
+                Question(
+                    id=qid.strip(),
+                    question=text.strip(),
+                    why=why.strip(),
+                    depth=parent.depth + 1,
+                    parent=parent_id,
+                    caused_by=caused_by,
+                )
+            )
+        except LedgerError:
+            return
+
     def run_autonomous(
         self,
         analyst_message: str,
@@ -2331,6 +2683,7 @@ class AnalysisRuntime:
         on_step: Callable[[AnalysisStepResult, ProgressRecord], None] | None = None,
         finalize: bool = True,
         cover: bool = True,
+        plan: bool = True,
     ) -> AutonomousRunResult:
         """Run analyst-directed steps until progress stops or a bound is hit.
 
@@ -2368,7 +2721,7 @@ class AnalysisRuntime:
         `model_calls` counts them all, so the figure reported is the figure
         spent.
         """
-        ledger = ProgressLedger()
+        progress_ledger = ProgressLedger()
         steps: list[AnalysisStepResult] = []
         records: list[ProgressRecord] = []
         model_calls = 0
@@ -2418,6 +2771,8 @@ class AnalysisRuntime:
         # These calls count against `max_model_calls` like every other call, so
         # a covered run is bounded exactly as an uncovered one is.
         covered_calls = 0
+        plan_calls = 0
+        ledger: "QuestionLedger | None" = None
         if cover and not self.source_covered:
             try:
                 coverage = self.plan_source_coverage()
@@ -2433,6 +2788,16 @@ class AnalysisRuntime:
                     # must not now tell the model to go and read it. The
                     # analyst's own line still governs what the run is for.
                     message = analyst_message
+                    # One tools-free call to declare what still needs a tool.
+                    # A ledger of None means it could not be read even after a
+                    # repair, and the run continues exactly as it did before
+                    # this existed -- an unreadable plan is not a bound.
+                    if plan and model_calls < max_model_calls:
+                        ledger, planning_calls = self.plan_questions(
+                            on_progress=on_progress, on_delta=on_delta
+                        )
+                        model_calls += planning_calls
+                        plan_calls = planning_calls
             except KeyboardInterrupt:
                 cancelled = True
                 stop_reason = STOP_CANCELLED
@@ -2468,8 +2833,20 @@ class AnalysisRuntime:
             if model_calls >= max_model_calls:
                 stop_reason = STOP_MAX_MODEL_CALLS
                 break
+            if ledger is not None and ledger.exhausted:
+                # Nothing declared is still open, so no action is left to run.
+                # This is not a claim that the analysis is complete: the whole
+                # source and every piece of evidence remain in the history, and
+                # the report below draws on them regardless of what was asked.
+                stop_reason = STOP_LEDGER_EXHAUSTED
+                break
             try:
-                step = self.step(message, on_progress=on_progress, on_delta=on_delta)
+                step = self.step(
+                    _ledger_instruction(ledger) if ledger is not None else message,
+                    on_progress=on_progress,
+                    on_delta=on_delta,
+                    ledger=ledger,
+                )
             except KeyboardInterrupt:
                 # What ran already stands. `step()` has committed its own
                 # history and evidence, or rewound nothing; the analyst keeps
@@ -2537,7 +2914,24 @@ class AnalysisRuntime:
                 # above, so the run remains bounded.
                 suppressed += 1
 
-            record = ledger.classify(len(records) + 1, step)
+            if (
+                ledger is not None
+                and step.action_executed
+                and self._pending_question is not None
+                and model_calls < max_model_calls
+            ):
+                # The classification is one ordinary model call, tools off:
+                # the model says whether its own action settled its own
+                # question. The runtime records the answer and never supplies
+                # it -- a question nobody could resolve stays open, and the
+                # report says so.
+                model_calls += self._classify_question(
+                    ledger, self._pending_question, step,
+                    on_progress=on_progress, on_delta=on_delta,
+                )
+            self._pending_question = None
+
+            record = progress_ledger.classify(len(records) + 1, step)
             records.append(record)
             if on_step is not None:
                 on_step(step, record)
@@ -2678,10 +3072,19 @@ class AnalysisRuntime:
         # Cancellation is the exception. The analyst asked for the run to stop,
         # and spending another model call -- minutes of generation -- to
         # summarise it is the opposite of stopping.
-        if not cancelled and finalize and steps:
+        # `steps` is no longer the only thing worth reporting on. A covered
+        # run whose plan was empty took no step at all -- the model said the
+        # source answered everything, which the planning instruction calls a
+        # correct reply -- and skipping the report there would turn the whole
+        # analysis into nothing, discarding a source the model was given in
+        # full. So a run that covered the source reports even with no steps.
+        if not cancelled and finalize and (steps or covered_calls):
             try:
                 final_report = self.report(
-                    question=self._final_question(stop_reason),
+                    question=self._final_question(
+                        stop_reason,
+                        tuple(ledger.open_ids) if ledger is not None else (),
+                    ),
                     on_progress=on_progress,
                     on_delta=on_delta,
                 )
@@ -2744,6 +3147,20 @@ class AnalysisRuntime:
             final_report=final_report,
             completion_shadow=shadow,
             cover_calls=covered_calls,
+            plan_calls=plan_calls,
+            initial_questions=(
+                sum(1 for q in ledger.questions.values() if q.depth == 0)
+                if ledger is not None else 0
+            ),
+            child_questions=(
+                sum(1 for q in ledger.questions.values() if q.depth > 0)
+                if ledger is not None else 0
+            ),
+            resolved_questions=tuple(ledger.resolved_ids) if ledger else (),
+            open_questions=tuple(ledger.open_ids) if ledger else (),
+            rejected_free_actions=(
+                ledger.rejected_free_actions if ledger is not None else 0
+            ),
         )
 
     def _write_shadow_final(
@@ -2870,19 +3287,40 @@ class AnalysisRuntime:
             )
 
     @staticmethod
-    def _final_question(stop_reason: str) -> str:
+    def _final_question(
+        stop_reason: str, open_questions: "tuple[str, ...]" = ()
+    ) -> str:
         """What the closing report is asked, given how the run ended.
 
         A run that ended naturally is simply asked to report. One that was cut
         short says so, because a reader who is not told that a bound intervened
         would read an incomplete analysis as a finished one.
+
+        Questions still open are named. A question the model could not settle
+        is a result, and leaving it out of the closing prompt would let the
+        report read as though everything had been answered -- which is the one
+        thing the ledger must never cause.
         """
-        if stop_reason == STOP_COMPLETE:
+        unresolved = ""
+        if open_questions:
+            unresolved = (
+                " These questions were raised and not resolved: "
+                f"{', '.join(open_questions)}. Say what remains unknown about "
+                "each rather than omitting them."
+            )
+        if stop_reason == STOP_COMPLETE and not unresolved:
             return ""
+        if stop_reason in (STOP_COMPLETE, STOP_LEDGER_EXHAUSTED):
+            # Not "cut short": the model finished, or nothing left needed a
+            # tool. Saying a bound intervened would be false.
+            return (
+                "Report what the evidence and the artifact source establish."
+                f"{unresolved}"
+            )
         return (
             "This analysis stopped before the model chose to finish "
             f"({stop_reason}). Report what the evidence establishes and what "
-            "remains unresolved."
+            f"remains unresolved.{unresolved}"
         )
 
     def _close_incomplete_turn(self) -> None:
@@ -3018,6 +3456,14 @@ class AnalysisRuntime:
         """
         appendix = self.deterministic_sections()
         records = self._reportable_records()
+        if not records and self.source_covered:
+            # No action ran, but the model was given the whole source. Reporting
+            # "no evidence" here would be false: the source IS the evidence, and
+            # a run whose plan was empty is exactly the case where nothing else
+            # exists. The covered history is the grounding instead.
+            return self._report_from_coverage(
+                question, on_progress=on_progress, on_delta=on_delta
+            )
         if not records:
             # Deterministic, and free: there is nothing to ground a report in,
             # and asking a model to say so would be a call spent on a fact the
@@ -3103,6 +3549,84 @@ class AnalysisRuntime:
                 duration_seconds=round(seconds, 3),
             ),
         )
+
+    def _report_from_coverage(
+        self,
+        question: str,
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> "AnalysisReport":
+        """Report on a covered source when no action produced evidence.
+
+        The case this exists for: coverage supplied the whole artifact and the
+        model declared no question needing a tool, so nothing ran and the
+        EvidenceStore is empty. Saying "no evidence has been collected" there
+        would be false -- the source was supplied in full, and it is the
+        evidence. Reporting from the conversation that already holds it is what
+        keeps an empty plan from erasing what the model was given.
+
+        Tools off, like every other report. The history is used as-is rather
+        than rebuilt from cards, because the covered source lives there and
+        nowhere else.
+        """
+        appendix = self.deterministic_sections()
+        asked = question.strip() or "Report on what the artifact establishes."
+        messages: list[Message] = [
+            *self.messages,
+            {
+                "role": "user",
+                "content": (
+                    f"{asked}\n"
+                    "No execution was performed. Base the report on the "
+                    "artifact source supplied above and say plainly what it "
+                    "does and what, if anything, could not be determined "
+                    "without running it."
+                ),
+            },
+        ]
+
+        def _capture(text: str) -> None:
+            if on_delta is not None and text:
+                on_delta(text)
+
+        try:
+            admitted = self._admit(
+                messages,
+                max_tokens=self.effective_max_tokens,
+                tools=[],
+                next_action_reserve=0,
+            )
+        except ContextAdmissionError:
+            # Never "no evidence has been collected": the source WAS supplied
+            # in full, and saying otherwise is the same false claim this
+            # method exists to prevent. What failed is composing the report,
+            # which is a different fact and the one worth reporting.
+            text = (
+                "The report could not be composed: the covered source no "
+                "longer fits the context window. The artifact was supplied in "
+                "full and nothing was executed, so no finding was lost -- but "
+                "none could be stated here either."
+            )
+            if appendix:
+                text = (
+                    f"{text} The deterministic transformations below are "
+                    f"unaffected.\n\n{appendix}"
+                )
+            return AnalysisReport(text=text, model_calls=0, evidence_ids=())
+        with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
+            response = self.backend.chat_stream(
+                admitted,
+                temperature=self.temperature,
+                max_tokens=self.effective_max_tokens,
+                tools=[],
+                on_delta=_capture,
+                on_progress=on_progress,
+            )
+        text = (response.content or "").strip() or "the report call produced no usable text"
+        if appendix:
+            text = f"{text}\n\n{appendix}"
+        return AnalysisReport(text=text, model_calls=1, evidence_ids=())
 
     def _reportable_records(self) -> list[EvidenceRecord]:
         """The action evidence a report may cite, oldest first and bounded.

@@ -625,13 +625,30 @@ class AutonomousIntegrationTests(_Case):
         self.assertEqual(self.backend.chat_calls, [])
 
     def test_tools_return_after_coverage(self) -> None:
-        """5/J. Nothing is permanently disabled."""
+        """5/J. Nothing is permanently disabled.
+
+        Planning follows coverage and is also tools-free -- it asks what still
+        needs a tool, so offering one there would invite the action it is
+        deciding about. What must hold is that tools return for the steps
+        after it, which is what this checks. With planning off, the call right
+        after coverage carries them.
+        """
         runtime = self._runtime(b"body\n")
         result = runtime.run_autonomous("Analyse it.", max_model_calls=4,
-                                        finalize=False)
+                                        plan=False, finalize=False)
         after = [c["tools"] for c in self.backend.chat_calls[result.cover_calls:]]
         self.assertTrue(after)
         self.assertTrue(all(after), "tools must be offered after COVER")
+
+    def test_planning_is_tools_free_and_steps_after_it_are_not(self) -> None:
+        """The full shape: cover and plan tools-free, then tools return."""
+        runtime = self._runtime(b"body\n")
+        result = runtime.run_autonomous("Analyse it.", max_model_calls=6,
+                                        finalize=False)
+        modes = [bool(c["tools"]) for c in self.backend.chat_calls]
+        overhead = result.cover_calls + result.plan_calls
+        self.assertEqual(modes[:overhead], [False] * overhead)
+        self.assertTrue(any(modes[overhead:]), "tools must return after planning")
 
     def test_a_later_analyst_step_still_offers_tools(self) -> None:
         """J. An explicit follow-up keeps normal tools."""
@@ -946,10 +963,30 @@ class CeilingTests(_Case):
         self.assertEqual(len(result.steps), 1)
 
     def test_two_calls_allow_coverage_and_a_step(self) -> None:
+        """With planning off, two calls buy coverage and one step.
+
+        Planning costs a call of its own, so with it on the same budget buys
+        coverage and a plan and leaves nothing to investigate with -- which is
+        why the ledger is sized against the full budget rather than this one.
+        """
         runtime = self._runtime(b"body\n")
-        result = runtime.run_autonomous("Go.", max_model_calls=2, finalize=False)
+        result = runtime.run_autonomous("Go.", max_model_calls=2, plan=False,
+                                        finalize=False)
         self.assertEqual(result.cover_calls, 1)
         self.assertEqual(len(result.steps), 1)
+
+    def test_planning_costs_calls_of_its_own(self) -> None:
+        """Planning spends from the same budget as everything else.
+
+        This backend answers with prose, so the plan is unreadable and the one
+        bounded repair fires -- two calls, after which the run falls back to
+        the unbounded path with nothing left to spend.
+        """
+        runtime = self._runtime(b"body\n")
+        result = runtime.run_autonomous("Go.", max_model_calls=3, finalize=False)
+        self.assertEqual(result.cover_calls, 1)
+        self.assertEqual(result.plan_calls, 2)
+        self.assertEqual(result.initial_questions, 0)
 
 
 class PinnedArtifactTests(_Case):
