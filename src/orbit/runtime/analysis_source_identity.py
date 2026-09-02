@@ -208,7 +208,7 @@ def _match_repr(candidate: str, source: str) -> bool:
 # and keeps the conversion total.
 _MAX_LINE_NUMBER_DIGITS = 9
 _NUMBERED_LINE = re.compile(
-    r"\A[ \t]*(?P<number>\d{1,%d})(?P<sep>: | \| |\t|: |\. |  | )"
+    r"\A[ \t]*(?P<number>\d{1,%d})(?P<sep>: | \| |\t|\. |  | )"
     % _MAX_LINE_NUMBER_DIGITS
 )
 

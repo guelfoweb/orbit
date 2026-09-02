@@ -99,6 +99,15 @@ def _result(stdout="", stderr="", status="ok", artifacts=()):
     )
 
 
+def _truncated_result(stdout: str) -> AnalysisResult:
+    """An `ok` result the sandbox had to cut. Truncation alone is not `bounded`."""
+    return AnalysisResult(
+        status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+        stdout=stdout, stderr="", exit_status=0, duration_seconds=0.1,
+        truncated=True,
+    )
+
+
 class _Case(unittest.TestCase):
     def _runtime(self, data: bytes = None, backend=None) -> AnalysisRuntime:
         data = SOURCE.encode() if data is None else data
@@ -228,6 +237,33 @@ class FailClosedRuntimeTests(_Case):
         self._assert_useful(
             runtime, _result(stdout=SOURCE, stderr="warning: deprecated")
         )
+
+    def test_truncated_output_is_never_suppressed(self) -> None:
+        """A prefix proves nothing about what was cut off.
+
+        The sandbox caps stdout and leaves `status` as "ok", so a program that
+        printed the source and THEN its findings has exactly the visible bytes
+        of a bare re-read. Suppressing it would discard the findings while
+        telling the model nothing was established -- the catastrophic
+        direction. `truncated` is the only signal the comparison is partial.
+
+        The artifact here is small enough to be COVER-eligible; what is
+        exercised is the flag, which the sandbox sets independently of size.
+        """
+        runtime = self._runtime()
+        self._cover(runtime)
+        before = runtime.actions_executed
+        step = self._step(runtime, _truncated_result(SOURCE + "\n"))
+        self.assertIsNone(step.suppressed_duplicate_of)
+        self.assertTrue(step.action_executed)
+        self.assertEqual(runtime.actions_executed, before + 1)
+
+    def test_the_same_output_untruncated_is_suppressed(self) -> None:
+        """The control: only truncation changes the verdict."""
+        runtime = self._runtime()
+        self._cover(runtime)
+        step = self._step(runtime, _result(stdout=SOURCE + "\n"))
+        self.assertIsNotNone(step.suppressed_duplicate_of)
 
     def test_a_failed_action_is_never_suppressed(self) -> None:
         """A failure must reach the model as a failure."""
@@ -360,6 +396,25 @@ class AccountingTests(_Case):
             )
         self.assertEqual(runtime.actions_executed, 0)
         self.assertEqual(runtime.suppressed_duplicates, 4)
+
+    def test_a_suppressed_step_still_reports_its_artifacts(self) -> None:
+        """Suppression is about the observation, never about hiding the action.
+
+        A suppressed action still ran and may have written a file. The
+        analyst's trailer reads these fields, so dropping them would leave a
+        real artifact on disk that nothing mentions.
+        """
+        runtime = self._runtime()
+        self._cover(runtime)
+        copy = DerivedArtifact(
+            name="copy.py", size_bytes=len(SOURCE.encode()),
+            sha256=hashlib.sha256(SOURCE.encode()).hexdigest(),
+        )
+        step = self._step(runtime, _result(stdout="", artifacts=[copy]))
+        self.assertIsNotNone(step.suppressed_duplicate_of)
+        self.assertIsNotNone(step.raw_output_evidence_id)
+        self.assertEqual(len(step.artifact_handles), 1)
+        self.assertIn("copy.py", step.artifact_handles[0])
 
     def test_provenance_records_what_was_suppressed(self) -> None:
         """N. An audit can see the claim and check it."""

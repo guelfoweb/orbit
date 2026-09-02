@@ -207,6 +207,25 @@ class NumberedRecognizerTests(unittest.TestCase):
             with self.subTest(content=content):
                 self.assertIsNone(classify_output(content + listing, SOURCE))
 
+    def test_every_separator_form_is_reachable(self) -> None:
+        """Each documented separator actually matches something.
+
+        Checked by running the pattern rather than by parsing it: the
+        alternation contains an escaped `|`, so splitting the source text on
+        `|` mis-reads the grammar it is meant to audit.
+        """
+        from orbit.runtime.analysis_source_identity import _NUMBERED_LINE
+
+        separators = {": ", " | ", "\t", ". ", "  ", " "}
+        matched = set()
+        for separator in separators:
+            match = _NUMBERED_LINE.match(f"1{separator}body")
+            self.assertIsNotNone(match, separator)
+            matched.add(match.group("sep"))
+        # Every form maps to a distinct captured separator: none is shadowed
+        # into unreachability by an earlier alternative.
+        self.assertEqual(matched, separators)
+
     def test_stripping_returns_none_rather_than_guessing(self) -> None:
         self.assertIsNone(strip_line_numbers("no numbers here\nat all"))
         self.assertIsNone(strip_line_numbers("single line"))

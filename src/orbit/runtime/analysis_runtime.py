@@ -50,7 +50,7 @@ from orbit.runtime.analysis_source_identity import (
     SourceEquivalence,
     classify_artifacts,
     classify_output,
-)
+)  # noqa: F401 - SourceEquivalence is referenced in quoted annotations
 from orbit.runtime.analysis_coverage import (
     COVERAGE_COMPLETE,
     COVERAGE_NOT_ELIGIBLE,
@@ -695,6 +695,14 @@ def _source_reacquisition(
     line means the observation carries something the session does not hold.
     """
     if covered_text is None or not result.ok or result.stderr:
+        return None
+    if result.truncated:
+        # The sandbox cut this output at its byte cap, so what is being
+        # compared is a PREFIX, not the output. A program that printed the
+        # source and then its findings has exactly the visible bytes of a bare
+        # re-read, and suppressing it would discard the findings while telling
+        # the model nothing was established. Truncation alone leaves `status`
+        # as "ok", so this is the only signal that the comparison is partial.
         return None
     equivalence = classify_output(result.stdout, covered_text)
     if equivalence is not None:
@@ -1935,7 +1943,7 @@ class AnalysisRuntime:
             # budget bounds work that can advance an analysis, and this cannot.
             # The model call it cost is still counted, so the run stays bounded.
             self.suppressed_duplicates += 1
-            record, _raw = self._record_action_evidence(
+            record, raw_record = self._record_action_evidence(
                 calls[0],
                 result,
                 _source_reacquisition_observation(equivalence),
@@ -1965,6 +1973,16 @@ class AnalysisRuntime:
                 assistant_text=response.content or "",
                 result=result,
                 evidence=record,
+                # Carried exactly as the ordinary path carries them. A
+                # suppressed action still ran: it may have written a file, and
+                # the analyst's trailer reads these fields to say so. Dropping
+                # them would leave a real artifact on disk that nothing
+                # mentions -- suppression is about what the observation
+                # established, never about hiding what the action did.
+                raw_output_evidence_id=raw_record.evidence_id,
+                artifact_handles=tuple(
+                    f"{WORK_MOUNT}/{a.name}" for a in result.artifacts
+                ),
                 diagnostics=_diagnostics(None),
                 suppressed_duplicate_of=record.evidence_id,
             )
