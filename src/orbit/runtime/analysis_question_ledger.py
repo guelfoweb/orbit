@@ -61,7 +61,33 @@ MAX_TOTAL_QUESTIONS = MAX_INITIAL_QUESTIONS * 2
 
 # Identifiers are model-authored text that ends up in prompts and provenance.
 MAX_ID_CHARS = 16
-MAX_TEXT_CHARS = 300
+
+# The two fields are capped separately because they are asked for different
+# things. A question is a sentence naming what is unknown; a `why` has to say
+# what fact is missing AND why the source cannot supply it, which is reasoning
+# and runs longer.
+#
+# One shared cap of 300 rejected the only real plans this has ever seen. The
+# first live run produced two syntactically valid plans of three good questions
+# each -- questions of 101 to 163 characters, comfortably inside the bound --
+# and both were refused because their `why` fields ran 295 to 357. The run then
+# fell back to the unbounded path exactly as designed, which is why nothing
+# broke, but the ledger never engaged and the hypothesis went untested.
+#
+# The question cap is unchanged at 300: the observed maximum was 163, so
+# nothing in the evidence asks for more, and a question that needs a paragraph
+# is not a question. The `why` cap is 512 -- above the observed 357 with room
+# for a longer explanation, and still a hard bound rather than an invitation to
+# prose.
+#
+# The two bounds protect different things, which is why widening one is safe.
+# The question is rendered into every later step prompt, so its size compounds
+# across a run -- that bound stays where it was. The `why` appears once, in the
+# model's own plan reply, and `render()` never repeats it; what bounds it is
+# the plan document itself, and the reason to bound it at all is that it is
+# model-authored text reaching a prompt.
+MAX_QUESTION_CHARS = 300
+MAX_WHY_CHARS = 512
 # A plan is a short JSON document. Anything vastly larger is not one.
 MAX_PLAN_CHARS = 20_000
 
@@ -264,8 +290,14 @@ def _question_from(entry: object) -> Question:
             raise LedgerError(f"question is missing a usable `{name}`")
     if not _ID.match(qid):
         raise LedgerError(f"question id is not a plain identifier: {qid!r}")
-    if len(text) > MAX_TEXT_CHARS or len(why) > MAX_TEXT_CHARS:
-        raise LedgerError(f"question {qid} is longer than {MAX_TEXT_CHARS} characters")
+    if len(text) > MAX_QUESTION_CHARS:
+        raise LedgerError(
+            f"question {qid} is longer than {MAX_QUESTION_CHARS} characters"
+        )
+    if len(why) > MAX_WHY_CHARS:
+        raise LedgerError(
+            f"question {qid} explains itself in more than {MAX_WHY_CHARS} characters"
+        )
     return Question(id=qid, question=text.strip(), why=why.strip())
 
 

@@ -107,6 +107,211 @@ class PlanParsingTests(unittest.TestCase):
             parse_plan("{" + "x" * 100_000)
 
 
+class CapturedLivePlanTests(unittest.TestCase):
+    """The two plans Ornith actually produced, replayed byte for byte.
+
+    Live run #1 never exercised the ledger. Both replies were syntactically
+    valid and each carried three useful questions; both were refused because
+    one shared 300-character cap covered the `why` field, and the observed
+    `why` fields ran 295 to 357. The run fell back to the unbounded path
+    exactly as designed -- nothing broke -- but the hypothesis went untested.
+
+    These fixtures are the captured replies verbatim, so a future change to the
+    bounds is measured against what the model really writes rather than against
+    what a test author imagines it writes.
+    """
+
+    FIXTURES = ROOT / "tests" / "fixtures"
+
+    def _plan(self, index: int) -> str:
+        path = self.FIXTURES / f"live_plan_{index}.json"
+        if not path.exists():
+            self.skipTest(f"captured plan {index} missing")
+        return path.read_text()
+
+    def test_the_first_captured_plan_parses_into_three_questions(self) -> None:
+        questions = parse_plan(self._plan(1))
+        self.assertEqual([q.id for q in questions], ["Q1", "Q2", "Q3"])
+
+    def test_the_second_captured_plan_parses_into_three_questions(self) -> None:
+        questions = parse_plan(self._plan(2))
+        self.assertEqual([q.id for q in questions], ["Q1", "Q2", "Q3"])
+
+    def test_the_captured_text_is_preserved_exactly(self) -> None:
+        """No truncation, no normalisation -- what was written is what is kept."""
+        import json as _json
+
+        for index in (1, 2):
+            with self.subTest(plan=index):
+                raw = self._plan(index)
+                payload = _json.loads(raw[raw.index("{") : raw.rindex("}") + 1])
+                parsed = parse_plan(raw)
+                for original, question in zip(payload["questions"], parsed):
+                    self.assertEqual(question.id, original["id"])
+                    self.assertEqual(question.question, original["question"].strip())
+                    self.assertEqual(question.why, original["why"].strip())
+
+    def test_the_captured_plans_need_no_repair(self) -> None:
+        """Each parses on the first attempt, so no repair round is spent."""
+        for index in (1, 2):
+            with self.subTest(plan=index):
+                parse_plan(self._plan(index))  # would raise if a repair were needed
+
+    def test_each_captured_plan_still_exceeds_the_old_cap(self) -> None:
+        """Pins the measurement the fix rests on, per fixture.
+
+        Pooling both fixtures into one maximum let either be shortened
+        unnoticed -- the other's length still satisfied the assertion. Each is
+        now checked in its own right, so a fixture that stops exercising the
+        old bound fails loudly instead of quietly testing nothing.
+        """
+        import json as _json
+
+        for index in (1, 2):
+            with self.subTest(plan=index):
+                raw = self._plan(index)
+                payload = _json.loads(raw[raw.index("{") : raw.rindex("}") + 1])
+                whys = [len(q["why"]) for q in payload["questions"]]
+                questions = [len(q["question"]) for q in payload["questions"]]
+                self.assertGreater(
+                    max(whys), 300,
+                    f"fixture {index} no longer exceeds the old 300 cap",
+                )
+                self.assertLessEqual(max(whys), 512)
+                # And every question stayed inside the unchanged bound, which
+                # is why only the `why` cap needed to move.
+                self.assertLess(max(questions), 300)
+
+    def test_every_captured_why_would_have_failed_the_old_cap(self) -> None:
+        """Not just the longest: the plans were unusable, not marginal."""
+        import json as _json
+
+        over = 0
+        for index in (1, 2):
+            raw = self._plan(index)
+            payload = _json.loads(raw[raw.index("{") : raw.rindex("}") + 1])
+            over += sum(1 for q in payload["questions"] if len(q["why"]) > 300)
+        self.assertGreaterEqual(over, 4, "most captured whys must exceed 300")
+
+class TextBoundaryTests(unittest.TestCase):
+    """The bounds, probed at the boundary with literal numbers.
+
+    Deliberately not written in terms of `MAX_WHY_CHARS`: a test that reuses
+    the production constant passes whatever that constant becomes, which is
+    exactly how a 300-character cap survived until a live run hit it.
+    """
+
+    def _plan_with(self, question: str, why: str) -> str:
+        import json as _json
+
+        return _json.dumps(
+            {"questions": [{"id": "Q1", "question": question, "why": why}]}
+        )
+
+    def test_a_why_of_511_characters_is_accepted(self) -> None:
+        parse_plan(self._plan_with("q", "w" * 511))
+
+    def test_a_why_of_512_characters_is_accepted(self) -> None:
+        parse_plan(self._plan_with("q", "w" * 512))
+
+    def test_a_why_of_513_characters_is_refused(self) -> None:
+        with self.assertRaises(LedgerError):
+            parse_plan(self._plan_with("q", "w" * 513))
+
+    def test_the_question_bound_is_unchanged_at_300(self) -> None:
+        parse_plan(self._plan_with("q" * 300, "w"))
+        with self.assertRaises(LedgerError):
+            parse_plan(self._plan_with("q" * 301, "w"))
+
+    def test_a_long_why_does_not_licence_a_long_question(self) -> None:
+        """The caps are separate; widening one must not widen the other."""
+        with self.assertRaises(LedgerError):
+            parse_plan(self._plan_with("q" * 400, "w" * 400))
+
+    def test_the_two_bounds_are_distinct(self) -> None:
+        from orbit.runtime.analysis_question_ledger import (
+            MAX_QUESTION_CHARS,
+            MAX_WHY_CHARS,
+        )
+
+        self.assertEqual(MAX_QUESTION_CHARS, 300)
+        self.assertEqual(MAX_WHY_CHARS, 512)
+
+
+class WhyCostsNothingPerStepTests(unittest.TestCase):
+    """Why a wider `why` bound is safe: it never enters a later prompt.
+
+    The whole ledger is rendered into every step prompt, so a bound that grows
+    the rendering would compound across a run and could push a context
+    admission that the tighter bound survived. `render()` prints the question
+    and the state, never the `why` -- that text appears once, in the model's own
+    PLAN reply, and is not repeated. This pins that, because the argument for
+    512 rests on it.
+    """
+
+    def test_the_rendered_ledger_omits_the_why(self) -> None:
+        ledger = QuestionLedger()
+        ledger.add(Question("Q1", "the question text", "UNIQUE-WHY-MARKER"))
+        rendered = ledger.render()
+        self.assertIn("the question text", rendered)
+        self.assertNotIn("UNIQUE-WHY-MARKER", rendered)
+
+    def test_the_worst_case_rendering_is_bounded_by_the_question_cap(self) -> None:
+        from orbit.runtime.analysis_question_ledger import (
+            MAX_QUESTION_CHARS,
+            MAX_TOTAL_QUESTIONS,
+            MAX_WHY_CHARS,
+        )
+
+        ledger = QuestionLedger()
+        for index in range(MAX_TOTAL_QUESTIONS):
+            ledger.add(
+                Question(f"Q{index}", "q" * MAX_QUESTION_CHARS, "w" * MAX_WHY_CHARS)
+            )
+        rendered = ledger.render()
+        # Every `why` is excluded, so the rendering cannot exceed the question
+        # text plus a short marker per line.
+        self.assertLess(
+            len(rendered), MAX_TOTAL_QUESTIONS * (MAX_QUESTION_CHARS + 64)
+        )
+        self.assertNotIn("w" * 64, rendered)
+
+    def test_a_full_plan_at_both_caps_still_fits_the_document_bound(self) -> None:
+        import json as _json
+
+        from orbit.runtime.analysis_question_ledger import (
+            MAX_INITIAL_QUESTIONS,
+            MAX_PLAN_CHARS,
+            MAX_QUESTION_CHARS,
+            MAX_WHY_CHARS,
+        )
+
+        plan = _json.dumps({"questions": [
+            {"id": f"Q{i}", "question": "q" * MAX_QUESTION_CHARS,
+             "why": "w" * MAX_WHY_CHARS}
+            for i in range(MAX_INITIAL_QUESTIONS)
+        ]})
+        self.assertLess(len(plan), MAX_PLAN_CHARS)
+        self.assertEqual(len(parse_plan(plan)), MAX_INITIAL_QUESTIONS)
+
+    def test_the_cap_counts_characters_and_that_stays_bounded(self) -> None:
+        """Multi-byte text costs more bytes; the document bound still holds."""
+        import json as _json
+
+        for filler in ("w", "é", "\U0001f600"):
+            with self.subTest(filler=filler):
+                plan = _json.dumps(
+                    {"questions": [{"id": "Q1", "question": "q",
+                                    "why": filler * 512}]}
+                )
+                self.assertEqual(len(parse_plan(plan)), 1)
+                with self.assertRaises(LedgerError):
+                    parse_plan(_json.dumps(
+                        {"questions": [{"id": "Q1", "question": "q",
+                                        "why": filler * 513}]}
+                    ))
+
+
 class LedgerTransitionTests(unittest.TestCase):
     """E. Resolution is one-way without new causal evidence."""
 
