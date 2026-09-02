@@ -47,10 +47,13 @@ from orbit.runtime.context_manager import (
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
 from orbit.runtime.analysis_source_identity import (
     SOURCE_REACQUISITION,
+    # Referenced only in quoted annotations, which `from __future__ import
+    # annotations` defers -- the name still has to be bound for a reader or
+    # `typing.get_type_hints`.
     SourceEquivalence,
     classify_artifacts,
     classify_output,
-)  # noqa: F401 - SourceEquivalence is referenced in quoted annotations
+)
 from orbit.runtime.analysis_coverage import (
     COVERAGE_COMPLETE,
     COVERAGE_NOT_ELIGIBLE,

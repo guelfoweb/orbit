@@ -226,6 +226,27 @@ class NumberedRecognizerTests(unittest.TestCase):
         # into unreachability by an earlier alternative.
         self.assertEqual(matched, separators)
 
+    def test_a_single_numbered_line_is_never_a_listing(self) -> None:
+        """One line cannot be distinguished from a grep hit or a result index.
+
+        `1: evil.example.com` against a one-line source is exactly the shape of
+        a search result whose leading number is a match count -- real
+        information about WHERE something was found. A listing needs at least
+        two lines before its numbering means anything, so a single line is
+        refused outright.
+        """
+        for candidate in (
+            "1: evil.example.com",
+            "1 evil.example.com",
+            "  0: evil.example.com",
+            "1\tevil.example.com",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertIsNone(classify_output(candidate, "evil.example.com"))
+                self.assertIsNone(strip_line_numbers(candidate))
+        # Two lines is where a listing becomes meaningful.
+        self.assertIsNotNone(classify_output("0: a\n1: b", "a\nb"))
+
     def test_stripping_returns_none_rather_than_guessing(self) -> None:
         self.assertIsNone(strip_line_numbers("no numbers here\nat all"))
         self.assertIsNone(strip_line_numbers("single line"))

@@ -478,6 +478,41 @@ class AccountingTests(_Case):
         self.assertEqual(len(step.artifact_handles), 1)
         self.assertIn("copy.py", step.artifact_handles[0])
 
+    def test_the_analyst_sees_what_a_suppressed_action_did(self) -> None:
+        """It ran. Saying "not executed" would misreport the sandbox.
+
+        The step produced no useful evidence, which is a different thing from
+        not having executed -- and it may have written a file the analyst needs
+        to know about. The summary shows the execution, the artifact once, the
+        evidence ids, and states the suppression.
+        """
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        runtime = self._runtime()
+        self._cover(runtime)
+        copy = DerivedArtifact(
+            name="copy.py", size_bytes=len(SOURCE.encode()),
+            sha256=hashlib.sha256(SOURCE.encode()).hexdigest(),
+        )
+        step = self._step(runtime, _result(stdout="", artifacts=[copy]))
+        rendered = format_analysis_step(step)
+        self.assertNotIn("action attempted but not executed", rendered)
+        self.assertIn("evidence:", rendered)
+        self.assertIn("raw:", rendered)
+        self.assertIn("no new evidence:", rendered)
+        # Listed once, not twice.
+        self.assertEqual(rendered.count("/workspace/work/copy.py"), 1)
+
+    def test_an_ordinary_step_renders_unchanged(self) -> None:
+        from orbit.terminal.analysis_mode import format_analysis_step
+
+        runtime = self._runtime()
+        self._cover(runtime)
+        step = self._step(runtime, _result(stdout="FINDING: real"))
+        rendered = format_analysis_step(step)
+        self.assertIn("evidence:", rendered)
+        self.assertNotIn("no new evidence:", rendered)
+
     def test_provenance_records_what_was_suppressed(self) -> None:
         """N. An audit can see the claim and check it."""
         runtime = self._runtime()

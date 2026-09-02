@@ -225,6 +225,10 @@ def strip_line_numbers(candidate: str) -> str | None:
     """
     lines = candidate.split("\n")
     if len(lines) < 2:
+        # One line is not a listing. `1: value` against a one-line source is
+        # indistinguishable from a search result whose leading number is a
+        # match index -- real information about where something was found --
+        # so numbering means nothing until there is a sequence to check.
         return None
     numbers: list[int] = []
     bodies: list[str] = []
