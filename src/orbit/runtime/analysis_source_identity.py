@@ -201,7 +201,16 @@ def _match_repr(candidate: str, source: str) -> bool:
 # matching at all, so nothing with real content can hide in front of a
 # listing -- verified for prefixes like `x`, `0`, `#` and ` 0: `, each of which
 # leaves the observation as ordinary evidence.
-_NUMBERED_LINE = re.compile(r"^[ \t]*(?P<number>\d+)(?P<sep>: | \| |\t|: |\. |  | )")
+# The digit run is bounded. A line number is at most as large as the file has
+# lines, so a long one cannot be a real listing -- and `int()` on a very long
+# digit string raises rather than returning, which is artifact-controlled input
+# crashing the runtime. Nine digits admits any file this could plausibly cover
+# and keeps the conversion total.
+_MAX_LINE_NUMBER_DIGITS = 9
+_NUMBERED_LINE = re.compile(
+    r"\A[ \t]*(?P<number>\d{1,%d})(?P<sep>: | \| |\t|: |\. |  | )"
+    % _MAX_LINE_NUMBER_DIGITS
+)
 
 
 def strip_line_numbers(candidate: str) -> str | None:

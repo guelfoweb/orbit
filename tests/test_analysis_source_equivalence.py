@@ -419,6 +419,32 @@ class SecurityTests(unittest.TestCase):
         # But a DIFFERENT file whose lines merely look numbered is refused.
         self.assertIsNone(classify_output(listed, "0: other\n1: text\n"))
 
+    def test_an_absurd_line_number_cannot_crash_the_parser(self) -> None:
+        """Artifact-controlled input must never raise out of a recognizer.
+
+        `int()` on a very long digit string raises rather than returning, so a
+        printed line with a hundred thousand leading digits crashed the parser
+        before the digit run was bounded. A line number is at most as large as
+        the file has lines, so a long one cannot be a real listing anyway.
+        """
+        hostile = "9" * 100_000 + ": x\n" + "9" * 100_000 + ": y"
+        self.assertIsNone(strip_line_numbers(hostile))
+        self.assertIsNone(classify_output(hostile, SOURCE))
+
+    def test_hostile_input_never_raises_from_any_recognizer(self) -> None:
+        for hostile in (
+            "9" * 50_000 + ": x\n" + "9" * 50_000 + ": y",
+            "\\" * 100_000,
+            "'" + "\\x41" * 50_000 + "'",
+            "\x00" * 1000,
+            "\r\n" * 10_000,
+            "0" * 5000 + ": line",
+        ):
+            with self.subTest(hostile=hostile[:20]):
+                self.assertIsNone(classify_output(hostile, SOURCE))
+                self.assertIsNone(strip_line_numbers(hostile))
+                decode_repr_literal(hostile)  # must not raise
+
     def test_decoding_is_bounded_and_terminates(self) -> None:
         import time
 
