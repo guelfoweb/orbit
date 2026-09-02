@@ -545,6 +545,38 @@ class SeparatorTests(unittest.TestCase):
                     )
 
 
+class DeliberateNarrownessTests(unittest.TestCase):
+    """Choices that only ever refuse more, pinned so they are not widened idly.
+
+    Neither of these can cause a false positive -- a value must still equal a
+    recomputation whatever spelling names it, and every counted line is still
+    verified. They are pinned because the safe direction is still a decision:
+    the label table is exhaustive by design, and the cap bounds work rather
+    than trusting the model to be brief.
+    """
+
+    def test_labels_are_case_sensitive(self) -> None:
+        """`len` is not `LEN`. Adding a spelling is a deliberate act."""
+        for label in ("len", "Len", "lEN", "total_lines", "Sha256", "SHA256 "):
+            with self.subTest(label=label):
+                self.assertIsNone(
+                    classify_dominated(
+                        f"{SOURCE}\n{label}: {len(SOURCE)}\n", SOURCE
+                    )
+                )
+
+    def test_the_property_cap_bounds_work(self) -> None:
+        """Every line still verifies; the cap only bounds how many are tried."""
+        correct = "\n".join(f"LEN: {len(SOURCE)}" for _ in range(MAX_PROPERTIES))
+        self.assertIsNotNone(
+            classify_dominated(f"{SOURCE}\n{correct}\n", SOURCE)
+        )
+        one_more = "\n".join(
+            f"LEN: {len(SOURCE)}" for _ in range(MAX_PROPERTIES + 1)
+        )
+        self.assertIsNone(classify_dominated(f"{SOURCE}\n{one_more}\n", SOURCE))
+
+
 class SecurityTests(unittest.TestCase):
     """R. Bounded, deterministic, non-executing."""
 
