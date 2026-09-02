@@ -293,13 +293,32 @@ class FailClosedRuntimeTests(_Case):
         step = self._step(runtime, _result(stdout=source))
         self.assertIsNotNone(step.suppressed_duplicate_of)
 
-    def test_the_sandbox_detects_substitution_by_round_trip(self) -> None:
-        """Lossless re-encoding is exactly the absence of replacement."""
+    def test_the_sandbox_detects_substitution_on_each_stream(self) -> None:
+        """Each stream is checked in its own right.
+
+        Testing only the pair would let one half cover for the other: an
+        implementation that checked stderr alone would still pass while
+        stdout -- the stream the recognizers actually read -- went unguarded.
+        """
+        from orbit.runtime.analysis_sandbox import execute_analysis  # noqa: F401
+
         for raw, expected in ((b"he\xfflo\n", True), (b"hello\n", False),
                               ("héllo\n".encode(), False)):
             with self.subTest(raw=raw):
                 decoded = raw.decode("utf-8", "replace")
                 self.assertEqual(decoded.encode("utf-8") != raw, expected)
+
+    def test_replacement_on_stdout_alone_is_detected(self) -> None:
+        """The stream the recognizers read must be guarded by itself."""
+        import inspect
+
+        from orbit.runtime import analysis_sandbox
+
+        source = inspect.getsource(analysis_sandbox)
+        marker = source[source.index("replaced = ("):]
+        marker = marker[: marker.index(")\n")]
+        self.assertIn("stdout.encode", marker)
+        self.assertIn("stderr.encode", marker)
 
     def test_the_same_output_untruncated_is_suppressed(self) -> None:
         """The control: only truncation changes the verdict."""
