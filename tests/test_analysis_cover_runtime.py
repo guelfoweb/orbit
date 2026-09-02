@@ -640,15 +640,35 @@ class AutonomousIntegrationTests(_Case):
         self.assertTrue(after)
         self.assertTrue(all(after), "tools must be offered after COVER")
 
-    def test_planning_is_tools_free_and_steps_after_it_are_not(self) -> None:
-        """The full shape: cover and plan tools-free, then tools return."""
+    def test_planning_offers_only_the_control_tool(self) -> None:
+        """COVER is tools-free; PLAN carries exactly one control tool.
+
+        The plan used to be asked for in prose and parsed back out. It is now a
+        tool call, because that is the one structured channel this protocol
+        validates -- so the planning call does offer a tool, but only
+        `submit_analysis_plan`, never the analysis tool. A model cannot act
+        during planning because the means to act is not on the table.
+        """
+        from orbit.runtime.analysis_runtime import (
+            ANALYSIS_TOOL_NAME,
+            PLAN_TOOL_NAME,
+        )
+
         runtime = self._runtime(b"body\n")
         result = runtime.run_autonomous("Analyse it.", max_model_calls=6,
                                         finalize=False)
-        modes = [bool(c["tools"]) for c in self.backend.chat_calls]
-        overhead = result.cover_calls + result.plan_calls
-        self.assertEqual(modes[:overhead], [False] * overhead)
-        self.assertTrue(any(modes[overhead:]), "tools must return after planning")
+        offered = [
+            [t["function"]["name"] for t in (call["tools"] or [])]
+            for call in self.backend.chat_calls
+        ]
+        # Coverage offers nothing at all.
+        self.assertEqual(offered[: result.cover_calls],
+                         [[]] * result.cover_calls)
+        # Planning offers the control tool alone.
+        planning = offered[result.cover_calls: result.cover_calls + result.plan_calls]
+        for names in planning:
+            self.assertEqual(names, [PLAN_TOOL_NAME])
+            self.assertNotIn(ANALYSIS_TOOL_NAME, names)
 
     def test_a_later_analyst_step_still_offers_tools(self) -> None:
         """J. An explicit follow-up keeps normal tools."""

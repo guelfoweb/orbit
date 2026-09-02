@@ -45,16 +45,17 @@ from orbit.runtime.context_manager import (
     plan_exact_context,
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
-from orbit.runtime.analysis_question_ledger import (
-    MAX_CHILD_DEPTH,
-    _extract_json_object,
-    parse_resolution,
-    MAX_INITIAL_QUESTIONS,
+from orbit.runtime.analysis_controller import (
+    BLOCKED,
+    OPEN,
+    MAX_ACTIONS_PER_QUESTION,
+    PHASE_REPORT,
     RESOLVED,
-    LedgerError,
+    AnalysisController,
+    ControlError,
     Question,
-    QuestionLedger,
-    parse_plan,
+    parse_finish_call,
+    parse_plan_call,
 )
 from orbit.runtime.analysis_source_dominance import (
     SOURCE_DOMINATED,
@@ -240,6 +241,113 @@ ANALYSIS_SYSTEM_PROMPT = (
     "Base every claim on the artifact or on output an action actually produced. "
     "State plainly when something is unresolved rather than filling the gap."
 )
+
+PLAN_TOOL_NAME = "submit_analysis_plan"
+FINISH_TOOL_NAME = "finish_analysis_question"
+
+# The control channel. Control state travels as a tool call because that is the
+# one structured channel this protocol already validates -- the previous design
+# asked for it in assistant prose, and native calls often carry no prose at
+# all, so the field had nowhere to go and every action was refused.
+#
+# No `id` field anywhere: the model never names a question. Orbit assigns
+# Q1, Q2, Q3 after validating the plan, which deletes duplicate, missing and
+# malformed identifiers as failure modes rather than validating them.
+PLAN_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": PLAN_TOOL_NAME,
+        "description": (
+            "Declare the questions you cannot answer from the artifact source "
+            "you were given, and which need a program to be executed to "
+            "settle. Submit an empty list if the source answers everything -- "
+            "that is a complete answer, not a failure. Do not list analysis "
+            "steps, and do not list anything you can already conclude by "
+            "reading the source: you will report those directly."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "string",
+                                "description": "What is unknown.",
+                            },
+                            "missing_fact": {
+                                "type": "string",
+                                "description": (
+                                    "The fact only execution can supply."
+                                ),
+                            },
+                        },
+                        "required": ["question", "missing_fact"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["questions"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+# What became of the question that was active. Called after an action's result
+# is in hand. The runtime records the answer and never infers it: a question
+# the model could not settle stays visibly unsettled.
+FINISH_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": FINISH_TOOL_NAME,
+        "description": (
+            "Report what the action just run established about the question "
+            "you were working on. Answer `still_open` if it did not settle "
+            "the question and `blocked` if it cannot be settled -- both are "
+            "real answers and the report will say so."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["resolved", "still_open", "blocked"],
+                },
+                "evidence_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Evidence ids supporting the answer.",
+                },
+                "answer_summary": {
+                    "type": "string",
+                    "description": "What was established, in a sentence or two.",
+                },
+                "child_question": {
+                    "type": "object",
+                    "description": (
+                        "Only when the evidence you just obtained forced a "
+                        "further question that must be settled to answer this "
+                        "one. Never for something merely interesting."
+                    ),
+                    "properties": {
+                        "question": {"type": "string"},
+                        "missing_fact": {"type": "string"},
+                        "caused_by_evidence_id": {"type": "string"},
+                    },
+                    "required": [
+                        "question", "missing_fact", "caused_by_evidence_id"
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 ANALYSIS_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
@@ -612,96 +720,6 @@ def _cover_message(
 # The empty answer is stated as legitimate and first, because it is the honest
 # reply for an artifact the source already explains, and a model that felt
 # obliged to name something would invent work.
-ANALYSIS_PLAN_INSTRUCTION = (
-    "You now have the complete source of this artifact. Before running "
-    "anything, list only the questions you CANNOT answer from that source and "
-    "the evidence already provided -- questions that need a program to be "
-    "executed to settle.\n"
-    "Reply with JSON: {\"questions\": [{\"id\": \"Q1\", \"question\": "
-    "\"...\", \"why\": \"...\"}]}\n"
-    "`why` states what fact is missing that only execution can supply.\n"
-    "If the source answers everything, reply {\"questions\": []} -- that is a "
-    "complete and correct answer, not a failure. Do not list analysis steps, "
-    "and do not list anything you can already conclude by reading the source: "
-    "you will report those directly, and they do not need a question.\n"
-    f"At most {MAX_INITIAL_QUESTIONS} questions."
-)
-
-# Sent when a planning reply could not be parsed. One attempt, then the run
-# falls back to the behaviour it had before this existed.
-ANALYSIS_PLAN_REPAIR = (
-    "That reply could not be read as the required JSON. Reply with exactly "
-    "one JSON object and nothing else: {\"questions\": [{\"id\": \"Q1\", "
-    "\"question\": \"...\", \"why\": \"...\"}]}, or {\"questions\": []} "
-    "if the source answers everything."
-)
-
-
-# `question: Q1` at the head of the reply, which is how an action names the
-# question it belongs to. Read from the assistant's own prose rather than added
-# to the tool schema: the schema is what the sandbox validates, and widening it
-# would change every action's shape for a bookkeeping field.
-_QUESTION_TAG = re.compile(r"question\s*[:=]\s*([A-Za-z][A-Za-z0-9_.-]{0,15})", re.I)
-
-
-def _named_question(assistant_text: str) -> str | None:
-    """The question id this reply claims, or None.
-
-    Only the first few lines are scanned. A model that mentions a question id
-    in passing halfway through its reasoning has not named the question its
-    action belongs to, and treating that as an association would let any
-    mention stand in for a declaration.
-    """
-    head = "\n".join((assistant_text or "").splitlines()[:4])
-    match = _QUESTION_TAG.search(head)
-    return match.group(1) if match else None
-
-
-def _ledger_instruction(ledger: "QuestionLedger") -> str:
-    """What the model is told before each RESOLVE step.
-
-    It names the open questions and requires the next action to belong to one
-    of them. The alternative -- letting an action be untethered -- is what the
-    live run did: seven actions, four of them re-deriving the source, none of
-    them caused by anything earlier.
-
-    It also says plainly what the ledger does not mean. A model told "only
-    these questions" could reasonably infer that nothing else may be reported,
-    which would trade an efficiency problem for a correctness one.
-    """
-    return (
-        "Open questions:\n"
-        f"{ledger.render()}\n"
-        "Run one execution for ONE open question. Begin your reply with "
-        "`question: <id>` naming it, then make the call.\n"
-        "After it runs you will be asked whether that question is resolved.\n"
-        "This list bounds only what you may RUN. Everything you can already "
-        "conclude from the source stays yours to report, whether or not it "
-        "appears here."
-    )
-
-
-# Asked after an action that belonged to a question.
-#
-# The classification is the model's, always. The runtime records it and never
-# infers it: a question the model could not settle stays open and is reported
-# open, which is the honest outcome and the one that keeps an unresolved fact
-# from disappearing.
-def _resolution_instruction(question_id: str) -> str:
-    return (
-        f"Did that resolve {question_id}? Reply with exactly one JSON object: "
-        f'{{"question": "{question_id}", "state": "resolved"|"still_open", '
-        '"evidence": "<evidence id from the result above>"}\n'
-        "Answer `still_open` if it did not settle the question -- that is a "
-        "real answer and the report will say so.\n"
-        "If the result raised a further question that must be settled to "
-        "answer this one, add "
-        '"child": {"id": "...", "question": "...", "why": "...", '
-        '"caused_by": "<evidence id>"} -- only when the evidence you just '
-        "obtained forced it, never for something merely interesting."
-    )
-
-
 AUTONOMOUS_REPLAN_MESSAGE = (
     "The previous action produced no new evidence. Choose a different "
     "deterministic strategy using the current evidence and artifacts. Do not "
@@ -941,6 +959,10 @@ STOP_COMPLETE = "model returned prose with no action"
 # Every declared question answered or given up on. Says nothing about the
 # analysis being complete -- only that nothing left open needs a tool.
 STOP_LEDGER_EXHAUSTED = "no open question requires an action"
+# The model could not use the structured control protocol. A bounded, honest
+# outcome -- preferable to spending the ceiling recovering, and deliberately
+# not a reason to fall back to the free-form loop.
+STOP_CONTROL_UNSUPPORTED = "autonomous control unsupported by this model"
 STOP_NO_PROGRESS = "no new evidence"
 STOP_ERROR = "repeated action failures"
 STOP_MAX_ACTIONS = "action bound reached"
@@ -1414,10 +1436,6 @@ class AnalysisRuntime:
     # the list -- is what makes the pass once-only: an artifact with nothing to
     # decode must not be rescanned on every step.
     _transform_snapshot: str | None = None
-    # The question the action of the step in flight belongs to, set when the
-    # association is checked and read when its result is classified. Per-step
-    # scratch, not session state.
-    _pending_question: str | None = None
 
     @property
     def source_covered(self) -> bool:
@@ -1925,7 +1943,7 @@ class AnalysisRuntime:
         *,
         on_progress: Callable[[Any], None] | None = None,
         on_delta: Callable[[str], None] | None = None,
-        ledger: "QuestionLedger | None" = None,
+        controller_messages: "list[Message] | None" = None,
     ) -> AnalysisStepResult:
         """Run exactly one analyst-driven step and return control.
 
@@ -1949,8 +1967,12 @@ class AnalysisRuntime:
         # step already makes, so the backend can continue the analysis chain's
         # own KV instead of prefilling it again.
         call_started = time.monotonic()
+        # A controller run supplies its own transient context for the active
+        # question; control prompting must not accumulate in the append-only
+        # history. Everything else about the step is unchanged.
         admitted = self._admit(
-            list(self.messages),
+            list(controller_messages if controller_messages is not None
+                 else self.messages),
             max_tokens=self.effective_max_tokens,
             tools=[ANALYSIS_TOOL_SCHEMA],
         )
@@ -1998,31 +2020,6 @@ class AnalysisRuntime:
             )
 
         rejection = self._structural_rejection(calls) if calls else None
-        if rejection is None and calls and ledger is not None:
-            # An action must belong to a declared open question. Refused here,
-            # with the other structural refusals, because an untethered action
-            # is exactly the unbounded exploration the ledger exists to stop --
-            # and because refusing before the sandbox means nothing runs.
-            #
-            # This is a refusal, not a suppression: the model is told which
-            # questions are open and asked again. Nothing is hidden and no
-            # finding is lost, because the ledger governs what may RUN and
-            # never what may be concluded or reported.
-            named = _named_question(content)
-            if named is None:
-                ledger.rejected_free_actions += 1
-                rejection = (
-                    "no question named; begin the reply with `question: <id>` "
-                    f"for one of: {', '.join(ledger.open_ids) or 'none open'}"
-                )
-            elif not ledger.is_open(named):
-                ledger.rejected_free_actions += 1
-                rejection = (
-                    f"{named} is not an open question; open: "
-                    f"{', '.join(ledger.open_ids) or 'none'}"
-                )
-            else:
-                self._pending_question = named
         if rejection is not None and _stopped_at_generation_limit(response):
             # Same refusal path, a truer reason. The call is unparseable
             # because generation ended mid-JSON, not because the model
@@ -2496,178 +2493,229 @@ class AnalysisRuntime:
         self.messages.append({"role": "assistant", "content": content})
         return 1
 
-    def plan_questions(
+    def _control_call(
         self,
+        messages: "list[Message]",
+        schema: "dict[str, Any]",
         *,
         on_progress: Callable[[Any], None] | None = None,
-        on_delta: Callable[[str], None] | None = None,
-    ) -> "tuple[QuestionLedger | None, int]":
-        """One tools-free call asking what still needs a tool. Returns (ledger, calls).
+    ) -> "tuple[dict | None, str]":
+        """One control exchange. Returns (arguments, assistant_text).
 
-        `None` means the run should proceed exactly as it did before this
-        existed: the reply could not be read even after one repair, or the
-        backend refused. That is the fail-closed direction, and it is the right
-        one -- a ledger nobody could parse is not a bound, and forcing a report
-        from an unreadable plan would end an analysis on a formatting error.
+        `messages` is built by the caller and thrown away afterwards: control
+        bookkeeping must not accumulate in the append-only analysis history,
+        or resolving more questions would make the permanent record grow with
+        every prompt and reply the protocol needed. The same pattern the report
+        path already uses.
 
-        An empty ledger is not `None`. It is the model saying the source
-        answered everything, which is a legitimate reply and leads straight to
-        the report.
+        Exactly one tool is offered, so a reply that calls anything else is a
+        protocol failure rather than an action to run.
+        """
+        admitted = self._admit(
+            list(messages),
+            max_tokens=self.effective_max_tokens,
+            tools=[schema],
+            next_action_reserve=0,
+        )
+        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
+            response = self.backend.chat_stream(
+                admitted,
+                temperature=self.temperature,
+                max_tokens=self.effective_max_tokens,
+                tools=[schema],
+                on_progress=on_progress,
+            )
+        self.model_calls += 1
+        text = response.content or ""
+        if _unencodable(text):
+            text = text.encode("utf-8", "replace").decode("utf-8")
+        for call in self._with_canonical_call_ids(response.tool_calls or []):
+            function = call.get("function") or {}
+            if function.get("name") != schema["function"]["name"]:
+                continue
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                return None, text
+            return arguments, text
+        return None, text
+
+    def plan_analysis(
+        self,
+        controller: "AnalysisController",
+        analyst_message: str,
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+    ) -> int:
+        """Ask for the plan through the control tool. Returns model calls spent.
+
+        One bounded repair, then the controller is marked unsupported and the
+        run reports. There is deliberately no path back to the free-form loop:
+        falling back is what recreated the unbounded exploration this replaces.
+        """
+        base: "list[Message]" = [
+            *self.messages,
+            {"role": "user", "content": (
+                f"{analyst_message}\n"
+                "Before running anything, call submit_analysis_plan with the "
+                "questions you cannot answer from the artifact source above."
+            )},
+        ]
+        calls = 0
+        messages = base
+        for attempt in range(2):
+            arguments, _text = self._control_call(
+                messages, PLAN_TOOL_SCHEMA, on_progress=on_progress
+            )
+            calls += 1
+            if arguments is not None:
+                try:
+                    controller.adopt_plan(parse_plan_call(arguments))
+                    return calls
+                except ControlError as exc:
+                    detail = str(exc)
+            else:
+                detail = "no submit_analysis_plan call was made"
+            if attempt == 0:
+                controller.repairs += 1
+                messages = [
+                    *base,
+                    {"role": "user", "content": (
+                        f"That plan could not be used: {detail}. Call "
+                        "submit_analysis_plan again, or with an empty list if "
+                        "the source answers everything."
+                    )},
+                ]
+                continue
+            # Twice is enough. The model cannot produce the protocol, which is
+            # a bounded outcome to report rather than a reason to spend the
+            # whole ceiling finding out.
+            controller.unsupported = True
+            controller.phase = PHASE_REPORT
+        return calls
+
+    def _resolve_messages(
+        self, controller: "AnalysisController", question: "Question"
+    ) -> "list[Message]":
+        """The transient context for working one question.
+
+        Carries the artifact history, the question, its missing fact, and what
+        the budget allows. It does NOT ask the model to name the question: the
+        question is active, so whatever it runs belongs to it.
+        """
+        state = controller.states[question.id]
+        remaining = MAX_ACTIONS_PER_QUESTION - state.actions
+        return [
+            *self.messages,
+            {"role": "user", "content": (
+                f"Work on this question and nothing else:\n"
+                f"{question.question}\n"
+                f"What is missing: {question.missing_fact}\n"
+                f"You may run {remaining} more "
+                f"{'action' if remaining == 1 else 'actions'} for it. "
+                "Run one now with execute_analysis.\n"
+                "Everything you can already conclude from the source stays "
+                "yours to report later, whether or not it is asked here."
+            )},
+        ]
+
+    def _finish_messages(
+        self, question: "Question", observation: str, evidence_id: str
+    ) -> "list[Message]":
+        return [
+            *self.messages,
+            {"role": "user", "content": (
+                f"The question was: {question.question}\n"
+                f"The action produced (evidence {evidence_id}):\n{observation}\n"
+                "Call finish_analysis_question to say what this established."
+            )},
+        ]
+
+    def finish_question(
+        self,
+        controller: "AnalysisController",
+        question: "Question",
+        observation: str,
+        evidence_id: str,
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+    ) -> int:
+        """Ask what the action established. Returns model calls spent.
+
+        A reply that cannot be used leaves the question exactly as it was, and
+        after one repair the question is blocked. Nothing here resolves a
+        question: only an explicit `resolved` from the model does.
         """
         calls = 0
-        message = ANALYSIS_PLAN_INSTRUCTION
+        messages = self._finish_messages(question, observation, evidence_id)
         for attempt in range(2):
-            self.messages.append({"role": "user", "content": message})
-
-            def _capture(text: str) -> None:
-                if on_delta is not None and text:
-                    on_delta(text)
-
-            admitted = self._admit(
-                list(self.messages), max_tokens=self.effective_max_tokens, tools=[]
+            arguments, _text = self._control_call(
+                messages, FINISH_TOOL_SCHEMA, on_progress=on_progress
             )
-            with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="off"):
-                response = self.backend.chat_stream(
-                    admitted,
-                    temperature=self.temperature,
-                    max_tokens=self.effective_max_tokens,
-                    tools=[],
-                    on_delta=_capture,
-                    on_progress=on_progress,
-                )
-            self.model_calls += 1
             calls += 1
-            content = response.content or ""
-            if _unencodable(content):
-                content = content.encode("utf-8", "replace").decode("utf-8")
-            self.messages.append({"role": "assistant", "content": content})
-            try:
-                questions = parse_plan(content)
-            except LedgerError:
-                if attempt == 0:
-                    # One bounded repair. A second failure is a real one: the
-                    # model cannot produce the format, and retrying would spend
-                    # the ceiling learning that again.
-                    message = ANALYSIS_PLAN_REPAIR
-                    continue
-                return None, calls
-            ledger = QuestionLedger()
-            for question in questions:
+            if arguments is not None:
                 try:
-                    ledger.add(question)
-                except LedgerError:
-                    return None, calls
-            return ledger, calls
-        return None, calls
-
-    def _classify_question(
-        self,
-        ledger: "QuestionLedger",
-        question_id: str,
-        step: "AnalysisStepResult",
-        *,
-        on_progress: Callable[[Any], None] | None = None,
-        on_delta: Callable[[str], None] | None = None,
-    ) -> int:
-        """Ask whether the action just run settled its question. Returns calls.
-
-        Tools off: this is bookkeeping about what happened, not another chance
-        to act. A reply that cannot be read leaves the question open, which is
-        the fail-closed direction -- an unreadable classification must never
-        close a question, and the run simply asks about it again or moves on
-        when the ceiling is reached.
-        """
-        self.messages.append(
-            {"role": "user", "content": _resolution_instruction(question_id)}
-        )
-
-        def _capture(text: str) -> None:
-            if on_delta is not None and text:
-                on_delta(text)
-
-        try:
-            admitted = self._admit(
-                list(self.messages), max_tokens=self.effective_max_tokens, tools=[]
+                    decision = parse_finish_call(arguments)
+                except ControlError as exc:
+                    detail = str(exc)
+                else:
+                    self._apply_decision(controller, decision, evidence_id)
+                    return calls
+            else:
+                detail = f"no {FINISH_TOOL_NAME} call was made"
+            if attempt == 0:
+                controller.repairs += 1
+                messages = [
+                    *messages,
+                    {"role": "user", "content": (
+                        f"That could not be used: {detail}. Call "
+                        f"{FINISH_TOOL_NAME} again."
+                    )},
+                ]
+                continue
+            controller.close_active(
+                BLOCKED, reason="the completion state could not be read"
             )
-            with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="off"):
-                response = self.backend.chat_stream(
-                    admitted,
-                    temperature=self.temperature,
-                    max_tokens=self.effective_max_tokens,
-                    tools=[],
-                    on_delta=_capture,
-                    on_progress=on_progress,
-                )
-        except (ContextAdmissionError, TimeoutError, RecoverableBackendError):
-            # The question stays open and the turn is closed cleanly.
-            self._close_incomplete_turn()
-            return 0
-        self.model_calls += 1
-        content = response.content or ""
-        if _unencodable(content):
-            content = content.encode("utf-8", "replace").decode("utf-8")
-        self.messages.append({"role": "assistant", "content": content})
+        return calls
 
-        evidence_id = getattr(step.evidence, "evidence_id", "") or ""
-        try:
-            named, state, cited = parse_resolution(content, ledger)
-        except LedgerError:
-            return 1  # unreadable: the question stays open
-        if named != question_id:
-            return 1  # about a different question: not something to act on
-        if state == RESOLVED:
-            try:
-                ledger.resolve(question_id, cited or evidence_id)
-            except LedgerError:
-                return 1
-        self._accept_child_question(ledger, content, question_id, evidence_id)
-        return 1
-
-    def _accept_child_question(
+    def _apply_decision(
         self,
-        ledger: "QuestionLedger",
-        content: str,
-        parent_id: str,
+        controller: "AnalysisController",
+        decision: "dict",
         evidence_id: str,
     ) -> None:
-        """Admit a question the result forced, if it really was forced.
-
-        Every rejection here is silent by design: a child that does not qualify
-        simply is not added, and the run continues with the questions it had.
-        Telling the model why would invite it to rephrase until something
-        stuck, which is the unbounded growth this is meant to prevent.
-        """
-        try:
-            payload = _extract_json_object(content)
-        except LedgerError:
-            return
-        if not isinstance(payload, dict):
-            return
-        raw = payload.get("child")
-        if not isinstance(raw, dict):
-            return
-        parent = ledger.questions.get(parent_id)
-        if parent is None:
-            return
-        qid = raw.get("id")
-        text = raw.get("question")
-        why = raw.get("why")
-        caused_by = raw.get("caused_by") or evidence_id
-        if not all(isinstance(v, str) and v.strip() for v in (qid, text, why)):
-            return
-        try:
-            ledger.accept_child(
-                Question(
-                    id=qid.strip(),
-                    question=text.strip(),
-                    why=why.strip(),
-                    depth=parent.depth + 1,
-                    parent=parent_id,
-                    caused_by=caused_by,
+        """Record a validated completion, and any child it forced."""
+        cited = tuple(
+            eid for eid in decision["evidence_ids"]
+            if self.evidence_store.reattest_exact(eid) is not None
+        )
+        if decision["status"] == RESOLVED and not cited:
+            # A resolution has to point at evidence that exists. Without one it
+            # is an assertion, and the honest record is that it stayed open.
+            cited = (evidence_id,) if self.evidence_store.reattest_exact(
+                evidence_id
+            ) is not None else ()
+        controller.close_active(
+            decision["status"],
+            evidence_ids=cited,
+            summary=decision["answer_summary"],
+        )
+        child = decision.get("child_question")
+        if isinstance(child, dict):
+            try:
+                controller.accept_child(
+                    child.get("question") or "",
+                    child.get("missing_fact") or "",
+                    child.get("caused_by_evidence_id") or "",
+                    {
+                        eid for eid in self.evidence_store.records
+                        if self.evidence_store.reattest_exact(eid) is not None
+                    },
                 )
-            )
-        except LedgerError:
-            return
+            except (ControlError, TypeError):
+                # Silently not added: explaining the refusal would invite
+                # rephrasing until something stuck.
+                pass
 
     def run_autonomous(
         self,
@@ -2772,7 +2820,7 @@ class AnalysisRuntime:
         # a covered run is bounded exactly as an uncovered one is.
         covered_calls = 0
         plan_calls = 0
-        ledger: "QuestionLedger | None" = None
+        controller: "AnalysisController | None" = None
         if cover and not self.source_covered:
             try:
                 coverage = self.plan_source_coverage()
@@ -2793,11 +2841,11 @@ class AnalysisRuntime:
                     # repair, and the run continues exactly as it did before
                     # this existed -- an unreadable plan is not a bound.
                     if plan and model_calls < max_model_calls:
-                        ledger, planning_calls = self.plan_questions(
-                            on_progress=on_progress, on_delta=on_delta
+                        controller = AnalysisController()
+                        plan_calls = self.plan_analysis(
+                            controller, analyst_message, on_progress=on_progress
                         )
-                        model_calls += planning_calls
-                        plan_calls = planning_calls
+                        model_calls += plan_calls
             except KeyboardInterrupt:
                 cancelled = True
                 stop_reason = STOP_CANCELLED
@@ -2833,19 +2881,51 @@ class AnalysisRuntime:
             if model_calls >= max_model_calls:
                 stop_reason = STOP_MAX_MODEL_CALLS
                 break
-            if ledger is not None and ledger.exhausted:
-                # Nothing declared is still open, so no action is left to run.
-                # This is not a claim that the analysis is complete: the whole
-                # source and every piece of evidence remain in the history, and
-                # the report below draws on them regardless of what was asked.
-                stop_reason = STOP_LEDGER_EXHAUSTED
-                break
+            active = None
+            if controller is not None:
+                if controller.unsupported:
+                    # The model could not use the control protocol even after a
+                    # repair. A bounded outcome to report, not a reason to
+                    # spend the ceiling discovering it again -- and explicitly
+                    # not a reason to fall back to the free-form loop.
+                    stop_reason = STOP_CONTROL_UNSUPPORTED
+                    break
+                # Which question this iteration works on, decided in one
+                # place. The active question is reused only while it is still
+                # open AND still has budget; anything else advances. Reusing a
+                # question the model has already closed would run an action for
+                # something already answered.
+                if (
+                    controller.active is not None
+                    and controller.states[controller.active].status == OPEN
+                    and controller.may_act()
+                ):
+                    active = controller.questions[controller.active]
+                else:
+                    if controller.active is not None and not controller.may_act():
+                        # Out of attempts rather than answered: blocked, and
+                        # visibly so, rather than quietly dropped.
+                        controller.exhaust_active(
+                            f"reached the {MAX_ACTIONS_PER_QUESTION}-action "
+                            "limit for one question"
+                        )
+                    active = controller.activate_next()
+                if active is None:
+                    # Nothing is open, so no action is left to run. Never a
+                    # claim that the analysis is complete: the source and every
+                    # piece of evidence remain, and the report draws on them
+                    # regardless of what was asked.
+                    stop_reason = STOP_LEDGER_EXHAUSTED
+                    break
             try:
                 step = self.step(
-                    _ledger_instruction(ledger) if ledger is not None else message,
+                    message,
                     on_progress=on_progress,
                     on_delta=on_delta,
-                    ledger=ledger,
+                    controller_messages=(
+                        self._resolve_messages(controller, active)
+                        if active is not None else None
+                    ),
                 )
             except KeyboardInterrupt:
                 # What ran already stands. `step()` has committed its own
@@ -2914,22 +2994,19 @@ class AnalysisRuntime:
                 # above, so the run remains bounded.
                 suppressed += 1
 
-            if (
-                ledger is not None
-                and step.action_executed
-                and self._pending_question is not None
-                and model_calls < max_model_calls
-            ):
-                # The classification is one ordinary model call, tools off:
-                # the model says whether its own action settled its own
-                # question. The runtime records the answer and never supplies
-                # it -- a question nobody could resolve stays open, and the
-                # report says so.
-                model_calls += self._classify_question(
-                    ledger, self._pending_question, step,
-                    on_progress=on_progress, on_delta=on_delta,
-                )
-            self._pending_question = None
+            if controller is not None and active is not None and step.action_executed:
+                # The association, in one line: an action ran while exactly one
+                # question was active, so it belongs to that question. Nothing
+                # is parsed out of the reply and nothing was asked of the model.
+                controller.record_action()
+                if model_calls < max_model_calls:
+                    model_calls += self.finish_question(
+                        controller, active,
+                        self.evidence_store.raw_excerpt(step.evidence)
+                        if step.evidence else "",
+                        step.evidence.evidence_id if step.evidence else "",
+                        on_progress=on_progress,
+                    )
 
             record = progress_ledger.classify(len(records) + 1, step)
             records.append(record)
@@ -3083,7 +3160,15 @@ class AnalysisRuntime:
                 final_report = self.report(
                     question=self._final_question(
                         stop_reason,
-                        tuple(ledger.open_ids) if ledger is not None else (),
+                        # Everything not resolved, not merely everything still
+                        # open: a question blocked by the action limit or by an
+                        # unreadable completion is exactly the one a reader must
+                        # be told about, and `open_ids` excludes it.
+                        tuple(
+                            qid for qid in controller.order
+                            if controller.states[qid].status != RESOLVED
+                        ) if controller is not None else (),
+                        dossier=controller.dossier() if controller is not None else "",
                     ),
                     on_progress=on_progress,
                     on_delta=on_delta,
@@ -3149,17 +3234,25 @@ class AnalysisRuntime:
             cover_calls=covered_calls,
             plan_calls=plan_calls,
             initial_questions=(
-                sum(1 for q in ledger.questions.values() if q.depth == 0)
-                if ledger is not None else 0
+                sum(1 for q in controller.questions.values() if q.depth == 0)
+                if controller is not None else 0
             ),
             child_questions=(
-                sum(1 for q in ledger.questions.values() if q.depth > 0)
-                if ledger is not None else 0
+                sum(1 for q in controller.questions.values() if q.depth > 0)
+                if controller is not None else 0
             ),
-            resolved_questions=tuple(ledger.resolved_ids) if ledger else (),
-            open_questions=tuple(ledger.open_ids) if ledger else (),
+            resolved_questions=(
+                tuple(qid for qid in controller.order
+                      if controller.states[qid].status == RESOLVED)
+                if controller is not None else ()
+            ),
+            open_questions=(
+                tuple(qid for qid in controller.order
+                      if controller.states[qid].status != RESOLVED)
+                if controller is not None else ()
+            ),
             rejected_free_actions=(
-                ledger.rejected_free_actions if ledger is not None else 0
+                controller.rejected_children if controller is not None else 0
             ),
         )
 
@@ -3288,7 +3381,9 @@ class AnalysisRuntime:
 
     @staticmethod
     def _final_question(
-        stop_reason: str, open_questions: "tuple[str, ...]" = ()
+        stop_reason: str,
+        open_questions: "tuple[str, ...]" = (),
+        dossier: str = "",
     ) -> str:
         """What the closing report is asked, given how the run ended.
 
@@ -3308,6 +3403,11 @@ class AnalysisRuntime:
                 f"{', '.join(open_questions)}. Say what remains unknown about "
                 "each rather than omitting them."
             )
+            if dossier:
+                # The ids alone say which questions are unanswered; the dossier
+                # says what they were. A reader given only "Q2" cannot tell
+                # what was left unknown.
+                unresolved = f"{unresolved}\n{dossier}"
         if stop_reason == STOP_COMPLETE and not unresolved:
             return ""
         if stop_reason in (STOP_COMPLETE, STOP_LEDGER_EXHAUSTED):
