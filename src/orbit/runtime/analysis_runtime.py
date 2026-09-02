@@ -38,7 +38,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from orbit.backend.base import ChatBackend, Message, RecoverableBackendError
+from orbit.backend.base import (
+    ChatBackend,
+    Message,
+    RecoverableBackendError,
+    ToolCallParseError,
+)
 from orbit.runtime.context_manager import (
     ContextAdmissionError,
     DEFAULT_NEXT_ACTION_RESERVE,
@@ -240,6 +245,32 @@ ANALYSIS_SYSTEM_PROMPT = (
     "what only running the transformation can.\n"
     "Base every claim on the artifact or on output an action actually produced. "
     "State plainly when something is unresolved rather than filling the gap."
+)
+
+# The system prompt a control phase runs under.
+#
+# The ordinary prompt tells the model to inspect the artifact by running
+# `execute_analysis`, which is correct for a RESOLVE step and a direct
+# contradiction during PLAN or a question completion: those phases offer one
+# control tool and no analysis tool at all. A live run showed the cost --
+# offered only `submit_analysis_plan`, the model followed the prose it could
+# still see and emitted an `execute_analysis` call, which the server's
+# tool-call grammar then refused to parse at all.
+#
+# So a control phase states its own contract. This replaces the system turn in
+# the transient control context only; the permanent history keeps the ordinary
+# prompt, because that is what the RESOLVE steps run under.
+CONTROL_SYSTEM_PROMPT = (
+    "You are performing static analysis of one artifact in an isolated "
+    "offline workspace. There is no network.\n"
+    "This is a control turn, not an analysis turn. Exactly one control tool "
+    "is offered to you, and it is the only action available: call it. No "
+    "program runs during this turn, and no analysis tool is available to "
+    "call -- naming one produces nothing.\n"
+    "Earlier results may appear as an evidence reference "
+    "(`tool_evidence_ref: true`) rather than their full text; that is the "
+    "exact output, archived. Cite such a result by its evidence id.\n"
+    "Base every claim on the artifact text you were given."
 )
 
 PLAN_TOOL_NAME = "submit_analysis_plan"
@@ -653,7 +684,6 @@ def _evidence_first_instruction(
     )
 
 
-
 # What COVER says. It is deliberately about the transaction, not the artifact:
 # it names no language, no file type, no technique and no finding, because the
 # whole point is that coverage is the same operation whatever the bytes are.
@@ -959,6 +989,8 @@ STOP_COMPLETE = "model returned prose with no action"
 # Every declared question answered or given up on. Says nothing about the
 # analysis being complete -- only that nothing left open needs a tool.
 STOP_LEDGER_EXHAUSTED = "no open question requires an action"
+
+
 # The model could not use the structured control protocol. A bounded, honest
 # outcome -- preferable to spending the ceiling recovering, and deliberately
 # not a reason to fall back to the free-form loop.
@@ -1174,6 +1206,13 @@ class AutonomousRunResult:
     # the analyst: `open_questions` is what the run could not settle, and it is
     # deliberately not hidden -- a question nobody answered is a result.
     plan_calls: int = 0
+    # Control calls actually dispatched, and how many were a second attempt
+    # after an unparsable response. `plan_calls` keeps its meaning -- calls
+    # that returned into planning -- which is why these are separate: a phase
+    # whose first call raised reported `plan_calls == 0`, and that read as a
+    # planning step that never ran rather than one that failed.
+    control_attempts: int = 0
+    control_repairs: int = 0
     initial_questions: int = 0
     child_questions: int = 0
     resolved_questions: "tuple[str, ...]" = ()
@@ -1404,6 +1443,58 @@ def _bounded_observation(result: AnalysisResult) -> tuple[str, bool, int]:
     return text[:keep] + notice, True, full
 
 
+# How much of a parse failure the repair turn is allowed to quote. The message
+# embeds the model's own unparsable output, which is untrusted text of
+# unbounded length -- it is a description of what went wrong, not an
+# instruction, and it must not be able to dominate the repair prompt.
+MAX_CONTROL_ERROR_CHARS = 240
+
+
+def _sanitise_control_error(exc: BaseException) -> str:
+    """A bounded single-line description of a control failure.
+
+    Collapses whitespace so the quoted text cannot forge prompt structure, and
+    truncates so a large unparsable response cannot crowd out the instruction
+    that follows it.
+    """
+    text = " ".join(str(exc).split())
+    if len(text) > MAX_CONTROL_ERROR_CHARS:
+        text = text[:MAX_CONTROL_ERROR_CHARS] + "..."
+    return text or "the response could not be read"
+
+
+def _control_context(messages: "list[Message]") -> "list[Message]":
+    """The transient messages a control turn runs under.
+
+    The ordinary system prompt instructs the model to run `execute_analysis`.
+    A control phase offers no analysis tool, so that instruction is a
+    contradiction the model can only resolve by emitting a call that does not
+    exist -- which is what a live run did, and what the server's tool-call
+    grammar then refused to parse.
+
+    Only the leading system turn is substituted. Everything after it is the
+    artifact history the phase genuinely needs, and nothing here is written
+    back: the caller discards this list.
+    """
+    control = {"role": "system", "content": CONTROL_SYSTEM_PROMPT}
+    replaced = False
+    out: "list[Message]" = []
+    for message in messages:
+        # Every system turn, not just the first. Production appends exactly
+        # one, so this is the same list either way -- but a second one would
+        # be another place the analysis instruction could reappear, and
+        # leaving that to the caller's ordering is not worth the risk.
+        if message.get("role") == "system":
+            if not replaced:
+                out.append(control)
+                replaced = True
+            continue
+        out.append(message)
+    if not replaced:
+        out.insert(0, control)
+    return out
+
+
 @dataclass
 class AnalysisRuntime:
     """Analyst-driven analysis. One model call and one action per step."""
@@ -1426,6 +1517,11 @@ class AnalysisRuntime:
     # exactly the scope in which "already established" is answerable.
     _observed_fingerprints: dict[str, str] = field(default_factory=dict)
     suppressed_duplicates: int = 0
+    # Control calls dispatched, counted before the backend can raise, and the
+    # subset that were a second attempt after an unparsable response. A phase
+    # that fails on its first call still attempted one.
+    control_attempts: int = 0
+    control_repairs: int = 0
     last_context_plan: object | None = None
     # Stages the deterministic pass recovered, paired with the evidence each
     # became. Computed once per artifact snapshot and read thereafter.
@@ -2511,21 +2607,29 @@ class AnalysisRuntime:
         Exactly one tool is offered, so a reply that calls anything else is a
         protocol failure rather than an action to run.
         """
-        admitted = self._admit(
-            list(messages),
-            max_tokens=self.effective_max_tokens,
-            tools=[schema],
-            next_action_reserve=0,
-        )
-        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
-            response = self.backend.chat_stream(
-                admitted,
-                temperature=self.temperature,
-                max_tokens=self.effective_max_tokens,
-                tools=[schema],
-                on_progress=on_progress,
+        allowed = schema["function"]["name"]
+        try:
+            response = self._control_dispatch(messages, schema, on_progress=on_progress)
+        except ToolCallParseError as exc:
+            # The model answered and the server could not parse the answer
+            # into a message, so there is nothing to reject structurally and
+            # nothing to repair from except the fact of the failure. Exactly
+            # one more attempt, restating the contract this phase actually
+            # offers. A second failure is the model's answer.
+            self.control_repairs += 1
+            repaired = [
+                *messages,
+                {"role": "user", "content": (
+                    "The previous control response could not be parsed: "
+                    f"{_sanitise_control_error(exc)}\n"
+                    f"This phase accepts only the {allowed} control call. "
+                    f"Submit that control call now. Do not execute an "
+                    "analysis action."
+                )},
+            ]
+            response = self._control_dispatch(
+                repaired, schema, on_progress=on_progress
             )
-        self.model_calls += 1
         text = response.content or ""
         if _unencodable(text):
             text = text.encode("utf-8", "replace").decode("utf-8")
@@ -2539,6 +2643,45 @@ class AnalysisRuntime:
                 return None, text
             return arguments, text
         return None, text
+
+    def _control_dispatch(
+        self,
+        messages: "list[Message]",
+        schema: "dict[str, Any]",
+        *,
+        on_progress: Callable[[Any], None] | None = None,
+    ):
+        """One control call to the backend. Counted at dispatch.
+
+        The counter is incremented before the call, not after it returns: a
+        call that raises still reached the model and still cost a turn, and a
+        counter that only counts successes reports a failing phase as one that
+        never ran. That is exactly what made a live parse failure look like a
+        planning step that was never attempted.
+        """
+        admitted = self._admit(
+            _control_context(messages),
+            max_tokens=self.effective_max_tokens,
+            tools=[schema],
+            next_action_reserve=0,
+        )
+        self.control_attempts += 1
+        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
+            response = self.backend.chat_stream(
+                admitted,
+                temperature=self.temperature,
+                max_tokens=self.effective_max_tokens,
+                tools=[schema],
+                # A control exchange produces no analyst-visible prose, so
+                # nothing here renders the deltas -- but `on_delta` is required
+                # by the backend, not optional, and every other call site
+                # passes one. Omitting it raised TypeError against the real
+                # backend while scripted test doubles accepted it.
+                on_delta=lambda _text: None,
+                on_progress=on_progress,
+            )
+        self.model_calls += 1
+        return response
 
     def plan_analysis(
         self,
@@ -2818,10 +2961,21 @@ class AnalysisRuntime:
         #
         # These calls count against `max_model_calls` like every other call, so
         # a covered run is bounded exactly as an uncovered one is.
+        # The control counters live on the runtime, which a REPL session
+        # reuses across analyses, so what a run reports has to be its own
+        # delta. Every sibling on the result is per-run; two lifetime totals
+        # among them would over-report the second `/analysis` in a session.
+        control_attempts_at_start = self.control_attempts
+        control_repairs_at_start = self.control_repairs
         covered_calls = 0
         plan_calls = 0
         controller: "AnalysisController | None" = None
+        covered = False
         if cover and not self.source_covered:
+            # COVER owns this block alone. It is an optimisation, and a
+            # backend that refuses it must leave the run exactly as it was --
+            # including PLAN, which is not an optimisation and runs below on
+            # its own terms.
             try:
                 coverage = self.plan_source_coverage()
                 # A call must remain for investigating. Spending the whole
@@ -2836,16 +2990,6 @@ class AnalysisRuntime:
                     # must not now tell the model to go and read it. The
                     # analyst's own line still governs what the run is for.
                     message = analyst_message
-                    # One tools-free call to declare what still needs a tool.
-                    # A ledger of None means it could not be read even after a
-                    # repair, and the run continues exactly as it did before
-                    # this existed -- an unreadable plan is not a bound.
-                    if plan and model_calls < max_model_calls:
-                        controller = AnalysisController()
-                        plan_calls = self.plan_analysis(
-                            controller, analyst_message, on_progress=on_progress
-                        )
-                        model_calls += plan_calls
             except KeyboardInterrupt:
                 cancelled = True
                 stop_reason = STOP_CANCELLED
@@ -2855,6 +2999,49 @@ class AnalysisRuntime:
                 # that refuses it leaves the run as it was and the ordinary
                 # loop below runs unchanged.
                 self._close_incomplete_turn()
+        # Whether the source was covered is read from the history, never from
+        # a local flag: the live failure raised *after* the source was
+        # appended, so an assignment below the call is skipped while the
+        # coverage it describes is real. `source_covered` is derived from the
+        # messages and survives the exception that skipped the flag.
+        covered = self.source_covered
+        # PLAN is attempted whenever coverage succeeded, in its own failure
+        # domain. A backend error here is a planning failure to be reported
+        # honestly -- never a silent slide into an unplanned run.
+        if plan and covered and not cancelled and model_calls < max_model_calls:
+            controller = AnalysisController()
+            try:
+                plan_calls = self.plan_analysis(
+                    controller, analyst_message, on_progress=on_progress
+                )
+                model_calls += plan_calls
+                # `plan_calls` alone does not make a plan valid: a planning
+                # step that returned without adopting one leaves a controller
+                # with no questions and no failure recorded, which reads as an
+                # empty plan the model never actually gave. Validity is
+                # claimed only when the protocol really ran.
+                if controller.unsupported or plan_calls == 0:
+                    # Either the protocol was refused, or planning returned
+                    # without adopting anything. Both leave a controller that
+                    # nobody planned into, and running against it would be the
+                    # unbounded loop wearing a controller's name.
+                    #
+                    # This is what keeps "PLAN never produced a plan" distinct
+                    # from "the plan was empty": an unplanned run is marked
+                    # unsupported and reports as such, while a model that was
+                    # asked and answered "nothing to investigate" leaves the
+                    # controller usable and reaches the ordinary report.
+                    controller.unsupported = True
+            except KeyboardInterrupt:
+                cancelled = True
+                stop_reason = STOP_CANCELLED
+                self._close_incomplete_turn()
+            except (ContextAdmissionError, TimeoutError, RecoverableBackendError):
+                # The protocol could not be driven. Fail closed: mark it, and
+                # let the loop report it as unsupported rather than continue
+                # with a controller nobody planned into.
+                self._close_incomplete_turn()
+                controller.unsupported = True
         shadow = ShadowLedger() if shadow_enabled() else None
         shadow_due = scheduled_actions()
         # Created only when the shadow runs: with the flag off this does no
@@ -3233,6 +3420,8 @@ class AnalysisRuntime:
             completion_shadow=shadow,
             cover_calls=covered_calls,
             plan_calls=plan_calls,
+            control_attempts=self.control_attempts - control_attempts_at_start,
+            control_repairs=self.control_repairs - control_repairs_at_start,
             initial_questions=(
                 sum(1 for q in controller.questions.values() if q.depth == 0)
                 if controller is not None else 0

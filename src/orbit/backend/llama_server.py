@@ -36,13 +36,38 @@ from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_rout
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.history_serialization import serialize_profile_messages
 from orbit.runtime.analysis_runtime import ANALYSIS_STEP_PHASE
-from orbit.backend.base import RecoverableBackendError
+from orbit.backend.base import RecoverableBackendError, ToolCallParseError
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 from orbit.runtime.tool_healing import tool_call_healing_status
 
 
 class LlamaServerError(RecoverableBackendError):
     pass
+
+
+# What the server says when its tool-call grammar rejects the model's output.
+# Matched here, once, at the boundary that owns output parsing -- not in the
+# runtimes that decide what to do about it. The text comes from `chat.cpp`'s
+# parser and is stable; a wording change turns a repairable failure back into
+# a fatal one, which is the safe direction to fail.
+_TOOL_CALL_PARSE_MARKERS = ("failed to parse input at pos",)
+
+
+class LlamaServerToolCallParseError(LlamaServerError, ToolCallParseError):
+    """A `LlamaServerError` that is also the narrow output-parse failure.
+
+    Inherits both so existing handlers catching `LlamaServerError` keep
+    working unchanged, while a caller that wants only the repairable case can
+    name `ToolCallParseError`.
+    """
+
+
+def _stream_error(message: str) -> LlamaServerError:
+    """Type one server error event. Output-parse failures get the narrow type."""
+    lowered = message.lower()
+    if any(marker in lowered for marker in _TOOL_CALL_PARSE_MARKERS):
+        return LlamaServerToolCallParseError(message)
+    return LlamaServerError(message)
 
 
 class LlamaServerBackend:
@@ -777,7 +802,7 @@ def _parse_native_stream(
             stream_done = True
         elif current_event == "error":
             message = _str_or_none(data.get("message")) or "native stream error"
-            raise LlamaServerError(message)
+            raise _stream_error(message)
         model = _str_or_none(data.get("model")) or model
         current_event = None
 
