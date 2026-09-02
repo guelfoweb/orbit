@@ -384,7 +384,13 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
     def test_bounds_are_small_and_explicit(self) -> None:
         self.assertEqual(SOFT_MAX_AUTONOMOUS_ACTIONS, 8)
         self.assertEqual(MAX_AUTONOMOUS_ACTIONS, 12)
-        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 15)
+        # 18, not 15: a question-ledger action costs two calls rather than one
+        # -- the step and the call classifying its question -- plus coverage
+        # and planning up front. Without a term for that overhead the action
+        # ceiling is unreachable and runs end on arithmetic instead of on the
+        # action policy, which is the defect that raised this from 13 to 15 in
+        # the first place. The action bounds themselves are unchanged.
+        self.assertEqual(MAX_AUTONOMOUS_MODEL_CALLS, 18)
         self.assertEqual(MAX_CONSECUTIVE_NO_PROGRESS, 2)
         self.assertEqual(MAX_CONSECUTIVE_ERRORS, 2)
         # The call bound must leave room for calls that execute nothing.
@@ -1314,7 +1320,11 @@ class BoundedReplanTests(AutonomousTestBase):
         # its own replan. This is the property; the exact count depends on
         # where the action budget cuts the trajectory off.
         self.assertGreater(run.replans, 1, "each fresh stall earns its own replan")
-        self.assertEqual(run.replans, stalls)
+        # Every stall that completed earned a replan. The run can end on the
+        # call ceiling mid-stall, in which case the final classification is
+        # recorded but its replan was never sent -- so the counts differ by at
+        # most the one stall in flight.
+        self.assertIn(run.replans, (stalls, stalls - 1))
         # Each stall here is a suppressed duplicate: a model call, no action
         # slot. Both bounds still hold and are asserted at their tightest --
         # a suppressed stall follows a step that did consume an action, so
@@ -1690,12 +1700,25 @@ class SoftActionBudgetTests(AutonomousTestBase):
         self.assertEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
         self.assertNotEqual(run.stop_reason, STOP_MAX_MODEL_CALLS)
 
-    def test_the_nonproductive_allowance_is_explicit(self) -> None:
-        """The only chosen term in the budget is named, not folded into a number."""
+    def test_the_chosen_terms_in_the_budget_are_explicit(self) -> None:
+        """Every chosen term is named, not folded into a number.
+
+        Two of them now. The non-productive allowance is what a run may spend
+        on calls that execute nothing; the ledger overhead is what the
+        question-ledger path costs beyond one call per action -- coverage,
+        planning, and a classification per action. Both are stated so the
+        ceiling stays derived rather than picked.
+        """
+        from orbit.runtime.analysis_runtime import MAX_LEDGER_OVERHEAD_CALLS
+
         self.assertEqual(MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS, 2)
+        self.assertEqual(MAX_LEDGER_OVERHEAD_CALLS, 3)
         self.assertEqual(
             MAX_AUTONOMOUS_MODEL_CALLS,
-            MAX_AUTONOMOUS_ACTIONS + 1 + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS,
+            MAX_AUTONOMOUS_ACTIONS
+            + 1
+            + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS
+            + MAX_LEDGER_OVERHEAD_CALLS,
         )
 
     def test_the_budget_relation_is_derived_not_guessed(self) -> None:
