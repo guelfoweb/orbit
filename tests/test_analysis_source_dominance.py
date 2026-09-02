@@ -197,11 +197,39 @@ class HexRangeTests(unittest.TestCase):
                 )
 
     def test_a_range_longer_than_the_source_is_useful(self) -> None:
-        """Refused rather than clamped: nobody proved that range."""
+        """Refused rather than clamped, and tested AT the boundary.
+
+        Python slicing returns a shorter string rather than raising, so
+        `data[:n+1] == data[:n]` and an off-by-one bound goes unnoticed: the
+        label asserts a range the source cannot supply while the value still
+        matches. A distant count like 99999 survives any off-by-one, so the
+        boundary has to be probed one step at a time.
+        """
         hexed = SOURCE.encode("utf-8").hex()
-        self.assertIsNone(
-            classify_dominated(f"{SOURCE}\nHEX99999: {hexed}\n", SOURCE)
+        for over in (1, 2, 3, 100, 99999):
+            with self.subTest(over=over):
+                count = len(SOURCE) + over
+                self.assertIsNone(
+                    classify_dominated(f"{SOURCE}\nHEX{count}: {hexed}\n", SOURCE)
+                )
+        # The control: exactly the whole source is a valid range.
+        self.assertIsNotNone(
+            classify_dominated(f"{SOURCE}\nHEX{len(SOURCE)}: {hexed}\n", SOURCE)
         )
+
+    def test_the_range_bound_is_exact_at_every_step(self) -> None:
+        """The full boundary map, so no single slot is left unguarded."""
+        length = len(SOURCE)
+        for count, expected in (
+            (length - 1, True), (length, True),
+            (length + 1, False), (length + 2, False),
+        ):
+            with self.subTest(count=count):
+                hexed = SOURCE[:count].encode("utf-8").hex()
+                found = classify_dominated(
+                    f"{SOURCE}\nHEX{count}: {hexed}\n", SOURCE
+                )
+                self.assertEqual(found is not None, expected)
 
     def test_a_zero_length_range_is_useful(self) -> None:
         self.assertIsNone(classify_dominated(f"{SOURCE}\nHEX0: \n", SOURCE))
