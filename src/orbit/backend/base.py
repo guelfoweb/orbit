@@ -28,6 +28,25 @@ class RecoverableBackendError(RuntimeError):
     """
 
 
+class ToolCallParseError(RecoverableBackendError):
+    """The backend could not parse the model's output into a message.
+
+    Narrower than its parent on purpose. The model answered, and the answer
+    was in a shape the tool-call grammar refuses -- so no assistant message
+    exists to inspect or reject structurally, and the request failed for a
+    reason the model itself could correct if asked again.
+
+    A caller may therefore treat this as a repairable turn. Nothing else may
+    be: a decode failure, a transport error, a cancelled request, a model that
+    would not load and a context refusal all arrive as the parent type and all
+    mean the model was never given a fair chance to answer. Re-prompting those
+    spends a call to fail the same way.
+
+    Defined beside `RecoverableBackendError` rather than in a concrete backend
+    so a runtime can name it without importing a backend implementation.
+    """
+
+
 class StreamConsumerAbort(Exception):
     """A stream consumer stopped its own call on purpose; the backend is fine.
 

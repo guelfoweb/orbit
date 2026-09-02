@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 from orbit.backend.llama_server import (
     LlamaServerBackend,
     LlamaServerError,
+    LlamaServerToolCallParseError,
     _enrich_model_info_with_props,
     _parse_chat_result,
     _parse_chat_stream,
@@ -25,7 +26,7 @@ from orbit.backend.llama_server import (
     _qwen_route_prefix_anchor_requested,
     _qwen36_shell_tool_prefix_anchor_requested,
 )
-from orbit.backend.base import ChatResult
+from orbit.backend.base import ChatResult, ToolCallParseError
 from orbit.backend.payloads import (
     ARTIFACT_CONTENT_PROTOCOL_ID,
     ARTIFACT_CONTENT_PROTOCOL_VERSION,
@@ -1564,3 +1565,71 @@ class LlamaServerBackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolCallParseErrorClassificationTests(unittest.TestCase):
+    """The narrow output-parse failure is typed once, at the boundary.
+
+    The server's tool-call grammar can refuse to parse a model's output into a
+    message at all. That is a failure the model itself could correct if asked
+    again, unlike a decode failure or a dead transport, so it gets its own
+    type here -- where output parsing is owned -- rather than being
+    string-matched by every runtime that wants to react to it.
+    """
+
+    def _stream(self, message: str):
+        return FakeStream(
+            [
+                "event: error\n",
+                "data: " + json.dumps({"message": message}) + "\n",
+                "\n",
+            ]
+        )
+
+    def test_a_grammar_parse_failure_is_typed_narrowly(self) -> None:
+        raw = (
+            "Failed to parse input at pos 118: <tool_call>\n"
+            "<function=execute_analysis>"
+        )
+        with self.assertRaises(ToolCallParseError) as caught:
+            _parse_native_stream(
+                self._stream(raw), on_delta=lambda _t: None, on_progress=None
+            )
+        # Still a LlamaServerError, so existing handlers are unaffected.
+        self.assertIsInstance(caught.exception, LlamaServerError)
+        self.assertIn("pos 118", str(caught.exception))
+
+    def test_the_match_is_case_insensitive(self) -> None:
+        with self.assertRaises(ToolCallParseError):
+            _parse_native_stream(
+                self._stream("FAILED TO PARSE INPUT AT POS 4: junk"),
+                on_delta=lambda _t: None,
+                on_progress=None,
+            )
+
+    def test_other_server_errors_are_not_output_parse_failures(self) -> None:
+        # Each of these means the model was never given a fair chance to
+        # answer, so re-prompting would spend a call to fail the same way.
+        for message in (
+            "llama_decode failed",
+            "failed to load model",
+            "context window exceeded",
+            "request cancelled",
+            "native stream error",
+        ):
+            with self.subTest(message=message):
+                with self.assertRaises(LlamaServerError) as caught:
+                    _parse_native_stream(
+                        self._stream(message),
+                        on_delta=lambda _t: None,
+                        on_progress=None,
+                    )
+                self.assertNotIsInstance(caught.exception, ToolCallParseError)
+
+    def test_an_error_event_without_a_message_is_generic(self) -> None:
+        stream = FakeStream(["event: error\n", "data: {}\n", "\n"])
+        with self.assertRaises(LlamaServerError) as caught:
+            _parse_native_stream(
+                stream, on_delta=lambda _t: None, on_progress=None
+            )
+        self.assertNotIsInstance(caught.exception, ToolCallParseError)
