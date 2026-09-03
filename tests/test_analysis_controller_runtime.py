@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import pathlib
 import sys
 import unittest
@@ -1173,3 +1174,628 @@ class ControlIsolationTests(ControlRepairTests):
         )
         self.assertNotIn("\n", text)
         self.assertEqual(text, "line one line two line three")
+
+
+class _InterruptingModel(_Model):
+    """Cancels the run at the completion call, not at the action.
+
+    The interesting instant is the one *between* an action and its outcome:
+    the execution has already run and its evidence is already durable, but
+    nothing has yet recorded what the question made of it.
+    """
+
+    def __init__(self, plan, *, interrupt_on_finish: int = 1, **kwargs) -> None:
+        super().__init__(plan, **kwargs)
+        self.interrupt_on_finish = interrupt_on_finish
+        self.finish_calls = 0
+
+    def reply(self, tools, last: str):
+        names = [t["function"]["name"] for t in (tools or [])]
+        if FINISH_TOOL_NAME in names:
+            self.finish_calls += 1
+            if self.finish_calls == self.interrupt_on_finish:
+                raise KeyboardInterrupt
+        return super().reply(tools, last)
+
+
+class CancellationDuringCompletionTests(_Case):
+    """Cancelling between an action and its outcome must not escape the run.
+
+    Every other model call in `run_autonomous` -- COVER, the step, the closing
+    report -- catches `KeyboardInterrupt` and ends the run, because the caller
+    holds only a pre-run checkpoint and rewinding to it would delete the
+    history and provenance of every step that already succeeded. The
+    completion call was the one omission from that policy.
+    """
+
+    def test_cancelling_the_completion_does_not_escape_the_run(self) -> None:
+        model = _InterruptingModel(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.stop_reason, module.STOP_CANCELLED)
+
+    def test_the_interrupted_question_is_not_resolved(self) -> None:
+        """Nothing recorded an outcome, so nothing may claim one."""
+        model = _InterruptingModel(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.open_questions, ("Q1",))
+
+    def test_a_cancelled_run_writes_no_closing_report(self) -> None:
+        """The analyst asked it to stop; spending minutes summarising is not stopping.
+
+        This is pre-existing policy for every other cancellation path, and the
+        containment here must not quietly buy an exception to it.
+        """
+        model = _InterruptingModel(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        with mock.patch.object(
+            module, "execute_analysis",
+            lambda **kw: AnalysisResult(
+                status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+                stdout="FINDING", stderr="", exit_status=0,
+                duration_seconds=0.1,
+            ),
+        ):
+            run = runtime.run_autonomous("Analyse it.", finalize=True)
+        self.assertTrue(run.cancelled)
+        self.assertIsNone(run.final_report)
+        # Unresolved and reported as such -- the run does not go quiet about
+        # the question it abandoned.
+        self.assertEqual(run.open_questions, ("Q1",))
+        self.assertEqual(run.resolved_questions, ())
+
+    def test_the_runtime_blocks_the_question_with_the_exact_reason(self) -> None:
+        """Production's own `exhaust_active` call, asserted on production's state.
+
+        The controller is run-local, so it is captured as the runtime builds
+        it. Asserting a reason the test itself wrote would prove nothing about
+        the shipped path.
+        """
+        model = _InterruptingModel(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        built: list = []
+        real = module.AnalysisController
+
+        def capture(*args, **kwargs):
+            controller = real(*args, **kwargs)
+            built.append(controller)
+            return controller
+
+        with mock.patch.object(module, "AnalysisController", capture):
+            run = self._run(runtime)
+
+        self.assertTrue(run.cancelled)
+        self.assertEqual(len(built), 1)
+        state = built[0].states["Q1"]
+        self.assertEqual(state.status, BLOCKED)
+        # Compared against an independent literal, not against the constant
+        # production wrote: reading the constant back proves only that the
+        # assignment happened, never that the sentence says what it should.
+        self.assertEqual(
+            state.reason,
+            "the analyst stopped the run before this question was closed",
+        )
+        self.assertIn(
+            "the analyst stopped the run before this question was closed",
+            built[0].dossier(),
+        )
+        self.assertIn("Q1 [BLOCKED]", built[0].dossier())
+
+    def test_the_cancellation_reason_says_the_question_was_not_closed(self) -> None:
+        """Pinned exactly, because word ORDER carries the meaning here.
+
+        A vocabulary check cannot hold this alone. Reviewing one showed that
+        reordering the shipped words into "this question was closed before the
+        analyst stopped the run" passes every vocabulary test and tells the
+        next analyst the question was settled -- the exact inversion the
+        constraint exists to prevent. A set of words discards the only thing
+        that distinguishes the two sentences.
+
+        So the string is pinned. A change to it is then a deliberate act that
+        must come here and be read as a sentence, which is the point: this
+        text is rendered verbatim under `unresolved:` in the dossier and
+        embedded in the guided follow-up.
+        """
+        self.assertEqual(
+            module.CANCELLED_QUESTION_REASON,
+            "the analyst stopped the run before this question was closed",
+        )
+
+    def test_the_backend_failure_reason_says_the_same_of_itself(self) -> None:
+        """The cancellation's twin, which was previously unasserted.
+
+        Mutating this string killed no test, while its cancellation twin had
+        two. The asymmetry is what matters: both are rendered to the analyst
+        in the same place, so both are pinned.
+        """
+        class _Boom(_Model):
+            def __init__(self, plan, **kwargs) -> None:
+                super().__init__(plan, **kwargs)
+                self.finish_calls = 0
+
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    self.finish_calls += 1
+                    raise module.RecoverableBackendError("upstream is down")
+                return _Model.reply(self, tools, last)
+
+        model = _Boom(plan=[_question("q")])
+        runtime = self._runtime(model)
+        built: list = []
+        real = module.AnalysisController
+
+        def capture(*args, **kwargs):
+            controller = real(*args, **kwargs)
+            built.append(controller)
+            return controller
+
+        # Production's own string, read off production's own state.
+        with mock.patch.object(module, "AnalysisController", capture):
+            self._run(runtime)
+        controller = built[0]
+        reason = controller.states["Q1"].reason
+        self.assertEqual(
+            reason,
+            "the run stopped on a backend error before this question was "
+            "closed",
+        )
+        # And it reaches the analyst, in the dossier the report is built from.
+        self.assertIn(reason, controller.dossier())
+        self.assertIn("Q1 [BLOCKED]", controller.dossier())
+
+    def test_calls_spent_before_the_interrupt_are_still_counted(self) -> None:
+        """A cancelled run must not be reported as cheaper than it was.
+
+        `finish_question` reports its spend by returning it, and an interrupt
+        leaves by a path that returns nothing -- so calls that reached the
+        model vanished from the total the analyst reads. The case that shows
+        it is an interrupt on the RETRY: a first completion attempt was
+        already spent and repaired before the analyst stopped the run.
+        """
+        class _Retry(_InterruptingModel):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    self.finish_calls += 1
+                    if self.finish_calls == 1:
+                        # Unusable: earns a repair, and costs a call.
+                        return self._call(FINISH_TOOL_NAME, {"bogus": "x"})
+                    raise KeyboardInterrupt
+                return _Model.reply(self, tools, last)
+
+        model = _Retry(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+
+        self.assertTrue(run.cancelled)
+        self.assertEqual(model.finish_calls, 2)
+        # Counted against the backend, the only independent witness.
+        self.assertEqual(run.model_calls, len(self.backend.chat_calls))
+
+    def test_the_first_completion_call_is_counted_when_interrupted(self) -> None:
+        """Counted against the BACKEND, not against another Orbit counter.
+
+        `run.model_calls == runtime.model_calls` is a tautology: both are fed
+        by the same increment, so both are wrong together whenever that
+        increment is misplaced. The only independent witness of how many calls
+        were made is the backend that served them.
+
+        COVER is excluded from the comparison deliberately. It is an
+        optimisation whose own handler swallows a `TimeoutError` and leaves
+        the run uncovered, so under load it may not run at all -- an equality
+        against the raw call total is then flaky, passing or failing on
+        machine load rather than on the accounting this asserts.
+        """
+        model = _InterruptingModel(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+        # The interrupted call reached the model and cost a turn.
+        self.assertEqual(run.model_calls, len(self.backend.chat_calls))
+
+    def test_a_backend_failure_during_completion_ends_the_run(self) -> None:
+        """The other half of the same omission.
+
+        Cancellation was not the only unguarded exit from the completion
+        call. A backend that fails there unwound `run_autonomous` exactly as
+        an interrupt did, and for the same cost: the caller holds only a
+        pre-run checkpoint.
+        """
+        class _Boom(_Model):
+            def __init__(self, plan, **kwargs) -> None:
+                super().__init__(plan, **kwargs)
+                self.finish_calls = 0
+
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    self.finish_calls += 1
+                    raise module.RecoverableBackendError("upstream is down")
+                return _Model.reply(self, tools, last)
+
+        model = _Boom(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+
+        # The run ended, rather than escaping to a caller that would rewind it.
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(len(run.steps), 1)
+        # The analyst is told the cause, not left to infer one.
+        self.assertIn("upstream is down", run.stop_reason)
+        self.assertIn(module.STOP_BACKEND_ERROR, run.stop_reason)
+        # An outage is not a decision: this is not a cancellation.
+        self.assertFalse(run.cancelled)
+        self.assertNotEqual(run.stop_reason, module.STOP_CANCELLED)
+        # Nothing recorded an answer, so nothing claims one.
+        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.open_questions, ("Q1",))
+        # And the spend is counted here too, against the backend.
+        self.assertEqual(run.model_calls, len(self.backend.chat_calls))
+
+    def test_a_backend_failure_on_the_retry_still_counts_the_first_call(self) -> None:
+        """The discriminating case for the backend path's accounting.
+
+        A failure on the FIRST completion call raises before the dispatch
+        counter moves, so nothing is spent and any accounting looks correct.
+        Only a failure on the retry -- after a call was spent and repaired --
+        can show whether the spend survives the exception.
+        """
+        class _BoomOnRetry(_Model):
+            def __init__(self, plan, **kwargs) -> None:
+                super().__init__(plan, **kwargs)
+                self.finish_calls = 0
+
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    self.finish_calls += 1
+                    if self.finish_calls == 1:
+                        return self._call(FINISH_TOOL_NAME, {"bogus": "x"})
+                    raise module.RecoverableBackendError("upstream is down")
+                return _Model.reply(self, tools, last)
+
+        model = _BoomOnRetry(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+
+        self.assertEqual(model.finish_calls, 2)
+        self.assertIn("upstream is down", run.stop_reason)
+        self.assertEqual(run.model_calls, len(self.backend.chat_calls))
+
+    def test_the_last_action_is_still_rendered_to_the_analyst(self) -> None:
+        """A step that ran must reach `on_step`, however the run then ends.
+
+        The REPL renders autonomous steps ONLY through `on_step` -- it forces
+        an empty step block for autonomous runs precisely because every step
+        was already shown. Leaving the loop before classifying meant the last
+        executed action was in `run.steps` but had never been rendered, and a
+        cancelled run produces no closing report either, so its evidence id
+        was displayed nowhere at all.
+        """
+        class _Late(_InterruptingModel):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    self.finish_calls += 1
+                    if self.finish_calls == 3:
+                        raise KeyboardInterrupt
+                return _Model.reply(self, tools, last)
+
+        model = _Late(plan=[_question("a"), _question("b"), _question("c")])
+        runtime = self._runtime(model)
+        rendered: list = []
+        counter = {"n": 0}
+
+        def distinct(**_kwargs):
+            counter["n"] += 1
+            return AnalysisResult(
+                status="ok", code_sha256=f"{counter['n']:064d}",
+                input_sha256="i" * 64, stdout=f"F{counter['n']}", stderr="",
+                exit_status=0, duration_seconds=0.1,
+            )
+
+        with mock.patch.object(module, "execute_analysis", distinct):
+            run = runtime.run_autonomous(
+                "Analyse it.", finalize=False,
+                on_step=lambda step, _record: rendered.append(step),
+            )
+
+        self.assertTrue(run.cancelled)
+        # Every step that ran was rendered, and the ledger agrees with it.
+        self.assertEqual(len(rendered), len(run.steps))
+        self.assertEqual(len(run.progress), len(run.steps))
+        # Specifically the last one, which is the one that used to vanish.
+        self.assertIs(rendered[-1], run.steps[-1])
+        self.assertIsNotNone(run.steps[-1].evidence)
+
+    def test_a_backend_failure_also_renders_its_last_action(self) -> None:
+        """Same invariant on the other new exit."""
+        class _Boom(_Model):
+            def __init__(self, plan, **kwargs) -> None:
+                super().__init__(plan, **kwargs)
+                self.finish_calls = 0
+
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    self.finish_calls += 1
+                    raise module.RecoverableBackendError("upstream is down")
+                return _Model.reply(self, tools, last)
+
+        model = _Boom(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        rendered: list = []
+        run = self._run(runtime, on_step=lambda s, _r: rendered.append(s))
+
+        self.assertEqual(len(rendered), len(run.steps))
+        self.assertEqual(len(run.progress), len(run.steps))
+        self.assertIn("upstream is down", run.stop_reason)
+
+    def test_every_failure_path_counts_the_calls_it_spent(self) -> None:
+        """One table, because the defect was the same at four call sites.
+
+        COVER, PLAN, the step and the completion each report their spend by
+        RETURNING it, and each has handlers that leave without returning. A
+        call that reached the model and then failed was therefore spent and
+        never counted, and the analyst reads that total. The witness is the
+        backend, the only counter not fed by the code under test.
+        """
+        def failing(tool, exc):
+            class _M(_Model):
+                def __init__(self, plan, **kwargs) -> None:
+                    super().__init__(plan, **kwargs)
+                    self.hits = 0
+
+                def reply(self, tools, last: str):
+                    names = [t["function"]["name"] for t in (tools or [])]
+                    # COVER is the call that offers no tools at all.
+                    if (tool is None and not names) or (tool and tool in names):
+                        self.hits += 1
+                        if self.hits == 1:
+                            raise exc
+                    return _Model.reply(self, tools, last)
+            return _M
+
+        interrupt = KeyboardInterrupt
+        outage = module.RecoverableBackendError
+        # The success path first: a run where nothing fails must also count
+        # exactly, or the failure rows below prove only that two wrongs match.
+        model = _Model(plan=[_question("q")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+        self.assertEqual(run.model_calls, len(self.backend.chat_calls),
+                         "a run with no failure must count exactly")
+
+        # And the boundary the counter must sit on, at EVERY site: admission
+        # refuses before anything is sent, so a refused request reached no
+        # model and must not be billed. Patching `_admit` globally only ever
+        # exercises the first site a run reaches, which is why each is
+        # refused in turn here by the phase it belongs to.
+        real_admit = module.AnalysisRuntime._admit
+        # Through 6, not 4: with `finalize=True` the run reaches a report
+        # dispatch too, and its admission boundary is otherwise never
+        # exercised -- a context exhausted at the closing report is exactly
+        # when that path runs in production.
+        for nth in range(1, 7):
+            with self.subTest(refuse_admission_number=nth):
+                model = _Model(plan=[_question("q")])
+                runtime = self._runtime(model)
+                seen = {"n": 0}
+
+                def refusing(self, *args, **kwargs):
+                    seen["n"] += 1
+                    if seen["n"] == nth:
+                        raise module.ContextAdmissionError("nothing fits")
+                    return real_admit(self, *args, **kwargs)
+
+                with mock.patch.object(
+                    module.AnalysisRuntime, "_admit", refusing
+                ):
+                    run = runtime.run_autonomous("Analyse it.", finalize=True)
+                # The refused admission sent nothing, so it is not a call --
+                # every other admitted request is.
+                self.assertEqual(
+                    run.model_calls, len(self.backend.chat_calls),
+                    f"refusal #{nth} was billed as a call",
+                )
+
+        sites = [
+            ("COVER", None), ("PLAN", PLAN_TOOL_NAME),
+            ("STEP", ANALYSIS_TOOL_NAME), ("FINISH", FINISH_TOOL_NAME),
+        ]
+        for label, tool in sites:
+            for kind, exc in (("interrupt", interrupt("stop")),
+                              ("outage", outage("upstream is down"))):
+                with self.subTest(site=label, failure=kind):
+                    model = failing(tool, exc)(plan=[_question("q")])
+                    runtime = self._runtime(model)
+                    run = self._run(runtime)
+                    self.assertEqual(
+                        run.model_calls, len(self.backend.chat_calls),
+                        f"{label} on {kind}: calls spent were not counted",
+                    )
+
+    def test_cancelling_spends_no_shadow_observation(self) -> None:
+        """The cancellation flag, tested where it actually bites.
+
+        `while not cancelled` only ends the loop at the NEXT iteration, so
+        without the flag the rest of this one still runs. When the completion
+        shadow is due that costs a real generation -- spent summarising a run
+        the analyst just asked to stop.
+
+        The schedule fires after four actions, so the interrupt must land ON
+        the fourth completion: a run that stops earlier never reaches the
+        checkpoint and the assertion would hold for the wrong reason.
+        """
+        with mock.patch.dict(
+            os.environ, {"ORBIT_ANALYSIS_COMPLETION_SHADOW": "1"}, clear=False
+        ):
+            model = _InterruptingModel(
+                plan=[_question(str(i)) for i in range(4)],
+                interrupt_on_finish=4,
+            )
+            runtime = self._runtime(model)
+            counter = {"n": 0}
+
+            def distinct(**_kwargs):
+                counter["n"] += 1
+                return AnalysisResult(
+                    status="ok", code_sha256=f"{counter['n']:064d}",
+                    input_sha256="i" * 64, stdout=f"F{counter['n']}",
+                    stderr="", exit_status=0, duration_seconds=0.1,
+                )
+
+            with mock.patch.object(module, "execute_analysis", distinct):
+                run = runtime.run_autonomous("Analyse it.", finalize=False)
+
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.actions_executed, 4, "the schedule must be reached")
+        self.assertEqual(
+            len(run.completion_shadow.observations), 0,
+            "a cancelled run must not spend a generation on a diagnostic",
+        )
+
+    def test_a_closing_report_is_counted_like_every_other_call(self) -> None:
+        """The fifth dispatch site. It was the one left unconverted.
+
+        `report()` reached the model without touching the counter at all, so
+        a report that died mid-generation was spent and never counted, and
+        even a successful one left the runtime's lifetime total short.
+        """
+        model = _Model(plan=[_question("q")])
+        runtime = self._runtime(model)
+        reached = {"n": 0}
+        served = self.backend.chat_stream
+
+        def counting(messages, **kwargs):
+            # Counted before dispatch, as production does, so a call that
+            # raises is still witnessed.
+            reached["n"] += 1
+            return served(messages, **kwargs)
+
+        self.backend.chat_stream = counting
+        with mock.patch.object(
+            module, "execute_analysis",
+            lambda **kw: AnalysisResult(
+                status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+                stdout="F", stderr="", exit_status=0, duration_seconds=0.1,
+            ),
+        ):
+            run = runtime.run_autonomous("Analyse it.", finalize=True)
+
+        self.assertIsNotNone(run.final_report)
+        self.assertEqual(run.model_calls, reached["n"])
+        # And the lifetime counter agrees, which it did not before.
+        self.assertEqual(runtime.model_calls, reached["n"])
+
+    def test_a_coverage_report_is_counted_too(self) -> None:
+        """The other report path -- the one with no evidence to report on.
+
+        A covered run whose plan was empty takes no step at all: the model
+        said the source answered everything, which the planning instruction
+        calls a correct reply. That run still reports, through a second
+        dispatch site, and that site was the one left uncounted -- so an
+        ordinary successful analysis under-reported what it cost.
+        """
+        model = _Model(plan=[])
+        runtime = self._runtime(model)
+        run = runtime.run_autonomous("Analyse it.", finalize=True)
+
+        # No steps, but a real report, served by a real call.
+        self.assertEqual(run.actions_executed, 0)
+        self.assertIsNotNone(run.final_report)
+        self.assertEqual(run.model_calls, len(self.backend.chat_calls))
+        self.assertEqual(runtime.model_calls, len(self.backend.chat_calls))
+
+    def test_a_report_that_fails_still_counts_the_call_it_made(self) -> None:
+        """The report's failure path, which returns nothing to add.
+
+        `report()` reports its spend in the object it returns; the handler
+        that catches a failing report returns None instead, so the call it
+        already made vanished from the total the analyst reads.
+        """
+        model = _Model(plan=[_question("q")])
+        runtime = self._runtime(model)
+        reached = {"n": 0}
+        served = self.backend.chat_stream
+
+        def failing(messages, **kwargs):
+            reached["n"] += 1
+            # The first toolless call is COVER; the second is the report.
+            if not kwargs.get("tools") and reached["n"] > 1:
+                raise module.RecoverableBackendError("upstream is down")
+            return served(messages, **kwargs)
+
+        self.backend.chat_stream = failing
+        with mock.patch.object(
+            module, "execute_analysis",
+            lambda **kw: AnalysisResult(
+                status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+                stdout="F", stderr="", exit_status=0, duration_seconds=0.1,
+            ),
+        ):
+            run = runtime.run_autonomous("Analyse it.", finalize=True)
+
+        # The run survives a report it could not compose...
+        self.assertIsNone(run.final_report)
+        # ...and still says what it cost.
+        self.assertEqual(run.model_calls, reached["n"])
+
+    def test_the_action_and_its_evidence_survive(self) -> None:
+        """What ran, ran. The interrupt withholds an outcome, not a result."""
+        model = _InterruptingModel(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(len(run.steps), 1)
+        self.assertIsNotNone(run.steps[0].evidence)
+
+    def test_cancelling_stops_the_run_rather_than_continuing(self) -> None:
+        """Leaving the loop is load-bearing -- but not because of Q2.
+
+        `while not cancelled` already stops the next iteration, so Q2 never
+        starts either way. What leaving actually protects is the REST of this
+        iteration: a COMPLETE classification below would overwrite the stop
+        reason that says the analyst cancelled, and the completion shadow
+        would spend a model call on a run that is already over.
+        """
+        model = _InterruptingModel(plan=[_question("first"), _question("second")])
+        runtime = self._runtime(model)
+        built: list = []
+        real = module.AnalysisController
+
+        def capture(*args, **kwargs):
+            controller = real(*args, **kwargs)
+            built.append(controller)
+            return controller
+
+        with mock.patch.object(module, "AnalysisController", capture):
+            run = self._run(runtime)
+
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.stop_reason, module.STOP_CANCELLED)
+        # Exactly one action ran and exactly one completion was attempted.
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(model.finish_calls, 1)
+        self.assertEqual(len(run.steps), 1)
+        # Q2 was never activated, never acted on, and is still open.
+        self.assertEqual(built[0].states["Q2"].actions, 0)
+        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.open_questions, ("Q1", "Q2"))
+        # The step that ran IS classified and rendered -- it is real work the
+        # analyst must see -- but nothing after it runs, so the cancellation
+        # survives as the stop reason.
+        self.assertEqual(len(run.progress), len(run.steps))
+        self.assertEqual(run.stop_reason, module.STOP_CANCELLED)
+
+    def test_normal_completion_is_untouched(self) -> None:
+        """The guard catches an interrupt; it changes nothing otherwise."""
+        model = _Model(plan=[_question("is pickle reachable?")])
+        runtime = self._runtime(model)
+        run = self._run(runtime)
+        self.assertFalse(run.cancelled)
+        self.assertEqual(run.resolved_questions, ("Q1",))
+        self.assertEqual(run.open_questions, ())

@@ -1001,6 +1001,12 @@ STOP_MAX_ACTIONS = "action bound reached"
 STOP_SOFT_MAX_ACTIONS = "action budget reached without further progress"
 STOP_MAX_MODEL_CALLS = "model call bound reached"
 STOP_CANCELLED = "cancelled"
+# Why a question has no outcome when the analyst stops mid-completion.
+# Named so the dossier a guided follow-up reads and the test that proves
+# it bind to one string rather than to two copies of it.
+CANCELLED_QUESTION_REASON = (
+    "the analyst stopped the run before this question was closed"
+)
 STOP_BACKEND_ERROR = "backend error"
 
 MAX_SESSION_SCRATCH_BYTES = 64 * 1024 * 1024
@@ -2072,6 +2078,12 @@ class AnalysisRuntime:
             max_tokens=self.effective_max_tokens,
             tools=[ANALYSIS_TOOL_SCHEMA],
         )
+        # Counted at dispatch: a call that raises still reached the model and
+        # still cost a turn, and a counter that only counts successes reports
+        # a failed step as one that never ran. Deliberately AFTER `_admit`,
+        # which refuses before any request is sent -- a refusal reached no
+        # model and must not be billed as a call.
+        self.model_calls += 1
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
             response = self.backend.chat_stream(
                 admitted,
@@ -2081,7 +2093,6 @@ class AnalysisRuntime:
                 on_delta=_capture,
                 on_progress=on_progress,
             )
-        self.model_calls += 1
         call_seconds = time.monotonic() - call_started
 
         calls = self._with_canonical_call_ids(response.tool_calls or [])
@@ -2559,6 +2570,9 @@ class AnalysisRuntime:
             if on_delta is not None and text:
                 on_delta(text)
 
+        # Counted before the call, as everywhere else: a call that raises
+        # still reached the model and still cost a turn.
+        self.model_calls += 1
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(
                 admitted,
@@ -2568,7 +2582,6 @@ class AnalysisRuntime:
                 on_delta=_capture,
                 on_progress=on_progress,
             )
-        self.model_calls += 1
         content = response.content or ""
         if _unencodable(content):
             content = content.encode("utf-8", "replace").decode("utf-8")
@@ -2653,11 +2666,13 @@ class AnalysisRuntime:
     ):
         """One control call to the backend. Counted at dispatch.
 
-        The counter is incremented before the call, not after it returns: a
-        call that raises still reached the model and still cost a turn, and a
-        counter that only counts successes reports a failing phase as one that
-        never ran. That is exactly what made a live parse failure look like a
-        planning step that was never attempted.
+        Both counters are incremented before the call, not after it returns:
+        a call that raises still reached the model and still cost a turn, and
+        a counter that only counts successes reports a failing phase as one
+        that never ran. That is exactly what made a live parse failure look
+        like a planning step that was never attempted -- and, while
+        `model_calls` was still incremented after the return, it made every
+        cancelled run report one model call fewer than it made.
         """
         admitted = self._admit(
             _control_context(messages),
@@ -2666,6 +2681,12 @@ class AnalysisRuntime:
             next_action_reserve=0,
         )
         self.control_attempts += 1
+        # Counted here, beside `control_attempts`, for the reason the
+        # docstring gives: a call that raises still reached the model and
+        # still cost a turn. Incrementing after `chat_stream` returned meant
+        # an interrupted or failed control call was spent and never counted,
+        # so every cancelled run reported one model call fewer than it made.
+        self.model_calls += 1
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
             response = self.backend.chat_stream(
                 admitted,
@@ -2680,7 +2701,6 @@ class AnalysisRuntime:
                 on_delta=lambda _text: None,
                 on_progress=on_progress,
             )
-        self.model_calls += 1
         return response
 
     def plan_analysis(
@@ -2971,6 +2991,11 @@ class AnalysisRuntime:
         plan_calls = 0
         controller: "AnalysisController | None" = None
         covered = False
+        # Measured across the whole COVER attempt, for the same reason as
+        # PLAN and the completion below: the handlers here leave by paths
+        # that return nothing, so a call that reached the model and then
+        # failed was spent and never counted.
+        cover_spent_before = self.model_calls
         if cover and not self.source_covered:
             # COVER owns this block alone. It is an optimisation, and a
             # backend that refuses it must leave the run exactly as it was --
@@ -2985,16 +3010,18 @@ class AnalysisRuntime:
                     covered_calls = self.cover_source(
                         coverage, on_progress=on_progress, on_delta=on_delta
                     )
-                    model_calls += covered_calls
+                    model_calls += self.model_calls - cover_spent_before
                     # The source has been supplied; the standing instruction
                     # must not now tell the model to go and read it. The
                     # analyst's own line still governs what the run is for.
                     message = analyst_message
             except KeyboardInterrupt:
+                model_calls += self.model_calls - cover_spent_before
                 cancelled = True
                 stop_reason = STOP_CANCELLED
                 self._close_incomplete_turn()
             except (ContextAdmissionError, TimeoutError, RecoverableBackendError):
+                model_calls += self.model_calls - cover_spent_before
                 # Coverage is an optimisation, never a precondition. A backend
                 # that refuses it leaves the run as it was and the ordinary
                 # loop below runs unchanged.
@@ -3010,11 +3037,17 @@ class AnalysisRuntime:
         # honestly -- never a silent slide into an unplanned run.
         if plan and covered and not cancelled and model_calls < max_model_calls:
             controller = AnalysisController()
+            # Measured, not returned -- the same reason as the completion
+            # call below. `plan_analysis` reports its spend on the way out,
+            # and the handlers underneath leave by paths that return nothing,
+            # so a planning call that reached the model and then failed was
+            # spent and never counted.
+            plan_spent_before = self.model_calls
             try:
                 plan_calls = self.plan_analysis(
                     controller, analyst_message, on_progress=on_progress
                 )
-                model_calls += plan_calls
+                model_calls += self.model_calls - plan_spent_before
                 # `plan_calls` alone does not make a plan valid: a planning
                 # step that returned without adopting one leaves a controller
                 # with no questions and no failure recorded, which reads as an
@@ -3033,10 +3066,12 @@ class AnalysisRuntime:
                     # controller usable and reaches the ordinary report.
                     controller.unsupported = True
             except KeyboardInterrupt:
+                model_calls += self.model_calls - plan_spent_before
                 cancelled = True
                 stop_reason = STOP_CANCELLED
                 self._close_incomplete_turn()
             except (ContextAdmissionError, TimeoutError, RecoverableBackendError):
+                model_calls += self.model_calls - plan_spent_before
                 # The protocol could not be driven. Fail closed: mark it, and
                 # let the loop report it as unsupported rather than continue
                 # with a controller nobody planned into.
@@ -3064,6 +3099,9 @@ class AnalysisRuntime:
             except Exception:  # noqa: BLE001 - diagnostics never end a run
                 shadow_ledger = None
 
+        # Set when a completion call fails, so the step it belonged to is
+        # still classified and rendered before the loop ends.
+        ended = False
         while not cancelled:
             if model_calls >= max_model_calls:
                 stop_reason = STOP_MAX_MODEL_CALLS
@@ -3104,6 +3142,11 @@ class AnalysisRuntime:
                     # regardless of what was asked.
                     stop_reason = STOP_LEDGER_EXHAUSTED
                     break
+            # Measured, like COVER, PLAN and the completion: `step()` reports
+            # its spend in the result it returns, and both handlers below
+            # leave without one, so a step whose call reached the model and
+            # then failed was spent and never counted.
+            step_spent_before = self.model_calls
             try:
                 step = self.step(
                     message,
@@ -3118,6 +3161,7 @@ class AnalysisRuntime:
                 # What ran already stands. `step()` has committed its own
                 # history and evidence, or rewound nothing; the analyst keeps
                 # the session either way.
+                model_calls += self.model_calls - step_spent_before
                 cancelled = True
                 stop_reason = STOP_CANCELLED
                 self._close_incomplete_turn()
@@ -3165,13 +3209,14 @@ class AnalysisRuntime:
                     # known not to fit.
                     message = analyst_message
                     continue
+                model_calls += self.model_calls - step_spent_before
                 error = f"{type(exc).__name__}: {exc}"
                 stop_reason = f"{STOP_BACKEND_ERROR}: {error}"
                 self._close_incomplete_turn()
                 break
 
             steps.append(step)
-            model_calls += step.model_calls
+            model_calls += self.model_calls - step_spent_before
             if step.action_executed:
                 actions += 1
             if step.suppressed_duplicate_of is not None:
@@ -3187,18 +3232,104 @@ class AnalysisRuntime:
                 # is parsed out of the reply and nothing was asked of the model.
                 controller.record_action()
                 if model_calls < max_model_calls:
-                    model_calls += self.finish_question(
-                        controller, active,
-                        self.evidence_store.raw_excerpt(step.evidence)
-                        if step.evidence else "",
-                        step.evidence.evidence_id if step.evidence else "",
-                        on_progress=on_progress,
-                    )
+                    # Measured rather than returned. `finish_question` reports
+                    # its spend on the way out, and an interrupt leaves by a
+                    # path that has no way out -- so the calls it had already
+                    # made vanished from the total the analyst is shown. The
+                    # runtime's own counter is incremented at dispatch, before
+                    # the backend can raise, so reading it here is exact
+                    # whether the call returned or was interrupted.
+                    spent_before = self.model_calls
+                    try:
+                        self.finish_question(
+                            controller, active,
+                            self.evidence_store.raw_excerpt(step.evidence)
+                            if step.evidence else "",
+                            step.evidence.evidence_id if step.evidence else "",
+                            on_progress=on_progress,
+                        )
+                        model_calls += self.model_calls - spent_before
+                    except KeyboardInterrupt:
+                        model_calls += self.model_calls - spent_before
+                        # The completion is a model call like every other one
+                        # here, and every other one is guarded: an interrupt
+                        # that propagates unwinds to a caller holding only a
+                        # pre-run checkpoint, and rewinding to that point
+                        # deletes the history and provenance of every step
+                        # that already succeeded -- leaving their evidence
+                        # durable on disk with nothing referring to it. This
+                        # call was the omission.
+                        #
+                        # The action ran and its evidence stands. What is
+                        # missing is only the question's outcome, so the
+                        # question is blocked with that reason rather than
+                        # resolved: nothing recorded an answer, so nothing
+                        # may claim one.
+                        controller.exhaust_active(CANCELLED_QUESTION_REASON)
+                        cancelled = True
+                        stop_reason = STOP_CANCELLED
+                        # Deliberately not `break` here. The action already
+                        # ran and is already in `steps`, and every step
+                        # reaches the analyst through `on_step` below --
+                        # leaving directly skipped its classification, broke
+                        # len(steps) == len(progress), and meant the REPL
+                        # (which renders autonomous steps ONLY through
+                        # `on_step`) never showed the last executed action's
+                        # evidence id at all.
+                        #
+                        # The flag is load-bearing here too, not merely
+                        # symmetric with the outage path below. `while not
+                        # cancelled` ends the loop only at the NEXT iteration,
+                        # so without this the rest of THIS one still runs --
+                        # and when the completion shadow is due, that spends a
+                        # real generation summarising a run the analyst just
+                        # asked to stop.
+                        ended = True
+                    except (
+                        ContextAdmissionError, TimeoutError,
+                        RecoverableBackendError,
+                    ) as exc:
+                        # The same omission, and the same reasoning as the
+                        # step above: a backend that fails during the
+                        # completion must end the run, not unwind it. What
+                        # ran, ran; the analyst is told why it stopped, and
+                        # is told the CAUSE rather than being left to infer
+                        # one.
+                        #
+                        # Kept distinct from the cancellation beside it. An
+                        # outage is not a decision, so the question is
+                        # blocked with what actually happened and the run
+                        # reports a backend error rather than a cancellation
+                        # the analyst never asked for.
+                        model_calls += self.model_calls - spent_before
+                        error = f"{type(exc).__name__}: {exc}"
+                        controller.exhaust_active(
+                            f"the run stopped on a {STOP_BACKEND_ERROR} "
+                            "before this question was closed"
+                        )
+                        stop_reason = f"{STOP_BACKEND_ERROR}: {error}"
+                        # As with the cancellation beside it: the step that
+                        # ran is classified and rendered before leaving.
+                        ended = True
 
             record = progress_ledger.classify(len(records) + 1, step)
             records.append(record)
             if on_step is not None:
                 on_step(step, record)
+            if ended:
+                # The completion failed, and the step it belonged to is now
+                # recorded and rendered like any other. What must not happen
+                # is the REST of this iteration: the completion shadow would
+                # spend a model call on a run that is already over, and a
+                # COMPLETE classification below would overwrite the stop
+                # reason that says why it ended.
+                #
+                # `_close_incomplete_turn` cannot fire from here -- `step()`
+                # appended both its turns and `finish_question` never commits
+                # its transient messages -- but it is kept for symmetry with
+                # the sibling handlers, where the history CAN end mid-turn.
+                self._close_incomplete_turn()
+                break
 
             # Observational only, and placed here deliberately: after the step
             # is committed and before any stop decision, so the shadow sees
@@ -3343,6 +3474,11 @@ class AnalysisRuntime:
         # analysis into nothing, discarding a source the model was given in
         # full. So a run that covered the source reports even with no steps.
         if not cancelled and finalize and (steps or covered_calls):
+            # Measured, like the four sites above: `report()` reports its
+            # spend in the object it returns, and the handler below leaves
+            # without one -- so a closing report that reached the model and
+            # then failed was spent and never counted.
+            report_spent_before = self.model_calls
             try:
                 final_report = self.report(
                     question=self._final_question(
@@ -3378,9 +3514,10 @@ class AnalysisRuntime:
                 # pre-run checkpoint, and rewinding to that point deletes the
                 # history and provenance of every completed step -- leaving
                 # their evidence durable on disk with nothing referring to it.
+                model_calls += self.model_calls - report_spent_before
                 final_report = None
             else:
-                model_calls += final_report.model_calls
+                model_calls += self.model_calls - report_spent_before
 
         if shadow_ledger is not None:
             # Written last, so its absence is how a reader tells a killed run
@@ -3528,6 +3665,10 @@ class AnalysisRuntime:
                 with model_call_context(
                     phase=ANALYSIS_COMPLETION_SHADOW_PHASE, tools_mode="off"
                 ):
+                    # Deliberately NOT counted, and the only dispatch in
+                    # this module that is not: the shadow is a diagnostic,
+                    # and a diagnostic must not consume the budget that
+                    # bounds the investigation it is observing.
                     return self.backend.chat(
                         messages,
                         temperature=0,
@@ -3800,6 +3941,11 @@ class AnalysisRuntime:
                 model_calls=0,
                 evidence_ids=tuple(r.evidence_id for r in records),
             )
+        # The fifth dispatch site, counted like the other four: after the
+        # admission that can refuse without sending anything, and before the
+        # call that can raise after reaching the model. A closing report that
+        # dies mid-generation still cost a turn.
+        self.model_calls += 1
         with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(
                 admitted,
@@ -3903,6 +4049,12 @@ class AnalysisRuntime:
                     f"unaffected.\n\n{appendix}"
                 )
             return AnalysisReport(text=text, model_calls=0, evidence_ids=())
+        # The fifth and last COUNTED site. (There is a sixth dispatch in the
+        # completion shadow, deliberately uncounted -- see there.) It reports
+        # its own spend in the AnalysisReport it returns, and the caller now
+        # reads the runtime counter instead, so a site that never touched the
+        # counter dropped its call entirely.
+        self.model_calls += 1
         with model_call_context(phase=ANALYSIS_REPORT_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(
                 admitted,
