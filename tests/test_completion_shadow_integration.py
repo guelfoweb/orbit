@@ -168,14 +168,23 @@ class ShadowIsObservationalTests(AutonomousTestBase):
         backend = _CountingBackend(
             _script(), verifier_answers=["CONTINUE missing: the payload"] * 12
         )
+        runtime = self.runtime(backend)
         with mock.patch.dict("os.environ", {SHADOW_ENV: "1"}, clear=False):
-            run = self.runtime(backend).run_autonomous("go", finalize=False)
+            run = runtime.run_autonomous("go", finalize=False)
         shadow = run.completion_shadow
         self.assertGreater(shadow.calls, 0)
         loop_calls = sum(1 for tools in backend.tool_modes if tools != [])
         # The load-bearing one: the loop's own budget counts loop calls and
         # nothing else, however many verifier calls the shadow made.
         self.assertEqual(run.model_calls, loop_calls)
+        # And the LIFETIME counter too. `run.model_calls` is structurally
+        # immune -- the shadow sits between the windows it is measured over --
+        # so counting a verifier call would leave that assertion green while
+        # the runtime's own total, which the terminal renders as session
+        # usage, silently absorbed a diagnostic.
+        self.assertGreater(backend.verifier_calls, 0,
+                           "the verifier must actually have run")
+        self.assertEqual(runtime.model_calls, loop_calls)
 
     def test_verifier_calls_are_tool_free(self) -> None:
         import os
