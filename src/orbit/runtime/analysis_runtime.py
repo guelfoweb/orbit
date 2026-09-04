@@ -221,6 +221,18 @@ ANALYSIS_REPORT_INSTRUCTION = (
 
 NO_EVIDENCE_REPORT = "No analysis evidence has been collected yet."
 
+#: How a report that could not be written begins. Named rather than
+#: spelled twice: it is the opening clause that states the failure, and
+#: a reader outside this module -- the live-validation harness treats
+#: such a report as a run that produced no answer -- must be able to
+#: recognise it without copying the wording and drifting from it.
+REPORT_NOT_COMPOSED_PREFIX = "The report could not be composed:"
+
+#: What stands in for a closing report the model returned empty. Named
+#: for the same reason as the line above: it is read from outside this
+#: module as the mark of a run that produced no answer.
+NO_USABLE_REPORT_TEXT = "the report call produced no usable text"
+
 # Stable prefix. Everything here is identical for every step of every
 # analysis on a given profile, which is what makes a future exact-prefix
 # prewarm possible. Nothing volatile belongs above this line: no source
@@ -3933,7 +3945,7 @@ class AnalysisRuntime:
                 raise
             return AnalysisReport(
                 text=(
-                    "The report could not be composed: the collected evidence "
+                    f"{REPORT_NOT_COMPOSED_PREFIX} the collected evidence "
                     "no longer fits the context window. The deterministic "
                     "transformations below are unaffected.\n\n"
                     f"{appendix}"
@@ -3961,7 +3973,7 @@ class AnalysisRuntime:
         if not text:
             # Truthful rather than silent, and no repair call: a second
             # invocation would cross the boundary this runtime holds.
-            text = "the report call produced no usable text"
+            text = NO_USABLE_REPORT_TEXT
         # Appended after the model's prose, not merged into it: this is
         # evidence rendering, and keeping it separate is what makes it
         # independent of whether the model chose to mention any of it.
@@ -4038,7 +4050,7 @@ class AnalysisRuntime:
             # method exists to prevent. What failed is composing the report,
             # which is a different fact and the one worth reporting.
             text = (
-                "The report could not be composed: the covered source no "
+                f"{REPORT_NOT_COMPOSED_PREFIX} the covered source no "
                 "longer fits the context window. The artifact was supplied in "
                 "full and nothing was executed, so no finding was lost -- but "
                 "none could be stated here either."
@@ -4064,7 +4076,7 @@ class AnalysisRuntime:
                 on_delta=_capture,
                 on_progress=on_progress,
             )
-        text = (response.content or "").strip() or "the report call produced no usable text"
+        text = (response.content or "").strip() or NO_USABLE_REPORT_TEXT
         if appendix:
             text = f"{text}\n\n{appendix}"
         return AnalysisReport(text=text, model_calls=1, evidence_ids=())
