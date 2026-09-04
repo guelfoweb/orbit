@@ -3128,6 +3128,46 @@ class AnalysisRuntime:
                     soft_max_actions=soft_max_actions,
                     max_model_calls=max_model_calls,
                 )
+            except KeyboardInterrupt:
+                # The analyst stopped the run while the ledger's opening
+                # record was being written. Nothing is filed for it: the
+                # `shadow_ledger = None` below is how an unusable ledger is
+                # recorded, and reusing it here would file their decision as
+                # a ledger that could not be opened.
+                #
+                # Contained rather than propagated for the reason every
+                # sibling handler is: `run_autonomous` would return to a
+                # caller holding only a pre-run checkpoint, and `repl.py`
+                # restores it, deleting the history of everything done so
+                # far and orphaning its evidence on disk. COVER and PLAN
+                # have already run by this point, so that is not nothing.
+                #
+                # This seam differs from BOTH of its siblings, and the
+                # differences are read off the ordering rather than copied:
+                #
+                # `stop_reason` here is still the DEFAULT set before the run
+                # began, not a decision -- unlike the final ledger, which
+                # runs after the loop where deferring to it is the honest
+                # thing. So it is set.
+                #
+                # No question is blocked, unlike the mid-run checkpoint.
+                # `select_active` runs inside the loop, BELOW this point, so
+                # measured across plan sizes 0-7 and budgets 2-30, all 35
+                # runs reaching this call have `controller.active is None`.
+                # `exhaust_active` early-returns on exactly that, so calling
+                # it would be a no-op dressed as diligence. The questions
+                # PLAN created are left OPEN, which is what they are: the
+                # run stopped before any of them was ever selected.
+                #
+                # No `break` and no `_close_incomplete_turn()` either. This
+                # call sits BEFORE `while not cancelled`, so the flag alone
+                # stops the loop being entered and nothing below can
+                # overwrite the reason; and the last history entry here is
+                # measured to be `assistant` at every observation, never the
+                # unanswered `user` turn that method drops.
+                shadow_ledger = None
+                cancelled = True
+                stop_reason = STOP_CANCELLED
             except Exception:  # noqa: BLE001 - diagnostics never end a run
                 shadow_ledger = None
 

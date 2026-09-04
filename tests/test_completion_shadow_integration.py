@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from orbit.runtime.completion_shadow import SHADOW_ENV, ShadowObservation
@@ -1362,3 +1364,289 @@ class CheckpointCancellationTests(AutonomousTestBase):
 
         self.assertGreater(len(observed), 0)
         self.assertEqual(set(observed), {False})
+
+
+class RunStartCancellationTests(AutonomousTestBase):
+    """A cancellation while the ledger's opening record is written.
+
+    `write_run_start` sits BEFORE the loop, which makes this seam differ
+    from both of its siblings. COVER and PLAN have already run, so real
+    work exists to preserve; `stop_reason` is still the default rather
+    than a decision, so it must be set; and no question has been selected
+    yet, so none may be blocked.
+    """
+
+    def _runtime_with(self, questions):
+        from tests.test_analysis_controller_runtime import _Case, _Model, _question
+
+        borrowed = _Case("run")
+        borrowed.addCleanup = self.addCleanup
+        return borrowed._runtime(
+            _Model(plan=[_question(f"q{i}") for i in range(questions)])
+        )
+
+    def _run_with_run_start_raising(self, exc, *, questions=3):
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+
+        runtime = self._runtime_with(questions)
+
+        def raising(self_, *args, **kwargs):
+            raise exc
+
+        with mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_run_start", raising):
+            return runtime.run_autonomous("Analyse it.", finalize=False)
+
+    def _states_at_end(self, exc, *, questions=3):
+        """The controller's own question states after such a run."""
+        from orbit.runtime import analysis_controller
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+
+        live = {}
+        original = analysis_controller.AnalysisController.__init__
+
+        def capture(self_, *args, **kwargs):
+            original(self_, *args, **kwargs)
+            live["controller"] = self_
+
+        runtime = self._runtime_with(questions)
+
+        def raising(self_, *args, **kwargs):
+            raise exc
+
+        with mock.patch.object(
+            analysis_controller.AnalysisController, "__init__", capture
+        ), mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_run_start", raising):
+            run = runtime.run_autonomous("Analyse it.", finalize=False)
+        controller = live["controller"]
+        return run, {
+            qid: (controller.states[qid].status, controller.states[qid].reason)
+            for qid in controller.order
+        }
+
+    # -- the call site is real ---------------------------------------------
+    def test_the_run_start_record_is_actually_written(self) -> None:
+        """The premise every other test here rests on."""
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+
+        runtime = self._runtime_with(3)
+        calls = []
+        real = ShadowLedgerWriter.write_run_start
+
+        def counting(self_, *args, **kwargs):
+            calls.append(1)
+            return real(self_, *args, **kwargs)
+
+        with mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_run_start", counting):
+            runtime.run_autonomous("Analyse it.", finalize=False)
+
+        self.assertEqual(len(calls), 1)
+
+    # -- the domains --------------------------------------------------------
+    def test_an_ordinary_failure_still_does_not_end_the_run(self) -> None:
+        run = self._run_with_run_start_raising(RuntimeError("unopenable"))
+        self.assertFalse(run.cancelled)
+        self.assertNotEqual(run.stop_reason, "cancelled")
+        # The run went on and did its work despite the unusable ledger.
+        self.assertGreater(len(run.steps), 0)
+
+    def test_a_cancellation_does_not_escape(self) -> None:
+        run = self._run_with_run_start_raising(KeyboardInterrupt())
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.stop_reason, "cancelled")
+
+    def test_system_exit_still_propagates(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._run_with_run_start_raising(SystemExit(3))
+
+    def test_generator_exit_still_propagates(self) -> None:
+        with self.assertRaises(GeneratorExit):
+            self._run_with_run_start_raising(GeneratorExit())
+
+    # -- question state -----------------------------------------------------
+    def test_the_planned_questions_are_left_open(self) -> None:
+        """No question is blocked here, and that is not an oversight.
+
+        `select_active` runs inside the loop, below this call, so nothing
+        has been selected yet. Blocking would claim the analyst stopped a
+        question mid-investigation when none was ever started.
+        """
+        run, states = self._states_at_end(KeyboardInterrupt(), questions=3)
+        self.assertEqual(len(states), 3)
+        for qid, (status, reason) in states.items():
+            self.assertEqual(status, "open")
+            self.assertEqual(reason, "")
+        self.assertTrue(run.cancelled)
+
+    def test_nothing_is_resolved_by_the_cancellation(self) -> None:
+        """A run stopped before any question was selected resolved none."""
+        run, states = self._states_at_end(KeyboardInterrupt(), questions=5)
+        resolved = [q for q, (s, _) in states.items() if s == "resolved"]
+        self.assertEqual(resolved, [])
+        self.assertEqual(list(run.resolved_questions), [])
+
+    def test_nothing_is_blocked_by_the_cancellation(self) -> None:
+        blocked = [
+            q
+            for q, (s, _) in self._states_at_end(
+                KeyboardInterrupt(), questions=5
+            )[1].items()
+            if s == "blocked"
+        ]
+        self.assertEqual(blocked, [])
+
+    def test_an_ordinary_failure_leaves_the_questions_to_the_run(self) -> None:
+        """The witness that the OPEN assertions above are discriminating.
+
+        With the same fixture and an ordinary failure the run proceeds and
+        resolves its questions, so "all open" is a property of the
+        cancellation rather than of the fixture.
+        """
+        _, states = self._states_at_end(RuntimeError("unopenable"), questions=3)
+        self.assertTrue(any(s == "resolved" for s, _ in states.values()))
+
+    # -- what the cancellation must preserve --------------------------------
+    def test_a_cancellation_keeps_the_work_already_done(self) -> None:
+        """COVER and PLAN ran before this call and their cost stands.
+
+        Each value is measured non-zero on this fixture, so none of these
+        is a `0 == 0` comparison.
+        """
+        run = self._run_with_run_start_raising(KeyboardInterrupt(), questions=3)
+        self.assertEqual(run.model_calls, 2)
+        self.assertEqual(run.cover_calls, 1)
+        self.assertEqual(run.plan_calls, 1)
+        self.assertEqual(run.control_attempts, 1)
+        self.assertEqual(run.initial_questions, 3)
+        self.assertEqual(len(run.open_questions), 3)
+
+    def test_the_run_stopped_before_doing_any_analysis(self) -> None:
+        """The other half of the contract: nothing is invented either.
+
+        `steps` and `actions_executed` are 0 here, so they are pinned
+        against a run that DID act rather than against themselves.
+        """
+        cancelled = self._run_with_run_start_raising(
+            KeyboardInterrupt(), questions=3
+        )
+        ordinary = self._run_with_run_start_raising(
+            RuntimeError("unopenable"), questions=3
+        )
+        self.assertEqual(len(cancelled.steps), 0)
+        self.assertEqual(cancelled.actions_executed, 0)
+        # The witness: the same fixture without the interrupt does act.
+        self.assertGreater(len(ordinary.steps), 0)
+        self.assertGreater(ordinary.actions_executed, 0)
+
+    # -- no invented diagnostics -------------------------------------------
+    def test_a_cancellation_files_no_ledger_failure(self) -> None:
+        """The analyst's decision is not an unopenable ledger.
+
+        The writer records real I/O trouble in `failures`; an interrupt
+        must not be filed there.
+        """
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+
+        seen = {}
+        runtime = self._runtime_with(3)
+        original = ShadowLedgerWriter.__init__
+
+        def capture(self_, *args, **kwargs):
+            original(self_, *args, **kwargs)
+            seen["writer"] = self_
+
+        def raising(self_, *args, **kwargs):
+            raise KeyboardInterrupt()
+
+        with mock.patch.object(
+            ShadowLedgerWriter, "__init__", capture
+        ), mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_run_start", raising):
+            runtime.run_autonomous("Analyse it.", finalize=False)
+
+        self.assertEqual(list(seen["writer"].failures), [])
+
+        # The witness that `failures` is a live channel rather than one
+        # nothing ever writes to: the same writer, asked to append to a
+        # path it cannot create, records the fault.
+        blocked = Path(seen["writer"].path.parent) / "wall"
+        blocked.parent.mkdir(parents=True, exist_ok=True)
+        blocked.write_text("not a directory", encoding="utf-8")
+        writer = ShadowLedgerWriter(blocked / "ledger.jsonl")
+        self.assertFalse(writer.write_run_start(request="x"))
+        self.assertNotEqual(list(writer.failures), [])
+
+    def test_a_cancellation_leaves_no_ledger_behind(self) -> None:
+        """A ledger whose opening record never landed writes nothing else.
+
+        The handler drops the writer, and that is load-bearing rather than
+        housekeeping: `_write_shadow_final` still runs after the loop, so a
+        retained writer appends a `run_final` row to a ledger that has no
+        `run_start` -- a closing record for a run that never opened, which
+        is precisely the invented diagnostic this seam must not produce.
+        """
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+
+        seen = {}
+        runtime = self._runtime_with(3)
+        original = ShadowLedgerWriter.__init__
+
+        def capture(self_, *args, **kwargs):
+            original(self_, *args, **kwargs)
+            seen["writer"] = self_
+
+        def raising(self_, *args, **kwargs):
+            raise KeyboardInterrupt()
+
+        with mock.patch.object(
+            ShadowLedgerWriter, "__init__", capture
+        ), mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_run_start", raising):
+            runtime.run_autonomous("Analyse it.", finalize=False)
+
+        self.assertFalse(seen["writer"].path.exists())
+
+    def test_an_ordinary_failure_also_leaves_no_ledger_behind(self) -> None:
+        """The same drop on the recovery path, which already did it.
+
+        Pinned so the cancellation's behaviour is shown to match the
+        contract this block already had rather than inventing a new one.
+        """
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+
+        seen = {}
+        runtime = self._runtime_with(3)
+        original = ShadowLedgerWriter.__init__
+
+        def capture(self_, *args, **kwargs):
+            original(self_, *args, **kwargs)
+            seen["writer"] = self_
+
+        def raising(self_, *args, **kwargs):
+            raise RuntimeError("unopenable")
+
+        with mock.patch.object(
+            ShadowLedgerWriter, "__init__", capture
+        ), mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_run_start", raising):
+            runtime.run_autonomous("Analyse it.", finalize=False)
+
+        self.assertFalse(seen["writer"].path.exists())
+
+    def test_the_completion_shadow_records_no_observation(self) -> None:
+        """A run that never entered the loop observed nothing."""
+        cancelled = self._run_with_run_start_raising(KeyboardInterrupt())
+        ordinary = self._run_with_run_start_raising(RuntimeError("unopenable"))
+        self.assertEqual(list(cancelled.completion_shadow.observations), [])
+        # The witness: the shadow is enabled on both runs, so an empty
+        # observation list is a property of stopping before the loop and
+        # not of the flag being off.
+        self.assertIsNotNone(ordinary.completion_shadow)
