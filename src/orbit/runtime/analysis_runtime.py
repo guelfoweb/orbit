@@ -3409,6 +3409,73 @@ class AnalysisRuntime:
                     # serialization around them for the same reason.
                     try:
                         shadow_ledger.write_checkpoint(observation)
+                    except KeyboardInterrupt:
+                        # The analyst stopped the run while a checkpoint was
+                        # being serialised. Nothing is recorded for it: a
+                        # `checkpoint_serialization_failed` here would file
+                        # their decision as an I/O fault the writer never hit.
+                        #
+                        # Contained rather than propagated for the reason
+                        # every sibling handler is: `run_autonomous` would
+                        # return to a caller holding only a pre-run
+                        # checkpoint, and `repl.py` restores it, deleting the
+                        # history of every completed step and orphaning their
+                        # evidence on disk.
+                        #
+                        # Unlike the final ledger -- where `stop_reason` is
+                        # already settled and deferring to it is right -- this
+                        # call sits INSIDE the loop, before any stop decision
+                        # is taken. So the two things the final handler could
+                        # leave alone must both be done here.
+                        #
+                        # The active question is blocked. Measured, not
+                        # assumed: across a sweep of the model-call budget and
+                        # plan size, 32 runs reach this call and the active
+                        # question is RESOLVED in 31 of them -- but OPEN in
+                        # one, at the budget where `model_calls >=
+                        # max_model_calls` skips the completion and the
+                        # question arrives still open. `exhaust_active` blocks
+                        # only an OPEN question, so the 31 keep the outcome
+                        # they earned and the one is told the truth: the
+                        # analyst stopped before it was closed.
+                        if controller is not None:
+                            controller.exhaust_active(CANCELLED_QUESTION_REASON)
+                        cancelled = True
+                        stop_reason = STOP_CANCELLED
+                        # A no-op at this particular call, and kept for the
+                        # same reason the sibling above keeps it: measured,
+                        # the last history entry here is always a `tool`
+                        # turn, never the unanswered `user` one this drops,
+                        # because the step has already been answered and
+                        # classified. It costs nothing and stops this
+                        # handler's correctness from depending on that.
+                        self._close_incomplete_turn()
+                        # `break`, unlike the handler at the completion call
+                        # above, whose step is not yet classified. This step
+                        # already is -- `classify` and `on_step` ran before
+                        # the shadow block -- so leaving now loses nothing.
+                        #
+                        # It is not, on today's code, observably necessary:
+                        # removing it leaves all 96 runs that reach this call
+                        # across a sweep of plan size x budget still
+                        # returning `cancelled=True` -- 96 being every
+                        # reaching run at any plan size, where the 32 above
+                        # counts only the fixture's own -- because the checkpoint
+                        # is the last thing in the iteration that can be
+                        # reached before `while not cancelled` retests. An
+                        # earlier sweep here appeared to show 108 failures
+                        # and was wrong: it counted runs that never reached
+                        # this call at all and so were never interrupted.
+                        #
+                        # It is kept because the guard it relies on is
+                        # distant. `while not cancelled` is tested only at
+                        # the TOP of an iteration, so anything later added
+                        # between here and the loop's end would silently
+                        # overwrite `stop_reason` -- and the two sibling
+                        # handlers differ on exactly this point for reasons
+                        # local to each. Leaving explicitly is what makes
+                        # this one's contract independent of that distance.
+                        break
                     except Exception:  # noqa: BLE001 - diagnostics never end a run
                         shadow_ledger.failures.append("checkpoint_serialization_failed")
 
