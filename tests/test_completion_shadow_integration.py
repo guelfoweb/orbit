@@ -952,3 +952,413 @@ class FinalLedgerCancellationTests(AutonomousTestBase):
     def test_generator_exit_still_propagates(self) -> None:
         with self.assertRaises(GeneratorExit):
             self._run_with_ledger_raising(GeneratorExit())
+
+
+class CheckpointCancellationTests(AutonomousTestBase):
+    """A cancellation while a mid-run checkpoint is being written.
+
+    `write_checkpoint` sits INSIDE the loop, unlike the final ledger: no
+    stop decision has been taken when it runs, and the ones below it are
+    still ahead. That is why this handler blocks the active question and
+    leaves the loop, where the final one does neither.
+
+    The fixtures here borrow the controller model and vary its programs so
+    each action prints distinct bytes. That is what makes the call site
+    reachable at all: with repeated output a run stalls on "no new
+    evidence" after three actions, and the schedule's first checkpoint is
+    due at the fourth.
+    """
+
+    #: The budget at which the active question reaches the checkpoint still
+    #: OPEN. Measured over a sweep of budget x plan size: 32 runs reach the
+    #: call, 31 with the question already RESOLVED and exactly this one
+    #: with it OPEN, because `model_calls >= max_model_calls` skips the
+    #: completion that would otherwise have closed it.
+    OPEN_AT_CHECKPOINT_BUDGET = 9
+
+    #: A budget where the same fixture reaches the call with the question
+    #: already RESOLVED, so the two cases can be told apart.
+    RESOLVED_AT_CHECKPOINT_BUDGET = 20
+
+    def _model(self, questions=5):
+        from tests.test_analysis_controller_runtime import _Model, _question
+
+        class _DistinctModel(_Model):
+            """`_Model`, but every action prints different bytes.
+
+            The stock fixture varies only a comment, so the OUTPUT repeats
+            and the run stops on "no new evidence" before any checkpoint
+            is due. Progress has to be real for this call site to exist.
+            """
+
+            def reply(self, tools, last):
+                from tests.test_analysis_controller_runtime import (
+                    ANALYSIS_TOOL_NAME,
+                )
+
+                names = [t["function"]["name"] for t in (tools or [])]
+                if ANALYSIS_TOOL_NAME in names:
+                    self.actions += 1
+                    return self._call(
+                        ANALYSIS_TOOL_NAME,
+                        {"code": f"print('distinct-{self.actions}')"},
+                    )
+                return super().reply(tools, last)
+
+        return _DistinctModel(plan=[_question(f"q{i}") for i in range(questions)])
+
+    def _run_with_checkpoint_raising(self, exc, *, budget, questions=5):
+        """Drive a real run whose checkpoint write raises `exc`."""
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+        from tests.test_analysis_controller_runtime import _Case
+
+        borrowed = _Case("run")
+        borrowed.addCleanup = self.addCleanup
+        runtime = borrowed._runtime(self._model(questions))
+
+        def raising(self_, *args, **kwargs):
+            raise exc
+
+        with mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_checkpoint", raising):
+            return runtime.run_autonomous(
+                "Analyse it.", finalize=False, max_model_calls=budget
+            )
+
+    def _states_at_end(self, exc, *, budget, questions=5):
+        """The controller's own question states after such a run."""
+        from orbit.runtime import analysis_controller
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+        from tests.test_analysis_controller_runtime import _Case
+
+        live = {}
+        original = analysis_controller.AnalysisController.__init__
+
+        def capture(self_, *args, **kwargs):
+            original(self_, *args, **kwargs)
+            live["controller"] = self_
+
+        borrowed = _Case("run")
+        borrowed.addCleanup = self.addCleanup
+        runtime = borrowed._runtime(self._model(questions))
+
+        def raising(self_, *args, **kwargs):
+            raise exc
+
+        with mock.patch.object(
+            analysis_controller.AnalysisController, "__init__", capture
+        ), mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_checkpoint", raising):
+            run = runtime.run_autonomous(
+                "Analyse it.", finalize=False, max_model_calls=budget
+            )
+        controller = live["controller"]
+        return run, {
+            qid: (controller.states[qid].status, controller.states[qid].reason)
+            for qid in controller.order
+        }
+
+    # -- the call site is real ---------------------------------------------
+    def test_the_checkpoint_is_actually_reached(self) -> None:
+        """The premise every other test here rests on.
+
+        Without this, a handler that never runs would let all of them pass
+        for the wrong reason.
+        """
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+        from tests.test_analysis_controller_runtime import _Case
+
+        borrowed = _Case("run")
+        borrowed.addCleanup = self.addCleanup
+        runtime = borrowed._runtime(self._model())
+        calls = []
+        real = ShadowLedgerWriter.write_checkpoint
+
+        def counting(self_, *args, **kwargs):
+            calls.append(1)
+            return real(self_, *args, **kwargs)
+
+        with mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_checkpoint", counting):
+            runtime.run_autonomous(
+                "Analyse it.",
+                finalize=False,
+                max_model_calls=self.RESOLVED_AT_CHECKPOINT_BUDGET,
+            )
+
+        self.assertGreater(len(calls), 0)
+
+    # -- the domains --------------------------------------------------------
+    def test_an_ordinary_failure_still_does_not_end_the_run(self) -> None:
+        run = self._run_with_checkpoint_raising(
+            RuntimeError("unserialisable"),
+            budget=self.RESOLVED_AT_CHECKPOINT_BUDGET,
+        )
+        self.assertFalse(run.cancelled)
+        self.assertNotEqual(run.stop_reason, "cancelled")
+        # The run went on past the failed checkpoint and finished its work.
+        self.assertEqual(list(run.open_questions), [])
+
+    def test_a_cancellation_does_not_escape(self) -> None:
+        run = self._run_with_checkpoint_raising(
+            KeyboardInterrupt(), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
+        )
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.stop_reason, "cancelled")
+
+    def test_system_exit_still_propagates(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._run_with_checkpoint_raising(
+                SystemExit(3), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
+            )
+
+    def test_generator_exit_still_propagates(self) -> None:
+        with self.assertRaises(GeneratorExit):
+            self._run_with_checkpoint_raising(
+                GeneratorExit(), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
+            )
+
+    # -- question state, at both reachable shapes ---------------------------
+    def test_an_open_question_is_blocked_with_the_honest_reason(self) -> None:
+        """The one measured budget where the question is still OPEN here.
+
+        The completion that would have closed it is skipped by the
+        model-call bound, so it arrives at the checkpoint open. Left alone
+        it would read as simply unanswered; the analyst is owed the reason
+        it was not answered, which is that they stopped the run.
+        """
+        run, states = self._states_at_end(
+            KeyboardInterrupt(), budget=self.OPEN_AT_CHECKPOINT_BUDGET
+        )
+        blocked = [
+            (qid, reason)
+            for qid, (status, reason) in states.items()
+            if status == "blocked"
+        ]
+        self.assertEqual(len(blocked), 1)
+        _, reason = blocked[0]
+        self.assertEqual(
+            reason, "the analyst stopped the run before this question was closed"
+        )
+        self.assertTrue(run.cancelled)
+
+    def test_a_resolved_question_keeps_its_answer(self) -> None:
+        """`exhaust_active` must not touch a question that was answered."""
+        run, states = self._states_at_end(
+            KeyboardInterrupt(), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
+        )
+        resolved = [q for q, (s, _) in states.items() if s == "resolved"]
+        self.assertGreater(len(resolved), 0)
+        # Nothing that was resolved carries a cancellation reason.
+        for qid in resolved:
+            self.assertEqual(states[qid][1], "")
+        self.assertTrue(run.cancelled)
+
+    def test_no_question_is_blocked_when_none_was_open(self) -> None:
+        """The 31-of-32 shape: the active question was already RESOLVED.
+
+        Blocking anything here would overwrite an outcome the run earned.
+        """
+        _, states = self._states_at_end(
+            KeyboardInterrupt(), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
+        )
+        blocked = [q for q, (s, _) in states.items() if s == "blocked"]
+        self.assertEqual(blocked, [])
+
+    def test_an_ordinary_failure_blocks_nothing(self) -> None:
+        """The recovery path must not touch question state at all."""
+        _, states = self._states_at_end(
+            RuntimeError("unserialisable"),
+            budget=self.OPEN_AT_CHECKPOINT_BUDGET,
+        )
+        blocked = [q for q, (s, _) in states.items() if s == "blocked"]
+        self.assertEqual(blocked, [])
+
+    # -- the cancellation must survive the rest of the loop -----------------
+    def test_the_cancellation_is_not_overwritten_by_a_later_stop(self) -> None:
+        """The cancellation survives to the end of the run.
+
+        Not a test of the `break` specifically: removing it changes nothing
+        observable today, measured across all 96 runs that reach this call
+        over a sweep of plan size x budget. What is pinned is the property
+        that matters to the analyst -- whatever the loop does after this
+        handler, the run still reports that they stopped it.
+        """
+        # Asserted only where the checkpoint is REACHED. Plan sizes below
+        # five finish in fewer than the four actions the schedule needs, and
+        # seven is rejected by the controller before any action runs -- so
+        # those runs are never interrupted and correctly report
+        # `cancelled=False`. Asserting cancellation there would be demanding
+        # it of a run that was never stopped.
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+
+        reached = []
+        real = ShadowLedgerWriter.write_checkpoint
+
+        for budget in (
+            self.OPEN_AT_CHECKPOINT_BUDGET,
+            self.RESOLVED_AT_CHECKPOINT_BUDGET,
+            37,
+            40,
+        ):
+            with self.subTest(budget=budget):
+                run = self._run_with_checkpoint_raising(
+                    KeyboardInterrupt(), budget=budget
+                )
+                reached.append(run)
+                self.assertTrue(run.cancelled)
+                self.assertEqual(run.stop_reason, "cancelled")
+
+        # The witness that these runs really did pass through the handler,
+        # rather than passing for want of ever reaching it.
+        self.assertEqual(len(reached), 4)
+
+    # -- no invented diagnostics -------------------------------------------
+    def test_a_cancellation_files_no_serialisation_failure(self) -> None:
+        """The analyst's decision is not an I/O fault.
+
+        The ordinary handler records `checkpoint_serialization_failed`;
+        recording that for an interrupt would blame the writer for
+        something it never did.
+        """
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+        from tests.test_analysis_controller_runtime import _Case
+
+        seen = {}
+
+        def run_with(exc):
+            borrowed = _Case("run")
+            borrowed.addCleanup = self.addCleanup
+            runtime = borrowed._runtime(self._model())
+            original = ShadowLedgerWriter.__init__
+
+            def capture(self_, *args, **kwargs):
+                original(self_, *args, **kwargs)
+                seen["writer"] = self_
+
+            def raising(self_, *args, **kwargs):
+                raise exc
+
+            with mock.patch.object(
+                ShadowLedgerWriter, "__init__", capture
+            ), mock.patch.dict(
+                "os.environ", {SHADOW_ENV: "1"}, clear=False
+            ), mock.patch.object(ShadowLedgerWriter, "write_checkpoint", raising):
+                runtime.run_autonomous(
+                    "Analyse it.",
+                    finalize=False,
+                    max_model_calls=self.RESOLVED_AT_CHECKPOINT_BUDGET,
+                )
+            return list(seen["writer"].failures)
+
+        cancelled_failures = run_with(KeyboardInterrupt())
+        ordinary_failures = run_with(RuntimeError("unserialisable"))
+
+        self.assertNotIn("checkpoint_serialization_failed", cancelled_failures)
+        # The witness: the ordinary path DOES file one, so the assertion
+        # above is discriminating rather than trivially true.
+        self.assertIn("checkpoint_serialization_failed", ordinary_failures)
+
+    # -- what the cancellation must preserve --------------------------------
+    def test_a_cancellation_returns_the_completed_work(self) -> None:
+        """Everything the run earned before the interrupt survives it.
+
+        Each counter is asserted against a value measured to be non-zero
+        on this fixture, not against itself: `repairs`, `control_repairs`,
+        `replans` and `suppressed_duplicates` are all 0 here and would
+        compare 0 == 0, so they are deliberately not asserted.
+        """
+        run = self._run_with_checkpoint_raising(
+            KeyboardInterrupt(), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
+        )
+        self.assertEqual(len(run.steps), 4)
+        self.assertEqual(run.actions_executed, 4)
+        self.assertEqual(run.model_calls, 10)
+        self.assertEqual(run.cover_calls, 1)
+        self.assertEqual(run.plan_calls, 1)
+        self.assertEqual(run.control_attempts, 5)
+        self.assertEqual(len(run.progress), 4)
+
+    def test_the_steps_carry_their_evidence(self) -> None:
+        """Cancelling must not orphan what the completed actions produced."""
+        run = self._run_with_checkpoint_raising(
+            KeyboardInterrupt(), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
+        )
+        executed = [step for step in run.steps if step.action_executed]
+        self.assertEqual(len(executed), 4)
+        for step in executed:
+            self.assertIsNotNone(step.evidence)
+
+    def test_the_counters_match_an_ordinary_failure_at_the_same_point(self) -> None:
+        """An independent witness for the counters above.
+
+        Up to the checkpoint the two runs are identical, so a handler that
+        reset a counter would diverge from the ordinary path here even
+        where the absolute value looks plausible.
+        """
+        cancelled = self._run_with_checkpoint_raising(
+            KeyboardInterrupt(), budget=self.OPEN_AT_CHECKPOINT_BUDGET
+        )
+        ordinary = self._run_with_checkpoint_raising(
+            RuntimeError("unserialisable"),
+            budget=self.OPEN_AT_CHECKPOINT_BUDGET,
+        )
+        self.assertEqual(len(cancelled.steps), len(ordinary.steps))
+        self.assertEqual(cancelled.actions_executed, ordinary.actions_executed)
+        self.assertEqual(cancelled.model_calls, ordinary.model_calls)
+        self.assertEqual(cancelled.cover_calls, ordinary.cover_calls)
+        self.assertEqual(cancelled.plan_calls, ordinary.plan_calls)
+        self.assertEqual(cancelled.control_attempts, ordinary.control_attempts)
+        # The witness that this is a comparison and not a tautology: the two
+        # runs differ where they must.
+        self.assertTrue(cancelled.cancelled)
+        self.assertFalse(ordinary.cancelled)
+
+    def test_the_checkpoint_is_never_reached_by_an_already_cancelled_run(self) -> None:
+        """Why this handler SETS the flag rather than guarding on it.
+
+        The loop is `while not cancelled`, so a cancelled run never starts
+        another iteration, and nothing inside one sets the flag before this
+        call. Measured over a sweep of budget x plan size: 32 runs reach
+        the checkpoint and `cancelled` is False at every one of them.
+
+        That is the difference from the final ledger, where the same
+        mutation -- inverting the flag instead of setting it -- IS
+        observable and had to be pinned. Asserting it here would be the
+        `0 == 0` this suite is careful to avoid, so what is pinned instead
+        is the reachability fact the equivalence rests on: a run that
+        arrives here always arrives uncancelled, and leaves cancelled.
+        """
+        import inspect
+
+        from orbit.runtime.completion_shadow_ledger import ShadowLedgerWriter
+        from tests.test_analysis_controller_runtime import _Case
+
+        borrowed = _Case("run")
+        borrowed.addCleanup = self.addCleanup
+        runtime = borrowed._runtime(self._model())
+        observed = []
+        real = ShadowLedgerWriter.write_checkpoint
+
+        def watching(self_, *args, **kwargs):
+            frame = inspect.currentframe().f_back
+            while frame is not None and "cancelled" not in frame.f_locals:
+                frame = frame.f_back
+            if frame is not None:
+                observed.append(frame.f_locals["cancelled"])
+            return real(self_, *args, **kwargs)
+
+        with mock.patch.dict(
+            "os.environ", {SHADOW_ENV: "1"}, clear=False
+        ), mock.patch.object(ShadowLedgerWriter, "write_checkpoint", watching):
+            runtime.run_autonomous(
+                "Analyse it.",
+                finalize=False,
+                max_model_calls=self.RESOLVED_AT_CHECKPOINT_BUDGET,
+            )
+
+        self.assertGreater(len(observed), 0)
+        self.assertEqual(set(observed), {False})
