@@ -19,7 +19,11 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from orbit.backend.base import ChatResult, TokenCount  # noqa: E402
+from orbit.backend.base import (  # noqa: E402
+    ChatResult,
+    RecoverableBackendError,
+    TokenCount,
+)
 from orbit.runtime import analysis_runtime as module  # noqa: E402
 from orbit.runtime.analysis_controller import (  # noqa: E402
     BLOCKED,
@@ -546,8 +550,6 @@ class PreservedBehaviourTests(_Case):
             self.assertEqual(names, [PLAN_TOOL_NAME])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class BackendSignatureTests(_Case):
@@ -696,8 +698,11 @@ class PlanStateTests(_Case):
 
         with mock.patch.object(type(runtime), "plan_analysis", raising):
             run = self._run(runtime)
+        # Fail closed: no unplanned actions. The verdict names the server,
+        # not the model -- the two are different failures.
         self.assertEqual(run.actions_executed, 0)
-        self.assertEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        self.assertTrue(run.stop_reason.startswith(module.STOP_BACKEND_ERROR))
+        self.assertIn("planning call failed", run.stop_reason)
 
 
 class PlanBackendErrorTests(_Case):
@@ -748,14 +753,41 @@ class PlanBackendErrorTests(_Case):
         self.assertEqual(seen, [PLAN_TOOL_NAME])
 
     def test_a_parse_error_during_planning_fails_closed(self) -> None:
+        """A TYPED parse failure ends control as unsupported.
+
+        The type carries the distinction, not the wording: this raises the
+        parse subclass, which is the one failure the model itself can
+        correct and therefore the one that earns a repair and, failing
+        twice, the unsupported verdict.
+        """
         runtime = self._runtime(_Model(plan=[_question("a")]))
         with self._raising_backend(
-            runtime, LlamaServerError("Failed to parse input at pos 118")
+            runtime,
+            LlamaServerToolCallParseError("Failed to parse input at pos 118"),
         ):
             run = self._run(runtime)
         self.assertEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
         self.assertEqual(run.actions_executed, 0)
         self.assertEqual(run.initial_questions, 0)
+
+    def test_a_server_error_that_mentions_parsing_is_still_a_server_error(
+        self,
+    ) -> None:
+        """Wording must not decide who is blamed.
+
+        A generic `LlamaServerError` whose message happens to contain the
+        words a parse failure uses is still a server failure. Inferring the
+        domain from the text would let a server's phrasing decide whether
+        the model is called incapable.
+        """
+        runtime = self._runtime(_Model(plan=[_question("a")]))
+        with self._raising_backend(
+            runtime, LlamaServerError("Failed to parse input at pos 118")
+        ):
+            run = self._run(runtime)
+        self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        self.assertTrue(run.stop_reason.startswith(module.STOP_BACKEND_ERROR))
+        self.assertEqual(run.actions_executed, 0)
 
     def test_a_healthy_plan_call_is_made_exactly_once(self) -> None:
         # The invariant the failing runs are measured against:
@@ -871,7 +903,8 @@ class ControlRepairTests(_Case):
         self.assertEqual(run.actions_executed, 0)
         self.assertEqual(run.control_repairs, 1)
 
-    # D. a generic backend error is not a format repair.
+    # D. a generic backend error is not a format repair, and not the
+    # model's fault either.
     def test_a_generic_backend_error_is_not_repaired(self) -> None:
         runtime = self._strict(
             _Model(plan=[_question("a")]),
@@ -879,8 +912,13 @@ class ControlRepairTests(_Case):
         )
         run = self._run(runtime)
         self.assertEqual(run.control_repairs, 0)
-        self.assertEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
         self.assertEqual(run.actions_executed, 0)
+        # Reported as what it is. It used to read as "unsupported by this
+        # model", which blamed the model for a decode failure in the server
+        # and threw the cause away.
+        self.assertTrue(run.stop_reason.startswith(module.STOP_BACKEND_ERROR))
+        self.assertIn("llama_decode failed", run.stop_reason)
+        self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
 
     # E. the PLAN request carries no instruction to run an analysis action.
     def test_the_plan_request_offers_no_analysis_instruction(self) -> None:
@@ -1617,6 +1655,12 @@ class CancellationDuringCompletionTests(_Case):
             ("COVER", None), ("PLAN", PLAN_TOOL_NAME),
             ("STEP", ANALYSIS_TOOL_NAME), ("FINISH", FINISH_TOOL_NAME),
         ]
+        # `parse` is the third way a control phase can end, and it has its
+        # own exit: `_control_call` spends a repair, re-raises, and the PLAN
+        # handler catches the typed failure separately from the infra one.
+        # A table covering only interrupt and outage leaves that exit's
+        # accounting unwitnessed -- two spent calls vanished from the total
+        # the analyst reads, with the whole suite green.
         for label, tool in sites:
             for kind, exc in (("interrupt", interrupt("stop")),
                               ("outage", outage("upstream is down"))):
@@ -1628,6 +1672,38 @@ class CancellationDuringCompletionTests(_Case):
                         run.model_calls, len(self.backend.chat_calls),
                         f"{label} on {kind}: calls spent were not counted",
                     )
+
+        # `parse` is a third way a control phase ends, and it has its own
+        # exit. One failure is REPAIRED and never reaches it, so the failure
+        # has to be persistent -- which is exactly the shape a table of
+        # first-call failures cannot express, and why that exit's accounting
+        # was unwitnessed while the suite stayed green.
+        class _AlwaysUnparsable(_Model):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if PLAN_TOOL_NAME in names:
+                    raise LlamaServerToolCallParseError(
+                        "failed to parse input at pos 42"
+                    )
+                return _Model.reply(self, tools, last)
+
+        with self.subTest(site="PLAN", failure="parse (persistent)"):
+            runtime = self._runtime(_AlwaysUnparsable(plan=[_question("q")]))
+            run = self._run(runtime)
+            self.assertEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+            self.assertEqual(
+                run.model_calls, len(self.backend.chat_calls),
+                "PLAN on a persistent parse failure: calls spent were not "
+                "counted",
+            )
+            # Two PLAN dispatches: the attempt and its one repair. Counted
+            # by the tool offered, since the run also spends a COVER call.
+            plan_calls = [
+                c for c in self.backend.chat_calls
+                if PLAN_TOOL_NAME in
+                [t["function"]["name"] for t in (c["tools"] or [])]
+            ]
+            self.assertEqual(len(plan_calls), 2)
 
     def test_cancelling_spends_no_shadow_observation(self) -> None:
         """The cancellation flag, tested where it actually bites.
@@ -1935,3 +2011,154 @@ class CancellationDuringCompletionTests(_Case):
         self.assertFalse(run.cancelled)
         self.assertEqual(run.resolved_questions, ("Q1",))
         self.assertEqual(run.open_questions, ())
+
+
+class PlanFailureDomainTests(ControlRepairTests):
+    """PLAN failures are reported by domain, not flattened into one verdict.
+
+    Three different things can end planning, and they are not interchangeable:
+    the model cannot use the protocol, the server failed, or this runtime
+    declined to send a request that would not fit. A single `except` clause
+    reported all of them as "autonomous control unsupported by this model" --
+    blaming the one participant that, in two of the three cases, did nothing
+    wrong, and discarding the cause the analyst needs to act on.
+
+    Every assertion here reads the SHIPPED result: `stop_reason` is what the
+    REPL prints and `control_repairs` counts calls the backend actually
+    served, so neither restates a decision the runtime made about itself.
+    """
+
+    def _run_with_plan_failure(self, failure, *, questions=1):
+        plan = [_question(f"q{i}") for i in range(questions)]
+        model = _Model(plan=plan)
+        runtime = self._strict(model, failures=[failure])
+        return self._run(runtime)
+
+    # -- the model's own failure ------------------------------------------
+    def test_one_parse_failure_is_repaired_and_the_run_continues(self) -> None:
+        run = self._run_with_plan_failure(
+            LlamaServerToolCallParseError("failed to parse input at pos 42")
+        )
+        self.assertEqual(run.control_repairs, 1)
+        self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        # The repair worked, so planning really happened.
+        self.assertEqual(run.plan_calls, 1)
+        self.assertEqual(run.initial_questions, 1)
+
+    def test_a_second_parse_failure_ends_control_as_unsupported(self) -> None:
+        """The model answered twice in a shape the grammar refuses."""
+        parse = LlamaServerToolCallParseError("failed to parse input at pos 42")
+        model = _Model(plan=[_question("q")])
+        runtime = self._strict(model, failures=[parse, parse])
+        run = self._run(runtime)
+        self.assertEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        # Exactly one repair: a second failure is the model's answer, not an
+        # invitation to keep asking.
+        self.assertEqual(run.control_repairs, 1)
+
+    def test_an_unsupported_plan_never_falls_back_to_free_form(self) -> None:
+        """The legacy loop is the thing this controller replaced.
+
+        `actions_executed` is the witness: an unplanned run that ran actions
+        anyway is the unbounded exploration, wearing a controller's name.
+        """
+        parse = LlamaServerToolCallParseError("failed to parse input at pos 42")
+        model = _Model(plan=[_question("q")])
+        runtime = self._strict(model, failures=[parse, parse])
+        run = self._run(runtime)
+        self.assertEqual(run.actions_executed, 0)
+        self.assertEqual(run.initial_questions, 0)
+        self.assertEqual(run.resolved_questions, ())
+
+    # -- the server's failure ---------------------------------------------
+    def test_a_backend_outage_is_not_blamed_on_the_model(self) -> None:
+        run = self._run_with_plan_failure(
+            RecoverableBackendError("upstream is down")
+        )
+        self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        self.assertTrue(run.stop_reason.startswith(module.STOP_BACKEND_ERROR))
+
+    def test_a_backend_outage_keeps_its_exact_cause(self) -> None:
+        """The analyst is told what failed, not merely that something did."""
+        run = self._run_with_plan_failure(
+            RecoverableBackendError("upstream is down")
+        )
+        self.assertIn("upstream is down", run.stop_reason)
+        self.assertIn("RecoverableBackendError", run.stop_reason)
+
+    def test_a_backend_outage_earns_no_protocol_repair(self) -> None:
+        """Re-prompting a dead server spends a call to fail the same way."""
+        run = self._run_with_plan_failure(
+            RecoverableBackendError("upstream is down")
+        )
+        self.assertEqual(run.control_repairs, 0)
+        # And the backend was asked exactly once for the plan.
+        self.assertEqual(self.backend.attempts.count(PLAN_TOOL_NAME), 1)
+
+    def test_a_timeout_is_reported_as_a_backend_failure(self) -> None:
+        run = self._run_with_plan_failure(TimeoutError("no response in 900s"))
+        self.assertTrue(run.stop_reason.startswith(module.STOP_BACKEND_ERROR))
+        self.assertIn("no response in 900s", run.stop_reason)
+        self.assertEqual(run.control_repairs, 0)
+
+    # -- this runtime's own refusal ---------------------------------------
+    def test_an_admission_refusal_keeps_its_own_cause(self) -> None:
+        """Admission declined to send: not the model's fault, not the server's."""
+        run = self._run_with_plan_failure(
+            module.ContextAdmissionError("nothing fits")
+        )
+        self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        self.assertIn("ContextAdmissionError", run.stop_reason)
+        self.assertEqual(run.control_repairs, 0)
+
+    # -- the analyst's decision -------------------------------------------
+    def test_a_cancellation_is_not_a_protocol_or_backend_failure(self) -> None:
+        run = self._run_with_plan_failure(KeyboardInterrupt())
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.stop_reason, module.STOP_CANCELLED)
+        self.assertEqual(run.control_repairs, 0)
+        self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        self.assertNotIn(module.STOP_BACKEND_ERROR, run.stop_reason)
+
+    # -- the domains stay apart -------------------------------------------
+    def test_the_four_domains_produce_four_different_verdicts(self) -> None:
+        """One table, because conflating any two of them is the defect."""
+        parse = LlamaServerToolCallParseError("failed to parse input at pos 42")
+        verdicts = {}
+        for label, failures in (
+            ("parse", [parse, parse]),
+            ("backend", [RecoverableBackendError("upstream is down")]),
+            ("admission", [module.ContextAdmissionError("nothing fits")]),
+            ("cancelled", [KeyboardInterrupt()]),
+        ):
+            model = _Model(plan=[_question("q")])
+            runtime = self._strict(model, failures=list(failures))
+            verdicts[label] = self._run(runtime).stop_reason
+
+        self.assertEqual(verdicts["parse"], STOP_CONTROL_UNSUPPORTED)
+        self.assertEqual(verdicts["cancelled"], module.STOP_CANCELLED)
+        for infra in ("backend", "admission"):
+            self.assertTrue(verdicts[infra].startswith(module.STOP_BACKEND_ERROR))
+        # Four inputs, four distinguishable outcomes.
+        self.assertEqual(len(set(verdicts.values())), 4)
+
+    def test_no_stop_reason_is_inferred_from_message_text(self) -> None:
+        """A backend whose message merely mentions parsing is not a parse failure.
+
+        The distinction is carried by the exception TYPE at the backend
+        boundary. Matching on wording would make a server's phrasing decide
+        whether the model gets blamed.
+        """
+        run = self._run_with_plan_failure(
+            RecoverableBackendError("failed to parse input at pos 42")
+        )
+        self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
+        self.assertTrue(run.stop_reason.startswith(module.STOP_BACKEND_ERROR))
+        self.assertEqual(run.control_repairs, 0)
+
+
+if __name__ == "__main__":
+    # At the END of the file, deliberately. Sitting mid-file it ran only the
+    # classes defined above it -- 24 of 123 -- and exited OK, so a direct
+    # invocation silently skipped every test added afterwards.
+    unittest.main()

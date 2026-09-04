@@ -3002,6 +3002,9 @@ class AnalysisRuntime:
         covered_calls = 0
         plan_calls = 0
         controller: "AnalysisController | None" = None
+        # Set when PLAN ended on a failure that is not the model's, so the
+        # loop leaves with the cause already in `stop_reason`.
+        plan_failed = False
         covered = False
         # Measured across the whole COVER attempt, for the same reason as
         # PLAN and the completion below: the handlers here leave by paths
@@ -3082,13 +3085,30 @@ class AnalysisRuntime:
                 cancelled = True
                 stop_reason = STOP_CANCELLED
                 self._close_incomplete_turn()
-            except (ContextAdmissionError, TimeoutError, RecoverableBackendError):
+            except ToolCallParseError:
                 model_calls += self.model_calls - plan_spent_before
-                # The protocol could not be driven. Fail closed: mark it, and
-                # let the loop report it as unsupported rather than continue
-                # with a controller nobody planned into.
+                # The model answered twice in a shape the grammar refuses --
+                # `_control_call` already spent its one bounded repair before
+                # re-raising. That IS the model failing to use the protocol,
+                # which is the one failure `unsupported` is meant to name.
+                #
+                # Ordered before its parent deliberately: `ToolCallParseError`
+                # subclasses `RecoverableBackendError`, so the broader clause
+                # below would otherwise swallow it and report a server fault
+                # for something the server did correctly.
                 self._close_incomplete_turn()
                 controller.unsupported = True
+            except (ContextAdmissionError, TimeoutError, RecoverableBackendError) as exc:
+                model_calls += self.model_calls - plan_spent_before
+                # The request never reached the model, or the server failed
+                # answering it. Calling either "control unsupported by this
+                # model" blames the one participant that did nothing wrong,
+                # and discards the cause the analyst needs to act on. The
+                # cause is preserved verbatim, exactly as the step handler
+                # reports the same three types.
+                self._close_incomplete_turn()
+                plan_failed = True
+                stop_reason = f"{STOP_BACKEND_ERROR}: {type(exc).__name__}: {exc}"
         shadow = ShadowLedger() if shadow_enabled() else None
         shadow_due = scheduled_actions()
         # Created only when the shadow runs: with the flag off this does no
@@ -3119,6 +3139,12 @@ class AnalysisRuntime:
                 stop_reason = STOP_MAX_MODEL_CALLS
                 break
             active = None
+            if plan_failed:
+                # Planning ended on a failure that is not the model's, and
+                # `stop_reason` already names it. Leaving here keeps that
+                # reason instead of letting the controller -- which nobody
+                # planned into -- report itself unsupported over the top.
+                break
             if controller is not None:
                 if controller.unsupported:
                     # The model could not use the control protocol even after a
