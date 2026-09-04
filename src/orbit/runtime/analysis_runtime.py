@@ -3606,6 +3606,35 @@ class AnalysisRuntime:
                     replans=replans,
                     final_report=final_report,
                 )
+            except KeyboardInterrupt:
+                # The analyst stopped during the final ledger write. The run
+                # itself is already over -- every step, the report and the
+                # stop reason are settled above -- so what is left is to
+                # report the stop honestly rather than let it escape.
+                #
+                # Escaping is not merely untidy: `run_autonomous` returns to a
+                # caller holding only a pre-run checkpoint, and `repl.py`
+                # restores it, deleting the history of every completed step
+                # and orphaning their evidence on disk.
+                #
+                # No question is blocked here, unlike the sibling handlers.
+                # Anything still OPEN at this point is open because the run
+                # ended for its own reason, whatever that was -- a bound,
+                # exhausted progress, an empty plan -- and that was true
+                # before the interrupt arrived. Recording those as "the
+                # analyst stopped the run before this question was closed"
+                # would attribute to them a cause that is not theirs.
+                #
+                # The measured fact this rests on is narrow and does not
+                # depend on enumerating the reasons: at this call the run's
+                # own `stop_reason` is ALREADY SET and names why it ended.
+                # Two earlier attempts at this comment tried to list the
+                # causes instead and were both falsified -- first by the
+                # action bound, then by `no new evidence`. The stop reason
+                # is the runtime's own answer, so deferring to it is right
+                # however many ways a run can end.
+                cancelled = True
+                stop_reason = STOP_CANCELLED
             except Exception:  # noqa: BLE001 - diagnostics must not end a run
                 pass
 
