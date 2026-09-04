@@ -418,3 +418,129 @@ class SnapshotUsesActiveEvidenceOnlyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShadowCancellationTests(AutonomousTestBase):
+    """A checkpoint must not be able to swallow the analyst's cancellation.
+
+    The shadow is a diagnostic and its failures are contained -- that is the
+    whole point of the handler. But it caught `BaseException`, so a Ctrl-C
+    arriving during a checkpoint was recorded as `shadow_error:
+    KeyboardInterrupt` and the analysis carried on, resolving questions the
+    analyst had asked it to abandon. The three cases are different events and
+    must stay distinguishable.
+    """
+
+    def _run_with_shadow_raising(self, exc):
+        """Drive a run whose shadow observation raises `exc`.
+
+        The failure is injected at `evaluate_completion_shadow`, inside the
+        observer's own `try`, which is where a real verifier failure or a
+        real interrupt would arrive.
+        """
+        import os
+
+        backend = _CountingBackend(
+            _script(), verifier_answers=["CONTINUE missing: the payload"] * 12
+        )
+        runtime = self.runtime(backend)
+
+        def raising(**_kwargs):
+            raise exc
+
+        with mock.patch.dict("os.environ", {SHADOW_ENV: "1"}, clear=False), \
+             mock.patch(
+                 "orbit.runtime.analysis_runtime.evaluate_completion_shadow",
+                 side_effect=raising,
+             ):
+            return runtime.run_autonomous("go", finalize=False)
+
+    def test_an_ordinary_failure_is_still_contained_as_evidence(self) -> None:
+        """The behaviour the handler exists for, unchanged."""
+        run = self._run_with_shadow_raising(RuntimeError("verifier exploded"))
+        self.assertIsNotNone(run.completion_shadow)
+        self.assertEqual(
+            [o.blocked_by for o in run.completion_shadow.observations],
+            ["shadow_error: RuntimeError"],
+        )
+        # The run was not stopped by a diagnostic failing.
+        self.assertFalse(run.cancelled)
+        self.assertNotEqual(run.stop_reason, "cancelled")
+
+    def test_a_cancellation_stops_the_run(self) -> None:
+        run = self._run_with_shadow_raising(KeyboardInterrupt())
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.stop_reason, "cancelled")
+
+    def test_a_cancellation_writes_no_shadow_evidence(self) -> None:
+        """The analyst's decision is not a diagnostic failure.
+
+        Recording `shadow_error: KeyboardInterrupt` would put their stop into
+        the ledger as an observation the verifier made, which it did not.
+        """
+        run = self._run_with_shadow_raising(KeyboardInterrupt())
+        blocked = [o.blocked_by for o in run.completion_shadow.observations]
+        self.assertEqual(blocked, [])
+        self.assertNotIn("shadow_error: KeyboardInterrupt", blocked)
+
+    def test_a_cancellation_stops_the_analysis_short(self) -> None:
+        """The run must END, not carry on past the analyst's stop.
+
+        Asserting `resolved_questions == ()` would be vacuous here -- this
+        backend resolves nothing either way -- so the witness is the work
+        actually done: a cancelled run stops at the checkpoint, while the
+        same run with an ordinary shadow failure continues to completion.
+        """
+        cancelled = self._run_with_shadow_raising(KeyboardInterrupt())
+        ordinary = self._run_with_shadow_raising(RuntimeError("verifier died"))
+        self.assertLess(
+            cancelled.actions_executed, ordinary.actions_executed,
+            "the run continued past the cancellation",
+        )
+        self.assertEqual(cancelled.resolved_questions, ())
+
+    def test_a_cancellation_leaves_no_report(self) -> None:
+        """Consistent with every other cancellation path in the runtime."""
+        import os
+
+        backend = _CountingBackend(
+            _script(), verifier_answers=["CONTINUE missing: the payload"] * 12
+        )
+        runtime = self.runtime(backend)
+        with mock.patch.dict("os.environ", {SHADOW_ENV: "1"}, clear=False), \
+             mock.patch(
+                 "orbit.runtime.analysis_runtime.evaluate_completion_shadow",
+                 side_effect=KeyboardInterrupt(),
+             ):
+            run = runtime.run_autonomous("go", finalize=True)
+        self.assertTrue(run.cancelled)
+        self.assertIsNone(run.final_report)
+
+    def test_system_exit_is_not_turned_into_shadow_evidence(self) -> None:
+        """A `BaseException` that is neither ordinary nor a cancellation.
+
+        It must not be normalised into a diagnostic observation. Propagating
+        is the honest outcome: the runtime has no meaning to assign it.
+        """
+        with self.assertRaises(SystemExit):
+            self._run_with_shadow_raising(SystemExit(3))
+
+    def test_generator_exit_is_not_turned_into_shadow_evidence(self) -> None:
+        with self.assertRaises(GeneratorExit):
+            self._run_with_shadow_raising(GeneratorExit())
+
+    def test_the_three_outcomes_stay_distinct(self) -> None:
+        """One table, because conflating any two of them is the defect."""
+        ordinary = self._run_with_shadow_raising(ValueError("bad snapshot"))
+        self.assertFalse(ordinary.cancelled)
+        self.assertEqual(
+            [o.blocked_by for o in ordinary.completion_shadow.observations],
+            ["shadow_error: ValueError"],
+        )
+
+        cancelled = self._run_with_shadow_raising(KeyboardInterrupt())
+        self.assertTrue(cancelled.cancelled)
+        self.assertEqual(cancelled.completion_shadow.observations, [])
+
+        with self.assertRaises(SystemExit):
+            self._run_with_shadow_raising(SystemExit(1))
