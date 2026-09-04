@@ -23,6 +23,7 @@ from orbit.backend.base import ChatResult, TokenCount  # noqa: E402
 from orbit.runtime import analysis_runtime as module  # noqa: E402
 from orbit.runtime.analysis_controller import (  # noqa: E402
     BLOCKED,
+    OPEN,
     MAX_ACTIONS_PER_QUESTION,
     RESOLVED,
 )
@@ -121,6 +122,16 @@ class _Backend:
     def count_chat_tokens(self, messages, *, tools=None, thinking=False):
         chars = sum(len(str(m.get("content") or "")) for m in messages)
         return TokenCount(tokens=int(40 + chars * 0.25), context_tokens=CTX,
+                          rendered_hash="a" * 64, token_hash="b" * 64)
+
+    def count_text_tokens(self, text: str):
+        """Whole-word counting, so a completion-shadow checkpoint can run.
+
+        Without this the shadow fails on an AttributeError before it reaches
+        anything worth observing, and every checkpoint reads `shadow_error`
+        regardless of what the run did.
+        """
+        return TokenCount(tokens=len(text.split()), context_tokens=CTX,
                           rendered_hash="a" * 64, token_hash="b" * 64)
 
     def chat_stream(self, messages, **kwargs):
@@ -1743,6 +1754,131 @@ class CancellationDuringCompletionTests(_Case):
         self.assertIsNone(run.final_report)
         # ...and still says what it cost.
         self.assertEqual(run.model_calls, reached["n"])
+
+    def test_cancelling_in_a_shadow_checkpoint_blocks_the_question(self) -> None:
+        """A Ctrl-C during a checkpoint must not leave a question resolved.
+
+        The shadow observer used to catch `BaseException`, so the analyst's
+        stop became a line of `shadow_error` evidence while the run carried
+        on -- resolving questions they had asked it to abandon. Contained
+        now, and the active question is blocked rather than answered:
+        nothing recorded an outcome, so nothing may claim one.
+        """
+        with mock.patch.dict(
+            os.environ, {"ORBIT_ANALYSIS_COMPLETION_SHADOW": "1"}, clear=False
+        ):
+            model = _Model(plan=[_question(str(i)) for i in range(6)])
+            runtime = self._runtime(model)
+            built: list = []
+            real = module.AnalysisController
+
+            def capture(*args, **kwargs):
+                controller = real(*args, **kwargs)
+                built.append(controller)
+                return controller
+
+            counter = {"n": 0}
+
+            def distinct(**_kwargs):
+                counter["n"] += 1
+                return AnalysisResult(
+                    status="ok", code_sha256=f"{counter['n']:064d}",
+                    input_sha256="i" * 64, stdout=f"F{counter['n']}",
+                    stderr="", exit_status=0, duration_seconds=0.1,
+                )
+
+            with mock.patch.object(module, "AnalysisController", capture), \
+                 mock.patch.object(module, "execute_analysis", distinct), \
+                 mock.patch.object(
+                     module, "evaluate_completion_shadow",
+                     side_effect=KeyboardInterrupt(),
+                 ):
+                run = runtime.run_autonomous("Analyse it.", finalize=False)
+
+        self.assertTrue(run.cancelled)
+        self.assertEqual(run.stop_reason, module.STOP_CANCELLED)
+        # No fake evidence was written for the analyst's decision.
+        self.assertEqual(run.completion_shadow.observations, [])
+        # The checkpoint fires between questions, so the one that was active
+        # had already closed honestly -- `exhaust_active` blocks only an OPEN
+        # question, and must not rewrite a settled one. What matters is that
+        # the questions the analyst abandoned stay abandoned.
+        self.assertEqual(len(built), 1)
+        controller = built[0]
+        still_open = [qid for qid in controller.order
+                      if controller.states[qid].status == OPEN]
+        self.assertTrue(still_open, "the run did not stop early")
+        for qid in still_open:
+            self.assertNotIn(qid, run.resolved_questions)
+        # And the run stopped rather than working through them.
+        self.assertLess(len(run.resolved_questions), len(controller.order))
+
+    def test_cancelling_blocks_a_question_the_budget_left_open(self) -> None:
+        """The case a sweep of plan sizes alone does not reach.
+
+        A checkpoint usually fires after the completion has closed the active
+        question, so blocking it is a no-op. But when the model-call budget
+        runs out, `if model_calls < max_model_calls` skips the completion and
+        the question arrives at the checkpoint still OPEN. Cancelling there
+        must say WHY it is unresolved: the dossier the closing report reads
+        otherwise tells the analyst "no answer was established" when the
+        truth is that they stopped the run.
+        """
+        with mock.patch.dict(
+            os.environ, {"ORBIT_ANALYSIS_COMPLETION_SHADOW": "1"}, clear=False
+        ):
+            model = _Model(plan=[_question(str(i)) for i in range(6)])
+            runtime = self._runtime(model)
+            built: list = []
+            real = module.AnalysisController
+
+            def capture(*args, **kwargs):
+                controller = real(*args, **kwargs)
+                built.append(controller)
+                return controller
+
+            counter = {"n": 0}
+
+            def distinct(**_kwargs):
+                counter["n"] += 1
+                return AnalysisResult(
+                    status="ok", code_sha256=f"{counter['n']:064d}",
+                    input_sha256="i" * 64, stdout=f"F{counter['n']}",
+                    stderr="", exit_status=0, duration_seconds=0.1,
+                )
+
+            with mock.patch.object(module, "AnalysisController", capture), \
+                 mock.patch.object(module, "execute_analysis", distinct), \
+                 mock.patch.object(
+                     module, "evaluate_completion_shadow",
+                     side_effect=KeyboardInterrupt(),
+                 ):
+                # 9 is the budget at which the completion is skipped and Q4
+                # reaches the checkpoint open.
+                run = runtime.run_autonomous(
+                    "Analyse it.", finalize=False, max_model_calls=9
+                )
+
+        self.assertTrue(run.cancelled)
+        controller = built[0]
+        blocked = [qid for qid in controller.order
+                   if controller.states[qid].status == BLOCKED]
+        self.assertTrue(
+            blocked,
+            "the question left open by the budget was not blocked",
+        )
+        for qid in blocked:
+            self.assertEqual(controller.states[qid].reason,
+                             module.CANCELLED_QUESTION_REASON)
+        # And the analyst reads that reason for the question that was in
+        # flight. Questions never started keep the generic wording, which is
+        # correct for them -- nothing stopped them, they simply never ran.
+        dossier = controller.dossier()
+        self.assertIn(module.CANCELLED_QUESTION_REASON, dossier)
+        for qid in blocked:
+            row = [ln for ln in dossier.splitlines() if ln.startswith(f"{qid} ")]
+            self.assertTrue(row, f"{qid} missing from the dossier")
+            self.assertIn("BLOCKED", row[0])
 
     def test_the_action_and_its_evidence_survive(self) -> None:
         """What ran, ran. The interrupt withholds an outcome, not a result."""

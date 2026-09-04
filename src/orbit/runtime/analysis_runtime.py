@@ -3348,7 +3348,35 @@ class AnalysisRuntime:
             # exactly the state a real gate would have seen -- while every
             # `break` below remains reachable regardless of what it says.
             if shadow is not None and shadow_due(actions):
-                observation = self._observe_completion_shadow(actions, analyst_message)
+                try:
+                    observation = self._observe_completion_shadow(
+                        actions, analyst_message
+                    )
+                except KeyboardInterrupt:
+                    # The analyst stopped the run during a checkpoint. The
+                    # observation is abandoned rather than invented: writing
+                    # a `shadow_error` for it would record their decision as
+                    # a diagnostic failure the verifier never made. Contained
+                    # here, as at every other model call, because propagating
+                    # unwinds to a caller holding only a pre-run checkpoint.
+                    #
+                    # The active question is blocked, as at the sibling
+                    # handlers. It is usually already closed by the
+                    # completion above and `exhaust_active` then no-ops --
+                    # but not always: when the model-call budget runs out,
+                    # `if model_calls < max_model_calls` skips the completion
+                    # entirely and the question reaches this checkpoint still
+                    # OPEN. Measured across a sweep of that budget, not of
+                    # plan sizes alone, which is what an earlier reading of
+                    # this path missed. Without this the analyst is told "no
+                    # answer was established" when the truth is that they
+                    # stopped the run.
+                    if controller is not None:
+                        controller.exhaust_active(CANCELLED_QUESTION_REASON)
+                    cancelled = True
+                    stop_reason = STOP_CANCELLED
+                    self._close_incomplete_turn()
+                    break
                 shadow.observations.append(observation)
                 if shadow_ledger is not None:
                     # The writer swallows its own I/O failures; this guards the
@@ -3713,7 +3741,19 @@ class AnalysisRuntime:
                 fits_budget=fits,
                 snapshot_tokens=total,
             )
-        except BaseException as exc:  # noqa: BLE001 - diagnostics must not end a run
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not end a run
+            # `Exception`, not `BaseException`. A diagnostic that fails is a
+            # diagnostic that failed, and recording it as one is right. A
+            # `KeyboardInterrupt` is not a failure of the shadow: it is the
+            # analyst stopping the run, and catching it here turned their
+            # decision into a line of shadow evidence while the analysis
+            # carried on -- resolving questions they had asked it to abandon.
+            # `SystemExit` and the rest are equally not shadow errors.
+            #
+            # They propagate to the call site, which contains them the way
+            # every other model call in the loop is contained. Propagating is
+            # only half of it: left to leave `run_autonomous` entirely they
+            # would unwind to a caller holding a pre-run checkpoint.
             return ShadowObservation(
                 action=actions,
                 snapshot_digest="",
