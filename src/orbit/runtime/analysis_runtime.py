@@ -191,6 +191,15 @@ ANALYSIS_STEP_PHASE = "analysis_step"
 # mistaken for a link in the analysis chain.
 ANALYSIS_REPORT_PHASE = "analysis_report"
 
+#: Diagnostic phase labels for the control calls. They all dispatched under
+#: `analysis_step` before, which is true of the loop but leaves a trace unable
+#: to say whether a call was a plan, a finish decision or an action -- the
+#: first question any autopsy asks. Derived from the schema already passed to
+#: `_control_dispatch`, so nothing about the call changes.
+ANALYSIS_PLAN_PHASE = "analysis_plan"
+ANALYSIS_FINISH_PHASE = "analysis_finish"
+ANALYSIS_COVER_PHASE = "analysis_cover"
+
 # What one report may read from the store. The evidence cards are already
 # bounded by `final_card`; this caps how many of them a single report carries,
 # so a long session cannot grow the report prompt without limit.
@@ -1057,6 +1066,62 @@ class AnalysisSource:
         return self.sha256[:16]
 
 
+#: Where a diagnostic run keeps its workspace instead of deleting it. Unset
+#: means today's behaviour exactly: the workspace is removed on close.
+ANALYSIS_RETENTION_ENV = "ORBIT_ANALYSIS_RETAIN_DIR"
+
+
+def _record_report_diagnostics(
+    runtime: "AnalysisRuntime",
+    *,
+    question: str,
+    records: "list[EvidenceRecord]",
+    messages: "list[Message]",
+    admitted: "list[Message] | None" = None,
+    refusal: Exception | None = None,
+) -> None:
+    """Persist the exact REPORT prompt when diagnostic retention is on.
+
+    Off by default and a no-op then, so an ordinary run is byte-identical.
+    What it writes is the prompt as built and the refusal that met it, with a
+    per-message size table -- which is what makes each component's
+    contribution reconstructible offline rather than estimated. Never a model
+    call, never a change to what is sent.
+    """
+    root = retention_root()
+    if root is None:
+        return
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "event": "analysis_report_admission",
+            "question": question,
+            "record_count": len(records),
+            "record_ids": [r.evidence_id for r in records],
+            "record_raw_chars": {r.evidence_id: r.raw_chars for r in records},
+            "messages": messages,
+            "message_chars": [
+                {"role": m.get("role"), "chars": len(str(m.get("content") or ""))}
+                for m in messages
+            ],
+            "admitted": admitted,
+            "refusal": None if refusal is None else {
+                "type": type(refusal).__name__, "detail": str(refusal),
+            },
+        }
+        with (root / "report_admission.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        # A diagnostic must never fail a run that otherwise succeeded.
+        pass
+
+
+def retention_root() -> "Path | None":
+    """The directory diagnostic runs retain into, or None when disabled."""
+    value = os.environ.get(ANALYSIS_RETENTION_ENV, "").strip()
+    return Path(value) if value else None
+
+
 @dataclass
 class AnalysisWorkspace:
     """Storage owned by one analysis session, for its whole lifetime.
@@ -1095,10 +1160,46 @@ class AnalysisWorkspace:
         return self.root / "work"
 
     def close(self) -> None:
-        """Remove the workspace. Safe to call more than once."""
+        """Remove the workspace. Safe to call more than once.
+
+        Unless diagnostic retention is on, in which case the workspace is
+        moved aside instead of deleted. A live report failure could not be
+        diagnosed at all because the EvidenceStore lives inside this
+        directory and went with it: the run's own evidence, the thing an
+        autopsy needs first, is destroyed by the cleanup that makes ordinary
+        runs leave nothing behind.
+
+        Retention is explicit and off by default, so a normal run keeps
+        exactly today's semantics -- the directory is removed, and nothing
+        about the analysis changes either way.
+        """
         if self._closed:
             return
         self._closed = True
+        retained = retention_root()
+        if retained is not None:
+            try:
+                retained.mkdir(parents=True, exist_ok=True)
+                destination = retained / self.root.name
+                # A collision is suffixed, never overwritten. `mkdtemp` makes
+                # basenames unique so this is unreachable today, but deleting
+                # an existing bundle would destroy retained evidence inside
+                # the one feature whose whole purpose is keeping it.
+                if destination.exists():
+                    for attempt in range(1, 1000):
+                        candidate = retained / f"{self.root.name}.{attempt}"
+                        if not candidate.exists():
+                            destination = candidate
+                            break
+                    else:
+                        raise OSError("no free retention path")
+                shutil.move(str(self.root), str(destination))
+                return
+            except OSError:
+                # Retention is a diagnostic, and a diagnostic must never turn
+                # a finished run into a failed one. A workspace that cannot
+                # be moved is removed as it always was.
+                pass
         shutil.rmtree(self.root, ignore_errors=True)
 
     def __enter__(self) -> "AnalysisWorkspace":
@@ -2615,7 +2716,7 @@ class AnalysisRuntime:
         # Counted before the call, as everywhere else: a call that raises
         # still reached the model and still cost a turn.
         self.model_calls += 1
-        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="off"):
+        with model_call_context(phase=ANALYSIS_COVER_PHASE, tools_mode="off"):
             response = self.backend.chat_stream(
                 admitted,
                 temperature=self.temperature,
@@ -2729,7 +2830,20 @@ class AnalysisRuntime:
         # an interrupted or failed control call was spent and never counted,
         # so every cancelled run reported one model call fewer than it made.
         self.model_calls += 1
-        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
+        # Which control call this is, for the trace only. The loop treats all
+        # three identically; an autopsy cannot.
+        control_phase = {
+            PLAN_TOOL_NAME: ANALYSIS_PLAN_PHASE,
+            FINISH_TOOL_NAME: ANALYSIS_FINISH_PHASE,
+        }.get(schema["function"]["name"], ANALYSIS_STEP_PHASE)
+        # The active question rides in the phase label rather than in a new
+        # `kv_diag` parameter: the trace already carries `phase` through every
+        # emitter, and a FINISH call whose question is unknown answers half
+        # the question an autopsy asks. Only present when there is one.
+        active_id = getattr(self, "_diagnostic_active_question", None)
+        if active_id:
+            control_phase = f"{control_phase}:{active_id}"
+        with model_call_context(phase=control_phase, tools_mode="on"):
             response = self.backend.chat_stream(
                 admitted,
                 temperature=self.temperature,
@@ -3341,6 +3455,11 @@ class AnalysisRuntime:
                             "limit for one question"
                         )
                     active = controller.activate_next()
+                # Diagnostics only: which question the next dispatches belong
+                # to. Read by the trace label, never by the loop.
+                self._diagnostic_active_question = (
+                    active.id if active is not None else None
+                )
                 if active is None:
                     # Nothing is open, so no action is left to run. Never a
                     # claim that the analysis is complete: the source and every
@@ -4259,6 +4378,15 @@ class AnalysisRuntime:
         # costs nothing to produce. Losing it there would mean the values the
         # runtime computed with certainty are the ones a full context discards
         # first.
+        #
+        # Everything an offline reconstruction of a refused report needs, and
+        # only when retention is on. The live failure could not be explained
+        # because the prompt that was refused no longer existed anywhere:
+        # `_report_messages` builds it fresh, admission either rewrites it or
+        # raises, and neither survives the call.
+        _record_report_diagnostics(
+            self, question=question, records=records, messages=messages
+        )
         try:
             admitted = self._admit(
                 messages,
@@ -4275,7 +4403,11 @@ class AnalysisRuntime:
                 # prompt.
                 rehydrate_evidence=False,
             )
-        except ContextAdmissionError:
+        except ContextAdmissionError as exc:
+            _record_report_diagnostics(
+                self, question=question, records=records, messages=messages,
+                refusal=exc,
+            )
             if not appendix:
                 raise
             return AnalysisReport(
