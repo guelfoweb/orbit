@@ -3849,13 +3849,57 @@ class AnalysisRuntime:
                 consecutive_no_progress += 1
                 consecutive_errors = 0
                 if consecutive_no_progress >= max_no_progress:
-                    stop_reason = (
+                    stalled = (
                         f"{STOP_NO_PROGRESS}: strategy repeated"
                         if record.repeated_strategy
                         else f"{STOP_NO_PROGRESS}: action repeated"
                         if record.repeated_action
                         else STOP_NO_PROGRESS
                     )
+                    # A stall belongs to the question that owns the actions
+                    # that caused it, not to the run. Measured on the live
+                    # Fattura shape: Q2 repeated its strategy, the bound
+                    # tripped, and the run ended with Q3 never activated --
+                    # 10 actions and 52 model calls still unspent.
+                    #
+                    # So the question is blocked with the reason its own
+                    # streak earned, and the scheduler is asked for the next
+                    # one. Nothing is reset: the streak counter, the evidence
+                    # and the progress history all stand, and a run with no
+                    # other eligible question still stops exactly here.
+                    #
+                    # Eligibility asks whether any OTHER question is open:
+                    # `open_ids` still counts the active one, so `exhausted`
+                    # would always divert here and the global stop reason
+                    # below would become unreachable.
+                    others = (
+                        [q for q in controller.open_ids if q != controller.active]
+                        if controller is not None else []
+                    )
+                    # The ceilings are checked BELOW this block, and the
+                    # diversion leaves by `continue` -- so they have to be
+                    # honoured here too, or handing the run to another
+                    # question would buy an action the budget had already
+                    # refused. A diverting step is NO_PROGRESS by definition,
+                    # so the soft budget's "unless it earned it" clause
+                    # cannot apply either.
+                    at_ceiling = (
+                        actions >= max_actions or actions >= soft_max_actions
+                    )
+                    if others and not at_ceiling:
+                        controller.exhaust_active(stalled)
+                        # The streak is the question's, and that question is
+                        # now closed. Carrying it into the next one would
+                        # blame a fresh question for the previous one's
+                        # repetition and stop the run a step later.
+                        consecutive_no_progress = 0
+                        # Always already false where this is reached -- the
+                        # branch that sets it is the one this block returns
+                        # from. Kept so the diversion cannot carry a pending
+                        # replan into a question that never asked for one.
+                        replan_pending = False
+                        continue
+                    stop_reason = stalled
                     break
                 # First unproductive step of this streak: say so, and ask for
                 # a different strategy rather than another attempt at the same
