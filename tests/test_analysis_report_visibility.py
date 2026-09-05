@@ -21,6 +21,7 @@ from pathlib import Path
 
 from orbit.backend.base import ChatResult
 from orbit.runtime.analysis_runtime import (
+    REPORT_NOT_COMPOSED_PREFIX,
     AnalysisRuntime,
     acquire_analysis_source,
 )
@@ -620,3 +621,286 @@ class RealSampleRenderingTests(ReportVisibilityTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportDossierAdmissionTests(unittest.TestCase):
+    """The report prompt is bounded by its cards, not by raw evidence bytes.
+
+    A live Fattura run reached a correct analysis -- exact C2, five
+    deterministic stages -- and then could not compose its narrative: the
+    report prompt carried every reportable record's full re-attested body, so
+    it grew with the artifact rather than with what the report had to say.
+    Measured on that shape at ctx 8192: 44,287 tokens against an 8,192 limit,
+    and 9,129 for a single 35 KB observation.
+    """
+
+    C2 = "http://185.234.72.19/gate.php"
+    SOURCE = (
+        "// padding line with some javascript content here\n" * 700
+        + f"var c2 = '{C2}';\n"
+    )
+    CTX = 8192
+
+    class _Ctx8192:
+        """Exact-admission backend with a deterministic ~4 char/token count."""
+
+        thinking = False
+
+        def __init__(self, context_length: int = 8192) -> None:
+            self.context_length = context_length
+            self.calls = 0
+            self.admitted: list | None = None
+
+        def health(self):
+            return True
+
+        def supports_exact_context_admission(self):
+            return True
+
+        def model_info(self):
+            class _Info:
+                pass
+
+            info = _Info()
+            info.context_length = self.context_length
+            return info
+
+        def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+            from orbit.backend.base import TokenCount
+
+            chars = sum(len(str(m.get("content") or "")) for m in messages)
+            return TokenCount(
+                tokens=int(chars / 4), context_tokens=self.context_length,
+                rendered_hash="a" * 64, token_hash="b" * 64,
+            )
+
+        def count_text_tokens(self, text):
+            from orbit.backend.base import TokenCount
+
+            return TokenCount(
+                tokens=int(len(text) / 4), context_tokens=self.context_length
+            )
+
+        def chat_stream(self, messages, *, temperature=None, max_tokens=None,
+                        tools=None, on_delta=None, on_progress=None):
+            # Records what admission actually let through, so a test can
+            # assert on the prompt the model was really sent rather than on
+            # the one `_report_messages` built.
+            self.calls += 1
+            self.admitted = list(messages)
+            text = "The artifact drops a second stage."
+            if on_delta:
+                on_delta(text)
+            return ChatResult(
+                content=text, model="m", finish_reason="stop", tool_calls=[],
+                prompt_tokens=10, completion_tokens=5, cached_tokens=0,
+                prompt_tokens_per_second=None,
+                generation_tokens_per_second=None,
+            )
+
+    def _runtime(self, *, context_length: int = 8192):
+        import hashlib
+
+        from orbit.runtime.analysis_runtime import AnalysisRuntime, AnalysisSource
+
+        tmp = Path(tempfile.mkdtemp(prefix="orbit-dossier-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        artifact = tmp / "artifact.js"
+        artifact.write_text(self.SOURCE, encoding="utf-8")
+        store = EvidenceStore(root=tmp / "evidence")
+        runtime = AnalysisRuntime(
+            backend=self._Ctx8192(context_length),
+            source=AnalysisSource(
+                snapshot_path=artifact,
+                sha256=hashlib.sha256(self.SOURCE.encode()).hexdigest(),
+                size_bytes=len(self.SOURCE),
+                original_path=str(artifact),
+            ),
+            evidence_store=store,
+        )
+        self.addCleanup(runtime.close)
+        return runtime, store
+
+    def _observe(self, store, count, *, body=None):
+        for index in range(count):
+            store.add(
+                "execute_analysis", self.SOURCE if body is None else body,
+                metadata={
+                    "tool_call_id": f"call_{index}", "user_turn_id": "turn_0",
+                    "status": "ok", "produced_by_phase": "analysis_step",
+                },
+            )
+
+    def _compose(self, runtime):
+        """Drive the REAL report path and return (report, admitted tokens).
+
+        Deliberately not `_report_messages` + `count_chat_tokens`: the first
+        version of this fix was measured that way and looked correct while
+        the defect was untouched. `_admit` rehydrates evidence references,
+        so a dossier that is bounded on the way in can be unbounded by the
+        time it is sent. Only the admitted prompt says what happened.
+        """
+        report = runtime.report("What does it do?")
+        admitted = runtime.backend.admitted
+        tokens = (
+            runtime.backend.count_chat_tokens(admitted).tokens
+            if admitted is not None else None
+        )
+        return report, tokens
+
+    # -- the defect ---------------------------------------------------------
+    def test_one_large_observation_still_fits(self) -> None:
+        """The measured live shape started failing at a single observation."""
+        runtime, store = self._runtime()
+        self._observe(store, 1)
+        report, tokens = self._compose(runtime)
+        self.assertLess(tokens, self.CTX)
+        # Composed, not merely admissible: the model call was dispatched.
+        self.assertEqual(report.model_calls, 1)
+        self.assertNotIn(REPORT_NOT_COMPOSED_PREFIX, report.text)
+
+    def test_duplicate_observations_do_not_scale_the_prompt(self) -> None:
+        """Raw copies may stay in the store; admission must not follow them.
+
+        Deduplication is deliberately not the fix here -- the records remain
+        -- so this asserts the prompt grows by CARD, which is a small
+        constant, rather than by the 35 KB each copy holds.
+        """
+        seen = {}
+        for count in (1, 3, 5):
+            runtime, store = self._runtime()
+            self._observe(store, count)
+            report, seen[count] = self._compose(runtime)
+            self.assertLess(seen[count], self.CTX)
+            self.assertEqual(report.model_calls, 1)
+
+        # Growth per extra copy is a card, not an artifact: well under a
+        # tenth of the ~8,790 tokens each raw copy used to add.
+        per_copy = (seen[5] - seen[1]) / 4
+        self.assertLess(per_copy, 879)
+
+    def test_the_record_bound_caps_the_dossier(self) -> None:
+        """Past MAX_REPORT_EVIDENCE_RECORDS the prompt stops growing at all."""
+        from orbit.runtime.analysis_runtime import MAX_REPORT_EVIDENCE_RECORDS
+
+        runtime, store = self._runtime()
+        self._observe(store, MAX_REPORT_EVIDENCE_RECORDS)
+        _, at_bound = self._compose(runtime)
+        self._observe(store, 8)
+        _, beyond = self._compose(runtime)
+        self.assertEqual(beyond, at_bound)
+        self.assertLess(at_bound, self.CTX)
+
+    # -- what must survive --------------------------------------------------
+    def test_the_exact_c2_survives_in_the_dossier(self) -> None:
+        runtime, store = self._runtime()
+        self._observe(store, 5)
+        dossier = "\n\n".join(
+            runtime._evidence_card(record)
+            for record in runtime._reportable_records()
+        )
+        self.assertIn(self.C2, dossier)
+
+    def test_raw_evidence_remains_re_attestable(self) -> None:
+        """Bounded in the prompt, complete in the store."""
+        runtime, store = self._runtime()
+        self._observe(store, 5)
+        records = runtime._reportable_records()
+        for record in records:
+            restored = store.reattest_exact(record.evidence_id)
+            self.assertIsNotNone(restored)
+            self.assertEqual(len(restored), len(self.SOURCE))
+            self.assertIn(self.C2, restored)
+
+    def test_no_excerpt_is_presented_as_complete(self) -> None:
+        """The card states the real size beside the reference that recovers it."""
+        runtime, store = self._runtime()
+        self._observe(store, 1)
+        card = runtime._evidence_card(runtime._reportable_records()[0])
+        self.assertLess(len(card), len(self.SOURCE))
+        self.assertIn(f"size: {len(self.SOURCE)} chars", card)
+        self.assertIn("raw_ref: evidence:", card)
+
+    def test_small_evidence_is_still_quoted_whole(self) -> None:
+        """No regression for the ordinary case, which is most of them."""
+        runtime, store = self._runtime()
+        finding = "small finding: port 4444 open"
+        self._observe(store, 1, body=finding)
+        card = runtime._evidence_card(runtime._reportable_records()[0])
+        self.assertIn(finding, card)
+
+    def test_a_dossier_that_still_cannot_fit_fails_honestly(self) -> None:
+        """Bounded is not unbounded-enough: admission stays authoritative."""
+        from orbit.runtime.analysis_runtime import ContextAdmissionError
+
+        runtime, store = self._runtime(context_length=200)
+        self._observe(store, 3)
+        with self.assertRaises(ContextAdmissionError):
+            runtime._admit(
+                runtime._report_messages(
+                    "q", runtime._reportable_records()
+                ),
+                max_tokens=64, tools=[], next_action_reserve=0,
+            )
+
+    # -- the design rule the first fix violated -----------------------------
+    def test_a_dossier_reference_is_not_a_retrieval_request(self) -> None:
+        """Citation is not a request, even when it names an evidence id.
+
+        `_with_evidence_rehydration` states the rule: retrieval is something
+        the model asks for, never something a reference triggers by existing.
+        The report writes its own dossier and every card names `raw_ref` as
+        provenance, so admission must not read those as requests -- the first
+        version of this fix did, re-inlining every record it had just replaced
+        with a citation and making the prompt LARGER than the unbounded one.
+        """
+        runtime, store = self._runtime()
+        self._observe(store, 5)
+        records = runtime._reportable_records()
+        messages = runtime._report_messages("q", records)
+
+        rehydrated, ids = runtime._with_evidence_rehydration(messages)
+        # The references ARE recognisable as ids -- that is what makes the
+        # suppression meaningful rather than accidental.
+        self.assertEqual(len(ids), len(records))
+        self.assertGreater(
+            runtime.backend.count_chat_tokens(rehydrated).tokens,
+            runtime.backend.count_chat_tokens(messages).tokens * 5,
+        )
+
+        # And the report path does not take that route.
+        report, admitted_tokens = self._compose(runtime)
+        self.assertEqual(report.model_calls, 1)
+        self.assertLess(admitted_tokens, self.CTX)
+        sent = "\n".join(
+            str(m.get("content") or "") for m in runtime.backend.admitted
+        )
+        self.assertNotIn(self.SOURCE, sent)
+        # Provenance survives: the analyst can still follow every citation.
+        for record in records:
+            self.assertIn(record.evidence_id, sent)
+
+    def test_an_ordinary_request_still_rehydrates(self) -> None:
+        """The default is unchanged, which is most of the system."""
+        runtime, store = self._runtime()
+        finding = "finding: beacon to 10.0.0.5:4444"
+        self._observe(store, 1, body=finding)
+        record = runtime._reportable_records()[0]
+        asked = [
+            {"role": "system", "content": "s"},
+            {"role": "user",
+             "content": f"show me evidence:{record.evidence_id} again"},
+        ]
+
+        admitted = runtime._admit(asked, max_tokens=256, tools=None)
+        self.assertIn(finding, "\n".join(
+            str(m.get("content") or "") for m in admitted
+        ))
+
+        withheld = runtime._admit(
+            asked, max_tokens=256, tools=None, rehydrate_evidence=False
+        )
+        body = "\n".join(str(m.get("content") or "") for m in withheld)
+        self.assertNotIn(finding, body)
+        # Still cited, just not fetched.
+        self.assertIn(record.evidence_id, body)

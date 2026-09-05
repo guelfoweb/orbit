@@ -196,6 +196,16 @@ ANALYSIS_REPORT_PHASE = "analysis_report"
 # so a long session cannot grow the report prompt without limit.
 MAX_REPORT_EVIDENCE_RECORDS = 12
 
+#: Above this, a record is cited rather than quoted in the report prompt.
+#: The bound is on the record, not the dossier: `MAX_REPORT_EVIDENCE_RECORDS`
+#: already caps how many are carried, and one 35 KB observation on its own
+#: exceeded an 8,192-token context in the measured live shape -- so a total
+#: budget would have to refuse that record anyway. Set to `MAX_EVIDENCE_CHARS`
+#: because that is already the size the runtime treats as "as much of one
+#: observation as a model should be handed at once"; a record under it was
+#: quotable before this bound existed and still is.
+MAX_REPORT_EVIDENCE_QUOTE_CHARS = 3200
+
 ANALYSIS_REPORT_INSTRUCTION = (
     "Report on the evidence already collected. Run nothing: this turn has no "
     "tools and performs no analysis.\n"
@@ -1828,7 +1838,8 @@ class AnalysisRuntime:
                 return candidate
 
     def _admit(self, messages: list[Message], *, max_tokens: int,
-               tools: list[dict] | None, next_action_reserve: int | None = None) -> list[Message]:
+               tools: list[dict] | None, next_action_reserve: int | None = None,
+               rehydrate_evidence: bool = True) -> list[Message]:
         """Plan one ANALYSIS request through Orbit's shared context admission.
 
         ANALYSIS had none. Prompts grew 581 -> 2898 -> 5241 -> 6105 -> 6991
@@ -1878,7 +1889,26 @@ class AnalysisRuntime:
         else:
             return messages
 
-        messages, rehydrated = self._with_evidence_rehydration(messages)
+        # `rehydrate_evidence` is the caller stating whether the references in
+        # this prompt are REQUESTS. The default is unchanged for every path
+        # where they are: a compacted turn carries an id, and the model naming
+        # one is asking for those bytes back.
+        #
+        # The final report is the one prompt where they are not. Its dossier
+        # is already resolved and bounded, and each card names `raw_ref` as
+        # provenance -- so the analyst can audit what a claim rests on, not so
+        # the runtime fetches it. Rehydrating there re-inlined every record it
+        # had just replaced with a citation and made the report prompt LARGER
+        # than the unbounded version it replaced: measured at ctx 8192 on five
+        # 35 KB observations, 2,428 tokens of dossier became 46,646.
+        #
+        # This is the rule the method below already states -- retrieval is
+        # something the model asks for, never something a reference triggers
+        # by existing -- applied to a prompt the runtime writes itself.
+        if rehydrate_evidence:
+            messages, rehydrated = self._with_evidence_rehydration(messages)
+        else:
+            rehydrated = ()
         available, covered = self._compactable_evidence_sets(messages, rehydrated)
 
         plan = plan_exact_context(
@@ -4239,6 +4269,11 @@ class AnalysisRuntime:
                 # path most likely to block. Chat makes the same
                 # phase-dependent choice.
                 next_action_reserve=0,
+                # The dossier is already resolved: its `raw_ref` lines are
+                # citations the analyst can follow, not requests. The store
+                # keeps every record complete and re-attestable outside this
+                # prompt.
+                rehydrate_evidence=False,
             )
         except ContextAdmissionError:
             if not appendix:
@@ -4432,16 +4467,36 @@ class AnalysisRuntime:
         ]
 
     def _evidence_card(self, record: EvidenceRecord) -> str:
-        """One record as the report sees it: header plus the observation.
+        """One record as the report sees it, bounded by what it costs.
 
-        `final_card` shows a 700/300 head-and-tail excerpt, which is right for
-        a citation card but wrong here -- a finding in the middle of a step's
-        output would vanish, and the report would then call it unresolved,
-        which is a confident wrong answer rather than a missing one. The
-        re-attested text is the same bounded observation the step already put
-        in front of the model, so carrying it adds nothing the model has not
-        already been trusted with, and it is verified rather than remembered.
+        A record small enough to quote whole is quoted whole: a finding in the
+        middle of a step's output would vanish from an excerpt, and a report
+        that then called it unresolved would be confidently wrong rather than
+        merely incomplete. That reasoning still holds, and nothing changes for
+        the ordinary case.
+
+        What it never accounted for is the cost. The re-attested body is NOT
+        the bounded observation a step was shown -- the store keeps the whole
+        thing -- so quoting every record unconditionally made the report
+        prompt grow with raw evidence bytes. Measured on the live Fattura
+        shape at ctx 8192: five byte-identical 35 KB observations rendered a
+        44,287-token prompt against an 8,192 limit, and even ONE of them
+        exceeded it at 9,129. The analysis had already succeeded; only the
+        report could not be composed.
+
+        Past the threshold the record is carried as `final_card` instead: the
+        same bounded citation the rest of the system uses, declaring the full
+        `size` and `sha256` beside a head-and-tail excerpt, so the model is
+        never told an excerpt is the whole record. The raw bytes stay in the
+        store, re-attestable by `raw_ref`, and the deterministic values a
+        report must state exactly do not depend on this path at all -- the
+        appendix renders every transformation and indicator itself.
         """
+        if record.raw_chars > MAX_REPORT_EVIDENCE_QUOTE_CHARS:
+            # Too expensive to quote. Described exactly, with the reference
+            # that recovers the bytes, rather than dropped or truncated in a
+            # way that hides that it was.
+            return final_card(record)
         body = self.evidence_store.reattest_exact(record.evidence_id)
         if body is None:
             # Re-attestation is the gate; a record that cannot pass it is
