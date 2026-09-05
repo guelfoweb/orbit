@@ -1038,6 +1038,17 @@ STOP_CANCELLED = "cancelled"
 CANCELLED_QUESTION_REASON = (
     "the analyst stopped the run before this question was closed"
 )
+
+#: Returned as the assistant text when a control exchange has already spent
+#: its bounded protocol repair. The caller must not dispatch again: the two
+#: allowed attempts are gone, and retrying would multiply the nested loops.
+#:
+#: The leading NUL is the whole anti-spoofing mechanism, not decoration. A
+#: model reply cannot carry it over the JSON transport, so no generated text
+#: can impersonate this marker. Replacing it with printable characters would
+#: let a reply claim the repair allowance was spent -- which costs only the
+#: model its own second attempt, but is a collision that need not exist.
+PROTOCOL_REPAIR_EXHAUSTED = "\x00protocol-repair-exhausted"
 STOP_BACKEND_ERROR = "backend error"
 
 MAX_SESSION_SCRATCH_BYTES = 64 * 1024 * 1024
@@ -2783,9 +2794,35 @@ class AnalysisRuntime:
                     "analysis action."
                 )},
             ]
-            response = self._control_dispatch(
-                repaired, schema, on_progress=on_progress
-            )
+            try:
+                response = self._control_dispatch(
+                    repaired, schema, on_progress=on_progress
+                )
+            except ToolCallParseError:
+                # Twice is the allowance, and this is the second. Returning
+                # `None` hands the caller the same "unusable reply" it gets
+                # from any other unreadable answer, so the bounded outcome
+                # each phase already defines is reached instead of escaping:
+                # PLAN marks the controller unsupported, FINISH blocks the
+                # question with "the completion state could not be read".
+                #
+                # Measured on the live Fattura run: this dispatch was
+                # unguarded, so a repeated parse failure while closing Q2
+                # propagated out of `finish_question` and was caught by the
+                # step handler's `RecoverableBackendError` clause -- which
+                # `ToolCallParseError` subclasses. The run ended reporting a
+                # backend error for something the server did correctly, and
+                # the question never reached its own bounded close.
+                #
+                # The dispatch bound is unchanged at two: this clause spends
+                # no further call, it only stops the second failure escaping.
+                #
+                # The empty marker says WHY the reply is unusable, which the
+                # outer loop needs: a protocol failure has already spent its
+                # whole allowance here, and letting `finish_question` retry
+                # would multiply the two layers into four dispatches for one
+                # question -- measured, not feared.
+                return None, PROTOCOL_REPAIR_EXHAUSTED
         text = response.content or ""
         if _unencodable(text):
             text = text.encode("utf-8", "replace").decode("utf-8")
@@ -2907,6 +2944,18 @@ class AnalysisRuntime:
                     return calls
                 except ControlError as exc:
                     detail = str(exc)
+            elif _text == PROTOCOL_REPAIR_EXHAUSTED:
+                # Both allowed dispatches are already spent inside
+                # `_control_call`, exactly as at the finish call. Retrying
+                # here would multiply the two bounded layers into four.
+                #
+                # Returns 0, not `calls`: `plan_calls` counts calls that
+                # RETURNED INTO planning, and neither of these did -- they
+                # raised. `control_attempts`, incremented at dispatch, is
+                # what says they reached the model, and it still reports 2.
+                controller.unsupported = True
+                controller.phase = PHASE_REPORT
+                return 0
             else:
                 detail = "no submit_analysis_plan call was made"
             if attempt == 0 and attempts > 1:
@@ -2998,6 +3047,15 @@ class AnalysisRuntime:
                 else:
                     self._apply_decision(controller, decision, evidence_id)
                     return calls
+            elif _text == PROTOCOL_REPAIR_EXHAUSTED:
+                # Both allowed dispatches are already spent inside
+                # `_control_call`. Retrying here is what turned a bound of
+                # two into four, so the question closes now on the same
+                # outcome a second failure reaches below.
+                controller.close_active(
+                    BLOCKED, reason="the completion state could not be read"
+                )
+                return calls
             else:
                 detail = f"no {FINISH_TOOL_NAME} call was made"
             if attempt == 0:
