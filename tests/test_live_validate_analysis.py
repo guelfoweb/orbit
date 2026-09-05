@@ -664,7 +664,21 @@ class ExitCodeTests(unittest.TestCase):
         obfuscated dropper is.
         """
         class _ProseOnly(_StubBackend):
+            """Prose instead of an ACTION, but still able to control.
+
+            The point is a model that never runs a tool and so collects no
+            evidence. It must still answer PLAN and FINISH: a double that
+            cannot ends the run on "control unsupported" before any report
+            exists, which tests the protocol rather than the empty-evidence
+            report this case is about.
+            """
+
             def chat_stream(self, messages, **kwargs):
+                offered = [
+                    t["function"]["name"] for t in (kwargs.get("tools") or [])
+                ]
+                if PLAN_TOOL_NAME in offered or FINISH_TOOL_NAME in offered:
+                    return super().chat_stream(messages, **kwargs)
                 self.calls += 1
                 return ChatResult(
                     content="I cannot analyse this.", model="m",
@@ -675,7 +689,13 @@ class ExitCodeTests(unittest.TestCase):
                 )
 
         observed = _run_main(
-            backend=_ProseOnly(),
+            # One question, so there is something for the model to refuse to
+            # act on. With an empty plan the run ends before any step and the
+            # empty-evidence REPORT this case is about is never composed.
+            backend=_ProseOnly(plan_questions=[
+                {"question": "What does the entrypoint do?",
+                 "missing_fact": "needs execution"},
+            ]),
             # Large enough to refuse coverage, and carrying an indicator so
             # the appendix is appended after the message -- the shape that
             # defeated an equality test.

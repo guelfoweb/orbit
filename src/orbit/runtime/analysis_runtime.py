@@ -2721,6 +2721,7 @@ class AnalysisRuntime:
         analyst_message: str,
         *,
         on_progress: Callable[[Any], None] | None = None,
+        max_calls: int = 2,
     ) -> int:
         """Ask for the plan through the control tool. Returns model calls spent.
 
@@ -2728,17 +2729,30 @@ class AnalysisRuntime:
         run reports. There is deliberately no path back to the free-form loop:
         falling back is what recreated the unbounded exploration this replaces.
         """
+        # What "above" contains depends on whether COVER ran: with it, the
+        # source itself; without it, the artifact's identity and whatever
+        # deterministic evidence the preflight established. The wording has
+        # to be true in both cases, because PLAN runs in both -- naming the
+        # source specifically would describe an uncovered history that does
+        # not contain it, and invite questions premised on text the model
+        # cannot see.
         base: "list[Message]" = [
             *self.messages,
             {"role": "user", "content": (
                 f"{analyst_message}\n"
                 "Before running anything, call submit_analysis_plan with the "
-                "questions you cannot answer from the artifact source above."
+                "questions you cannot already answer from the context above."
             )},
         ]
         calls = 0
         messages = base
-        for attempt in range(2):
+        # `max_calls` is the caller's remaining ceiling, not a policy of its
+        # own: the repair allowance is one, and it is spent only if a call
+        # remains to spend it on. Reserving two up front would deny planning
+        # to a budget that can afford one good plan, and taking the repair
+        # regardless would put the run over a ceiling the analyst set.
+        attempts = max(1, min(2, max_calls))
+        for attempt in range(attempts):
             arguments, _text = self._control_call(
                 messages, PLAN_TOOL_SCHEMA, on_progress=on_progress
             )
@@ -2751,7 +2765,11 @@ class AnalysisRuntime:
                     detail = str(exc)
             else:
                 detail = "no submit_analysis_plan call was made"
-            if attempt == 0:
+            if attempt == 0 and attempts > 1:
+                # Counted here, where the repair is about to be DISPATCHED.
+                # A repair the budget denied was never sent, and reporting it
+                # would tell the analyst the model was given a second chance
+                # it never got.
                 controller.repairs += 1
                 messages = [
                     *base,
@@ -3028,8 +3046,18 @@ class AnalysisRuntime:
                     model_calls += self.model_calls - cover_spent_before
                     # The source has been supplied; the standing instruction
                     # must not now tell the model to go and read it. The
-                    # analyst's own line still governs what the run is for.
-                    message = analyst_message
+                    # analyst's own line still governs what the run is for --
+                    # together with the deterministic evidence, which coverage
+                    # neither supersedes nor reproduces. Dropping it here
+                    # would hand a covered run less than an uncovered one.
+                    message = (
+                        _evidence_first_instruction(
+                            analyst_message,
+                            _evidence_first_ids(self.transform_stages),
+                        )
+                        if self.transform_stages
+                        else analyst_message
+                    )
             except KeyboardInterrupt:
                 model_calls += self.model_calls - cover_spent_before
                 cancelled = True
@@ -3047,10 +3075,24 @@ class AnalysisRuntime:
         # coverage it describes is real. `source_covered` is derived from the
         # messages and survives the exception that skipped the flag.
         covered = self.source_covered
-        # PLAN is attempted whenever coverage succeeded, in its own failure
-        # domain. A backend error here is a planning failure to be reported
-        # honestly -- never a silent slide into an unplanned run.
-        if plan and covered and not cancelled and model_calls < max_model_calls:
+        # PLAN runs for every autonomous run, in its own failure domain. A
+        # backend error here is a planning failure to be reported honestly --
+        # never a silent slide into an unplanned run.
+        #
+        # Deliberately NOT gated on coverage. It used to be, and the effect
+        # was that `COVER=false` produced no controller at all: no plan, no
+        # questions, and a free-form loop that spent the whole action ceiling
+        # on actions belonging to nothing. Measured on that shape: 0 plan
+        # calls, 0 questions, 12 actions, "action bound reached".
+        #
+        # Coverage is evidence enrichment, not a precondition for structure.
+        # What PLAN needs is already in the history before COVER is even
+        # attempted -- the artifact's path, size and sha256 -- plus whatever
+        # deterministic evidence the preflight established. An uncovered run
+        # simply plans from less, which is what questions are FOR: the model
+        # asks for what it cannot see rather than being handed an unbounded
+        # licence to explore.
+        if plan and not cancelled and model_calls < max_model_calls:
             controller = AnalysisController()
             # Measured, not returned -- the same reason as the completion
             # call below. `plan_analysis` reports its spend on the way out,
@@ -3059,8 +3101,18 @@ class AnalysisRuntime:
             # spent and never counted.
             plan_spent_before = self.model_calls
             try:
+                # `message`, not `analyst_message`: it is the analyst's line
+                # PLUS whatever deterministic evidence the preflight
+                # established, and PLAN is the first thing that decides what
+                # still requires investigation. Asking that question without
+                # the evidence invites a plan whose questions are already
+                # answered -- and, measured on the old free-form path, the
+                # evidence used to be the first instruction the model saw.
+                # When there is no evidence the two are the same string, so
+                # nothing about an ordinary run moves.
                 plan_calls = self.plan_analysis(
-                    controller, analyst_message, on_progress=on_progress
+                    controller, message, on_progress=on_progress,
+                    max_calls=max_model_calls - model_calls,
                 )
                 model_calls += self.model_calls - plan_spent_before
                 # `plan_calls` alone does not make a plan valid: a planning
@@ -3100,15 +3152,61 @@ class AnalysisRuntime:
                 controller.unsupported = True
             except (ContextAdmissionError, TimeoutError, RecoverableBackendError) as exc:
                 model_calls += self.model_calls - plan_spent_before
-                # The request never reached the model, or the server failed
-                # answering it. Calling either "control unsupported by this
-                # model" blames the one participant that did nothing wrong,
-                # and discards the cause the analyst needs to act on. The
-                # cause is preserved verbatim, exactly as the step handler
-                # reports the same three types.
-                self._close_incomplete_turn()
-                plan_failed = True
-                stop_reason = f"{STOP_BACKEND_ERROR}: {type(exc).__name__}: {exc}"
+                # The same one exception the step handler makes, for the same
+                # reason and bounded the same way. The evidence-first opening
+                # restores decoded bytes into the context, and how many tokens
+                # those bytes are is the artifact's to decide -- so a refusal
+                # withdraws the opening rather than ending the run. Without
+                # this, an artifact rich enough to decode is an artifact that
+                # cannot be planned, which is the analysis "unable to begin at
+                # all on an artifact it used to handle".
+                #
+                # Bounded by identity, not a counter: the retry sets `message`
+                # to the analyst line itself, so this condition is false on
+                # any later pass and no loop can spin. A second refusal is a
+                # real one and ends the run below.
+                #
+                # The withdrawal costs no model call: `_admit` refuses before
+                # dispatch, so `self.model_calls` has not moved and the delta
+                # added above is zero. It is not a repair either -- nothing
+                # about the control protocol failed.
+                if (
+                    isinstance(exc, ContextAdmissionError)
+                    and message is not analyst_message
+                ):
+                    self._close_incomplete_turn()
+                    message = analyst_message
+                    plan_spent_before = self.model_calls
+                    try:
+                        plan_calls = self.plan_analysis(
+                            controller, message, on_progress=on_progress,
+                            max_calls=max_model_calls - model_calls,
+                        )
+                        model_calls += self.model_calls - plan_spent_before
+                        if controller.unsupported or plan_calls == 0:
+                            plan_failed = True
+                            stop_reason = STOP_CONTROL_UNSUPPORTED
+                    except (
+                        ContextAdmissionError, TimeoutError,
+                        RecoverableBackendError,
+                    ) as retry_exc:
+                        model_calls += self.model_calls - plan_spent_before
+                        self._close_incomplete_turn()
+                        plan_failed = True
+                        stop_reason = (
+                            f"{STOP_BACKEND_ERROR}: "
+                            f"{type(retry_exc).__name__}: {retry_exc}"
+                        )
+                else:
+                    # The request never reached the model, or the server failed
+                    # answering it. Calling either "control unsupported by this
+                    # model" blames the one participant that did nothing wrong,
+                    # and discards the cause the analyst needs to act on. The
+                    # cause is preserved verbatim, exactly as the step handler
+                    # reports the same three types.
+                    self._close_incomplete_turn()
+                    plan_failed = True
+                    stop_reason = f"{STOP_BACKEND_ERROR}: {type(exc).__name__}: {exc}"
         shadow = ShadowLedger() if shadow_enabled() else None
         shadow_due = scheduled_actions()
         # Created only when the shadow runs: with the flag off this does no

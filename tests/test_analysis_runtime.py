@@ -42,15 +42,100 @@ class ExhaustedBackend(Exception):
 
 
 class ScriptedBackend:
-    """Serves scripted responses; explodes on an unscripted call."""
+    """Serves scripted responses; explodes on an unscripted call.
 
-    def __init__(self, *responses: ChatResult) -> None:
+    PLAN is answered automatically and does NOT consume a scripted slot.
+    Every autonomous run is now planned, so without this each fixture would
+    have to prepend a plan response and renumber everything after it --
+    changing what hundreds of tests assert in order to keep asserting the
+    same thing. The default plan carries one open question, which is what
+    keeps the scripted actions below it runnable; a fixture that wants a
+    different plan passes `plan_questions`.
+
+    `plan_calls` is recorded so a test can still see that PLAN happened.
+    """
+
+    #: The automatic plan's questions. Six, the controller's maximum, because
+    #: it allows two actions each: a fixture that scripts N actions to reach a
+    #: bound must be able to spend them, and one question would end the run
+    #: after two with "no open question requires an action" -- hiding the very
+    #: bound the test exists to check. Fixtures wanting a specific plan pass
+    #: `plan_questions`.
+    DEFAULT_PLAN_QUESTIONS = [
+        f"Scripted fixture question {i + 1}" for i in range(6)
+    ]
+
+    def __init__(
+        self,
+        *responses: ChatResult,
+        plan_questions: "list[str] | None" = None,
+        finish_decisions: "list[dict] | None" = None,
+    ) -> None:
         self._responses = list(responses)
+        self._plan_questions = (
+            list(self.DEFAULT_PLAN_QUESTIONS) if plan_questions is None
+            else list(plan_questions)
+        )
+        self._finish_decisions = list(finish_decisions or [])
+        self.plan_calls = 0
+        self.finish_calls = 0
         self.calls = 0
         self.seen_tools: list[list[str]] = []
         self.seen_messages: list[list[dict]] = []
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None, on_delta, on_progress=None):
+        offered = [t["function"]["name"] for t in (tools or [])]
+        if "finish_analysis_question" in offered:
+            # Answered automatically like PLAN, and for the same reason: the
+            # scripted responses are ACTIONS, and a fixture should not have
+            # to interleave control decisions to keep asserting what it was
+            # always asserting. `still_open` keeps the question workable so
+            # the remaining scripted actions still run; `finish_decisions`
+            # lets a test drive the outcome when that is the point.
+            self.finish_calls += 1
+            self.seen_messages.append([dict(m) for m in messages])
+            self.seen_tools.append(offered)
+            decision = (
+                self._finish_decisions.pop(0) if self._finish_decisions
+                else {"status": "still_open", "answer_summary": "more to do"}
+            )
+            return ChatResult(
+                content="", model="m", finish_reason="stop",
+                tool_calls=[{
+                    "id": "finish_call", "type": "function",
+                    "function": {
+                        "name": "finish_analysis_question",
+                        "arguments": json.dumps(decision),
+                    },
+                }],
+                prompt_tokens=10, completion_tokens=5, cached_tokens=0,
+                prompt_tokens_per_second=None,
+                generation_tokens_per_second=None,
+            )
+        if "submit_analysis_plan" in offered:
+            # Answered here rather than from the script, so the scripted
+            # responses keep the positions the fixture gave them.
+            self.plan_calls += 1
+            self.seen_messages.append([dict(m) for m in messages])
+            self.seen_tools.append(offered)
+            return ChatResult(
+                content="", model="m", finish_reason="stop",
+                tool_calls=[{
+                    "id": "plan_call", "type": "function",
+                    "function": {
+                        "name": "submit_analysis_plan",
+                        "arguments": json.dumps({
+                            "questions": [
+                                {"question": q, "missing_fact": "needs execution"}
+                                for q in self._plan_questions
+                            ]
+                        }),
+                    },
+                }],
+                prompt_tokens=10, completion_tokens=5, cached_tokens=0,
+                prompt_tokens_per_second=None,
+                generation_tokens_per_second=None,
+            )
         if self.calls >= len(self._responses):
             raise ExhaustedBackend(
                 f"model invoked {self.calls + 1} times; only {len(self._responses)} scripted "

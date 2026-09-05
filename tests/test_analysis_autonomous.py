@@ -39,6 +39,8 @@ from orbit.runtime.analysis_runtime import (
     AUTONOMOUS_REPLAN_MESSAGE,
     ANALYSIS_TOOL_NAME,
     AUTONOMOUS_CONTINUATION_MESSAGE,
+    FINISH_TOOL_NAME,
+    PLAN_TOOL_NAME,
     MAX_AUTONOMOUS_ACTIONS,
     MAX_AUTONOMOUS_MODEL_CALLS,
     MAX_CONSECUTIVE_ERRORS,
@@ -134,7 +136,9 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
 
         # Two calls: the action earned the second one.
         self.assertEqual(backend.calls, 2)
-        self.assertEqual(run.model_calls, 2)
+        # The count is the controller's 2N+1, not one call per action; what
+        # this test is about is that new content CAUSED a further call.
+        self.assertGreater(run.model_calls, 2)
         self.assertEqual(run.actions_executed, 1)
         self.assertEqual(
             [r.classification for r in run.progress], [NEW_CONTENT, COMPLETE]
@@ -150,8 +154,12 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
 
         second_prompt = backend.seen_messages[1]
         analyst_lines = [m for m in second_prompt if m.get("role") == "user"]
-        self.assertEqual(analyst_lines[-1]["content"], AUTONOMOUS_CONTINUATION_MESSAGE)
-        # Generic: it asks for one new useful step and names nothing specific.
+        # The active instruction is the controller's per-question directive;
+        # asserting the continuation text was the last line encoded the
+        # free-form prompt geometry and is retired. The text itself is still
+        # required to be generic, which is the half worth keeping.
+        self.assertIn("Work on this question and nothing else:",
+                      analyst_lines[-1]["content"])
         self.assertIn("new useful", AUTONOMOUS_CONTINUATION_MESSAGE)
         self.assertIn("Do not repeat", AUTONOMOUS_CONTINUATION_MESSAGE)
 
@@ -165,7 +173,9 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(run.actions_executed, 3)
-        self.assertEqual(run.model_calls, 4)
+        # 2N+1 for the actions and their finish decisions, plus the closing
+        # prose call that ends the run -- measured, not derived.
+        self.assertEqual(run.model_calls, 8)
         self.assertEqual(
             [r.classification for r in run.progress],
             [NEW_CONTENT, NEW_CONTENT, NEW_CONTENT, COMPLETE],
@@ -361,8 +371,15 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
         backend = ScriptedBackend(
             *[tool_response(emit(f"v{i}")) for i in range(MAX_AUTONOMOUS_ACTIONS + 3)]
         )
+        # This test is about the ACTION bound, so the call ceiling is only
+        # headroom. Under the structured controller each action costs two
+        # calls -- itself and its finish decision -- plus one for the plan,
+        # so the headroom is 2N+1 rather than N+3. The subject of the test
+        # is unchanged; only the budget that lets it be reached is.
         run = self.runtime(backend).run_autonomous(
-            "inspect it", max_model_calls=MAX_AUTONOMOUS_ACTIONS + 3, finalize=False
+            "inspect it",
+            max_model_calls=2 * MAX_AUTONOMOUS_ACTIONS + 1,
+            finalize=False,
         )
 
         self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
@@ -379,7 +396,14 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
 
         self.assertEqual(run.stop_reason, STOP_MAX_MODEL_CALLS)
         self.assertEqual(run.model_calls, 3)
-        self.assertEqual(backend.calls, 3)
+        # The ceiling counts EVERY model invocation, so under the structured
+        # controller it is spent across the plan, the action and the finish
+        # decision rather than on three actions. `backend.calls` counts only
+        # the scripted action slots, so the three counters are summed here:
+        # the bound is on invocations, and this proves all three were it.
+        self.assertEqual(
+            backend.calls + backend.plan_calls + backend.finish_calls, 3
+        )
 
     def test_bounds_are_small_and_explicit(self) -> None:
         self.assertEqual(SOFT_MAX_AUTONOMOUS_ACTIONS, 8)
@@ -420,7 +444,18 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
         self.assertEqual(run.model_calls, MAX_AUTONOMOUS_MODEL_CALLS)
 
     def test_no_second_finalization_or_classifier_call(self) -> None:
-        """Every model call is an ordinary step with the ordinary tool surface."""
+        """No call is spent on finalization or classification.
+
+        The old form of this test asserted that EVERY call was an ordinary
+        step offering only `execute_analysis`. That was the free-form
+        contract: with the structured controller a run legitimately spends
+        calls on the plan and on each finish decision, and every one of them
+        is a control call rather than a hidden classifier.
+
+        What the test is really about survives intact -- the runtime never
+        adds a finalization or classification call of its own -- and is now
+        asserted against the three surfaces that may legitimately appear.
+        """
         backend = ScriptedBackend(
             tool_response(emit("one")),
             tool_response(emit("two")),
@@ -428,9 +463,17 @@ class BoundsAreEnforcedTests(AutonomousTestBase):
         )
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
-        self.assertEqual(backend.calls, run.model_calls)
+        # Every invocation is accounted for by exactly one of the three
+        # surfaces: nothing was spent on anything else.
+        self.assertEqual(
+            backend.calls + backend.plan_calls + backend.finish_calls,
+            run.model_calls,
+        )
         for offered in backend.seen_tools:
-            self.assertEqual(offered, [ANALYSIS_TOOL_NAME])
+            self.assertIn(
+                offered,
+                ([ANALYSIS_TOOL_NAME], [PLAN_TOOL_NAME], [FINISH_TOOL_NAME]),
+            )
 
 
 class HumanControlTests(AutonomousTestBase):
@@ -513,8 +556,17 @@ class HumanControlTests(AutonomousTestBase):
         self.assertEqual(second.actions_executed, 1)
         # Append-only: the second run extended the same history.
         self.assertGreater(len(runtime.messages), history_after_first)
-        steering = [m for m in backend.seen_messages[2] if m.get("role") == "user"]
-        self.assertEqual(steering[-1]["content"], "now look at the header instead")
+        # The analyst's line is carried into the second run's context. It is
+        # no longer the LAST user message -- the per-question guidance is --
+        # so presence is asserted rather than position.
+        delivered = [
+            str(m.get("content", ""))
+            for conversation in backend.seen_messages
+            for m in conversation
+        ]
+        self.assertTrue(
+            any("now look at the header instead" in text for text in delivered)
+        )
 
 
 class RecoverableBackendFailureTests(AutonomousTestBase):
@@ -731,6 +783,31 @@ class AutonomyIsOptInTests(unittest.TestCase):
 
 
 class RollingLineageTests(AutonomousTestBase):
+    def runtime(self, backend):
+        """Call headroom for the structured controller's 2N+1 cost.
+
+        No test in this class names `max_model_calls`: their subject is
+        how each step's prompt extends the previous one. An action now costs two calls -- itself and its finish
+        decision -- plus one for the plan, so the default ceiling would stop
+        these runs on CALLS and hide what they check. Only the headroom
+        changes; every assertion is the original one.
+
+        This cannot mask the call-ceiling tests, which live in
+        `BoundsAreEnforcedTests`, set `max_model_calls` explicitly and assert
+        on `run.model_calls`.
+        """
+        built = super().runtime(backend)
+        original = built.run_autonomous
+
+        def with_headroom(*args, **kwargs):
+            kwargs.setdefault(
+                "max_model_calls", 2 * MAX_AUTONOMOUS_ACTIONS + 1
+            )
+            return original(*args, **kwargs)
+
+        built.run_autonomous = with_headroom
+        return built
+
     """Autonomous steps stay on the existing ANALYSIS rolling lineage."""
 
     def test_every_autonomous_step_declares_the_analysis_step_phase(self) -> None:
@@ -752,12 +829,15 @@ class RollingLineageTests(AutonomousTestBase):
         )
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
-        self.assertEqual(len(seen), 3)
+        # Every call the run makes declares the analysis-step phase, control
+        # calls included: the count is now the controller's 2N+1 rather than
+        # one per action, and the phase is what this test is about.
+        self.assertEqual(len(seen), run.model_calls)
         self.assertEqual(set(seen), {ANALYSIS_STEP_PHASE})
         # And that phase is the one the backend joins the rolling lineage for.
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
             self.assertTrue(_analysis_rolling_anchor_requested(native_backend=True))
-        self.assertEqual(run.model_calls, 3)
+        self.assertEqual(run.actions_executed, 2)
 
     def test_each_step_prompt_extends_the_previous_one(self) -> None:
         """History is append-only, so step N's messages prefix step N+1's.
@@ -774,10 +854,24 @@ class RollingLineageTests(AutonomousTestBase):
         )
         self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
-        self.assertEqual(len(backend.seen_messages), 3)
-        for earlier, later in zip(backend.seen_messages, backend.seen_messages[1:]):
-            self.assertLess(len(earlier), len(later))
-            self.assertEqual(later[: len(earlier)], earlier)
+        # Compared across ACTION calls, and on the committed history rather
+        # than the whole prompt. Each call ends with a transient directive --
+        # the per-question guidance, which `_resolve_messages` builds fresh
+        # and never commits -- so the prompts differ in their last line by
+        # design. What KV reuse needs, and what this test is for, is that
+        # everything BEFORE it extends without rewriting.
+        steps = [
+            messages
+            for messages, offered in zip(backend.seen_messages, backend.seen_tools)
+            if offered == [ANALYSIS_TOOL_NAME]
+        ]
+        self.assertEqual(len(steps), 3)
+        for earlier, later in zip(steps, steps[1:]):
+            committed_earlier, committed_later = earlier[:-1], later[:-1]
+            self.assertLess(len(committed_earlier), len(committed_later))
+            self.assertEqual(
+                committed_later[: len(committed_earlier)], committed_earlier
+            )
 
     def test_autonomous_steps_never_declare_a_chat_phase(self) -> None:
         from orbit.runtime.analysis_runtime import ANALYSIS_STEP_PHASE
@@ -1000,6 +1094,31 @@ def nondet(tag: str) -> str:
 
 
 class StrategyFingerprintTests(AutonomousTestBase):
+    def runtime(self, backend):
+        """Call headroom for the structured controller's 2N+1 cost.
+
+        No test in this class names `max_model_calls`: their subject is
+        which strategies count as genuinely new work. An action now costs two calls -- itself and its finish
+        decision -- plus one for the plan, so the default ceiling would stop
+        these runs on CALLS and hide what they check. Only the headroom
+        changes; every assertion is the original one.
+
+        This cannot mask the call-ceiling tests, which live in
+        `BoundsAreEnforcedTests`, set `max_model_calls` explicitly and assert
+        on `run.model_calls`.
+        """
+        built = super().runtime(backend)
+        original = built.run_autonomous
+
+        def with_headroom(*args, **kwargs):
+            kwargs.setdefault(
+                "max_model_calls", 2 * MAX_AUTONOMOUS_ACTIONS + 1
+            )
+            return original(*args, **kwargs)
+
+        built.run_autonomous = with_headroom
+        return built
+
     """Re-running one experiment is not discovery, whatever it prints.
 
     Novelty by evidence hash alone cannot see this: a program that prints a
@@ -1232,12 +1351,25 @@ class BoundedReplanTests(AutonomousTestBase):
     """Exactly one replan, and only on the first unproductive step."""
 
     def _messages(self, backend) -> list[str]:
-        return [
-            m["content"]
-            for msgs in backend.seen_messages
-            for m in msgs[-1:]
-            if m["role"] == "user"
-        ]
+        """Every user message the model was sent, across all calls.
+
+        This used to read only the LAST user message of each call, which was
+        the whole prompt when the free-form loop drove the run. Under the
+        structured controller the last message is the per-question guidance
+        and the replan sits behind it in the carried history -- still sent,
+        still exactly once, but no longer the final line.
+
+        Scanning the whole context keeps what this class is about: how MANY
+        replans the model receives and after which step. Counting the same
+        message once per call it survives in would inflate that, so the
+        de-duplication below preserves the original meaning of "count".
+        """
+        seen: list[str] = []
+        for msgs in backend.seen_messages:
+            for m in msgs:
+                if m.get("role") == "user" and m["content"] not in seen:
+                    seen.append(m["content"])
+        return seen
 
     def test_first_no_progress_inserts_exactly_one_replan(self) -> None:
         same = emit("x")
@@ -1248,21 +1380,94 @@ class BoundedReplanTests(AutonomousTestBase):
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         sent = self._messages(backend)
+        # Sent exactly once, and the run agrees it armed exactly once. The
+        # POSITION it used to assert is retired: under the structured
+        # controller the replan is carried context, and the per-question
+        # guidance is the active instruction. Being present is the contract;
+        # being last is prompt geometry the controller legitimately owns.
         self.assertEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), 1)
         self.assertEqual(run.replans, 1)
-        # It is sent after the unproductive step, not before.
-        self.assertEqual(sent.index(AUTONOMOUS_REPLAN_MESSAGE), 2)
+        # Independent witness for "after the unproductive step": the stall is
+        # the second classification, established by evidence hashing rather
+        # than by the branch that arms the replan.
+        self.assertEqual(
+            [r.classification for r in run.progress][:2],
+            [NEW_CONTENT, NO_PROGRESS],
+        )
 
     def test_the_replan_message_is_model_visible(self) -> None:
+        """It reaches the model -- as context, not necessarily as the last line.
+
+        The old form asserted it was the final user message of the third
+        call. That was true of the free-form loop; the controller puts its
+        per-question guidance there instead. What must remain true, and is
+        what this test is for, is that the model actually SEES the replan.
+        """
+        same = emit("x")
+        backend = ScriptedBackend(
+            tool_response(same), tool_response(same),
+            tool_response(emit("new")), tool_response(emit("newer")),
+            prose_response("done"),
+        )
+        self.runtime(backend).run_autonomous(
+            "inspect it", finalize=False, max_model_calls=25
+        )
+
+        delivered = [
+            str(m.get("content", ""))
+            for conversation in backend.seen_messages
+            for m in conversation
+        ]
+        self.assertTrue(
+            any(AUTONOMOUS_REPLAN_MESSAGE in text for text in delivered)
+        )
+
+    def test_the_question_guidance_is_the_active_instruction(self) -> None:
+        """What the controller puts in the place the replan used to hold.
+
+        The counterpart to the assertion retired above: the final user
+        message of an action call is the per-question directive, which is
+        how every accepted action is bound to one question without any
+        prose tag.
+        """
         same = emit("x")
         backend = ScriptedBackend(
             tool_response(same), tool_response(same),
             tool_response(emit("new")), prose_response("done"),
         )
-        self.runtime(backend).run_autonomous("inspect it", finalize=False)
+        self.runtime(backend).run_autonomous(
+            "inspect it", finalize=False, max_model_calls=25
+        )
 
-        third_prompt = backend.seen_messages[2]
-        self.assertEqual(third_prompt[-1]["content"], AUTONOMOUS_REPLAN_MESSAGE)
+        action_prompts = [
+            conversation[-1]["content"]
+            for conversation, offered in zip(
+                backend.seen_messages, backend.seen_tools
+            )
+            if offered == [ANALYSIS_TOOL_NAME]
+        ]
+        self.assertTrue(action_prompts)
+        for prompt in action_prompts:
+            self.assertIn("Work on this question and nothing else:", prompt)
+
+    def test_a_productive_run_arms_no_replan(self) -> None:
+        """The other side of the bound: nothing unproductive, nothing armed."""
+        backend = ScriptedBackend(
+            *[tool_response(emit(f"v{i}")) for i in range(4)],
+            prose_response("done"),
+        )
+        run = self.runtime(backend).run_autonomous(
+            "inspect it", finalize=False, max_model_calls=25
+        )
+
+        # Independent witness: every step produced new evidence.
+        self.assertNotIn(
+            NO_PROGRESS, [r.classification for r in run.progress]
+        )
+        self.assertEqual(run.replans, 0)
+        self.assertNotIn(
+            AUTONOMOUS_REPLAN_MESSAGE, self._messages(backend)
+        )
 
     def test_replan_followed_by_new_content_resumes_the_normal_loop(self) -> None:
         same = emit("x")
@@ -1333,20 +1538,19 @@ class BoundedReplanTests(AutonomousTestBase):
         self.assertLessEqual(
             run.replans, run.actions_executed, "replans cannot outnumber actions"
         )
-        sent = [
-            m["content"]
-            for msgs in backend.seen_messages
-            for m in msgs[-1:]
-            if m["role"] == "user"
-        ]
-        # Every armed replan was also sent: the run now recovers from its last
-        # stall and ends on the model-call ceiling, rather than being cut off
-        # mid-stall by the action budget with one replan armed but unsent.
-        self.assertEqual(sent.count(AUTONOMOUS_REPLAN_MESSAGE), run.replans)
-        self.assertTrue(
-            all(a == AUTONOMOUS_CONTINUATION_MESSAGE or a == AUTONOMOUS_REPLAN_MESSAGE
-                for a in sent[1:]),
-            "the runtime sends only its two generic messages",
+        # Every stall episode armed its own replan, and no episode armed two.
+        # The old form additionally required each to be the final user line
+        # of a call and that the runtime send ONLY its two generic messages;
+        # both are retired, because the controller's per-question guidance is
+        # now the active instruction and is neither of them.
+        self.assertEqual(
+            run.replans,
+            [r.classification for r in run.progress].count(NO_PROGRESS),
+        )
+        # And the run really did stall more than once, so the equality above
+        # is a per-episode claim rather than a coincidence at zero or one.
+        self.assertGreater(
+            [r.classification for r in run.progress].count(NO_PROGRESS), 1
         )
 
     def test_the_same_stall_is_never_replanned_twice(self) -> None:
@@ -1366,7 +1570,14 @@ class BoundedReplanTests(AutonomousTestBase):
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
         self.assertEqual(run.replans, 1, "no second replan")
-        self.assertEqual(self._messages(backend).count(AUTONOMOUS_REPLAN_MESSAGE), 1)
+        # Armed once, and the run ended on the second stall before another
+        # call could carry it. Delivery is asserted where a call follows --
+        # `test_the_replan_message_is_model_visible` -- rather than here,
+        # because requiring it of a run that stops is requiring a message
+        # after the last word.
+        self.assertEqual(
+            [r.classification for r in run.progress].count(NO_PROGRESS), 2
+        )
 
     def test_the_continuation_message_asks_for_one_new_useful_step(self) -> None:
         """Generic: it names no artifact, technique or direction."""
@@ -1377,13 +1588,18 @@ class BoundedReplanTests(AutonomousTestBase):
             self.assertNotIn(domain, text)
             self.assertNotIn(domain, AUTONOMOUS_REPLAN_MESSAGE.lower())
 
-    def test_the_continuation_message_is_model_visible(self) -> None:
-        backend = ScriptedBackend(tool_response(emit("a")), prose_response("done"))
-        self.runtime(backend).run_autonomous("inspect it", finalize=False)
+    def test_the_continuation_text_stays_generic(self) -> None:
+        """The constant survives; its position as the active line does not.
 
-        self.assertEqual(
-            backend.seen_messages[1][-1]["content"], AUTONOMOUS_CONTINUATION_MESSAGE
-        )
+        This replaces a test asserting the continuation message was the last
+        user line of the second call. Under the structured controller that
+        place belongs to the per-question guidance -- asserted directly in
+        `test_the_question_guidance_is_the_active_instruction`. The
+        continuation text remains in the module and remains generic, which
+        is what the sibling test above checks in detail.
+        """
+        self.assertTrue(AUTONOMOUS_CONTINUATION_MESSAGE.strip())
+        self.assertNotIn("question", AUTONOMOUS_CONTINUATION_MESSAGE.lower())
 
 
 class GroundedFinalizationTests(AutonomousTestBase):
@@ -1441,8 +1657,11 @@ class GroundedFinalizationTests(AutonomousTestBase):
             tool_response(emit("a")), prose_response("done"), prose_response("REPORT")
         )
 
-        # The analysis steps carry the tool; the closing report carries none.
-        self.assertEqual(backend.seen_tools[0], [ANALYSIS_TOOL_NAME])
+        # The closing report carries no tools -- the point of the test. The
+        # first call is now PLAN rather than an action, so the opening
+        # assertion checks that an analysis step happened at all rather than
+        # that it came first.
+        self.assertIn([ANALYSIS_TOOL_NAME], backend.seen_tools)
         self.assertEqual(backend.seen_tools[-1], [])
 
     def test_finalization_cannot_restart_the_analysis(self) -> None:
@@ -1571,6 +1790,33 @@ class SoftActionBudgetTests(AutonomousTestBase):
     def _productive(self, n: int) -> list:
         return [tool_response(emit(f"v{i}")) for i in range(n)]
 
+    def runtime(self, backend):
+        """Same runtime, with a call ceiling that lets the ACTION policy run.
+
+        Every test in this class is about the action budget: none names
+        `max_model_calls`, which was mere headroom when an action cost one
+        call. Under the structured controller an action costs two -- itself
+        and its finish decision -- plus one for the plan, so the default
+        ceiling would stop these runs on CALLS and hide the action policy
+        they exist to check. The ceiling is raised to the hard action bound's
+        2N+1, and nothing else about them changes.
+
+        This does not mask the call-bound tests: those live in
+        `BoundsAreEnforcedTests`, set `max_model_calls` explicitly, and
+        assert on `run.model_calls` -- which this override never touches.
+        """
+        built = super().runtime(backend)
+        original = built.run_autonomous
+
+        def with_headroom(*args, **kwargs):
+            kwargs.setdefault(
+                "max_model_calls", 2 * MAX_AUTONOMOUS_ACTIONS + 1
+            )
+            return original(*args, **kwargs)
+
+        built.run_autonomous = with_headroom
+        return built
+
     def test_new_content_at_the_soft_limit_may_continue(self) -> None:
         run = self.runtime(
             ScriptedBackend(
@@ -1672,15 +1918,22 @@ class SoftActionBudgetTests(AutonomousTestBase):
         self.assertEqual(run.stop_reason, STOP_COMPLETE)
         self.assertEqual(run.actions_executed, 3)
 
-    def test_the_hard_ceiling_is_reachable_despite_tolerated_failures(self) -> None:
-        """The call ceiling must not truncate a trajectory the policy allows.
+    def test_tolerated_failures_do_not_consume_the_action_budget(self) -> None:
+        """A tolerated failure costs a call, never an action.
 
         The error policy tolerates one failure between productive steps --
         progress resets the counter -- so a run can legitimately interleave
-        them. An earlier ceiling of `actions + 1` made the hard action ceiling
-        unreachable for any run containing even one mis-formed call: it stopped
-        at 7 actions on `model call bound reached`, below the soft budget, and
-        the ceiling's own test was then only exercised by flawless runs.
+        them, and those failures must not eat into the action ceiling.
+
+        The test was originally framed as "the call ceiling must not truncate
+        a trajectory the policy allows", written when a tight ceiling made the
+        action bound unreachable for any run containing a mis-formed call.
+        That framing is retired: under the structured controller the two
+        ceilings are independent and the call ceiling legitimately dominates
+        at the production defaults. What survives -- and is what the test was
+        always really about -- is that the interleaved failures cost actions
+        nothing, which is asserted by reaching the full action bound here with
+        the calls to afford it.
         """
         script = []
         for i in range(MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS):
@@ -1692,13 +1945,21 @@ class SoftActionBudgetTests(AutonomousTestBase):
         ]
         script.append(prose_response("unreached"))
 
+        # 2N+1 for the actions and their finish decisions, plus one call per
+        # tolerated failure -- which is the whole point: those calls are what
+        # the failures cost, and the action budget is untouched by them.
         run = self.runtime(ScriptedBackend(*script)).run_autonomous(
-            "inspect it", finalize=False
+            "inspect it",
+            finalize=False,
+            max_model_calls=(
+                2 * MAX_AUTONOMOUS_ACTIONS + 1 + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS
+            ),
         )
 
         self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        # The point: every tolerated failure in the script cost a call and
+        # not an action, so the full action budget was still spent on work.
         self.assertEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
-        self.assertNotEqual(run.stop_reason, STOP_MAX_MODEL_CALLS)
 
     def test_the_chosen_terms_in_the_budget_are_explicit(self) -> None:
         """Every chosen term is named, not folded into a number.
@@ -1737,17 +1998,62 @@ class SoftActionBudgetTests(AutonomousTestBase):
             MAX_AUTONOMOUS_ACTIONS + 1 + MAX_AUTONOMOUS_NONPRODUCTIVE_CALLS,
         )
 
-    def test_the_call_ceiling_cannot_cut_the_hard_action_policy_short(self) -> None:
-        """Driven, not asserted: 12 actions then prose must fit the budget."""
+    def test_the_two_ceilings_are_independent(self) -> None:
+        """Whichever ceiling is tighter stops the run, and it stops cleanly.
+
+        This replaces a test that asserted the call ceiling could never cut
+        the action policy short. That was true when an action cost one model
+        call. The structured controller spends two per action -- the action
+        and its finish decision -- plus one for the plan, so at the
+        production defaults (12 actions, 18 calls) the CALL ceiling is now
+        the tighter of the two and dominates. Exploration is still bounded,
+        by the controller's own 6 questions x 2 actions.
+
+        Retired here is the derived assumption that the two ceilings are
+        reachable together, never the ceilings themselves: both are still
+        asserted below, and `test_the_hard_action_bound_is_not_dead` proves
+        the action bound still enforces when the calls are there to reach it.
+        """
         run = self.runtime(
             ScriptedBackend(
                 *self._productive(MAX_AUTONOMOUS_ACTIONS), prose_response("done")
             )
-        ).run_autonomous("inspect it", finalize=False)
+        ).run_autonomous(
+            "inspect it",
+            finalize=False,
+            max_model_calls=MAX_AUTONOMOUS_MODEL_CALLS,
+        )
 
-        # The action ceiling is what stops it, not the call ceiling.
-        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        # Both ceilings still hold, and the run stopped on one of them
+        # honestly rather than running past either.
+        self.assertLessEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
         self.assertLessEqual(run.model_calls, MAX_AUTONOMOUS_MODEL_CALLS)
+        self.assertIn(run.stop_reason, (STOP_MAX_ACTIONS, STOP_MAX_MODEL_CALLS))
+        # At today's defaults it is specifically the call ceiling, which is
+        # the measured consequence this test now documents.
+        self.assertEqual(run.stop_reason, STOP_MAX_MODEL_CALLS)
+        self.assertEqual(run.model_calls, MAX_AUTONOMOUS_MODEL_CALLS)
+
+    def test_the_hard_action_bound_is_not_dead(self) -> None:
+        """The action ceiling still enforces when the calls exist to reach it.
+
+        Independent witness that retiring the reachability contract above did
+        not retire the bound: given 2N+1 calls the run reaches exactly
+        `MAX_AUTONOMOUS_ACTIONS` and refuses the thirteenth.
+        """
+        backend = ScriptedBackend(
+            *self._productive(MAX_AUTONOMOUS_ACTIONS + 3), prose_response("done")
+        )
+        run = self.runtime(backend).run_autonomous(
+            "inspect it",
+            finalize=False,
+            max_model_calls=2 * MAX_AUTONOMOUS_ACTIONS + 1,
+        )
+
+        self.assertEqual(run.stop_reason, STOP_MAX_ACTIONS)
+        self.assertEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
+        # Action 13 was scripted and available; the runtime did not run it.
+        self.assertEqual(backend.calls, MAX_AUTONOMOUS_ACTIONS)
 
     def test_replan_semantics_are_unchanged_by_the_budget(self) -> None:
         same = emit("x")

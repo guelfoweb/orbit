@@ -34,14 +34,59 @@ class _CountingBackend:
     with `tools == []`.
     """
 
+    #: The automatic plan's questions. Six -- the controller's maximum -- so
+    #: the scripted action sequence can be spent in full: with two actions
+    #: allowed per question, fewer would end a run early on "no open question
+    #: requires an action" and hide the checkpoints this suite measures.
+    PLAN_QUESTIONS = [f"Shadow fixture question {i + 1}" for i in range(6)]
+
     def __init__(self, responses, verifier_answers=None):
         self._responses = list(responses)
         self.calls = 0
         self.tool_modes: list[object] = []
         self._verifier = list(verifier_answers or [])
         self.verifier_calls = 0
+        # Counted apart from `calls`, which this suite asserts on as the
+        # number of scripted ACTION responses served. Folding control traffic
+        # into it would make the controller's own calls look like loop work
+        # and falsify exactly the counts these tests exist to measure.
+        self.control_calls = 0
+
+    def _control_response(self, name):
+        """A valid answer to a control tool, built without a scripted slot."""
+        import json
+
+        from orbit.backend.base import ChatResult
+
+        if name == "submit_analysis_plan":
+            arguments = {
+                "questions": [
+                    {"question": q, "missing_fact": "needs execution"}
+                    for q in self.PLAN_QUESTIONS
+                ]
+            }
+        else:
+            arguments = {"status": "still_open", "answer_summary": "more to do"}
+        return ChatResult(
+            content="", model="m", finish_reason="stop",
+            tool_calls=[{
+                "id": "control_call", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }],
+            prompt_tokens=50, completion_tokens=4, cached_tokens=0,
+            prompt_tokens_per_second=None, generation_tokens_per_second=None,
+        )
 
     def chat(self, messages, *, temperature, max_tokens, tools=None):
+        offered = [t["function"]["name"] for t in (tools or [])]
+        for control in ("submit_analysis_plan", "finish_analysis_question"):
+            if control in offered:
+                # Answered here, never from the script: the scripted
+                # responses are the ACTION payloads this suite drives, and
+                # their sequence must survive the controller unchanged.
+                self.tool_modes.append(tools)
+                self.control_calls += 1
+                return self._control_response(control)
         self.tool_modes.append(tools)
         if tools == []:
             from orbit.backend.base import ChatResult

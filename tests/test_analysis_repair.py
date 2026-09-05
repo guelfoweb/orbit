@@ -69,22 +69,99 @@ def _prose(text: str) -> ChatResult:
     )
 
 
+def _control_reply(offered: "list[str]", plan_questions: "list[str]") -> ChatResult:
+    """A valid answer to whichever control tool was offered."""
+    if "submit_analysis_plan" in offered:
+        name = "submit_analysis_plan"
+        arguments = {
+            "questions": [
+                {"question": q, "missing_fact": "needs execution"}
+                for q in plan_questions
+            ]
+        }
+    else:
+        name = "finish_analysis_question"
+        arguments = {"status": "still_open", "answer_summary": "more to do"}
+    return ChatResult(
+        content="", model="m", finish_reason="stop",
+        tool_calls=[{
+            "id": "control_call", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }],
+        prompt_tokens=10, completion_tokens=5, cached_tokens=0,
+        prompt_tokens_per_second=None, generation_tokens_per_second=None,
+    )
+
+
+def _directive_count(backend, message: str) -> int:
+    """How many times the runtime ISSUED `message`, not how often it is visible.
+
+    History is append-only, so a directive sent once remains in every later
+    context. Counting occurrences across contexts would therefore multiply a
+    single offer by the number of calls that followed it. The count that
+    matters is how many times it appears in the accumulated history of the
+    LAST call, which is every issuance and each exactly once.
+    """
+    if not backend.delivered:
+        return 0
+    return backend.delivered[-1].count(message)
+
+
+def _first_index_of(backend, message: str) -> int:
+    """Which delivered context first carried `message`, or -1.
+
+    Indices into `delivered` are not the action numbers they were under the
+    free-form loop: the structured controller interleaves a finish call after
+    every action, so a directive sent "after action N" now appears at a later
+    index. Tests assert ORDER through this helper rather than fixed offsets,
+    which keeps what they mean without pinning the controller's call pattern.
+    """
+    for i, context in enumerate(backend.delivered):
+        if message in context:
+            return i
+    return -1
+
+
 class RecordingBackend:
     """Serves scripted responses and records the analyst line that drove each."""
 
-    def __init__(self, *responses: ChatResult) -> None:
+    def __init__(
+        self, *responses: ChatResult, plan_questions: "list[str] | None" = None
+    ) -> None:
         self._responses = list(responses)
+        self._plan_questions = (
+            [f"Repair fixture question {i + 1}" for i in range(6)]
+            if plan_questions is None else list(plan_questions)
+        )
         self.calls = 0
+        self.control_calls = 0
         self.instructions: list[str] = []
+        self.delivered: list[str] = []
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
                     on_delta, on_progress=None):
+        offered = [t["function"]["name"] for t in (tools or [])]
+        if "submit_analysis_plan" in offered or "finish_analysis_question" in offered:
+            # Control calls are answered here rather than from the script, so
+            # the scripted responses keep meaning "the actions this fixture
+            # drives". Every autonomous run is planned now; without this each
+            # repair fixture would have to interleave control turns and the
+            # repair assertions would move for a reason unrelated to repair.
+            self.control_calls += 1
+            return _control_reply(offered, self._plan_questions)
         if self.calls >= len(self._responses):
             raise AssertionError(
                 f"model invoked {self.calls + 1} times; only {len(self._responses)} scripted"
             )
         users = [m for m in messages if m.get("role") == "user"]
         self.instructions.append(users[-1]["content"] if users else "")
+        # The whole user context, not just its last line. Under the
+        # structured controller the last line is the per-question guidance,
+        # and the runtime's own directives -- the repair offer, the replan --
+        # sit behind it in the carried history. Tests about WHETHER a
+        # directive was sent read this; tests about what the model was told
+        # to do next still read `instructions`.
+        self.delivered.append("\n".join(m["content"] for m in users))
         response = self._responses[self.calls]
         self.calls += 1
         if response.content:
@@ -214,10 +291,18 @@ class RepairFlowTests(RepairTestBase):
         run = runtime.run_autonomous("analyse", finalize=False)
 
         self.assertEqual(run.repairs, 1, "exactly one repair opportunity")
-        self.assertEqual(backend.instructions[1], AUTONOMOUS_REPAIR_MESSAGE)
+        # The repair offer reached the model on the call after the failure.
+        # Its POSITION as the last line is retired: the per-question
+        # guidance holds that place under the structured controller.
+        offered_at = _first_index_of(backend, AUTONOMOUS_REPAIR_MESSAGE)
+        self.assertNotEqual(offered_at, -1, "the repair offer was sent")
         # No observational detour between the failure and the correction.
-        self.assertNotIn(AUTONOMOUS_CONTINUATION_MESSAGE, backend.instructions[1])
-        self.assertNotIn(AUTONOMOUS_REPLAN_MESSAGE, backend.instructions[1])
+        self.assertNotIn(
+            AUTONOMOUS_CONTINUATION_MESSAGE, backend.delivered[offered_at]
+        )
+        self.assertNotIn(
+            AUTONOMOUS_REPLAN_MESSAGE, backend.delivered[offered_at]
+        )
 
         corrected = run.steps[1]
         self.assertTrue(corrected.action_executed)
@@ -282,7 +367,10 @@ class RepairBoundTests(RepairTestBase):
         run = runtime.run_autonomous("analyse", finalize=False)
 
         self.assertEqual(run.repairs, 1, "the second failure earns no new offer")
-        self.assertEqual(backend.instructions.count(AUTONOMOUS_REPAIR_MESSAGE), 1)
+        self.assertEqual(
+            _directive_count(backend, AUTONOMOUS_REPAIR_MESSAGE),
+            1,
+        )
 
     def test_a_failed_repair_hands_back_to_the_ordinary_loop(self) -> None:
         """One instruction per step, and the repair is spent exactly once.
@@ -308,11 +396,20 @@ class RepairBoundTests(RepairTestBase):
         run = runtime.run_autonomous("analyse", finalize=False)
 
         self.assertEqual(run.repairs, 1, "the repair is offered exactly once")
-        self.assertEqual(backend.instructions[1], AUTONOMOUS_REPAIR_MESSAGE)
-        # Handed back: the failed repair gets the ordinary replan, not a
-        # second repair, and never both directives for one step.
-        self.assertEqual(backend.instructions[2], AUTONOMOUS_REPLAN_MESSAGE)
-        self.assertEqual(backend.instructions.count(AUTONOMOUS_REPAIR_MESSAGE), 1)
+        self.assertEqual(
+            _directive_count(backend, AUTONOMOUS_REPAIR_MESSAGE), 1
+        )
+        # Handed back: the failed repair armed the ordinary replan rather
+        # than a second repair. The replan is asserted on the counter, not on
+        # delivery: this run ends on prose before another call carries it,
+        # and requiring a message after the last word would be requiring the
+        # runtime to speak past the end of the run.
+        self.assertEqual(run.replans, 1)
+        self.assertEqual(
+            _directive_count(backend, AUTONOMOUS_REPAIR_MESSAGE),
+            1,
+            "never a second repair",
+        )
 
     def test_a_dropped_replan_is_not_counted_as_one_sent(self) -> None:
         """`replans` counts messages, not intentions.
@@ -344,7 +441,9 @@ class RepairBoundTests(RepairTestBase):
         # with no repair in flight, so both the replan and the repair arm.
         self.assertEqual(run.progress[2].classification, "NO_PROGRESS")
         # The repair wins and the replan is dropped -- not queued behind it.
-        self.assertEqual(backend.instructions[3], AUTONOMOUS_REPAIR_MESSAGE)
+        self.assertNotEqual(
+            _first_index_of(backend, AUTONOMOUS_REPAIR_MESSAGE), -1
+        )
         self.assertNotIn(AUTONOMOUS_REPLAN_MESSAGE, backend.instructions)
         self.assertEqual(
             run.replans,
@@ -374,8 +473,15 @@ class RepairBoundTests(RepairTestBase):
         runtime.run_autonomous("analyse", finalize=False)
 
         # Offered once, immediately after the failure, and never again.
-        self.assertEqual(backend.instructions[1], AUTONOMOUS_REPAIR_MESSAGE)
-        self.assertNotIn(AUTONOMOUS_REPAIR_MESSAGE, backend.instructions[2:])
+        self.assertNotEqual(
+            _first_index_of(backend, AUTONOMOUS_REPAIR_MESSAGE), -1
+        )
+        # Issued exactly once: the offer was not renewed after the
+        # intervening step, which is what "never carried across" means now
+        # that history keeps every earlier directive visible.
+        self.assertEqual(
+            _directive_count(backend, AUTONOMOUS_REPAIR_MESSAGE), 1
+        )
 
     def test_repair_does_not_raise_the_ceilings(self) -> None:
         """It spends an existing model call and no extra action budget."""
@@ -394,7 +500,10 @@ class RepairBoundTests(RepairTestBase):
         self.assertLessEqual(run.actions_executed, MAX_AUTONOMOUS_ACTIONS)
         # The correction is an ordinary action, not a free one.
         self.assertEqual(run.actions_executed, 2)
-        self.assertEqual(run.model_calls, 3)
+        # 2N+1 under the structured controller: two actions, their finish
+        # decisions and the plan. The ceiling itself is unchanged, which
+        # is what this test is about.
+        self.assertEqual(run.model_calls, 6)
 
     def test_the_runtime_never_re_runs_the_failed_code_itself(self) -> None:
         """Every execution is one the model submitted."""
@@ -420,7 +529,10 @@ class RepairBoundTests(RepairTestBase):
         run = runtime.run_autonomous("analyse", finalize=False)
 
         self.assertEqual(run.repairs, 2)
-        self.assertEqual(backend.instructions.count(AUTONOMOUS_REPAIR_MESSAGE), 2)
+        self.assertEqual(
+            _directive_count(backend, AUTONOMOUS_REPAIR_MESSAGE),
+            2,
+        )
 
 
 if __name__ == "__main__":

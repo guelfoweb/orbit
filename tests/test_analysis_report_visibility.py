@@ -48,6 +48,46 @@ def encode(text: str, key: int, delimiter: str) -> str:
     return delimiter.join(str(ord(c) ^ key) for c in text)
 
 
+def _control_reply(offered: "list[str]") -> "ChatResult | None":
+    """A valid answer to a control tool, or None when none was offered.
+
+    These doubles stream prose for every call, which the structured
+    controller correctly reads as "the model cannot use the protocol": PLAN
+    is attempted twice and the run reports itself unsupported before any
+    action, so nothing reaches the report these tests are about. Answering
+    the control tools here restores the run without touching what the
+    doubles say on the paths the suite actually measures -- the step prose
+    and the closing report.
+    """
+    import json
+
+    if "submit_analysis_plan" in offered:
+        arguments = {
+            "questions": [
+                {
+                    "question": f"Report fixture question {i + 1}",
+                    "missing_fact": "needs execution",
+                }
+                for i in range(6)
+            ]
+        }
+        name = "submit_analysis_plan"
+    elif "finish_analysis_question" in offered:
+        arguments = {"status": "still_open", "answer_summary": "more to do"}
+        name = "finish_analysis_question"
+    else:
+        return None
+    return ChatResult(
+        content="", model="m", finish_reason="stop",
+        tool_calls=[{
+            "id": "control_call", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }],
+        prompt_tokens=10, completion_tokens=5, cached_tokens=0,
+        prompt_tokens_per_second=None, generation_tokens_per_second=None,
+    )
+
+
 class _ReportBackend:
     """Streams prose the way the real backend does, then returns it."""
 
@@ -57,6 +97,9 @@ class _ReportBackend:
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
                     on_delta=None, on_progress=None):
+        control = _control_reply([t["function"]["name"] for t in (tools or [])])
+        if control is not None:
+            return control
         self.calls += 1
         if on_delta:
             on_delta(self.prose)
@@ -319,6 +362,9 @@ class _TwoPhaseBackend:
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
                     on_delta=None, on_progress=None):
+        control = _control_reply([t["function"]["name"] for t in (tools or [])])
+        if control is not None:
+            return control
         self.calls += 1
         text = REPORT_PROSE if tools == [] else PROSE
         if on_delta:
