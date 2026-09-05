@@ -833,7 +833,12 @@ class RollingLineageTests(AutonomousTestBase):
         # calls included: the count is now the controller's 2N+1 rather than
         # one per action, and the phase is what this test is about.
         self.assertEqual(len(seen), run.model_calls)
-        self.assertEqual(set(seen), {ANALYSIS_STEP_PHASE})
+        # Every call declares an analysis phase, and the action calls declare
+        # the step phase specifically. The control calls around them carry
+        # their own labels so a trace can distinguish a plan from a finish
+        # decision -- which is the whole reason the labels exist.
+        self.assertTrue(all(str(phase).startswith("analysis") for phase in seen))
+        self.assertIn(ANALYSIS_STEP_PHASE, seen)
         # And that phase is the one the backend joins the rolling lineage for.
         with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
             self.assertTrue(_analysis_rolling_anchor_requested(native_backend=True))
@@ -889,8 +894,12 @@ class RollingLineageTests(AutonomousTestBase):
         )
         self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
+        # The claim is that an autonomous call never declares a CHAT phase,
+        # not that every call is literally `analysis_step`. Control calls now
+        # name themselves -- `analysis_plan`, `analysis_finish:<question>` --
+        # so a diagnostic trace can tell them apart; all remain analysis.
         for phase in seen:
-            self.assertEqual(phase, ANALYSIS_STEP_PHASE)
+            self.assertTrue(str(phase).startswith("analysis"))
             self.assertNotIn("chat", str(phase).lower())
 
 
