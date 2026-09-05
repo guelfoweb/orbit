@@ -977,10 +977,24 @@ class CeilingTests(_Case):
     """5. Coverage must leave a call for the work it exists to make cheaper."""
 
     def test_a_one_call_ceiling_is_spent_investigating_not_covering(self) -> None:
+        """The one call belongs to the analysis, and COVER does not take it.
+
+        It used to be spent on an ACTION, because the free-form loop's first
+        call was one. Under the structured controller the single call is
+        PLAN -- still the analysis rather than coverage, and still bounded:
+        with no budget left for a repair the run stops at the ceiling instead
+        of exceeding it.
+        """
         runtime = self._runtime(b"body\n")
         result = runtime.run_autonomous("Go.", max_model_calls=1, finalize=False)
+        # Class A, unchanged: coverage consumes no inference call.
         self.assertEqual(result.cover_calls, 0)
-        self.assertEqual(len(result.steps), 1)
+        # Class A, unchanged: the ceiling is authoritative.
+        self.assertLessEqual(result.model_calls, 1)
+        # The call was spent on the analysis. Retired: that it had to be an
+        # ACTION -- planning what to investigate is investigating.
+        self.assertEqual(result.model_calls, 1)
+        self.assertEqual(result.plan_calls, 1)
 
     def test_two_calls_allow_coverage_and_a_step(self) -> None:
         """With planning off, two calls buy coverage and one step.

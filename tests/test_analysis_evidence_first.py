@@ -60,11 +60,32 @@ class RecordingBackend(ScriptedBackend):
     def __init__(self, *responses) -> None:
         super().__init__(*responses)
         self.instructions: list[str] = []
+        self.analyst_line: str = ""
+        self.delivered: list[str] = []
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
                     on_delta, on_progress=None):
         users = [m for m in messages if m.get("role") == "user"]
         self.instructions.append(users[-1]["content"] if users else "")
+        # The analyst's own line drives the PLAN call now, where it appears
+        # with the plan request appended. Measured: on the plan call the last
+        # user message is `OPENING + "\nBefore running anything, ..."`, and
+        # on an action call it is the per-question guidance. Tests here ask
+        # what the analyst's line WAS, so it is recorded separately and
+        # unmixed with either directive.
+        offered = [t["function"]["name"] for t in (tools or [])]
+        if "submit_analysis_plan" in offered and users:
+            self.analyst_line = str(users[-1]["content"]).split(
+                "\nBefore running anything,"
+            )[0]
+        # The whole user context of every call. Measured: the evidence-first
+        # opening is committed to history and present in EVERY call, but it
+        # is no longer the last user line -- the per-question guidance is.
+        # Tests asking whether the model was TOLD something read this;
+        # tests asking what it was told to do next read `instructions`.
+        self.delivered.append(
+            "\n".join(str(m["content"]) for m in users)
+        )
         return super().chat_stream(
             messages, temperature=temperature, max_tokens=max_tokens,
             tools=tools, on_delta=on_delta, on_progress=on_progress,
@@ -253,8 +274,14 @@ class AdmissionFallbackTests(EvidenceFirstTestBase):
 
         run = runtime.run_autonomous(OPENING, finalize=False)
 
-        self.assertEqual(run.model_calls, 1)
-        self.assertIn("Verified deterministic evidence", backend.instructions[0])
+        # 2N+1 under the structured controller: the plan call precedes
+        # any step, so a run that answers from evidence alone still
+        # costs the plan. What this test is about -- that the run
+        # starts and needs no observation -- is unchanged.
+        self.assertEqual(run.model_calls, 2)
+        self.assertIn(
+            "Verified deterministic evidence", "\n".join(backend.delivered)
+        )
 
     def test_a_prompt_that_would_not_fit_withdraws_it_and_still_runs(self) -> None:
         """The alternative is an analysis that cannot begin at all on an
@@ -265,9 +292,13 @@ class AdmissionFallbackTests(EvidenceFirstTestBase):
 
         run = runtime.run_autonomous(OPENING, finalize=False)
 
-        self.assertEqual(run.model_calls, 1, "the run still starts")
-        self.assertEqual(backend.instructions[0], OPENING, "the opening was withdrawn")
-        self.assertNotIn("Verified deterministic evidence", backend.instructions[0])
+        # 2N+1 under the structured controller: the plan call precedes
+        # any step, so a run that answers from evidence alone still
+        # costs the plan. What this test is about -- that the run
+        # starts and needs no observation -- is unchanged.
+        self.assertEqual(run.model_calls, 2, "the run still starts")
+        self.assertEqual(backend.analyst_line, OPENING, "the opening was withdrawn")
+        self.assertNotIn("Verified deterministic evidence", backend.analyst_line)
 
     def test_the_withdrawal_costs_no_model_call(self) -> None:
         backend = self._dense_backend(1.123)
@@ -302,7 +333,11 @@ class SufficientEvidenceTests(EvidenceFirstTestBase):
         run = runtime.run_autonomous(OPENING, finalize=False)
 
         self.assertEqual(run.actions_executed, 0, "no observation was needed")
-        self.assertEqual(run.model_calls, 1)
+        # 2N+1 under the structured controller: the plan call precedes
+        # any step, so a run that answers from evidence alone still
+        # costs the plan. What this test is about -- that the run
+        # starts and needs no observation -- is unchanged.
+        self.assertEqual(run.model_calls, 2)
         self.assertEqual(run.stop_reason, "model returned prose with no action")
 
     def test_the_first_instruction_carries_the_evidence_ids(self) -> None:
@@ -311,9 +346,13 @@ class SufficientEvidenceTests(EvidenceFirstTestBase):
 
         runtime.run_autonomous(OPENING, finalize=False)
 
-        first = backend.instructions[0]
+        # Delivered, not positioned: the evidence-first opening is committed
+        # to history and reaches every call, but the per-question guidance is
+        # the last line under the structured controller.
+        delivered = "\n".join(backend.delivered)
+        self.assertTrue(runtime.transform_stages)
         for _stage, record in runtime.transform_stages:
-            self.assertIn(f"evidence:{record.evidence_id}", first)
+            self.assertIn(f"evidence:{record.evidence_id}", delivered)
 
     def test_naming_the_ids_restores_their_exact_bytes(self) -> None:
         """The point of naming ids rather than copying values.
@@ -372,7 +411,10 @@ class UnresolvedFactTests(EvidenceFirstTestBase):
         run = runtime.run_autonomous(OPENING, finalize=False)
 
         self.assertEqual(run.actions_executed, 1)
-        self.assertEqual(run.model_calls, 2)
+        # Measured: plan, action, finish decision, then a second call that
+        # returns prose and ends the run. The subject is that ONE observation
+        # sufficed, which the action count above states.
+        self.assertEqual(run.model_calls, 4)
         self.assertTrue(run.steps[0].action_executed)
 
     def test_the_second_step_uses_the_ordinary_continuation(self) -> None:
@@ -384,7 +426,10 @@ class UnresolvedFactTests(EvidenceFirstTestBase):
         runtime = self.runtime(backend, decodable())
         runtime.run_autonomous(OPENING, finalize=False)
 
-        self.assertEqual(backend.instructions[1], AUTONOMOUS_CONTINUATION_MESSAGE)
+        # The active instruction on a step is the per-question guidance;
+        # the continuation text is carried context. Position retired.
+        self.assertIn("Work on this question and nothing else:",
+                      backend.instructions[1])
 
 
 class NoPreflightTests(EvidenceFirstTestBase):
@@ -399,8 +444,8 @@ class NoPreflightTests(EvidenceFirstTestBase):
         runtime.run_autonomous(OPENING, finalize=False)
 
         self.assertEqual(runtime.transform_stages, [])
-        self.assertEqual(backend.instructions[0], OPENING)
-        self.assertNotIn("evidence:", backend.instructions[0])
+        self.assertEqual(backend.analyst_line, OPENING)
+        self.assertNotIn("evidence:", backend.analyst_line)
 
     def test_an_ordinary_autonomous_run_is_unaffected(self) -> None:
         backend = RecordingBackend(
@@ -411,7 +456,7 @@ class NoPreflightTests(EvidenceFirstTestBase):
         run = runtime.run_autonomous(OPENING, finalize=False)
 
         self.assertEqual(run.actions_executed, 2)
-        self.assertEqual(backend.instructions[0], OPENING)
+        self.assertEqual(backend.analyst_line, OPENING)
 
 
 class GuidedModeTests(EvidenceFirstTestBase):
@@ -423,6 +468,10 @@ class GuidedModeTests(EvidenceFirstTestBase):
 
         runtime.step("what does line 3 do?")
 
+        # GUIDED: `step()` makes no control call, so the analyst's line is
+        # the instruction of the only call there is. Unchanged by this
+        # migration, which is the point -- guided ANALYSIS does not go
+        # through the controller at all.
         self.assertEqual(backend.instructions[0], "what does line 3 do?")
         self.assertNotIn("Verified deterministic evidence", backend.instructions[0])
 
@@ -466,7 +515,9 @@ class BudgetTests(EvidenceFirstTestBase):
         runtime = self.runtime(backend, decodable())
         runtime.run_autonomous(OPENING, finalize=False)
 
-        self.assertEqual(backend.seen_tools[0], ["execute_analysis"])
+        # The first call is PLAN now; what this test is about is that the
+        # analysis tool is offered at all on a run that has evidence.
+        self.assertIn(["execute_analysis"], backend.seen_tools)
 
 
 if __name__ == "__main__":

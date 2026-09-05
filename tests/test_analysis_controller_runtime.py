@@ -510,11 +510,20 @@ class PreservedBehaviourTests(_Case):
     """Q/R/S/K. Everything outside the controller is untouched."""
 
     def test_a_binary_artifact_still_runs(self) -> None:
-        """Q. No COVER, so no plan -- and the run still works."""
+        """Q. An artifact COVER cannot read is still PLANNED and still runs.
+
+        Coverage needs text it can attest; a binary artifact gets none. That
+        used to mean no plan either, and the run fell into the free-form
+        loop. Coverage is evidence enrichment, so its absence now costs the
+        run context -- never its structure.
+        """
         runtime = self._runtime(_Model(plan=[]), data=b"\x00\xffbinary")
         run = self._run(runtime, max_model_calls=3)
         self.assertEqual(run.cover_calls, 0)
-        self.assertEqual(run.plan_calls, 0)
+        # The invariant this test has always been about: the run still works.
+        self.assertIsNotNone(run.stop_reason)
+        # And the one it now also carries: structure does not depend on COVER.
+        self.assertEqual(run.plan_calls, 1)
 
     def test_a_guided_step_needs_no_controller(self) -> None:
         """R. `step()` without a controller offers the analysis tool."""
