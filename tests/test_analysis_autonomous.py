@@ -125,6 +125,34 @@ class AutonomousTestBase(unittest.TestCase):
         self.addCleanup(built.close)
         return built
 
+    @staticmethod
+    def n_questions(backend, n):
+        """Plan exactly `n` questions on `backend`, and return it.
+
+        `MAX_ACTIONS_PER_QUESTION` caps one question at two actions, so a test
+        whose triggering sequence is three actions long cannot fit in a single
+        question: the per-question limit blocks it before the consecutive
+        no-progress bound can trip, and the stop reason changes. Such a test
+        gets the fewest questions its own sequence needs -- no budget is
+        raised, and the plan is still exhausted at the end.
+        """
+        backend._plan_questions = [f"Question {i + 1} under test" for i in range(n)]
+        return backend
+
+    @staticmethod
+    def one_question(backend):
+        """Plan a single question on `backend`, and return it.
+
+        For tests whose subject is ONE question's stagnation or repetition
+        policy. The shared fixture plans six, and a stalled question no
+        longer ends the run -- so with six the run moves on to the others
+        and outruns a script written for a single stall, exercising the
+        scheduler rather than the detection under test. Opt-in and explicit:
+        every other fixture keeps the six-question default.
+        """
+        backend._plan_questions = ["The one question under test"]
+        return backend
+
 
 class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
     def test_new_content_causes_the_next_model_call(self) -> None:
@@ -248,9 +276,9 @@ class ContinuationIsDrivenByNewContentTests(AutonomousTestBase):
 class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
     def test_repeated_identical_action_is_no_progress(self) -> None:
         code = emit("same")
-        backend = ScriptedBackend(
+        backend = self.one_question(ScriptedBackend(
             tool_response(code), tool_response(code), tool_response(code)
-        )
+        ))
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
@@ -264,11 +292,11 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
 
     def test_different_code_with_identical_output_is_not_progress(self) -> None:
         """Novelty is judged on evidence, not on the program that produced it."""
-        backend = ScriptedBackend(
+        backend = self.n_questions(ScriptedBackend(
             tool_response(emit("same")),
             tool_response("x = 1\n" + emit("same")),
             tool_response("y = 2\n" + emit("same")),
-        )
+        ), 2)
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
@@ -286,7 +314,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
         asserted is that an unchanged digest buys nothing.
         """
         code = write_artifact("same.bin", "identical")
-        backend = ScriptedBackend(*[tool_response(code)] * 5)
+        backend = self.n_questions(ScriptedBackend(*[tool_response(code)] * 5), 2)
         run = self.runtime(backend).run_autonomous("transform it", finalize=False)
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS), run.stop_reason)
@@ -299,7 +327,7 @@ class DuplicateWorkIsNotProgressTests(AutonomousTestBase):
 
     def test_stagnation_bound_stops_the_run(self) -> None:
         code = emit("same")
-        backend = ScriptedBackend(*[tool_response(code)] * 6)
+        backend = self.one_question(ScriptedBackend(*[tool_response(code)] * 6))
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS), run.stop_reason)
@@ -1139,7 +1167,7 @@ class StrategyFingerprintTests(AutonomousTestBase):
 
     def test_repeated_action_with_random_output_is_not_progress(self) -> None:
         run = self.runtime(
-            ScriptedBackend(*[tool_response(nondet("scan"))] * 8)
+            self.one_question(ScriptedBackend(*[tool_response(nondet("scan"))] * 8))
         ).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
@@ -1157,7 +1185,7 @@ class StrategyFingerprintTests(AutonomousTestBase):
 
     def test_repeated_action_with_timestamp_output_is_not_progress(self) -> None:
         code = "import time\nprint('t', time.time(), end='')"
-        run = self.runtime(ScriptedBackend(*[tool_response(code)] * 8)).run_autonomous(
+        run = self.runtime(self.one_question(ScriptedBackend(*[tool_response(code)] * 8))).run_autonomous(
             "inspect it", finalize=False
         )
 
@@ -1168,7 +1196,7 @@ class StrategyFingerprintTests(AutonomousTestBase):
 
     def test_repeated_action_with_pid_output_is_not_progress(self) -> None:
         code = "import os\nprint('pid', os.getpid(), os.urandom(8).hex(), end='')"
-        run = self.runtime(ScriptedBackend(*[tool_response(code)] * 8)).run_autonomous(
+        run = self.runtime(self.one_question(ScriptedBackend(*[tool_response(code)] * 8))).run_autonomous(
             "inspect it", finalize=False
         )
 
@@ -1196,11 +1224,11 @@ class StrategyFingerprintTests(AutonomousTestBase):
     def test_duplicate_evidence_from_a_new_action_is_not_progress(self) -> None:
         """Both questions must pass: an unseen strategy that adds nothing fails."""
         run = self.runtime(
-            ScriptedBackend(
+            self.n_questions(ScriptedBackend(
                 tool_response(emit("same")),
                 tool_response("x = 1\n" + emit("same")),
                 tool_response("y = 2\n" + emit("same")),
-            )
+            ), 2)
         ).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
@@ -1224,12 +1252,12 @@ class StrategyFingerprintTests(AutonomousTestBase):
             "print(p.read_text() if p.exists() else 'absent', end='')"
         )
         run = self.runtime(
-            ScriptedBackend(
+            self.n_questions(ScriptedBackend(
                 tool_response(read_work),                       # 'absent'
                 tool_response(write_artifact("stage.txt", "one")),
                 tool_response(read_work),                       # same code, new state
                 prose_response("done"),
-            )
+            ), 2)
         ).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
@@ -1565,7 +1593,7 @@ class BoundedReplanTests(AutonomousTestBase):
     def test_the_same_stall_is_never_replanned_twice(self) -> None:
         """Two consecutive unproductive steps end the run after one replan."""
         same = emit("x")
-        backend = ScriptedBackend(*[tool_response(same)] * 6)
+        backend = self.one_question(ScriptedBackend(*[tool_response(same)] * 6))
 
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
@@ -1574,7 +1602,7 @@ class BoundedReplanTests(AutonomousTestBase):
 
     def test_second_consecutive_no_progress_stops(self) -> None:
         same = emit("x")
-        backend = ScriptedBackend(*[tool_response(same)] * 6)
+        backend = self.one_question(ScriptedBackend(*[tool_response(same)] * 6))
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
@@ -1614,8 +1642,14 @@ class BoundedReplanTests(AutonomousTestBase):
 class GroundedFinalizationTests(AutonomousTestBase):
     """Every ending that is not a cancellation produces one grounded answer."""
 
-    def _run(self, *responses, **kw):
+    def _run(self, *responses, questions: int = 0, **kw):
         backend = ScriptedBackend(*responses)
+        if questions:
+            # Opt-in, for the tests here whose subject is a bounded stop: the
+            # stall has to belong to the last question standing for the run
+            # itself to stop on it. The finish-and-report tests keep the
+            # shared six-question default.
+            self.n_questions(backend, questions)
         run = self.runtime(backend).run_autonomous("inspect it", **kw)
         return run, backend
 
@@ -1633,6 +1667,7 @@ class GroundedFinalizationTests(AutonomousTestBase):
         run, backend = self._run(
             tool_response(same), tool_response(same), tool_response(same),
             prose_response("REPORT"),
+            questions=1,
         )
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
@@ -1645,6 +1680,7 @@ class GroundedFinalizationTests(AutonomousTestBase):
         run, backend = self._run(
             tool_response(same), tool_response(same), tool_response(same),
             prose_response("REPORT"),
+            questions=1,
         )
 
         final_prompt = backend.seen_messages[-1]
@@ -2080,7 +2116,7 @@ class SoftActionBudgetTests(AutonomousTestBase):
 
     def test_consecutive_limits_are_unchanged_below_the_budget(self) -> None:
         same = emit("x")
-        run = self.runtime(ScriptedBackend(*[tool_response(same)] * 6)).run_autonomous(
+        run = self.runtime(self.one_question(ScriptedBackend(*[tool_response(same)] * 6))).run_autonomous(
             "inspect it", finalize=False
         )
 

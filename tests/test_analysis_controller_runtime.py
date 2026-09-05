@@ -38,6 +38,9 @@ from orbit.runtime.analysis_runtime import (  # noqa: E402
     STOP_CONTROL_UNSUPPORTED,
     MAX_CONTROL_ERROR_CHARS,
     STOP_LEDGER_EXHAUSTED,
+    STOP_MAX_ACTIONS,
+    STOP_NO_PROGRESS,
+    STOP_MAX_MODEL_CALLS,
     AnalysisRuntime,
     AnalysisSource,
     AnalysisWorkspace,
@@ -2164,6 +2167,324 @@ class PlanFailureDomainTests(ControlRepairTests):
         self.assertNotEqual(run.stop_reason, STOP_CONTROL_UNSUPPORTED)
         self.assertTrue(run.stop_reason.startswith(module.STOP_BACKEND_ERROR))
         self.assertEqual(run.control_repairs, 0)
+
+
+class _StallingModel(_Model):
+    """Q1 resolves; every question after it stalls by repeating a strategy.
+
+    The live Fattura shape. `still_open` after the first FINISH keeps the
+    stalling question active, so the repetition belongs to it rather than
+    being credited to whichever question happened to be mentioned last.
+    """
+
+    def __init__(self, *args, stalls: int = 3, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.acts = 0
+        self.finishes = 0
+        # How many actions repeat one strategy. Three, so that the streak
+        # begins on the first question and the bound trips on the SECOND
+        # question's own repeat -- the live Fattura shape. Two would let that
+        # question spend both its action slots first, and it would be blocked
+        # for reaching the per-question limit instead, which is a different
+        # policy from the one under test.
+        self._stalls = stalls
+
+    def reply(self, tools, last: str):
+        names = [t["function"]["name"] for t in (tools or [])]
+        if FINISH_TOOL_NAME in names:
+            self.finishes += 1
+            decision = (
+                {"status": "resolved", "answer_summary": "answered"}
+                if self.finishes == 1
+                else {"status": "still_open", "answer_summary": "more to do"}
+            )
+            return self._call(FINISH_TOOL_NAME, decision)
+        if ANALYSIS_TOOL_NAME in names:
+            self.acts += 1
+            # The first action is new evidence, the next `stalls` repeat one
+            # strategy -- that streak is what trips the bound -- and anything
+            # after it is new again, so a later question can still do work.
+            if self.acts == 1:
+                code = "print('distinct-1')"
+            elif self.acts <= 1 + self._stalls:
+                code = "print('SAME')"
+            else:
+                code = f"print('distinct-{self.acts}')"
+            return self._call(ANALYSIS_TOOL_NAME, {"code": code})
+        return super().reply(tools, last)
+
+
+class StalledQuestionYieldsToTheNextTests(_Case):
+    """A question that stalls blocks itself; it does not end the run.
+
+    Measured on the live Fattura session: Q1 resolved, Q2 repeated its
+    strategy until the no-progress bound tripped, and the run stopped there
+    with Q3 never activated -- 10 actions and 52 model calls still unspent.
+    The stall was Q2's; the termination was global. Every witness below is a
+    dispatch record -- which question owned each executed action -- rather
+    than a runtime counter, so a test cannot pass by the runtime merely
+    claiming it continued.
+    """
+
+    def _run_owners(self, model, same_output: bool = False, **kwargs):
+        live: dict = {}
+        owners: list[str] = []
+        runtime = self._runtime(model)
+        real = type(runtime).step
+
+        def spy(self_, message, **kw):
+            # The controller is a local of `run_autonomous`, read from the
+            # calling frame: the same object the runtime is using. Captured
+            # BEFORE the step, since afterwards a question that just finished
+            # is closed and its action would be credited to its successor.
+            controller = inspect.currentframe().f_back.f_locals.get("controller")
+            if controller is not None:
+                live["controller"] = controller
+            active = getattr(controller, "active", None)
+            result = real(self_, message, **kw)
+            if getattr(result, "action_executed", False) and active is not None:
+                owners.append(active)
+            return result
+
+        # The shared `_run` makes every sandbox result distinct, which is the
+        # opposite of what these tests need: here the OUTPUT repeats whenever
+        # the code does, so a repeated strategy actually stagnates.
+        def by_code(**call):
+            code = call.get("code", "")
+            return AnalysisResult(
+                status="ok",
+                code_sha256=hashlib.sha256(code.encode()).hexdigest(),
+                input_sha256="i" * 64,
+                # `same_output` is the harder shape: DISTINCT code that always
+                # observes the same thing, so every action genuinely executes
+                # and every one of them stagnates. That is what puts a stall
+                # on the step where the action ceiling is reached -- the case
+                # where a diversion could buy an action the budget refused.
+                stdout="IDENTICAL" if same_output else f"OUT {code}",
+                stderr="", exit_status=0, duration_seconds=0.1,
+            )
+
+        kwargs.setdefault("max_actions", 12)
+        kwargs.setdefault("max_model_calls", 60)
+        with mock.patch.object(type(runtime), "step", spy), \
+                mock.patch.object(module, "execute_analysis", by_code):
+            run = runtime.run_autonomous("Analyse it.", finalize=False, **kwargs)
+        # The capture reads a local of `run_autonomous` by name. If that name
+        # ever changes the tests must say so here, rather than failing later
+        # with an empty owner list and an AttributeError on None.
+        self.assertIsNotNone(
+            live.get("controller"),
+            "controller capture failed: the local in run_autonomous was renamed",
+        )
+        return run, owners, live["controller"]
+
+    def test_a_stalled_question_does_not_strand_the_next_one(self) -> None:
+        """The defect exactly: Q2 stalls, and Q3 must still get its turn."""
+        model = _StallingModel(
+            plan=[_question("q1"), _question("q2"), _question("q3")],
+        )
+        run, owners, controller = self._run_owners(model)
+
+        # Dispatch, not the stop reason: Q3 actually ran an action after Q2
+        # stalled. Under the defect this list ended at Q2.
+        self.assertIn("Q3", owners, owners)
+        states = {qid: st.status for qid, st in controller.states.items()}
+        self.assertEqual(states["Q1"], RESOLVED, states)
+        self.assertEqual(states["Q2"], BLOCKED, states)
+        # Blocked for its OWN repetition, and never quietly resolved.
+        self.assertIn("repeated", controller.states["Q2"].reason)
+
+    def test_a_later_question_can_still_be_resolved_after_a_stall(self) -> None:
+        """Continuing is not a formality: the next question can still answer."""
+        model = _StallingModel(
+            plan=[_question("q1"), _question("q2"), _question("q3")],
+        )
+        _run, owners, controller = self._run_owners(model)
+
+        self.assertIn("Q3", owners, owners)
+        self.assertEqual(controller.states["Q2"].status, BLOCKED)
+
+    def test_a_stall_with_no_other_question_still_stops_the_run(self) -> None:
+        """The GLOBAL no-progress stop must stay reachable.
+
+        The diversion is guarded on another question being open, and that
+        guard cannot be `controller.exhausted`: the stalling question is open
+        by definition, so `exhausted` would always divert and this stop reason
+        would become dead code. Q1 stalls and yields; Q2 completes the streak
+        with nothing left to move on to, and the run stops on the streak's own
+        reason rather than on the scheduler running dry.
+        """
+
+        class _AlwaysStalls(_StallingModel):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    return self._call(
+                        FINISH_TOOL_NAME,
+                        {"status": "still_open", "answer_summary": "more to do"},
+                    )
+                if ANALYSIS_TOOL_NAME in names:
+                    self.acts += 1
+                    return self._call(
+                        ANALYSIS_TOOL_NAME,
+                        {"code": f"# v{self.acts}\nprint('SAME')"},
+                    )
+                return super().reply(tools, last)
+
+        model = _AlwaysStalls(plan=[_question("q1"), _question("q2")])
+        run, _owners, controller = self._run_owners(model, same_output=True)
+
+        # The streak's reason, NOT STOP_LEDGER_EXHAUSTED: this is the branch
+        # that a wrong eligibility guard makes unreachable.
+        self.assertTrue(
+            run.stop_reason.startswith(STOP_NO_PROGRESS), run.stop_reason
+        )
+        self.assertEqual(controller.states["Q1"].status, BLOCKED)
+        self.assertNotIn(
+            RESOLVED,
+            {st.status for st in controller.states.values()},
+        )
+
+    def test_every_question_stalling_still_terminates_within_the_bounds(self) -> None:
+        """Yielding must not become a way to walk a whole plan for free.
+
+        Nothing here ever progresses, so each question stalls in turn and is
+        blocked in turn. The run has to end on the last one rather than
+        cycling, and the walk itself has to stay inside the ceilings.
+        """
+
+        class _NeverProgresses(_StallingModel):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    return self._call(
+                        FINISH_TOOL_NAME,
+                        {"status": "still_open", "answer_summary": "more to do"},
+                    )
+                if ANALYSIS_TOOL_NAME in names:
+                    self.acts += 1
+                    return self._call(ANALYSIS_TOOL_NAME, {"code": "print('SAME')"})
+                return super().reply(tools, last)
+
+        model = _NeverProgresses(
+            plan=[_question(f"q{i + 1}") for i in range(6)]
+        )
+        run, _owners, controller = self._run_owners(
+            model, max_actions=2, max_model_calls=20
+        )
+
+        self.assertTrue(run.stop_reason, "the run must end, not cycle")
+        # Binding: the walk itself must not buy actions the budget refused.
+        self.assertLessEqual(run.actions_executed, 2)
+        self.assertLessEqual(run.model_calls, 20)
+        # Every question got its OWN attempt. The streak that blocked the
+        # previous question is not carried into the next one -- a fresh
+        # question is not blamed for its predecessor's repetition. Without
+        # that reset each question after the first is cut short, and six
+        # questions cost 11 calls here instead of 16.
+        self.assertEqual(
+            run.model_calls, 16,
+            "each question must get its own attempt after the previous stalled",
+        )
+        # Blocked, never resolved: nothing was answered here.
+        statuses = {st.status for st in controller.states.values()}
+        self.assertNotIn(RESOLVED, statuses, statuses)
+
+    def test_a_stall_on_the_last_affordable_action_does_not_buy_another(
+        self,
+    ) -> None:
+        """The ceiling is checked below the diversion; it must bind above it.
+
+        Distinct code that always observes the same thing: every action runs
+        and every one stagnates, so the stall lands on the very step that
+        reaches the action ceiling. Handing the run to another question there
+        would spend an action the budget had already refused -- the run must
+        stop instead.
+        """
+
+        class _AlwaysStalls(_StallingModel):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    return self._call(
+                        FINISH_TOOL_NAME,
+                        {"status": "still_open", "answer_summary": "more to do"},
+                    )
+                if ANALYSIS_TOOL_NAME in names:
+                    self.acts += 1
+                    return self._call(
+                        ANALYSIS_TOOL_NAME,
+                        {"code": f"# v{self.acts}\nprint('SAME')"},
+                    )
+                return super().reply(tools, last)
+
+        model = _AlwaysStalls(plan=[_question(f"q{i + 1}") for i in range(4)])
+        run, _owners, _controller = self._run_owners(
+            model, same_output=True, max_actions=3, max_model_calls=60
+        )
+
+        self.assertLessEqual(
+            run.actions_executed, 3,
+            f"action ceiling overspent: {run.actions_executed} > 3",
+        )
+
+    def test_the_soft_budget_also_binds_across_a_stall(self) -> None:
+        """The soft budget is checked below the diversion too."""
+
+        class _AlwaysStalls(_StallingModel):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    return self._call(
+                        FINISH_TOOL_NAME,
+                        {"status": "still_open", "answer_summary": "more to do"},
+                    )
+                if ANALYSIS_TOOL_NAME in names:
+                    self.acts += 1
+                    return self._call(
+                        ANALYSIS_TOOL_NAME,
+                        {"code": f"# v{self.acts}\nprint('SAME')"},
+                    )
+                return super().reply(tools, last)
+
+        model = _AlwaysStalls(plan=[_question(f"q{i + 1}") for i in range(4)])
+        run, _owners, _controller = self._run_owners(
+            model, same_output=True,
+            max_actions=12, soft_max_actions=3, max_model_calls=60,
+        )
+
+        # Nothing here ever earns its way past the soft budget.
+        self.assertLessEqual(
+            run.actions_executed, 3,
+            f"soft budget overspent: {run.actions_executed} > 3",
+        )
+
+    def test_continuing_past_a_stall_stays_inside_the_global_bounds(self) -> None:
+        """Yielding to the next question spends budget; never beyond the ceiling."""
+        model = _StallingModel(
+            plan=[_question(f"q{i + 1}") for i in range(3)]
+        )
+        # Ceilings that BIND. At max_actions=4 this scenario spends exactly
+        # four, so the assertion below would hold no matter what the budget
+        # did; at three the run has to stop ON a ceiling, which is what the
+        # stop-reason assertion checks.
+        #
+        # This shape never puts a stall on the ceiling step, so it is not the
+        # witness for the ceiling guard itself -- the two `same_output` tests
+        # above are. What this one holds is that the walk ends on a bound
+        # rather than on the plan running dry.
+        run, _owners, _controller = self._run_owners(
+            model, max_actions=3, max_model_calls=10
+        )
+
+        self.assertLessEqual(run.actions_executed, 3)
+        self.assertLessEqual(run.model_calls, 10)
+        # The ceiling is what ended it -- not the plan running out.
+        self.assertIn(
+            run.stop_reason,
+            (STOP_MAX_ACTIONS, STOP_MAX_MODEL_CALLS),
+            run.stop_reason,
+        )
 
 
 if __name__ == "__main__":
