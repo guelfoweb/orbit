@@ -389,6 +389,72 @@ class SandboxBehaviourTest(SandboxTestBase):
         self.assertEqual(result.code_sha256, hashlib.sha256(code.encode()).hexdigest())
 
 
+class EvidenceIsNotReadableFromAProgramTests(SandboxTestBase):
+    """A live run lost an action to `read_file(evidence_id=...)`.
+
+    The system prompt says naming `evidence:<id>` restores exact bytes. That
+    is true of the conversation and false of a sandboxed program, and the
+    model read one as licensing the other. The boundary is not the canonical
+    gate -- this is a helper called inside generated Python, which the gate
+    never inspects -- so the only place the mistake can be answered is the
+    shim itself.
+    """
+
+    def test_asking_read_file_for_an_evidence_id_explains_the_supported_move(
+        self,
+    ) -> None:
+        result = self.run_code(
+            "import orbit_tools\n"
+            "try:\n"
+            "    orbit_tools.read_file(evidence_id='ev_abc123')\n"
+            "except Exception as exc:\n"
+            "    print(type(exc).__name__ + ': ' + str(exc))\n"
+        )
+
+        self.assertEqual(result.status, "ok")
+        # Not a bare TypeError about a signature: it has to name what to do.
+        self.assertIn("NotImplementedError", result.stdout)
+        self.assertIn("evidence:<evidence_id>", result.stdout)
+        self.assertIn("next message", result.stdout)
+
+    def test_the_shim_offers_read_evidence_and_it_refuses_the_same_way(self) -> None:
+        """A model that reaches for the plausible name gets the same guidance."""
+        result = self.run_code(
+            "import orbit_tools\n"
+            "try:\n"
+            "    orbit_tools.read_evidence('ev_abc123')\n"
+            "except Exception as exc:\n"
+            "    print(type(exc).__name__ + ': ' + str(exc))\n"
+        )
+
+        self.assertEqual(result.status, "ok")
+        self.assertIn("NotImplementedError", result.stdout)
+        self.assertIn("evidence:<evidence_id>", result.stdout)
+
+    def test_an_unrelated_unexpected_keyword_is_still_refused_by_name(self) -> None:
+        """The tolerance is for one known confusion, not for any argument."""
+        result = self.run_code(
+            "import orbit_tools\n"
+            "try:\n"
+            "    orbit_tools.read_file(orbit_tools.SOURCE_PATH, follow_symlinks=True)\n"
+            "except TypeError as exc:\n"
+            "    print('TypeError: ' + str(exc))\n"
+        )
+
+        self.assertEqual(result.status, "ok")
+        self.assertIn("follow_symlinks", result.stdout)
+
+    def test_reading_the_artifact_by_path_still_works(self) -> None:
+        """The supported call is unchanged."""
+        result = self.run_code(
+            "import orbit_tools\n"
+            "print(orbit_tools.read_file(orbit_tools.SOURCE_PATH), end='')\n"
+        )
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.stdout, FIXTURE_TEXT)
+
+
 if __name__ == "__main__":
     unittest.main()
 

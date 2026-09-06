@@ -33,6 +33,7 @@ from orbit.runtime.context_manager import (  # noqa: E402
     ContextBudget,
     _eligible_tool_turn,
     _parse_turns,
+    _project,
     plan_context,
 )
 from orbit.runtime.evidence import EvidenceStore  # noqa: E402
@@ -353,6 +354,98 @@ class PromptContractTests(unittest.TestCase):
         self.assertIn("evidence:<evidence_id>", ANALYSIS_SYSTEM_PROMPT)
         self.assertIn("Never infer content from a reference alone",
                       ANALYSIS_SYSTEM_PROMPT)
+
+
+class AutonomousLoopTurnsAreCompactableTests(_Base):
+    """The loop's own turn shape, which no fixture here had.
+
+    Every fixture above closes a turn with a terminal assistant reply --
+    that is how a CHAT turn ends. An autonomous ANALYSIS step ends on the
+    tool result: the action ran, its output is in the store, and the model's
+    next word opens the next turn. Eligibility required the terminal
+    assistant, so every autonomous turn was permanently ineligible,
+    compaction never ran once, and history grew until admission refused.
+
+    Measured on a live PowerShell run: refused from the fourth action,
+    6,140 tokens of history against an 8,192 context with a 2,048 reserve,
+    while six re-attestable records sat available and uncompacted.
+    """
+
+    def _loop_turn(self, messages: list[dict], tag: str, body: str):
+        """One step as `run_autonomous` leaves it: no terminal assistant."""
+        call = {"id": f"call_{tag}",
+                "function": {"name": "execute_analysis",
+                             "arguments": '{"code": "%s"}' % ("p" * 400)}}
+        record = self.store.add(
+            "execute_analysis", body,
+            metadata={"tool_call_id": call["id"], "user_turn_id": "turn_1",
+                      "produced_by_phase": "analysis_action"},
+        )
+        messages.append({"role": "user", "content": f"step {tag}"})
+        messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
+        self.runtime.messages = messages
+        self.runtime._append_tool_result(call, body, record=record)
+        return record
+
+    def _loop_history(self, steps: int = 3):
+        messages = [{"role": "system", "content": "sys"},
+                    {"role": "user", "content": "artifact"}]
+        records = [self._loop_turn(messages, str(i), LARGE) for i in range(steps)]
+        return self.runtime.messages, records
+
+    def test_a_loop_turn_with_no_terminal_assistant_is_compactable(self) -> None:
+        messages, records = self._loop_history()
+        available = frozenset(r.evidence_id for r in records)
+
+        turns = _parse_turns(messages)
+        eligible = [
+            index for index, turn in enumerate(turns)
+            if _eligible_tool_turn(turn, available=available, covered=available)
+        ]
+
+        self.assertTrue(
+            eligible,
+            "no autonomous turn was eligible; compaction can never run",
+        )
+
+    def test_compaction_reclaims_the_generated_program(self) -> None:
+        """The tool result is already a short reference; the program is not."""
+        messages, records = self._loop_history()
+        available = frozenset(r.evidence_id for r in records)
+        turns = _parse_turns(messages)
+        eligible = {
+            index for index, turn in enumerate(turns)
+            if _eligible_tool_turn(turn, available=available, covered=available)
+        }
+
+        projected = _project(messages, turns, eligible)
+
+        before = sum(len(str(m)) for m in messages)
+        after = sum(len(str(m)) for m in projected)
+        self.assertLess(after, before // 2, f"{before} -> {after}: no real saving")
+
+    def test_compaction_preserves_call_identity_and_evidence(self) -> None:
+        """Compacting must not cost the pairing or the way back to the bytes."""
+        messages, records = self._loop_history()
+        available = frozenset(r.evidence_id for r in records)
+        turns = _parse_turns(messages)
+        eligible = {
+            index for index, turn in enumerate(turns)
+            if _eligible_tool_turn(turn, available=available, covered=available)
+        }
+
+        projected = _project(messages, turns, eligible)
+
+        # The structure still parses: results are still paired to their calls.
+        self.assertEqual(len(_parse_turns(projected)), len(turns))
+        for message in projected:
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                call = message["tool_calls"][0]
+                self.assertTrue(call["id"].startswith("call_"))
+                self.assertEqual(call["function"]["name"], "execute_analysis")
+        # And every record is still named, so the bytes are one request away.
+        cited = {m.get("evidence_id") for m in projected if m.get("role") == "tool"}
+        self.assertEqual(cited, {r.evidence_id for r in records})
 
 
 if __name__ == "__main__":

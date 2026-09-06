@@ -53,13 +53,48 @@ def _safe_path(value):
     raise PermissionError("path is outside the analyst workspace")
 
 
-def read_file(path, offset=0, limit=MAX_READ_BYTES):
+def read_evidence(evidence_id=None, **_ignored):
+    """Not available here. Evidence is restored in conversation, not in code.
+
+    A live run lost an action to `read_file(evidence_id=...)`: the system
+    prompt says to name `evidence:<id>` to get exact bytes back, which is
+    true of the conversation and false of a sandboxed program, and the model
+    read one instruction as licensing the other. A bare
+    "unexpected keyword argument" said nothing about which of the two was
+    wrong, so the repair had nothing to act on.
+
+    Defined so that mistake lands on a message naming the supported move
+    instead of a TypeError about a signature.
+    """
+    raise NotImplementedError(
+        "evidence cannot be read from inside an analysis program. "
+        "Stored evidence is restored in the conversation: end this action, "
+        "then write evidence:<evidence_id> in your next message and the exact "
+        "bytes are returned. Inside a program, read the artifact with "
+        "read_file(SOURCE_PATH) or a file you wrote under WORK_ROOT."
+    )
+
+
+def read_file(path=None, offset=0, limit=MAX_READ_BYTES, **unsupported):
     """Return up to `limit` bytes of `path` from `offset`, decoded as UTF-8.
 
     Opened with O_NOFOLLOW so a symlink planted in scratch cannot redirect
     the read, and bounded so a large artifact cannot be pulled into memory
     in one call.
+
+    `**unsupported` exists to give one specific mistake a useful answer
+    rather than a signature error: `evidence_id=` is the conversation's way
+    of restoring bytes and has never been this function's. Anything else
+    unexpected is still refused, by name.
     """
+    if unsupported:
+        if "evidence_id" in unsupported:
+            read_evidence()
+        raise TypeError(
+            "read_file does not accept "
+            + ", ".join(sorted(unsupported))
+            + "; it takes (path, offset, limit)"
+        )
     canonical = _safe_path(path)
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ValueError("offset must be a non-negative integer")

@@ -7,6 +7,10 @@ from orbit.backend.base import ChatResult, Message, StreamProgress, TokenCount
 
 
 EVIDENCE_REF_MARKER = "tool_evidence_ref: true"
+
+#: Replaces a compacted tool call's arguments. The program is not lost: it
+#: produced the archived result beside it and is readable in that record.
+_ARCHIVED_ARGUMENTS = '{"archived": true}'
 DEFAULT_NEXT_ACTION_RESERVE = 256
 DEFAULT_SAFETY_MARGIN = 256
 
@@ -434,7 +438,26 @@ def _eligible_tool_turn(
     available: frozenset[str],
     covered: frozenset[str],
 ) -> bool:
-    if turn.final_index is None or not turn.evidence_ids or turn.contains_embedded_system:
+    # A turn may be externalised when it is COMPLETE and everything it holds
+    # can be read back exactly. "Complete" was read as "ends in an assistant
+    # reply", which is how a CHAT turn ends -- but an ANALYSIS loop step ends
+    # on the tool result: the action ran, its output is in the store, and the
+    # model's next word opens the next turn.
+    #
+    # Measured on a live PowerShell run: every autonomous turn was therefore
+    # permanently ineligible, compaction never ran once, and history grew
+    # unbounded until admission refused at 6,140 tokens against an 8,192
+    # context with a 2,048 reserve. `available` held six re-attestable
+    # records the whole time; `final_index` alone kept them out.
+    #
+    # `_parse_turns` has already proved the turn is closed: it raises on a
+    # pending tool call, on an orphan result and on a message after a terminal
+    # assistant, and it clears `evidence_ids` unless EVERY result in the turn
+    # is a reference to a record. So a turn carrying evidence ids is one whose
+    # results are all archived and all pending calls answered -- which is the
+    # property this gate needs. A terminal assistant is one way to reach it,
+    # not the definition of it.
+    if not turn.evidence_ids or turn.contains_embedded_system:
         return False
     evidence = frozenset(turn.evidence_ids)
     return evidence.issubset(available) and evidence.issubset(covered)
@@ -453,8 +476,33 @@ def _project(messages: list[Message], turns: list[_Turn], selected: set[int]) ->
                 evidence_id = copied.get("evidence_id")
                 assert isinstance(evidence_id, str)
                 copied["content"] = _archive_tool_reference(evidence_id)
+            elif copied.get("role") == "assistant" and copied.get("tool_calls"):
+                # The request is archived with its result. In ANALYSIS the
+                # tool content is already a short reference, so collapsing
+                # only the results reclaims almost nothing: measured on a live
+                # PowerShell run, the assistant turns carrying the generated
+                # programs were 7,344 tokens of 9,180 -- 80% -- and grew about
+                # 1,224 per action, while the evidence side was 1,714.
+                #
+                # Only the arguments go. The id, type and name are kept
+                # exactly, because `_parse_turns` pairs results to calls by id
+                # and would reject a turn that lost one. The program itself
+                # stays readable: it produced the archived result beside it.
+                copied["tool_calls"] = [
+                    _archive_tool_call(call) for call in copied["tool_calls"]
+                ]
             projected.append(copied)
     return projected
+
+
+def _archive_tool_call(call: object) -> object:
+    """A tool call with its arguments archived and its identity untouched."""
+    if not isinstance(call, dict):
+        return call
+    function = call.get("function")
+    if not isinstance(function, dict):
+        return call
+    return {**call, "function": {**function, "arguments": _ARCHIVED_ARGUMENTS}}
 
 
 def _blocked(messages: list[Message], budget: ContextBudget, tokens: int | None, reason: str) -> ContextPlan:

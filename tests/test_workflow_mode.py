@@ -18,7 +18,13 @@ if str(SRC) not in sys.path:
 from orbit.backend.base import ChatResult, Message
 from orbit.runtime import ChatRuntime
 from orbit.runtime import analysis_runtime
-from orbit.runtime.analysis_runtime import ANALYSIS_AUTONOMY_ENV, ANALYSIS_TOOL_NAME, AnalysisRuntime
+from orbit.runtime.analysis_runtime import (
+    ANALYSIS_AUTONOMY_ENV,
+    ANALYSIS_TOOL_NAME,
+    AnalysisRuntime,
+    UNSUPPORTED_INDICATOR_FOOTER,
+    UNSUPPORTED_INLINE_MARK,
+)
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.sessions import SessionStore
 from orbit.runtime.tools import TOOL_NAMES
@@ -2737,7 +2743,19 @@ class RenderedAssistantTextTest(ModeTestBase):
 
         report = repl.analysis.report("what did you find")
 
-        self.assertEqual(report.text, HOSTILE_TEXT)
+        # `model_text` is the contract for the model's raw bytes: escapes and
+        # all, unsanitised, for the terminal layer to handle and for audit.
+        self.assertEqual(report.model_text, HOSTILE_TEXT)
+        # `text` is what gets published, and the hostile fixture names a URI
+        # no record supports -- exactly the case the consistency check exists
+        # for -- so that occurrence is marked where it is used. Removing only
+        # the marks must give the model's bytes back unchanged.
+        self.assertEqual(
+            report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
+            .lstrip("\n")
+            .replace(UNSUPPORTED_INLINE_MARK, ""),
+            HOSTILE_TEXT,
+        )
 
     def test_chat_result_keeps_the_original_unsanitized_text(self) -> None:
         backend = HostileTextBackend()
