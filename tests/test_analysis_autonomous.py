@@ -2159,3 +2159,42 @@ class SoftActionBudgetTests(AutonomousTestBase):
 
         self.assertEqual(run.actions_executed, 3)
         self.assertEqual(len(run.steps), 4, "the report is not a step")
+
+
+class ClosingReportIsOutsideTheLoopBudgetTests(AutonomousTestBase):
+    """`max_model_calls` bounds the loop; the closing report is one more.
+
+    Documented at `run_autonomous`'s docstring and implemented by counting
+    the report after the loop exits, but nothing pinned it -- so a live run
+    reporting 19 calls against an 18-call default read as an overrun until
+    the scope was reconciled by hand. It is a contract, so it is fixed here.
+    """
+
+    def test_a_bounded_run_spends_one_further_call_on_the_report(self) -> None:
+        backend = ScriptedBackend(
+            *[tool_response(emit(f"d{i}")) for i in range(40)],
+            prose_response("REPORT"),
+        )
+
+        run = self.runtime(backend).run_autonomous("inspect it", max_model_calls=6)
+
+        self.assertTrue(run.stop_reason.startswith(STOP_MAX_MODEL_CALLS),
+                        run.stop_reason)
+        # Six in the loop, one for the report: the figure reported is the
+        # figure spent, and it is the loop that the budget bounds.
+        self.assertEqual(run.model_calls, 7)
+
+    def test_a_cancelled_run_does_not_buy_the_extra_call(self) -> None:
+        """The +1 is for a report that happens, not an allowance."""
+        backend = ScriptedBackend(
+            *[tool_response(emit(f"d{i}")) for i in range(40)],
+            prose_response("REPORT"),
+        )
+
+        run = self.runtime(backend).run_autonomous(
+            "inspect it", max_model_calls=6, finalize=False
+        )
+
+        self.assertEqual(run.model_calls, 6)
+
+

@@ -22,7 +22,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orbit.runtime.analysis_runtime import ANALYSIS_TOOL_NAME
+from orbit.runtime.analysis_runtime import (
+    ANALYSIS_TOOL_NAME,
+    DETERMINISTIC_AUTHORITY_PREAMBLE,
+    UNSUPPORTED_INDICATOR_FOOTER,
+    UNSUPPORTED_INDICATOR_NOTICE,
+    UNSUPPORTED_INLINE_MARK,
+)
 from orbit.runtime.evidence_authority import (
     ACTIVE,
     SUPERSEDED,
@@ -406,6 +412,41 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
             '    "timing and file deletion as what they do; call them "\n'
             '    "evasion or anti-forensic only where a purpose is evidenced. Prefer a "\n'
             '    "plain description to a technique label when intent is not established.\\n"\n'
+            # ANALYSIS-IOC-4. The operational list is the runtime's: a
+            # report that wrote its own listed a corrupted host while the
+            # canonical section two below carried the right one, and a reader
+            # had no way to tell which was authoritative.
+            # ANALYSIS-IOC-3. Two live PowerShell runs wrote a corrupted host
+            # under Confirmed findings despite being given the exact value
+            # nine times in the prompt. Detection cannot fix a transcription
+            # failure, so the report no longer requires transcription: the
+            # model cites a token and the runtime substitutes the value.
+            '    "Never retype a network address: write the IOC- token the indicator list "\n'
+            '    "gives you and the exact value is substituted. An address you type "\n'
+            '    "yourself is unsupported even when you meant the right one.\\n"\n'
+            # ANALYSIS-IOC-4. The operational list is the runtime's: a report
+            # that wrote its own listed a corrupted host while the canonical
+            # section below carried the right one, and a reader had no way to
+            # tell which was authoritative.
+            '    "Do not write an indicators list of your own: the runtime publishes that "\n'
+            '    "section from the canonical records, and a second list can only "\n'
+            '    "contradict it.\\n"\n'
+            # ANALYSIS-IOC-5. A live report titled a section "Self-persisting
+            # dropper behaviour" while its own body described write-run-delete
+            # with no re-execution mechanism -- an intent label in a heading,
+            # the same class as "Beaconing" for a single fetch. A heading is a
+            # claim and the instruction now says so.
+            '    "A section heading is a claim too: do not title a section beaconing, "\n'
+            '    "persistence, evasion or anti-forensic unless the evidence shows the "\n'
+            '    "mechanism, exactly as for a sentence. A heading its own body walks back "\n'
+            '    "is worse than no heading.\\n"\n'
+            # ANALYSIS-IOC-2. A live PowerShell report again headed a section
+            # "Beaconing" for a single fetch-and-execute, having correctly
+            # refused "persistence" and "anti-forensics" in the same report.
+            # The bar was stated once, mid-sentence, beside two others; this
+            # states the beaconing case as concretely as the staging one.
+            '    "A payload fetched once and run once is retrieval and execution, not "\n'
+            '    "beaconing.\\n"\n'
             '    "This analysis is offline and isolated: the next step must be one that "\n'
             '    "can be taken here, on the artifact and the evidence. Retrieving a "\n'
             '    "remote resource is not that step, though it may be named as separately "\n'
@@ -696,6 +737,875 @@ class FinalizationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(report.model_calls, 1)
         self.assertEqual(backend.calls, 2)
+
+
+class _StubBackend:
+    """Never called: these tests inspect the prompt, not a reply."""
+
+    def chat_stream(self, *args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("no model call expected")
+
+
+class _ReportingBackend:
+    """Returns one fixed narrative, so the test controls what the report says."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
+                    on_delta, on_progress=None):
+        from orbit.backend.base import ChatResult
+
+        if on_delta is not None:
+            on_delta(self.text)
+        return ChatResult(
+            content=self.text, model="stub", finish_reason="stop", tool_calls=[],
+            prompt_tokens=1, completion_tokens=1, cached_tokens=0,
+            prompt_tokens_per_second=None, generation_tokens_per_second=None,
+        )
+
+
+class DeterministicFactsReachTheReportTests(unittest.TestCase):
+    """A value the runtime decoded exactly must reach the model that writes about it.
+
+    Measured on a live run: the runtime had decoded the artifact's real C2 and
+    three WMI strings, every one of them was excluded from the report prompt
+    because the appendix renders them -- and the appendix is concatenated
+    AFTER generation. The model wrote its narrative having never seen them,
+    supplied an endpoint of its own, and cited the evidence ids whose exact
+    contents said otherwise.
+    """
+
+    #: One PowerShell numeric-XOR stage, in the shape the deobfuscator
+    #: recognises, carrying a URL chosen by the test. Nothing here is taken
+    #: from any real sample: the point is that the runtime decodes it and the
+    #: report has to agree with what came out.
+    DECODED_URL = "http://example-c2.test/a.php?s=SYNTH"
+
+    def _artifact_text(self, url: str) -> str:
+        key = 34
+        blob = ",".join(str(ord(c) ^ key) for c in url)
+        return (
+            "powershell -noprofile -WindowStyle hidden -C "
+            f"\"$a='{blob}';$k={key};$out='';"
+            "$parts=$a -split ',';foreach($p in $parts)"
+            "{$out=$out+[char]([int]$p -bxor $k)};iex $out\"\n"
+        )
+
+    def _runtime(self, backend, url: str | None = None):
+        import tempfile
+
+        from orbit.runtime.analysis_runtime import (
+            AnalysisRuntime, AnalysisWorkspace, acquire_analysis_source,
+        )
+        from orbit.runtime.evidence import EvidenceStore
+
+        tmp = Path(tempfile.mkdtemp(prefix="orbit-grounding-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        artifact = tmp / "sample.js"
+        artifact.write_text(self._artifact_text(url or self.DECODED_URL))
+        ws = AnalysisWorkspace.create()
+        self.addCleanup(ws.close)
+        built = AnalysisRuntime(
+            backend=backend,
+            source=acquire_analysis_source(artifact, ws.source_root),
+            evidence_store=EvidenceStore(root=tmp / "ev"),
+            workspace=ws,
+        )
+        self.addCleanup(built.close)
+        built._run_transform_preflight()
+        return built
+
+    def _with_one_action(self, backend, url: str | None = None):
+        """A runtime that also holds one ACTION record, so report() takes the
+        evidence-grounded path rather than the zero-call "no evidence" one."""
+        runtime = self._runtime(backend, url)
+        runtime.evidence_store.add(
+            ANALYSIS_TOOL_NAME,
+            "status: ok",
+            metadata={
+                "analysis_source_sha256": runtime.source.sha256,
+                "tool_call_id": "call_1",
+                "user_turn_id": "turn_1",
+                "produced_by_phase": "analysis_action",
+            },
+        )
+        return runtime
+
+    def test_a_decoded_value_is_in_the_prompt_the_model_answers(self) -> None:
+        """The failing boundary: what report() puts in front of the model."""
+        runtime = self._runtime(_StubBackend())
+
+        messages = runtime._report_messages(
+            "What does this establish?", runtime._reportable_records()
+        )
+        prompt = " ".join(str(m.get("content", "")) for m in messages)
+
+        self.assertIn(self.DECODED_URL, prompt)
+
+    def test_the_decoded_value_is_marked_as_outranking_other_text(self) -> None:
+        """It must be usable as authority, not read as one more opinion."""
+        runtime = self._runtime(_StubBackend())
+
+        messages = runtime._report_messages("", runtime._reportable_records())
+        prompt = " ".join(str(m.get("content", "")) for m in messages)
+
+        self.assertIn(DETERMINISTIC_AUTHORITY_PREAMBLE, prompt)
+        self.assertLess(
+            prompt.index(DETERMINISTIC_AUTHORITY_PREAMBLE),
+            prompt.index("Evidence collected so far"),
+            "the authoritative values must precede the citable cards",
+        )
+
+    def test_an_endpoint_the_artifact_never_contained_is_marked_unsupported(
+        self,
+    ) -> None:
+        """The exact live failure: an invented address, cited as a finding."""
+        invented = "http://198.51.100.7:4444/payload.ps1"
+        runtime = self._with_one_action(
+            _ReportingBackend(f"The dropper downloads from {invented} and runs it.")
+        )
+
+        report = runtime.report("what is it")
+
+        self.assertIn(UNSUPPORTED_INDICATOR_NOTICE, report.text)
+        self.assertIn(invented, report.text.split(UNSUPPORTED_INDICATOR_NOTICE)[1])
+
+    def test_a_near_miss_is_answered_with_provenance_not_a_replacement(
+        self,
+    ) -> None:
+        """Measured live: the model wrote `gibuyuy37v2v` for `gibuzuy37v2v`.
+
+        The answer is what the records DO contain, not a guess at what was
+        meant. Equal length and one differing character does not prove two
+        hostnames are the same endpoint.
+        """
+        near = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        self.assertEqual(len(near), len(self.DECODED_URL))
+        runtime = self._with_one_action(
+            _ReportingBackend(f"The script contacts {near} and runs the reply.")
+        )
+
+        report = runtime.report("what is it")
+
+        self.assertIn(UNSUPPORTED_INDICATOR_NOTICE, report.text)
+        self.assertIn("UNSUPPORTED: no evidence record contains this value",
+                      report.text)
+        # The recovered value is named, WITH the record that holds it...
+        self.assertIn(self.DECODED_URL, report.text)
+        # ...and the runtime does not decide which one was meant.
+        self.assertIn("NOT established", report.text)
+        self.assertNotIn("differs by ONE character", report.text)
+
+    def test_the_warning_precedes_the_narrative_it_rejects(self) -> None:
+        """A trailing notice cannot repair a confirmed claim already read."""
+        near = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        runtime = self._with_one_action(
+            _ReportingBackend(
+                "## Confirmed findings\n\n" + f"The C2 is {near}. " * 5
+            )
+        )
+
+        report = runtime.report("what is it")
+
+        self.assertTrue(
+            report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE),
+            "the rejection must lead the report, not trail it",
+        )
+        # The model's own words are still quoted, because repudiating a claim
+        # requires showing it.
+        self.assertIn(near, report.text)
+        self.assertIn(near, report.model_text)
+        self.assertFalse(report.model_text.startswith(UNSUPPORTED_INDICATOR_NOTICE))
+
+    def test_two_distinct_recovered_endpoints_are_both_named(self) -> None:
+        """Two real endpoints one character apart are not each other."""
+        from orbit.runtime.analysis_runtime import _unsupported_line
+
+        provenance = {
+            "http://a1.example.test/x": ["ev_aaa"],
+            "http://a2.example.test/x": ["ev_bbb"],
+        }
+        line = _unsupported_line("http://a3.example.test/x", provenance)
+
+        self.assertIn("ev_aaa", line)
+        self.assertIn("ev_bbb", line)
+        self.assertIn("NOT established", line)
+
+    def test_an_unsupported_endpoint_is_marked_where_it_is_used(self) -> None:
+        """A leading warning does not stop a later sentence confirming it.
+
+        Measured on two independent live PowerShell runs: given the correct
+        host nine times in its prompt, the model wrote a one-token-shorter
+        form under "Confirmed findings" -- "The URI is confirmed" beside a
+        value no record holds, citing a real evidence id.
+        """
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\n**The URI is confirmed.** {wrong} appears "
+            f"in the artifact.\n\n## Artifacts produced\n\n- writes {wrong}"
+        ))
+
+        report = runtime.report("what is it")
+
+        body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
+        # No occurrence is left standing unqualified.
+        for piece in body.split(wrong)[1:]:
+            self.assertTrue(
+                piece.startswith(UNSUPPORTED_INLINE_MARK),
+                "an unsupported endpoint was left unmarked at the point of use",
+            )
+
+    def test_marking_never_rewrites_the_model_text(self) -> None:
+        """Removing only the marks must return the model's words exactly."""
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        narrative = (
+            f"## Confirmed findings\n\nIt contacts {wrong} and also names "
+            f"the bare host {wrong.split('//')[1].split('/')[0]} later."
+        )
+        runtime = self._with_one_action(_ReportingBackend(narrative))
+
+        report = runtime.report("what is it")
+
+        body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1].lstrip("\n")
+        body = body.split("\n\n## Verified indicators")[0]
+        self.assertEqual(body.replace(UNSUPPORTED_INLINE_MARK, ""), narrative)
+        # And the untouched original is kept for audit.
+        self.assertEqual(report.model_text, narrative)
+
+    def test_a_bare_authority_beside_the_uri_is_marked_too(self) -> None:
+        """A narrative names an endpoint both ways; both must be qualified.
+
+        KNOWN LIMIT, stated rather than implied: detection is by URI, so a
+        report that named ONLY a bare hostname and never a URI would raise
+        nothing to mark. That case is not covered here and is not claimed to
+        be -- on both live PowerShell runs the bare host appeared only
+        alongside the wrong URI, which is what this marks.
+        """
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        host = wrong.split("//")[1].split("/")[0]
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\nIt contacts {wrong}.\n"
+            f"The host is {host}, seen again."
+        ))
+
+        report = runtime.report("what is it")
+
+        body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
+        # The URI keeps its mark, and the bare host gets one of its own.
+        self.assertIn(wrong + UNSUPPORTED_INLINE_MARK, body)
+        self.assertIn(host + UNSUPPORTED_INLINE_MARK + ", seen again", body)
+
+    def test_a_canonical_reference_resolves_to_the_exact_value(self) -> None:
+        """The model cites a token; the runtime writes the address.
+
+        This is the half that removes the failure instead of detecting it.
+        Two live PowerShell runs wrote a corrupted host under Confirmed
+        findings while the prompt held the exact value nine times, so the
+        report no longer asks the model to transcribe an address at all.
+        """
+        from orbit.runtime.analysis_runtime import _indicator_token
+
+        runtime = self._with_one_action(_StubBackend())
+        indicators = runtime.canonical_indicators()
+        self.assertTrue(indicators, "the fixture must recover one indicator")
+        token = _indicator_token(indicators[0])
+
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\nIt contacts {token} once."
+        ))
+        report = runtime.report("what is it")
+
+        body = report.text.split("## Verified indicators")[0]
+        self.assertIn(self.DECODED_URL, body)
+        self.assertNotIn(token, body, "the token must not survive into the report")
+        # Nothing is flagged: a resolved reference is a recovered value.
+        self.assertNotIn(UNSUPPORTED_INDICATOR_NOTICE, report.text)
+        # And the model's own words are kept for audit.
+        self.assertIn(token, report.model_text)
+
+    def test_an_unknown_reference_resolves_to_nothing(self) -> None:
+        """No nearest match, no guess, no false confirmation."""
+        from orbit.runtime.analysis_runtime import UNRESOLVED_REFERENCE_MARK
+
+        runtime = self._with_one_action(_ReportingBackend(
+            "## Confirmed findings\n\nIt contacts IOC-deadbeef once."
+        ))
+
+        report = runtime.report("what is it")
+
+        self.assertIn(UNRESOLVED_REFERENCE_MARK, report.text)
+        self.assertNotIn(self.DECODED_URL,
+                         report.text.split("## Verified indicators")[0])
+
+    def test_the_reference_table_reaches_the_prompt(self) -> None:
+        """A token the model never saw cannot be cited."""
+        from orbit.runtime.analysis_runtime import _indicator_token
+
+        runtime = self._with_one_action(_StubBackend())
+        token = _indicator_token(runtime.canonical_indicators()[0])
+        runtime = self._with_one_action(_ReportingBackend("ok"))
+
+        messages = runtime._report_messages("x", runtime._reportable_records())
+        prompt = " ".join(str(m.get("content", "")) for m in messages)
+
+        self.assertIn(token, prompt)
+        self.assertIn(self.DECODED_URL, prompt)
+
+    def test_a_token_identifies_one_indicator_not_a_record(self) -> None:
+        """Digest-derived, so several indicators in one record stay distinct."""
+        from orbit.runtime.analysis_runtime import _indicator_token
+        from orbit.runtime.analysis_indicators import Indicator
+
+        one = Indicator(kind="uri", value="http://a.test/x", evidence_id="ev_1",
+                        source="s", line=1, sha256="a" * 64)
+        two = Indicator(kind="uri", value="http://b.test/x", evidence_id="ev_1",
+                        source="s", line=1, sha256="b" * 64)
+
+        self.assertNotEqual(_indicator_token(one), _indicator_token(two))
+
+    def test_the_model_cannot_publish_its_own_indicator_list(self) -> None:
+        """One operational section, and the runtime owns it.
+
+        Measured live: a report listed a corrupted host under its own
+        "Indicators" while the canonical section two below carried the right
+        one. A reader has no way to tell which is authoritative, so the
+        model's list does not reach the document -- for every run, whether
+        the value it would have written was right or wrong.
+        """
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\nIt runs a payload.\n\n"
+            f"## Indicators\n\n- URI: {wrong}\n\n"
+            f"## Behaviour established\n\nIt fetches once."
+        ))
+
+        report = runtime.report("what is it")
+
+        # The model's list is gone from the BODY; the canonical section
+        # remains. The fabricated value still appears in the notice, because
+        # deleting the section must not delete the evidence that the report
+        # invented an address -- a reader shown a clean document would never
+        # learn it happened.
+        body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
+        self.assertNotIn(wrong, body)
+        self.assertIn(wrong, report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[0])
+        self.assertIn(self.DECODED_URL, report.text)
+        self.assertIn("Verified indicators", report.text)
+        # The surrounding analysis is untouched.
+        self.assertIn("It runs a payload.", report.text)
+        self.assertIn("It fetches once.", report.text)
+        # And the original is kept for audit.
+        self.assertIn(wrong, report.model_text)
+
+    def test_a_correct_indicator_list_is_dropped_too(self) -> None:
+        """The rule is the contract, not a per-run judgement of correctness."""
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\nIt runs a payload.\n\n"
+            f"## Indicators\n\n- URI: {self.DECODED_URL}\n"
+        ))
+
+        report = runtime.report("what is it")
+
+        published = report.text.split("## Indicators", 1)[1].split("##", 1)[0]
+        self.assertNotIn("- URI:", published,
+                         "the model's list must not survive, right or wrong")
+        self.assertIn("Verified indicators", report.text)
+
+    def test_dropping_the_list_does_not_excuse_prose(self) -> None:
+        """Moving a false claim into a sentence must not escape the check."""
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\nThe downloader contacts {wrong}."
+        ))
+
+        report = runtime.report("what is it")
+
+        self.assertTrue(report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE))
+        self.assertIn(wrong + UNSUPPORTED_INLINE_MARK, report.text)
+
+    def test_a_fabricated_query_on_a_real_host_is_flagged(self) -> None:
+        """A superset of a recovered URI is a different endpoint.
+
+        Containment ran both ways, so appending invented exfiltration
+        parameters to a genuine host raised nothing: no notice, no inline
+        mark, and the scorers used the same rule so they missed it too.
+        """
+        from orbit.runtime.analysis_runtime import _unsupported_indicators
+
+        known = {self.DECODED_URL}
+        invented = f"{self.DECODED_URL}&cmd=exfil&target=192.168.1.1"
+
+        self.assertEqual(
+            _unsupported_indicators(f"It posts to {invented}.", known),
+            [invented],
+        )
+        # Quoting LESS than the record holds is still the recovered endpoint.
+        shorter = self.DECODED_URL.split("?")[0]
+        self.assertEqual(_unsupported_indicators(f"It hits {shorter}.", known), [])
+
+    def test_a_heading_inside_a_code_fence_is_not_a_section(self) -> None:
+        """Dropping one ate the quoted source and the analysis after it."""
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = (
+            "## Confirmed findings\n\nThe script contains:\n\n```powershell\n"
+            "# Indicators\n$u = 'http://quoted.test/x'\n```\n\n"
+            "That is retrieval, not beaconing.\n\n## Behaviour\n\nfetches once.\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("That is retrieval, not beaconing.", out)
+        self.assertIn("http://quoted.test/x", out)
+        self.assertEqual(out.count("```"), 2, "the closing fence must survive")
+
+    def test_a_fabrication_only_in_the_dropped_list_is_still_reported(
+        self,
+    ) -> None:
+        """Removing the section must not remove the evidence it was wrong.
+
+        A fabricated endpoint that appears ONLY under the model's own
+        indicators heading was deleted before the consistency check ran: no
+        notice, no mark, nothing. The reader was shown a clean document about
+        a report that had invented an address.
+        """
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\nIt runs a payload.\n\n"
+            f"## Indicators\n\n- URI: {wrong}\n"
+        ))
+
+        report = runtime.report("what is it")
+
+        self.assertTrue(report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE))
+        notice = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[0]
+        self.assertIn(wrong, notice)
+
+    def _covered_runtime(self, backend):
+        """A runtime on the covered path: source supplied, no action evidence.
+
+        `report()` routes here when there is nothing to cite but the model
+        was given the whole artifact. The path was entirely untested, so
+        removing any of its three layers passed the suite.
+        """
+        runtime = self._runtime(backend)
+        runtime.messages.append(
+            {"role": "user", "content": "artifact", "source_covered": True}
+        )
+        runtime.messages.append({"role": "assistant", "content": "seen"})
+        self.assertTrue(runtime.source_covered)
+        self.assertEqual(runtime._reportable_records(), [])
+        return runtime
+
+    def test_the_covered_path_drops_the_model_list_too(self) -> None:
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        runtime = self._covered_runtime(_ReportingBackend(
+            f"## Confirmed findings\n\nx\n\n## Indicators\n\n- URI: {wrong}\n"
+        ))
+
+        report = runtime.report("what is it")
+
+        body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1] \
+            if UNSUPPORTED_INDICATOR_FOOTER in report.text else report.text
+        self.assertNotIn(wrong, body)
+
+    def test_the_covered_path_resolves_references(self) -> None:
+        from orbit.runtime.analysis_runtime import _indicator_token
+
+        probe = self._covered_runtime(_StubBackend())
+        token = _indicator_token(probe.canonical_indicators()[0])
+        runtime = self._covered_runtime(_ReportingBackend(
+            f"## Confirmed findings\n\nIt contacts {token} once."
+        ))
+
+        report = runtime.report("what is it")
+
+        self.assertIn(self.DECODED_URL, report.text)
+        self.assertNotIn(token, report.text)
+
+    def test_the_covered_path_keeps_the_original_for_audit(self) -> None:
+        narrative = "## Confirmed findings\n\nIt runs a payload.\n"
+        runtime = self._covered_runtime(_ReportingBackend(narrative))
+
+        report = runtime.report("what is it")
+
+        self.assertEqual(report.model_text.rstrip(), narrative.rstrip())
+
+    def test_a_fence_line_must_be_only_a_fence(self) -> None:
+        """An inline span at line start is not an opening fence.
+
+        Matching any line beginning with the marker counted ```short``` as a
+        fence, inverted the parity of everything after it, and put a real
+        fenced block outside a fence -- deleting the analysis the guard exists
+        to protect.
+        """
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = (
+            "```short``` is the marker.\n\n## Confirmed findings\n\nSource:\n\n"
+            "```powershell\n## Indicators\n$u='http://quoted.test/x'\n```\n\n"
+            "Critical analysis that must survive.\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("Critical analysis that must survive.", out)
+        self.assertIn("http://quoted.test/x", out)
+
+    def test_an_unterminated_fence_runs_to_the_end(self) -> None:
+        """A block the model never closed is still quoted text, not sections."""
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = (
+            "## Confirmed findings\n\nSource:\n\n```powershell\n"
+            "## Indicators\n$u='http://quoted.test/x'\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("http://quoted.test/x", out)
+
+    def test_an_indented_fence_is_still_a_fence(self) -> None:
+        """Up to three spaces of indent, per CommonMark -- lists nest code."""
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        # The fence is indented; the heading inside it is not, so only fence
+        # recognition decides whether the block is quoted text or sections.
+        text = (
+            "## Confirmed findings\n\n- the script contains:\n\n   ```\n"
+            "## Indicators\n$u='http://quoted.test/x'\n   ```\n\nkeep me.\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("keep me.", out)
+        self.assertIn("http://quoted.test/x", out)
+
+    def test_a_backtick_in_a_code_info_string_still_opens_a_fence(self) -> None:
+        """```python` must protect its block, not delete it.
+
+        Rejecting any backtick in the info string dropped the quoted section
+        and inverted the parity of everything after it -- the exact class the
+        fence guard exists to prevent, back one backtick away.
+        """
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = (
+            "## Confirmed findings\n\n```python`\n## Indicators\n"
+            "$u='http://quoted.test/x'\n```\n\n## Conclusion\n\nkeep me.\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("keep me.", out)
+        self.assertIn("http://quoted.test/x", out)
+
+    def test_a_longer_fence_is_not_closed_by_a_shorter_run(self) -> None:
+        """A ``` inside a ```` block is content, not a terminator."""
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = (
+            "## Confirmed findings\n\n````\n## Indicators\n```\n"
+            "data='http://quoted.test/x'\n````\n\nkeep me.\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("keep me.", out)
+        self.assertIn("http://quoted.test/x", out)
+
+    def test_a_tilde_inline_span_is_not_a_fence(self) -> None:
+        """~~~x~~~ at line start opens and closes on one line."""
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = (
+            "~~~x~~~ is the marker.\n\n## Confirmed findings\n\n```\n"
+            "## Indicators\nu='http://quoted.test/x'\n```\n\nkeep me.\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("keep me.", out)
+        self.assertIn("http://quoted.test/x", out)
+
+    def test_a_fence_closes_only_on_its_own_marker(self) -> None:
+        """``` does not close ~~~, so the block stays a block."""
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = (
+            "## Confirmed findings\n\n~~~\n## Indicators\nx\n~~~\n\nkeep me.\n"
+        )
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("keep me.", out)
+
+    def test_only_headings_that_are_the_list_are_dropped(self) -> None:
+        """The heading must READ as the operational list, not merely mention it.
+
+        An exact-title list let "Indicators of compromise" through. Matching
+        on words alone then went too far and removed "No indicators found" --
+        a statement, not a list -- and "Indicators and next steps", which
+        carries analysis this contract has no business deleting.
+        """
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        owned = ("Indicators", "Indicator", "IOC", "IOCs",
+                 "Indicators of compromise", "Network indicators",
+                 "Indicators (network)")
+        kept = ("Behaviour indicators", "No indicators found",
+                "Indicators and next steps", "Confirmed findings",
+                "Summary", "What remains unresolved")
+
+        for heading in owned:
+            with self.subTest(heading=heading, expect="dropped"):
+                text = (f"## Confirmed findings\n\nx\n\n## {heading}\n\n"
+                        "- URI: http://bad.test/y\n\n## Behaviour\n\ny\n")
+                out, dropped = _drop_runtime_owned_sections(text)
+                self.assertEqual(dropped, [heading])
+                self.assertNotIn("http://bad.test/y", out)
+                self.assertIn("## Behaviour", out)
+
+        for heading in kept:
+            with self.subTest(heading=heading, expect="kept"):
+                text = (f"## Confirmed findings\n\nx\n\n## {heading}\n\n"
+                        "- the analysis says this\n\n## Behaviour\n\ny\n")
+                out, dropped = _drop_runtime_owned_sections(text)
+                self.assertEqual(dropped, [])
+                self.assertIn("the analysis says this", out)
+
+    def test_the_original_text_is_persisted_for_audit(self) -> None:
+        """The notice says the original is kept; it has to actually be kept.
+
+        A dropped section exists nowhere else, so without this the audit
+        trail the document promises did not exist on disk.
+        """
+        import json
+        import os
+        import pathlib
+        import tempfile
+
+        retain = pathlib.Path(tempfile.mkdtemp(prefix="orbit-retain-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(retain, ignore_errors=True))
+        previous = os.environ.get("ORBIT_ANALYSIS_RETAIN_DIR")
+        os.environ["ORBIT_ANALYSIS_RETAIN_DIR"] = str(retain)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("ORBIT_ANALYSIS_RETAIN_DIR", previous)
+            if previous is not None
+            else os.environ.pop("ORBIT_ANALYSIS_RETAIN_DIR", None)
+        )
+
+        runtime = self._with_one_action(_ReportingBackend(
+            "## Confirmed findings\n\nx\n\n## Indicators\n\n- URI: http://bad.test/y\n"
+        ))
+        report = runtime.report("what is it")
+
+        rows = [
+            json.loads(line)
+            for line in (retain / "report_admission.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        persisted = [row for row in rows if row.get("model_text")]
+        self.assertTrue(persisted, "the model's text reached no diagnostic file")
+        self.assertIn("http://bad.test/y", persisted[-1]["model_text"])
+        # The published BODY is clean; the notice still reports what the
+        # model claimed, so the removal is visible rather than silent.
+        body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
+        self.assertNotIn("http://bad.test/y", body)
+
+    def test_the_real_decoded_endpoint_is_not_flagged(self) -> None:
+        """The check must not cry wolf over the value the runtime itself decoded."""
+        runtime = self._with_one_action(
+            _ReportingBackend(f"It contacts {self.DECODED_URL} once.")
+        )
+
+        report = runtime.report("what is it")
+
+        self.assertNotIn(UNSUPPORTED_INDICATOR_NOTICE, report.text)
+
+    def test_many_quotable_records_still_fit_the_report_prompt(self) -> None:
+        """Each record under the per-record bound, the sum over it.
+
+        Measured live: five action records of ~3,092 chars are each under
+        MAX_REPORT_EVIDENCE_QUOTE_CHARS and together rendered a 19,225-char
+        user message that admission refused outright -- so a run that had
+        done its work produced an appendix and no narrative.
+        """
+        # A tokenising backend, because that is the production path and the
+        # one the live failure exercised; the char fallback is deliberately
+        # looser and would not demote at this size.
+        class _Tokenising:
+            def count_text_tokens(self, text: str):
+                from types import SimpleNamespace
+
+                # ~2.0 chars/token. Measured against the real tokeniser, a
+                # card is a mix: obfuscated payload runs at 1.17 but the
+                # surrounding metadata is structured text and tokenises far
+                # better, so a whole `final_card` of 1,654 chars costs 812
+                # tokens rather than the 1,413 a flat payload density predicts.
+                return SimpleNamespace(
+                    tokens=max(1, int(len(text) / 2.0)), context_tokens=8192
+                )
+
+            def chat_stream(self, *args, **kwargs):  # pragma: no cover
+                raise AssertionError("no model call expected")
+
+        runtime = self._runtime(_Tokenising())
+        for index, size in enumerate((3070, 3092, 1804, 3092, 3092), start=1):
+            runtime.evidence_store.add(
+                ANALYSIS_TOOL_NAME, "x" * size,
+                metadata={
+                    "analysis_source_sha256": runtime.source.sha256,
+                    "tool_call_id": f"call_{index}",
+                    "user_turn_id": f"turn_{index}",
+                    "produced_by_phase": "analysis_action",
+                },
+            )
+
+        records = runtime._reportable_records()
+        messages = runtime._report_messages("report it", records)
+        user = messages[1]["content"]
+
+        self.assertEqual(len(records), 5, "every record is still carried")
+        # The stub backend cannot tokenise, so the char fallback applies.
+        # 19,225 was the live failure; a demoted record still costs a citation
+        # with size, digest and raw_ref, so the floor is the number of records
+        # rather than zero.
+        # 19,225 was the live failure. The char fallback is looser than the
+        # token path by design -- without a tokeniser there is nothing to be
+        # precise with -- so this asserts the bound binds, not that it is tight.
+        self.assertLess(
+            len(user), 19000,
+            f"report prompt is {len(user)} chars; the aggregate budget did not bind",
+        )
+        cards = runtime._evidence_cards(records)
+        self.assertGreaterEqual(
+            sum(1 for card in cards if "raw_ref" in card), 1,
+            "the budget must demote older records, not quote them all",
+        )
+        # How MANY survive depends on the window, and this fixture's is
+        # narrower than the live one -- the replayed failures carried all five.
+        # What must hold at any size is that the newest is never the one
+        # dropped, since a report cites what it just learned.
+        self.assertGreaterEqual(len(cards), 1)
+        self.assertIn(
+            records[-1].evidence_id, "\n".join(cards),
+            "the newest record must always be carried",
+        )
+        # Demotion must not cost the facts the report has to state exactly.
+        self.assertIn(self.DECODED_URL, user)
+
+    def test_the_budget_is_capped_by_what_the_context_actually_leaves(
+        self,
+    ) -> None:
+        """A fixed evidence budget bounds the evidence, not the prompt.
+
+        Measured live: five records came to 6,364 tokens -- inside an 8,192
+        context -- and admission refused anyway, because it reserves
+        generation space the evidence budget never saw. Over by 220 tokens,
+        which no constant chosen in advance would catch for every artifact.
+        """
+
+        class _Tokenising:
+            """A backend that tokenises and reports a small window."""
+
+            context = 2000
+
+            def count_text_tokens(self, text: str):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(
+                    tokens=max(1, len(text) // 4), context_tokens=self.context
+                )
+
+            def chat_stream(self, *args, **kwargs):  # pragma: no cover
+                raise AssertionError("no model call expected")
+
+        runtime = self._runtime(_Tokenising())
+        for index in range(1, 6):
+            runtime.evidence_store.add(
+                ANALYSIS_TOOL_NAME, "z" * 3000,
+                metadata={
+                    "analysis_source_sha256": runtime.source.sha256,
+                    "tool_call_id": f"call_{index}",
+                    "user_turn_id": f"turn_{index}",
+                    "produced_by_phase": "analysis_action",
+                },
+            )
+
+        records = runtime._reportable_records()
+        cards = runtime._evidence_cards(records)
+
+        # The window leaves almost nothing, so nothing is quoted whole and
+        # the prompt is bounded by dropping the oldest rather than overflowing.
+        self.assertTrue(
+            all("raw_ref" in card for card in cards),
+            "a context this small must demote every record it carries",
+        )
+        self.assertLess(
+            len(cards), len(records),
+            "a context this small must also drop what it cannot even cite",
+        )
+        # What IS carried is the newest, and it is carried by id.
+        joined = "\n".join(cards)
+        for card in cards:
+            self.assertIn("raw_ref", card)
+        self.assertIn(records[-1].evidence_id, joined,
+                      "the newest record must survive")
+
+    def test_a_demoted_record_is_cited_not_dropped(self) -> None:
+        """Over budget means carried as a citation, never silently removed."""
+        runtime = self._runtime(_StubBackend())
+        for index in range(1, 7):
+            runtime.evidence_store.add(
+                ANALYSIS_TOOL_NAME, f"RECORD{index}-" + "y" * 3000,
+                metadata={
+                    "analysis_source_sha256": runtime.source.sha256,
+                    "tool_call_id": f"call_{index}",
+                    "user_turn_id": f"turn_{index}",
+                    "produced_by_phase": "analysis_action",
+                },
+            )
+
+        records = runtime._reportable_records()
+        cards = "\n".join(runtime._evidence_cards(records))
+
+        # Every record appears by id, whether quoted whole or cited: the
+        # budget is spent on citations first, so nothing is dropped while the
+        # floor still fits.
+        for record in records:
+            self.assertIn(record.evidence_id, cards, record.evidence_id)
+        # The newest keeps its text; older ones are demoted to citations.
+        self.assertIn("RECORD6", cards)
+
+    def test_a_model_summary_is_labelled_as_unverified_not_as_evidence(self) -> None:
+        """A FINISH summary is interpretation; the dossier must not promote it."""
+        from orbit.runtime.analysis_controller import AnalysisController
+
+        controller = AnalysisController()
+        controller.adopt_plan([
+            {"question": "what does it contact?", "missing_fact": "needs execution"}
+        ])
+        controller.activate_next()
+        controller.close_active(
+            "resolved",
+            summary="It contacts http://wrong.invalid/x.",
+            evidence_ids=("ev_abc123",),
+        )
+
+        dossier = controller.dossier()
+
+        self.assertIn("unverified", dossier.lower())
+        self.assertIn("cited by that claim", dossier)
 
 
 if __name__ == "__main__":

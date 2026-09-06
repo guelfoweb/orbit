@@ -312,9 +312,23 @@ class AnalysisController:
             head = f"{qid} [{state.status.upper()}]: {_one_line(question.question)}"
             lines.append(head)
             if state.summary:
-                lines.append(f"    {_one_line(state.summary)}")
+                # Labelled, because it is the model's own prose about the
+                # evidence and not the evidence itself. Rendered plainly it
+                # read as an established finding, and a later turn restated
+                # invented values from it while citing the ids beside it --
+                # ids whose exact contents said something else. The label
+                # does not make a false summary true; it stops the closing
+                # report treating one as authoritative.
+                lines.append(f"    claimed (unverified model summary): "
+                             f"{_one_line(state.summary)}")
             if state.evidence_ids:
-                lines.append(f"    evidence: {', '.join(state.evidence_ids)}")
+                # "cited by that claim", not "evidence for it": a valid id
+                # proves a record exists, never that the sentence beside it
+                # describes the record accurately.
+                lines.append(
+                    f"    evidence ids cited by that claim: "
+                    f"{', '.join(state.evidence_ids)}"
+                )
             if state.status != RESOLVED:
                 lines.append(
                     "    unresolved: "

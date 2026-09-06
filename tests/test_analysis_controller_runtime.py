@@ -2459,6 +2459,49 @@ class StalledQuestionYieldsToTheNextTests(_Case):
             f"soft budget overspent: {run.actions_executed} > 3",
         )
 
+    def test_the_last_question_is_blocked_by_its_own_stall(self) -> None:
+        """A stall that ends the run still belongs to the question that caused it.
+
+        Measured on a live run: Q1 and Q2 resolved, Q3 was activated, acted,
+        and repeated itself until the bound stopped the run. The scheduler was
+        right to stop -- nothing else was eligible -- but Q3 was left OPEN, so
+        the closing report was told only "no answer was established", which
+        reads as a question never reached rather than one the bound stopped.
+        """
+
+        class _StallsOnTheLast(_StallingModel):
+            def reply(self, tools, last: str):
+                names = [t["function"]["name"] for t in (tools or [])]
+                if FINISH_TOOL_NAME in names:
+                    self.finishes += 1
+                    return self._call(
+                        FINISH_TOOL_NAME,
+                        {"status": "resolved", "answer_summary": "answered"}
+                        if self.finishes <= 2
+                        else {"status": "still_open", "answer_summary": "more"},
+                    )
+                if ANALYSIS_TOOL_NAME in names:
+                    self.acts += 1
+                    return self._call(
+                        ANALYSIS_TOOL_NAME,
+                        {"code": f"print('d{self.acts}')" if self.acts <= 2
+                         else "print('SAME')"},
+                    )
+                return super().reply(tools, last)
+
+        model = _StallsOnTheLast(plan=[_question(f"q{i + 1}") for i in range(3)])
+        run, owners, controller = self._run_owners(model)
+
+        # The scheduler did its job: the last question was reached and acted.
+        self.assertIn("Q3", owners, owners)
+        self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS), run.stop_reason)
+        # And the question that stalled says so itself.
+        self.assertEqual(controller.states["Q3"].status, BLOCKED)
+        self.assertTrue(
+            controller.states["Q3"].reason.startswith(STOP_NO_PROGRESS),
+            controller.states["Q3"].reason,
+        )
+
     def test_continuing_past_a_stall_stays_inside_the_global_bounds(self) -> None:
         """Yielding to the next question spends budget; never beyond the ceiling."""
         model = _StallingModel(

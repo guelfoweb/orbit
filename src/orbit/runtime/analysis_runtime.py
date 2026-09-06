@@ -27,6 +27,7 @@ later exact-prefix KV strategy will need.
 from __future__ import annotations
 
 import hashlib
+from urllib.parse import urlsplit
 import json
 import os
 import re
@@ -84,7 +85,11 @@ from orbit.runtime.analysis_coverage import (
     decode_artifact,
     plan_coverage,
 )
-from orbit.runtime.analysis_indicators import extract_indicators, render_indicators
+from orbit.runtime.analysis_indicators import (
+    Indicator,
+    extract_indicators,
+    render_indicators,
+)
 from orbit.runtime.analysis_progress import (
     COMPLETE,
     ERROR,
@@ -215,6 +220,315 @@ MAX_REPORT_EVIDENCE_RECORDS = 12
 #: quotable before this bound existed and still is.
 MAX_REPORT_EVIDENCE_QUOTE_CHARS = 3200
 
+#: Total quoted evidence a report prompt may carry, across all records.
+#:
+#: The per-record bound above reasoned that a total budget was unnecessary
+#: because one oversized observation would be refused anyway. Measured on a
+#: live Fattura run that reasoning is wrong: five records of ~3,092 chars are
+#: each UNDER the per-record bound and together render a 19,225-char user
+#: message that admission refuses outright, so a successful analysis produced
+#: no narrative at all. The bound has to be on the sum as well as the item.
+#:
+#: Oldest records are demoted to `final_card` first, so the newest evidence --
+#: what the last actions established -- keeps its full text. Nothing is
+#: dropped: a demoted record is still cited with its size, digest and
+#: `raw_ref`, and the deterministic appendix is unaffected either way.
+#:
+#: Counted in TOKENS where the backend can tokenise, because characters are
+#: the wrong unit for this artifact class. Measured on the live Fattura
+#: evidence -- obfuscated JScript, long random identifiers -- one record of
+#: 3,091 chars is 2,648 tokens, i.e. 1.17 chars/token, against 5.22 for the
+#: system prompt. A char budget generous enough for ordinary prose admits
+#: four such records as 8,363 tokens and the whole prompt does not fit an
+#: 8,192 context at all.
+#: Headroom kept between a report prompt and the context ceiling: the question
+#: text, the dossier and the chat template's own framing are all real tokens
+#: this budget does not enumerate individually. Sized from the measured
+#: overshoot (220 tokens) with room to spare, because being slightly under is
+#: a shorter quote and being over is no report at all.
+REPORT_PROMPT_SAFETY_TOKENS = 1024
+
+MAX_REPORT_EVIDENCE_TOTAL_QUOTE_TOKENS = 3200
+
+#: Fallback when the backend cannot tokenise.
+#:
+#: Sized from the citation FLOOR rather than from the token budget: a
+#: `final_card` is ~1,650 chars, so a budget picked for token-dense evidence
+#: alone left room for two of them and dropped the rest -- turning a bound
+#: meant to compact the prompt into one that discards evidence. This is
+#: `MAX_REPORT_EVIDENCE_RECORDS` citations plus room to upgrade a few of them
+#: back to full quotes. A backend that cannot tokenise gets a looser bound
+#: than one that can, and that is the honest trade: without a tokeniser
+#: there is nothing to be precise with.
+MAX_REPORT_EVIDENCE_TOTAL_QUOTE_CHARS = 24000
+
+#: How a report names an indicator without retyping it. The token is derived
+#: from the indicator's own sha256, so it identifies exactly one value even
+#: when a single record carries several, and it never depends on iteration
+#: order. Short enough to write inline; long enough not to collide.
+INDICATOR_REFERENCE_PREFIX = "IOC-"
+_INDICATOR_REFERENCE_PATTERN = re.compile(r"\bIOC-[0-9a-f]{8}\b")
+
+INDICATOR_REFERENCE_PREAMBLE = (
+    "Indicators recovered from the artifact. Refer to one by its token and "
+    "the runtime substitutes the exact value when the report is composed. "
+    "Write the token, never the address: a mistyped address is a different "
+    "finding, and a token you did not read here resolves to nothing."
+)
+
+#: Marks a reference that names no known indicator. Nothing is substituted --
+#: there is no nearest match and choosing one would invent a finding.
+UNRESOLVED_REFERENCE_MARK = " [UNRESOLVED REFERENCE - names no known indicator]"
+
+
+def _indicator_token(indicator: "Indicator") -> str:
+    """The stable token for one indicator: its digest, abbreviated."""
+    return f"{INDICATOR_REFERENCE_PREFIX}{indicator.sha256[:8]}"
+
+
+UNSUPPORTED_INDICATOR_NOTICE = (
+    "## Consistency check\n\n"
+    "The runtime compared every network indicator named in the report below "
+    "against the indicators it recovered from the artifact itself. The "
+    "following appear in that report but in no authoritative record, so they "
+    "are NOT supported by this analysis and must not be actioned:"
+)
+
+
+UNSUPPORTED_INDICATOR_FOOTER = (
+    "The report below is the model's own output. Every unsupported endpoint "
+    "listed above is marked inline where it appears, so no sentence presents "
+    "one as a confirmed finding; nothing else is altered, and the original "
+    "text is kept in diagnostics."
+)
+
+#: Marks an unsupported endpoint at the point of use. A leading warning tells
+#: a reader the value is unsupported; it does not stop a later sentence
+#: reading "The URI is confirmed" beside it. Measured on two independent live
+#: PowerShell runs: the model was given the correct host nine times in its
+#: prompt and still wrote a one-token-shorter form under "Confirmed findings",
+#: citing a real evidence id whose record holds the other value.
+UNSUPPORTED_INLINE_MARK = " [UNSUPPORTED - not in any evidence record]"
+
+
+#: Headings whose content is the runtime's to produce, not the model's. A
+#: report that carries its own operational list can contradict the canonical
+#: one rendered beside it, and a reader has no way to tell which is
+#: authoritative. Matched case-insensitively on the heading text alone.
+#: Headings that ARE the operational list, in the forms reports actually use.
+#:
+#: An exact-title list let "Indicators of compromise" -- the conventional
+#: heading in malware reporting -- bypass the contract. Matching on the words
+#: alone then went too far the other way and removed "No indicators found"
+#: (a statement, not a list) and "Indicators and next steps" (which carries
+#: analysis this contract has no business deleting). So the heading must READ
+#: as the list: the noun, optionally qualified, and nothing else.
+_RUNTIME_OWNED_HEADING = re.compile(
+    r"^(?:network\s+|c2\s+|host\s+)?"
+    r"(?:indicators?|iocs?)"
+    r"(?:\s+of\s+compromise)?"
+    r"(?:\s*\(.*\))?$"
+)
+
+_HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
+#: A fence line, per CommonMark: at most three spaces of indent, a run of at
+#: least three identical markers, then only an info string -- no closing run
+#: on the same line. Matching any line that merely STARTS with the marker
+#: counted an inline span like ```short``` as an opening fence, inverted the
+#: parity of everything after it, and put a real fenced block outside a fence
+#: -- which deleted the analysis this guard exists to protect.
+_FENCE_PATTERN = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>[^\n]*)$", re.M)
+
+
+def _drop_runtime_owned_sections(text: str) -> tuple[str, list[str]]:
+    """Remove sections the runtime publishes itself, and say which.
+
+    The operational list is the runtime's responsibility for every run --
+    when the model would have written it correctly as much as when it would
+    not. Deciding per-run, or removing only a wrong value, would be exactly
+    the guesswork this contract exists to remove.
+
+    A dropped section is replaced by a line naming what publishes it instead,
+    so the document does not read as though the subject was never covered.
+    The model's full text stays in `model_text` for audit.
+    """
+    # Headings inside a fenced block are artifact text the report is quoting,
+    # not sections of the report. Dropping one ate the quoted source, the
+    # closing fence and the analysis that followed it, all the way to the next
+    # real heading -- silently removing evidence, which is the opposite of
+    # what this contract is for.
+    # A fence closes only on the same marker character, and on a run at least
+    # as long as the one that opened it -- so ``` does not close ~~~, and a
+    # longer run inside a block is content, not a terminator.
+    fenced: list[tuple[int, int]] = []
+    open_at: int | None = None
+    open_marker = ""
+    for fence in _FENCE_PATTERN.finditer(text):
+        marker = fence.group("marker")
+        if open_at is None:
+            # A single-line inline span -- ```short``` or ~~~x~~~ -- opens and
+            # closes on one line; it is not a fence and must not swallow what
+            # follows. But a backtick in the info string of an otherwise-valid
+            # opener (```python`) is ambiguous, and the safe reading for THIS
+            # purpose is to open a fence: doing so protects the quoted block
+            # from the drop, where refusing to open would delete it. The bias
+            # is toward keeping content, never toward removing it.
+            # A run of the marker character LATER on the same line closes an
+            # inline span (```short```, ~~~x~~~): the line is content, not a
+            # fence opener. A lone trailing backtick in a code info string
+            # (```python`) is not such a run, so it still opens a fence and
+            # protects the block below -- the bias is always toward keeping
+            # quoted analysis, never toward removing it.
+            info = fence.group("info")
+            if marker[0] * 3 in info:
+                continue
+            open_at, open_marker = fence.start(), marker
+        elif marker[0] == open_marker[0] and len(marker) >= len(open_marker):
+            fenced.append((open_at, fence.end()))
+            open_at, open_marker = None, ""
+    if open_at is not None:
+        fenced.append((open_at, len(text)))
+
+    def _in_fence(position: int) -> bool:
+        return any(start <= position < end for start, end in fenced)
+
+    headings = [
+        match for match in _HEADING_PATTERN.finditer(text)
+        if not _in_fence(match.start())
+    ]
+    if not headings:
+        return text, []
+    dropped: list[str] = []
+    out: list[str] = []
+    cursor = 0
+    for index, match in enumerate(headings):
+        title = match.group(2).strip().rstrip(":").lower()
+        if not _RUNTIME_OWNED_HEADING.match(title):
+            continue
+        end = (
+            headings[index + 1].start()
+            if index + 1 < len(headings)
+            else len(text)
+        )
+        out.append(text[cursor:match.start()])
+        out.append(
+            f"{match.group(1)} {match.group(2).strip()}\n\n"
+            "Published from the canonical records below, under "
+            "'Verified indicators'.\n\n"
+        )
+        dropped.append(match.group(2).strip())
+        cursor = end
+    if not dropped:
+        return text, []
+    out.append(text[cursor:])
+    return "".join(out), dropped
+
+
+def _mark_unsupported_inline(text: str, unsupported: "list[str]") -> str:
+    """Annotate each unsupported endpoint where the narrative uses it.
+
+    Marks the value, never rewrites it: the sentence stays the model's, the
+    endpoint stays readable, and no substitute is chosen. Longer values are
+    marked first so a value that contains another cannot be marked twice.
+    """
+    # The authority alone as well as the whole URI. A narrative names an
+    # endpoint both ways -- `http://host/path` in one sentence and `host` in
+    # the next -- and `uris_in` only extracts the first, so marking URIs alone
+    # left the bare hostname standing unmarked. Measured on a live PowerShell
+    # report: three of four occurrences carried the path, the fourth was the
+    # host by itself under "Confirmed findings".
+    # Whole URIs FIRST, longest first, then bare authorities: marking an
+    # authority before the URI that contains it would split the URI in two
+    # and leave a mark in the middle of an address.
+    authorities: list[str] = []
+    for value in unsupported:
+        authority = urlsplit(value).netloc
+        if authority and authority not in authorities:
+            authorities.append(authority)
+    targets = sorted(unsupported, key=len, reverse=True) + sorted(
+        authorities, key=len, reverse=True
+    )
+    for target in targets:
+        marked: list[str] = []
+        rest = text
+        while target in rest:
+            head, rest = rest.split(target, 1)
+            already = rest[:len(UNSUPPORTED_INLINE_MARK)] == UNSUPPORTED_INLINE_MARK
+            # An authority inside an already-marked URI needs no mark of its
+            # own: the mark that follows the URI covers it.
+            inside = UNSUPPORTED_INLINE_MARK in rest[:200] and rest[:1] not in ("", " ", "`", '"', "\n")
+            if already or inside:
+                marked.append(head + target)
+                continue
+            marked.append(head + target + UNSUPPORTED_INLINE_MARK)
+        text = "".join(marked) + rest
+    return text
+
+
+def _unsupported_line(value: str, provenance: "dict[str, list[str]]") -> str:
+    """One bullet for the consistency check, anchored to EvidenceStore records.
+
+    States what the records DO contain and that this claim is not among them.
+    It never selects a replacement and never says which endpoint the model
+    meant: equal length and one differing character does NOT prove two
+    hostnames identify the same intended endpoint -- `a1.example` and
+    `a2.example` can both be real and are not each other. Similarity may
+    prompt a reader to look; it cannot establish authority, and a runtime
+    that silently healed an indicator would be inventing a finding of its own.
+    """
+    lines = [f"- {value} -- UNSUPPORTED: no evidence record contains this value."]
+    if provenance:
+        lines.append("  The recovered indicators, and the records holding them:")
+        for known in sorted(provenance):
+            ids = ", ".join(provenance[known]) or "artifact snapshot"
+            lines.append(f"    {known}  (evidence: {ids})")
+        lines.append(
+            "  Which of these, if any, the narrative meant is NOT established: "
+            "use the recovered values above, not the unsupported one."
+        )
+    return "\n".join(lines)
+
+
+def _unsupported_indicators(text: str, authoritative: "set[str]") -> list[str]:
+    """URIs the narrative asserts that no authoritative record contains.
+
+    Deterministic and free: both sides come from the same extractor the
+    appendix uses, so this compares like with like and spends no model call.
+    It answers one mechanical question -- does this address exist in the
+    evidence -- and deliberately not whether a sentence about it is apt.
+
+    A value is unsupported only when some authoritative record CONTAINS it:
+    a narrative may quote less than the record holds -- the host without its
+    query string -- and that is still the recovered endpoint. It may not
+    quote more.
+    """
+    from orbit.runtime.analysis_indicators import uris_in
+
+    unsupported: list[str] = []
+    for value in uris_in(text):
+        # One direction only. A narrative may quote LESS than the record holds
+        # -- the host without the query string -- and that is still the
+        # recovered endpoint. It may not quote MORE: appending a path or a
+        # query invents a request the artifact never made, and
+        # `host/1.php?s=X&cmd=exfil&target=...` is a different endpoint from
+        # `host/1.php?s=X` however much of it is real. The reverse arm treated
+        # every superset as supported, so fabricated exfiltration parameters
+        # on a genuine host raised nothing.
+        if any(value in known for known in authoritative):
+            continue
+        if value not in unsupported:
+            unsupported.append(value)
+    return unsupported
+
+
+DETERMINISTIC_AUTHORITY_PREAMBLE = (
+    "The following values were computed by the runtime directly from the "
+    "artifact, not by a model. They are exact. Where anything else in this "
+    "prompt -- including a previous answer summary -- disagrees with them, "
+    "these values are correct and the other text is wrong. Do not restate a "
+    "decoded value from memory: quote it from here."
+)
+
 ANALYSIS_REPORT_INSTRUCTION = (
     "Report on the evidence already collected. Run nothing: this turn has no "
     "tools and performs no analysis.\n"
@@ -232,6 +546,18 @@ ANALYSIS_REPORT_INSTRUCTION = (
     "timing and file deletion as what they do; call them "
     "evasion or anti-forensic only where a purpose is evidenced. Prefer a "
     "plain description to a technique label when intent is not established.\n"
+    "Never retype a network address: write the IOC- token the indicator list "
+    "gives you and the exact value is substituted. An address you type "
+    "yourself is unsupported even when you meant the right one.\n"
+    "Do not write an indicators list of your own: the runtime publishes that "
+    "section from the canonical records, and a second list can only "
+    "contradict it.\n"
+    "A section heading is a claim too: do not title a section beaconing, "
+    "persistence, evasion or anti-forensic unless the evidence shows the "
+    "mechanism, exactly as for a sentence. A heading its own body walks back "
+    "is worse than no heading.\n"
+    "A payload fetched once and run once is retrieval and execution, not "
+    "beaconing.\n"
     "This analysis is offline and isolated: the next step must be one that "
     "can be taken here, on the artifact and the evidence. Retrieving a "
     "remote resource is not that step, though it may be named as separately "
@@ -1090,6 +1416,7 @@ def _record_report_diagnostics(
     messages: "list[Message]",
     admitted: "list[Message] | None" = None,
     refusal: Exception | None = None,
+    model_text: str | None = None,
 ) -> None:
     """Persist the exact REPORT prompt when diagnostic retention is on.
 
@@ -1110,6 +1437,11 @@ def _record_report_diagnostics(
             "record_count": len(records),
             "record_ids": [r.evidence_id for r in records],
             "record_raw_chars": {r.evidence_id: r.raw_chars for r in records},
+            # The model's prose before the runtime composed the document. The
+            # notice tells a reader the original is kept for audit; without
+            # this it was kept only in memory, and a section the contract
+            # removes would have had no record anywhere on disk.
+            "model_text": model_text,
             "messages": messages,
             "message_chars": [
                 {"role": m.get("role"), "chars": len(str(m.get("content") or ""))}
@@ -1272,6 +1604,16 @@ class AnalysisReport:
     model_calls: int
     evidence_ids: tuple[str, ...] = ()
     diagnostics: "StepDiagnostics | None" = None
+    #: The model's own prose, before the runtime prepended any rejection of an
+    #: unsupported indicator. `text` is what a reader must see; this is what
+    #: the model actually wrote, kept for diagnostics so a rejected claim can
+    #: be studied without reading it out of the reader-facing report. Defaults
+    #: to `text` for every path that adds nothing.
+    model_text: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.model_text:
+            object.__setattr__(self, "model_text", self.text)
 
 
 @dataclass(frozen=True)
@@ -1844,6 +2186,122 @@ class AnalysisRuntime:
         for stage, record in self.transform_stages:
             sources.append((stage.kind, record.evidence_id, stage.output))
         return render_indicators(extract_indicators(sources))
+
+    def authoritative_indicators(self) -> "set[str]":
+        """Every network indicator the runtime itself recovered, exactly.
+
+        The same sources `verified_indicators` renders: the artifact snapshot
+        and every deterministic stage. Used to tell a narrative that quotes a
+        recovered address from one that supplies an address of its own.
+        """
+        from orbit.runtime.analysis_indicators import uris_in
+
+        found: set[str] = set()
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            raw = b""
+        for _label, text in _decoded_views(raw):
+            found.update(uris_in(text))
+        for _stage, record in self.transform_stages:
+            found.update(uris_in(_stage.output))
+        for record in self.evidence_store.records.values():
+            try:
+                found.update(uris_in(self.evidence_store.load_raw(record.evidence_id)))
+            except Exception:  # noqa: BLE001 - a body that cannot be read adds nothing
+                continue
+        return found
+
+    def canonical_indicators(self) -> "list[Indicator]":
+        """Every indicator the runtime recovered, as canonical objects.
+
+        The same extraction `verified_indicators` renders, returned instead of
+        formatted so a reference can be resolved against it. Ordered, so a
+        reference never depends on set or dict iteration order.
+        """
+        from orbit.runtime.analysis_indicators import (
+            extract_indicators as _extract,
+        )
+
+        sources: list[tuple[str, str, str]] = []
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            raw = b""
+        for label, text in _decoded_views(raw):
+            sources.append((label, f"sha256:{self.source.sha256}", text))
+        for stage, record in self.transform_stages:
+            sources.append((stage.kind, record.evidence_id, stage.output))
+        return _extract(sources)
+
+    def indicator_reference_table(self) -> str:
+        """The references a report may cite, and what each one is.
+
+        Names an indicator by a short token tied to its digest, so the model
+        never has to retype an address. Measured on two live PowerShell runs:
+        given the exact host nine times, the model still wrote a
+        one-token-shorter form four times out of seven -- transcription is the
+        failure, so the fix is to stop requiring it.
+
+        The token is derived from the indicator's own sha256, which is what
+        makes it unambiguous when one record carries several indicators.
+        """
+        indicators = self.canonical_indicators()
+        if not indicators:
+            return ""
+        lines = [INDICATOR_REFERENCE_PREAMBLE, ""]
+        for indicator in indicators:
+            lines.append(
+                f"- {_indicator_token(indicator)} = {indicator.kind}: "
+                f"{indicator.value}"
+            )
+        return "\n".join(lines)
+
+    def resolve_indicator_references(self, text: str) -> str:
+        """Replace every canonical reference with the exact value it names.
+
+        Exact, and by digest: a token resolves to one indicator or to none.
+        An unknown or malformed token is left untouched and marked, never
+        guessed at -- there is no nearest match here and none is wanted.
+        """
+        indicators = {_indicator_token(i): i for i in self.canonical_indicators()}
+
+        def _swap(match: "re.Match[str]") -> str:
+            token = match.group(0)
+            indicator = indicators.get(token)
+            if indicator is None:
+                return f"{token}{UNRESOLVED_REFERENCE_MARK}"
+            return indicator.value
+
+        return _INDICATOR_REFERENCE_PATTERN.sub(_swap, text)
+
+    def indicator_provenance(self) -> "dict[str, list[str]]":
+        """For each recovered indicator, the records that actually contain it.
+
+        Provenance, not similarity. Two hostnames one character apart may be
+        two different endpoints -- `a1.example` and `a2.example` are both real
+        and are not each other -- so a claim can only be answered by naming
+        what a record DOES contain, never by guessing which endpoint a model
+        meant. Values with no record here are values the runtime read from the
+        artifact snapshot rather than from stored evidence, and they are
+        reported that way.
+        """
+        from orbit.runtime.analysis_indicators import uris_in
+
+        provenance: dict[str, list[str]] = {}
+        for _stage, record in self.transform_stages:
+            for value in uris_in(_stage.output):
+                provenance.setdefault(value, []).append(record.evidence_id)
+        for record in self.evidence_store.records.values():
+            try:
+                body = self.evidence_store.load_raw(record.evidence_id)
+            except Exception:  # noqa: BLE001 - unreadable adds no provenance
+                continue
+            for value in uris_in(body):
+                ids = provenance.setdefault(value, [])
+                if record.evidence_id not in ids:
+                    ids.append(record.evidence_id)
+        return provenance
 
     def transform_appendix(self) -> str:
         """Exact rendering of the deterministic stages. No model involved.
@@ -3899,6 +4357,14 @@ class AnalysisRuntime:
                         # replan into a question that never asked for one.
                         replan_pending = False
                         continue
+                    # No other question to move to, so this stall ends the
+                    # run -- but it is still THIS question's stall, and the
+                    # dossier has to say so. Left open, the closing report is
+                    # told only "no answer was established", which reads as a
+                    # question never reached rather than one that repeated
+                    # itself until the bound stopped it.
+                    if controller is not None and not controller.exhausted:
+                        controller.exhaust_active(stalled)
                     stop_reason = stalled
                     break
                 # First unproductive step of this streak: say so, and ask for
@@ -4548,10 +5014,63 @@ class AnalysisRuntime:
         # independent of whether the model chose to mention any of it.
         # Computed once at the top of the call and reused here, so the object
         # a caller receives and the text a terminal prints cannot diverge.
+        # Deterministic, and spends no model call: an address the narrative
+        # names that appears in no authoritative record is contradicted by
+        # the artifact, and a reader must not have to diff the prose against
+        # the appendix to discover that. Mechanically checkable facts only --
+        # whether a sentence ABOUT a real address is apt is not decidable
+        # here and is not claimed to be.
+        # The model's own words are kept exactly as `model_text`; what gets
+        # published is that text with every canonical reference resolved to
+        # the value it names. Resolution happens BEFORE the consistency check,
+        # so a resolved reference is checked like any other address -- it
+        # cannot smuggle a value past the check, and it cannot be flagged for
+        # being a token.
+        model_text = text
+        text = self.resolve_indicator_references(text)
+        authoritative = self.authoritative_indicators()
+        # DETECTED BEFORE THE DROP, and deliberately. An endpoint the model
+        # fabricated only inside its own indicators section would otherwise be
+        # deleted before the check ever saw it: no notice, no mark, nothing --
+        # the reader is shown a clean document about a report that invented an
+        # address. Removing the section must not remove the evidence that it
+        # was wrong.
+        unsupported = _unsupported_indicators(text, authoritative)
+        # The operational list is the runtime's to publish. A report carrying
+        # its own can contradict the canonical one rendered beside it, and a
+        # reader cannot tell which is authoritative -- measured live, a
+        # narrative listed a corrupted host under its own "Indicators" while
+        # "Verified indicators" carried the right one two sections down.
+        #
+        # Dropped for every run, not when a value looks wrong: removing only
+        # the wrong ones would be the guesswork this replaces. The prose is
+        # untouched and still checked, because moving a false claim from a
+        # list into a sentence must not escape anything.
+        text, _dropped_sections = _drop_runtime_owned_sections(text)
+        if unsupported:
+            # AHEAD of the narrative, not after it. A reader who meets a
+            # wrong hostname asserted five times under "Confirmed findings"
+            # has already acted on it by the time a trailing notice corrects
+            # them. The narrative is preserved verbatim below the warning,
+            # because repudiating a claim requires quoting it.
+            text = "\n".join(
+                [UNSUPPORTED_INDICATOR_NOTICE, ""]
+                + [
+                    _unsupported_line(value, self.indicator_provenance())
+                    for value in unsupported
+                ]
+                + ["", UNSUPPORTED_INDICATOR_FOOTER, "",
+                   _mark_unsupported_inline(text, unsupported)]
+            )
         if appendix:
             text = f"{text}\n\n{appendix}"
+        _record_report_diagnostics(
+            self, question=question, records=records, messages=messages,
+            model_text=model_text,
+        )
         return AnalysisReport(
             text=text,
+            model_text=model_text,
             model_calls=1,
             evidence_ids=tuple(r.evidence_id for r in records),
             diagnostics=StepDiagnostics(
@@ -4646,9 +5165,38 @@ class AnalysisRuntime:
                 on_progress=on_progress,
             )
         text = (response.content or "").strip() or NO_USABLE_REPORT_TEXT
+        # The same three layers as the evidence-grounded report, and for the
+        # same reason: this path generates model prose too, so an address the
+        # artifact never contained is no more supported for having arrived by
+        # the covered route, and a list the model wrote is no more
+        # authoritative here than there. Two of the three were missing --
+        # reachable whenever a covered run collects no action evidence.
+        model_text = text
+        text = self.resolve_indicator_references(text)
+        authoritative = self.authoritative_indicators()
+        # Detected before the drop, for the reason given on the other path.
+        unsupported = _unsupported_indicators(text, authoritative)
+        text, _dropped_sections = _drop_runtime_owned_sections(text)
+        if unsupported:
+            # AHEAD of the narrative, not after it. A reader who meets a
+            # wrong hostname asserted five times under "Confirmed findings"
+            # has already acted on it by the time a trailing notice corrects
+            # them. The narrative is preserved verbatim below the warning,
+            # because repudiating a claim requires quoting it.
+            text = "\n".join(
+                [UNSUPPORTED_INDICATOR_NOTICE, ""]
+                + [
+                    _unsupported_line(value, self.indicator_provenance())
+                    for value in unsupported
+                ]
+                + ["", UNSUPPORTED_INDICATOR_FOOTER, "",
+                   _mark_unsupported_inline(text, unsupported)]
+            )
         if appendix:
             text = f"{text}\n\n{appendix}"
-        return AnalysisReport(text=text, model_calls=1, evidence_ids=())
+        return AnalysisReport(
+            text=text, model_text=model_text, model_calls=1, evidence_ids=()
+        )
 
     def _reportable_records(self) -> list[EvidenceRecord]:
         """The action evidence a report may cite, oldest first and bounded.
@@ -4699,6 +5247,111 @@ class AnalysisRuntime:
             for r in records
             if r.evidence_id in standing and not standing[r.evidence_id].is_active
         ]
+
+    def _evidence_cards(self, records: list[EvidenceRecord]) -> list[str]:
+        """Every record as a card, within a TOTAL quoted-text budget.
+
+        The per-record bound alone let five records of ~3,092 chars -- each
+        under it -- render a 19,225-char user message that admission refused,
+        so a run that had done its work produced no narrative at all.
+
+        Newest first when deciding who keeps full text, because the last
+        actions are the ones a closing report is most likely to be about;
+        rendered back in the original order so the reader still sees the
+        analysis as it happened. A record that does not fit is carried as
+        `final_card` -- size, digest and `raw_ref` -- never truncated
+        silently and never dropped.
+        """
+        # Tokens where the tokeniser is reachable, characters only as a
+        # conservative fallback: the two budgets are not interchangeable, and
+        # measuring the wrong one is what let this prompt overflow.
+        def measure(text: str) -> int:
+            counted = getattr(self.backend, "count_text_tokens", None)
+            if counted is None:
+                return len(text)
+            try:
+                result = counted(text)
+            except Exception:  # noqa: BLE001 - a tokeniser that errors is one we lack
+                return len(text)
+            if result is None:
+                return len(text)
+            return int(result.tokens)
+
+        using_tokens = getattr(self.backend, "count_text_tokens", None) is not None
+        budget = (
+            MAX_REPORT_EVIDENCE_TOTAL_QUOTE_TOKENS if using_tokens
+            else MAX_REPORT_EVIDENCE_TOTAL_QUOTE_CHARS
+        )
+        if using_tokens:
+            # A fixed budget bounds the evidence but not the prompt. Measured
+            # live: five demoted-and-quoted records came to 6,364 tokens --
+            # inside an 8,192 context -- and admission still refused, because
+            # it reserves generation space the evidence budget never saw. Over
+            # by 220 tokens, which no constant chosen in advance would have
+            # caught for every artifact.
+            #
+            # So the ceiling is what actually remains: the context, less the
+            # generation reserve, less everything else this prompt carries.
+            # `fixed_cost` is measured, not estimated, and a backend that
+            # cannot report its context window simply keeps the constant.
+            # The tokeniser reports the window alongside the count, so both
+            # sides of this arithmetic come from the same measurement.
+            probe = self.backend.count_text_tokens(
+                ANALYSIS_REPORT_INSTRUCTION + self.deterministic_sections()
+            )
+            context = getattr(probe, "context_tokens", None) if probe else None
+            if isinstance(context, int) and context > 0:
+                remaining = (
+                    context - int(self.effective_max_tokens) - int(probe.tokens)
+                    - REPORT_PROMPT_SAFETY_TOKENS
+                )
+                budget = max(0, min(budget, remaining))
+        # EVERY card is charged, including a demoted one. Measured on the
+        # retained failures: a `final_card` citation is not free -- the ones
+        # here cost 930, 954 and 655 tokens -- so a budget that charged only
+        # the quoted cards let twelve records render 7,684 tokens and the
+        # prompt was refused exactly as before.
+        #
+        # A record that cannot afford even its citation is dropped from the
+        # prompt rather than allowed to overflow it. That is a real loss and
+        # it is bounded to the OLDEST records: the store still holds them,
+        # `deterministic_sections` still renders every transformation, and
+        # the alternative is a report that cannot be composed at all.
+        # Two passes, because the order matters. Charging each record its full
+        # quote as it arrives spends the budget on the newest few and leaves
+        # nothing for the rest -- measured on the live shape that dropped six
+        # of twelve records while demoting none, which loses evidence instead
+        # of compacting it.
+        #
+        # So: every record is first costed as a CITATION, which is the floor it
+        # can be carried for. Whatever the budget has left over is then spent
+        # upgrading records back to full quotes, newest first. A record is only
+        # dropped when even the floor does not fit, and then the oldest goes.
+        citations = {r.evidence_id: final_card(r) for r in records}
+        floor = {rid: measure(card) for rid, card in citations.items()}
+
+        carried: list[EvidenceRecord] = []
+        spent = 0
+        for record in reversed(records):
+            cost = floor[record.evidence_id]
+            if spent + cost > budget and carried:
+                # Room for the newest is not negotiable: a report with no
+                # evidence card at all cannot cite anything, and a context too
+                # small for one citation is a configuration problem the
+                # analyst has to see rather than an empty prompt to admit.
+                continue
+            spent += cost
+            carried.append(record)
+        carried.reverse()
+
+        chosen = dict(citations)
+        for record in reversed(carried):
+            full = self._evidence_card(record)
+            upgrade = measure(full) - floor[record.evidence_id]
+            if upgrade <= 0 or spent + upgrade <= budget:
+                spent += max(0, upgrade)
+                chosen[record.evidence_id] = full
+        return [chosen[record.evidence_id] for record in carried]
 
     def _evidence_card(self, record: EvidenceRecord) -> str:
         """One record as the report sees it, bounded by what it costs.
@@ -4757,8 +5410,30 @@ class AnalysisRuntime:
         put the model back in the frame where running something is the
         expected move.
         """
-        cards = "\n\n".join(self._evidence_card(record) for record in records)
+        cards = "\n\n".join(self._evidence_cards(records))
         asked = question.strip() or "Report on what the evidence establishes."
+        # The deterministic values, IN the prompt rather than only appended to
+        # the answer. They were excluded from the citation budget because
+        # `deterministic_sections` renders them exactly -- but that rendering
+        # is concatenated AFTER generation, so the model wrote its narrative
+        # without ever seeing them.
+        #
+        # Measured on the live Fattura run: the runtime had decoded the real
+        # C2 and three WMI strings, none reached this prompt, and the model
+        # supplied an invented endpoint and an invented decoding in their
+        # place -- while citing the very evidence ids whose exact contents
+        # contradicted it. Facts the runtime knows exactly are cheaper to
+        # state than to correct.
+        facts = self.deterministic_sections()
+        grounding = (
+            f"{DETERMINISTIC_AUTHORITY_PREAMBLE}\n\n{facts}\n\n" if facts else ""
+        )
+        # The reference table, so an indicator can be cited without being
+        # retyped. This is the half that removes the failure rather than
+        # detecting it: the model writes a token, the runtime writes the value.
+        references = self.indicator_reference_table()
+        if references:
+            grounding = f"{grounding}{references}\n\n"
         return [
             {"role": "system", "content": ANALYSIS_REPORT_INSTRUCTION},
             {
@@ -4766,6 +5441,7 @@ class AnalysisRuntime:
                 "content": (
                     f"Artifact under analysis: {self.source.size_bytes} bytes, "
                     f"sha256 {self.source.sha256}.\n\n"
+                    f"{grounding}"
                     f"Evidence collected so far:\n\n{cards}\n\n{asked}"
                 ),
             },
