@@ -233,6 +233,8 @@ class CaptureGuardTest(unittest.TestCase):
                 # The route lineage never checkpoints at a turn boundary, so
                 # the whole-prompt guard is the one that runs for it.
                 "capture_at": None,
+                # Nor is it the STEP lineage, whose guard is skipped outright.
+                "step_lineage": False,
             }
             exec(source, exec_globals)
         finally:

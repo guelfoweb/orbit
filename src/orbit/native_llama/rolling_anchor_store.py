@@ -1,14 +1,16 @@
 """Ownership of the rolling route-anchor checkpoint slots.
 
 A rolling anchor is a KV checkpoint the runtime may restore instead of
-prefilling a prompt from cold. There are two independent lineages -- CHAT route
-and ANALYSIS -- and keeping them apart is the point: a route prompt must never
-meet an analysis checkpoint. The slot follows the identity's own `strategy_id`,
-so the separation is data-driven rather than a branch on model or call-site
-names, and the backend never learns the distinction.
+prefilling a prompt from cold. There are three independent lineages -- CHAT
+route, ANALYSIS control, and the ANALYSIS step -- and keeping them apart is
+the point: a route prompt must never meet an analysis checkpoint, and a
+control turn must never evict the checkpoint the next step extends. The slot
+follows the identity's own `strategy_id`, so the separation is data-driven
+rather than a branch on model or call-site names, and the backend never
+learns the distinction.
 
-This owns the two slots and the operations over them: which slot an identity
-addresses, what is stored there, storing a new state, and invalidating both.
+This owns the slots and the operations over them: which slot an identity
+addresses, what is stored there, storing a new state, and invalidating all.
 
 Deliberately NOT here:
 
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 from .rolling_route_anchor import (
     ROLLING_ANALYSIS_STRATEGY_ID,
+    ROLLING_STEP_STRATEGY_ID,
     RollingRouteAnchorState,
     RollingRouteIdentity,
     invalidate_rolling_route_anchor,
@@ -38,13 +41,14 @@ from .rolling_route_anchor import (
 
 
 class RollingAnchorStore:
-    """The single owner of the two rolling-anchor checkpoint slots."""
+    """The single owner of the rolling-anchor checkpoint slots."""
 
-    __slots__ = ("_route", "_analysis")
+    __slots__ = ("_route", "_analysis", "_step")
 
     def __init__(self) -> None:
         self._route = RollingRouteAnchorState()
         self._analysis = RollingRouteAnchorState()
+        self._step = RollingRouteAnchorState()
 
     @staticmethod
     def slot_for(identity: RollingRouteIdentity | None) -> str:
@@ -55,6 +59,8 @@ class RollingAnchorStore:
         """
         if identity is not None and identity.strategy_id == ROLLING_ANALYSIS_STRATEGY_ID:
             return "analysis"
+        if identity is not None and identity.strategy_id == ROLLING_STEP_STRATEGY_ID:
+            return "step"
         return "route"
 
     @property
@@ -65,27 +71,37 @@ class RollingAnchorStore:
     def analysis_state(self) -> RollingRouteAnchorState:
         return self._analysis
 
+    @property
+    def step_state(self) -> RollingRouteAnchorState:
+        return self._step
+
     def state_for(self, identity: RollingRouteIdentity | None) -> RollingRouteAnchorState:
         """What is stored in the slot this identity addresses.
 
         An absent slot reads as empty rather than raising: a checkpoint that is
         not there must fall cold, never fail the call.
         """
-        if self.slot_for(identity) == "analysis":
+        slot = self.slot_for(identity)
+        if slot == "analysis":
             return self._analysis or RollingRouteAnchorState()
+        if slot == "step":
+            return self._step or RollingRouteAnchorState()
         return self._route
 
     def store(
         self, identity: RollingRouteIdentity | None, state: RollingRouteAnchorState
     ) -> None:
         """Record a checkpoint in the slot this identity addresses."""
-        if self.slot_for(identity) == "analysis":
+        slot = self.slot_for(identity)
+        if slot == "analysis":
             self._analysis = state
+        elif slot == "step":
+            self._step = state
         else:
             self._route = state
 
     def invalidate(self, reason: str) -> None:
-        """Invalidate BOTH lineages.
+        """Invalidate EVERY lineage.
 
         A reset destroys the conversation whose tokens these are, and an
         analysis checkpoint surviving it would be exactly the stale-state reuse
@@ -101,3 +117,6 @@ class RollingAnchorStore:
         analysis = self._analysis
         if analysis is not None and (analysis.valid or analysis.identity is not None):
             self._analysis = invalidate_rolling_route_anchor(analysis, reason)
+        step = self._step
+        if step is not None and (step.valid or step.identity is not None):
+            self._step = invalidate_rolling_route_anchor(step, reason)

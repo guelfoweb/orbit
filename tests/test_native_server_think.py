@@ -58,6 +58,7 @@ class _FakeClient:
         thinking,
         route_prefix_anchor=False,
         analysis_rolling_anchor=False,
+        analysis_step_anchor=False,
         qwen_route_prefix_anchor=False,
         qwen36_shell_tool_prefix_anchor=False,
         allow_mtp_experimental=None,

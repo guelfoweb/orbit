@@ -119,6 +119,7 @@ class LlamaServerBackend:
                 tools=tools,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 analysis_rolling_anchor=_analysis_rolling_anchor_requested(native_backend=native_backend),
+                analysis_step_anchor=_analysis_step_anchor_requested(native_backend=native_backend),
                 qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
                 qwen36_shell_tool_prefix_anchor=_qwen36_shell_tool_prefix_anchor_requested(
                     native_backend=native_backend,
@@ -163,6 +164,7 @@ class LlamaServerBackend:
                 stream=True,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 analysis_rolling_anchor=_analysis_rolling_anchor_requested(native_backend=native_backend),
+                analysis_step_anchor=_analysis_step_anchor_requested(native_backend=native_backend),
                 qwen_route_prefix_anchor=_qwen_route_prefix_anchor_requested(native_backend=native_backend),
                 qwen36_shell_tool_prefix_anchor=_qwen36_shell_tool_prefix_anchor_requested(
                     native_backend=native_backend,
@@ -1159,6 +1161,22 @@ def _analysis_rolling_anchor_requested(*, native_backend: bool) -> bool:
         phase == member or phase.startswith(f"{member}:")
         for member in _ROLLING_ANALYSIS_PHASES
     )
+
+
+def _analysis_step_anchor_requested(*, native_backend: bool) -> bool:
+    """Whether this call is the analysis STEP turn of that lineage.
+
+    A STEP prompt ends with the controller's transient per-question guidance,
+    which the next STEP replaces, and a FINISH runs between any two STEPs. The
+    STEP therefore checkpoints before that last user turn and in a slot of its
+    own; the control turns keep theirs. Never true unless the rolling gate
+    above already admitted the call, so this can only refine the lineage,
+    never widen it.
+    """
+    if not _analysis_rolling_anchor_requested(native_backend=native_backend):
+        return False
+    phase = current_phase()
+    return phase == ANALYSIS_STEP_PHASE or phase.startswith(f"{ANALYSIS_STEP_PHASE}:")
 
 
 def _qwen_route_prefix_anchor_requested(*, native_backend: bool) -> bool:

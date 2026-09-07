@@ -185,6 +185,7 @@ class OrbitNativeServer:
                     thinking=thinking,
                     route_prefix_anchor=request.route_prefix_anchor,
                     analysis_rolling_anchor=request.analysis_rolling_anchor,
+                    analysis_step_anchor=request.analysis_step_anchor,
                     qwen_route_prefix_anchor=qwen_route_prefix_anchor,
                     qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
                     allow_mtp_experimental=request.allow_mtp_experimental,
