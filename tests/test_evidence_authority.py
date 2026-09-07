@@ -1359,12 +1359,22 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
         """
         from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
 
+        # A NAMED list must not bypass the contract: "Key indicators",
+        # "Network IOCs", "Verified indicators" (the runtime's own section
+        # name, when the model writes one of its own) all read as the list.
         owned = ("Indicators", "Indicator", "IOC", "IOCs",
                  "Indicators of compromise", "Network indicators",
-                 "Indicators (network)")
+                 "Indicators (network)", "Key indicators", "Network IOCs",
+                 "Verified indicators", "Malicious indicators",
+                 "C2 indicators", "Command-and-control indicators",
+                 "Observed IOCs", "Primary indicators", "Host indicators")
+        # A heading that MENTIONS the word but is analysis keeps its body.
         kept = ("Behaviour indicators", "No indicators found",
                 "Indicators and next steps", "Confirmed findings",
-                "Summary", "What remains unresolved")
+                "Summary", "What remains unresolved",
+                "How the indicators were derived",
+                "Why no indicator was recovered",
+                "Limitations of indicator extraction", "Indicator analysis")
 
         for heading in owned:
             with self.subTest(heading=heading, expect="dropped"):
@@ -1382,6 +1392,55 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
                 out, dropped = _drop_runtime_owned_sections(text)
                 self.assertEqual(dropped, [])
                 self.assertIn("the analysis says this", out)
+
+    def test_a_setext_indicator_heading_is_dropped(self) -> None:
+        """A setext heading is a heading; the model must not bypass by syntax.
+
+        `Indicators` underlined by `===` or `---` is the operational list in a
+        different Markdown form, and it was not recognised at all.
+        """
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        for rule in ("=" * 10, "-" * 10):
+            with self.subTest(rule=rule[0]):
+                text = (
+                    f"Confirmed findings\n{'=' * 18}\n\nx\n\n"
+                    f"Indicators\n{rule}\n\n- URI: http://bad.test/y\n\n"
+                    f"Behaviour\n{'=' * 9}\n\ny\n"
+                )
+                out, dropped = _drop_runtime_owned_sections(text)
+                self.assertEqual(dropped, ["Indicators"])
+                self.assertNotIn("http://bad.test/y", out)
+                self.assertIn("Behaviour", out)
+
+    def test_a_thematic_break_is_not_a_heading(self) -> None:
+        """A bare `---` rule with no title over it is not a section."""
+        from orbit.runtime.analysis_runtime import _drop_runtime_owned_sections
+
+        text = ("## Confirmed findings\n\nsome analysis\n\n---\n\n"
+                "more analysis mentioning http://kept.test/y\n")
+
+        out, dropped = _drop_runtime_owned_sections(text)
+
+        self.assertEqual(dropped, [])
+        self.assertIn("http://kept.test/y", out)
+
+    def test_a_fabrication_only_in_a_named_list_is_still_reported(self) -> None:
+        """Detection runs before the drop, for a bypassing heading too."""
+        wrong = self.DECODED_URL.replace("example-c2", "examp1e-c2")
+        runtime = self._with_one_action(_ReportingBackend(
+            f"## Confirmed findings\n\nIt runs.\n\n## Key indicators\n\n"
+            f"- URI: {wrong}\n"
+        ))
+
+        report = runtime.report("what is it")
+
+        self.assertTrue(report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE))
+        notice = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[0]
+        self.assertIn(wrong, notice)  # kept in the error record
+        body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
+        self.assertNotIn(wrong, body)  # dropped from the published body
+        self.assertIn(wrong, report.model_text)  # original preserved
 
     def test_the_original_text_is_persisted_for_audit(self) -> None:
         """The notice says the original is kept; it has to actually be kept.

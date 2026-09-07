@@ -323,14 +323,49 @@ UNSUPPORTED_INLINE_MARK = " [UNSUPPORTED - not in any evidence record]"
 #: (a statement, not a list) and "Indicators and next steps" (which carries
 #: analysis this contract has no business deleting). So the heading must READ
 #: as the list: the noun, optionally qualified, and nothing else.
-_RUNTIME_OWNED_HEADING = re.compile(
-    r"^(?:network\s+|c2\s+|host\s+)?"
-    r"(?:indicators?|iocs?)"
-    r"(?:\s+of\s+compromise)?"
-    r"(?:\s*\(.*\))?$"
+#: A short, closed set of qualifiers a list heading actually uses, so a named
+#: list cannot bypass an exact prefix ("Key indicators", "Network IOCs") while
+#: a heading that merely CONTAINS the word keeps its analysis. Deliberately
+#: NOT open: an arbitrary leading word swept up "Behaviour indicators", which
+#: is analysis, not a list. New forms are added here on evidence, not guessed.
+_INDICATOR_QUALIFIER = (
+    r"network|host|c2|command[- ]and[- ]control|"
+    r"key|primary|main|notable|observed|extracted|recovered|"
+    r"malicious|suspicious|atomic|derived|verified"
 )
 
-_HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
+#: The heading must READ as the operational list: an optional qualifier, the
+#: noun, an optional "of compromise" or parenthetical -- and nothing after.
+#: "Indicators and next steps" and "No indicators found" keep their analysis
+#: because they do not end on the noun. Case-insensitive.
+_RUNTIME_OWNED_HEADING = re.compile(
+    r"^(?:(?:" + _INDICATOR_QUALIFIER + r")\s+)?"
+    r"(?:indicators?|iocs?)"
+    r"(?:\s+of\s+compromise)?"
+    r"(?:\s*\(.*\))?$",
+    re.IGNORECASE,
+)
+
+# ATX (`## Title`) or setext (a text line underlined by `===` or `---`). The
+# setext arm requires a non-blank title line immediately above the rule, so a
+# bare `---` thematic break -- no title over it -- is not mistaken for a
+# heading. `title`/`marker` name the parts both forms share.
+_HEADING_PATTERN = re.compile(
+    r"(?:^(?P<marker>#{1,6})[ \t]+(?P<title>.+?)[ \t]*$)"
+    r"|(?:^(?P<stitle>(?!\s*$).+?)[ \t]*\n(?P<srule>=+|-+)[ \t]*$)",
+    re.M,
+)
+
+
+def _heading_title(match: "re.Match[str]") -> str:
+    return (match.group("title") or match.group("stitle") or "").strip()
+
+
+def _heading_render(match: "re.Match[str]") -> str:
+    """Re-emit the heading in its original form, ATX or setext."""
+    if match.group("marker"):
+        return f"{match.group('marker')} {_heading_title(match)}"
+    return f"{_heading_title(match)}\n{match.group('srule')}"
 #: A fence line, per CommonMark: at most three spaces of indent, a run of at
 #: least three identical markers, then only an info string -- no closing run
 #: on the same line. Matching any line that merely STARTS with the marker
@@ -402,7 +437,7 @@ def _drop_runtime_owned_sections(text: str) -> tuple[str, list[str]]:
     out: list[str] = []
     cursor = 0
     for index, match in enumerate(headings):
-        title = match.group(2).strip().rstrip(":").lower()
+        title = _heading_title(match).rstrip(":").lower()
         if not _RUNTIME_OWNED_HEADING.match(title):
             continue
         end = (
@@ -412,11 +447,11 @@ def _drop_runtime_owned_sections(text: str) -> tuple[str, list[str]]:
         )
         out.append(text[cursor:match.start()])
         out.append(
-            f"{match.group(1)} {match.group(2).strip()}\n\n"
+            f"{_heading_render(match)}\n\n"
             "Published from the canonical records below, under "
             "'Verified indicators'.\n\n"
         )
-        dropped.append(match.group(2).strip())
+        dropped.append(_heading_title(match))
         cursor = end
     if not dropped:
         return text, []
