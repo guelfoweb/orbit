@@ -3220,6 +3220,7 @@ class AnalysisRuntime:
         schema: "dict[str, Any]",
         *,
         on_progress: Callable[[Any], None] | None = None,
+        repair_budget: int | None = None,
     ) -> "tuple[dict | None, str]":
         """One control exchange. Returns (arguments, assistant_text).
 
@@ -3241,6 +3242,19 @@ class AnalysisRuntime:
             # nothing to repair from except the fact of the failure. Exactly
             # one more attempt, restating the contract this phase actually
             # offers. A second failure is the model's answer.
+            # The repair is a second dispatch, and it counts against
+            # `max_model_calls` like the first. The loop's guard admits a turn
+            # while a call remains, but the turn can then spend two -- so
+            # without this check the repair pushed the total to
+            # `max_model_calls + 1` inside a single admitted iteration, and the
+            # report on top made `max_model_calls + 2`, past the documented
+            # `+ 1` ceiling. Measured on the live PowerShell run as 20 against
+            # a bound of 18. When no call remains for it, the repair is
+            # skipped and the caller gets the same unusable-reply outcome a
+            # second parse failure would have produced -- the question blocks
+            # honestly rather than the budget being exceeded.
+            if repair_budget is not None and repair_budget <= 0:
+                return None, ""
             self.control_repairs += 1
             repaired = [
                 *messages,
@@ -3483,18 +3497,37 @@ class AnalysisRuntime:
         evidence_id: str,
         *,
         on_progress: Callable[[Any], None] | None = None,
+        max_calls: int | None = None,
     ) -> int:
         """Ask what the action established. Returns model calls spent.
 
         A reply that cannot be used leaves the question exactly as it was, and
         after one repair the question is blocked. Nothing here resolves a
         question: only an explicit `resolved` from the model does.
+
+        `max_calls` is the calls this finish may still spend against the run's
+        ceiling. The first attempt is always taken -- the loop only entered
+        here because a call remained -- but the repair is a second dispatch,
+        so it is offered only when a call remains for it. Without this a finish
+        admitted at the last call spent two and put the run one over its
+        documented ceiling.
         """
         calls = 0
         messages = self._finish_messages(question, observation, evidence_id)
         for attempt in range(2):
+            remaining = None if max_calls is None else max_calls - calls
+            # Every dispatch here -- this attempt and the repair inside
+            # `_control_call` -- counts against the run ceiling. The first
+            # attempt is covered by the loop's own guard, but a second attempt
+            # or a repair is only taken while a call remains for it; otherwise
+            # the question closes on the reply already in hand rather than
+            # spending past the bound. `remaining <= 0` on a later attempt
+            # means the budget is gone.
+            if remaining is not None and remaining <= 0 and attempt > 0:
+                break
             arguments, _text = self._control_call(
-                messages, FINISH_TOOL_SCHEMA, on_progress=on_progress
+                messages, FINISH_TOOL_SCHEMA, on_progress=on_progress,
+                repair_budget=None if remaining is None else remaining - 1,
             )
             calls += 1
             if arguments is not None:
@@ -4088,6 +4121,10 @@ class AnalysisRuntime:
                             if step.evidence else "",
                             step.evidence.evidence_id if step.evidence else "",
                             on_progress=on_progress,
+                            # What this finish may still spend against the run
+                            # ceiling: the first attempt is covered by the
+                            # guard above, the repair only if a call remains.
+                            max_calls=max_model_calls - model_calls,
                         )
                         model_calls += self.model_calls - spent_before
                     except KeyboardInterrupt:
