@@ -35,7 +35,11 @@ from orbit.native_llama.ornith_route_prefix import resolve_ornith_route_prefix_r
 from orbit.native_llama.qwen3_coder_route_prefix import resolve_qwen3_coder_route_prefix_reuse
 from orbit.native_llama.prefix_anchor import prefix_anchor_enabled
 from orbit.runtime.history_serialization import serialize_profile_messages
-from orbit.runtime.analysis_runtime import ANALYSIS_STEP_PHASE
+from orbit.runtime.analysis_runtime import (
+    ANALYSIS_FINISH_PHASE,
+    ANALYSIS_PLAN_PHASE,
+    ANALYSIS_STEP_PHASE,
+)
 from orbit.backend.base import RecoverableBackendError, ToolCallParseError
 from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
 from orbit.runtime.tool_healing import tool_call_healing_status
@@ -1116,8 +1120,30 @@ def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     return current_phase() == "route" and current_tools_mode() == "on"
 
 
+#: The analysis phases that join the rolling ANALYSIS lineage.
+#:
+#: Written when `analysis_step` was the only analysis model call; the
+#: structured controller then added PLAN and FINISH -- the control turns --
+#: and an equality test against the step phase silently excluded them. That
+#: is where the measured loss sat: a control turn whose reply cannot be parsed
+#: is retried once with the same messages plus one user turn, so the retry
+#: shares ~96% of its prompt with the call it repairs, and none of it was
+#: being reused. A FINISH phase carries the active question as a suffix
+#: (`analysis_finish:Q2`), so membership is by prefix, not equality.
+#:
+#: REPORT stays out by construction: it builds a fresh context and must not
+#: replace the checkpoint a later `continue` depends on. COVER stays out
+#: because it runs with tools off and is never followed by a same-shape turn.
+#:
+#: Joining the lineage is not reuse. It only makes the call ELIGIBLE; whether
+#: anything is restored is decided by the identity -- which includes the tool
+#: schema, so a PLAN checkpoint can never serve a STEP -- and by the strict
+#: exact-prefix rule the backend applies to every candidate.
+_ROLLING_ANALYSIS_PHASES = (ANALYSIS_STEP_PHASE, ANALYSIS_PLAN_PHASE, ANALYSIS_FINISH_PHASE)
+
+
 def _analysis_rolling_anchor_requested(*, native_backend: bool) -> bool:
-    """Whether this call is an analysis step eligible for rolling reuse.
+    """Whether this call is an analysis turn eligible for rolling reuse.
 
     Read from the phase the runtime already declares for its own call, the
     same way the route anchor is: the backend is told, never infers.
@@ -1126,7 +1152,13 @@ def _analysis_rolling_anchor_requested(*, native_backend: bool) -> bool:
         return False
     if not prefix_anchor_enabled():
         return False
-    return current_phase() == ANALYSIS_STEP_PHASE
+    phase = current_phase()
+    if not isinstance(phase, str):
+        return False
+    return any(
+        phase == member or phase.startswith(f"{member}:")
+        for member in _ROLLING_ANALYSIS_PHASES
+    )
 
 
 def _qwen_route_prefix_anchor_requested(*, native_backend: bool) -> bool:
