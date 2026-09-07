@@ -113,6 +113,7 @@ from orbit.runtime.evidence import (
     EvidenceRehydrationError,
     EvidenceStore,
     final_card,
+    route_card,
     rehydrated_evidence_block,
     requested_evidence_ids,
     tool_evidence_ref,
@@ -1987,6 +1988,58 @@ def _bounded_observation(result: AnalysisResult) -> tuple[str, bool, int]:
         f"full output stored in evidence]"
     )
     return text[:keep] + notice, True, full
+
+
+#: Marker closing a card whose body was shortened to keep the rendered card
+#: inside the per-record bound. Distinct from the observation's own truncation
+#: notice: this one is about what THIS PROMPT shows, not about what the step saw.
+CARD_BODY_TRUNCATED_NOTICE = "[card body shortened to fit the per-record bound]"
+
+#: What a card says when it carries provenance but no excerpt. The wording has
+#: to close off one specific misreading: a report that treated "no excerpt" as
+#: "nothing was found" would state the artifact lacks something the store
+#: actually holds. Content not shown here is content that exists and can be
+#: re-attested; the card says exactly that, and names the reference to do it.
+#: Kept short deliberately: it is repeated on every record that has no
+#: excerpt, so each word is paid once per record out of the same budget the
+#: excerpts come from. A 245-character version cost ~188 tokens per record and
+#: was itself the largest single item in the floor it was meant to keep cheap.
+EVIDENCE_CONTENT_NOT_SHOWN = (
+    "content_not_shown: excerpt omitted here; the record is not empty. "
+    "Its output is stored and re-attestable by raw_ref."
+)
+
+
+def _fit_card(header_lines: list[str], body: str, limit: int) -> str:
+    """Render a card whose FINAL text fits `limit`, shortening only the body.
+
+    The per-record bound was checked against the body alone while the framing
+    was added afterwards, so a body admitted at exactly the bound rendered a
+    card over it. The bound belongs on what is actually emitted.
+
+    Identity is never what gets cut. The header carries the evidence id, status
+    and size a reader needs to attribute and re-attest the record; a card that
+    loses those is unciteable, whereas a body that loses its tail is still
+    exactly attributable and says so. If even the header does not fit, the
+    header is still returned whole -- an oversized identity is a configuration
+    problem to see, not a truncated one to hide.
+    """
+    head = "\n".join(header_lines)
+    whole = f"{head}\n{body}"
+    if len(whole) <= limit:
+        return whole
+    notice = f"\n{CARD_BODY_TRUNCATED_NOTICE}"
+    room = limit - len(head) - 1 - len(notice)
+    if room <= 0:
+        # No room for even a marked fragment. The body still goes, and the fact
+        # that it went is still stated: a card that dropped its content
+        # silently would read as a record with nothing in it. Identity is kept
+        # whole even though that puts the card over the limit -- an unciteable
+        # card is worse than an oversized one, and this shape means a header
+        # larger than the entire per-record bound, which is a configuration
+        # problem to see rather than one to truncate away.
+        return f"{head}\n{CARD_BODY_TRUNCATED_NOTICE}"
+    return f"{head}\n{body[:room].rstrip()}{notice}"
 
 
 def _head_and_tail_excerpt(text: str, *, head_chars: int, tail_chars: int) -> str:
@@ -5381,9 +5434,9 @@ class AnalysisRuntime:
         Newest first when deciding who keeps full text, because the last
         actions are the ones a closing report is most likely to be about;
         rendered back in the original order so the reader still sees the
-        analysis as it happened. A record that does not fit is carried as
-        `final_card` -- size, digest and `raw_ref` -- never truncated
-        silently and never dropped.
+        analysis as it happened. A record that does not get an excerpt is
+        carried as provenance -- id, size, digest and `raw_ref` -- never
+        truncated silently and never dropped.
         """
         # Tokens where the tokeniser is reachable, characters only as a
         # conservative fallback: the two budgets are not interchangeable, and
@@ -5450,13 +5503,28 @@ class AnalysisRuntime:
         # can be carried for. Whatever the budget has left over is then spent
         # upgrading records back to full quotes, newest first. A record is only
         # dropped when even the floor does not fit, and then the oldest goes.
-        citations = {r.evidence_id: final_card(r) for r in records}
-        floor = {rid: measure(card) for rid, card in citations.items()}
+        # The floor is PROVENANCE ONLY, not a citation-with-excerpt.
+        #
+        # `final_card` is `route_card` plus an excerpt, so reserving it for
+        # every record spent the budget on text before any record could be
+        # shown properly -- and a record that could not afford even that was
+        # dropped from the prompt entirely. Measured on the retained dossiers
+        # at ctx 8192 with the real tokeniser: the provenance floor costs
+        # ~180-205 tokens against 428-1035 for a citation-with-excerpt. On ARC1
+        # that turned a dossier whose evidence was unreadable into one where
+        # the call chain is legible, at +64 tokens on the whole prompt; on YB it
+        # represented all six records where the old floor dropped one.
+        #
+        # Every candidate record is represented. Nothing is dropped to make
+        # room, because the floor is now cheap enough that it does not have to
+        # be. Excerpts are optional content bought with what is left.
+        floors = {r.evidence_id: self._provenance_card(r) for r in records}
+        floor_cost = {rid: measure(card) for rid, card in floors.items()}
 
         carried: list[EvidenceRecord] = []
         spent = 0
         for record in reversed(records):
-            cost = floor[record.evidence_id]
+            cost = floor_cost[record.evidence_id]
             if spent + cost > budget and carried:
                 # Room for the newest is not negotiable: a report with no
                 # evidence card at all cannot cite anything, and a context too
@@ -5467,12 +5535,42 @@ class AnalysisRuntime:
             carried.append(record)
         carried.reverse()
 
-        chosen = dict(citations)
-        for record in reversed(carried):
+        # Excerpts, newest first, and a record whose observation was SHORTENED
+        # is offered one before a record whose observation was complete.
+        #
+        # Not a relevance judgement and not derived from any artifact's text: a
+        # record whose observation was cut is the only kind whose stored body
+        # holds material no card can show, because the step itself only ever saw
+        # a prefix. `observation_truncated` is a structural fact the runtime
+        # records at capture time. Measured: without this, the residual is spent
+        # on complete records first and a shortened record never gets its
+        # window, which is how YB kept a dossier whose evidence was already
+        # collected but never rendered.
+        newest_first = list(reversed(carried))
+        offer_order = [
+            r for r in newest_first if r.metadata.get("observation_truncated")
+        ] + [
+            r for r in newest_first if not r.metadata.get("observation_truncated")
+        ]
+
+        # Each record is priced ONCE, at whichever representation it ends with:
+        # the delta replaces its floor rather than adding to it, so `spent`
+        # stays exactly the sum of the chosen forms.
+        #
+        # The delta is credited when it is NEGATIVE too. An excerpt can be
+        # cheaper than the provenance card that would otherwise stand in for it
+        # -- a small complete observation quoted whole costs less than the
+        # citation describing it -- and clamping that saving away left `spent`
+        # above what the dossier actually contains. Measured on YB: 2,983
+        # claimed against 2,902 real, 81 tokens of budget held against nothing.
+        # It never overflows, but it can deny a LATER record an excerpt that
+        # would have fitted, which is the opposite of what this pass is for.
+        chosen = dict(floors)
+        for record in offer_order:
             full = self._evidence_card(record)
-            upgrade = measure(full) - floor[record.evidence_id]
-            if upgrade <= 0 or spent + upgrade <= budget:
-                spent += max(0, upgrade)
+            delta = measure(full) - floor_cost[record.evidence_id]
+            if delta <= 0 or spent + delta <= budget:
+                spent += delta
                 chosen[record.evidence_id] = full
         return [chosen[record.evidence_id] for record in carried]
 
@@ -5525,16 +5623,65 @@ class AnalysisRuntime:
             # Re-attestation is the gate; a record that cannot pass it is
             # described, never quoted.
             return final_card(record)
-        return "\n".join(
-            [
-                "tool_evidence_card: true",
-                f"evidence_id: {record.evidence_id}",
-                f"status: {record.status}",
-                f"size: {record.raw_chars} chars",
-                "evidence:",
-                body,
-            ]
-        )
+        header = [
+            "tool_evidence_card: true",
+            f"evidence_id: {record.evidence_id}",
+            f"status: {record.status}",
+            f"size: {record.raw_chars} chars",
+            "evidence:",
+        ]
+        # The gate above bounds the BODY; the framing is added after it, so a
+        # record that passes at exactly the bound renders a card over it -- the
+        # off-by-framing overflow. Bound the FINAL rendered card instead, and
+        # take the space out of the body, never out of the identity: a card
+        # that loses its evidence_id or size is unciteable, while a body that
+        # loses its tail is still exactly attributable.
+        return _fit_card(header, body, MAX_REPORT_EVIDENCE_QUOTE_CHARS)
+
+    def _provenance_card(self, record: EvidenceRecord) -> str:
+        """One record identified and attributed, with no excerpt of its text.
+
+        The floor a record can be carried for. `final_card` -- the previous
+        floor -- is a citation PLUS an excerpt, so reserving it for every record
+        spent the budget on text before any record could be shown properly.
+        Measured on the retained dossiers at ctx 8192: this floor costs ~180-205
+        tokens against 428-1035 for a citation-with-excerpt, and the residual is
+        what lets a record that needs a real excerpt actually get one.
+
+        What it must never become is evidence of absence. A card with no
+        excerpt states in words that the content is not shown HERE and remains
+        in the store, re-attestable by `raw_ref`: "not shown" is not "not
+        found", and a report that read it the second way would be confidently
+        wrong about the artifact.
+
+        Everything needed to identify and re-attest the record stays: id, tool,
+        kind, status, `raw_ref`, digest and size come from the shipped
+        `route_card`. Where the observation was shortened, that is stated with
+        the sizes; where a full-output sibling exists, it is named with ITS OWN
+        id and digest -- never the truncated observation's, which describes
+        different bytes.
+        """
+        lines = [route_card(record)]
+        if record.metadata.get("observation_truncated"):
+            lines.append(
+                f"observation_truncated: true (the step saw {record.raw_chars} "
+                f"chars of {record.metadata.get('observation_full_chars')} produced)"
+            )
+        raw_id = record.metadata.get("raw_output_evidence_id")
+        if isinstance(raw_id, str) and raw_id:
+            raw_record = self.evidence_store.records.get(raw_id)
+            detail = ""
+            if raw_record is not None:
+                # The sibling's own identity. Attributing the full body to the
+                # observation's digest would attest bytes that digest never
+                # covered.
+                detail = (
+                    f", sha256 {raw_record.raw_sha256[:16]}, "
+                    f"{raw_record.raw_chars} chars"
+                )
+            lines.append(f"full_output_evidence: {raw_id}{detail}")
+        lines.append(EVIDENCE_CONTENT_NOT_SHOWN)
+        return "\n".join(lines)
 
     def _linking_excerpt_card(self, record: EvidenceRecord) -> str | None:
         """A head-and-tail window of the full output, when the step saw a cut.
@@ -5570,7 +5717,11 @@ class AnalysisRuntime:
             head_chars=REPORT_LINKING_EXCERPT_HEAD_CHARS,
             tail_chars=REPORT_LINKING_EXCERPT_TAIL_CHARS,
         )
-        return "\n".join(
+        # Bounded on the FINAL rendered card, like every other card: the window
+        # constants are sized to leave room for this framing, but the framing
+        # grows with the digits of `full_chars`, so the bound is enforced on
+        # what is emitted rather than trusted to arithmetic done once.
+        return _fit_card(
             [
                 "tool_evidence_card: true",
                 f"evidence_id: {record.evidence_id}",
@@ -5583,8 +5734,9 @@ class AnalysisRuntime:
                 f"raw_ref: {RAW_REF_PREFIX}{raw_id}",
                 "evidence (head-and-tail excerpt of the full output; "
                 "the middle is elided, the full bytes are in the store):",
-                excerpt,
-            ]
+            ],
+            excerpt,
+            MAX_REPORT_EVIDENCE_QUOTE_CHARS,
         )
 
     def _report_messages(
