@@ -108,6 +108,7 @@ from orbit.runtime.analysis_sandbox import (
     validate_code,
 )
 from orbit.runtime.evidence import (
+    RAW_REF_PREFIX,
     EvidenceRecord,
     EvidenceRehydrationError,
     EvidenceStore,
@@ -219,6 +220,34 @@ MAX_REPORT_EVIDENCE_RECORDS = 12
 #: observation as a model should be handed at once"; a record under it was
 #: quotable before this bound existed and still is.
 MAX_REPORT_EVIDENCE_QUOTE_CHARS = 3200
+
+#: When a reportable observation was shortened for the step that saw it, the
+#: report quotes a head-AND-tail window of the FULL retained output instead of
+#: the head-only observation. The observation is cut at MAX_EVIDENCE_CHARS from
+#: the front (`text[:keep]`), so anything a step's output established past that
+#: point -- the call sites that link an artifact's decoded strings into the
+#: action it takes with them -- is not in the observation at all, and a report
+#: built only from observations cannot state it. Measured on the live Fattura
+#: shape: the `Win32_Process.Create(<decoded powershell>, null, startup)` spawn
+#: and its `SpawnInstance_()`/`ShowWindow` setup sit at 77-89% of a 7.7 KB file,
+#: past a 3 KB head. A window that spends the per-record quote budget across a
+#: head and a tail keeps both an artifact's opening structure and its closing
+#: behaviour, which is where a downloader or launcher does its work. Head and
+#: tail split the budget so neither end can crowd out the other; the middle is
+#: elided with a marker and the full bytes stay re-attestable in the store.
+#: This is generic to any artifact whose salient behaviour is not in its first
+#: 3 KB -- it names no sample, function or expected chain.
+#:
+#: Sized so the RENDERED CARD fits `MAX_REPORT_EVIDENCE_QUOTE_CHARS`, not just
+#: the excerpt: the card adds ~306 chars of framing (the identity, size and
+#: raw_ref lines that stop an excerpt passing as the whole record) and the
+#: elision marker adds ~53 more. Sizing head+tail to the bound itself put the
+#: card ~260 chars OVER the per-record limit it had just been checked against
+#: -- measured, not theorised. The total-budget accounting in `_evidence_cards`
+#: re-measures the real card so a prompt could not overflow, but a per-record
+#: bound that the record then exceeds is a broken invariant either way.
+REPORT_LINKING_EXCERPT_HEAD_CHARS = 600
+REPORT_LINKING_EXCERPT_TAIL_CHARS = 2200
 
 #: Total quoted evidence a report prompt may carry, across all records.
 #:
@@ -1958,6 +1987,28 @@ def _bounded_observation(result: AnalysisResult) -> tuple[str, bool, int]:
         f"full output stored in evidence]"
     )
     return text[:keep] + notice, True, full
+
+
+def _head_and_tail_excerpt(text: str, *, head_chars: int, tail_chars: int) -> str:
+    """A head and a tail of `text`, with the elided middle named.
+
+    Unlike the head-only `_bounded_observation` cut and unlike `_bounded_text`
+    -- which caps its tail so short a link near the end of a file is lost -- the
+    two ends are sized by the caller and both are kept whole. A record short
+    enough to fit both ends is returned unchanged: an excerpt of something that
+    would fit anyway only invites a report to treat a whole record as partial.
+    The marker states how many characters the middle dropped, so the excerpt is
+    never mistaken for the full output.
+    """
+    if head_chars < 0 or tail_chars < 0:
+        raise ValueError("excerpt bounds must be non-negative")
+    total = len(text)
+    if total <= head_chars + tail_chars:
+        return text
+    dropped = total - head_chars - tail_chars
+    head = text[:head_chars].rstrip()
+    tail = text[total - tail_chars:].lstrip()
+    return f"{head}\n[... {dropped} chars elided; full output in evidence ...]\n{tail}"
 
 
 # How much of a parse failure the repair turn is allowed to quote. The message
@@ -5450,12 +5501,25 @@ class AnalysisRuntime:
         store, re-attestable by `raw_ref`, and the deterministic values a
         report must state exactly do not depend on this path at all -- the
         appendix renders every transformation and indicator itself.
+
+        One case the quote-whole path got wrong: a record whose observation was
+        SHORTENED for the step that saw it is small enough to quote whole, but
+        quoting it whole quotes the head-only cut, not the artifact. The step
+        was handed `text[:keep]`, so whatever the output established past the
+        cut -- the call sites that link decoded strings into the action taken
+        with them -- is absent from the observation, and a report built from it
+        cannot state the link even though the store holds it. For those, quote
+        a head-and-tail window of the FULL retained output instead, so the
+        artifact's closing behaviour survives alongside its opening structure.
         """
         if record.raw_chars > MAX_REPORT_EVIDENCE_QUOTE_CHARS:
             # Too expensive to quote. Described exactly, with the reference
             # that recovers the bytes, rather than dropped or truncated in a
             # way that hides that it was.
             return final_card(record)
+        linking = self._linking_excerpt_card(record)
+        if linking is not None:
+            return linking
         body = self.evidence_store.reattest_exact(record.evidence_id)
         if body is None:
             # Re-attestation is the gate; a record that cannot pass it is
@@ -5469,6 +5533,57 @@ class AnalysisRuntime:
                 f"size: {record.raw_chars} chars",
                 "evidence:",
                 body,
+            ]
+        )
+
+    def _linking_excerpt_card(self, record: EvidenceRecord) -> str | None:
+        """A head-and-tail window of the full output, when the step saw a cut.
+
+        Returns None -- deferring to the ordinary quote-whole path -- unless the
+        record's observation was shortened AND the full output is recorded in a
+        re-attestable raw record. The raw record is the untruncated sibling
+        `_record_action_evidence` writes for exactly this: the store keeps the
+        whole output so a later reader is not limited to the bounded view a step
+        was shown.
+
+        The window spends the per-record quote budget across a head and a tail.
+        Head-only is what the observation already was; a head-and-tail of the
+        full body is what recovers a link established near the end of an
+        artifact -- a downloader's fetch-and-run, a launcher's process spawn --
+        without re-dumping the whole record into the prompt. The middle is
+        elided with a marker and the raw bytes stay re-attestable in the store,
+        so the model is never told the excerpt is complete.
+        """
+        if not record.metadata.get("observation_truncated"):
+            return None
+        raw_id = record.metadata.get("raw_output_evidence_id")
+        if not isinstance(raw_id, str) or not raw_id:
+            return None
+        full = self.evidence_store.reattest_exact(raw_id)
+        if full is None:
+            # The full output cannot be re-attested exactly. Fall back to the
+            # ordinary path rather than quote something unverified.
+            return None
+        full_chars = len(full)
+        excerpt = _head_and_tail_excerpt(
+            full,
+            head_chars=REPORT_LINKING_EXCERPT_HEAD_CHARS,
+            tail_chars=REPORT_LINKING_EXCERPT_TAIL_CHARS,
+        )
+        return "\n".join(
+            [
+                "tool_evidence_card: true",
+                f"evidence_id: {record.evidence_id}",
+                f"status: {record.status}",
+                # The observation the step saw, and the full output this card
+                # excerpts, are distinct records; name both so the excerpt is
+                # never mistaken for the whole and the raw bytes are findable.
+                f"size: {full_chars} chars (full output; the step saw a "
+                f"{record.raw_chars}-char excerpt)",
+                f"raw_ref: {RAW_REF_PREFIX}{raw_id}",
+                "evidence (head-and-tail excerpt of the full output; "
+                "the middle is elided, the full bytes are in the store):",
+                excerpt,
             ]
         )
 
