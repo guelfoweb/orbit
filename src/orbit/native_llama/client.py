@@ -59,10 +59,12 @@ from .paths import NativeLlamaPaths
 from .rolling_route_anchor import (
     ROLLING_ANALYSIS_STRATEGY_ID,
     ROLLING_ROUTE_STRATEGY_ID,
+    ROLLING_STEP_STRATEGY_ID,
     RollingRouteAnchorState,
     RollingRouteIdentity,
     capture_rolling_route_anchor,
     rolling_capture_boundary,
+    rolling_step_boundary,
     invalidate_rolling_route_anchor,
     restore_rolling_route_anchor,
     rolling_route_reuse_start,
@@ -1418,6 +1420,7 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
         analysis_rolling_anchor: bool = False,
+        analysis_step_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
         qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
@@ -1460,6 +1463,23 @@ class NativeLlamaClient:
                 return timings
             finally:
                 self._session.in_flight = False
+        # The STEP lineage checkpoints before its last user turn, and the
+        # head it needs is rendered here, BEFORE the production render: the
+        # bridge parser is tied to the most recent render, so the prompt the
+        # model answers must be the last thing rendered. Nothing here decides
+        # eligibility -- the gates below still do, unchanged -- so a head
+        # computed for a call that turns out ineligible is simply never used.
+        rolling_boundary_head: str | None = None
+        if (
+            analysis_step_anchor
+            and not route_prefix_anchor
+            and self._ornith_rolling_analysis_eligible(
+                analysis_rolling_anchor=analysis_rolling_anchor, thinking=thinking
+            )
+        ):
+            rolling_boundary_head = self._step_boundary_head(
+                messages, tools=tools, thinking=thinking
+            )
         try:
             prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
         except Exception:
@@ -1540,8 +1560,19 @@ class NativeLlamaClient:
         if rolling_route_eligible:
             rolling_route_identity = self._rolling_route_identity(tools=tools)
         elif rolling_analysis_eligible:
+            # The STEP turn keeps a checkpoint of its own. The controller
+            # renders a STEP as history plus one transient user turn, and a
+            # FINISH control turn runs between any two STEPs; under one shared
+            # slot that FINISH evicted the STEP checkpoint every time. The
+            # strategy id is what selects the slot, and identities compare
+            # whole, so a STEP checkpoint can never serve a control turn.
             rolling_route_identity = self._rolling_route_identity(
-                tools=tools, strategy_id=ROLLING_ANALYSIS_STRATEGY_ID
+                tools=tools,
+                strategy_id=(
+                    ROLLING_STEP_STRATEGY_ID
+                    if analysis_step_anchor
+                    else ROLLING_ANALYSIS_STRATEGY_ID
+                ),
             )
         else:
             rolling_route_identity = None
@@ -1561,6 +1592,7 @@ class NativeLlamaClient:
             rolling_route_eligible=rolling_route_eligible,
             rolling_route_identity=rolling_route_identity,
             rolling_boundary_suffix=rolling_boundary_suffix,
+            rolling_boundary_head=rolling_boundary_head,
             route_anchor_segments=route_anchor_segments,
             qwen_route_anchor_plan=qwen_route_anchor_plan,
             qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -1582,6 +1614,7 @@ class NativeLlamaClient:
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
         analysis_rolling_anchor: bool = False,
+        analysis_step_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
         qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
@@ -1599,6 +1632,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             analysis_rolling_anchor=analysis_rolling_anchor,
+            analysis_step_anchor=analysis_step_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
@@ -1763,6 +1797,7 @@ class NativeLlamaClient:
         thinking: bool,
         route_prefix_anchor: bool = False,
         analysis_rolling_anchor: bool = False,
+        analysis_step_anchor: bool = False,
         qwen_route_prefix_anchor: bool = False,
         qwen36_shell_tool_prefix_anchor: bool = False,
         allow_mtp_experimental: bool | None = None,
@@ -1781,6 +1816,7 @@ class NativeLlamaClient:
                 thinking=thinking,
                 route_prefix_anchor=route_prefix_anchor,
                 analysis_rolling_anchor=analysis_rolling_anchor,
+                analysis_step_anchor=analysis_step_anchor,
                 qwen_route_prefix_anchor=qwen_route_prefix_anchor,
                 qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
                 allow_mtp_experimental=allow_mtp_experimental,
@@ -1851,6 +1887,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             analysis_rolling_anchor=analysis_rolling_anchor,
+            analysis_step_anchor=analysis_step_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
@@ -1881,6 +1918,7 @@ class NativeLlamaClient:
         allow_mtp_experimental: bool | None,
         final_prefix_experiment: bool,
         analysis_rolling_anchor: bool = False,
+        analysis_step_anchor: bool = False,
         on_progress=None,
         on_token=None,
         should_cancel=None,
@@ -1926,6 +1964,7 @@ class NativeLlamaClient:
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             analysis_rolling_anchor=analysis_rolling_anchor,
+            analysis_step_anchor=analysis_step_anchor,
             qwen_route_prefix_anchor=qwen_route_prefix_anchor,
             qwen36_shell_tool_prefix_anchor=qwen36_shell_tool_prefix_anchor,
             allow_mtp_experimental=allow_mtp_experimental,
@@ -2260,6 +2299,7 @@ class NativeLlamaClient:
         rolling_route_eligible: bool = False,
         rolling_route_identity: RollingRouteIdentity | None = None,
         rolling_boundary_suffix: str | None = None,
+        rolling_boundary_head: str | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -2305,6 +2345,7 @@ class NativeLlamaClient:
                 rolling_route_eligible=rolling_route_eligible,
                 rolling_route_identity=rolling_route_identity,
                 rolling_boundary_suffix=rolling_boundary_suffix,
+                rolling_boundary_head=rolling_boundary_head,
                 route_anchor_segments=route_anchor_segments,
                 qwen_route_anchor_plan=qwen_route_anchor_plan,
                 qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -2567,6 +2608,7 @@ class NativeLlamaClient:
         rolling_route_eligible: bool = False,
         rolling_route_identity: RollingRouteIdentity | None = None,
         rolling_boundary_suffix: str | None = None,
+        rolling_boundary_head: str | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -2669,15 +2711,33 @@ class NativeLlamaClient:
         # None on the CHAT lineage and wherever the renderer reported no
         # boundary, which leaves the whole-prompt capture below untouched.
         capture_at: int | None = None
-        if (
+        # The STEP lineage checkpoints earlier still: before the transient user
+        # turn that closes every STEP prompt, which the next STEP replaces. Its
+        # head was rendered by `complete_chat`; here it is only verified.
+        step_lineage = (
+            rolling_route_eligible
+            and rolling_route_identity is not None
+            and rolling_route_identity.strategy_id == ROLLING_STEP_STRATEGY_ID
+        )
+        control_lineage = (
             rolling_route_eligible
             and rolling_route_identity is not None
             and rolling_route_identity.strategy_id == ROLLING_ANALYSIS_STRATEGY_ID
-        ):
+        )
+        if control_lineage:
             boundary = rolling_capture_boundary(
                 prompt,
                 prompt_tokens,
                 generation_prompt=rolling_boundary_suffix,
+                tokenize=self.tokenize,
+            )
+            if boundary is not None and boundary > processed:
+                capture_at = boundary
+        elif step_lineage:
+            boundary = rolling_step_boundary(
+                prompt,
+                prompt_tokens,
+                head=rolling_boundary_head,
                 tokenize=self.tokenize,
             )
             if boundary is not None and boundary > processed:
@@ -2703,7 +2763,18 @@ class NativeLlamaClient:
             if processed == capture_at and not self.cancel_event.is_set():
                 boundary_tokens = prompt_tokens[:capture_at]
                 slot_state = self._rolling_anchor_state_for(rolling_route_identity)
-                if rolling_route_should_replace(
+                # Both ANALYSIS slots always advance to the boundary just
+                # decoded. Keep-older exists for a chain that must survive a
+                # stranger (the CHAT final); an analysis turn that does not
+                # extend the stored checkpoint means the history moved on --
+                # a rewrite before a STEP, a new action before a FINISH -- and
+                # from there only the newest boundary can serve the next same-
+                # phase turn. Under one shared slot the STEP<->FINISH identity
+                # churn happened to reset the control checkpoint every time;
+                # with the STEP in its own slot a stale FINISH checkpoint would
+                # otherwise block every later FINISH from being captured, and
+                # its repair would prefill cold (measured live: 3 of 4 repairs).
+                if step_lineage or control_lineage or rolling_route_should_replace(
                     slot_state, boundary_tokens, rolling_route_identity
                 ):
                     captured, _capture_meta = capture_rolling_route_anchor(
@@ -2730,6 +2801,7 @@ class NativeLlamaClient:
         pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
         if (
             capture_at is None
+            and not step_lineage
             and rolling_route_eligible
             and rolling_route_identity is not None
             and processed == n_prompt
@@ -3657,6 +3729,58 @@ class NativeLlamaClient:
             return None
         suffix = rendered.get("generation_prompt")
         return suffix if isinstance(suffix, str) and suffix else None
+
+    def _step_boundary_head(
+        self,
+        messages: list[NativeMessage],
+        *,
+        tools: list[dict] | None,
+        thinking: bool | None,
+    ) -> str | None:
+        """The rendered prompt up to the last user turn, or None.
+
+        The structured controller renders a STEP as the committed history
+        followed by exactly one transient user turn -- the per-question
+        guidance -- which the next STEP replaces. What the next STEP repeats
+        is everything before it, so that is the head: the messages before the
+        last user turn, rendered through the same renderer as the prompt, with
+        the generation prompt the renderer appended stripped off again.
+
+        Must run BEFORE the production render of the full prompt -- the
+        bridge parser is tied to the most recent render -- and only for a
+        profile that renders through the bridge, because only the bridge
+        reports its generation prompt. None whenever the head cannot be
+        stated exactly: no user turn, nothing before it, a renderer that
+        reports no generation prompt, or a render that fails. None means no
+        STEP checkpoint on this call, never a wrong one; the token-prefix
+        check in `rolling_step_boundary` still has to pass afterwards.
+        """
+        profile = getattr(self, "model_profile", None)
+        if profile is None or not getattr(profile, "uses_native_chat_bridge", False):
+            return None
+        last_user = None
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].get("role") == "user":
+                last_user = index
+                break
+        if not last_user:
+            return None
+        try:
+            head_prompt = self.apply_chat_template(
+                messages[:last_user], tools=tools, thinking=thinking
+            )
+        except Exception:
+            return None
+        generation_prompt = self._generation_prompt_suffix()
+        if not generation_prompt or not head_prompt.endswith(generation_prompt):
+            return None
+        head = head_prompt[: len(head_prompt) - len(generation_prompt)]
+        return head or None
+
+    @property
+    def _rolling_step_anchor_state(self) -> RollingRouteAnchorState:
+        """The ANALYSIS STEP checkpoint; see `_rolling_route_anchor_state`."""
+        return self._rolling_anchor_store().step_state
 
     def _ornith_rolling_analysis_eligible(self, *, analysis_rolling_anchor: bool, thinking: bool) -> bool:
         """Same gate as the route lineage, asked about an analysis step.

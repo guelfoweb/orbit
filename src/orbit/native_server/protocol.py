@@ -25,6 +25,9 @@ class ChatRequest:
     allow_mtp_experimental: bool | None
     final_prefix_experiment: bool
     artifact_content: bool
+    # The analysis STEP turn, within the rolling lineage: it checkpoints
+    # before its transient last user turn and in a slot of its own.
+    analysis_step_anchor: bool = False
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,7 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
         allow_mtp_experimental=_optional_bool(payload.get("allow_mtp_experimental")),
         final_prefix_experiment=payload.get("final_prefix_experiment") is True,
         artifact_content=payload.get("artifact_content") is True,
+        analysis_step_anchor=payload.get("analysis_step_anchor") is True,
     )
 
 

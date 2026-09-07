@@ -36,6 +36,17 @@ ROLLING_ROUTE_STRATEGY_ID = "ornith15-rolling-route-v1"
 # reaching the backend.
 ROLLING_ANALYSIS_STRATEGY_ID = "ornith15-rolling-analysis-v1"
 
+# The analysis STEP turn keeps a checkpoint of its own. The structured
+# controller renders a STEP as the committed history followed by one transient
+# user turn -- the per-question guidance -- and a FINISH control turn runs
+# between any two STEPs. Under one shared analysis slot the FINISH evicted the
+# STEP checkpoint every time, so no STEP ever restored: measured on the
+# retained traces as every STEP after the first prefilling 1.0-1.6k tokens
+# its predecessor had already decoded. A distinct strategy id gives the STEP
+# its own slot through the same store, and -- because identities are compared
+# whole -- makes a STEP checkpoint and a control checkpoint mutually unusable.
+ROLLING_STEP_STRATEGY_ID = "ornith15-rolling-analysis-step-v1"
+
 
 @dataclass(frozen=True)
 class RollingRouteIdentity:
@@ -135,6 +146,42 @@ def rolling_capture_boundary(
         return None
     head = prompt[: len(prompt) - len(generation_prompt)]
     if not head:
+        return None
+    head_tokens = tokenize(head)
+    n = len(head_tokens)
+    if n <= 0 or n >= len(prompt_tokens):
+        return None
+    if prompt_tokens[:n] != head_tokens:
+        return None
+    return n
+
+
+def rolling_step_boundary(
+    prompt: str,
+    prompt_tokens: list[int],
+    *,
+    head: str | None,
+    tokenize: Callable[[str], list[int]],
+) -> int | None:
+    """How many leading tokens the NEXT step can still extend, or None.
+
+    `head` is the rendered prompt up to -- not including -- the transient
+    user turn that closes a STEP prompt: the controller's per-question
+    guidance, which the next STEP replaces rather than repeats. Everything
+    before it is the committed history, which is append-only, so the next
+    STEP prompt begins with exactly this text followed by whatever the turn
+    in between appended. The caller renders that head through the same
+    renderer as the prompt; this only decides whether it is a boundary.
+
+    Accepted only when the head is literally how the prompt begins, and its
+    tokens are a strict prefix of the prompt's tokens: a head whose render
+    differs from the prompt's opening -- a template that treats its last turn
+    specially, a rewrite of history -- and a boundary that lands inside a
+    token are both refused rather than rounded. Every refusal returns None,
+    and None means no STEP checkpoint is taken on this call; it can never
+    make a checkpoint less safe, only absent.
+    """
+    if not head or not prompt.startswith(head) or len(head) >= len(prompt):
         return None
     head_tokens = tokenize(head)
     n = len(head_tokens)
