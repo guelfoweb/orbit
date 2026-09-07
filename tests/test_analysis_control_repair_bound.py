@@ -78,7 +78,8 @@ class _DispatchWitness:
 
 
 class ControlRepairBoundTestBase(unittest.TestCase):
-    def _run(self, *, questions=1, finish=(), plan=(), capture_states=False):
+    def _run(self, *, questions=1, finish=(), plan=(), capture_states=False,
+             max_model_calls=60, max_actions=None):
         borrowed = _Case("run")
         borrowed.addCleanup = self.addCleanup
         runtime = borrowed._runtime(
@@ -103,9 +104,10 @@ class ControlRepairBoundTestBase(unittest.TestCase):
         )
         with patcher:
             try:
-                run = runtime.run_autonomous(
-                    "Analyse it.", finalize=False, max_model_calls=60
-                )
+                kwargs = dict(finalize=False, max_model_calls=max_model_calls)
+                if max_actions is not None:
+                    kwargs["max_actions"] = max_actions
+                run = runtime.run_autonomous("Analyse it.", **kwargs)
             except BaseException as exc:  # noqa: BLE001 - the point of the test
                 run, escaped = None, exc
         return run, witness, escaped, live.get("controller")
@@ -153,6 +155,29 @@ class TheDispatchBoundIsTotalTests(ControlRepairBoundTestBase):
         # One repair per question, and two dispatches per question.
         self.assertEqual(run.control_repairs, 2)
         self.assertEqual(witness.finish_dispatches, 4)
+
+    def test_a_repair_never_pushes_the_run_past_max_model_calls(self) -> None:
+        """The finish repair is a dispatch, and it counts against the ceiling.
+
+        The loop admits a turn while a call remains, then the finish could
+        spend two -- the reply and its repair -- so a finish admitted at the
+        last call pushed the run one past its documented ceiling. Measured on
+        a live PowerShell run as 20 against a bound of 18. Every dispatch is
+        counted (the reported figure equals the real dispatches), so the check
+        is on that honest figure.
+        """
+        for bound in (3, 4, 5, 6):
+            with self.subTest(bound=bound):
+                run, witness, escaped, _ = self._run(
+                    questions=3, finish=("parse",) * 20,
+                    max_model_calls=bound, max_actions=99,
+                )
+                self.assertIsNone(escaped)
+                # finalize=False, so model_calls is the loop spend alone.
+                self.assertLessEqual(
+                    run.model_calls, bound,
+                    f"loop spent {run.model_calls} against a bound of {bound}",
+                )
 
     def test_the_plan_phase_is_bounded_the_same_way(self) -> None:
         run, witness, escaped, _ = self._run(questions=1, plan=("parse",) * 20)
