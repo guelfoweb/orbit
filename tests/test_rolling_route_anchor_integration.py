@@ -230,6 +230,9 @@ class CaptureGuardTest(unittest.TestCase):
                 "prompt_tokens": ROUTE2,
                 "rolling_route_should_replace": client_module.rolling_route_should_replace,
                 "capture_rolling_route_anchor": fake_capture,
+                # The route lineage never checkpoints at a turn boundary, so
+                # the whole-prompt guard is the one that runs for it.
+                "capture_at": None,
             }
             exec(source, exec_globals)
         finally:
@@ -287,7 +290,10 @@ def _capture_guard_source() -> str:
     import textwrap
 
     source = inspect.getsource(NativeLlamaClient._complete_prompt_standard)
-    marker = "        if (\n            rolling_route_eligible"
+    # The whole-prompt guard is the one that opens on `capture_at is None`:
+    # the ANALYSIS lineage's boundary capture sits above it and is lifted by
+    # its own harness in test_analysis_rolling_kv_control_repair.
+    marker = "        if (\n            capture_at is None"
     start = source.index(marker)
     end = source.index("        self.last_committed_generated_tokens = []", start)
     return textwrap.dedent(source[start:end])

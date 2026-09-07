@@ -62,6 +62,7 @@ from .rolling_route_anchor import (
     RollingRouteAnchorState,
     RollingRouteIdentity,
     capture_rolling_route_anchor,
+    rolling_capture_boundary,
     invalidate_rolling_route_anchor,
     restore_rolling_route_anchor,
     rolling_route_reuse_start,
@@ -1545,6 +1546,13 @@ class NativeLlamaClient:
         else:
             rolling_route_identity = None
         rolling_route_eligible = rolling_route_eligible or rolling_analysis_eligible
+        # The ANALYSIS lineage checkpoints at the turn boundary, which needs
+        # the exact text the renderer appended to open the assistant turn.
+        # Only the native bridge reports it; a profile rendered any other way
+        # passes None and keeps the whole-prompt capture it has today.
+        rolling_boundary_suffix = (
+            self._generation_prompt_suffix() if rolling_analysis_eligible else None
+        )
         return self.complete_prompt(
             prompt,
             max_tokens=max_tokens,
@@ -1552,6 +1560,7 @@ class NativeLlamaClient:
             thinking=thinking,
             rolling_route_eligible=rolling_route_eligible,
             rolling_route_identity=rolling_route_identity,
+            rolling_boundary_suffix=rolling_boundary_suffix,
             route_anchor_segments=route_anchor_segments,
             qwen_route_anchor_plan=qwen_route_anchor_plan,
             qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -2250,6 +2259,7 @@ class NativeLlamaClient:
         final_prefix_segments: RoutePromptSegments | None = None,
         rolling_route_eligible: bool = False,
         rolling_route_identity: RollingRouteIdentity | None = None,
+        rolling_boundary_suffix: str | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -2294,6 +2304,7 @@ class NativeLlamaClient:
                 max_tokens=max_tokens,
                 rolling_route_eligible=rolling_route_eligible,
                 rolling_route_identity=rolling_route_identity,
+                rolling_boundary_suffix=rolling_boundary_suffix,
                 route_anchor_segments=route_anchor_segments,
                 qwen_route_anchor_plan=qwen_route_anchor_plan,
                 qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -2555,6 +2566,7 @@ class NativeLlamaClient:
         final_prefix_segments: RoutePromptSegments | None = None,
         rolling_route_eligible: bool = False,
         rolling_route_identity: RollingRouteIdentity | None = None,
+        rolling_boundary_suffix: str | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -2643,6 +2655,66 @@ class NativeLlamaClient:
                 )
             )
         token_array = (llama_token * n_prompt)(*prompt_tokens)
+        # Where the ANALYSIS lineage checkpoints: at the turn boundary, before
+        # the generation prompt. A checkpoint taken at the end of the prompt
+        # carries the assistant-turn opener, and no same-phase successor ever
+        # repeats it -- a repair puts a user turn there, a continuation puts
+        # the reply -- so such a checkpoint was captured on every step and
+        # restored on none. Measured on the retained traces as 96% of a repair
+        # prompt sitting behind that opener.
+        #
+        # Only past what is already resident: a boundary at or before the
+        # restored prefix describes state this call did not decode, and a
+        # checkpoint must be exactly the tokens the KV holds when it is taken.
+        # None on the CHAT lineage and wherever the renderer reported no
+        # boundary, which leaves the whole-prompt capture below untouched.
+        capture_at: int | None = None
+        if (
+            rolling_route_eligible
+            and rolling_route_identity is not None
+            and rolling_route_identity.strategy_id == ROLLING_ANALYSIS_STRATEGY_ID
+        ):
+            boundary = rolling_capture_boundary(
+                prompt,
+                prompt_tokens,
+                generation_prompt=rolling_boundary_suffix,
+                tokenize=self.tokenize,
+            )
+            if boundary is not None and boundary > processed:
+                capture_at = boundary
+        if capture_at is not None:
+            # Two stages, the boundary between them being where the snapshot is
+            # taken. Splitting the prefill here realigns one decode batch, the
+            # same class of numerical variation every restored anchor already
+            # introduces; it is not a change in what is decoded. The snapshot
+            # is the exact tokens resident at that moment and nothing more.
+            while processed < capture_at and not self.cancel_event.is_set():
+                processed = self._decode_prompt_range(
+                    token_array,
+                    processed=processed,
+                    end=capture_at,
+                    step=step,
+                    total=n_prompt,
+                    on_progress=on_progress,
+                    should_cancel=should_cancel,
+                    reused=reused,
+                    started_us=pf_start,
+                )
+            if processed == capture_at and not self.cancel_event.is_set():
+                boundary_tokens = prompt_tokens[:capture_at]
+                slot_state = self._rolling_anchor_state_for(rolling_route_identity)
+                if rolling_route_should_replace(
+                    slot_state, boundary_tokens, rolling_route_identity
+                ):
+                    captured, _capture_meta = capture_rolling_route_anchor(
+                        lib,
+                        self._session.ctx_tgt,
+                        prompt_tokens=boundary_tokens,
+                        identity=rolling_route_identity,
+                    )
+                    # A failed capture must not discard a still-usable checkpoint.
+                    if captured.valid:
+                        self._store_rolling_anchor_state(rolling_route_identity, captured)
         while processed < n_prompt and not self.cancel_event.is_set():
             processed = self._decode_prompt_range(
                 token_array,
@@ -2657,13 +2729,17 @@ class NativeLlamaClient:
             )
         pf_ms = (lib.llama_time_us() - pf_start) / 1000.0
         if (
-            rolling_route_eligible
+            capture_at is None
+            and rolling_route_eligible
             and rolling_route_identity is not None
             and processed == n_prompt
             and not self.cancel_event.is_set()
         ):
             # Prefill completed exactly through the prompt and nothing has been
             # generated yet, so the snapshot is the prompt and only the prompt.
+            # Skipped when a boundary checkpoint was taken above: the full
+            # prompt extends it, so this would replace the reusable checkpoint
+            # with the one that cannot be.
             slot_state = self._rolling_anchor_state_for(rolling_route_identity)
             if rolling_route_should_replace(
                 slot_state, prompt_tokens, rolling_route_identity
@@ -3561,6 +3637,26 @@ class NativeLlamaClient:
         if self.config.use_mtp_experimental or self._session.mtp_enabled:
             return False
         return True
+
+    def _generation_prompt_suffix(self) -> str | None:
+        """The text the last render appended to open the assistant turn.
+
+        Reported by the native chat bridge beside the prompt it rendered, so it
+        is the renderer's own statement of where the turn boundary sits rather
+        than a guess made here about the template. Read only for a profile
+        that renders through the bridge: `_active_profile_render` is written by
+        that path alone, and on any other it would be whatever the previous
+        bridge render left behind. None on every other path, which keeps the
+        whole-prompt capture exactly as it is.
+        """
+        profile = getattr(self, "model_profile", None)
+        if profile is None or not getattr(profile, "uses_native_chat_bridge", False):
+            return None
+        rendered = getattr(self, "_active_profile_render", None)
+        if not isinstance(rendered, dict):
+            return None
+        suffix = rendered.get("generation_prompt")
+        return suffix if isinstance(suffix, str) and suffix else None
 
     def _ornith_rolling_analysis_eligible(self, *, analysis_rolling_anchor: bool, thinking: bool) -> bool:
         """Same gate as the route lineage, asked about an analysis step.

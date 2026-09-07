@@ -105,6 +105,46 @@ def rolling_route_reuse_start(
     return len(saved)
 
 
+def rolling_capture_boundary(
+    prompt: str,
+    prompt_tokens: list[int],
+    *,
+    generation_prompt: str | None,
+    tokenize: Callable[[str], list[int]],
+) -> int | None:
+    """How many leading tokens the NEXT turn can still extend, or None.
+
+    A checkpoint is only worth keeping if a later prompt can be a strict
+    extension of it. The rendered prompt ends with the generation prompt -- the
+    text that opens the assistant turn the model is about to write -- and that
+    tail is precisely what the next prompt does NOT repeat: a repair appends a
+    user turn in its place, and a continuation renders the assistant's actual
+    reply there. Measured on the retained ANALYSIS traces, every same-phase
+    miss diverged at exactly that point, with the saved tokens continuing into
+    the assistant role opener and the new prompt into the user's. A checkpoint
+    that includes the generation prompt can therefore never be restored by a
+    same-phase successor, whatever else matches.
+
+    The boundary is the prompt with that tail removed, re-tokenized, and
+    accepted only if those tokens are a strict prefix of the full prompt's --
+    a boundary that lands inside a token is refused rather than rounded. Every
+    refusal returns None, and None means the caller keeps its existing
+    behaviour; nothing here can make a checkpoint LESS safe, only shorter.
+    """
+    if not generation_prompt or not prompt.endswith(generation_prompt):
+        return None
+    head = prompt[: len(prompt) - len(generation_prompt)]
+    if not head:
+        return None
+    head_tokens = tokenize(head)
+    n = len(head_tokens)
+    if n <= 0 or n >= len(prompt_tokens):
+        return None
+    if prompt_tokens[:n] != head_tokens:
+        return None
+    return n
+
+
 def rolling_route_should_replace(
     state: RollingRouteAnchorState,
     prompt_tokens: list[int],
