@@ -1805,6 +1805,78 @@ class AnalysisReport:
 
 
 @dataclass(frozen=True)
+class AnalysisProgressEvent:
+    """One authoritative controller transition, for presentation only.
+
+    Emitted by the runtime at the moment the fact becomes true -- a plan is
+    about to be requested, a question was made active, a program is being
+    handed to the sandbox, a step was classified, a question was resolved or
+    blocked -- and consumed by whatever renders progress. It carries state the
+    controller already holds, never an estimate, never model prose beyond the
+    question text the ledger itself displays, and never a decision: no branch
+    of the runtime reads whether anyone is listening.
+
+    `event` names the transition; `detail` is a short runtime-owned string
+    (a tool label, a classification, a bounded blocked reason, a stop reason).
+    `question_index` is 1-based in plan order; `question_total` is the plan
+    size, so a sink can say `Q2/3` without asking the controller anything.
+    """
+
+    phase: str
+    event: str
+    question_id: str | None = None
+    question_index: int | None = None
+    question_total: int | None = None
+    detail: str | None = None
+
+
+AnalysisProgressSink = Callable[[AnalysisProgressEvent], None]
+
+
+def _notify(
+    on_event: "AnalysisProgressSink | None",
+    phase: str,
+    event: str,
+    *,
+    question: "Question | None" = None,
+    controller: "AnalysisController | None" = None,
+    detail: str | None = None,
+) -> None:
+    """Hand one event to the sink, and let nothing the sink does reach the run.
+
+    Presentation must not be able to change an analysis: a renderer that
+    raises is a renderer that failed, and the step, the question and the run
+    carry on exactly as they would have with no renderer at all. Only
+    `Exception` is contained -- a `KeyboardInterrupt` or `SystemExit` raised
+    while a sink runs is the analyst's, not the sink's, and propagates as it
+    does from anywhere else.
+    """
+    if on_event is None:
+        return
+    index = total = None
+    question_id = question.id if question is not None else None
+    if controller is not None and question_id is not None:
+        try:
+            index = controller.order.index(question_id) + 1
+            total = len(controller.order)
+        except ValueError:
+            index = total = None
+    try:
+        on_event(
+            AnalysisProgressEvent(
+                phase=phase,
+                event=event,
+                question_id=question_id,
+                question_index=index,
+                question_total=total,
+                detail=detail,
+            )
+        )
+    except Exception:  # noqa: BLE001 - presentation never ends a run
+        return
+
+
+@dataclass(frozen=True)
 class AnalysisStepResult:
     """What one analyst step produced. Control is with the analyst on return."""
 
@@ -2968,8 +3040,16 @@ class AnalysisRuntime:
         on_progress: Callable[[Any], None] | None = None,
         on_delta: Callable[[str], None] | None = None,
         controller_messages: "list[Message] | None" = None,
+        on_event: "AnalysisProgressSink | None" = None,
+        active_question: "Question | None" = None,
+        controller: "AnalysisController | None" = None,
     ) -> AnalysisStepResult:
         """Run exactly one analyst-driven step and return control.
+
+        `on_event` is told when a program is handed to the sandbox, and when
+        one is not run or not counted; `active_question` and `controller`
+        only label those events. All three are presentation: nothing here
+        reads them to decide anything.
 
         The callbacks report what is already happening; neither adds a model
         call, changes a message, or reaches the backend. A step that spends
@@ -3146,6 +3226,11 @@ class AnalysisRuntime:
             # this exists to prevent. The prior id is returned instead, and
             # remains exactly as re-attestable as it was.
             self.suppressed_duplicates += 1
+            _notify(
+                on_event, ANALYSIS_STEP_PHASE, "skipped",
+                question=active_question, controller=controller,
+                detail="duplicate observation, not run again",
+            )
             self._append_tool_result(
                 calls[0], _no_progress_observation(duplicate_of)
             )
@@ -3160,6 +3245,13 @@ class AnalysisRuntime:
                 diagnostics=_diagnostics(None),
                 suppressed_duplicate_of=duplicate_of,
             )
+        # The program is about to run. The label is the tool's, never the
+        # program's text: what the model wrote is evidence, not status.
+        _notify(
+            on_event, ANALYSIS_STEP_PHASE, "action",
+            question=active_question, controller=controller,
+            detail="sandboxed analysis",
+        )
         try:
             result = execute_analysis(
                 source_path=self.source.snapshot_path,
@@ -3211,6 +3303,11 @@ class AnalysisRuntime:
             # budget bounds work that can advance an analysis, and this cannot.
             # The model call it cost is still counted, so the run stays bounded.
             self.suppressed_duplicates += 1
+            _notify(
+                on_event, ANALYSIS_STEP_PHASE, "skipped",
+                question=active_question, controller=controller,
+                detail="already-known source, not counted",
+            )
             record, raw_record = self._record_action_evidence(
                 calls[0],
                 result,
@@ -3975,6 +4072,7 @@ class AnalysisRuntime:
         finalize: bool = True,
         cover: bool = True,
         plan: bool = True,
+        on_event: "AnalysisProgressSink | None" = None,
     ) -> AutonomousRunResult:
         """Run analyst-directed steps until progress stops or a bound is hit.
 
@@ -4025,6 +4123,10 @@ class AnalysisRuntime:
         consecutive_errors = 0
         replans = 0
         replan_pending = False
+        # Presentation only: which question was last announced, so the sink
+        # hears a question once when it becomes active rather than on every
+        # iteration it stays active. Read by nothing else.
+        announced_question: str | None = None
         # One repair opportunity per failed execution, and never two in a row.
         # `repair_pending` is what the next iteration will send; `repairing`
         # remembers that the step about to run IS the repair, so a correction
@@ -4160,6 +4262,7 @@ class AnalysisRuntime:
                 # evidence used to be the first instruction the model saw.
                 # When there is no evidence the two are the same string, so
                 # nothing about an ordinary run moves.
+                _notify(on_event, ANALYSIS_PLAN_PHASE, "planning")
                 plan_calls = self.plan_analysis(
                     controller, message, on_progress=on_progress,
                     max_calls=max_model_calls - model_calls,
@@ -4228,6 +4331,7 @@ class AnalysisRuntime:
                     message = analyst_message
                     plan_spent_before = self.model_calls
                     try:
+                        _notify(on_event, ANALYSIS_PLAN_PHASE, "planning")
                         plan_calls = self.plan_analysis(
                             controller, message, on_progress=on_progress,
                             max_calls=max_model_calls - model_calls,
@@ -4356,16 +4460,29 @@ class AnalysisRuntime:
                     if controller.active is not None and not controller.may_act():
                         # Out of attempts rather than answered: blocked, and
                         # visibly so, rather than quietly dropped.
-                        controller.exhaust_active(
+                        limit_reason = (
                             f"reached the {MAX_ACTIONS_PER_QUESTION}-action "
                             "limit for one question"
                         )
+                        _notify(
+                            on_event, ANALYSIS_STEP_PHASE, "blocked",
+                            question=controller.questions[controller.active],
+                            controller=controller, detail=limit_reason,
+                        )
+                        controller.exhaust_active(limit_reason)
                     active = controller.activate_next()
                 # Diagnostics only: which question the next dispatches belong
                 # to. Read by the trace label, never by the loop.
                 self._diagnostic_active_question = (
                     active.id if active is not None else None
                 )
+                if active is not None and active.id != announced_question:
+                    announced_question = active.id
+                    _notify(
+                        on_event, ANALYSIS_STEP_PHASE, "question",
+                        question=active, controller=controller,
+                        detail=active.question,
+                    )
                 if active is None:
                     # Nothing is open, so no action is left to run. Never a
                     # claim that the analysis is complete: the source and every
@@ -4378,6 +4495,10 @@ class AnalysisRuntime:
             # leave without one, so a step whose call reached the model and
             # then failed was spent and never counted.
             step_spent_before = self.model_calls
+            _notify(
+                on_event, ANALYSIS_STEP_PHASE, "investigating",
+                question=active, controller=controller,
+            )
             try:
                 step = self.step(
                     message,
@@ -4387,6 +4508,9 @@ class AnalysisRuntime:
                         self._resolve_messages(controller, active)
                         if active is not None else None
                     ),
+                    on_event=on_event,
+                    active_question=active,
+                    controller=controller,
                 )
             except KeyboardInterrupt:
                 # What ran already stands. `step()` has committed its own
@@ -4471,6 +4595,10 @@ class AnalysisRuntime:
                     # the backend can raise, so reading it here is exact
                     # whether the call returned or was interrupted.
                     spent_before = self.model_calls
+                    _notify(
+                        on_event, ANALYSIS_FINISH_PHASE, "checking",
+                        question=active, controller=controller,
+                    )
                     try:
                         self.finish_question(
                             controller, active,
@@ -4546,9 +4674,30 @@ class AnalysisRuntime:
                         # As with the cancellation beside it: the step that
                         # ran is classified and rendered before leaving.
                         ended = True
+                    else:
+                        # What became of the question, read off the controller
+                        # after the decision was applied: the status is the
+                        # controller's, the reason is the bounded one it kept.
+                        # In the `else`, deliberately: an interrupt raised
+                        # while a sink prints this must not be billed as an
+                        # interrupted completion call by the handler above.
+                        outcome = controller.states[active.id]
+                        _notify(
+                            on_event, ANALYSIS_FINISH_PHASE,
+                            {RESOLVED: "resolved", BLOCKED: "blocked"}.get(
+                                outcome.status, "still_open"
+                            ),
+                            question=active, controller=controller,
+                            detail=outcome.reason if outcome.status == BLOCKED else None,
+                        )
 
             record = progress_ledger.classify(len(records) + 1, step)
             records.append(record)
+            _notify(
+                on_event, ANALYSIS_STEP_PHASE, "classified",
+                question=active, controller=controller,
+                detail=record.classification,
+            )
             if on_step is not None:
                 on_step(step, record)
             if ended:
@@ -4739,6 +4888,10 @@ class AnalysisRuntime:
                         actions >= max_actions or actions >= soft_max_actions
                     )
                     if others and not at_ceiling:
+                        _notify(
+                            on_event, ANALYSIS_STEP_PHASE, "blocked",
+                            question=active, controller=controller, detail=stalled,
+                        )
                         controller.exhaust_active(stalled)
                         # The streak is the question's, and that question is
                         # now closed. Carrying it into the next one would
@@ -4758,6 +4911,10 @@ class AnalysisRuntime:
                     # question never reached rather than one that repeated
                     # itself until the bound stopped it.
                     if controller is not None and not controller.exhausted:
+                        _notify(
+                            on_event, ANALYSIS_STEP_PHASE, "blocked",
+                            question=active, controller=controller, detail=stalled,
+                        )
                         controller.exhaust_active(stalled)
                     stop_reason = stalled
                     break
@@ -4810,6 +4967,10 @@ class AnalysisRuntime:
                 repair_pending = False
                 repairing = True
                 repairs += 1
+                _notify(
+                    on_event, ANALYSIS_STEP_PHASE, "repairing",
+                    question=active, controller=controller,
+                )
                 # Reachable, and load-bearing. A failing program writes its
                 # traceback as evidence, so the FIRST such failure is
                 # NEW_CONTENT -- but a later failure with byte-identical
@@ -4824,6 +4985,10 @@ class AnalysisRuntime:
             elif replan_pending:
                 message = AUTONOMOUS_REPLAN_MESSAGE
                 replan_pending = False
+                _notify(
+                    on_event, ANALYSIS_STEP_PHASE, "replanning",
+                    question=active, controller=controller,
+                )
                 # Counted here rather than where the stall is detected: a
                 # replan can be armed and then dropped when the same step also
                 # earns a repair, and a counter that recorded the intention
@@ -4855,12 +5020,14 @@ class AnalysisRuntime:
         # correct reply -- and skipping the report there would turn the whole
         # analysis into nothing, discarding a source the model was given in
         # full. So a run that covered the source reports even with no steps.
+        _notify(on_event, ANALYSIS_STEP_PHASE, "stopped", detail=stop_reason)
         if not cancelled and finalize and (steps or covered_calls):
             # Measured, like the four sites above: `report()` reports its
             # spend in the object it returns, and the handler below leaves
             # without one -- so a closing report that reached the model and
             # then failed was spent and never counted.
             report_spent_before = self.model_calls
+            _notify(on_event, ANALYSIS_REPORT_PHASE, "report")
             try:
                 final_report = self.report(
                     question=self._final_question(

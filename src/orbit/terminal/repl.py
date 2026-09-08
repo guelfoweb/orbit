@@ -22,6 +22,7 @@ from orbit.runtime.sessions import SessionStore
 from orbit.runtime.workflow_mode import DEFAULT_WORKFLOW_MODE, WorkflowMode
 from orbit.terminal.analysis_mode import (
     AnalysisModeError,
+    AnalysisProgressDisplay,
     format_analysis_step,
     format_step_diagnostics,
     open_analysis_session,
@@ -425,11 +426,16 @@ class Repl:
                         print(block, flush=True)
                     renderer.reset_visible_text()
 
+                # Controller transitions, one line each, on a terminal only:
+                # which question is active, what is being run, what became of
+                # it. The runtime emits the facts; this prints them.
+                progress_display = AnalysisProgressDisplay(renderer)
                 run = self.analysis.run_autonomous(
                     analyst_message,
                     on_progress=renderer.progress,
                     on_delta=renderer.write,
                     on_step=show,
+                    on_event=progress_display,
                 )
                 result = run.last_step
                 if result is None:
