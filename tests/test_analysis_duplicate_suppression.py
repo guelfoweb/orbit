@@ -226,12 +226,43 @@ class NotSuppressedTests(AutonomousTestBase):
         self.assertEqual(run.suppressed_duplicates, 0)
 
     def test_the_same_program_runs_again_after_the_workspace_changes(self) -> None:
-        """A changed workspace makes it a different experiment."""
+        """A changed workspace makes it a different experiment.
+
+        The program is dispatched again -- the fingerprint says so -- and
+        that is what this test is about. What its OUTPUT establishes is a
+        separate question: `READ_X` prints the whole 17-char fixture, so the
+        first run delivered the complete source and the second, byte-identical,
+        is a source reacquisition (ANALYSIS-SOURCE-CHURN-1) -- run, recorded,
+        reported, but no useful action. The fingerprint path is the sibling
+        below, on a program whose output is not the source.
+        """
         run = self.runtime(
             ScriptedBackend(
                 tool_response(READ_X),
                 tool_response(write_artifact("derived.txt", "stage two")),
                 tool_response(READ_X),
+                prose_response("done"),
+            )
+        ).run_autonomous("inspect it", finalize=False)
+
+        attempted = [s for s in run.steps if s.action_attempted]
+        self.assertEqual(len(attempted), 3, "the third program was dispatched again")
+        third = attempted[-1]
+        self.assertIsNotNone(third.suppressed_duplicate_of)
+        self.assertIsNotNone(third.raw_output_evidence_id, "it ran and its output is archived")
+        record = self.store.records[third.suppressed_duplicate_of]
+        self.assertEqual(record.metadata["suppressed_as"], "source_reacquisition")
+        self.assertEqual(run.suppressed_duplicates, 1)
+        self.assertEqual(run.actions_executed, 2)
+
+    def test_a_non_source_program_runs_and_counts_again_after_the_workspace_changes(self) -> None:
+        """The fingerprint intent, on an output that is not the source."""
+        read_len = "print(len(open('/workspace/input').read()), end='')"
+        run = self.runtime(
+            ScriptedBackend(
+                tool_response(read_len),
+                tool_response(write_artifact("derived.txt", "stage two")),
+                tool_response(read_len),
                 prose_response("done"),
             )
         ).run_autonomous("inspect it", finalize=False)
