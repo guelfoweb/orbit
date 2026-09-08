@@ -1291,15 +1291,110 @@ AUTONOMOUS_REPAIR_MESSAGE = (
 # already knows and which kinds of step can still change that, because the
 # alternative -- "already seen" with no route forward -- is what produced a run
 # that re-read one file nine times.
+@dataclass(frozen=True)
+class SourceDelivery:
+    """The first complete acquisition of the source, on a run without COVER.
+
+    COVER hands the model the artifact in a user turn and marks that turn;
+    without COVER the model's own first action does the same job -- it prints
+    the whole file, as text, as a repr, as a numbered listing -- and the run
+    then treated every later identical read as new work, because nothing
+    recorded that the session already held those bytes. Measured on the
+    retained Fattura runs (all of them without COVER): 13 of 135 actions were
+    byte-exact or reversibly exact re-reads of a source an earlier action had
+    already produced in full, each costing the STEP, the FINISH and usually a
+    repair.
+
+    What this records is exactly what a COVER turn records, established the
+    other way round: not "the model was shown the source" but "an action of
+    this session produced the complete source, byte-exact against the pinned
+    snapshot, and its raw output is archived under `evidence_id`". Identity is
+    the snapshot's digest, never a name; the state lives on the tool message
+    that carries the record (like `source_covered` lives on the COVER turn) so
+    a rewind withdraws it, a new session starts without it, and a changed
+    snapshot invalidates it.
+
+    It says nothing about what the model has SEEN inline: a large output
+    reaches the history as a bounded reference either way, on the first read
+    and on every identical one after it, which is precisely why an identical
+    complete read cannot add anything -- the excerpt rules are the same, and
+    the exact bytes are one `evidence:` reference away in both cases.
+    """
+
+    evidence_id: str
+    representation: str
+    sha256: str
+    # The sidecar that holds the action's COMPLETE output. `evidence_id` is
+    # the model-facing record, whose content is the observation bounded at
+    # `MAX_EVIDENCE_CHARS` -- on the artifacts this exists for, a truncated
+    # view. Only the raw record holds the bytes the delivery was proven on,
+    # so it is the one the model is pointed at.
+    raw_evidence_id: str = ""
+
+
+RAW_CONTAINED = "raw_contained"
+REPR_CONTAINED = "repr_contained"
+
+
+def _source_delivery_proof(result: AnalysisResult, source_text: str) -> str | None:
+    """The representation in which this output delivered the COMPLETE source.
+
+    The same exact forms `_source_reacquisition` accepts -- the source alone,
+    its repr, a full consecutive numbered listing, or the source plus
+    recomputable properties -- and additionally the source or its repr
+    contained verbatim in a larger output, which is what the first read on the
+    live runs looks like (`LENGTH: 7706` and a `REPR START:` marker around the
+    literal). Containment is a byte-exact comparison of the whole source
+    against a slice of the output; nothing shorter, nothing similar, nothing
+    reconstructed from pieces. The surrounding bytes make that action USEFUL
+    -- it is never suppressed -- but they do not change the fact that the
+    complete artifact was produced and archived.
+
+    Fail closed on any doubt about the archive itself: a truncated or
+    substituted output is not what the program printed, and stderr is
+    irrelevant here because the source bytes are in stdout regardless. None
+    means the session still holds no delivered source and the next complete
+    read is ordinary work.
+    """
+    if not result.ok or result.truncated or result.output_replaced:
+        return None
+    stdout = result.stdout
+    if not stdout or not source_text:
+        return None
+    exact = classify_output(stdout, source_text)
+    if exact is not None:
+        return exact.recognizer
+    dominated = classify_dominated(stdout, source_text)
+    if dominated is not None:
+        return dominated.representation
+    if len(stdout) > MAX_DELIVERY_CANDIDATE_CHARS:
+        return None
+    if source_text in stdout:
+        return RAW_CONTAINED
+    if repr(source_text) in stdout:
+        return REPR_CONTAINED
+    return None
+
+
+# Bound on the output searched for a contained source. The live first reads
+# were at most twice the source plus a few lines; a hostile megabyte of text is
+# not worth scanning for a copy of a file that is already on disk.
+MAX_DELIVERY_CANDIDATE_CHARS = 4_000_000
+
+
 def _source_reacquisition(
     result: AnalysisResult, source: "AnalysisSource", covered_text: str | None
 ) -> "SourceEquivalence | SourceDominance | None":
     """Whether this execution only handed back the source already supplied.
 
-    Gated on coverage: without it the model was never given the source, so
-    reading it is how the session learns what the artifact is -- ordinary,
-    necessary work. `covered_text` is None then and this returns None, leaving
-    every path below byte-identical to a run before this existed.
+    Gated on the session holding the source authoritatively: either COVER
+    supplied it (`covered_source_text`) or an earlier action of this session
+    produced it in full and it was recorded as a `SourceDelivery`
+    (`delivered_source_text`). Without either the model was never given the
+    source, so reading it is how the session learns what the artifact is --
+    ordinary, necessary work. `covered_text` is None then and this returns
+    None, leaving every path below byte-identical to a run before this
+    existed.
 
     A successful action only. A failure has to reach the model as a failure,
     and an action that was bounded or errored has not proven anything about
@@ -1358,6 +1453,7 @@ def _source_reacquisition(
 # what to do instead is the model's decision, not the runtime's.
 def _source_reacquisition_observation(
     verdict: "SourceEquivalence | SourceDominance",
+    delivery: "SourceDelivery | None" = None,
 ) -> str:
     """What the model is told when its output added nothing.
 
@@ -1368,24 +1464,51 @@ def _source_reacquisition_observation(
     bytes already are, because "you already have this" without a pointer is
     what produced the re-reading in the first place.
 
+    Where they are depends on who supplied them. After COVER the source sits
+    in the conversation above; after a delivery it is the archived output of
+    the model's own earlier action, named by its evidence id, and the note
+    says that rather than claiming a turn the conversation never had.
+
     It does not say the analysis is finished and does not suggest a direction:
     what to do instead is the model's decision, not the runtime's.
     """
     dominated = isinstance(verdict, SourceDominance)
+    if delivery is None:
+        supplied = "which Orbit already supplied in full earlier in this conversation"
+        recomputed = "the bytes it already supplied"
+        where = (
+            "The source above is the same bytes; re-read it there rather than "
+            "running another program to produce it."
+        )
+    else:
+        # The RAW record, not the model-facing one: the latter is the
+        # observation bounded at `MAX_EVIDENCE_CHARS`, which on the artifacts
+        # this exists for is a truncated view. Naming it as "the same bytes"
+        # was measured false on the live run (3091 of 7799 chars archived
+        # under that id); the sidecar holds the complete output.
+        archived = f"evidence:{delivery.raw_evidence_id or delivery.evidence_id}"
+        supplied = (
+            "which an earlier action of this session already produced in "
+            f"full and Orbit archived exactly as {archived}"
+        )
+        recomputed = f"the bytes archived as {archived}"
+        where = (
+            f"{archived} holds that complete output, exactly, and the artifact "
+            "itself is the same bytes; another program that only reproduces "
+            "them cannot add to them."
+        )
     lead = (
         "this output is the complete artifact source together with values "
-        "computed from it, all of which Orbit recomputed from the bytes it "
-        "already supplied and confirmed"
+        f"computed from it, all of which Orbit recomputed from {recomputed} "
+        "and confirmed"
         if dominated
-        else "this output is the complete artifact source, which Orbit "
-        "already supplied in full earlier in this conversation"
+        else f"this output is the complete artifact source, {supplied}"
     )
     name = SOURCE_DOMINATED if dominated else SOURCE_REACQUISITION
     return (
         f"{name.upper()}: {lead} ({verdict.detail}). It was executed, and it "
         "established nothing the session did not already hold.\n"
-        "The source above is the same bytes; re-read it there rather than "
-        "running another program to produce it."
+        f"{where}"
     )
 
 
@@ -2181,21 +2304,69 @@ class AnalysisRuntime:
         """
         if not self.source_covered:
             return None
+        return self._snapshot_text()
+
+    def _snapshot_text(self) -> str | None:
+        """The pinned snapshot's bytes as text, or None if they are not pinned.
+
+        The artifact is the authority for its own bytes; nothing is re-derived
+        from a rendered prompt or from an archived output. The digest is
+        checked every time: the snapshot is 0400 inside a 0700 session
+        directory and the sandbox refuses a changed read-only input, so a
+        mismatch should be unreachable -- which is the reason to check it
+        here rather than rely on that. The digest is already in hand, and
+        comparing against the wrong bytes would suppress an observation on
+        the strength of a file nobody supplied.
+        """
         try:
             raw = self.source.snapshot_path.read_bytes()
         except OSError:
             return None
         if hashlib.sha256(raw).hexdigest() != self.source.sha256:
-            # The bytes on disk are no longer the ones the session is pinned
-            # to, so they are not what the model was shown. The snapshot is
-            # 0400 inside a 0700 session directory and the sandbox refuses a
-            # changed read-only input, so this should be unreachable -- which
-            # is the reason to check it here rather than rely on that: the
-            # digest is already in hand, and comparing against the wrong bytes
-            # would suppress an observation on the strength of a file nobody
-            # covered.
             return None
         return decode_artifact(raw)
+
+    @property
+    def source_delivery(self) -> "SourceDelivery | None":
+        """The first complete acquisition of the source by an action, if any.
+
+        Derived from the history exactly as `source_covered` is: the tool
+        message that carries the record of that action is marked, so a caller
+        rewinding the history withdraws the delivery with it, a fresh runtime
+        starts without one, and nothing survives the session. The mark also
+        names the snapshot digest it was proven against; a mark for another
+        digest is not a delivery of THIS artifact and reads as None.
+        """
+        for message in self.messages:
+            if message.get("role") != "tool":
+                continue
+            mark = message.get("source_delivered")
+            if not isinstance(mark, dict):
+                continue
+            if mark.get("sha256") != self.source.sha256:
+                continue
+            evidence_id = mark.get("evidence_id")
+            representation = mark.get("representation")
+            raw_evidence_id = mark.get("raw_evidence_id")
+            if isinstance(evidence_id, str) and isinstance(representation, str):
+                return SourceDelivery(
+                    evidence_id, representation, self.source.sha256,
+                    raw_evidence_id if isinstance(raw_evidence_id, str) else evidence_id,
+                )
+        return None
+
+    @property
+    def delivered_source_text(self) -> str | None:
+        """The source an earlier action of this session produced in full.
+
+        Read from the snapshot, never from the archived output: the snapshot
+        is what the delivery was proven against, and the digest check inside
+        `_snapshot_text` is what keeps a swapped file from being compared.
+        None without a delivery.
+        """
+        if self.source_delivery is None:
+            return None
+        return self._snapshot_text()
 
     def __post_init__(self) -> None:
         if self.workspace is None:
@@ -3015,9 +3186,19 @@ class AnalysisRuntime:
                 diagnostics=_diagnostics(detail),
             )
 
-        equivalence = _source_reacquisition(
-            result, self.source, self.covered_source_text
-        )
+        # Which authority the session holds the source under. Coverage first:
+        # it is the stronger statement (the bytes are in the conversation),
+        # and a run with both was covered before any action ran. Without it,
+        # a delivery -- an earlier action of this session that produced the
+        # complete source -- is the authority, and the note the model gets
+        # names that action's evidence rather than a turn it never had.
+        authority_text = self.covered_source_text
+        delivery = None
+        if authority_text is None:
+            delivery = self.source_delivery
+            if delivery is not None:
+                authority_text = self.delivered_source_text
+        equivalence = _source_reacquisition(result, self.source, authority_text)
         if equivalence is not None:
             # The program ran; what it produced is the source the session was
             # already given. Recorded as evidence like any other execution --
@@ -3033,12 +3214,19 @@ class AnalysisRuntime:
             record, raw_record = self._record_action_evidence(
                 calls[0],
                 result,
-                _source_reacquisition_observation(equivalence),
+                _source_reacquisition_observation(equivalence, delivery),
                 extra={
                     "suppressed_as": (
                         SOURCE_DOMINATED
                         if isinstance(equivalence, SourceDominance)
                         else SOURCE_REACQUISITION
+                    ),
+                    # Which authority the proof compared against, so an audit
+                    # can redo it: the COVER turn, or the archived output of
+                    # the earlier action named here.
+                    "suppressed_against": (
+                        "coverage" if delivery is None
+                        else f"delivery:{delivery.evidence_id}"
                     ),
                     "suppression_recognizer": (
                         equivalence.representation
@@ -3062,7 +3250,7 @@ class AnalysisRuntime:
             # unhelpful.
             self._append_tool_result(
                 calls[0],
-                _source_reacquisition_observation(equivalence),
+                _source_reacquisition_observation(equivalence, delivery),
                 record=record,
             )
             return AnalysisStepResult(
@@ -3092,9 +3280,26 @@ class AnalysisRuntime:
         self.actions_executed += 1
         observation, truncated, full_chars = _bounded_observation(result)
 
+        # The first complete acquisition on a run without COVER becomes the
+        # session's authority for the source, so that identical later reads
+        # are judged against it exactly as they are judged against a COVER
+        # turn. Decided from the whole output, not the bounded observation,
+        # and only while the session holds no authority yet: coverage is
+        # already one, and a second delivery would just repeat the first.
+        # This action itself is never suppressed -- it is the acquisition.
+        delivered: str | None = None
+        if authority_text is None:
+            snapshot_text = self._snapshot_text()
+            if snapshot_text is not None:
+                delivered = _source_delivery_proof(result, snapshot_text)
+
         record, raw_record = self._record_action_evidence(
             calls[0], result, observation,
             truncated=truncated, full_chars=full_chars,
+            extra=(
+                {"source_delivery": delivered, "source_delivery_sha256": self.source.sha256}
+                if delivered is not None else None
+            ),
         )
         # Remember the experiment, keyed by the identity computed before it
         # ran, so a later request for the same one is answerable without
@@ -3108,8 +3313,21 @@ class AnalysisRuntime:
             self._observed_fingerprints.setdefault(fingerprint, record.evidence_id)
 
         # Appended before returning: step N+1 must find this already in place
-        # rather than have it reconstructed later.
-        self._append_tool_result(calls[0], observation, record=record)
+        # rather than have it reconstructed later. A delivery is a property
+        # of this tool turn, marked on it the way coverage is marked on the
+        # COVER turn, so that rewinding the history withdraws it.
+        self._append_tool_result(
+            calls[0], observation, record=record,
+            mark=(
+                {"source_delivered": {
+                    "evidence_id": record.evidence_id,
+                    "raw_evidence_id": raw_record.evidence_id,
+                    "representation": delivered,
+                    "sha256": self.source.sha256,
+                }}
+                if delivered is not None else None
+            ),
+        )
         return AnalysisStepResult(
             model_calls=1,
             action_attempted=True,
@@ -5831,8 +6049,13 @@ class AnalysisRuntime:
         content: str,
         *,
         record: EvidenceRecord | None = None,
+        mark: "dict[str, object] | None" = None,
     ) -> None:
         """Persist one tool result, carrying its evidence identity when it has one.
+
+        `mark` adds keys to the message itself -- the way the COVER turn
+        carries `source_covered` -- for state that is a property of this turn
+        of the history and must disappear with it.
 
         A result backed by an attestable record is stored as the canonical
         evidence reference rather than raw text, and tagged with the record's
@@ -5864,4 +6087,6 @@ class AnalysisRuntime:
             message["evidence_id"] = record.evidence_id
             if record.user_turn_id:
                 message["user_turn_id"] = record.user_turn_id
+        if mark:
+            message.update(mark)
         self.messages.append(message)
