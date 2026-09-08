@@ -14,12 +14,14 @@ the current session exactly as it was.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import Callable
 
 from orbit.backend.base import ChatBackend
 from orbit.runtime.analysis_runtime import (
     WORK_MOUNT,
+    AnalysisProgressEvent,
     AnalysisRuntime,
     AnalysisStepResult,
     StepDiagnostics,
@@ -30,7 +32,7 @@ from orbit.runtime.analysis_runtime import (
 from orbit.runtime.analysis_sandbox import AnalysisResult
 from orbit.runtime.confined_acquire import ConfinedAcquireError, acquire_confined_bytes
 from orbit.runtime.evidence import EvidenceStore
-from orbit.terminal.theme import sanitize_terminal_text
+from orbit.terminal.theme import is_tty, sanitize_terminal_text
 
 
 class AnalysisModeError(Exception):
@@ -134,6 +136,149 @@ def _resolve_target(raw_path: str, *, workdir: Path) -> Path:
     if not candidate.is_file():
         raise AnalysisModeError(f"not a regular file: {value}")
     return candidate
+
+
+#: How much of a question's text a progress line shows. The full text is in
+#: the report's dossier; the line only has to say which question this is.
+_PROGRESS_QUESTION_CHARS = 72
+
+# What each runtime event reads as. The runtime names the transition; the
+# wording is the terminal's, so a change here changes nothing but the screen.
+_PROGRESS_LABELS = {
+    "planning": "Planning investigation",
+    "question": "Investigating",
+    "investigating": "Deciding the next action",
+    "action": "Running",
+    "skipped": "Skipped",
+    "classified": None,  # spelled per classification below
+    "checking": "Checking completion",
+    "resolved": "Resolved",
+    "still_open": "Still open",
+    "blocked": "Blocked",
+    "replanning": "Replanning after no progress",
+    "repairing": "Repairing the failed action",
+    "stopped": "Stopped",
+    "report": "Composing report",
+}
+_CLASSIFICATION_LABELS = {
+    "NEW_CONTENT": "New evidence recorded",
+    "NO_PROGRESS": "No new evidence",
+    "ERROR": "Action failed",
+    "COMPLETE": "Nothing further to run",
+}
+
+
+def format_progress_event(event: "AnalysisProgressEvent") -> str | None:
+    """One line for one controller transition, or None for nothing to say.
+
+    Runtime-owned facts only: the event name, the question's position in the
+    plan, and the bounded detail the runtime attached (a tool label, a
+    classification, a blocked reason, a stop reason). The question text is
+    the controller's own ledger entry -- the same one the report's dossier
+    prints -- sanitised and cut to one short line. No estimate, no
+    percentage, no prose from a model reply ever reaches this line.
+    """
+    label = _PROGRESS_LABELS.get(event.event)
+    if event.event == "classified":
+        label = _CLASSIFICATION_LABELS.get(str(event.detail), None)
+        detail = None
+    else:
+        detail = event.detail
+    if label is None:
+        return None
+    position = ""
+    if event.question_index is not None and event.question_total:
+        position = f"Q{event.question_index}/{event.question_total} "
+    elif event.question_id:
+        position = f"{event.question_id} "
+    text = f"[analysis] {position}{label}"
+    if detail:
+        safe = sanitize_terminal_text(str(detail)).strip()
+        safe = " ".join(safe.split())
+        if len(safe) > _PROGRESS_QUESTION_CHARS:
+            safe = safe[: _PROGRESS_QUESTION_CHARS - 1] + "…"
+        if safe:
+            text = f"{text}: {safe}"
+    return text
+
+
+class AnalysisProgressDisplay:
+    """Print controller transitions as they happen, on an interactive terminal.
+
+    A sink for `AnalysisRuntime.run_autonomous(on_event=...)`. It owns no
+    state about the analysis -- only the last line it printed, so a repeated
+    transition is not printed twice -- and it prints through the renderer's
+    `event`, which is what already keeps the in-place wait line from
+    colliding with a printed line. Off a terminal it prints nothing at all:
+    redirected output keeps exactly the text it had before this existed.
+
+    Fail-open by construction: the runtime contains any exception a sink
+    raises, so a rendering failure costs a line, never a step.
+    """
+
+    # Outcomes that already say what a step established. The ledger's
+    # classification arrives after the completion check, so following
+    # `Resolved` with `New evidence recorded`, or `Skipped` with `No new
+    # evidence`, tells the analyst the same thing twice. ERROR and COMPLETE
+    # are never folded: they say something no outcome line said.
+    _OUTCOMES = frozenset({"resolved", "still_open", "blocked", "skipped"})
+    _FOLDED = frozenset({"NEW_CONTENT", "NO_PROGRESS"})
+    # Events after which the runtime hands the completed step to `on_step`,
+    # which prints its block. The wait line must not be restarted between the
+    # two: a fresh tick would draw a row under that block. The next
+    # `investigating`, `question`, `stopped` or `report` restarts it.
+    _BEFORE_STEP_BLOCK = frozenset({"resolved", "still_open", "blocked", "skipped", "classified"})
+
+    def __init__(self, renderer, *, interactive: bool | None = None) -> None:
+        self._renderer = renderer
+        self._interactive = is_tty(sys.stdout) if interactive is None else interactive
+        self._last: str | None = None
+        self._last_event: str | None = None
+        self._outcome_shown = False
+
+    def __call__(self, event: "AnalysisProgressEvent") -> None:
+        if not self._interactive:
+            return
+        if event.event == "investigating":
+            self._outcome_shown = False
+            if self._last_event == "question":
+                # "Investigating: <question>" was just printed; the first
+                # step of that question needs no second line saying so.
+                self._last_event = event.event
+                return
+        elif event.event in self._OUTCOMES:
+            self._outcome_shown = True
+        elif event.event == "classified" and self._outcome_shown and event.detail in self._FOLDED:
+            return
+        line = format_progress_event(event)
+        if line is None:
+            return
+        self._last_event = event.event
+        if line == self._last:
+            return
+        self._last = line
+        # A finished generation line is committed, not erased: the same
+        # settle `on_step` performs before its block, done here because this
+        # line now prints first.
+        settle = getattr(self._renderer, "settle_progress_line", None)
+        if settle is not None:
+            settle()
+        self._renderer.event(
+            _fit_progress_line(line),
+            restart_timer=event.event not in self._BEFORE_STEP_BLOCK,
+        )
+
+
+def _fit_progress_line(line: str) -> str:
+    """Cut the line to the terminal width, so it never wraps onto a second row."""
+    try:
+        from orbit.terminal.streaming import _terminal_columns
+
+        columns = _terminal_columns()
+    except Exception:  # noqa: BLE001 - width is cosmetic
+        return line
+    limit = max(20, columns - 1)
+    return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
 def format_analysis_step(
