@@ -458,14 +458,19 @@ class CompleteChatStepWiringTest(unittest.TestCase):
         self.assertEqual(renders, [self.MESSAGES[:-1], self.MESSAGES])
         self.assertEqual(client._active_profile_render["prompt"], seen[0]["prompt"])
 
-    def test_a_control_turn_keeps_the_stage_a_strategy_and_no_head(self) -> None:
+    def test_a_control_turn_keeps_the_stage_a_strategy_and_gets_its_history_head(self) -> None:
         client, seen, renders = self._client()
         self._call(client, analysis_rolling_anchor=True)
         call = seen[0]
         self.assertEqual(call["rolling_route_identity"].strategy_id, ROLLING_ANALYSIS_STRATEGY_ID)
-        self.assertIsNone(call["rolling_boundary_head"])
         self.assertEqual(call["rolling_boundary_suffix"], GEN_TEXT, "Stage A's boundary still travels")
-        self.assertEqual(renders, [self.MESSAGES], "no head render for a control turn")
+        # ANALYSIS-FINISH-PREFILL-1: the control turn's history head travels
+        # too, rendered before the production render. It is cut before the
+        # trailing RUN of user turns (a control turn's transient message, and
+        # its repair beneath it); this STEP-shaped list ends with two.
+        self.assertEqual(call["rolling_boundary_head"],
+                         _render_messages(self.MESSAGES[:-2], tools=[{"a": 1}], thinking=False)[: -len(GEN_TEXT)])
+        self.assertEqual(renders, [self.MESSAGES[:-2], self.MESSAGES], "head render first, production render last")
 
     def test_the_step_flag_alone_requests_nothing(self) -> None:
         """It refines the lineage; it cannot open it."""
@@ -565,6 +570,8 @@ class StepCaptureBlockTest(unittest.TestCase):
             "rolling_route_identity": ident,
             "ROLLING_ANALYSIS_STRATEGY_ID": ROLLING_ANALYSIS_STRATEGY_ID,
             "ROLLING_STEP_STRATEGY_ID": ROLLING_STEP_STRATEGY_ID,
+            "ROLLING_CONTROL_HISTORY_STRATEGY_ID": client_module.ROLLING_CONTROL_HISTORY_STRATEGY_ID,
+            "replace": client_module.replace,
             "rolling_capture_boundary": rolling_capture_boundary,
             "rolling_step_boundary": rolling_step_boundary,
             "rolling_route_should_replace": client_module.rolling_route_should_replace,
@@ -724,6 +731,8 @@ class StepCaptureBlockTest(unittest.TestCase):
             "rolling_route_eligible": True, "rolling_route_identity": step_identity(),
             "ROLLING_ANALYSIS_STRATEGY_ID": ROLLING_ANALYSIS_STRATEGY_ID,
             "ROLLING_STEP_STRATEGY_ID": ROLLING_STEP_STRATEGY_ID,
+            "ROLLING_CONTROL_HISTORY_STRATEGY_ID": client_module.ROLLING_CONTROL_HISTORY_STRATEGY_ID,
+            "replace": client_module.replace,
             "rolling_capture_boundary": rolling_capture_boundary,
             "rolling_step_boundary": rolling_step_boundary,
             "rolling_route_should_replace": client_module.rolling_route_should_replace,
@@ -747,16 +756,19 @@ class StepCaptureBlockTest(unittest.TestCase):
         self.assertEqual(captured, [HISTORY2], "capture was attempted")
         self.assertEqual(client._rolling_step_anchor_state.tokens, HISTORY1)
 
-    def test_a_control_turn_ignores_the_head_and_keeps_its_stage_a_boundary(self) -> None:
-        """Stage A unchanged: a control identity captures before the opener."""
+    def test_a_control_turn_keeps_its_stage_a_boundary_and_adds_a_history_checkpoint(self) -> None:
+        """Stage A unchanged: the control slot still holds the pre-opener
+        checkpoint; the head now feeds a SECOND, earlier checkpoint in the
+        control-history slot (ANALYSIS-FINISH-PREFILL-1), never the STEP slot."""
         control_prompt = HISTORY1 + GUIDE1 + GEN
         client, g, decoded, captured = self._run(
             ident=control_identity(), head=self.HEAD1, prompt_tokens=control_prompt,
             processed=0, suffix=tokens_as_text(GEN))
         self.assertFalse(g["step_lineage"])
         self.assertEqual(g["capture_at"], len(HISTORY1 + GUIDE1))
-        self.assertEqual(captured, [HISTORY1 + GUIDE1])
+        self.assertEqual(captured, [HISTORY1, HISTORY1 + GUIDE1], "history first, then the Stage A boundary")
         self.assertEqual(client._rolling_analysis_anchor_state.tokens, HISTORY1 + GUIDE1)
+        self.assertEqual(client._rolling_control_history_anchor_state.tokens, HISTORY1)
         self.assertFalse(client._rolling_step_anchor_state.valid, "the STEP slot is untouched")
 
     def test_a_later_control_turn_replaces_a_stale_control_checkpoint(self) -> None:
@@ -1034,9 +1046,9 @@ class LifecycleTest(unittest.TestCase):
         self.assertIsNone(ref(), "the replaced checkpoint must not be retained anywhere")
         self.assertIs(client._rolling_step_anchor_state, second)
 
-    def test_the_store_holds_exactly_three_slots(self) -> None:
-        """No fourth slot without a measured need (mission §7)."""
-        self.assertEqual(RollingAnchorStore.__slots__, ("_route", "_analysis", "_step"))
+    def test_the_store_holds_exactly_four_slots(self) -> None:
+        """Route, control, STEP, and (ANALYSIS-FINISH-PREFILL-1) control history."""
+        self.assertEqual(RollingAnchorStore.__slots__, ("_route", "_analysis", "_step", "_control_history"))
 
 
 if __name__ == "__main__":

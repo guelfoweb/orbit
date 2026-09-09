@@ -58,6 +58,7 @@ from .native_names import mtmd_bridge_filename, runtime_library_filename
 from .paths import NativeLlamaPaths
 from .rolling_route_anchor import (
     ROLLING_ANALYSIS_STRATEGY_ID,
+    ROLLING_CONTROL_HISTORY_STRATEGY_ID,
     ROLLING_ROUTE_STRATEGY_ID,
     ROLLING_STEP_STRATEGY_ID,
     RollingRouteAnchorState,
@@ -1480,6 +1481,21 @@ class NativeLlamaClient:
             rolling_boundary_head = self._step_boundary_head(
                 messages, tools=tools, thinking=thinking
             )
+        elif (
+            analysis_rolling_anchor
+            and not route_prefix_anchor
+            and self._ornith_rolling_analysis_eligible(
+                analysis_rolling_anchor=analysis_rolling_anchor, thinking=thinking
+            )
+        ):
+            # A control turn (PLAN, FINISH, their repairs) checkpoints twice:
+            # before its own transient user turn(s), which the NEXT control
+            # turn extends, and -- unchanged from Stage A -- before the
+            # assistant opener, which its repair extends. The first head is
+            # rendered here for the same reason as the STEP's.
+            rolling_boundary_head = self._control_history_head(
+                messages, tools=tools, thinking=thinking
+            )
         try:
             prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
         except Exception:
@@ -2733,6 +2749,50 @@ class NativeLlamaClient:
             )
             if boundary is not None and boundary > processed:
                 capture_at = boundary
+            # The earlier checkpoint of the control lineage: the history before
+            # this turn's own user turn(s), which the next control turn
+            # extends. Taken first, into its own slot, and only when it lies
+            # past what is resident and before the Stage A boundary; then the
+            # prefill continues to the Stage A boundary exactly as before.
+            history_boundary = rolling_step_boundary(
+                prompt,
+                prompt_tokens,
+                head=rolling_boundary_head,
+                tokenize=self.tokenize,
+            )
+            if (
+                history_boundary is not None
+                and history_boundary > processed
+                and (capture_at is None or history_boundary < capture_at)
+            ):
+                while processed < history_boundary and not self.cancel_event.is_set():
+                    processed = self._decode_prompt_range(
+                        token_array,
+                        processed=processed,
+                        end=history_boundary,
+                        step=step,
+                        total=n_prompt,
+                        on_progress=on_progress,
+                        should_cancel=should_cancel,
+                        reused=reused,
+                        started_us=pf_start,
+                    )
+                if processed == history_boundary and not self.cancel_event.is_set():
+                    history_identity = replace(
+                        rolling_route_identity,
+                        strategy_id=ROLLING_CONTROL_HISTORY_STRATEGY_ID,
+                    )
+                    # Newest boundary wins, as for every ANALYSIS slot: a
+                    # control turn that does not extend the stored history
+                    # means the history moved on.
+                    captured, _capture_meta = capture_rolling_route_anchor(
+                        lib,
+                        self._session.ctx_tgt,
+                        prompt_tokens=prompt_tokens[:history_boundary],
+                        identity=history_identity,
+                    )
+                    if captured.valid:
+                        self._store_rolling_anchor_state(history_identity, captured)
         elif step_lineage:
             boundary = rolling_step_boundary(
                 prompt,
@@ -3777,6 +3837,61 @@ class NativeLlamaClient:
         head = head_prompt[: len(head_prompt) - len(generation_prompt)]
         return head or None
 
+    def _control_history_head(
+        self,
+        messages: list[NativeMessage],
+        *,
+        tools: list[dict] | None,
+        thinking: bool | None,
+    ) -> str | None:
+        """The rendered prompt up to a control turn's own user turn(s), or None.
+
+        A control call is the committed history plus the turn(s) the control
+        protocol adds and throws away: the completion (or plan) message, and
+        after a parse failure the repair message beneath it. Neither is ever
+        repeated -- the next FINISH closes another question with its own
+        message -- so the head the next control turn extends is the history
+        before that trailing run of user turns. Measured on the normalized
+        replay: every later FINISH's tokens were exactly its predecessor's up
+        to that point (1581 of 2542, 2337 of 2751) and nothing beyond it.
+
+        The run is taken at the tail only, and only of `user` turns: history
+        ends with the action's `tool` result, which is what stops it. A STEP
+        prompt is not shaped this way (its analyst turn precedes the guidance
+        and IS history), which is why the STEP has its own head helper. Same
+        preconditions and same fail-closed answer as `_step_boundary_head`:
+        None means no history checkpoint on this call, never a wrong one; the
+        token-prefix check in `rolling_step_boundary` still has to pass.
+        """
+        profile = getattr(self, "model_profile", None)
+        if profile is None or not getattr(profile, "uses_native_chat_bridge", False):
+            return None
+        cut = len(messages)
+        while cut > 0 and messages[cut - 1].get("role") == "user":
+            cut -= 1
+        # Nothing to checkpoint unless real history precedes the run: a head
+        # that is only the system turn (PLAN, before any action) cannot be
+        # extended by a later FINISH, whose system turn carries another tool
+        # schema, so capturing it would cost ~75 MB and a snapshot for nothing.
+        if cut == len(messages) or cut <= 1:
+            return None
+        try:
+            head_prompt = self.apply_chat_template(
+                messages[:cut], tools=tools, thinking=thinking
+            )
+        except Exception:
+            return None
+        generation_prompt = self._generation_prompt_suffix()
+        if not generation_prompt or not head_prompt.endswith(generation_prompt):
+            return None
+        head = head_prompt[: len(head_prompt) - len(generation_prompt)]
+        return head or None
+
+    @property
+    def _rolling_control_history_anchor_state(self) -> RollingRouteAnchorState:
+        """The control lineage's history checkpoint; see `_rolling_route_anchor_state`."""
+        return self._rolling_anchor_store().control_history_state
+
     @property
     def _rolling_step_anchor_state(self) -> RollingRouteAnchorState:
         """The ANALYSIS STEP checkpoint; see `_rolling_route_anchor_state`."""
@@ -3899,6 +4014,22 @@ class NativeLlamaClient:
         # to pass, which is what rejects a stale checkpoint within a lineage.
         state = self._rolling_anchor_state_for(identity)
         reuse_start = rolling_route_reuse_start(state, prompt_tokens, identity)
+        if identity is not None and identity.strategy_id == ROLLING_ANALYSIS_STRATEGY_ID:
+            # A control turn may be served by either of its two checkpoints:
+            # the Stage A one (which its repair extends) or the history one
+            # (which the next FINISH extends). Both are judged by the same
+            # exact-prefix rule under their own identity; the longer exact
+            # match wins, and a slot that cannot serve this prompt is simply
+            # not chosen -- never truncated, never guessed.
+            history_identity = replace(
+                identity, strategy_id=ROLLING_CONTROL_HISTORY_STRATEGY_ID
+            )
+            history_state = self._rolling_anchor_state_for(history_identity)
+            history_start = rolling_route_reuse_start(
+                history_state, prompt_tokens, history_identity
+            )
+            if history_start is not None and (reuse_start is None or history_start > reuse_start):
+                identity, state, reuse_start = history_identity, history_state, history_start
         if reuse_start is None:
             return self._prepare_memory_for_prompt(prompt_tokens)
         ok, restored, _meta = restore_rolling_route_anchor(
