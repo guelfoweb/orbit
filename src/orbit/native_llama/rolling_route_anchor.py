@@ -47,6 +47,18 @@ ROLLING_ANALYSIS_STRATEGY_ID = "ornith15-rolling-analysis-v1"
 # whole -- makes a STEP checkpoint and a control checkpoint mutually unusable.
 ROLLING_STEP_STRATEGY_ID = "ornith15-rolling-analysis-step-v1"
 
+# The control lineage's second checkpoint: the history BEFORE a control turn's
+# own transient user turn(s). Stage A's control checkpoint sits after the
+# completion message and before the assistant opener, which is exactly what
+# a repair extends -- and exactly what the NEXT FINISH does not: measured on
+# the normalized Fattura replay, every later FINISH shares its predecessor's
+# tokens only up to the previous completion message (1581 of 2542, 2337 of
+# 2751), so each one prefilled cold, 42% of all prefill. A checkpoint taken
+# before that message is a strict prefix of the next FINISH whatever question
+# it closes, because the history between them is append-only. It lives in its
+# own slot so the repair keeps Stage A's longer checkpoint untouched.
+ROLLING_CONTROL_HISTORY_STRATEGY_ID = "ornith15-rolling-control-history-v1"
+
 
 @dataclass(frozen=True)
 class RollingRouteIdentity:
