@@ -4129,14 +4129,23 @@ class AnalysisRuntime:
             eid for eid in decision["evidence_ids"]
             if self.evidence_store.reattest_exact(eid) is not None
         )
-        if decision["status"] == RESOLVED and not cited:
-            # A resolution has to point at evidence that exists. Without one it
-            # is an assertion, and the honest record is that it stayed open.
-            cited = (evidence_id,) if self.evidence_store.reattest_exact(
-                evidence_id
-            ) is not None else ()
+        status = decision["status"]
+        if status == RESOLVED and not cited:
+            # A resolution must rest on evidence that EXISTS. If the model named
+            # no valid id, the action it just ran is the evidence its answer
+            # rests on -- cite that when it re-attests. This is legitimate (the
+            # answer is stated in answer_summary, which the completion contract
+            # already required to be non-empty); it is not the IBAN defect. That
+            # defect was a resolution with NO answer at all, refused at parse.
+            # If even the step's evidence does not re-attest, there is nothing to
+            # rest on and the question stays open.
+            fallback = self.evidence_store.reattest_exact(evidence_id)
+            if fallback is not None:
+                cited = (evidence_id,)
+            else:
+                status = OPEN
         controller.close_active(
-            decision["status"],
+            status,
             evidence_ids=cited,
             summary=decision["answer_summary"],
         )

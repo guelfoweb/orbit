@@ -95,14 +95,14 @@ class ActivationTests(unittest.TestCase):
         controller = self._three()
         self.assertEqual(controller.activate_next().id, "Q1")
         self.assertEqual(controller.active, "Q1")
-        controller.close_active(RESOLVED, evidence_ids=("ev_1",))
+        controller.close_active(RESOLVED, evidence_ids=("ev_1",), summary="answered")
         self.assertEqual(controller.activate_next().id, "Q2")
 
     def test_a_resolved_question_is_not_reactivated(self) -> None:
         """E. After Q1 closes, the next action belongs to Q2."""
         controller = self._three()
         controller.activate_next()
-        controller.close_active(RESOLVED, evidence_ids=("ev_1",))
+        controller.close_active(RESOLVED, evidence_ids=("ev_1",), summary="answered")
         self.assertEqual(controller.activate_next().id, "Q2")
         self.assertNotIn("Q1", controller.open_ids)
 
@@ -110,7 +110,7 @@ class ActivationTests(unittest.TestCase):
         controller = self._three()
         for _ in range(3):
             controller.activate_next()
-            controller.close_active(RESOLVED, evidence_ids=("ev",))
+            controller.close_active(RESOLVED, evidence_ids=("ev",), summary="answered")
         self.assertIsNone(controller.activate_next())
         self.assertEqual(controller.phase, PHASE_REPORT)
 
@@ -235,7 +235,7 @@ class ChildQuestionTests(unittest.TestCase):
     def test_a_grandchild_is_refused(self) -> None:
         controller = self._parent()
         controller.accept_child("child", "m", "ev_a", {"ev_a"})
-        controller.close_active(RESOLVED, evidence_ids=("ev_a",))
+        controller.close_active(RESOLVED, evidence_ids=("ev_a",), summary="answered")
         controller.activate_next()  # now Q1.1
         with self.assertRaises(ControlError):
             controller.accept_child("grandchild", "m", "ev_a", {"ev_a"})
@@ -366,7 +366,7 @@ class DossierTests(unittest.TestCase):
         controller.adopt_plan(_plan("a", "b"))
         controller.activate_next()
         controller.record_action()
-        controller.close_active(RESOLVED, evidence_ids=("ev",))
+        controller.close_active(RESOLVED, evidence_ids=("ev",), summary="answered")
         counts = controller.counts()
         self.assertEqual(counts["questions"], 2)
         self.assertEqual(counts["resolved"], 1)
