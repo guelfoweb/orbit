@@ -345,7 +345,9 @@ class ShadowWiringTests(unittest.TestCase):
 
         from orbit.runtime import analysis_runtime
 
-        source = inspect.getsource(analysis_runtime.AnalysisRuntime.run_autonomous)
+        # The loop body lives in `_run_autonomous_locked`; `run_autonomous` is a
+        # thin wrapper that only enters the network-denial context.
+        source = inspect.getsource(analysis_runtime.AnalysisRuntime._run_autonomous_locked)
         self.assertIn("_observe_completion_shadow", source)
         self.assertNotIn("would_stop", source)
 

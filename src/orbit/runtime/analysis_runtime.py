@@ -105,6 +105,7 @@ from orbit.runtime.analysis_bootstrap import (
     BOOTSTRAP_TAIL_BYTES,
     build_bootstrap_view,
 )
+from orbit.runtime.analysis_network_policy import analysis_network_denied
 from orbit.runtime.analysis_sandbox import (
     SOURCE_MOUNT,
     WORK_MOUNT,
@@ -4156,7 +4157,22 @@ class AnalysisRuntime:
                 # rephrasing until something stuck.
                 pass
 
-    def run_autonomous(
+    def run_autonomous(self, *args: Any, **kwargs: Any) -> AutonomousRunResult:
+        """Autonomous run with network retrieval denied for its whole lifetime.
+
+        The autonomy loop is static analysis of a local artifact: no step of it
+        may reach the network, and a discovered URL is evidence, not permission
+        to contact it. Entering `analysis_network_denied()` here makes that a
+        runtime-enforced contract over every model call, action, repair and the
+        closing report -- the mandatory execution-time layer beneath the
+        sandbox's own `--unshare-all` isolation, so even a miswired network tool
+        refuses rather than fetches. Guided single `step()` calls do not pass
+        through here; they carry the same policy via their own callers.
+        """
+        with analysis_network_denied():
+            return self._run_autonomous_locked(*args, **kwargs)
+
+    def _run_autonomous_locked(
         self,
         analyst_message: str,
         *,

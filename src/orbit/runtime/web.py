@@ -7,6 +7,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 
+from orbit.runtime.analysis_network_policy import (
+    ANALYSIS_NETWORK_DENIED_REASON,
+    network_retrieval_denied,
+)
+
 
 MAX_SEARCH_RESULTS = 5
 SEARCH_TIMEOUT_SECONDS = 10
@@ -27,6 +32,10 @@ _TEXTUAL_CONTENT_TYPES = (
 
 
 def search_web(query: str, *, max_results: int = MAX_SEARCH_RESULTS) -> str:
+    if network_retrieval_denied():
+        # A search is an outbound request; under the static-analysis contract it
+        # is refused before any socket is opened. No network occurs.
+        return f"error: {ANALYSIS_NETWORK_DENIED_REASON}"
     query = query.strip()
     if not query:
         return "error: search query must be non-empty"
@@ -93,6 +102,14 @@ def execute_fetch_url(arguments: dict[str, object]) -> str:
     url = arguments.get("url")
     if not isinstance(url, str) or not url.strip():
         return "error: fetch_url requires a non-empty url"
+    if network_retrieval_denied():
+        # Execution-time denial: the mandatory second layer. Whatever routed a
+        # fetch_url request here -- a stale tool listing, a malformed call, a
+        # future miswiring -- no socket is opened and no redirect is followed.
+        # Reported as a policy denial (its own status), never a network failure,
+        # and never a success: the URL stays a reportable IOC and the caller can
+        # truthfully say the remote resource was not retrieved.
+        return _format_fetch_failure("policy_denied", url=url.strip(), error=ANALYSIS_NETWORK_DENIED_REASON)
     timeout = _bounded_int(arguments.get("timeout"), default=DEFAULT_FETCH_TIMEOUT_SECONDS, maximum=MAX_FETCH_TIMEOUT_SECONDS)
     max_bytes = _bounded_int(arguments.get("max_bytes"), default=DEFAULT_FETCH_MAX_BYTES, maximum=MAX_FETCH_MAX_BYTES)
     request = Request(
