@@ -100,7 +100,13 @@ from orbit.runtime.analysis_progress import (
     ProgressRecord,
     observation_fingerprint,
 )
+from orbit.runtime.analysis_bootstrap import (
+    BOOTSTRAP_HEAD_BYTES,
+    BOOTSTRAP_TAIL_BYTES,
+    build_bootstrap_view,
+)
 from orbit.runtime.analysis_sandbox import (
+    SOURCE_MOUNT,
     WORK_MOUNT,
     AnalysisResult,
     SandboxUnavailable,
@@ -2540,6 +2546,51 @@ class AnalysisRuntime:
                 {"role": "user", "content": _transform_preamble(self.transform_stages)}
             )
 
+    def _oversized_source_overview(self) -> str | None:
+        """A bounded, deterministic structural view for a source too large to
+        cover -- PLAN-only, never committed to history.
+
+        Built only when the source was measured as too large to admit in full
+        (`COVERAGE_TOO_LARGE`), and offered only to the PLAN call: a coverable
+        source is covered instead, and a source that is not text or cannot be
+        measured gets no view, so nothing claims a size it did not establish.
+        It is emphatically NOT coverage -- it shows a structural summary and two
+        bounded windows, and tells the model the rest is readable by bounded
+        range with the artifact's own digest as provenance. Kept out of
+        `self.messages` on purpose: a 2-3k-token view committed to an
+        append-only history would ride every later step and the report, change
+        admission arithmetic, and has no business being resident once PLAN has
+        used it. The model reads the exact bytes it needs during steps via
+        `read_file`; PLAN only needs to know the source is large and how to
+        reach it. Deterministic and bounded by construction
+        (`analysis_bootstrap`); a failure to build it returns None and leaves
+        PLAN exactly as it was.
+        """
+        text = self._snapshot_text()
+        if text is None:
+            return None
+        # A view is only worth injecting when it genuinely omits a middle --
+        # i.e. the source is materially larger than the head and tail windows
+        # together. When it is not (a small source a pathological tokenizer
+        # happened to call over-budget), the "view" would be as large as the
+        # source or larger and would only crowd the PLAN prompt it is meant to
+        # help. There, PLAN plans from the ordinary uncovered context, which is
+        # correct: nothing was hidden that a structural view would reveal.
+        if self.source.size_bytes <= (
+            BOOTSTRAP_HEAD_BYTES + BOOTSTRAP_TAIL_BYTES
+        ) * 2:
+            return None
+        try:
+            return build_bootstrap_view(
+                source_text=text,
+                size_bytes=self.source.size_bytes,
+                sha256=self.source.sha256,
+                original_path=self.source.original_path,
+                source_mount=SOURCE_MOUNT,
+            )
+        except Exception:  # noqa: BLE001 - enrichment must never end a run
+            return None
+
     def deterministic_sections(self) -> str:
         """Everything the runtime renders exactly, in reading order.
 
@@ -3845,12 +3896,20 @@ class AnalysisRuntime:
         *,
         on_progress: Callable[[Any], None] | None = None,
         max_calls: int = 2,
+        source_overview: str | None = None,
     ) -> int:
         """Ask for the plan through the control tool. Returns model calls spent.
 
         One bounded repair, then the controller is marked unsupported and the
         run reports. There is deliberately no path back to the free-form loop:
         falling back is what recreated the unbounded exploration this replaces.
+
+        `source_overview`, when given, is the bounded structural view of a
+        source too large to cover (see `_oversized_source_overview`). It is
+        PLAN-only transient context -- placed just before the plan request, not
+        in `self.messages` -- so an oversized artifact is planned against its
+        structure rather than against its bare identity, without that view
+        riding the rest of the run.
         """
         # What "above" contains depends on whether COVER ran: with it, the
         # source itself; without it, the artifact's identity and whatever
@@ -3859,8 +3918,13 @@ class AnalysisRuntime:
         # source specifically would describe an uncovered history that does
         # not contain it, and invite questions premised on text the model
         # cannot see.
+        overview_turns: "list[Message]" = (
+            [{"role": "user", "content": source_overview}]
+            if source_overview else []
+        )
         base: "list[Message]" = [
             *self.messages,
+            *overview_turns,
             {"role": "user", "content": (
                 f"{analyst_message}\n"
                 "Before running anything, call submit_analysis_plan with the "
@@ -4197,6 +4261,11 @@ class AnalysisRuntime:
         # that return nothing, so a call that reached the model and then
         # failed was spent and never counted.
         cover_spent_before = self.model_calls
+        # The coverage verdict, kept beyond the COVER block so the oversized
+        # bootstrap below can be offered only when the source was actually
+        # measured as too large -- never for a source that is simply not text,
+        # or that a non-attesting backend could not measure.
+        coverage_status = ""
         if cover and not self.source_covered:
             # COVER owns this block alone. It is an optimisation, and a
             # backend that refuses it must leave the run exactly as it was --
@@ -4204,6 +4273,7 @@ class AnalysisRuntime:
             # its own terms.
             try:
                 coverage = self.plan_source_coverage()
+                coverage_status = coverage.status
                 # A call must remain for investigating. Spending the whole
                 # ceiling on coverage would supply the source and then stop,
                 # which is strictly worse than not covering at all.
@@ -4243,6 +4313,21 @@ class AnalysisRuntime:
         # coverage it describes is real. `source_covered` is derived from the
         # messages and survives the exception that skipped the flag.
         covered = self.source_covered
+        # A source too large to cover is not a source to plan blind against.
+        # When coverage measured it as over-budget, PLAN is given a bounded,
+        # deterministic structural view (and the means to read the rest by
+        # range) instead of the artifact's bare identity. Computed here, handed
+        # to PLAN below, and never committed to history: it supplies no
+        # coverage and spends no model call, and keeping it out of the
+        # append-only history is what stops a 2-3k-token view riding every
+        # later step. Only on the measured TOO_LARGE verdict -- a coverable
+        # source is covered above, and a non-text or unmeasurable source gets
+        # no view, so nothing claims a size it did not establish.
+        source_overview = (
+            self._oversized_source_overview()
+            if not covered and coverage_status == COVERAGE_TOO_LARGE
+            else None
+        )
         # PLAN runs for every autonomous run, in its own failure domain. A
         # backend error here is a planning failure to be reported honestly --
         # never a silent slide into an unplanned run.
@@ -4282,6 +4367,7 @@ class AnalysisRuntime:
                 plan_calls = self.plan_analysis(
                     controller, message, on_progress=on_progress,
                     max_calls=max_model_calls - model_calls,
+                    source_overview=source_overview,
                 )
                 model_calls += self.model_calls - plan_spent_before
                 # `plan_calls` alone does not make a plan valid: a planning

@@ -726,6 +726,13 @@ class FailClosedTests(_Case):
                 [bool(call["tools"]) for call in backend.chat_calls],
             )
 
+        # Coverage refused (cover=True, source too large) and coverage disabled
+        # (cover=False) remain equivalent on every dimension, INCLUDING history
+        # length. The oversized-source bootstrap view that cover=True now builds
+        # is PLAN-ONLY transient context: it is injected into the planning call
+        # but never committed to `self.messages`, so the resident history is the
+        # same as a coverage-disabled run. This assertion is the proof that the
+        # view does not pollute history (the no-fake-coverage invariant).
         self.assertEqual(observe(True), observe(False))
 
     def test_a_refusal_leaves_no_coverage_state(self) -> None:
