@@ -49,6 +49,7 @@ from orbit.runtime.analysis_runtime import (  # noqa: E402
     NO_EVIDENCE_REPORT,
     NO_USABLE_REPORT_TEXT,
     REPORT_NOT_COMPOSED_PREFIX,
+    SOURCE_TOO_LARGE_REPORT,
     STOP_BACKEND_ERROR,
     AnalysisRuntime,
     AnalysisSource,
@@ -66,10 +67,19 @@ from orbit.runtime.evidence import EvidenceStore  # noqa: E402
 #: clause in the runtime left every suite green while both composed-failure
 #: reports began exiting 0, which is the false pass this gate exists to
 #: prevent. Importing makes the harness follow a rename automatically.
+#: The oversized-source closing report is a truthful result but NOT an answer:
+#: it states that coverage was impossible and asserts nothing about the
+#: artifact. The harness must still fail on it, so its stable opening (the part
+#: before the `{size}`/`{sha256}` fields) joins the non-answer set. Derived from
+#: the imported template by cutting at its first format field, so a reworded
+#: template is followed automatically rather than copied and left to drift.
+_SOURCE_TOO_LARGE_PREFIX = SOURCE_TOO_LARGE_REPORT.split("{", 1)[0].rstrip()
+
 NON_ANSWER_REPORT_PREFIXES = (
     NO_USABLE_REPORT_TEXT,
     REPORT_NOT_COMPOSED_PREFIX,
     NO_EVIDENCE_REPORT,
+    _SOURCE_TOO_LARGE_PREFIX,
 )
 
 

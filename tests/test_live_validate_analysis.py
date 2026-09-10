@@ -704,9 +704,15 @@ class ExitCodeTests(unittest.TestCase):
         )
         record = observed["_record"]
         self.assertIs(record["source_covered"], False)
+        # A truthful closing result exists (the run no longer terminates
+        # silently), and on an artifact too large to cover it names that cause
+        # specifically rather than the generic "no evidence" -- a reader must
+        # be able to tell an oversized-source limitation from an inert file.
         self.assertIs(record["final_report_present"], True)
         self.assertTrue(record["final_report"].lstrip().startswith(
-            harness.NO_EVIDENCE_REPORT))
+            harness._SOURCE_TOO_LARGE_PREFIX))
+        # It is still NOT an answer: the harness must fail on it exactly as it
+        # does on every other non-answer shape.
         self.assertNotEqual(observed["_exit_code"], 0)
 
     def test_a_report_that_could_not_be_composed_fails(self) -> None:

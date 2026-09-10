@@ -80,6 +80,7 @@ from orbit.runtime.analysis_source_identity import (
 from orbit.runtime.analysis_coverage import (
     COVERAGE_COMPLETE,
     COVERAGE_NOT_ELIGIBLE,
+    COVERAGE_TOO_LARGE,
     COVERAGE_UNADMISSIBLE,
     SourceCoverage,
     decode_artifact,
@@ -630,6 +631,21 @@ ANALYSIS_REPORT_INSTRUCTION = (
 )
 
 NO_EVIDENCE_REPORT = "No analysis evidence has been collected yet."
+
+#: The closing report for a run that ended before any evidence was collected
+#: AND could not be given the source because it exceeds the admissible context.
+#: This is an operational limitation, not a finding: it states the cause and the
+#: artifact's own metadata, invents nothing about what the artifact does, and
+#: spends no model call. Named so the live-validation harness and any external
+#: reader can recognise an oversized-source block without copying the wording.
+#: `{size}` is filled with the artifact's byte size.
+SOURCE_TOO_LARGE_REPORT = (
+    "Analysis could not proceed: the artifact source is larger than the "
+    "model context and could not be admitted in full, so no evidence was "
+    "collected. This is a coverage limitation, not a finding -- nothing is "
+    "asserted about what the artifact does. Artifact: {size} bytes, "
+    "sha256 {sha256}."
+)
 
 #: How a report that could not be written begins. Named rather than
 #: spelled twice: it is the opening clause that states the failure, and
@@ -5014,14 +5030,24 @@ class AnalysisRuntime:
         # Cancellation is the exception. The analyst asked for the run to stop,
         # and spending another model call -- minutes of generation -- to
         # summarise it is the opposite of stopping.
-        # `steps` is no longer the only thing worth reporting on. A covered
-        # run whose plan was empty took no step at all -- the model said the
-        # source answered everything, which the planning instruction calls a
-        # correct reply -- and skipping the report there would turn the whole
-        # analysis into nothing, discarding a source the model was given in
-        # full. So a run that covered the source reports even with no steps.
+        #
+        # Every OTHER finalizing run produces a closing result, including one
+        # that did nothing at all -- no step, no coverage, an empty plan. The
+        # previous guard `(steps or covered_calls)` let exactly that case slip
+        # through and return no report, which is how an oversized source whose
+        # PLAN came back empty terminated silently: the analyst was handed a
+        # stop reason and nothing else, with no statement that analysis could
+        # not proceed. Reaching finalization is itself the thing that must
+        # produce a truthful closing result. `report()` carries every sub-case
+        # without a model call or a fabricated finding: a covered run grounds on
+        # its source, a run with records grounds on them, and a run with neither
+        # opens with why there is nothing (oversized source, or no actionable
+        # plan) -- never a claim that the artifact is inert. A backend-error
+        # run is not special-cased here: it is not cancelled, so it too gets a
+        # truthful closing result, and with no evidence that result is the
+        # honest "no evidence was collected", never "source too large".
         _notify(on_event, ANALYSIS_STEP_PHASE, "stopped", detail=stop_reason)
-        if not cancelled and finalize and (steps or covered_calls):
+        if not cancelled and finalize:
             # Measured, like the four sites above: `report()` reports its
             # spend in the object it returns, and the handler below leaves
             # without one -- so a closing report that reached the model and
@@ -5454,6 +5480,40 @@ class AnalysisRuntime:
                 continue
         return digests
 
+    def _uncovered_report_reason(self) -> str:
+        """Why an uncovered run collected no evidence, as a closing opening.
+
+        Called only on the already-empty path (no reportable records, source
+        not covered), so it can afford to re-probe coverage -- a tokeniser
+        measurement, not a model call -- to separate the two operational
+        causes a reader must be able to tell apart:
+
+        - the source is larger than the admissible context, so it could not be
+          supplied and nothing could be investigated against it; versus
+        - the source was coverable but no evidence exists (for example an
+          empty plan on a small source a bound or refusal left uncovered).
+
+        Neither asserts anything about what the artifact does. The probe is
+        wrapped because a measurement must never be able to fail a report: if
+        coverage cannot be evaluated, the generic no-evidence line stands.
+        """
+        try:
+            status = self.plan_source_coverage().status
+        except Exception:  # noqa: BLE001 - a measurement must not end a report
+            status = ""
+        if status == COVERAGE_TOO_LARGE:
+            return SOURCE_TOO_LARGE_REPORT.format(
+                size=self.source.size_bytes, sha256=self.source.sha256
+            )
+        # Every other status keeps the generic, accurate line. Only TOO_LARGE
+        # licenses the "larger than the context" claim: NOT_ELIGIBLE (binary or
+        # not strict UTF-8) and UNADMISSIBLE (no exact-token backend) did not
+        # measure the source against the window, so asserting it overflowed
+        # would be a claim the runtime cannot support. The honesty boundary is
+        # exactly this `if`: a source is only called oversized when coverage
+        # measured it as oversized.
+        return NO_EVIDENCE_REPORT
+
     def report(
         self,
         question: str = "",
@@ -5490,7 +5550,16 @@ class AnalysisRuntime:
             # runtime already knows. The appendix still stands: what the
             # artifact determines does not depend on there being findings
             # about it.
-            text = f"{NO_EVIDENCE_REPORT}\n\n{appendix}" if appendix else NO_EVIDENCE_REPORT
+            #
+            # The opening clause names WHY there is nothing, without inventing a
+            # finding. An oversized source that could not be admitted is an
+            # operational limitation the reader must be told about -- a silent
+            # "no evidence" there reads as "the artifact is inert", which is a
+            # different and false claim. The cause is measured, not guessed:
+            # `_uncovered_report_reason` re-probes coverage (a tokeniser
+            # measurement, no model call) only on this already-empty path.
+            opening = self._uncovered_report_reason()
+            text = f"{opening}\n\n{appendix}" if appendix else opening
             return AnalysisReport(text=text, model_calls=0, evidence_ids=())
 
         messages = self._report_messages(question, records)
