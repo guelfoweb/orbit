@@ -63,6 +63,13 @@ class TransformStage:
 
     @property
     def summary(self) -> str:
+        # The key/delimiter describe the XOR and Chr passes; a folded value has
+        # neither, so it is summarised by what it is and where it came from.
+        if self.kind == JS_STRINGARRAY_FOLD:
+            return (
+                f"{self.kind} line={self.line} depth={self.depth} "
+                f"(ActiveXObject ProgID {self.output!r} folded from {self.encoded!r})"
+            )
         return (
             f"{self.kind} key={self.key} delimiter={self.delimiter!r} "
             f"line={self.line} depth={self.depth} "
@@ -857,6 +864,1088 @@ def find_powershell_chr_stages(
     return stages
 
 
+# --- JavaScript string-array + base64 + RC4, with helper folding -----------
+#
+# A different obfuscation family from the XOR and Chr passes above, handled the
+# same way: structurally, never by name, and fail-closed. `javascript-obfuscator`
+# hides operational strings in a string array, behind a base64+RC4 decoder, and
+# assembles the strings a program actually uses (ActiveX ProgIDs such as
+# `MSXML2.XMLHTTP`) through PURE helper functions -- `f(x)=x(y)` (apply) and
+# `f(x,y)=x+y` (concat) -- over constant indices into a self-defending
+# array-returning function. None of that is runtime-dependent: the indices are
+# literals, the helpers are pure, the decoder is a fixed transform, and the
+# self-defending guard is a comparison of a constant with itself. So the final
+# operational strings are determined by the bytes on disk, exactly like the XOR
+# and Chr decodes -- and like them, a model asked to reconstruct them by hand
+# has a dozen ways to get it wrong.
+#
+# This pass recovers them by a BOUNDED EXPRESSION FOLDER, not a JavaScript
+# engine. It evaluates a tiny grammar (string/number literals, `a+b`, `a[b]`,
+# and calls of functions it has PROVEN are the decoder, the array accessor, or a
+# pure apply/concat/eq helper) against an environment it builds only when the
+# whole family shape is structurally proven. Anything outside that grammar --
+# an impure helper, a dynamic key, a mutated array, a guard that is not
+# constant-true, a decoder that is not this base64+RC4 -- folds to UNKNOWN and
+# nothing is emitted. It never executes, imports, or interprets the script.
+JS_STRINGARRAY_FOLD = "js_stringarray_fold"
+
+# The standard base64 glyph set. The family's decoder uses these glyphs in a
+# nonstandard ORDER (lowercase first); the alphabet is identified by being a
+# 60+ char string drawn from exactly this set, not by a fixed literal.
+_B64_GLYPHS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
+)
+
+# Bounds on the fold. Small and about the artifact: an expression or array that
+# exceeds them is not the unambiguous case this handles.
+_FOLD_MAX_NODES = 4096      # expression nodes evaluated per top-level fold
+_FOLD_MAX_DEPTH = 64        # fold recursion depth
+_FOLD_MAX_ARRAY = 20_000    # string-array element count
+_FOLD_MAX_Q = 4_000         # accessor-array element count
+_FOLD_MAX_SOURCE = MAX_INPUT_CHARS
+
+
+class _Unknown:
+    """The fold's bottom value: a subexpression that is not statically
+    determined. It is distinct from every real string/number, and it propagates
+    -- any UNKNOWN inside an expression makes the whole expression UNKNOWN, so a
+    partially-folded value is never emitted."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNKNOWN"
+
+
+_UNKNOWN = _Unknown()
+
+
+def _fold_b64_custom(encoded: str) -> str | None:
+    """Base64-decode with the family's custom-ORDER alphabet, then read the
+    bytes back as UTF-8 (the source percent-encodes each byte and calls
+    decodeURIComponent). Pure; mirrors the decoder's own loop. Returns None on
+    any invalid digit -- fail closed."""
+    order = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
+    out: list[int] = []
+    bits = 0
+    val = 0
+    for ch in encoded:
+        if ch == "=":
+            break
+        idx = order.find(ch)
+        if idx < 0:
+            return None
+        val = (val << 6) | idx
+        bits += 6
+        if bits >= 8:
+            bits -= 8
+            out.append((val >> bits) & 0xFF)
+    try:
+        return bytes(out).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _fold_rc4(data: str, key: str) -> str:
+    """Standard RC4 over the code units of `data` with string `key`, returning
+    fromCharCode of each XOR byte -- exactly what the family's `p(C,S)` does."""
+    s = list(range(256))
+    j = 0
+    klen = len(key)
+    for i in range(256):
+        j = (j + s[i] + ord(key[i % klen])) % 256
+        s[i], s[j] = s[j], s[i]
+    i = j = 0
+    out: list[str] = []
+    for ch in data:
+        i = (i + 1) % 256
+        j = (j + s[i]) % 256
+        s[i], s[j] = s[j], s[i]
+        out.append(chr(ord(ch) ^ s[(s[i] + s[j]) % 256]))
+    return "".join(out)
+
+
+def _fold_decode(array: "list[str]", index: int, key: str) -> str | None:
+    """The decoder `v(index, key)` = RC4(base64_custom(array[index]), key).
+    Pure arithmetic; None (fail closed) on any step that does not resolve."""
+    if not (0 <= index < len(array)):
+        return None
+    if not key:
+        # RC4's key schedule indexes `key[i % len(key)]`; an empty key is not a
+        # call this decoder family makes, and evaluating it would divide by
+        # zero. Refuse rather than invent a value.
+        return None
+    decoded = _fold_b64_custom(array[index])
+    if decoded is None:
+        return None
+    return _fold_rc4(decoded, key)
+
+
+# --- the bounded expression folder -----------------------------------------
+#
+# Grammar (the only syntax it will evaluate):
+#   expr    := concat
+#   concat  := postfix ('+' postfix)*
+#   postfix := primary ( '[' expr ']' | '.' IDENT | '(' args ')' )*
+#   primary := STRING | NUMBER | IDENT | '(' expr ')'
+# Any other character or shape makes the parse return None, which folds to
+# UNKNOWN. This is a calculator over proven-pure operations, not an interpreter.
+
+
+def _fold_tokenize(expr: str):
+    toks: list[tuple] = []
+    i, n = 0, len(expr)
+    while i < n:
+        c = expr[i]
+        if c in " \t\r\n":
+            i += 1
+            continue
+        if c in "'\"":
+            q = c
+            j = i + 1
+            buf: list[str] = []
+            while j < n:
+                d = expr[j]
+                if d == "\\" and j + 1 < n:
+                    buf.append(d)
+                    buf.append(expr[j + 1])
+                    j += 2
+                    continue
+                if d == q:
+                    break
+                buf.append(d)
+                j += 1
+            if j >= n:
+                return None  # unterminated string
+            toks.append(("str", _unescape("".join(buf))))
+            i = j + 1
+            continue
+        if c.isdigit() or (c == "0" and i + 1 < n and expr[i + 1] in "xX"):
+            j = i
+            if expr[j:j + 2].lower() == "0x":
+                j += 2
+                while j < n and expr[j] in "0123456789abcdefABCDEF":
+                    j += 1
+                toks.append(("num", int(expr[i:j], 16)))
+            else:
+                while j < n and expr[j].isdigit():
+                    j += 1
+                toks.append(("num", int(expr[i:j])))
+            i = j
+            continue
+        if c.isalpha() or c in "_$":
+            j = i
+            while j < n and (expr[j].isalnum() or expr[j] in "_$"):
+                j += 1
+            toks.append(("id", expr[i:j]))
+            i = j
+            continue
+        if c in "()[],+.":
+            toks.append((c, c))
+            i += 1
+            continue
+        return None  # outside the grammar
+    return toks
+
+
+class _FoldParser:
+    def __init__(self, toks):
+        self.t = toks
+        self.i = 0
+
+    def peek(self):
+        return self.t[self.i] if self.i < len(self.t) else (None, None)
+
+    def advance(self):
+        tok = self.peek()
+        self.i += 1
+        return tok
+
+
+def _fold_parse(expr: str):
+    toks = _fold_tokenize(expr)
+    if toks is None:
+        return None
+    p = _FoldParser(toks)
+    node = _fold_concat(p)
+    if node is None or p.i != len(toks):
+        return None  # trailing garbage
+    return node
+
+
+def _fold_concat(p):
+    left = _fold_postfix(p)
+    if left is None:
+        return None
+    while p.peek()[0] == "+":
+        p.advance()
+        right = _fold_postfix(p)
+        if right is None:
+            return None
+        left = ("add", left, right)
+    return left
+
+
+def _fold_postfix(p):
+    node = _fold_primary(p)
+    if node is None:
+        return None
+    while True:
+        k = p.peek()[0]
+        if k == "[":
+            p.advance()
+            idx = _fold_concat(p)
+            if idx is None or p.peek()[0] != "]":
+                return None
+            p.advance()
+            node = ("index", node, idx)
+        elif k == ".":
+            p.advance()
+            kk, name = p.advance()
+            if kk != "id":
+                return None
+            node = ("index", node, ("str", name))
+        elif k == "(":
+            p.advance()
+            args = []
+            if p.peek()[0] != ")":
+                while True:
+                    a = _fold_concat(p)
+                    if a is None:
+                        return None
+                    args.append(a)
+                    if p.peek()[0] == ",":
+                        p.advance()
+                        continue
+                    break
+            if p.peek()[0] != ")":
+                return None
+            p.advance()
+            node = ("call", node, args)
+        else:
+            break
+    return node
+
+
+def _fold_primary(p):
+    kind, val = p.peek()
+    if kind == "str":
+        p.advance()
+        return ("str", val)
+    if kind == "num":
+        p.advance()
+        return ("num", val)
+    if kind == "(":
+        p.advance()
+        node = _fold_concat(p)
+        if node is None or p.peek()[0] != ")":
+            return None
+        p.advance()
+        return node
+    if kind == "id":
+        p.advance()
+        return ("id", val)
+    return None
+
+
+@dataclass
+class _FoldEnv:
+    """The proven environment a folder evaluates against. Every field is built
+    only when the family shape is structurally proven, so each function named
+    here has been checked to do exactly what its role says."""
+
+    string_array: "list[str]"      # the decoder's backing array
+    decoder_names: set             # names proven to be the base64+RC4 decoder
+    decoder_offset: int            # the `a = a - OFFSET` index normalization
+    accessor_names: set            # names proven to index the accessor array q
+    q_values: list                 # q, pre-resolved to final str / UNKNOWN
+    helpers: dict                  # member -> ('apply'|'concat'|'eq',) | ('const', expr)
+    objects: dict                  # value-object name -> {key: expr-string}
+    helper_objects: set            # names of objects whose members are helpers
+
+
+class _Folder:
+    def __init__(self, env: "_FoldEnv"):
+        self.env = env
+        self._budget = _FOLD_MAX_NODES
+
+    def fold(self, expr: str):
+        self._budget = _FOLD_MAX_NODES
+        node = _fold_parse(expr)
+        if node is None:
+            return _UNKNOWN
+        return self._ev(node, 0)
+
+    def _ev(self, node, depth):
+        if depth > _FOLD_MAX_DEPTH:
+            return _UNKNOWN
+        self._budget -= 1
+        if self._budget <= 0:
+            return _UNKNOWN
+        tag = node[0]
+        if tag == "str":
+            return node[1]
+        if tag == "num":
+            return node[1]
+        if tag == "add":
+            a = self._ev(node[1], depth + 1)
+            b = self._ev(node[2], depth + 1)
+            if isinstance(a, str) and isinstance(b, str):
+                return a + b
+            return _UNKNOWN
+        if tag == "index":
+            base = self._ev(node[1], depth + 1)
+            idx = self._ev(node[2], depth + 1)
+            return self._index(base, idx, depth)
+        if tag == "id":
+            name = node[1]
+            if name in self.env.objects:
+                return ("obj", name)
+            if name in self.env.helper_objects:
+                return ("helperobj", name)
+            if name in self.env.decoder_names:
+                return ("fn", "decoder")
+            if name in self.env.accessor_names:
+                return ("fn", "accessor")
+            if name in self.env.helpers:
+                role = self.env.helpers[name]
+                if role[0] == "const":
+                    return self._fold_sub(role[1], depth)
+                return ("fn", role[0])
+            return _UNKNOWN
+        if tag == "call":
+            callee = self._ev(node[1], depth + 1)
+            return self._invoke(callee, node[2], depth)
+        return _UNKNOWN
+
+    def _invoke(self, callee, argnodes, depth):
+        if not (isinstance(callee, tuple) and callee and callee[0] == "fn"):
+            return _UNKNOWN
+        role = callee[1]
+        if role == "decoder":
+            if len(argnodes) != 2:
+                return _UNKNOWN
+            idx = self._ev(argnodes[0], depth + 1)
+            key = self._ev(argnodes[1], depth + 1)
+            if not isinstance(idx, int) or not isinstance(key, str):
+                return _UNKNOWN
+            out = _fold_decode(self.env.string_array, idx - self.env.decoder_offset, key)
+            return out if out is not None else _UNKNOWN
+        if role == "accessor":
+            if len(argnodes) != 1:
+                return _UNKNOWN
+            idx = self._ev(argnodes[0], depth + 1)
+            if not isinstance(idx, int):
+                return _UNKNOWN
+            if not (0 <= idx < len(self.env.q_values)):
+                return _UNKNOWN
+            val = self.env.q_values[idx]
+            return val if isinstance(val, str) else _UNKNOWN
+        if role == "apply":
+            # apply(f, x) == f(x): arg0 must resolve to a fn marker
+            if len(argnodes) != 2:
+                return _UNKNOWN
+            f = self._ev(argnodes[0], depth + 1)
+            return self._invoke(f, [argnodes[1]], depth + 1)
+        if role == "concat":
+            if len(argnodes) != 2:
+                return _UNKNOWN
+            a = self._ev(argnodes[0], depth + 1)
+            b = self._ev(argnodes[1], depth + 1)
+            if isinstance(a, str) and isinstance(b, str):
+                return a + b
+            return _UNKNOWN
+        return _UNKNOWN
+
+    def _index(self, base, idx, depth):
+        if not isinstance(idx, str):
+            return _UNKNOWN
+        if isinstance(base, tuple) and base and base[0] == "obj":
+            obj = self.env.objects.get(base[1])
+            if obj is None or idx not in obj:
+                return _UNKNOWN
+            return self._fold_sub(obj[idx], depth)
+        if isinstance(base, tuple) and base and base[0] == "helperobj":
+            role = self.env.helpers.get(idx)
+            if role is None:
+                return _UNKNOWN
+            if role[0] == "const":
+                return self._fold_sub(role[1], depth)
+            return ("fn", role[0])
+        return _UNKNOWN
+
+    def _fold_sub(self, expr, depth):
+        node = _fold_parse(expr)
+        if node is None:
+            return _UNKNOWN
+        return self._ev(node, depth + 1)
+
+
+# --- structural recognition (builds the environment, or refuses) ------------
+#
+# Regex LOCATES candidates; balanced, string-aware scanning is the authority
+# for nested syntax. Every proof is structural and local; the only cross-scope
+# reasoning is a bounded alias-chain closure, the same idiom the PowerShell
+# `-bxor` pass already uses. If any piece is missing or ambiguous, the whole
+# family is refused and nothing is folded.
+
+
+def _balanced(src: str, startpos: int, op: str, cl: str):
+    """The balanced `op..cl` slice starting at the first `op` at/after
+    `startpos`, skipping string literals. Returns (text, start, end) or None."""
+    try:
+        st = src.index(op, startpos)
+    except ValueError:
+        return None
+    i = st
+    depth = 0
+    instr = None
+    esc = False
+    while i < len(src):
+        c = src[i]
+        if instr:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == instr:
+                instr = None
+        else:
+            if c in "'\"":
+                instr = c
+            elif c == op:
+                depth += 1
+            elif c == cl:
+                depth -= 1
+                if depth == 0:
+                    return src[st:i + 1], st, i
+        i += 1
+    return None
+
+
+def _split_top(inner: str) -> "list[str]":
+    """Top-level comma split, string/bracket aware."""
+    segs: list[str] = []
+    depth = 0
+    instr = None
+    esc = False
+    cur: list[str] = []
+    for ch in inner:
+        if instr:
+            cur.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == instr:
+                instr = None
+        else:
+            if ch in "'\"":
+                instr = ch
+                cur.append(ch)
+            elif ch in "([{":
+                depth += 1
+                cur.append(ch)
+            elif ch in ")]}":
+                depth -= 1
+                cur.append(ch)
+            elif ch == "," and depth == 0:
+                segs.append("".join(cur))
+                cur = []
+            else:
+                cur.append(ch)
+    if cur:
+        segs.append("".join(cur))
+    return segs
+
+
+def _string_array_elems(seg: str):
+    """If `seg` is exactly `['...','...']` of string literals, return the list;
+    otherwise None (an element that is not a string literal rejects it)."""
+    seg = seg.strip()
+    if not (seg.startswith("[") and seg.endswith("]")):
+        return None
+    out: list[str] = []
+    for e in _split_top(seg[1:-1]):
+        e = e.strip()
+        m = re.fullmatch(r"'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"", e)
+        if not m:
+            return None
+        out.append(_unescape(m.group(1) if m.group(1) is not None else m.group(2)))
+    return out
+
+
+def _find_string_array_fn(source: str):
+    """`function N(){ ... ['...', ...] ... }` whose body returns the string
+    array (directly or via the `N=function(){return ARR}` self-reassignment the
+    obfuscator emits). Returns (name, elems) or None. The decoder-linkage check
+    downstream is what actually qualifies it."""
+    for m in re.finditer(r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{", source):
+        name = m.group(1)
+        body = _balanced(source, m.end() - 1, "{", "}")
+        if not body:
+            continue
+        btext = body[0]
+        # The data variable that holds the array literal, e.g. `var data=[...]`.
+        dm = re.search(r"(?:var|let|const)?\s*([A-Za-z_$][\w$]*)\s*=\s*\[", btext)
+        if not dm:
+            continue
+        datavar = dm.group(1)
+        br = _balanced(btext, dm.end() - 1, "[", "]")
+        if not br:
+            continue
+        elems = _string_array_elems(br[0])
+        if not elems or not (1 <= len(elems) <= _FOLD_MAX_ARRAY):
+            continue
+        # The array variable must be assigned exactly once: a second write means
+        # the value at the call site depends on control flow, which is
+        # interpretation, not reading. Refuse rather than read a stale literal.
+        writes = re.findall(
+            rf"(?<![\w$.]){re.escape(datavar)}\s*(?:\[[^\]]*\])?\s*(?:\+=|=(?!=))", btext
+        )
+        if len(writes) != 1:
+            continue
+        # The array this var holds must be the one the function actually RETURNS,
+        # or the decoy-first-array case reads a literal the program never uses.
+        # Two spellings return it: `return datavar;` directly, or the
+        # self-reassignment `N=function(){return datavar}` the obfuscator emits.
+        returns_datavar = re.search(
+            rf"return\s+{re.escape(datavar)}\s*;", btext
+        ) or re.search(
+            rf"{re.escape(name)}\s*=\s*function\s*\(\s*\)\s*\{{\s*return\s+"
+            rf"{re.escape(datavar)}\s*;",
+            btext,
+        )
+        if returns_datavar:
+            return name, elems
+    return None
+
+
+def _find_fold_decoder(source: str, array_fn: str):
+    """`function D(a,q){ a=a-OFF; ... <custom b64 alphabet> ... RC4 ... }`,
+    matched structurally: (1) the first param normalized by subtraction, (2) a
+    60+ char base64 alphabet drawn from the standard glyph set (both cases and
+    digits), (3) an RC4 element swap `S[i]=S[j]` and a 256 modulus, and (4) a
+    reference to the string-array function. Returns (name, offset) or None."""
+    for m in re.finditer(
+        r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*"
+        r"([A-Za-z_$][\w$]*)\s*\)\s*\{",
+        source,
+    ):
+        name, p0 = m.group(1), m.group(2)
+        body = _balanced(source, m.end() - 1, "{", "}")
+        if not body:
+            continue
+        b = body[0]
+        off_m = re.search(
+            rf"{re.escape(p0)}\s*=\s*{re.escape(p0)}\s*-\s*(0x[0-9a-fA-F]+|\d+)", b
+        )
+        if not off_m:
+            continue
+        alpha_ok = False
+        for sm in re.finditer(r"'((?:[^'\\]|\\.){60,})'|\"((?:[^\"\\]|\\.){60,})\"", b):
+            lit = _unescape(sm.group(1) if sm.group(1) is not None else sm.group(2))
+            if (len(lit) >= 60 and set(lit) <= _B64_GLYPHS
+                    and any(c.islower() for c in lit)
+                    and any(c.isupper() for c in lit)
+                    and any(c.isdigit() for c in lit)):
+                alpha_ok = True
+                break
+        if not alpha_ok:
+            continue
+        rc4_mod = re.search(r"%\s*(?:0x100|256)\b", b)
+        swap = re.search(
+            r"[A-Za-z_$][\w$]*\s*\[[^\]]+\]\s*=\s*[A-Za-z_$][\w$]*\s*\[[^\]]+\]", b
+        )
+        uses_array = re.search(rf"{re.escape(array_fn)}\s*\(\s*\)", b)
+        if rc4_mod and swap and uses_array:
+            digits = off_m.group(1)
+            off = int(digits, 16) if digits.lower().startswith("0x") else int(digits)
+            return name, off
+    return None
+
+
+def _top_level_write_counts(source: str) -> dict:
+    """How many times each name is WRITTEN (`=`, `+=`, or through an index) at
+    brace-depth zero -- outside every function body. String-aware.
+
+    Assignments inside a function body are that function's business and may
+    reuse a name as a local (a minified RC4 loop counter reusing `R`, say);
+    only writes at the top level, where the decoder/accessor aliases are bound,
+    decide whether a fold name's value is agreed on across the file. A name
+    written more than once at the top level is ambiguous at its call sites --
+    reassigned to a call, array, object or other function -- and treating it as
+    the decoder/accessor would fold a call that at runtime is something else.
+    """
+    counts: dict = {}
+    depth = 0
+    instr = None
+    esc = False
+    i = 0
+    n = len(source)
+    while i < n:
+        c = source[i]
+        if instr:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == instr:
+                instr = None
+            i += 1
+            continue
+        if c in "'\"":
+            instr = c
+            i += 1
+            continue
+        if c == "{":
+            depth += 1
+            i += 1
+            continue
+        if c == "}":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 0:
+            wm = re.match(
+                r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\[[^\]]*\])?\s*(?:\+=|=(?!=))",
+                source[i:],
+            )
+            if wm:
+                counts[wm.group(1)] = counts.get(wm.group(1), 0) + 1
+                i += wm.end()
+                continue
+        i += 1
+    return counts
+
+
+def _fold_aliases_of(source: str, target: str) -> set:
+    """All names bound to `target` through a chain of plain `NAME = OTHERNAME`
+    assignments (no call, member, or index on the RHS). A bounded transitive
+    closure -- the alias-chain idiom the `-bxor` recogniser uses -- so a 2-hop
+    `XX=qZ; qZ=v` resolves `XX`. A closure over simple bindings; it interprets
+    no scope or control flow.
+
+    A name with a CONFLICTING simple binding is EXCLUDED: if `NAME = OTHER`
+    appears anywhere with `OTHER` not itself an alias of `target`, the name's
+    value at a call site is ambiguous, and treating it as the decoder/accessor
+    could fold a call that at runtime is something else. (A reused single-letter
+    loop local such as `R=U%4...` is an arithmetic write, not a simple-identifier
+    binding, so it does not make `R=H` ambiguous -- only a competing
+    `NAME=OTHERNAME` does.) `target` was proven structurally and is always in.
+    """
+    # A simple alias binding is `NAME = OTHER` where OTHER is a bare identifier
+    # that ENDS the right-hand side -- the next token closes the statement or
+    # the comma-chain (`,`, `;`, `)`, `}`, newline, or end). `R = U % 4` is not
+    # a simple binding (U is followed by an operator); it is arithmetic, and the
+    # trailing guard rejects it, so a reused loop local does not masquerade as
+    # an alias.
+    binds = re.findall(
+        r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*(?=[,;)}\r\n]|$)",
+        source,
+    )
+    # Every name that receives a simple-identifier binding, and the set of RHS
+    # identifiers it is bound to. A name bound to two different identifiers is
+    # ambiguous regardless of what those identifiers turn out to be.
+    rhs_of: dict = {}
+    for name, rhs in binds:
+        rhs_of.setdefault(name, set()).add(rhs)
+    # Top-level write counts catch the reassignment a simple-binding check
+    # cannot see: `X = makeSomethingElse()`, `X = [..]`, `X = {..}`, `X = new ..`
+    # are not simple-identifier bindings, so a name reassigned that way would
+    # otherwise stay an alias. More than one top-level write -> ambiguous.
+    top_writes = _top_level_write_counts(source)
+    reached = {target}
+    for _ in range(8):
+        grew = False
+        for name, rhs in binds:
+            if name in reached or rhs not in reached:
+                continue
+            # Exclude a name bound to more than one distinct identifier, or
+            # written more than once at the top level: its value is not agreed.
+            if len(rhs_of.get(name, ())) != 1:
+                continue
+            if top_writes.get(name, 0) > 1:
+                continue
+            reached.add(name)
+            grew = True
+        if not grew:
+            break
+    return reached
+
+
+def _extract_helper_members(objtext: str) -> dict:
+    """Map an object literal's pure-function members to fold roles:
+       ('apply',) for function(x,y){return x(y)}
+       ('concat',) for function(x,y){return x+y}
+       ('eq',) for function(x,y){return x===y}
+       ('const', expr) for a decoder-call or string-literal member.
+    Any member that is none of these is omitted, so a reference to it folds to
+    UNKNOWN -- an impure or unexpected member never becomes a fold operation."""
+    members: dict = {}
+    for mm in re.finditer(
+        r"'([A-Za-z_$][\w$]*)'\s*:\s*function\(([^)]*)\)\{return ([^;]+);\}", objtext
+    ):
+        nm, params, expr = mm.group(1), mm.group(2), mm.group(3).strip()
+        ps = [p.strip() for p in params.split(",")]
+        if len(ps) == 2 and expr == f"{ps[0]}({ps[1]})":
+            members[nm] = ("apply",)
+        elif len(ps) == 2 and expr == f"{ps[0]}+{ps[1]}":
+            members[nm] = ("concat",)
+        elif len(ps) == 2 and expr == f"{ps[0]}==={ps[1]}":
+            members[nm] = ("eq",)
+    for mm in re.finditer(
+        r"'([A-Za-z_$][\w$]*)'\s*:\s*"
+        r"([A-Za-z_$][\w$]*\((?:0x[0-9a-fA-F]+|\d+),'(?:[^'\\]|\\.)*'\))",
+        objtext,
+    ):
+        members.setdefault(mm.group(1), ("const", mm.group(2)))
+    for mm in re.finditer(r"'([A-Za-z_$][\w$]*)'\s*:\s*'((?:[^'\\]|\\.)*)'", objtext):
+        members.setdefault(mm.group(1), ("const", "'" + mm.group(2) + "'"))
+    return members
+
+
+def _guard_folds_true(guard: str, folder: "_Folder") -> bool:
+    """True only when the self-defending guard is PROVEN statically true: a
+    direct `X===X` with textually-identical operands, or `CALLEE(A,B)` where
+    CALLEE folds to an `eq` (===) helper and A,B fold to the same value (or are
+    textually identical). The comparator key may itself be a decoder call. Any
+    other guard -> False (refusal)."""
+    g = guard.strip()
+    parts = re.split(r"(?<![=!<>])===", g)
+    if len(parts) == 2 and parts[0].strip() == parts[1].strip():
+        return True
+    if not g.endswith(")"):
+        return False
+    depth = 0
+    instr = None
+    esc = False
+    open_at = None
+    for i, c in enumerate(g):
+        if instr:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == instr:
+                instr = None
+        else:
+            if c in "'\"":
+                instr = c
+            elif c == "(":
+                if depth == 0:
+                    open_at = i
+                depth += 1
+            elif c == ")":
+                depth -= 1
+    if open_at is None:
+        return False
+    callee = g[:open_at].strip()
+    args = _split_top(g[open_at + 1:-1])
+    if len(args) != 2:
+        return False
+    cv = folder.fold(callee)
+    if not (isinstance(cv, tuple) and len(cv) >= 2 and cv[0] == "fn" and cv[1] == "eq"):
+        return False
+    if args[0].strip() == args[1].strip():
+        return True
+    a = folder.fold(args[0].strip())
+    b = folder.fold(args[1].strip())
+    return not isinstance(a, _Unknown) and a == b
+
+
+def _resolve_self_defending(source, xname, string_array, decoder_names, decoder_offset):
+    """Prove `function xname(){...}` statically returns its local array. The
+    family emits a small, enumerable set of spellings, all with one semantics: a
+    statically-true guard (or none) governs the function so it returns the
+    array-local RET, and any other return lies on the dead branch. Requires RET
+    assigned exactly one array literal and never rewritten; a guard, if present,
+    that FOLDS to true. Returns (q_elems, x_helper_obj, x_helpers) or None."""
+    fm = re.search(rf"function\s+{re.escape(xname)}\s*\(\s*\)\s*\{{", source)
+    if not fm:
+        return None
+    body = _balanced(source, fm.end() - 1, "{", "}")
+    if not body:
+        return None
+    b = body[0]
+    # The X-local helper object is optional (a bare `x===x` guard needs none).
+    xobj_name = None
+    xhelpers: dict = {}
+    om = re.search(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\{", b)
+    if om:
+        xobj = _balanced(b, om.end() - 1, "{", "}")
+        if xobj:
+            hm = _extract_helper_members(xobj[0])
+            if hm:
+                xobj_name = om.group(1)
+                xhelpers = hm
+    # Determine the single identifier the function yields on the LIVE path, then
+    # require it to be a single-assignment array local. This is what makes the
+    # fold read the array the program actually uses, not a decoy on a dead
+    # branch. The guard's true branch decides:
+    #   * no guard            -> the body's `return RET;`
+    #   * if(GUARD) return RET;                       -> RET (the consequent)
+    #   * if(GUARD){ ...no return... } return RET;    -> RET (fall-through)
+    #   * if(GUARD){ return RET; } ...                -> RET (consequent block)
+    # A consequent (or fall-through) that returns anything OTHER than a single
+    # array local refuses the function -- including the poison
+    # `if(true){return other;} return ret;`, whose live return is `other`.
+    gm = re.search(r"if\s*\(", b)
+    guard = None
+    retname = None
+    if gm:
+        gs = _balanced(b, gm.start(), "(", ")")
+        if not gs:
+            return None
+        guard = gs[0][1:-1].strip()
+        after = b[gs[2] + 1:].lstrip()
+        if after.startswith("return"):
+            rm = re.match(r"return\s+([A-Za-z_$][\w$]*)\s*;", after)
+            if not rm:
+                return None
+            retname = rm.group(1)
+        elif after.startswith("{"):
+            blk = _balanced(after, 0, "{", "}")
+            if not blk:
+                return None
+            inner_ret = re.search(r"return\s+([A-Za-z_$][\w$]*)\s*;", blk[0])
+            if inner_ret:
+                retname = inner_ret.group(1)          # true branch returns this
+            else:
+                # Empty/return-free true branch: control falls through past an
+                # optional (dead) `else { ... }` to the next `return RET;`.
+                tail = after[blk[2] + 1:].lstrip()
+                if tail.startswith("else"):
+                    eb = _balanced(tail, 0, "{", "}")
+                    if not eb:
+                        return None
+                    tail = tail[eb[2] + 1:].lstrip()
+                rm = re.match(r"return\s+([A-Za-z_$][\w$]*)\s*;", tail)
+                if not rm:
+                    return None
+                retname = rm.group(1)
+        else:
+            return None
+    else:
+        rm = re.search(r"return\s+([A-Za-z_$][\w$]*)\s*;", b)
+        if not rm:
+            return None
+        retname = rm.group(1)
+
+    # RET must be a single-assignment array local, never rewritten.
+    asg = list(re.finditer(rf"(?<![\w$.]){re.escape(retname)}\s*=\s*\[", b))
+    writes = re.findall(
+        rf"(?<![\w$.]){re.escape(retname)}\s*(?:\[[^\]]*\])?\s*(?:\+=|=(?!=))", b
+    )
+    if len(asg) != 1 or len(writes) != 1:
+        return None
+    asg_m = asg[0]
+    arr = _balanced(b, asg_m.end() - 1, "[", "]")
+    if not arr:
+        return None
+    q_elems = [e.strip() for e in _split_top(arr[0][1:-1])]
+    if not q_elems or len(q_elems) > _FOLD_MAX_Q:
+        return None
+    if guard is not None:
+        env = _FoldEnv(
+            string_array=string_array, decoder_names=decoder_names,
+            decoder_offset=decoder_offset, accessor_names=set(), q_values=[],
+            helpers=xhelpers, objects={},
+            helper_objects=({xobj_name} if xobj_name else set()),
+        )
+        if not _guard_folds_true(guard, _Folder(env)):
+            return None
+    return q_elems, xobj_name, xhelpers
+
+
+def _find_fold_accessor(source, string_array, decoder_names, decoder_offset):
+    """`function H(d[,F]){ ... C=X(); ... return C[d] }` (either `var C=X(),
+    S=C[d]; return S` or `var C=X(); return C[d]`) where X is a self-defending
+    array-returning function. Returns (accessor_name, q_elems, x_helper_obj,
+    x_helpers) or None."""
+    for m in re.finditer(
+        r"function\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*"
+        r"(?:,\s*[A-Za-z_$][\w$]*\s*)?\)\s*\{",
+        source,
+    ):
+        d = m.group(2)
+        body = _balanced(source, m.end() - 1, "{", "}")
+        if not body:
+            continue
+        b = body[0]
+        am = re.search(
+            rf"([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*\)\s*,\s*"
+            rf"([A-Za-z_$][\w$]*)\s*=\s*\1\s*\[\s*{re.escape(d)}\s*\]\s*;?\s*return\s+\3",
+            b,
+        )
+        if am:
+            xname = am.group(2)
+        else:
+            am = re.search(
+                rf"([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*\)\s*;\s*"
+                rf"return\s+\1\s*\[\s*{re.escape(d)}\s*\]",
+                b,
+            )
+            if not am:
+                continue
+            xname = am.group(2)
+        res = _resolve_self_defending(
+            source, xname, string_array, decoder_names, decoder_offset
+        )
+        if res is None:
+            continue
+        q_elems, xobj_name, xhelpers = res
+        return m.group(1), q_elems, xobj_name, xhelpers
+    return None
+
+
+def _find_activex_exprs(source: str):
+    """Every `new ActiveXObject(<expr>)` argument expression, with its offset."""
+    out = []
+    for m in re.finditer(r"new\s+ActiveXObject\s*\(", source):
+        arg = _balanced(source, m.end() - 1, "(", ")")
+        if arg:
+            out.append((m.start(), arg[0][1:-1].strip()))
+    return out
+
+
+def _recognize_stringarray_family(source: str):
+    """Build a `_FoldEnv` and the ActiveX expressions to fold, but ONLY when the
+    complete supported family is structurally proven. Any missing or ambiguous
+    piece returns None -- the pass then emits nothing for this artifact."""
+    if not source or len(source) > _FOLD_MAX_SOURCE:
+        return None
+    sa = _find_string_array_fn(source)
+    if not sa:
+        return None
+    array_fn, elems = sa
+    dec = _find_fold_decoder(source, array_fn)
+    if not dec:
+        return None
+    dec_name, dec_off = dec
+
+    acc = _find_fold_accessor(source, elems, _fold_aliases_of(source, dec_name), dec_off)
+    if not acc:
+        return None
+    acc_name, q_raw, xobj_name, xhelpers = acc
+
+    # The decoder and accessor are named by a `function NAME(){}` declaration,
+    # not an assignment. If either base name is ALSO reassigned at the top level
+    # (`dec = wrap(dec)`), its value at a call site is no longer that function,
+    # and folding a call through it would invent a string. Refuse.
+    top_writes = _top_level_write_counts(source)
+    if top_writes.get(dec_name, 0) > 0 or top_writes.get(acc_name, 0) > 0:
+        return None
+
+    decoder_names = _fold_aliases_of(source, dec_name)
+    accessor_names = _fold_aliases_of(source, acc_name)
+    if decoder_names & accessor_names:
+        return None  # a name cannot be both the decoder and the accessor
+
+    # Resolve q in the self-defending function's own scope (decoder + its local
+    # helper object available), to final strings.
+    q_env = _FoldEnv(
+        string_array=elems, decoder_names=decoder_names, decoder_offset=dec_off,
+        accessor_names=set(), q_values=[], helpers=xhelpers, objects={},
+        helper_objects=({xobj_name} if xobj_name else set()),
+    )
+    q_folder = _Folder(q_env)
+    q_values = []
+    for e in q_raw:
+        v = q_folder.fold(e)
+        q_values.append(v if isinstance(v, str) else _UNKNOWN)
+
+    # Outer scope: every object literal contributes its pure-function members to
+    # the shared helper map and its non-function members to its own value map.
+    # A member whose helper role conflicts across objects, or an object name
+    # declared twice with different value members, is dropped/poisoned so the
+    # lookup fails closed rather than pick an arbitrary scope.
+    helper_members: dict = {}
+    conflicts: set = set()
+    helper_obj_names: set = set()
+    value_objects: dict = {}
+    for m in re.finditer(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\{", source):
+        name = m.group(1)
+        obj = _balanced(source, m.end() - 1, "{", "}")
+        if not obj:
+            continue
+        text = obj[0]
+        hm = _extract_helper_members(text)
+        if hm:
+            helper_obj_names.add(name)
+            for k, role in hm.items():
+                if k in helper_members and helper_members[k] != role:
+                    conflicts.add(k)
+                helper_members[k] = role
+        pairs = {}
+        for seg in _split_top(text[1:-1]):
+            seg = seg.strip()
+            km = re.match(r"^'([A-Za-z_$][\w$]*)'\s*:(.*)$", seg, re.S)
+            if km and not km.group(2).strip().startswith("function"):
+                pairs[km.group(1)] = km.group(2).strip()
+        if pairs:
+            if name in value_objects and value_objects[name] != pairs:
+                value_objects[name] = None
+            elif name not in value_objects:
+                value_objects[name] = pairs
+    for k in conflicts:
+        helper_members.pop(k, None)
+    value_objects = {k: v for k, v in value_objects.items() if v}
+
+    env = _FoldEnv(
+        string_array=elems, decoder_names=decoder_names, decoder_offset=dec_off,
+        accessor_names=accessor_names, q_values=q_values, helpers=helper_members,
+        objects=value_objects, helper_objects=helper_obj_names,
+    )
+    return env, _find_activex_exprs(source)
+
+
+def find_js_stringarray_fold_stages(
+    source: str, depth: int = 0, truncation: "_Truncation | None" = None
+) -> list[TransformStage]:
+    """Every `new ActiveXObject(<expr>)` whose ProgID the bounded folder can
+    prove from the string-array+base64+RC4 family. Emits nothing unless the
+    whole family shape is recognised; a ProgID that does not fold to a string is
+    skipped (fail closed), never guessed."""
+    stages: list[TransformStage] = []
+    recognized = _recognize_stringarray_family(source)
+    if recognized is None:
+        return stages
+    env, activex = recognized
+    folder = _Folder(env)
+    seen: set[str] = set()
+    for offset, expr in activex:
+        if len(expr) > MAX_INPUT_CHARS:
+            if truncation is not None:
+                truncation.dropped_input = True
+            continue
+        value = folder.fold(expr)
+        if not isinstance(value, str) or not value:
+            continue  # not statically determined -> not emitted
+        if len(value) > MAX_OUTPUT_CHARS:
+            if truncation is not None:
+                truncation.dropped_output = True
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        stages.append(
+            TransformStage(
+                kind=JS_STRINGARRAY_FOLD,
+                key=0,
+                delimiter="",
+                line=source[:offset].count("\n") + 1,
+                offset=offset,
+                depth=depth,
+                encoded=expr,
+                output=value,
+                input_sha256=_sha(expr),
+                output_sha256=_sha(value),
+            )
+        )
+    return stages
+
+
 # Why a traversal stopped.
 #
 # The distinction that matters is between a walk that ended because there was
@@ -955,6 +2044,7 @@ def deobfuscate_with_status(source: str) -> TransformResult:
             + find_powershell_stages(text, depth, truncation)
             + find_vbscript_chr_stages(text, depth, truncation)
             + find_powershell_chr_stages(text, depth, truncation)
+            + find_js_stringarray_fold_stages(text, depth, truncation)
         )
         for stage in found:
             if len(stages) >= MAX_STAGES:
@@ -984,6 +2074,7 @@ def deobfuscate_with_status(source: str) -> TransformResult:
                 or find_powershell_stages(text, 0, probe)
                 or find_vbscript_chr_stages(text, 0, probe)
                 or find_powershell_chr_stages(text, 0, probe)
+                or find_js_stringarray_fold_stages(text, 0, probe)
             ):
                 status = STAGE_LIMIT if frontier else DEPTH_LIMIT
                 break
