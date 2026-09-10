@@ -225,7 +225,19 @@ class AnalysisController:
         summary: str = "",
         reason: str = "",
     ) -> None:
-        """Record what the model said became of the active question."""
+        """Record what the model said became of the active question.
+
+        A RESOLVED status is honoured only with a completion witness: a
+        non-empty answer summary and at least one cited evidence id. This is the
+        second, mandatory layer of the completion contract -- `parse_finish_call`
+        already refuses a resolution with no stated answer, and the runtime cites
+        the answering evidence -- and this refuses one that reaches here by any
+        other path with either half of the witness missing. A resolution missing
+        its witness is downgraded to OPEN (not blocked): the honest record is
+        that the action did not settle it, and the question keeps whatever action
+        budget it had left. Reading the evidence's meaning is never attempted;
+        only its presence is required.
+        """
         if self.active is None:
             raise ControlError("no active question to close")
         if status not in (RESOLVED, OPEN, BLOCKED):
@@ -233,6 +245,10 @@ class AnalysisController:
         state = self.states[self.active]
         state.evidence_ids = tuple(evidence_ids)
         state.summary = summary[:MAX_SUMMARY_CHARS]
+        if status == RESOLVED and (not state.summary.strip() or not state.evidence_ids):
+            # Missing witness: not a resolution. Leave it open for another
+            # bounded attempt rather than record an answer that was not given.
+            status = OPEN
         if status == RESOLVED:
             state.status = RESOLVED
         elif status == BLOCKED:
@@ -411,6 +427,29 @@ def parse_finish_call(arguments: object) -> "dict":
     child = arguments.get("child_question")
     if child is not None and not isinstance(child, dict):
         raise ControlError("child_question is not an object")
+    # The completion contract for RESOLVED. A resolution is a claim that the
+    # question is answered, so it must carry the answer and point at the
+    # evidence that supports it -- and it must not, in the same breath, declare
+    # a dependency it has not settled. These are structural contradictions the
+    # runtime rejects without reading the artifact or judging what the answer
+    # means: the model still decides what the answer IS, but it may not mark a
+    # question resolved while its own completion data says work remains. A
+    # rejected resolution is not lost -- the caller keeps the question open with
+    # its remaining action budget. `still_open` and `blocked` are honest answers
+    # and carry no such requirement (still_open is where a child belongs).
+    if status == RESOLVED:
+        if not summary.strip():
+            raise ControlError(
+                "a resolved question must carry a non-empty answer_summary "
+                "stating the answer; answer still_open if the value is not yet "
+                "established"
+            )
+        if child is not None:
+            raise ControlError(
+                "a resolved question cannot also declare a child_question: an "
+                "unresolved dependency means the question is still_open, not "
+                "resolved"
+            )
     return {
         "status": OPEN if status == "still_open" else status,
         "evidence_ids": tuple(raw_ids[:16]),
