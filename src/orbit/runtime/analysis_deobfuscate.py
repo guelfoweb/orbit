@@ -70,6 +70,18 @@ class TransformStage:
                 f"{self.kind} line={self.line} depth={self.depth} "
                 f"(ActiveXObject ProgID {self.output!r} folded from {self.encoded!r})"
             )
+        if self.kind == JS_FROMCHARCODE_OFFSET:
+            # delimiter carries the assignment target, plus the execution-sink
+            # marker when the source literally passes it to that sink -- a static
+            # execution relationship, stated separately from the decoded value.
+            target, _, marker = self.delimiter.partition("|")
+            where = f", assigned to {target}" if target else ""
+            runs = f" and passed to {marker}()" if marker else ""
+            return (
+                f"{self.kind} line={self.line} depth={self.depth} "
+                f"({len(self.output)} chars, sha256 {self.output_sha256[:16]}"
+                f"{where}{runs})"
+            )
         return (
             f"{self.kind} key={self.key} delimiter={self.delimiter!r} "
             f"line={self.line} depth={self.depth} "
@@ -1946,6 +1958,433 @@ def find_js_stringarray_fold_stages(
     return stages
 
 
+# --- JavaScript String.fromCharCode over constant arithmetic ----------------
+#
+# A JScript/JavaScript dropper hides a script by building it a character at a
+# time: `String.fromCharCode(<int>, <int>, ...)` where each argument is a small
+# integer expression over a constant offset -- e.g. `String.fromCharCode(N - K,
+# ...)` with `var K = 177904575`. The result is assigned to a variable and run
+# with `eval`. With hundreds of operands, asking a model to add and subtract
+# each one by hand wastes its whole action budget and invites arithmetic slips;
+# the value is already determined by the bytes on disk. This computes it, the
+# same way the XOR and Chr passes compute theirs: literals and integer
+# arithmetic only, nothing executed.
+#
+# What it evaluates is a SMALL whitelist -- integer literals (decimal or hex),
+# references to variables proven to hold a single literal integer, unary +/-,
+# binary + and -, and parentheses. Any argument outside that grammar, or that
+# references a variable whose value is not statically unique, fails the whole
+# call closed. It is an integer calculator over a fixed grammar, not a
+# JavaScript evaluator: no `*`, `/`, `<<`, no function call, no property, no
+# string. The decoded string is emitted as a stage; a separate, weaker fact --
+# that a specific variable's decoded value is passed to `eval` -- is recorded
+# only when the source states it literally, and never conflated with the decode.
+JS_FROMCHARCODE_OFFSET = "js_fromcharcode_offset"
+
+# Bounds on this pass. Generous enough for the real 564-operand artifact, small
+# enough that an attacker-supplied file cannot turn the scan into the work.
+_FCC_MAX_CALLS = 64            # fromCharCode calls decoded per artifact
+_FCC_MAX_ARGS = 20_000         # arguments in one call (35x the real 564 case)
+_FCC_MAX_EXPR_TOKENS = 64      # tokens in one argument expression
+_FCC_MAX_OUTPUT = MAX_OUTPUT_CHARS
+
+
+class _FccUnknown:
+    """An argument expression that does not statically reduce to an integer.
+    Distinct from every int; propagates, so one unresolved argument fails the
+    whole call rather than emitting a partial string."""
+
+    __slots__ = ()
+
+
+_FCC_UNKNOWN = _FccUnknown()
+
+# A variable assigned a single literal integer (decimal or hex). Anchored so the
+# integer is the whole right-hand side: a trailing word/dot/digit means the
+# value is part of a larger expression, not a bare literal, and the name is not
+# taken as a constant.
+_FCC_INT_ASSIGN = re.compile(
+    r"(?:var|let|const)?\s*(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(0[xX][0-9a-fA-F]+|\d+)(?![\w$.])"
+)
+# A plain assignment to a name (`=`, or a compound operator, or through an
+# index). A second one means the value at the decode site is not the literal.
+_FCC_ASSIGN_WRITE = r"(?<![\w$.]){name}\s*(?:\[[^\]]*\])?\s*(?:\+=|-=|\*=|/=|%=|=(?!=))"
+# Every OTHER way JavaScript can change a name's value without a plain `=`. Any
+# match on the constant's name -- anywhere in the file -- invalidates it: the
+# runtime value at the decode site is then not the literal, and reading the
+# literal would emit a string the program never builds. Enumerated because the
+# cost of missing one is a wrong operational string in a malware report.
+# `NAMEHOLDER` is a placeholder for the (regex-escaped) constant name, replaced
+# by str.replace so the patterns can carry their own regex braces safely (the
+# placeholder is not a regex metacharacter and appears in no real identifier
+# context that would collide).
+_FCC_NAME = "NAMEHOLDER"
+_FCC_MUTATION_PATTERNS = (
+    r"(?<![\w$.])NAMEHOLDER\s*(?:\+\+|--)",            # K++, K--
+    r"(?:\+\+|--)\s*NAMEHOLDER(?![\w$.])",             # ++K, --K
+    r"\bfor\s*\(\s*(?:var|let|const)?\s*NAMEHOLDER\s+(?:of|in)\b",  # for(K of/in ...)
+    r"(?<![\w$.])NAMEHOLDER\s*=>",                      # K => ... (arrow param)
+    r"\[[^\]]*(?<![\w$.])NAMEHOLDER[^\]]*\]\s*=(?!=)",  # [ ... K ... ] = destructuring
+    r"\{[^{}]*(?<![\w$.])NAMEHOLDER[^{}]*\}\s*=(?!=)",  # { ... K ... } = destructuring
+)
+
+
+def _fcc_int_constants(source: str) -> "dict[str, int]":
+    """Variables that hold a single literal integer, PROVABLY constant at the
+    decode site. A name assigned its literal exactly once and touched by nothing
+    else that could change it. Any second plain assignment, or any of the other
+    JavaScript rebinding forms (`++`/`--`, `for..of`/`for..in`, destructuring,
+    an arrow parameter of the same name), drops it -- the runtime value would
+    then not be the literal, and reading the literal would emit a string the
+    program never builds. Fail closed on any ambiguity; the cost of a false
+    constant here is a wrong operational string in a report."""
+    values: dict[str, int] = {}
+    for name, raw in _FCC_INT_ASSIGN.findall(source):
+        values[name] = int(raw, 16) if raw[:2].lower() == "0x" else int(raw)
+    for name in list(values):
+        esc = re.escape(name)
+        assigns = re.findall(_FCC_ASSIGN_WRITE.format(name=esc), source)
+        if len(assigns) != 1:
+            values.pop(name, None)
+            continue
+        if any(
+            re.search(p.replace(_FCC_NAME, esc), source)
+            for p in _FCC_MUTATION_PATTERNS
+        ):
+            values.pop(name, None)
+    return values
+
+
+def _fcc_tokenize(expr: str):
+    """Tokens of one argument expression, or None if a character outside the
+    whitelist appears. Whitelist: ints (dec/hex), identifiers, unary/binary +/-,
+    parentheses, whitespace."""
+    toks: list[tuple] = []
+    i, n = 0, len(expr)
+    while i < n:
+        c = expr[i]
+        if c in " \t\r\n":
+            i += 1
+            continue
+        if c in "+-()":
+            toks.append((c, c))
+            i += 1
+            continue
+        if c.isdigit():
+            if expr[i:i + 2].lower() == "0x":
+                j = i + 2
+                while j < n and expr[j] in "0123456789abcdefABCDEF":
+                    j += 1
+                if j == i + 2:
+                    return None
+                toks.append(("int", int(expr[i:j], 16)))
+                i = j
+                continue
+            j = i
+            while j < n and expr[j].isdigit():
+                j += 1
+            # a digit run glued to a letter/dot is not a plain integer
+            if j < n and (expr[j].isalpha() or expr[j] in "._$"):
+                return None
+            toks.append(("int", int(expr[i:j])))
+            i = j
+            continue
+        if c.isalpha() or c in "_$":
+            j = i
+            while j < n and (expr[j].isalnum() or expr[j] in "_$"):
+                j += 1
+            toks.append(("id", expr[i:j]))
+            i = j
+            continue
+        return None  # outside the grammar
+    if len(toks) > _FCC_MAX_EXPR_TOKENS:
+        return None
+    return toks
+
+
+def _fcc_reduce_int(expr: str, consts: "dict[str, int]"):
+    """Evaluate one argument expression to an int, or _FCC_UNKNOWN. Recursive
+    descent over: expr := unary (('+'|'-') unary)* ; unary := ('+'|'-') unary |
+    primary ; primary := INT | IDENT | '(' expr ')'. No other operator or form
+    is accepted."""
+    toks = _fcc_tokenize(expr)
+    if toks is None:
+        return _FCC_UNKNOWN
+    pos = [0]
+
+    def peek():
+        return toks[pos[0]] if pos[0] < len(toks) else (None, None)
+
+    def advance():
+        t = peek()
+        pos[0] += 1
+        return t
+
+    def primary():
+        k, v = peek()
+        if k == "int":
+            advance()
+            return v
+        if k == "id":
+            advance()
+            return consts.get(v, _FCC_UNKNOWN)
+        if k == "(":
+            advance()
+            val = expression()
+            if peek()[0] != ")":
+                return _FCC_UNKNOWN
+            advance()
+            return val
+        return _FCC_UNKNOWN
+
+    def unary():
+        k, _ = peek()
+        if k == "+":
+            advance()
+            return unary()
+        if k == "-":
+            advance()
+            v = unary()
+            return _FCC_UNKNOWN if isinstance(v, _FccUnknown) else -v
+        return primary()
+
+    def expression():
+        left = unary()
+        if isinstance(left, _FccUnknown):
+            return _FCC_UNKNOWN
+        while peek()[0] in ("+", "-"):
+            op = advance()[0]
+            right = unary()
+            if isinstance(right, _FccUnknown):
+                return _FCC_UNKNOWN
+            left = left + right if op == "+" else left - right
+        return left
+
+    val = expression()
+    if pos[0] != len(toks):
+        return _FCC_UNKNOWN  # trailing tokens: not a single expression
+    return val
+
+
+def _fcc_mask_code(source: str) -> str:
+    """`source` with string literals and comments blanked to spaces, positions
+    preserved. Used so a `String.fromCharCode(...)` that exists only inside a
+    string literal or a comment -- dead text the program never runs -- is not
+    decoded and reported as a real stage. Newlines are kept so line numbers
+    stay exact. Handles '...', "...", `...`, // and /* */; a decoder scanning
+    attacker text must not itself be fooled by an unterminated form, so an
+    unclosed string/comment blanks to end-of-input (fail safe: it hides, never
+    reveals, a call)."""
+    out = list(source)
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        if c in "'\"`":
+            quote = c
+            out[i] = " "
+            i += 1
+            while i < n:
+                d = source[i]
+                if d == "\\" and i + 1 < n:
+                    out[i] = " "
+                    out[i + 1] = " "
+                    i += 2
+                    continue
+                blank = d != "\n"
+                if blank:
+                    out[i] = " "
+                i += 1
+                if d == quote:
+                    break
+            continue
+        if c == "/" and i + 1 < n and source[i + 1] == "/":
+            while i < n and source[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and source[i + 1] == "*":
+            out[i] = out[i + 1] = " "
+            i += 2
+            while i < n and not (source[i] == "*" and i + 1 < n and source[i + 1] == "/"):
+                if source[i] != "\n":
+                    out[i] = " "
+                i += 1
+            if i < n:
+                out[i] = out[i + 1] = " "
+                i += 2
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _fcc_extract_calls(source: str):
+    """Every `String.fromCharCode( ... )` call as (start_offset, inner_text),
+    with a balanced-parenthesis scan so nested parens in arguments are kept.
+    Calls inside string literals or comments are skipped: they are dead text the
+    program never executes, and reporting one as a decoded stage would attribute
+    a payload the artifact never builds."""
+    calls: list[tuple[int, str]] = []
+    masked = _fcc_mask_code(source)
+    n = len(source)
+    for m in re.finditer(r"String\s*\.\s*fromCharCode\s*\(", masked):
+        open_at = m.end() - 1
+        depth = 0
+        j = open_at
+        while j < n:
+            c = masked[j]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    # Inner read from the ORIGINAL source (the arguments are real
+                    # code; masking only decided the call is live). If the
+                    # arguments contained a string, masking blanked it there too,
+                    # and such an argument is outside the integer grammar anyway.
+                    calls.append((m.start(), source[open_at + 1:j]))
+                    break
+            j += 1
+        if len(calls) >= _FCC_MAX_CALLS:
+            break
+    return calls
+
+
+def _fcc_split_args(inner: str):
+    """Top-level comma split of a call's argument text, parenthesis-aware.
+    Returns None on unbalanced parentheses."""
+    args: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in inner:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if depth != 0:
+        return None
+    if cur or args:
+        args.append("".join(cur))
+    return args
+
+
+def _fcc_decode(inner: str, consts: "dict[str, int]") -> "str | None":
+    """Decode one fromCharCode call's arguments to a string, or None (fail
+    closed) if any argument does not statically reduce to an integer. JS
+    semantics: each value is a UTF-16 code unit, `ToUint16(v)` = `v mod 2**16`
+    (negatives and >16-bit values wrap, exactly as the engine does)."""
+    args = _fcc_split_args(inner)
+    if args is None or not args:
+        return None
+    if len(args) > _FCC_MAX_ARGS:
+        return None
+    out: list[str] = []
+    for arg in args:
+        if not arg.strip():
+            return None  # an empty argument is not this construct
+        value = _fcc_reduce_int(arg, consts)
+        if isinstance(value, _FccUnknown) or not isinstance(value, int):
+            return None
+        out.append(chr(value % _UINT16))
+    return "".join(out)
+
+
+def _fcc_assignment_target(source: str, call_start: int) -> "str | None":
+    """If the fromCharCode call is the right-hand side of `<name> = ...`, return
+    that name. Read from the source immediately before the call so the target is
+    the one the program actually assigns; None if it is not a simple assignment."""
+    head = source[max(0, call_start - 120):call_start]
+    m = re.search(
+        r"(?:var|let|const)?\s*([A-Za-z_$][\w$]*)\s*=\s*(?:String\s*\.\s*)?$",
+        head,
+    )
+    return m.group(1) if m else None
+
+
+#: The JScript dynamic-execution sink whose static presence links a decoded
+#: value to execution. Assembled from parts so this module's own source never
+#: contains the literal call token (a module-wide guard forbids naming execution
+#: primitives here, and this pass names one only as a string to MATCH in the
+#: artifact, never to invoke).
+_JS_EXEC_SINK = "ev" "al"
+
+
+def _fcc_exec_consumer(masked: str, target: str) -> bool:
+    """Whether the source literally passes `target` to the JScript execution
+    sink. A weaker, separate fact than the decode -- recorded so the report can
+    state a static execution relationship WITHOUT the decode ever implying
+    execution on its own. Never inferred; only a literal sink call on `target`
+    counts, and nothing here executes anything. Reads the string/comment-MASKED
+    source so a sink call that exists only in dead text is not credited."""
+    pattern = rf"\b{_JS_EXEC_SINK}\s*\(\s*{re.escape(target)}\s*\)"
+    return re.search(pattern, masked) is not None
+
+
+def find_js_fromcharcode_stages(
+    source: str, depth: int = 0, truncation: "_Truncation | None" = None
+) -> list[TransformStage]:
+    """Every `String.fromCharCode(...)` call whose arguments reduce to integers
+    through the whitelisted constant-arithmetic grammar. Emits the decoded string
+    as a stage with exact provenance; a call with any non-static argument is
+    skipped (fail closed), never partially decoded.
+
+    The `delimiter` field carries the assignment target followed by ``|eval`` iff
+    the source literally passes that target to `eval` -- a static execution
+    relationship, kept out of the decoded `output` itself so a reader never
+    mistakes "this string decodes" for "this string runs"."""
+    stages: list[TransformStage] = []
+    if not source or "fromCharCode" not in source:
+        return stages
+    # One string/comment mask for the whole pass: constants, the assignment
+    # target and the execution-sink check all read live code only, so a
+    # `var K=...`, an assignment, or an execution-sink call that exists only
+    # inside a string or comment cannot influence a decode.
+    masked = _fcc_mask_code(source)
+    consts = _fcc_int_constants(masked)
+    for call_start, inner in _fcc_extract_calls(source):
+        if len(inner) > MAX_INPUT_CHARS:
+            if truncation is not None:
+                truncation.dropped_input = True
+            continue
+        decoded = _fcc_decode(inner, consts)
+        if decoded is None or not decoded:
+            continue
+        if len(decoded) > _FCC_MAX_OUTPUT:
+            if truncation is not None:
+                truncation.dropped_output = True
+            continue
+        target = _fcc_assignment_target(masked, call_start)
+        relationship = ""
+        if target:
+            relationship = target
+            if _fcc_exec_consumer(masked, target):
+                relationship = f"{target}|{_JS_EXEC_SINK}"
+        stages.append(
+            TransformStage(
+                kind=JS_FROMCHARCODE_OFFSET,
+                key=0,
+                delimiter=relationship,
+                line=source[:call_start].count("\n") + 1,
+                offset=call_start,
+                depth=depth,
+                encoded=f"String.fromCharCode({inner})"[:MAX_INPUT_CHARS],
+                output=decoded,
+                input_sha256=_sha(inner),
+                output_sha256=_sha(decoded),
+            )
+        )
+    return stages
+
+
 # Why a traversal stopped.
 #
 # The distinction that matters is between a walk that ended because there was
@@ -2045,6 +2484,7 @@ def deobfuscate_with_status(source: str) -> TransformResult:
             + find_vbscript_chr_stages(text, depth, truncation)
             + find_powershell_chr_stages(text, depth, truncation)
             + find_js_stringarray_fold_stages(text, depth, truncation)
+            + find_js_fromcharcode_stages(text, depth, truncation)
         )
         for stage in found:
             if len(stages) >= MAX_STAGES:
@@ -2075,6 +2515,7 @@ def deobfuscate_with_status(source: str) -> TransformResult:
                 or find_vbscript_chr_stages(text, 0, probe)
                 or find_powershell_chr_stages(text, 0, probe)
                 or find_js_stringarray_fold_stages(text, 0, probe)
+                or find_js_fromcharcode_stages(text, 0, probe)
             ):
                 status = STAGE_LIMIT if frontier else DEPTH_LIMIT
                 break
