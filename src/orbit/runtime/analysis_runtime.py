@@ -653,6 +653,25 @@ SOURCE_TOO_LARGE_REPORT = (
     "sha256 {sha256}."
 )
 
+#: The closing opening for a run that produced no ACTION findings but whose
+#: deterministic transformation pass DID recover exact stages from the artifact.
+#: Saying "no evidence was collected" there is false -- the transformations
+#: below are evidence, recovered without executing the artifact. This names what
+#: was recovered and defers the detail to the deterministic appendix, asserting
+#: nothing the transformations do not establish and spending no model call. It
+#: makes NO claim about context size or coverage (that is a separate matter and
+#: not always true here): only that deterministic stages were recovered. `{n}`
+#: is the number of deterministic stages; `{size}` the artifact's byte size.
+DETERMINISTIC_ONLY_REPORT = (
+    "No investigative action ran, but the runtime recovered {n} deterministic "
+    "transformation(s) from the artifact without executing anything -- exact "
+    "literal decodings of bytes in the file, with provenance. These are listed "
+    "below and are the evidence this report rests on; they are facts about the "
+    "artifact, not inferences. Anything not established by them remains "
+    "undetermined without running the artifact. Artifact: {size} bytes, "
+    "sha256 {sha256}."
+)
+
 #: How a report that could not be written begins. Named rather than
 #: spelled twice: it is the opening clause that states the failure, and
 #: a reader outside this module -- the live-validation harness treats
@@ -5630,6 +5649,24 @@ class AnalysisRuntime:
             return self._report_from_coverage(
                 question, on_progress=on_progress, on_delta=on_delta
             )
+        if not records and self.transform_stages:
+            # No ACTION ran, but the deterministic pass recovered exact stages
+            # from the artifact (the Chr/XOR decodings). Those are evidence --
+            # recovered without executing anything -- so the closing report must
+            # NOT say "no evidence was collected" or "source too large": it did
+            # collect evidence, and the appendix below IS it. The opening names
+            # what was recovered and grounds the reader in the deterministic
+            # sections; it spends no model call and asserts nothing the
+            # transformations do not establish. `_reportable_records` excludes
+            # transform-phase records (the appendix renders them exactly), which
+            # is why this case reads as "no records" while evidence exists.
+            opening = DETERMINISTIC_ONLY_REPORT.format(
+                n=len(self.transform_stages),
+                size=self.source.size_bytes,
+                sha256=self.source.sha256,
+            )
+            text = f"{opening}\n\n{appendix}" if appendix else opening
+            return AnalysisReport(text=text, model_calls=0, evidence_ids=())
         if not records:
             # Deterministic, and free: there is nothing to ground a report in,
             # and asking a model to say so would be a call spent on a fact the
