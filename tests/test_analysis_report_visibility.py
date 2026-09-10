@@ -268,16 +268,23 @@ class ZeroModelCallPathTests(ReportVisibilityTestBase):
 
         self.assertIn(NO_EVIDENCE_REPORT, output)
 
-    def test_the_no_evidence_notice_accompanies_the_appendix(self) -> None:
-        """Both halves, when an artifact decodes but produced no findings."""
-        from orbit.runtime.analysis_runtime import NO_EVIDENCE_REPORT
+    def test_the_deterministic_notice_accompanies_the_appendix(self) -> None:
+        """When an artifact DECODES but produced no action findings, the closing
+        report must present the decoding as the recovered evidence -- not claim
+        "no evidence was collected", which a decoded artifact contradicts."""
+        from orbit.runtime.analysis_runtime import (
+            DETERMINISTIC_ONLY_REPORT,
+            NO_EVIDENCE_REPORT,
+        )
 
         analysis = self._analysis(
             DECODER + f'dec("{encode("NOTICE-AND-STAGE", 5, ",")}", 5, ",");\n'
         )
         output = self._render(analysis)
 
-        self.assertIn(NO_EVIDENCE_REPORT, output)
+        # The deterministic decode IS evidence: the "no evidence" notice is gone.
+        self.assertNotIn(NO_EVIDENCE_REPORT, output)
+        self.assertIn(DETERMINISTIC_ONLY_REPORT.split("{", 1)[0], output)
         self.assertEqual(output.count(HEADING), 1)
         self.assertIn("NOTICE-AND-STAGE", output)
 
