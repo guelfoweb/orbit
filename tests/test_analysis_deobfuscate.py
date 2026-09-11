@@ -700,15 +700,19 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertIn("key 17", appendix)
 
     def test_a_decoded_uri_appears_verbatim_even_from_a_long_stage(self) -> None:
-        """A truncated indicator is not an indicator."""
+        """A truncated indicator is not an indicator. A stage past the inline
+        bound is named by length/digest, but any URI it produced survives."""
+        from orbit.runtime.analysis_runtime import TRANSFORM_INLINE_CHARS
+
         uri = "http://synthetic.invalid/path?token=ABC123"
-        payload = ("filler " * 120) + uri
+        # Exceed the per-stage inline bound so the stage is NOT inlined whole.
+        payload = ("filler " * ((TRANSFORM_INLINE_CHARS // 7) + 50)) + uri
         source = decoder() + f'dec("{encode(payload, 23, ",")}", 23, ",");\n'
         runtime, _store = self._runtime(source)
 
         appendix = runtime.transform_appendix()
         stage, _record = runtime.transform_stages[0]
-        self.assertGreater(len(stage.output), 400)
+        self.assertGreater(len(stage.output), TRANSFORM_INLINE_CHARS)
         self.assertNotIn(payload, appendix)          # not inlined whole
         self.assertIn(f"decoded URI: {uri}", appendix)  # but the URI survives
 

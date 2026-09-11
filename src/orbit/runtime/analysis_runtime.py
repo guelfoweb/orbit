@@ -157,12 +157,25 @@ class _TokenCountUnavailable(RuntimeError):
 # or ANALYSIS from it.
 ANALYSIS_TRANSFORM_PHASE = "analysis_transform"
 
-# How much of a decoded stage the report shows verbatim. Short stages are the
-# point -- an exact string is the whole value of an exact transformation -- so
-# the bound is generous relative to what a decoded moniker or command runs to,
-# and a stage past it is named by type, length and digest instead.
-TRANSFORM_INLINE_CHARS = 400
+# How much of a decoded stage the report shows verbatim. An exact decoded stage
+# IS the finding -- a decoded dropper script's whole behaviour (the objects it
+# creates, the path it writes, the command it runs) lives in its body, not its
+# first line -- so a stage is rendered in full up to this bound. The bound is
+# sized to a real decoded script: the IBAN family decodes a 564-char JScript
+# downloader whose fetch/write/run chain sits between offsets 165 and 534, well
+# past the old 120-char prefix that dropped it from the report entirely. A stage
+# longer than this is named by type, length and digest, and any URI it produced
+# is still listed verbatim. A per-appendix total budget (below) keeps many
+# stages from compounding into an oversized prompt; once it is spent, later
+# stages fall back to the prefix form regardless of their own length.
+TRANSFORM_INLINE_CHARS = 2048
 TRANSFORM_PREFIX_CHARS = 120
+#: Total verbatim decoded bytes the appendix will inline across ALL stages of
+#: one artifact. Bounds the prompt contribution when a file has many decoded
+#: stages: the first stages up to this budget render in full, the rest by
+#: digest. Sized to admit a handful of real decoded scripts (a few hundred to
+#: ~2 KB each) without letting sixteen maximum-size stages explode the report.
+TRANSFORM_INLINE_TOTAL_BUDGET = 8192
 
 # Absolute URIs in decoded text, so an indicator survives a stage too long to
 # inline. Deliberately syntactic: it extracts what is written, and says
@@ -2791,6 +2804,7 @@ class AnalysisRuntime:
         if not self.transform_stages:
             return ""
         lines = ["## Deterministic transformations", ""]
+        inlined = 0  # verbatim decoded bytes rendered so far, across all stages
         for stage, record in self.transform_stages:
             lines.append(
                 f"- {stage.kind} | line {stage.line} (offset {stage.offset}) | "
@@ -2798,8 +2812,17 @@ class AnalysisRuntime:
             )
             lines.append(f"  evidence: {record.evidence_id}")
             lines.append(f"  output sha256: {stage.output_sha256}")
-            if len(stage.output) <= TRANSFORM_INLINE_CHARS:
+            # Inline the whole decoded stage when it fits the per-stage bound AND
+            # the per-appendix total budget still has room: the decoded body is
+            # the finding, and a prefix drops the behaviour that lives past its
+            # first line. A stage too long, or one that would overrun the total
+            # budget, is named by length and digest and left to its evidence id.
+            if (
+                len(stage.output) <= TRANSFORM_INLINE_CHARS
+                and inlined + len(stage.output) <= TRANSFORM_INLINE_TOTAL_BUDGET
+            ):
                 lines.append(f"  output: {stage.output}")
+                inlined += len(stage.output)
             else:
                 lines.append(
                     f"  output: {len(stage.output)} chars, begins "

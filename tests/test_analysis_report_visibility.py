@@ -603,11 +603,15 @@ class RealSampleRenderingTests(ReportVisibilityTestBase):
         self.assertIn(r"winmgmts:\\.\root\cimv2", output)
         self.assertIn("Win32_ProcessStartup", output)
         self.assertIn(r"winmgmts:\\.\root\cimv2:Win32_Process", output)
-        # S4: too long to inline, so identity, length and digest.
-        self.assertIn("1008 chars", output)
+        # S4: a 1008-char decoded PowerShell command. It is within the inline
+        # bound, so its full body -- the -bxor decode loop and the cleanup
+        # Remove-Item operations that are the finding -- reaches the report
+        # rather than being reduced to a digest. Its sha is still rendered.
         self.assertIn(
             "ec8ccda0cbdce79a76748c0e32c1fb788276c762abc5fd8c6f77609a0c8f58f1", output
         )
+        self.assertIn("powershell -noprofile -WindowStyle hidden", output)
+        self.assertIn("Remove-Item", output)
         # S5: the recovered address, verbatim.
         self.assertIn(self.EXPECTED_URI, output)
 
