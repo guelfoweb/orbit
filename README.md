@@ -158,6 +158,39 @@ measures something new counts as progress whether or not the measurement was
 worth making, so an artifact with little to derive can still attract many
 actions. Whether that trade is worthwhile is the operator's call.
 
+### Deterministic deobfuscation
+
+Some obfuscation is not a judgement call: when a script hands a decoder a string
+literal and a constant key, the decoded bytes are already determined by the file.
+Orbit computes those itself, before the model reasons, and records each decoded
+stage as evidence with exact provenance (which bytes, which rule, which
+parameters, the output digest). Nothing is executed — it is parsing and
+arithmetic over inert text, and an ambiguous or runtime-dependent case is refused
+(fail-closed) rather than guessed.
+
+Supported families (each exercised by a frozen corpus sample):
+
+- JScript / PowerShell numeric-XOR array decoders;
+- VBScript / PowerShell `Chr(n − constant)` offset loops;
+- JavaScript `String.fromCharCode` over constant arithmetic;
+- `javascript-obfuscator`-style string-array ProgID folding (base64/RC4 helpers);
+- VBA byte-array offset + `StrReverse` / `Replace` / `Split` command decoders.
+
+The recovered value (e.g. a PowerShell command or a C2 URL) flows through the
+same canonical-indicator machinery as any other evidence. A decoded URL is an
+indicator only — it is never fetched.
+
+### Office / OLE documents
+
+Orbit recognises OLE2/CFB Microsoft Office documents with a bounded, pure-Python
+reader, decompresses the embedded VBA project (MS-OVBA) without executing any
+macro or invoking any application, and exposes each module's exact source as
+provenance-backed evidence. It also marks standard macro entrypoints
+(`Document_Open`, `AutoOpen`, `Workbook_Open`, …) as Office auto-execution event
+handlers when the module and host context prove that semantics — a static
+relationship ("the procedure the host invokes on this event when macros are
+permitted"), not a claim that the document was ever opened or that the macro ran.
+
 ## Limitations
 
 - Linux x86_64 CPU-only is the qualified platform. macOS may work; Windows is
@@ -169,6 +202,17 @@ actions. Whether that trade is worthwhile is the operator's call.
   back to ordinary cold behaviour rather than failing.
 - The analysis prefix is captured lazily by the first analysis step, which costs
   that step and benefits every later one. Eager capture at startup is opt-in.
+- Analysis is static only: no malware, macro, or decoded script is ever
+  executed, and no remote payload is retrieved. There is no dynamic sandbox.
+- Deterministic deobfuscation covers the families listed above. An unsupported
+  obfuscation family is not decoded — it fails closed, and the model analyses
+  what it can from the source rather than guessing a decode.
+- The Office auto-execution taxonomy is intentionally small: the qualified Word
+  and Excel core events (`Document_*`, `AutoOpen`/`AutoClose`/`AutoExec`,
+  `Workbook_*`, `Auto_Open`). Other hosts and callbacks are not classified.
+- A model run may reach its action/call ceiling on a complex artifact while the
+  deterministic evidence is already complete; the grounded report still carries
+  the deterministic facts regardless of where the model stopped.
 
 ## Configuration
 

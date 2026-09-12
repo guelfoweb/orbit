@@ -513,6 +513,132 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   topology, not a cache defect.
 - See `docs/releases/v0.0.1-rc34.md`.
 
+### RC35–RC37 (analysis workflow)
+
+- rc35 (`d29490a`): explicit CHAT/ANALYSIS workflow modes; sandboxed
+  `execute_analysis`; attested evidence; `/report`; opt-in bounded autonomous
+  mode; rolling KV reuse across chat and analysis turns.
+- rc36 (`0753dc7`): correctness hotfix — a grounded analysis report can no longer
+  cite a value the analysis has already corrected.
+- rc37 (`6dfa374`): UX (the analysis progress line), native-library isolation,
+  and documentation; the analysis runtime itself largely unchanged.
+- See `docs/releases/v0.0.1-rc35.md`, `…rc36.md`, `…rc37.md`.
+
+### RC38 (deterministic deobfuscation + Office/VBA + qualified malware corpus)
+
+- Current qualified production code: `7da19f9e944a740b1ac9be7be37a88f7cdfc98d5`
+  (`HEAD == origin/main`). Consolidates the post-rc37 ANALYSIS arc (#260 →
+  `7da19f9`) into a qualified release candidate. The release commit adds only
+  `docs/releases/v0.0.1-rc38.md` and this entry; no production behaviour change.
+- Qualified model: Ornith-1.5-35B-A3B Q4_K_M, sha
+  `42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f`; config
+  ctx 8192 / threads 6 / threads_batch 6 / batch 256 / ubatch 128 / think off /
+  MTP off.
+
+- **Capability matrix (capability → source seam → tests → status):**
+  - structured ANALYSIS controller (no free-form autonomy) → `analysis_controller.py`,
+    `analysis_runtime.py` → `test_analysis_controller*` → MERGED.
+  - exact EvidenceStore / provenance → `evidence.py` → `test_evidence.py` (65),
+    `test_evidence_authority.py` (67) → MERGED.
+  - network deny in autonomous ANALYSIS → `analysis_network_policy.py`
+    (execution-time deny) + `analysis_sandbox.py` (`--unshare-all` namespace) →
+    `test_analysis_network_policy.py` (14), `test_analysis_sandbox.py` (48) → MERGED.
+  - FINISH completeness invariant (no silent no-report; completion witness) →
+    `analysis_runtime.py` → `test_analysis_finish_completeness.py` (15) → MERGED.
+  - KV Stage A repair reuse / Stage B STEP reuse / FINISH control-history reuse →
+    `kv_diag.py`, `analysis_runtime.py` → `test_analysis_rolling_kv*` → MERGED.
+  - source-churn suppression → `analysis_runtime.py` → `test_analysis_duplicate_suppression.py` → MERGED.
+  - large-source bootstrap / bounded-range analysis → `analysis_runtime.py` →
+    `test_analysis_large_source.py` (12) → MERGED.
+  - progress UX → `terminal/repl.py` + `runtime/analysis_progress.py` → `test_analysis_progress_display.py`,
+    `test_progress_line_separation.py` → MERGED.
+  - report deterministic coverage → `analysis_runtime.py` `deterministic_sections` →
+    `test_analysis_report_deterministic_coverage.py` (7) → MERGED.
+  - evidence kind fidelity (`analysis_action`, not `fetch`) → `evidence.py` →
+    `test_evidence_kind_fidelity.py` (11) → MERGED (`7da19f9`).
+  - OLE2/CFB Office preflight + MS-OVBA extraction → `analysis_ole.py` →
+    `test_analysis_ole.py` (36) → MERGED (`1d161f6`).
+  - VBScript/PowerShell Chr-offset → `analysis_deobfuscate.py`
+    `find_vbscript_chr_stages` → `test_analysis_deobfuscate.py` (72) → MERGED (`6de28ea`).
+  - JS string-array ProgID folding → `analysis_deobfuscate.py`
+    `find_js_stringarray_fold_stages` → `test_analysis_js_stringarray_fold.py` (18) → MERGED (`8fd7586`).
+  - JS `String.fromCharCode` constant offset → `analysis_deobfuscate.py`
+    `find_js_fromcharcode_stages` → `test_analysis_fromcharcode.py` (43) → MERGED (`7fab248`).
+  - VBA byte-offset + StrReverse → `analysis_vba_eval.py` + `analysis_deobfuscate.py`
+    `find_vba_byteoffset_stages` → `test_analysis_vba_eval.py` (56) → MERGED (`1d1ae55`).
+  - Office/VBA autoexec relationships → `analysis_vba_autoexec.py` →
+    `test_analysis_vba_autoexec.py` (30) → MERGED (`d047308`).
+
+- **Qualified malware corpus (6 frozen samples, local-only/untracked):** Fattura
+  FULL · YPS FULL · mine.hta FULL · IBAN FULL · 4b863c7 CORPUS_PASS 4/4 · Office
+  DOC 7/7 PASS. Oracles under `workdir/diag/{corpus_*,iban,js_fold,large_source,
+  corpus_expansion_4}`; multisample bench under `workdir/diag/multisample_bench`;
+  release-closure reconciliation under `workdir/diag/release_corpus_closure`.
+
+- **Corpus qualification contract (established):** deterministic runtime work
+  (transforms, EvidenceStore/provenance, canonical IOC, report grounding) must be
+  COMPLETE and CORRECT; the model narrative/trajectory may vary within BOUNDED
+  HONESTY — no fabricated IOC escaping as authoritative, no false RESOLVED,
+  correct caveats, no unsupported material behaviour. The deterministic appendix
+  preserves authoritative facts even when model prose is selective. Orbit does
+  NOT guarantee model-output determinism.
+
+- **Safety contract (verified by tests/source):** malware/macros/decoded scripts
+  are never executed; decoded stages are inert data; ANALYSIS outbound network is
+  denied; C2/payload URLs are evidence only; the sandbox isolates each action on
+  a read-only artifact copy; cancellation is contained, not swallowed; hostile
+  OLE/VBA parsing is bounded and fail-closed; the deterministic evaluators use no
+  eval/exec/script engine; payload retrieval is not part of autonomous ANALYSIS.
+
+- **Performance baseline (multisample bench, one CPU-only NUC):** 79 model calls,
+  24 actions, 163,891 prompt / 69,615 cached = 42.5% reuse, 21,317 generated;
+  phase cost FINISH > REPORT > PLAN > STEP > COVER (REPORT is the largest
+  uncached recurring consumer). Rate-derived prefill/decode ~57%/43%; prefill
+  ~26–32 tok/s, decode ~8.8 tok/s (matches the Ornith baseline). Absolute wall is
+  contention-sensitive on this box and is NOT a comparable number.
+
+- **TECHNICAL_STOP / rejected (do not reopen without NEW measured evidence):**
+  further REPORT exact-KV reuse (only the ~384-tok system head reuses = ~2.4% of
+  corpus eval, below the material bar); REPORT lossless compaction (~0.3% safe);
+  REPORT excerpt reduction (safe frontier one step above a factual cliff); REPORT
+  output shortening (budget-bound); comment stripping (~0% on the real corpus);
+  suspicious-API lexical inventory (model overrode the hints); sub-threshold KV
+  prewarm candidates; MTP production default stays OFF (measured CPU cost);
+  SSD/expert-streaming research-only. Reconciled again in
+  `workdir/diag/release_corpus_closure/PART_B_report_reuse.md`.
+
+- **Known limitations (rc38):** static only (no execution, no remote retrieval,
+  no dynamic sandbox); unsupported JS/VBA obfuscation families fail closed; the
+  Office autoexec taxonomy is the qualified Word/Excel core events only; a model
+  run may reach the call ceiling while deterministic evidence is complete; the
+  deterministic preflight enforces MAX_INPUT_CHARS / per-family bounds; CPU-only,
+  performance dominated by model inference.
+
+- **IBAN oracle SHA reconciliation:** IBAN.js was re-saved after its oracle was
+  frozen, so the OUTER file SHA drifted (oracle recorded `f74ee186…`; current
+  local `86e23fa6…`, 7963 bytes); the analysis CONTENT is unchanged (decodes to
+  the exact `decoded_mmgclz` sha `5d51e76599…`). The original qualified SHA is
+  preserved and a `sha_reconciliation` block was added in `workdir/diag/iban/
+  oracle.json` (diagnostic only; no production change).
+
+- **rc38 validation:** full suite 5,454 passed / 8 skipped / 0 failed (RC=0);
+  QREL-1 qualification tests 92 passed; CLI `--version` → `orbit 0.0.1`;
+  `main == origin/main`, tracked tree clean. Frozen corpus qualification evidence
+  is authoritative — no fresh six-sample Ornith campaign was rerun for
+  documentation.
+- **Release-artifact malware safety:** the 6 real corpus samples are NEVER
+  git-tracked (untracked workdir scratch), so a build from a clean checkout
+  cannot include them. `MANIFEST.in` was hardened to `prune workdir` + explicit
+  `include` of only the 6 benign tracked fixtures (demo dropper, vuln-service
+  demo, edit/text fixtures), so even a build from a DIRTY working tree — which
+  locally holds the untracked malware corpus — packages no real malware (sdists
+  are built from the filesystem, not from git, so the prior broad
+  `recursive-include workdir *.js` glob was a footgun). Verified: the manifest
+  file-list resolves to exactly those 6 benign files, 0 corpus samples.
+  (`MANIFEST.in` is packaging metadata, not runtime behaviour.)
+
+- See `docs/releases/v0.0.1-rc38.md`.
+
 ## RC24 Tool-Loop Convergence
 
 - Orbit now has one production tool loop. The former opt-in agent path,
@@ -1155,6 +1281,14 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Main Commits
 
+- rc38 ANALYSIS arc (post-rc37, #260 → `7da19f9`): see the RC38 Release State
+  entry above for the per-capability merge SHAs (network-deny `92a4048`,
+  fromCharCode `7fab248`, Chr-offset `6de28ea`, string-array fold `8fd7586`,
+  byte-offset+StrReverse `1d1ae55`, OLE/VBA extraction `1d161f6`, autoexec
+  `d047308`, evidence-kind fidelity `7da19f9`, plus the structured controller,
+  completion shadow, source-coverage, and report-grounding fixes).
+- rc35–rc37: `6dfa374` (rc37), `0753dc7` (rc36), `d29490a` (rc35) — the analysis
+  workflow, the report-citation hotfix, and UX/isolation.
 - `2aada5c` Add release notes for v0.0.1-rc23
 - `0a446a2` Harden mtmd ABI and record vendor provenance (#152)
 - `2c40a0b` Add release notes for v0.0.1-rc22
@@ -1200,14 +1334,23 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-1. Stop and use RC23 as the published baseline.
-2. Keep the formal-healing whitelist fixed; collect natural malformed production-budget events before considering any expansion.
-3. Investigate wrong-tool and unwanted-tool reliability only as a separate observational mission, without semantic hardcoding or tool substitution.
-4. Use the process-isolated comparator and verified capability manifest before accepting a native backend, renderer, tokenizer, or tool-protocol revision.
-5. Run controlled CPU benchmarks with `bench-core` metadata; do not infer speedup from the compatibility comparator.
-6. Do not reopen route grammar, evidence selection, or generic argument repair without a new reliable signal and separate evidence.
-7. Do not reopen MTP algorithm tuning without new upstream evidence or a strong benchmark.
-8. Consider small UX/documentation improvements only if measurable, isolated, and covered by tests.
+Current state: rc38 is QUALIFIED and READY_TO_RELEASE (HEAD `7da19f9`). The
+single next action is **ORBIT-RELEASE-1** — run the repository-standard
+version/tag/release publication flow for rc38 from the qualified state (tag
+`v0.0.1-rc38`, publish `docs/releases/v0.0.1-rc38.md`). Do NOT open another
+optimization or analysis mission before that.
+
+Post-release (research, not pre-release work):
+
+1. Keep the formal-healing whitelist fixed; collect natural malformed production-budget events before considering any expansion.
+2. Investigate wrong-tool and unwanted-tool reliability only as a separate observational mission, without semantic hardcoding or tool substitution.
+3. Use the process-isolated comparator and verified capability manifest before accepting a native backend, renderer, tokenizer, or tool-protocol revision.
+4. Run controlled CPU benchmarks with `bench-core` metadata; do not infer speedup from the compatibility comparator.
+5. Do not reopen route grammar, evidence selection, or generic argument repair without a new reliable signal and separate evidence.
+6. Do not reopen MTP algorithm tuning without new upstream evidence or a strong benchmark.
+7. Do not reopen REPORT exact-KV reuse / compaction / excerpt-reduction: each is a standing TECHNICAL_STOP with no new seam (see the RC38 entry).
+8. New obfuscation families, additional Office hosts/events, or GPU/SYCL/NPU/DeepSeek work are all post-release; add a family only when a real corpus sample needs it and it can be made deterministic and fail-closed.
+9. Consider small UX/documentation improvements only if measurable, isolated, and covered by tests.
 
 ## Anti-Goals
 
