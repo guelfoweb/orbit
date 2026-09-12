@@ -17,6 +17,16 @@ from orbit.runtime.sessions import DEFAULT_SESSION_ROOT, SessionStore
 
 RAW_REF_PREFIX = "evidence:"
 INDEX_FILENAME = "index.json"
+#: Phase name for deterministic VBA-source enrichment (the Office/OLE preflight).
+#: Defined here, at the lower layer, so both the runtime that produces these
+#: records and the classifier that must treat their content as inert agree on
+#: one string. A record of this phase holds attacker-controlled macro source, so
+#: its kind and status are decided by the phase, never by sniffing the content --
+#: otherwise a macro line like `status: ok` would forge the card's framing.
+ANALYSIS_OFFICE_PHASE = "analysis_office_vba"
+#: The kind an Office VBA-source record carries. Inert: no content-derived
+#: enrichment, always `ok` status.
+VBA_SOURCE_KIND = "vba_source"
 HEAD_CHARS = 700
 TAIL_CHARS = 300
 COMPAT_INLINE_CHARS = 1200
@@ -261,7 +271,7 @@ def build_evidence_record(
     )
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     evidence_id = f"ev_{uuid.uuid4().hex[:12]}_{digest[:16]}"
-    kind = _classify_kind(tool_name, content, metadata)
+    kind = _classify_kind(tool_name, content, metadata, produced_by_phase)
     status = _status_for(kind, content, metadata)
     enriched = _enriched_metadata(kind, content, metadata)
     raw_ref = f"{RAW_REF_PREFIX}{evidence_id}"
@@ -709,7 +719,20 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
-def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) -> str:
+def _classify_kind(
+    tool_name: str,
+    content: str,
+    metadata: dict[str, object],
+    produced_by_phase: str | None = None,
+) -> str:
+    # A phase that carries attacker-controlled content decides its own kind
+    # BEFORE any content sniffing. VBA module source is macro text an author
+    # controls, so a line like `status: ok` in it must not make the card read
+    # `kind: fetch` -- nothing was fetched. Keyed on the producing phase, not on
+    # the bytes, so the framing cannot be forged. Mirrors the new-kind isolation
+    # used elsewhere to avoid cross-path coupling.
+    if produced_by_phase == ANALYSIS_OFFICE_PHASE:
+        return VBA_SOURCE_KIND
     command = str(metadata.get("command") or "")
     if tool_name == "write_artifact" and content.lstrip().lower().startswith("error:"):
         return "artifact_error"
@@ -739,6 +762,11 @@ def _classify_kind(tool_name: str, content: str, metadata: dict[str, object]) ->
 
 
 def _status_for(kind: str, content: str, metadata: dict[str, object]) -> str:
+    # Inert kind: the extraction that produced it either succeeded (record
+    # exists) or was never added. Its status is not read from the content, so a
+    # macro line like `shell_command_failed: true` cannot forge an error status.
+    if kind == VBA_SOURCE_KIND:
+        return "ok"
     if kind in {"artifact_error", "artifact_verification"} and content.lstrip().lower().startswith("error:"):
         return "error"
     if kind == "web_search":
