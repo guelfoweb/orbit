@@ -2,4 +2,16 @@ include AGENTS.md
 recursive-include docs *.md
 recursive-include scripts *.py *.sh
 recursive-include src/orbit/native_llama/vendor *
-recursive-include workdir *.js *.py *.txt
+# Ship only the small set of BENIGN workdir fixtures, by explicit name. Do NOT
+# use a `recursive-include workdir *.js` glob: sdists are built from the
+# filesystem, not from git, and the local workdir holds an untracked real-malware
+# corpus plus decoded payload stages — a glob would sweep them into the artifact
+# even though they are never committed. `prune workdir` first, then re-add only
+# the named fixtures, so a build from a dirty working tree is safe too.
+prune workdir
+include workdir/samples/suspicious_dropper_demo.js
+include workdir/samples/vulnerable_service.py
+include workdir/edit-patch.txt
+include workdir/edit-target.txt
+include workdir/text/divina_commedia_inferno_canto1.txt
+include workdir/text/summary.txt
