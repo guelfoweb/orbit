@@ -1969,7 +1969,8 @@ class EvidencePreviewTest(unittest.TestCase):
         from orbit.runtime.evidence import EvidenceRecord
 
         record = EvidenceRecord(
-            evidence_id="ev_aaa_bbb", tool_name="execute_analysis", kind="fetch",
+            evidence_id="ev_aaa_bbb", tool_name="execute_analysis",
+            kind="analysis_action",
             raw_ref="evidence:ev_aaa_bbb", raw_sha256="d" * 64, raw_chars=10,
             raw_lines=1, status="ok", metadata={}, route_card=None, final_card=None,
         )
