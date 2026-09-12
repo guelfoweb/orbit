@@ -51,6 +51,7 @@ from orbit.runtime.context_manager import (
     plan_exact_context,
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
+from orbit.runtime.analysis_ole import extract_office_vba, is_ole_container
 from orbit.runtime.analysis_controller import (
     BLOCKED,
     OPEN,
@@ -116,6 +117,7 @@ from orbit.runtime.analysis_sandbox import (
     validate_code,
 )
 from orbit.runtime.evidence import (
+    ANALYSIS_OFFICE_PHASE,
     RAW_REF_PREFIX,
     EvidenceRecord,
     EvidenceRehydrationError,
@@ -156,6 +158,10 @@ class _TokenCountUnavailable(RuntimeError):
 # which rolling checkpoint this prompt continues, and learns nothing about CHAT
 # or ANALYSIS from it.
 ANALYSIS_TRANSFORM_PHASE = "analysis_transform"
+# ANALYSIS_OFFICE_PHASE (deterministic VBA-source enrichment from an Office/OLE
+# container -- static, not an action, no model call) is defined in
+# orbit.runtime.evidence and imported above, so the classifier that must treat a
+# record of this phase as inert and the runtime that produces it share one name.
 
 # How much of a decoded stage the report shows verbatim. An exact decoded stage
 # IS the finding -- a decoded dropper script's whole behaviour (the objects it
@@ -176,6 +182,19 @@ TRANSFORM_PREFIX_CHARS = 120
 #: digest. Sized to admit a handful of real decoded scripts (a few hundred to
 #: ~2 KB each) without letting sixteen maximum-size stages explode the report.
 TRANSFORM_INLINE_TOTAL_BUDGET = 8192
+
+#: How many VBA modules the Office appendix lists by identity. A real project has
+#: a handful; a crafted document may declare hundreds (up to MAX_MODULES). Every
+#: listed module names its evidence id, so any not inlined is still retrievable;
+#: this only bounds how many identity lines the appendix prints.
+OFFICE_APPENDIX_MAX_MODULES = 64
+#: Verbatim VBA source the Office appendix inlines per module and in total. Macro
+#: source is often large (tens of KB), and the model reads full source via the
+#: evidence id, so the appendix inlines only small modules and names the rest by
+#: length + digest + id.
+OFFICE_INLINE_CHARS = 2048
+OFFICE_INLINE_TOTAL_BUDGET = 8192
+OFFICE_PREFIX_CHARS = 120
 
 # Absolute URIs in decoded text, so an indicator survives a stage too long to
 # inline. Deliberately syntactic: it extracts what is written, and says
@@ -208,6 +227,45 @@ def _transform_preamble(stages: "list[tuple[TransformStage, EvidenceRecord]]") -
         "Name an id as `evidence:<evidence_id>` to read its exact output. "
         "These are established facts about the artifact; do not recompute them."
     )
+    return "\n".join(lines)
+
+
+def _office_bootstrap(extraction, office_modules) -> str:
+    """A PLAN bootstrap describing an Office container and its extracted VBA,
+    structure only. It names the container, the module inventory with sizes, and
+    the evidence id that holds each module's exact source -- so PLAN knows macro
+    source exists and how to read it, without any behavioural conclusion. When no
+    module source was extracted, the extraction's honest note is surfaced so PLAN
+    is told why rather than left blind."""
+    if extraction is None:
+        return ""
+    lines = [
+        f"The artifact is an {extraction.container} Microsoft Office document "
+        f"(binary compound file, {extraction.stream_count} streams). It was "
+        "parsed statically -- no macro was executed and no application was "
+        "invoked.",
+    ]
+    if office_modules:
+        lines.append(
+            "Its VBA project was extracted. The macro source of each module "
+            "below is stored as evidence and is exact (decompressed from the "
+            "document's own bytes):"
+        )
+        for module, record in office_modules:
+            lines.append(
+                f"- module {module.name!r} ({len(module.source)} chars, "
+                f"codepage {module.codepage}) -- evidence: {record.evidence_id}"
+            )
+        lines.append(
+            "Read a module's exact source with `evidence:<evidence_id>`. This is "
+            "the macro source to analyse; the document's other streams are not "
+            "macro source."
+        )
+    else:
+        lines.append(
+            extraction.note or "No VBA module source was extracted from the "
+            "document."
+        )
     return "\n".join(lines)
 
 
@@ -683,6 +741,23 @@ DETERMINISTIC_ONLY_REPORT = (
     "below and are the evidence this report rests on; they are facts about the "
     "artifact, not inferences. Anything not established by them remains "
     "undetermined without running the artifact. Artifact: {size} bytes, "
+    "sha256 {sha256}."
+)
+
+#: The closing opening for a run that produced no ACTION findings but whose
+#: Office/OLE preflight DID extract VBA macro source. Saying "no evidence was
+#: collected" there is false -- the macro source below was recovered statically
+#: (decompressed from the document's own bytes, no macro executed, no application
+#: invoked) and IS evidence. Names what was recovered and defers detail to the
+#: office appendix, asserting nothing about what the macro DOES. `{n}` is the
+#: number of extracted modules; `{size}` the artifact's byte size.
+OFFICE_ONLY_REPORT = (
+    "No investigative action ran, but the runtime statically extracted {n} VBA "
+    "module(s) from this Office document without executing any macro or invoking "
+    "any application -- exact source decompressed from the document's own bytes, "
+    "with provenance. The module source is listed below and is the evidence this "
+    "report rests on. What the macro DOES is not established here; determining "
+    "that is further analysis of the source below. Artifact: {size} bytes, "
     "sha256 {sha256}."
 )
 
@@ -2399,6 +2474,10 @@ class AnalysisRuntime:
     transform_stages: list[tuple[TransformStage, EvidenceRecord]] = field(
         default_factory=list
     )
+    # VBA modules the Office preflight extracted, paired with their evidence
+    # records. Derived source, not the container's own bytes: the raw Office
+    # binary is never "covered", but its macro source becomes analyzable text.
+    office_modules: list[tuple[object, EvidenceRecord]] = field(default_factory=list)
     # The snapshot the pass ran against. Its presence -- not the emptiness of
     # the list -- is what makes the pass once-only: an artifact with nothing to
     # decode must not be rescanned on every step.
@@ -2540,6 +2619,21 @@ class AnalysisRuntime:
             return
         self._transform_snapshot = self.source.sha256
         try:
+            self._run_transform_stages()
+        finally:
+            # The Office preflight runs whatever the transform pass did. The two
+            # enrichments are independent: a `deobfuscate` that raises on some
+            # adversarial byte pattern in an OLE must not suppress VBA extraction
+            # and leave PLAN blind on a macro document. `finally`, not a second
+            # statement, so an unexpected error in the transform pass still does
+            # not skip it.
+            self._run_office_preflight()
+
+    def _run_transform_stages(self) -> None:
+        """The text-transform half of the preflight: deterministic decodes of the
+        artifact's own bytes, added as (excluded) evidence with a PLAN preamble.
+        Wrapped by its caller; see `_run_transform_preflight`."""
+        try:
             text = self.source.snapshot_path.read_text(encoding="utf-8", errors="replace")
             stages = deobfuscate(text)
         except (OSError, ValueError):
@@ -2578,6 +2672,62 @@ class AnalysisRuntime:
             self.messages.append(
                 {"role": "user", "content": _transform_preamble(self.transform_stages)}
             )
+
+    def _run_office_preflight(self) -> None:
+        """Recognise an OLE2/CFB Office container and expose its VBA module
+        source as derived evidence, once, before any model call.
+
+        Same discipline as the transform preflight: static, no sandbox, no model
+        call, no action budget, and wrapped so a malformed document leaves the
+        session exactly as it would have been. Nothing here interprets what the
+        macro DOES; it recovers the source text an analyst would read and hands
+        it to the ordinary controller, with byte-exact provenance. The raw Office
+        binary is never marked covered -- only its extracted modules become
+        analyzable text.
+        """
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            return
+        if not is_ole_container(raw):
+            return
+        try:
+            extraction = extract_office_vba(raw)
+        except Exception:  # noqa: BLE001 - a hostile document must not end a run
+            return
+        if extraction is None:
+            return
+        for index, module in enumerate(extraction.modules, 1):
+            try:
+                record = self.evidence_store.add(
+                    ANALYSIS_TOOL_NAME,
+                    module.source,
+                    metadata={
+                        "analysis_source_sha256": self.source.sha256,
+                        "original_path": self.source.original_path,
+                        "office_container": extraction.container,
+                        "office_module_name": module.name,
+                        "office_stream_path": module.stream_path,
+                        "office_stream_sha256": module.stream_sha256,
+                        "office_compressed_sha256": module.compressed_sha256,
+                        "office_codepage": module.codepage,
+                        "output_sha256": module.source_sha256,
+                        "tool_call_id": f"office_vba_{index}",
+                        "user_turn_id": "turn_0",
+                        "produced_by_phase": ANALYSIS_OFFICE_PHASE,
+                    },
+                )
+            except (OSError, ValueError):
+                continue
+            self.office_modules.append((module, record))
+        # A structural bootstrap for PLAN: the container, the module inventory,
+        # and how to read each module's exact source. It names structure only --
+        # not what the macros do -- and points at the derived evidence ids. When
+        # the container parsed but yielded no module source, the honest note is
+        # still surfaced so PLAN is not silently blind.
+        bootstrap = _office_bootstrap(extraction, self.office_modules)
+        if bootstrap:
+            self.messages.append({"role": "user", "content": bootstrap})
 
     def _oversized_source_overview(self) -> str | None:
         """A bounded, deterministic structural view for a source too large to
@@ -2629,11 +2779,17 @@ class AnalysisRuntime:
 
         Indicators first: they are the shortest, the most often acted on, and
         the most costly to get wrong. The transformation appendix follows,
-        showing the work the indicators may have come from.
+        showing the work the indicators may have come from, and then the
+        extracted VBA modules -- the macro source recovered from an Office
+        container, rendered exactly so it never depends on the model's citations.
         """
         return "\n\n".join(
             section
-            for section in (self.verified_indicators(), self.transform_appendix())
+            for section in (
+                self.verified_indicators(),
+                self.transform_appendix(),
+                self.office_appendix(),
+            )
             if section
         )
 
@@ -2832,6 +2988,48 @@ class AnalysisRuntime:
                 # Verbatim even from a long stage: a truncated indicator is
                 # not an indicator.
                 lines.append(f"  decoded URI: {uri}")
+        return "\n".join(lines)
+
+    def office_appendix(self) -> str:
+        """Exact rendering of the extracted VBA modules. No model involved.
+
+        Mirrors `transform_appendix`: the macro source the Office preflight
+        recovered is deterministic evidence, so it is rendered here from the
+        records themselves rather than left to the model to mention. This is why
+        Office records are excluded from the citation budget in
+        `_reportable_records` -- like transform stages, they would spend a place
+        there re-quoting what this appendix already renders exactly, and their
+        file-controlled count could otherwise crowd action findings out of the
+        report. Each module names its evidence id, so its full source stays
+        retrievable with `evidence:<id>` even when it is too long to inline.
+        """
+        if not self.office_modules:
+            return ""
+        lines = ["## Extracted VBA modules", ""]
+        inlined = 0
+        for module, record in self.office_modules[:OFFICE_APPENDIX_MAX_MODULES]:
+            lines.append(
+                f"- module {module.name!r} | {len(module.source)} chars | "
+                f"codepage {module.codepage}"
+            )
+            lines.append(f"  evidence: {record.evidence_id}")
+            lines.append(f"  source sha256: {module.source_sha256}")
+            if (
+                len(module.source) <= OFFICE_INLINE_CHARS
+                and inlined + len(module.source) <= OFFICE_INLINE_TOTAL_BUDGET
+            ):
+                lines.append(f"  source: {module.source}")
+                inlined += len(module.source)
+            else:
+                lines.append(
+                    f"  source: {len(module.source)} chars, begins "
+                    f"{module.source[:OFFICE_PREFIX_CHARS]!r}"
+                )
+        omitted = len(self.office_modules) - OFFICE_APPENDIX_MAX_MODULES
+        if omitted > 0:
+            lines.append(
+                f"- ... and {omitted} further module(s) held as evidence."
+            )
         return "\n".join(lines)
 
     def _with_canonical_call_ids(self, calls: Iterable[dict]) -> list[dict]:
@@ -5715,6 +5913,24 @@ class AnalysisRuntime:
             )
             text = f"{opening}\n\n{appendix}" if appendix else opening
             return AnalysisReport(text=text, model_calls=0, evidence_ids=())
+        if not records and self.office_modules:
+            # No ACTION ran, but the Office preflight extracted VBA module source
+            # statically. Like the transform case above, those modules are
+            # evidence -- and, like transforms, they are excluded from
+            # `_reportable_records` (the office appendix renders them exactly),
+            # which is why this reads as "no records" while evidence exists. The
+            # generic "no evidence was collected" opening below would be a plain
+            # falsehood here: the macro source is rendered in the appendix. This
+            # is the common macro-document outcome (the model can conclude from
+            # the source without an execute_analysis action), so it must not
+            # headline the report as inert.
+            opening = OFFICE_ONLY_REPORT.format(
+                n=len(self.office_modules),
+                size=self.source.size_bytes,
+                sha256=self.source.sha256,
+            )
+            text = f"{opening}\n\n{appendix}" if appendix else opening
+            return AnalysisReport(text=text, model_calls=0, evidence_ids=())
         if not records:
             # Deterministic, and free: there is nothing to ground a report in,
             # and asking a model to say so would be a call spent on a fact the
@@ -6028,7 +6244,14 @@ class AnalysisRuntime:
             # that does not carry the field at all -- `superseded_records`
             # makes the same allowance, and the two must agree about how
             # defensive to be or a record one accepts breaks the other.
-            and getattr(record, "produced_by_phase", None) != ANALYSIS_TRANSFORM_PHASE
+            # Office VBA-source records are excluded for the same reason as
+            # transforms: `office_appendix` renders every module exactly, and the
+            # module count comes from the file -- a crafted document with many
+            # modules could otherwise fill the budget before the analysis
+            # produced a finding of its own. The model can still reference a
+            # module by its evidence id (named in the appendix and the bootstrap).
+            and getattr(record, "produced_by_phase", None)
+            not in (ANALYSIS_TRANSFORM_PHASE, ANALYSIS_OFFICE_PHASE)
         ]
         return active_records(records)[-MAX_REPORT_EVIDENCE_RECORDS:]
 
