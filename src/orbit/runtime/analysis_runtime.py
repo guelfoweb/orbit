@@ -52,6 +52,10 @@ from orbit.runtime.context_manager import (
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
 from orbit.runtime.analysis_ole import extract_office_vba, is_ole_container
+from orbit.runtime.analysis_vba_autoexec import (
+    OfficeEventRelationship,
+    find_office_event_relationships,
+)
 from orbit.runtime.analysis_controller import (
     BLOCKED,
     OPEN,
@@ -230,13 +234,15 @@ def _transform_preamble(stages: "list[tuple[TransformStage, EvidenceRecord]]") -
     return "\n".join(lines)
 
 
-def _office_bootstrap(extraction, office_modules) -> str:
+def _office_bootstrap(extraction, office_modules, office_events=()) -> str:
     """A PLAN bootstrap describing an Office container and its extracted VBA,
     structure only. It names the container, the module inventory with sizes, and
     the evidence id that holds each module's exact source -- so PLAN knows macro
     source exists and how to read it, without any behavioural conclusion. When no
     module source was extracted, the extraction's honest note is surfaced so PLAN
-    is told why rather than left blind."""
+    is told why rather than left blind. Recognised auto-execution entrypoints are
+    named as static event-handler relationships (how the macro is triggered), not
+    as behaviour."""
     if extraction is None:
         return ""
     lines = [
@@ -261,6 +267,17 @@ def _office_bootstrap(extraction, office_modules) -> str:
             "the macro source to analyse; the document's other streams are not "
             "macro source."
         )
+        if office_events:
+            lines.append(
+                "Recognised Office auto-execution entrypoints (the documented "
+                "event that invokes the procedure when macros are permitted -- a "
+                "static relationship, not evidence the file was opened or that "
+                "the macro did anything):"
+            )
+            for rel in office_events:
+                lines.append(
+                    f"- {rel.module}.{rel.procedure}: {rel.description}"
+                )
     else:
         lines.append(
             extraction.note or "No VBA module source was extracted from the "
@@ -2478,6 +2495,11 @@ class AnalysisRuntime:
     # records. Derived source, not the container's own bytes: the raw Office
     # binary is never "covered", but its macro source becomes analyzable text.
     office_modules: list[tuple[object, EvidenceRecord]] = field(default_factory=list)
+    # Office auto-execution entrypoint relationships (Document_Open, etc.) the
+    # preflight recognised from the extracted module source + host context. A
+    # static event-handler contract, not a behavioural claim: the body's own
+    # evidence establishes what the macro does.
+    office_events: list[OfficeEventRelationship] = field(default_factory=list)
     # The snapshot the pass ran against. Its presence -- not the emptiness of
     # the list -- is what makes the pass once-only: an artifact with nothing to
     # decode must not be rescanned on every step.
@@ -2766,12 +2788,28 @@ class AnalysisRuntime:
             self._ingest_transform_stages(
                 module.source, origin=module.stream_path
             )
+            # Recognise documented Office auto-execution entrypoints
+            # (Document_Open, AutoOpen, Workbook_Open, ...) from the module name,
+            # its exact source, and the container host -- a STATIC event-handler
+            # relationship, not a behavioural claim. It references this module's
+            # evidence id; the body's own transform evidence establishes what the
+            # macro does. Fail-closed: a wrong module/host context, or a name in
+            # a comment/string, yields nothing.
+            for rel in find_office_event_relationships(
+                module.name,
+                module.source,
+                extraction.stream_inventory,
+                record.evidence_id,
+            ):
+                self.office_events.append(rel)
         # A structural bootstrap for PLAN: the container, the module inventory,
         # and how to read each module's exact source. It names structure only --
         # not what the macros do -- and points at the derived evidence ids. When
         # the container parsed but yielded no module source, the honest note is
         # still surfaced so PLAN is not silently blind.
-        bootstrap = _office_bootstrap(extraction, self.office_modules)
+        bootstrap = _office_bootstrap(
+            extraction, self.office_modules, self.office_events
+        )
         if bootstrap:
             self.messages.append({"role": "user", "content": bootstrap})
 
@@ -2828,6 +2866,8 @@ class AnalysisRuntime:
         showing the work the indicators may have come from, and then the
         extracted VBA modules -- the macro source recovered from an Office
         container, rendered exactly so it never depends on the model's citations.
+        The Office auto-execution entrypoints follow: the static event-handler
+        relationships (Document_Open, ...) that say how the macro is triggered.
         """
         return "\n\n".join(
             section
@@ -2835,6 +2875,7 @@ class AnalysisRuntime:
                 self.verified_indicators(),
                 self.transform_appendix(),
                 self.office_appendix(),
+                self.office_events_appendix(),
             )
             if section
         )
@@ -3075,6 +3116,35 @@ class AnalysisRuntime:
         if omitted > 0:
             lines.append(
                 f"- ... and {omitted} further module(s) held as evidence."
+            )
+        return "\n".join(lines)
+
+    def office_events_appendix(self) -> str:
+        """Exact rendering of the recognised Office auto-execution entrypoints.
+
+        Deterministic, like the transform/module appendices, so the fact survives
+        even if the model's prose omits it. It states the event-handler
+        relationship ONLY -- which documented Office event invokes the procedure
+        when macros are permitted -- and references the module's evidence id for
+        the body. It asserts NO behaviour: what the macro does is established by
+        that module's own transform evidence, not by the entrypoint name."""
+        if not self.office_events:
+            return ""
+        lines = ["## Office auto-execution entrypoints", ""]
+        for rel in self.office_events:
+            lines.append(
+                f"- {rel.host} {rel.module}.{rel.procedure} | {rel.description} "
+                f"(event: {rel.event})"
+            )
+            lines.append(
+                f"  module evidence: {rel.module_evidence_id} | "
+                f"line {rel.line} | contract {rel.contract}"
+            )
+            lines.append(
+                "  This is a static event-handler relationship: the procedure is "
+                "the handler Office invokes on this event when macros are "
+                "permitted. It does not establish that the file was opened, that "
+                "macros were enabled, or what the procedure does."
             )
         return "\n".join(lines)
 
