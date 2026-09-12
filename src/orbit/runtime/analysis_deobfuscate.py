@@ -25,6 +25,14 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
+from orbit.runtime.analysis_vba_eval import (
+    UNKNOWN as _VBA_UNKNOWN,
+    VbaEvaluator,
+    VbaRefuse,
+    collect_reaching_defs,
+    find_byte_offset_helpers,
+)
+
 # Bounds. Small, explicit, and about the artifact rather than the machine: a
 # literal chain deep or large enough to exceed these is not the unambiguous
 # case this handles, and stopping is the honest answer.
@@ -2385,6 +2393,95 @@ def find_js_fromcharcode_stages(
     return stages
 
 
+VBA_BYTEOFFSET = "vba_byteoffset_strreverse"
+
+# A hidden-window `Shell(<var>), <style>` call: the style argument is an integer
+# expression, commonly 0 (vbHide). The variable is the command the macro runs.
+_VBA_SHELL = re.compile(r"\bShell\s*\(\s*([A-Za-z_]\w*)\s*\)\s*,\s*(\d+)", re.I)
+# How much VBA text the finder will inspect. A module far larger than any real
+# macro is not this unambiguous case; stopping is the honest answer.
+_VBA_MAX_SOURCE = 2_000_000
+
+
+def find_vba_byteoffset_stages(
+    source: str, depth: int = 0, truncation: "_Truncation | None" = None
+) -> list[TransformStage]:
+    """Recover the command a VBA `Shell(<var>), <style>` call would run, when
+    `<var>` reduces through the whitelisted byte-offset + StrReverse + Split +
+    Replace subset to an exact static string.
+
+    Detection is structural and generic: a recognised byte-offset decoder
+    Function must exist (the offset is its call argument, never a hardcoded
+    constant), and a `Shell(var), style` site must resolve through unique static
+    reaching definitions. A site whose command depends on anything runtime --
+    or on a reassigned/ambiguous variable -- is refused, never partially
+    decoded. The decoded command is emitted as a stage; the `delimiter` field
+    records the static `Shell|<style>` execution relationship, kept out of the
+    decoded `output` so a reader never mistakes "this string decodes" for "this
+    string runs". Nothing is executed: the evaluator folds its own whitelisted
+    representation of the inert text.
+    """
+    stages: list[TransformStage] = []
+    if not source or "Shell" not in source or "StrConv" not in source:
+        return stages
+    if len(source) > _VBA_MAX_SOURCE:
+        if truncation is not None:
+            truncation.dropped_input = True
+        return stages
+    shell_sites = list(_VBA_SHELL.finditer(source))
+    if not shell_sites:
+        return stages
+    helpers = find_byte_offset_helpers(source)
+    if not helpers:
+        # No byte-offset decoder: this is not the family. Do not attempt to
+        # resolve arbitrary VBA -- that is interpretation, not reading.
+        return stages
+    seen_outputs: set[str] = set()
+    for match in shell_sites:
+        style_text = match.group(2)
+        if len(style_text) > 9:  # a real window style is one or two digits
+            continue
+        cmd_var, style = match.group(1), int(style_text)
+        # Scope reaching definitions to the procedure enclosing THIS Shell site,
+        # and to assignments before it: a `cmd` in another Sub, or a forward
+        # assignment, must not resolve here.
+        defs = collect_reaching_defs(source, position=match.start(1))
+        evaluator = VbaEvaluator(defs, helpers)
+        try:
+            value = evaluator.evaluate(cmd_var)
+        except VbaRefuse:
+            continue  # fail closed: this site is not statically reducible
+        except Exception:  # noqa: BLE001 - a hostile macro must not end a run;
+            # the evaluator is bounded and should only ever raise VbaRefuse, but
+            # an unforeseen input must fail closed here, never propagate.
+            continue
+        if value is _VBA_UNKNOWN or not isinstance(value, str) or not value:
+            continue
+        if len(value) > MAX_OUTPUT_CHARS:
+            if truncation is not None:
+                truncation.dropped_output = True
+            continue
+        if value in seen_outputs:
+            continue
+        seen_outputs.add(value)
+        offset = match.start()
+        stages.append(
+            TransformStage(
+                kind=VBA_BYTEOFFSET,
+                key=style,
+                delimiter=f"Shell|{style}",
+                line=source[:offset].count("\n") + 1,
+                offset=offset,
+                depth=depth,
+                encoded=f"Shell({cmd_var}), {style}",
+                output=value,
+                input_sha256=_sha(cmd_var),
+                output_sha256=_sha(value),
+            )
+        )
+    return stages
+
+
 # Why a traversal stopped.
 #
 # The distinction that matters is between a walk that ended because there was
@@ -2485,6 +2582,7 @@ def deobfuscate_with_status(source: str) -> TransformResult:
             + find_powershell_chr_stages(text, depth, truncation)
             + find_js_stringarray_fold_stages(text, depth, truncation)
             + find_js_fromcharcode_stages(text, depth, truncation)
+            + find_vba_byteoffset_stages(text, depth, truncation)
         )
         for stage in found:
             if len(stages) >= MAX_STAGES:
@@ -2516,6 +2614,7 @@ def deobfuscate_with_status(source: str) -> TransformResult:
                 or find_powershell_chr_stages(text, 0, probe)
                 or find_js_stringarray_fold_stages(text, 0, probe)
                 or find_js_fromcharcode_stages(text, 0, probe)
+                or find_vba_byteoffset_stages(text, 0, probe)
             ):
                 status = STAGE_LIMIT if frontier else DEPTH_LIMIT
                 break
