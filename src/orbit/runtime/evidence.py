@@ -27,6 +27,15 @@ ANALYSIS_OFFICE_PHASE = "analysis_office_vba"
 #: The kind an Office VBA-source record carries. Inert: no content-derived
 #: enrichment, always `ok` status.
 VBA_SOURCE_KIND = "vba_source"
+#: The tool name of a sandboxed static-analysis action, and the `_raw` sibling
+#: that holds its full output. Their observation text leads with a `status:`
+#: line, which the content sniffer would otherwise read as a network fetch --
+#: so their kind is decided by the tool, never by the bytes.
+ANALYSIS_ACTION_TOOL = "execute_analysis"
+ANALYSIS_ACTION_RAW_TOOL = "execute_analysis_raw"
+#: The kind a sandboxed analysis action carries. It describes HOW the evidence
+#: was obtained (a local action in the offline sandbox), never a network fetch.
+ANALYSIS_ACTION_KIND = "analysis_action"
 HEAD_CHARS = 700
 TAIL_CHARS = 300
 COMPAT_INLINE_CHARS = 1200
@@ -733,6 +742,13 @@ def _classify_kind(
     # used elsewhere to avoid cross-path coupling.
     if produced_by_phase == ANALYSIS_OFFICE_PHASE:
         return VBA_SOURCE_KIND
+    # A sandboxed analysis action, decided by the TOOL, before any content
+    # sniffing: its observation leads with `status: <word>`, which the fetch
+    # heuristic below would otherwise read as a network fetch -- the misleading
+    # `kind: fetch` this guard removes. Nothing was fetched; the result was
+    # produced locally in the offline sandbox.
+    if tool_name in (ANALYSIS_ACTION_TOOL, ANALYSIS_ACTION_RAW_TOOL):
+        return ANALYSIS_ACTION_KIND
     command = str(metadata.get("command") or "")
     if tool_name == "write_artifact" and content.lstrip().lower().startswith("error:"):
         return "artifact_error"

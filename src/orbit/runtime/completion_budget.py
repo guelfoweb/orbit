@@ -99,6 +99,12 @@ def resolve_max_tokens(
 
 
 def _final_from_tool_tokens(requested: int | None, evidence_kind: str, evidence_chars: int | None) -> int:
+    # This is the CHAT final-from-tool budget; its `kind` cases are CHAT tool
+    # kinds. The ANALYSIS `analysis_action` kind (execute_analysis) deliberately
+    # has no case here and never reaches this function: execute_analysis is not a
+    # CHAT tool, ANALYSIS and CHAT use separate evidence stores, and the ANALYSIS
+    # report path does not use this budget. If that ever changes, give
+    # analysis_action an explicit case rather than letting it fall to the default.
     if evidence_kind == "web_search":
         return _floor_and_cap(requested, FINAL_WEB_SEARCH_MAX_TOKENS, FINAL_WEB_SEARCH_MAX_TOKENS)
     if evidence_kind in {"read", "fetch"}:
