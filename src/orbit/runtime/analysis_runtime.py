@@ -2635,40 +2635,77 @@ class AnalysisRuntime:
         Wrapped by its caller; see `_run_transform_preflight`."""
         try:
             text = self.source.snapshot_path.read_text(encoding="utf-8", errors="replace")
-            stages = deobfuscate(text)
-        except (OSError, ValueError):
+        except OSError:
             return
-        for index, stage in enumerate(stages, 1):
+        self._ingest_transform_stages(text, origin=None)
+
+    def _ingest_transform_stages(self, text: str, *, origin: str | None) -> None:
+        """Run the deterministic decoders over `text` and record each stage as
+        (excluded) evidence, appending a PLAN preamble for any new stages.
+
+        Shared by the raw-artifact pass and the per-VBA-module pass: an Office
+        document's macro source is MS-OVBA-compressed, so it does NOT appear in
+        the raw file bytes -- the raw-text pass finds nothing in it, and the
+        decoders must be run over the extracted module source instead. `origin`
+        names that source (a module path) in provenance; None means the raw
+        artifact. Stages are de-duplicated by output digest against those
+        already recorded, so a value found in both passes is kept once.
+        """
+        try:
+            stages = deobfuscate(text)
+        except Exception:  # noqa: BLE001 - the decoders are bounded and should
+            # only ever fail closed, but a hostile artifact must never abort a
+            # run from this static enrichment; any escape leaves the session
+            # exactly as it would have been without the pass.
+            return
+        # De-duplicate by (output digest, origin): the SAME value found again in
+        # the SAME source is noise, but the same value in a different module is a
+        # distinct provenance worth keeping (which module carried it). Existing
+        # records' origin is read from their metadata.
+        already = {
+            (stage.output_sha256, record.metadata.get("transform_origin"))
+            for stage, record in self.transform_stages
+        }
+        added = False
+        base = len(self.transform_stages)
+        for offset, stage in enumerate(stages, 1):
+            if (stage.output_sha256, origin) in already:
+                continue
+            already.add((stage.output_sha256, origin))
+            metadata = {
+                # Provenance sufficient to reproduce the value: which bytes,
+                # which rule, which parameters, and what came out. A reader with
+                # the artifact can redo it by hand.
+                "analysis_source_sha256": self.source.sha256,
+                "original_path": self.source.original_path,
+                "transform_kind": stage.kind,
+                "transform_key": stage.key,
+                "transform_delimiter": stage.delimiter,
+                "transform_line": stage.line,
+                "transform_offset": stage.offset,
+                "transform_depth": stage.depth,
+                "input_sha256": stage.input_sha256,
+                "output_sha256": stage.output_sha256,
+                # Attestation requires all three; the ids are stable and name the
+                # pass rather than a tool call, because no tool call produced this.
+                "tool_call_id": f"transform_{base + offset}",
+                "user_turn_id": "turn_0",
+                "produced_by_phase": ANALYSIS_TRANSFORM_PHASE,
+            }
+            if origin is not None:
+                # The decoded value came from an extracted VBA module, not the
+                # raw file: record which module so provenance points at the
+                # macro source, not at bytes that do not contain it.
+                metadata["transform_origin"] = origin
             try:
                 record = self.evidence_store.add(
-                    ANALYSIS_TOOL_NAME,
-                    stage.output,
-                    metadata={
-                        # Provenance sufficient to reproduce the value: which
-                        # bytes, which rule, which parameters, and what came
-                        # out. A reader with the artifact can redo it by hand.
-                        "analysis_source_sha256": self.source.sha256,
-                        "original_path": self.source.original_path,
-                        "transform_kind": stage.kind,
-                        "transform_key": stage.key,
-                        "transform_delimiter": stage.delimiter,
-                        "transform_line": stage.line,
-                        "transform_offset": stage.offset,
-                        "transform_depth": stage.depth,
-                        "input_sha256": stage.input_sha256,
-                        "output_sha256": stage.output_sha256,
-                        # Attestation requires all three; the ids are stable
-                        # and name the pass rather than a tool call, because
-                        # no tool call produced this.
-                        "tool_call_id": f"transform_{index}",
-                        "user_turn_id": "turn_0",
-                        "produced_by_phase": ANALYSIS_TRANSFORM_PHASE,
-                    },
+                    ANALYSIS_TOOL_NAME, stage.output, metadata=metadata
                 )
             except (OSError, ValueError):
                 continue
             self.transform_stages.append((stage, record))
-        if self.transform_stages:
+            added = True
+        if added:
             self.messages.append(
                 {"role": "user", "content": _transform_preamble(self.transform_stages)}
             )
@@ -2720,6 +2757,15 @@ class AnalysisRuntime:
             except (OSError, ValueError):
                 continue
             self.office_modules.append((module, record))
+            # The macro source is MS-OVBA-compressed inside the container, so the
+            # raw-artifact transform pass could not see it. Run the deterministic
+            # decoders over the EXTRACTED module source here, so a VBA
+            # obfuscation (byte-offset + StrReverse, etc.) yields the same exact,
+            # excluded, IOC-bearing stages any other source would. Static: the
+            # decoders fold their own representation of the inert text.
+            self._ingest_transform_stages(
+                module.source, origin=module.stream_path
+            )
         # A structural bootstrap for PLAN: the container, the module inventory,
         # and how to read each module's exact source. It names structure only --
         # not what the macros do -- and points at the derived evidence ids. When
