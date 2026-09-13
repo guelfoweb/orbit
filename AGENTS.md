@@ -2,7 +2,170 @@
 
 ## Role
 
-This file guides engineering agents and future sessions working on Orbit. It preserves the post-`v0.0.1-rc23` project state, separating established facts, decisions, unproven hypotheses, and reasonable next steps.
+This file is the AUTHORITATIVE engineering handoff for Orbit. It is written to be
+sufficient for a fresh Claude Code or Codex session with NO prior chat history to
+continue Orbit safely, including moving development between machines (the
+NUC → Dell migration is closed; the Dell is the active workstation). It
+preserves established facts, decisions, rejected
+approaches (so they are not reopened), and prioritised next steps. When this file
+and any older handoff text disagree, the ACTUAL repository (HEAD, tests, source)
+is authoritative; then this file; then release notes.
+
+## Current State & Machine-Migration Handoff
+
+Last reconciled against the repository on 2026-09-13 (mission
+DELL-MIGRATION-CLOSURE-1). The NUC → Dell migration is CLOSED: code, model,
+corpus and diagnostics are all present and verified on the Dell.
+
+### Baseline (the anchor for a migration)
+- `main == origin/main == d9b2a67ecd938e9a330951fee62fb93f38c991bf`, tracked tree
+  clean. (`d9b2a67` = the rc38 doc/release commit; its qualified PRODUCTION code
+  is byte-identical to `7da19f9`.)
+- Published release: `v0.0.1-rc38` (annotated tag → `d9b2a67`; GitHub pre-release
+  at https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc38, no attached
+  assets by convention). Package version stays `0.0.1`; releases are RC tags.
+- No in-progress mission. The repository is at a clean, released, qualified state.
+  Post-release research has NOT started. The next sanctioned action is post-release
+  research (see Suggested Next Objectives); do NOT reopen qualification or
+  optimisation without new measured evidence.
+
+### Active workstation: the Dell (machine provenance)
+- **The Dell is now the primary post-release workstation.** The NUC remains the
+  machine every historical benchmark in this file was measured on.
+- Dell profile: `dell` — Dell Pro 5 14 P514260 (laptop, mobo 0W3WT8, UEFI 2.1.5
+  2026-05-21); Intel Core Ultra 7 366H, 16 cores, L2 24 MiB, 400–4900 MHz;
+  30 GiB usable RAM (32 GB class) + 2 GiB swapfile; Intel integrated GPU on the
+  `xe` driver (`Intel(R) Graphics (PTL)` — Panther Lake — Mesa 25.2.8, OpenGL
+  4.6). Vulkan: the device reports `apiVersion 1.4.318`, while the installed
+  loader/instance is only `1.3.275` — quote the device version when scoping GPU
+  work, and note the loader may need upgrading to reach it. 953.9 GB NVMe root;
+  Linux 7.0.0-31-generic x86_64; Python 3.12.3.
+- **Qualified CPU-only Ornith execution has already been observed on this Dell**
+  (operator-attested; the matching live IBAN re-verification record is
+  `workdir/diag/verify_iban/` — `RC=0 elapsed=1215.1s model_calls=11 actions=3
+  report=True`, decode sha `5d51e76599…`. That record carries no host field, so
+  it corroborates rather than proves the host).
+  Do NOT infer from the 30 GiB figure that Ornith cannot run here: that inference
+  was drawn once during reconciliation from the NUC's ~35.8 GiB peak RSS and was
+  wrong. That RSS is a NUC measurement, not a portable requirement.
+- **Keep machine provenance separate.** Every performance number already recorded
+  in this file (multisample bench, prefill/decode rates, RSS, prewarm timings,
+  route/final prefix timings) is a NUC number. Do not overwrite them with Dell
+  numbers; record Dell measurements as a separate profile when a benchmark
+  mission produces them.
+
+### What is NOT in git (machine-local) — transport status
+The runtime is fully in git. The following are machine-local and are REQUIRED for
+continuity (analysis qualification, benchmarks, reruns). All are now **PRESENT on
+the Dell**:
+- `models/` (gitignored): the GGUF model files. The qualified analysis model is
+  Ornith-1.5-35B-A3B Q4_K_M at
+  `models/ornith-ai--Ornith-1.5-35B-A3B-GGUF/Ornith-1.5-35B-Q4_K_M.gguf`, sha256
+  `42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f` — VERIFIED
+  byte-for-byte on the Dell (21 713 463 040 B). Re-download from Hugging Face
+  (`orbit download …`) or copy the file; verify the sha256.
+- `workdir/samples/` (the 6 frozen malware corpus items — NEVER committed):
+  6/6 present and hash-exact on the Dell. Copy them by hand; do not fetch fresh
+  copies (SHA must match the oracles). See the corpus table in the RC38 entry.
+- `workdir/diag/` (the frozen oracles, per-mission diagnostics, the multisample
+  bench, and the release-corpus-closure reconciliation): present, 788 files /
+  21 MB. Key subtrees all present: `corpus_expansion_4` (Office DOC oracle),
+  `corpus_4b863c7`, `corpus_mine_hta`, `iban`, `verify_iban`, `js_fold`,
+  `vba_byteoffset`, `vba_autoexec`, `multisample_bench`, `release_corpus_closure`,
+  `fattura_*`, `end_to_end_perf`, `evidence_kind`, `office_preflight`,
+  `report_coverage`, `source_churn`, `kv_*`.
+- `workdir/campaign/` (the live ANALYSIS campaign bundles and replay/scoring
+  tooling): present, 946 files / 21 MB.
+- The native libraries under `src/orbit/native_llama/vendor/lib/*.so*` are build
+  OUTPUTS; the vendored SOURCE is tracked, so rebuild them on the new machine with
+  `python3 scripts/build_native.py` rather than copying binaries. Built and
+  present on the Dell (llama.cpp `b9551`), together with the six MTP shim
+  binaries and both Orbit bridges.
+
+### Machine-local research artifacts that were NOT transported (expected, not a defect)
+These live OUTSIDE the repository and outside `workdir/`. They gate unit-test
+SKIPS and nothing else — no failure, no corpus or ANALYSIS capability depends on
+them. Recorded so a future session does not mistake the higher skip count for a
+regression.
+
+**Read the two numbers carefully, they are different quantities:** the four
+bullets below sum to **77**, which is the ABSOLUTE number of skips on the Dell —
+measured by collecting skip reasons, these eight modules account for 100% of the
+Dell's skips, and every reason is an artifact-absence reason. The **delta against
+the NUC's recorded 8 skips is 69**. The NUC was therefore not fully provisioned
+either: its 8 skips were a subset of these same 77 (the self-MTP shim alone is 7
+of them, and it lives in `/tmp`, so it does not survive a reboot on any host).
+- `~/LAB/llama.cpp` — upstream llama.cpp worktree; gates 32 skips in
+  `test_llama_provenance_v2` (vendor provenance attestation).
+- `~/LAB/orbit-checkpoints/` — the preserved checkpoint/corpus store; gates 37
+  skips across `test_lossless_ac_scoring` (18), `test_oracle_monotonicity` (15),
+  `test_completion_shadow_integration` (2), `test_completion_shadow_scorer` (1)
+  and `test_artifact_capabilities` (1, captured Ornith GGUF metadata).
+- `/tmp/selfmtp-build/liborbit-persistent-mtp.so` — a scratch build output; gates
+  7 skips in `test_selfmtp_ownership`. Transient even on the NUC (it does not
+  survive a reboot).
+- `models/unsloth--Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf` — a second verified
+  model; gates 1 skip in `test_history_serialization`.
+
+**Git credentials and author identity were also not transported — both are now
+RESOLVED on the Dell, but check them first on any future machine.** Initially the
+Dell had no GitHub authentication of any kind (HTTPS `origin`, no
+`credential.helper`, no `~/.netrc`, no SSH key, `gh auth status` not logged in,
+no `GH_TOKEN`), so `git fetch` worked on the public repo while `git push` failed
+with `could not read Username for 'https://github.com'`. Resolved by
+`gh auth login`: `gh` is authenticated as `guelfoweb` with `repo` scope, and
+`~/.gitconfig` now delegates `https://github.com` credentials to
+`!/usr/bin/gh auth git-credential`, so `git push` works. Note the helper lives in
+the USER gitconfig — `git config --get credential.helper` from inside the repo
+still prints nothing, so check `git config --show-origin --get-all
+credential.helper` or simply `git push --dry-run` rather than concluding it is
+unset. Git author identity was likewise unset (`guelfoweb@dell.(none)`); it is
+set repo-locally to `Gianni Amato <guelfoweb@gmail.com>` to match the existing
+history, with no `--global` change.
+
+### Cross-machine reproduction check (cheap, no rerun of the full campaign)
+**This repository runs unittest, not pytest.** There is no CI, no `conftest.py`,
+no pytest configuration and pytest is not a dependency (see
+`docs/checkpoints/qrel1-python-source-freshness.md`). The canonical full-suite
+command is:
+
+```
+TMPDIR=/tmp PYTHONPATH=src python3 -m unittest discover -s tests -q
+```
+
+Expect **5462 tests, 0 failures, 0 errors, RC=0**. The skip count is
+host-dependent and is NOT a pass/fail signal: 8 recorded on the NUC, **77 on the
+Dell**. All 77 are accounted for by the out-of-repo research artifacts listed
+above; the 69-skip difference is which of those artifacts each host happened to
+have. A green run is `OK` with a real child RC of 0 — never read the result from
+a shell pipeline.
+
+Then run one deterministic decode check on the transported IBAN.js (expect the
+`js_fromcharcode_offset` stage sha256 `5d51e7659955a754…`) and one Office check
+(`extract_office_vba` on the frozen `.doc` → module `ThisDocument`, 55 039 chars,
+source sha256 `d034bd8381f4663a…`). If those hold, the qualified state has
+reproduced; do NOT rerun the six-sample Ornith campaign for documentation.
+
+### Machine-independent setup assumptions (new Linux box)
+1. Linux x86_64, CPU-only, Python ≥ 3.11 (developed on 3.12), CMake present.
+   RAM: the NUC has 64 GiB and measured ~35.8 GiB Ornith peak RSS there; the Dell
+   runs the qualified profile on 30 GiB. Treat RAM as a per-host measurement, not
+   a fixed threshold.
+2. `git clone`, `python3 -m venv .venv && . .venv/bin/activate && pip install -e .`
+3. `python3 scripts/build_native.py` to build the vendored llama.cpp/ggml `.so`s
+   (see the two-manifest-hash gotcha in KV notes if you edit vendored sources).
+4. Transport `models/`, `workdir/samples/`, `workdir/diag/`, `workdir/campaign/`
+   as above; verify SHAs.
+5. `TMPDIR=/tmp` for all runs (a project convention; some sandbox/temp paths assume it).
+6. Qualified analysis server profile: `orbit server --ctx 8192 --threads 6
+   --threads-batch 6 --batch 256 --ubatch 128 --think off` (MTP off — the default).
+7. Performance is host-specific: re-measure with the qualification harness before
+   quoting any number; absolute wall time is contention-sensitive.
+
+The authoritative capability matrix, qualified model/config, full corpus table
+with SHAs and oracle locations, qualification & safety contracts, performance
+baseline, TECHNICAL_STOP decisions, and current limitations are in the **RC38**
+Release State entry below.
 
 ## Permanent Principles
 
@@ -526,10 +689,14 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ### RC38 (deterministic deobfuscation + Office/VBA + qualified malware corpus)
 
-- Current qualified production code: `7da19f9e944a740b1ac9be7be37a88f7cdfc98d5`
-  (`HEAD == origin/main`). Consolidates the post-rc37 ANALYSIS arc (#260 →
-  `7da19f9`) into a qualified release candidate. The release commit adds only
-  `docs/releases/v0.0.1-rc38.md` and this entry; no production behaviour change.
+- Current qualified production code: `7da19f9e944a740b1ac9be7be37a88f7cdfc98d5`.
+  It is the PARENT of the released `HEAD == origin/main == d9b2a67`, not HEAD
+  itself. Consolidates the post-rc37 ANALYSIS arc (#260 → `7da19f9`) into a
+  qualified release candidate. The release commit `d9b2a67` changes only
+  `docs/releases/v0.0.1-rc38.md`, this `AGENTS.md` entry, `MANIFEST.in` (the
+  `prune workdir` hardening) and `README.md` — nothing under `src/` or `tests/`,
+  so the production code at `d9b2a67` is byte-identical to `7da19f9` and there is
+  no production behaviour change.
 - Qualified model: Ornith-1.5-35B-A3B Q4_K_M, sha
   `42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f`; config
   ctx 8192 / threads 6 / threads_batch 6 / batch 256 / ubatch 128 / think off /
@@ -569,11 +736,37 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   - Office/VBA autoexec relationships → `analysis_vba_autoexec.py` →
     `test_analysis_vba_autoexec.py` (30) → MERGED (`d047308`).
 
-- **Qualified malware corpus (6 frozen samples, local-only/untracked):** Fattura
-  FULL · YPS FULL · mine.hta FULL · IBAN FULL · 4b863c7 CORPUS_PASS 4/4 · Office
-  DOC 7/7 PASS. Oracles under `workdir/diag/{corpus_*,iban,js_fold,large_source,
-  corpus_expansion_4}`; multisample bench under `workdir/diag/multisample_bench`;
-  release-closure reconciliation under `workdir/diag/release_corpus_closure`.
+- **Qualified malware corpus (6 frozen samples, local-only / UNTRACKED — must be
+  transported by hand to a new machine; SHA must match the oracles).
+  Status on the Dell: 6/6 PRESENT and hash-exact (verified 2026-09-13):**
+
+  | sample (workdir/samples/) | bytes | sha256[:16] | status | oracle |
+  |---|---:|---|---|---|
+  | Fattura981033956.js | 7706 | `b7cfd5fdeb16d7b5` | FULL | `workdir/diag/fattura_*`, `end_to_end_perf/trajectory_f24aec9.json` |
+  | peXF7I6W.ps1 (YPS) | 1701 | `5eba3e4538cffbde` | FULL | `workdir/diag/arc1_impl/final_YPS.json` |
+  | mine.hta | 50114 | `6840b6d84f7c7190` | FULL | `workdir/diag/corpus_mine_hta/oracle.md` |
+  | 4b863c7be268…js | 45316 | `e1a3a8937909e56d` | CORPUS_PASS 4/4 | `workdir/diag/corpus_4b863c7/oracle.md`, `js_fold/` |
+  | IBAN.js | 7963 | `86e23fa673271308` | FULL | `workdir/diag/iban/oracle.json` (see SHA note below) |
+  | 99eb1d90…74d0809.doc | 217600 | `99eb1d90eb5f0d01` | PASS 7/7 | `workdir/diag/corpus_expansion_4/{ORACLE.md,BLIND_FROZEN.json}` |
+
+  Multisample bench: `workdir/diag/multisample_bench/` (BENCH_REPORT.md,
+  metrics.json). Release-closure reconciliation:
+  `workdir/diag/release_corpus_closure/`. Live IBAN re-verification (2026-09-13,
+  7/7, decode sha `5d51e76599…`): `workdir/diag/verify_iban/`. NB: the IBAN
+  byte-SHA drifted from its oracle's recorded `f74ee186…` on a re-save; the
+  CONTENT is unchanged (decodes to the same `decoded_mmgclz`) — see the IBAN
+  reconciliation bullet below and `workdir/diag/iban/oracle.json`'s
+  `sha_reconciliation` block.
+
+  **`Fattura981033956_origin.js` is NOT a corpus item.** It is the 19 948-byte
+  non-qualified companion of the 7 706-byte qualified `Fattura981033956.js`
+  (see `workdir/diag/comment_view/COMMENT_STRIPPED_VIEW_RESULTS.md`, which lists
+  it explicitly as non-qualified). Both live in `workdir/samples/`. A partial
+  transport that carries only `_origin` and renames it will fail
+  `test_analysis_source_coverage` / `test_analysis_cover_runtime` with
+  `924fb89c… != b7cfd5fd…` — this happened once during the Dell migration.
+  `workdir/samples/trivial_greeting_demo.js` (244 B) is likewise a benign
+  non-corpus fixture, required by `test_oracle_monotonicity`.
 
 - **Corpus qualification contract (established):** deterministic runtime work
   (transforms, EvidenceStore/provenance, canonical IOC, report grounding) must be
@@ -621,11 +814,24 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   preserved and a `sha_reconciliation` block was added in `workdir/diag/iban/
   oracle.json` (diagnostic only; no production change).
 
-- **rc38 validation:** full suite 5,454 passed / 8 skipped / 0 failed (RC=0);
-  QREL-1 qualification tests 92 passed; CLI `--version` → `orbit 0.0.1`;
-  `main == origin/main`, tracked tree clean. Frozen corpus qualification evidence
-  is authoritative — no fresh six-sample Ornith campaign was rerun for
-  documentation.
+- **rc38 validation (measured on the NUC):** full suite 5,454 passed / 8 skipped /
+  0 failed (RC=0); CLI `--version` → `orbit 0.0.1`; `main == origin/main`, tracked
+  tree clean. Frozen corpus qualification evidence is authoritative — no fresh
+  six-sample Ornith campaign was rerun for documentation.
+- **rc38 re-validation on the Dell (2026-09-13, same HEAD):** full suite 5,462
+  tests, `OK (skipped=77)`, 0 failures / 0 errors, real child RC=0. Total test
+  count is identical to the NUC's 5,454 + 8, so there is no test drift; only the
+  skip count moves, for the out-of-repo reasons listed in the migration section.
+- **QREL-1 (source-fresh qualification) — measured decomposition.** QREL-1 is run
+  through `scripts/qualify_fresh.py`, which relaunches a fresh interpreter with a
+  private per-run `PYTHONPYCACHEPREFIX` so no stale `.pyc` can execute:
+  `python3 scripts/qualify_fresh.py -m unittest discover -s tests -p "test_qualif*.py" -q`
+  → **114 tests, OK, RC=0**, being the Qualification Harness (`test_qualification_*`,
+  **83**) plus the source-freshness suite (`test_qualify_fresh`, **31**).
+  The earlier "QREL-1 qualification tests 92 passed" figure recorded here for rc38
+  is unsourced — no run record in `workdir/diag/` or `workdir/campaign/` contains
+  it, and neither QREL-1 subset nor their union measures 92. It has been replaced
+  by the reproducible 83 + 31 = 114 decomposition. No production code is involved.
 - **Release-artifact malware safety:** the 6 real corpus samples are NEVER
   git-tracked (untracked workdir scratch), so a build from a clean checkout
   cannot include them. `MANIFEST.in` was hardened to `prune workdir` + explicit
@@ -636,6 +842,34 @@ This file guides engineering agents and future sessions working on Orbit. It pre
   `recursive-include workdir *.js` glob was a footgun). Verified: the manifest
   file-list resolves to exactly those 6 benign files, 0 corpus samples.
   (`MANIFEST.in` is packaging metadata, not runtime behaviour.)
+  **Second layer added 2026-09-13 (`.gitignore`):** `MANIFEST.in` protects the
+  sdist but did nothing to stop an accidental `git add`, and the corpus/diag
+  directories were only ever *untracked*, not ignored. `.gitignore` now carries
+  `/workdir/samples/*` with the two benign fixtures re-admitted by name
+  (`!/workdir/samples/suspicious_dropper_demo.js`,
+  `!/workdir/samples/vulnerable_service.py`), plus `/workdir/diag/` and
+  `/workdir/campaign/`. Verified: all 8 local samples ignored, both benign
+  fixtures still tracked and not ignored, diag/campaign ignored, and no tracked
+  file anywhere in the repo is shadowed by the new rules. The build backend is
+  plain `setuptools.build_meta` with no VCS file finder, so `.gitignore` cannot
+  change sdist contents and the `MANIFEST.in` guarantee is untouched.
+
+  **Scope of that protection — it is NOT a blanket `git add` safety net.** Only
+  `samples/`, `diag/` and `campaign/` are covered. `workdir/` as a whole is
+  deliberately not ignored, because `workdir/bench/checkpoint/`, `workdir/media/`,
+  `workdir/text/` and the edit fixtures contain legitimately TRACKED files — but
+  those same directories also hold untracked, unignored local scratch, so
+  `git add workdir/media` or `git add -A` is still unsafe. Known untracked
+  residue at the time of writing: `workdir/media/*.png` (analysis screenshots —
+  `sample_to_analyze.png` is by name a rendering of a sample under analysis),
+  `workdir/doc/` (a personal project document), `workdir/bench/server_mtp_*.log`
+  and `selfmtp_resident*.jsonl`, `workdir/__init__.py`, and `workdir/.miktex/`
+  (which the Permanent Principles already say never to touch or stage). Stage
+  `workdir/` paths by explicit filename, never by directory or with `-A`.
+  `workdir/samples/trivial_greeting_demo.js` (244 B, benign) is ignored along
+  with the corpus and is NOT re-admitted, even though `test_oracle_monotonicity`
+  needs it: like the corpus it is transported by hand, so transport it with the
+  six samples.
 
 - See `docs/releases/v0.0.1-rc38.md`.
 
@@ -1032,6 +1266,53 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 - Recovery gate: timeout/cancel with `shell20`, then a new `simple_chat --mtp-required`.
 - Never use a persistent store for RC evidence-lineage smokes.
 
+## Git & Qualification Workflow (as used by the ANALYSIS arc, #260 → rc38)
+
+The workflow every recent production mission followed, and the one a new session
+should follow for any tracked change:
+
+1. Baseline: `main == origin/main`, tracked tree clean. Branch off main
+   (`feat/…`, `fix/…`, or `docs/…`); never commit production code straight to main.
+2. Qualify on the branch BEFORE merge:
+   - focused unit tests for the changed surface, then the full suite
+     (`TMPDIR=/tmp PYTHONPATH=src python3 -m unittest discover -s tests -q` —
+     unittest, never pytest) with a REAL child return code, never one read from a
+     shell pipeline (chunk it if the box's memory-pressure heuristic kills a
+     single huge run; 5462 tests / 0 failed at rc38, skips host-dependent: 8 on
+     the NUC, 77 on the Dell);
+   - a mutation gate for any new deterministic capability — each mutant APPLIED
+     and CAUGHT on an isolated tree copy (see the transform/OLE/autoexec/kind
+     gates under `workdir/diag/*/mutation_gate.py`);
+   - `compileall` and `git diff --check`.
+3. Independent adversarial review (a fresh agent that reads the diff/tests, not
+   the author's summary): require **BLOCKER 0, MAJOR 0**. Fix in-scope findings
+   autonomously and re-review the delta until clean. A real production
+   correctness/safety defect in review → stop, do not paper over it.
+4. Freeze the reviewed commit SHA. Push the branch; verify the remote branch SHA
+   equals the reviewed SHA.
+5. Squash-merge to main from the reviewed content; verify the merged tree is
+   byte-identical to the reviewed tree (per-file sha compare, as the ANALYSIS
+   missions did). Commit source-ONLY — never stage `workdir/` scratch; the malware
+   corpus and diagnostics stay untracked. End commit messages with the session
+   attribution line when one is provided.
+6. Push main; verify `main == origin/main`. Delete the branch (local + remote).
+   Preserve diagnostics/oracles under `workdir/diag/`.
+7. Releases are RC tags (`v0.0.1-rcNN`, annotated, message `Orbit v0.0.1-rcNN`)
+   pointing at the doc/release commit; the GitHub release is a pre-release whose
+   body is the verbatim `docs/releases/v0.0.1-rcNN.md`, with NO attached assets.
+   Build any verification sdist from a CLEAN `git archive` checkout, never the
+   dirty working tree (untracked malware would otherwise be swept in — `MANIFEST.in`
+   is now hardened with `prune workdir` + explicit benign includes as a backstop).
+   Do not tag/release unless the mission explicitly authorises it.
+
+Live model runs (analysis qualification, benchmarks): one fresh session per
+sample via `scripts/live_validate_analysis.py` (controller metrics) or the
+KV-instrumented `workdir/diag/multisample_bench/bench_one.py` (adds a per-call
+KV trace — the live validation script does NOT install `kv_diag.instrument_backend`).
+Kill any leftover `until … do :; done` busy-wait loops before benchmarking (they
+spin at ~37% CPU each and contaminate timings). Absolute wall time on a contended
+box is not a comparable number; token/cache/rate and correctness are.
+
 ## Bounded Multi-Action Planning Shadow
 
 - Bounded multi-action planning is observational only. Production routing,
@@ -1334,13 +1615,26 @@ This file guides engineering agents and future sessions working on Orbit. It pre
 
 ## Suggested Next Objectives
 
-Current state: rc38 is QUALIFIED and READY_TO_RELEASE (HEAD `7da19f9`). The
-single next action is **ORBIT-RELEASE-1** — run the repository-standard
-version/tag/release publication flow for rc38 from the qualified state (tag
-`v0.0.1-rc38`, publish `docs/releases/v0.0.1-rc38.md`). Do NOT open another
-optimization or analysis mission before that.
+Current state (2026-09-13): rc38 is **RELEASED** — tag `v0.0.1-rc38` → `d9b2a67`,
+GitHub pre-release published, main clean. The NUC → Dell migration is CLOSED and
+the Dell is the active workstation. **Post-release research has NOT started.**
+No optimization or analysis mission is pending against the current baseline.
 
-Post-release (research, not pre-release work):
+Recommended next mission: **DELL-INTEL-GPU-BENCH-1** — establish the Dell's own
+CPU baseline and investigate its Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an
+external compatible backend. Constraints that already apply: native `orbit server`
+stays CPU-first with `gpu_layers=0` and no GPU promise (Anti-Goals); a GPU must be
+measured through an external backend such as `llama-server --base-url`, never
+reported as native `orbit server` performance (Benchmarking); use `bench-core`
+metadata; record the results as a Dell profile without overwriting NUC history.
+
+Other post-release research candidates (each a separate mission; do NOT bundle):
+- NPU/OpenVINO or DeepSeek/other model research — all post-release, none promised
+  for the native CPU server.
+- A new corpus item only when a real sample needs a NEW obfuscation family, and
+  only if that family can be made deterministic and fail-closed.
+
+Standing guardrails (apply to all post-release work):
 
 1. Keep the formal-healing whitelist fixed; collect natural malformed production-budget events before considering any expansion.
 2. Investigate wrong-tool and unwanted-tool reliability only as a separate observational mission, without semantic hardcoding or tool substitution.
