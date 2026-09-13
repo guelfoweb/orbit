@@ -1253,6 +1253,60 @@ Release State entry below.
 - GPU must be measured through an external compatible backend, for example `llama-server --base-url`, not as native `orbit server` performance.
 - Native `orbit server` is CPU-first with `gpu_layers=0`.
 
+## Server Startup Profile (auto-calibration)
+
+`orbit server` no longer ships one set of tuning numbers for every machine. It
+resolves `threads`, `threads_batch`, `batch`, `ubatch` and `cache_ram` through a
+precedence chain, measuring only what nobody supplied:
+
+    explicit CLI > explicit env > stored user profile (reserved, no loader yet)
+      > cached auto-calibrated profile > bounded auto-calibration > heuristic
+
+Each level fills only fields still unset, so `--threads 8` alone leaves the rest
+resolvable. **An explicitly supplied value is never measured, never cached over,
+and never reported as auto.** Source: `src/orbit/native_server/server_profile.py`
+(policy, pure) and `server_calibration.py` (the sweep).
+
+- Commands: `orbit server --show-profile` resolves and prints without loading a
+  model or measuring; `orbit server --recalibrate` discards the stored
+  measurement and takes it again. A preview never deletes anything.
+- Env: `ORBIT_THREADS`, `ORBIT_THREADS_BATCH`, `ORBIT_BATCH`, `ORBIT_UBATCH`,
+  `ORBIT_CACHE_RAM`. `ORBIT_`-prefixed on purpose — the old suggest script
+  printed bare `export THREADS=…` for a server that read no environment at all,
+  so its advice had no effect. `scripts/suggest-server-profile.sh` is now a thin
+  wrapper over the same Python heuristic; there is one source of truth.
+- **`cache_ram` is advisory.** It is computed conservatively and reported, but
+  Orbit's native server has no cache-RAM knob to consume it — `--cache-ram` is a
+  `llama-server` option. Treat it as advice for an external llama-server.
+- Cache: `~/.cache/orbit/server-profiles/<fingerprint>.json`, outside the
+  repository because a measurement describes one machine. It records **only
+  measured fields**, never the resolved profile — otherwise a one-off
+  `--batch 1024` would become a permanent "measurement" and a heuristic
+  improvement could never reach a machine that had calibrated. Fingerprint
+  covers CPU model, core counts, RAM class, model identity, backend revision,
+  ctx, and the `low_memory` / MTP / expert-usage flags; a stale
+  `format_version` entry is unlinked on read.
+- Calibration is bounded: candidates derived from topology, one pass each, a 90 s
+  ceiling, KV cleared before and after every candidate, and it runs after the
+  model loads but BEFORE the route-prefix prewarm and before the socket binds —
+  so it measures inference, never a checkpoint restore. Any failure (raise,
+  timeout, every candidate rejected, unwritable cache) falls back to the
+  heuristic and the server still starts. **Nothing auto-enables MTP, GPU, a
+  different ctx, quantization or model.**
+
+**Measured on the Dell (16-core hybrid), and the reason this measures rather
+than counts:** prefill rises 37 → 68 tok/s from 6 to 16 threads while decode
+FALLS 19 → 5.4. Scored against the real cache-restored turn (210 evaluated + 60
+generated) the winner is **threads=6** — the existing qualified value — and 16
+threads would roughly double turn latency. Scoring the full 978-token prompt
+instead would pick 12–16 and regress the machine; that constant is the single
+most consequential line in the calibrator. Candidate table:
+`workdir/diag/autocalibration/`.
+
+Calibration costs ~47 s once per fingerprint (first start 120 s vs 81 s cached,
+on top of a ~24 s prewarm and ~46 s model load). Concurrent server starts each
+measure the other's contention — start them sequentially.
+
 ## Recommended Gates
 
 - Pre-PR: targeted unit tests for the modified area.

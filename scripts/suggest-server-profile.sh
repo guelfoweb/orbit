@@ -1,176 +1,62 @@
 #!/usr/bin/env sh
+# Print the conservative heuristic server profile for this host.
+#
+# This is a PRESENTATION WRAPPER. It used to re-derive thread, batch, ubatch and
+# cache_ram numbers in shell, which made it a second implementation of a policy
+# that also lives in Python -- and the two drifted: the script printed
+# `export THREADS=...` for an `orbit server` that read no environment at all, so
+# its advice had no effect. The policy now lives in exactly one place,
+# `orbit.native_server.server_profile`, and this prints what that says.
+#
+# Note what this does NOT do. It is the heuristic only: it never measures and
+# never reads the profile cache, because a suggestion meant for review should
+# not depend on a benchmark the reader did not watch run. For the real resolved
+# profile, including any measurement Orbit has cached for this machine, use:
+#
+#   orbit server --show-profile
+#
+# and to discard a stored measurement and take it again:
+#
+#   orbit server --recalibrate
+#
+# ORBIT_CACHE_RAM is advisory. Orbit's native server has no cache-RAM knob to
+# pass it to -- it is computed conservatively here for an operator running an
+# external llama-server, and `orbit server` reads the variable only so that
+# `--show-profile` can report what an operator set.
+#
+# `orbit server` already resolves all of this by itself. These exports exist for
+# overriding it explicitly; anything you export here wins over what Orbit would
+# have chosen, and anything you pass on the command line wins over both.
 set -eu
 
-logical_cpus() {
-  if command -v nproc >/dev/null 2>&1; then
-    nproc
-    return 0
-  fi
-  getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1
+usage() {
+    cat <<'USAGE'
+usage: suggest-server-profile.sh [--shell] [--ctx N]
+
+  --shell   print an env block suitable for `eval`
+  --ctx N   context size to size the cache reserve against (default 8192)
+USAGE
 }
 
-physical_cores() {
-  if command -v lscpu >/dev/null 2>&1; then
-    cores_per_socket="$(lscpu | awk -F: '/^Core\\(s\\) per socket:/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
-    sockets="$(lscpu | awk -F: '/^Socket\\(s\\):/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
-    if [ "${cores_per_socket:-}" != "" ] && [ "${sockets:-}" != "" ]; then
-      echo $((cores_per_socket * sockets))
-      return 0
-    fi
-  fi
-  if [ -r /proc/cpuinfo ]; then
-    count="$(awk '
-      /^physical id/ {physical=$4}
-      /^core id/ {core=$4; seen[physical ":" core]=1}
-      END {for (item in seen) total++; print total + 0}
-    ' /proc/cpuinfo)"
-    if [ "$count" -gt 0 ] 2>/dev/null; then
-      echo "$count"
-      return 0
-    fi
-  fi
-  logical_cpus
-}
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) usage; exit 0 ;;
+    esac
+done
 
-memory_gib() {
-  if [ -r /proc/meminfo ]; then
-    awk '/MemTotal:/ {printf "%d\n", ($2 / 1024 / 1024) + 0.5}' /proc/meminfo
-    return 0
-  fi
-  if command -v sysctl >/dev/null 2>&1; then
-    bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
-    awk -v bytes="$bytes" 'BEGIN {printf "%d\n", (bytes / 1024 / 1024 / 1024) + 0.5}'
-    return 0
-  fi
-  echo 0
-}
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-cpu_model() {
-  if [ -r /proc/cpuinfo ]; then
-    awk -F: '/model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo
-    return 0
-  fi
-  if command -v sysctl >/dev/null 2>&1; then
-    sysctl -n machdep.cpu.brand_string 2>/dev/null || true
-    return 0
-  fi
-  echo "unknown"
-}
-
-CPUS="$(logical_cpus)"
-PHYSICAL_CORES="$(physical_cores)"
-RAM_GIB="$(memory_gib)"
-CPU_MODEL="$(cpu_model)"
-
-min() {
-  [ "$1" -le "$2" ] && echo "$1" || echo "$2"
-}
-
-max() {
-  [ "$1" -ge "$2" ] && echo "$1" || echo "$2"
-}
-
-nearest_power_profile_batch() {
-  cores="$1"
-  ram="$2"
-  if [ "$cores" -ge 24 ] && [ "$ram" -ge 96 ]; then
-    echo 512
-  elif [ "$cores" -ge 8 ] && [ "$ram" -ge 32 ]; then
-    echo 384
-  elif [ "$cores" -ge 4 ] && [ "$ram" -ge 16 ]; then
-    echo 256
-  else
-    echo 128
-  fi
-}
-
-nearest_power_profile_ubatch() {
-  cores="$1"
-  ram="$2"
-  if [ "$cores" -ge 16 ] && [ "$ram" -ge 64 ]; then
-    echo 256
-  elif [ "$cores" -ge 4 ] && [ "$ram" -ge 16 ]; then
-    echo 128
-  else
-    echo 64
-  fi
-}
-
-calculated_threads() {
-  cores="$1"
-  logical="$2"
-  ram="$3"
-  if [ "$cores" -le 2 ]; then
-    echo 2
-    return 0
-  fi
-  if [ "$ram" -lt 16 ]; then
-    echo "$(min "$cores" 4)"
-    return 0
-  fi
-  target="$cores"
-  if [ "$cores" -ge 12 ]; then
-    target=$((cores + cores / 3))
-  fi
-  target="$(min "$target" "$logical")"
-  target="$(min "$target" 32)"
-  target="$(max "$target" 4)"
-  echo "$target"
-}
-
-calculated_cache_ram() {
-  ram="$1"
-  if [ "$ram" -ge 128 ]; then
-    echo 32768
-  elif [ "$ram" -ge 96 ]; then
-    echo 24576
-  elif [ "$ram" -ge 48 ]; then
-    echo 8192
-  elif [ "$ram" -ge 24 ]; then
-    echo 6144
-  elif [ "$ram" -ge 16 ]; then
-    echo 4096
-  else
-    echo 2048
-  fi
-}
-
-PROFILE="calculated conservative"
-THREADS="$(calculated_threads "$PHYSICAL_CORES" "$CPUS" "$RAM_GIB")"
-BATCH_SIZE="$(nearest_power_profile_batch "$PHYSICAL_CORES" "$RAM_GIB")"
-UBATCH_SIZE="$(nearest_power_profile_ubatch "$PHYSICAL_CORES" "$RAM_GIB")"
-CACHE_RAM="$(calculated_cache_ram "$RAM_GIB")"
-
-# Keep measured profiles where benchmarks showed stable wins.
-if [ "$PHYSICAL_CORES" -ge 24 ] && [ "$RAM_GIB" -ge 120 ]; then
-  PROFILE="high-core measured"
-  THREADS=32
-  BATCH_SIZE=512
-  UBATCH_SIZE=256
-  CACHE_RAM=32768
-elif [ "$PHYSICAL_CORES" -eq 6 ] && [ "$CPUS" -eq 12 ] && [ "$RAM_GIB" -ge 48 ]; then
-  PROFILE="nuc10 measured"
-  THREADS=6
-  BATCH_SIZE=256
-  UBATCH_SIZE=128
-  CACHE_RAM=8192
+# The repository's own interpreter when there is one, otherwise whatever python3
+# is on PATH -- the module imports nothing outside the standard library, so an
+# uninstalled checkout still works.
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+else
+    echo "suggest-server-profile: no python3 found" >&2
+    exit 1
 fi
 
-cat <<EOF
-# Detected
-# CPU: $CPU_MODEL
-# physical_cores: $PHYSICAL_CORES
-# logical_cpus: $CPUS
-# memory_gib: $RAM_GIB
-# profile: $PROFILE
-# These values are suggestions for orbit server. Review them before exporting.
-# Typical use:
-#   export THREADS=$THREADS BATCH_SIZE=$BATCH_SIZE UBATCH_SIZE=$UBATCH_SIZE CACHE_RAM=$CACHE_RAM
-#   orbit server --port 12120
-# Add --mtp only when intentionally testing native MTP.
-
-export THREADS=$THREADS
-export BATCH_SIZE=$BATCH_SIZE
-export UBATCH_SIZE=$UBATCH_SIZE
-export CACHE_RAM=$CACHE_RAM
-EOF
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+    exec "$PYTHON" -m orbit.native_server.server_profile "$@"
