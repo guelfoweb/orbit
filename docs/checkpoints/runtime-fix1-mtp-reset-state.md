@@ -4,7 +4,7 @@ A correctness fix, not a refactor. Structural refactoring is complete.
 
 ## Baseline
 
-`a6e420efd9bc7b9bf18e2249c9fda8301c0d2cfb`
+`ff041d60f5107d4e09d03a7a68798bb93d95ae79`
 
 ## Two independent root causes
 

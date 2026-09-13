@@ -4,7 +4,7 @@ Fifth step of the incremental, behaviour-preserving runtime refactor.
 
 ## Baseline
 
-`fa805af3bc788fdf6a4b55316b4952c0963dd452`
+`6a49ab5cf4b47d559eeead89397c896a2277dac5`
 
 ## Seam audit — observed truth, not the estimate
 

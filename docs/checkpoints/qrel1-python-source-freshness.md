@@ -4,7 +4,7 @@ Qualification-tooling reliability. No Orbit runtime behaviour changes.
 
 ## Baseline
 
-`a4e13b7dba8920ecd45d59424edfa6a47fa71a45`
+`37b107c25eb36d852626eb5764ed062fcf120391`
 
 ## The REF-6 incident, and the corrected diagnosis
 

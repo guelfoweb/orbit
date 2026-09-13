@@ -25,9 +25,9 @@ functional qualification and performance qualification are separate verdicts.
 
 ## The measured result
 
-From the qualified benchmark, measured at Orbit `10444388` and recorded at
-`a9fa2c31` (the commit between them touches only the harness and the checkpoint;
-`git diff 10444388 a9fa2c31 -- src/` is empty), model
+From the qualified benchmark, measured at Orbit `5e954dab` and recorded at
+`fa294028` (the commit between them touches only the harness and the checkpoint;
+`git diff 5e954dab fa294028 -- src/` is empty), model
 `Ornith-1.5-35B-Q4_K_M.gguf`
 (`42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f`),
 recorded in `workdir/bench/checkpoint/`:

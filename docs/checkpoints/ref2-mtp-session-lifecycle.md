@@ -4,7 +4,7 @@ Second step of the incremental, behaviour-preserving runtime refactor.
 
 ## Baseline
 
-`e9acbb28be5c22f9f36709043ca4a2dc2b850766`
+`3a60bc2fa910425790136060728605266b8013be`
 
 ## Seam audit
 
@@ -44,7 +44,7 @@ Deliberately preserved rather than tidied:
   post-cancel rebuild clear it. Collapsing these would change what `/props`
   reports after a recovered session.
 * **`discard` never frees.** Baseline's failed-reset path (client.py:991-996 at
-  `e9acbb28`) drops the runtime with **zero** `free_persistent_mtp_session`
+  `3a60bc2f`) drops the runtime with **zero** `free_persistent_mtp_session`
   calls, because the native session has already torn itself down. Freeing there
   is a double free. Verified against baseline source, not assumed.
 

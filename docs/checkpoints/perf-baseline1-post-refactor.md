@@ -5,8 +5,8 @@ nothing was tuned. Numbers are one machine's, not a claim about the model.
 
 | Property | Value |
 |---|---|
-| Orbit baseline | `aaf544013a1f398e5587c710316a56ccd4d64e7d` |
-| Historical comparison | `892cfad` (`docs/benchmarks/ornith-1.5-35b-a3b.md`) |
+| Orbit baseline | `9e3aaa2dbcffa98cf976e906c3042a625baf1e2d` |
+| Historical comparison | `aeb8e54` (`docs/benchmarks/ornith-1.5-35b-a3b.md`) |
 | Model inference | YES — one model load |
 
 ## Reference system
@@ -133,9 +133,9 @@ This is BOUNDED SESSION STABILITY, not a long-run soak claim.
 
 Same artifact SHA-256, same machine, same backend build, same ctx/threads/
 batch/ubatch, thinking off, MTP off. The only material variable is the Orbit
-revision (`892cfad` → `aaf5440`), which is what the refactor line changed.
+revision (`aeb8e54` → `9e3aaa2`), which is what the refactor line changed.
 
-| Metric | `892cfad` | `aaf5440` | Delta |
+| Metric | `aeb8e54` | `9e3aaa2` | Delta |
 |---|---:|---:|---:|
 | Prefill | 29.0 tok/s | 29.8 tok/s | **+2.8 %** |
 | Generation | 8.3 tok/s | 8.66 tok/s | **+4.4 %** |

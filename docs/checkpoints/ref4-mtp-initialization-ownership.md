@@ -5,7 +5,7 @@ the REF-2/REF-3 seam.
 
 ## Baseline
 
-`b7308a71d2ad1ddc70181477ef4b4f66fb028ea3`
+`4cb490f57630bd95566b86103babd1dc4fd832d6`
 
 ## Audit: observed truth, not the estimate
 

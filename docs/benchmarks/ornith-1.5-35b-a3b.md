@@ -18,7 +18,7 @@ Raw machine-readable results: [`ornith-1.5-35b-a3b.json`](ornith-1.5-35b-a3b.jso
 | GPU | none |
 | OS | Linux 7.0.0-30-generic x86_64 |
 | llama.cpp build | b9551 (`379ac66`) |
-| Orbit revision | `892cfad` |
+| Orbit revision | `aeb8e54` |
 
 ## Model
 

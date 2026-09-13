@@ -19,18 +19,18 @@ day (DELL-MIGRATION-CLOSURE-1): code, model, corpus and diagnostics are all
 present and verified on the Dell.
 
 ### Baseline (the anchor for a migration)
-- `main == origin/main == 367104c9f136742ff74556be5d90c02d95799db6`, tracked tree
+- `main == origin/main == c1e466297f7025dadaa7425fa968c661abdf5305`, tracked tree
   clean. Untracked `workdir/` scratch is expected and is NOT dirt to clean up —
   read the staging warning at the end of the RC38 entry before `git add`.
-- Published release: `v0.0.1-rc38` (annotated tag → `d9b2a67`; GitHub pre-release
+- Published release: `v0.0.1-rc38` (annotated tag → `95ba0d5`; GitHub pre-release
   at https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc38, no attached
   assets by convention). Package version stays `0.0.1`; releases are RC tags.
-  `d9b2a67` = the rc38 doc/release commit; its qualified PRODUCTION code is
-  byte-identical to its parent `7da19f9`.
+  `95ba0d5` = the rc38 doc/release commit; its qualified PRODUCTION code is
+  byte-identical to its parent `9181c40`.
 - **`main` is six commits AHEAD of the released tag** (`git describe` →
   `v0.0.1-rc38-6-g…`). **Post-release research HAS started** — see
   "Post-RC38 (unreleased on `main`)" in Release State. Three of those commits
-  change production behaviour (`cbe577e`, `065dd00`, `367104c`), so the rc38
+  change production behaviour (`fa67e5a`, `47d6b4b`, `c1e4662`), so the rc38
   entry below no longer describes everything `main` does; read both.
 - No in-progress mission. The repository is at a clean, qualified state: each
   post-rc38 commit was qualified, adversarially reviewed to BLOCKER 0 / MAJOR 0
@@ -142,7 +142,7 @@ TMPDIR=/tmp PYTHONPATH=src python3 -m unittest discover -s tests -q
 ```
 
 Expect **0 failures, 0 errors, RC=0**; the test count grows with every mission
-(5462 at rc38, 5588 at `065dd00`, 5622 after DELL-RUNTIME-AND-IBAN-CLOSURE-1 —
+(5462 at rc38, 5588 at `47d6b4b`, 5622 after DELL-RUNTIME-AND-IBAN-CLOSURE-1 —
 all measured on the Dell). The skip count is host-dependent and is NOT a
 pass/fail signal: 8 recorded on the NUC, **77 on the Dell**. All 77 are accounted for by the out-of-repo research artifacts listed
 above; the 69-skip difference is which of those artifacts each host happened to
@@ -168,7 +168,7 @@ reproduced; do NOT rerun the six-sample Ornith campaign for documentation.
 5. `TMPDIR=/tmp` for all runs (a project convention; some sandbox/temp paths assume it).
 6. Qualified analysis server profile: `orbit server --ctx 8192 --threads 6
    --threads-batch 6 --batch 256 --ubatch 128 --think off` (MTP off — the default).
-   Passing all four tuning flags explicitly is deliberate: since `065dd00` an
+   Passing all four tuning flags explicitly is deliberate: since `47d6b4b` an
    omitted field would be auto-calibrated per machine, and qualification runs on
    the qualified numbers, not on measured ones.
 7. Performance is host-specific: re-measure with the qualification harness before
@@ -658,12 +658,12 @@ Release State entry below.
 
 - Current published baseline: `v0.0.1-rc34`.
 - Release URL: https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc34
-- Qualified production code: `dbc63cbc638ea6ea3a9d4ce4020547eea78050b0`; the
+- Qualified production code: `183add43145a5cc3f8cb4f413d6777894949e383`; the
   release commit adds only `docs/releases/v0.0.1-rc34.md` and this entry.
-- Includes squash merges from #191 through #218, ending with `dbc63cb` from
-  #218, `4da9b4c` from #213, `775062e` from #217, `ef330d9` from #216,
-  `f386e50` from #215, `12671fe` from #214, `6fcf2f5` from #212, `6f9040a`
-  from #211, `06c4c84` from #210, `ad08147` from #209, and `d351a7f` from #207.
+- Includes squash merges from #191 through #218, ending with `183add4` from
+  #218, `feef345` from #213, `6effa5a` from #217, `6e87211` from #216,
+  `d35fd8a` from #215, `c6f92b7` from #214, `1f5b79c` from #212, `4c74928`
+  from #211, `fef1d4f` from #210, `c205d52` from #209, and `8657488` from #207.
 - Focus: deterministic context management, evidence-grounded finalization, two
   more verified native models, and exact multi-turn chat correctness.
 - Admission is decided before every model call, and a session that cannot carry
@@ -690,24 +690,24 @@ Release State entry below.
 
 ### RC35–RC37 (analysis workflow)
 
-- rc35 (`d29490a`): explicit CHAT/ANALYSIS workflow modes; sandboxed
+- rc35 (`9864c3b`): explicit CHAT/ANALYSIS workflow modes; sandboxed
   `execute_analysis`; attested evidence; `/report`; opt-in bounded autonomous
   mode; rolling KV reuse across chat and analysis turns.
-- rc36 (`0753dc7`): correctness hotfix — a grounded analysis report can no longer
+- rc36 (`8d8f31f`): correctness hotfix — a grounded analysis report can no longer
   cite a value the analysis has already corrected.
-- rc37 (`6dfa374`): UX (the analysis progress line), native-library isolation,
+- rc37 (`ff5541f`): UX (the analysis progress line), native-library isolation,
   and documentation; the analysis runtime itself largely unchanged.
 - See `docs/releases/v0.0.1-rc35.md`, `…rc36.md`, `…rc37.md`.
 
 ### RC38 (deterministic deobfuscation + Office/VBA + qualified malware corpus)
 
-- Current qualified production code: `7da19f9e944a740b1ac9be7be37a88f7cdfc98d5`.
-  It is the PARENT of the released `HEAD == origin/main == d9b2a67`, not HEAD
-  itself. Consolidates the post-rc37 ANALYSIS arc (#260 → `7da19f9`) into a
-  qualified release candidate. The release commit `d9b2a67` changes only
+- Current qualified production code: `9181c4020915cfd1905ce6caf182f57f9d84547e`.
+  It is the PARENT of the released `HEAD == origin/main == 95ba0d5`, not HEAD
+  itself. Consolidates the post-rc37 ANALYSIS arc (#260 → `9181c40`) into a
+  qualified release candidate. The release commit `95ba0d5` changes only
   `docs/releases/v0.0.1-rc38.md`, this `AGENTS.md` entry, `MANIFEST.in` (the
   `prune workdir` hardening) and `README.md` — nothing under `src/` or `tests/`,
-  so the production code at `d9b2a67` is byte-identical to `7da19f9` and there is
+  so the production code at `95ba0d5` is byte-identical to `9181c40` and there is
   no production behaviour change.
 - Qualified model: Ornith-1.5-35B-A3B Q4_K_M, sha
   `42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f`; config
@@ -734,19 +734,19 @@ Release State entry below.
   - report deterministic coverage → `analysis_runtime.py` `deterministic_sections` →
     `test_analysis_report_deterministic_coverage.py` (7) → MERGED.
   - evidence kind fidelity (`analysis_action`, not `fetch`) → `evidence.py` →
-    `test_evidence_kind_fidelity.py` (11) → MERGED (`7da19f9`).
+    `test_evidence_kind_fidelity.py` (11) → MERGED (`9181c40`).
   - OLE2/CFB Office preflight + MS-OVBA extraction → `analysis_ole.py` →
-    `test_analysis_ole.py` (36) → MERGED (`1d161f6`).
+    `test_analysis_ole.py` (36) → MERGED (`ce1f750`).
   - VBScript/PowerShell Chr-offset → `analysis_deobfuscate.py`
-    `find_vbscript_chr_stages` → `test_analysis_deobfuscate.py` (72) → MERGED (`6de28ea`).
+    `find_vbscript_chr_stages` → `test_analysis_deobfuscate.py` (72) → MERGED (`442d008`).
   - JS string-array ProgID folding → `analysis_deobfuscate.py`
-    `find_js_stringarray_fold_stages` → `test_analysis_js_stringarray_fold.py` (18) → MERGED (`8fd7586`).
+    `find_js_stringarray_fold_stages` → `test_analysis_js_stringarray_fold.py` (18) → MERGED (`f2f59a4`).
   - JS `String.fromCharCode` constant offset → `analysis_deobfuscate.py`
-    `find_js_fromcharcode_stages` → `test_analysis_fromcharcode.py` (43) → MERGED (`7fab248`).
+    `find_js_fromcharcode_stages` → `test_analysis_fromcharcode.py` (43) → MERGED (`1fc5722`).
   - VBA byte-offset + StrReverse → `analysis_vba_eval.py` + `analysis_deobfuscate.py`
-    `find_vba_byteoffset_stages` → `test_analysis_vba_eval.py` (56) → MERGED (`1d1ae55`).
+    `find_vba_byteoffset_stages` → `test_analysis_vba_eval.py` (56) → MERGED (`131c3fd`).
   - Office/VBA autoexec relationships → `analysis_vba_autoexec.py` →
-    `test_analysis_vba_autoexec.py` (30) → MERGED (`d047308`).
+    `test_analysis_vba_autoexec.py` (30) → MERGED (`c247187`).
 
 - **Qualified malware corpus (6 frozen samples, local-only / UNTRACKED — must be
   transported by hand to a new machine; SHA must match the oracles).
@@ -754,7 +754,7 @@ Release State entry below.
 
   | sample (workdir/samples/) | bytes | sha256[:16] | status | oracle |
   |---|---:|---|---|---|
-  | Fattura981033956.js | 7706 | `b7cfd5fdeb16d7b5` | FULL | `workdir/diag/fattura_*`, `end_to_end_perf/trajectory_f24aec9.json` |
+  | Fattura981033956.js | 7706 | `b7cfd5fdeb16d7b5` | FULL | `workdir/diag/fattura_*`, `end_to_end_perf/trajectory_79f9ae8.json` |
   | peXF7I6W.ps1 (YPS) | 1701 | `5eba3e4538cffbde` | FULL | `workdir/diag/arc1_impl/final_YPS.json` |
   | mine.hta | 50114 | `6840b6d84f7c7190` | FULL | `workdir/diag/corpus_mine_hta/oracle.md` |
   | 4b863c7be268…js | 45316 | `e1a3a8937909e56d` | CORPUS_PASS 4/4 | `workdir/diag/corpus_4b863c7/oracle.md`, `js_fold/` |
@@ -892,25 +892,25 @@ is no rc39 tag and no release notes file for them: `main` is ahead of the last r
 normal post-release state, not an omission. Do not create a tag or release to
 "fix" it (Permanent Principles). Newest last:
 
-- `d1c45e6` *docs: close the Dell migration handoff* — documentation only.
-- `cbe577e` *fix(analysis): an empty plan is asked once more when the runtime
+- `b465ed6` *docs: close the Dell migration handoff* — documentation only.
+- `fa67e5a` *fix(analysis): an empty plan is asked once more when the runtime
   already decoded something* — **production behaviour change**, see the
   invariants below.
-- `ffc4305` *docs: record the Dell CPU CHAT cache baseline for the GPU mission*
+- `c9ace69` *docs: record the Dell CPU CHAT cache baseline for the GPU mission*
   — documentation only; closed CHAT-FIRST-TURN-CACHE-REUSE-1 as OUTCOME A (no
   regression, no production change). The baseline table it produced is under
   Suggested Next Objectives; evidence in `workdir/diag/chat_prefix_reuse/`.
-- `065dd00` *feat(server): resolve a measured startup profile instead of
+- `47d6b4b` *feat(server): resolve a measured startup profile instead of
   shipping one machine's numbers* — **production behaviour change**; `orbit
   server` now resolves `threads`/`threads_batch`/`batch`/`ubatch`/`cache_ram`
   through a precedence chain and may spend ~47 s once per fingerprint measuring
   them. Full contract in "Server Startup Profile (auto-calibration)"; evidence
   in `workdir/diag/autocalibration/`.
-- `367104c` *fix(server): calibrate on warm weights and prefer fewer threads;
+- `c1e4662` *fix(server): calibrate on warm weights and prefer fewer threads;
   render a zero-step report* (#324) — **production behaviour change**; the
   DELL-RUNTIME-AND-IBAN-CLOSURE-1 entry below.
 
-**Empty-plan re-ask invariant (`cbe577e`) — what a future session must not
+**Empty-plan re-ask invariant (`fa67e5a`) — what a future session must not
 undo.** An empty PLAN stays legitimate: a model that has enough evidence may
 plan nothing and the run reports from what it holds. The change is narrow. When
 the deterministic transform preflight (which runs in `__post_init__`, before any
@@ -941,7 +941,7 @@ This is NOT a licence to add replanning. No new model call beyond the existing
 bounded plan accounting, no sample-specific condition, no infinite replan, no
 REPORT prose parsed to reopen analysis.
 
-**DELL-RUNTIME-AND-IBAN-CLOSURE-1 (2026-09-13, merged as `367104c`, #324) — two
+**DELL-RUNTIME-AND-IBAN-CLOSURE-1 (2026-09-13, merged as `c1e4662`, #324) — two
 symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runtime_iban_closure/`
 (`RESULTS.md` is the record; `mutation_gate.py` 12/12 CAUGHT).
 
@@ -1477,7 +1477,7 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
 - If `/props` does not respond, `backend_props: unavailable` must not fail the benchmark.
 - Always record commit/tag, model, ctx, threads, MTP, tools, and prewarm.
 - `scripts/suggest-server-profile.sh` is a conservative starting point, not a guarantee of optimal tuning.
-- **Since `065dd00`, record the RESOLVED profile, not the flags you passed.** Any
+- **Since `47d6b4b`, record the RESOLVED profile, not the flags you passed.** Any
   of `threads`/`threads_batch`/`batch`/`ubatch` you leave unspecified is filled
   from a cached measurement, a calibration sweep or the heuristic — so two runs
   launched with identical command lines on the same box can run different
@@ -1865,18 +1865,18 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 ## Main Commits
 
-- post-rc38 (unreleased, newest last): `d1c45e6` migration-handoff closure,
-  `cbe577e` empty-plan re-ask + atomic `adopt_plan`, `ffc4305` Dell CPU CHAT
-  cache baseline, `065dd00` measured server startup profile, then
-  `367104c` DELL-RUNTIME-AND-IBAN-CLOSURE-1 (#324: calibration warm-up +
+- post-rc38 (unreleased, newest last): `b465ed6` migration-handoff closure,
+  `fa67e5a` empty-plan re-ask + atomic `adopt_plan`, `c9ace69` Dell CPU CHAT
+  cache baseline, `47d6b4b` measured server startup profile, then
+  `c1e4662` DELL-RUNTIME-AND-IBAN-CLOSURE-1 (#324: calibration warm-up +
   tie-break, REPL zero-step report, native thread read-back). See the "Post-RC38 (unreleased on `main`)" entry in Release State.
-- rc38 ANALYSIS arc (post-rc37, #260 → `7da19f9`): see the RC38 Release State
-  entry above for the per-capability merge SHAs (network-deny `92a4048`,
-  fromCharCode `7fab248`, Chr-offset `6de28ea`, string-array fold `8fd7586`,
-  byte-offset+StrReverse `1d1ae55`, OLE/VBA extraction `1d161f6`, autoexec
-  `d047308`, evidence-kind fidelity `7da19f9`, plus the structured controller,
+- rc38 ANALYSIS arc (post-rc37, #260 → `9181c40`): see the RC38 Release State
+  entry above for the per-capability merge SHAs (network-deny `35ae411`,
+  fromCharCode `1fc5722`, Chr-offset `442d008`, string-array fold `f2f59a4`,
+  byte-offset+StrReverse `131c3fd`, OLE/VBA extraction `ce1f750`, autoexec
+  `c247187`, evidence-kind fidelity `9181c40`, plus the structured controller,
   completion shadow, source-coverage, and report-grounding fixes).
-- rc35–rc37: `6dfa374` (rc37), `0753dc7` (rc36), `d29490a` (rc35) — the analysis
+- rc35–rc37: `ff5541f` (rc37), `8d8f31f` (rc36), `9864c3b` (rc35) — the analysis
   workflow, the report-citation hotfix, and UX/isolation.
 - `2aada5c` Add release notes for v0.0.1-rc23
 - `0a446a2` Harden mtmd ABI and record vendor provenance (#152)
@@ -1923,16 +1923,16 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 ## Suggested Next Objectives
 
-Current state (2026-09-13): rc38 is **RELEASED** — tag `v0.0.1-rc38` → `d9b2a67`,
+Current state (2026-09-13): rc38 is **RELEASED** — tag `v0.0.1-rc38` → `95ba0d5`,
 GitHub pre-release published. The NUC → Dell migration is CLOSED and the Dell is
 the active workstation. **Post-release research is UNDER WAY**: `main` is four
-commits ahead of the tag at `065dd00`, tracked tree clean, no mission in flight.
+commits ahead of the tag at `47d6b4b`, tracked tree clean, no mission in flight.
 Closed since the release — do not reopen any of them without new evidence:
 
-- CHAT-FIRST-TURN-CACHE-REUSE-1 → OUTCOME A, no regression, doc only (`ffc4305`);
+- CHAT-FIRST-TURN-CACHE-REUSE-1 → OUTCOME A, no regression, doc only (`c9ace69`);
   it produced the Dell CPU baseline immediately below.
-- The empty-plan re-ask and `adopt_plan` atomicity fix (`cbe577e`).
-- The measured server startup profile (`065dd00`).
+- The empty-plan re-ask and `adopt_plan` atomicity fix (`fa67e5a`).
+- The measured server startup profile (`47d6b4b`).
 - DELL-RUNTIME-AND-IBAN-CLOSURE-1: cold-first-candidate calibration + REPL zero-step
   report rendering (see the Post-RC38 entry). The Dell currently runs under a 17 W
   package cap (host state, P4): quote 33-38 / 12-16 tok/s for this boot, not the
@@ -1968,7 +1968,7 @@ measured through an external backend such as `llama-server --base-url`, never
 reported as native `orbit server` performance (Benchmarking); use `bench-core`
 metadata; record the results as a Dell profile without overwriting NUC history.
 
-### Authoritative Dell CPU CHAT baseline (2026-09-13, `cbe577e`)
+### Authoritative Dell CPU CHAT baseline (2026-09-13, `fa67e5a`)
 
 Measured for DELL-INTEL-GPU-BENCH-1 so CPU and GPU are compared under MATCHED
 cache states. Ornith-1.5-35B-A3B Q4_K_M, ctx 8192, threads 6/6, batch 256,
@@ -1998,7 +1998,7 @@ precedes `app.py:900` — at a measured cost of **23.8 s of blocking prefill and
 state-save on every server start**, whether or not a chat ever happens.
 `ORBIT_KV_PREFIX_PREWARM` defaults to `startup`; the Ornith reuse resolver
 defaults to enabled (`ornith_route_prefix.py:45`) and the env var is opt-OUT
-(`=0` disables). Note bc25fff's own message says "opt-in", which was wrong when
+(`=0` disables). Note 9a26838's own message says "opt-in", which was wrong when
 written — the default has never been False.
 
 **For DELL-INTEL-GPU-BENCH-1 this is the trap to avoid.** An external
