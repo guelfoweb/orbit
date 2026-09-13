@@ -34,6 +34,7 @@ from .rolling_anchor_store import RollingAnchorStore
 from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_chat, render_gemma4_route_prompt_segments
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
+from . import client_status
 from .kv_diag import build_prompt_component_tokens, emit_decode_kv_state, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_strict_append_miss, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .artifact_capabilities import verified_artifact_supports
@@ -417,183 +418,28 @@ class NativeLlamaClient:
         return self._session.snapshot(backend_mode=self._current_backend_mode())
 
     def final_prefix_experiment_status(self) -> dict[str, object]:
-        status = self._final_prefix_status
-        profile = getattr(self, "model_profile", None)
-        profile_eligible = profile is None or profile.gemma_prefix_reuse_supported
-        return {
-            "enabled": self.config.final_prefix_experiment_enabled and profile_eligible,
-            "initialized": status.initialized,
-            "prefix_tokens": status.prefix_tokens,
-            "capture_count": status.capture_count,
-            "restore_count": status.restore_count,
-            "fallback_count": status.fallback_count,
-            "failure_reason": status.failure_reason,
-            "last_used": status.last_used,
-            "checkpoint_size_bytes": self._final_prefix_anchor_state.checkpoint_size,
-        }
+        return client_status.final_prefix_experiment_status(self)
 
     def qwen_route_prefix_reuse_status(self) -> dict[str, object]:
-        status = self._qwen_route_prefix_status
-        profile = getattr(self, "model_profile", None)
-        profile_eligible = (
-            getattr(profile, "profile_id", None) == QWEN36_PROFILE_ID
-            and getattr(profile, "verified", False)
-            and self._model_metadata_identity.get("general.file_type") == "15"
-        )
-        spec = self._qwen_route_prefix_spec
-        return {
-            "enabled": self.config.qwen_route_prefix_reuse_enabled and profile_eligible,
-            "source": self.config.qwen_route_prefix_reuse_source,
-            "config_error": self.config.qwen_route_prefix_reuse_config_error,
-            "initialized": status.initialized,
-            "prefix_tokens": status.prefix_tokens,
-            "capture_count": status.capture_count,
-            "restore_count": status.restore_count,
-            "fallback_count": status.fallback_count,
-            "invalidation_count": status.invalidation_count,
-            "failure_reason": status.failure_reason,
-            "last_used": status.last_used,
-            "checkpoint_size_bytes": self._qwen_route_prefix_anchor_state.checkpoint_size,
-            "profile_identity": getattr(profile, "profile_id", None),
-            "template_identity": getattr(profile, "template_sha256", None),
-            "tokenizer_identity": hash_text(QWEN_ROUTE_TOKENIZER_IDENTITY),
-            "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
-            "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
-        }
+        return client_status.qwen_route_prefix_reuse_status(self)
 
     def qwen3_coder_route_prefix_reuse_status(self) -> dict[str, object]:
-        status = self._qwen3_coder_route_prefix_status
-        profile = getattr(self, "model_profile", None)
-        profile_eligible = (
-            getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
-            and getattr(profile, "verified", False)
-            and self._model_metadata_identity.get("general.file_type") == "15"
-        )
-        spec = self._qwen3_coder_route_prefix_spec
-        return {
-            "enabled": self.config.qwen3_coder_route_prefix_reuse_enabled and profile_eligible,
-            "source": self.config.qwen3_coder_route_prefix_reuse_source,
-            "config_error": self.config.qwen3_coder_route_prefix_reuse_config_error,
-            "initialized": status.initialized,
-            "prefix_tokens": status.prefix_tokens,
-            "capture_count": status.capture_count,
-            "restore_count": status.restore_count,
-            "fallback_count": status.fallback_count,
-            "invalidation_count": status.invalidation_count,
-            "failure_reason": status.failure_reason,
-            "last_used": status.last_used,
-            "checkpoint_size_bytes": self._qwen3_coder_route_prefix_anchor_state.checkpoint_size,
-            "profile_identity": getattr(profile, "profile_id", None),
-            "template_identity": getattr(profile, "template_sha256", None),
-            "tokenizer_identity": hash_text(QWEN3_CODER_ROUTE_TOKENIZER_IDENTITY),
-            "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
-            "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
-        }
+        return client_status.qwen3_coder_route_prefix_reuse_status(self)
 
     def ornith_route_prefix_reuse_status(self) -> dict[str, object]:
-        # Observability parity with the Qwen route-prefix accessors above: the
-        # Ornith status object is maintained by the runtime but was never
-        # surfaced, so an Ornith reuse REFUSAL reason was not observable. This
-        # only reads runtime-owned state; it changes no reuse/cache behaviour.
-        status = self._ornith_route_prefix_status
-        profile = getattr(self, "model_profile", None)
-        profile_eligible = (
-            getattr(profile, "profile_id", None) == ORNITH15_PROFILE_ID
-            and getattr(profile, "verified", False)
-            and self._model_metadata_identity.get("general.file_type") == "15"
-        )
-        spec = self._ornith_route_prefix_spec
-        return {
-            "enabled": self.config.ornith_route_prefix_reuse_enabled and profile_eligible,
-            "source": self.config.ornith_route_prefix_reuse_source,
-            "config_error": self.config.ornith_route_prefix_reuse_config_error,
-            "initialized": status.initialized,
-            "prefix_tokens": status.prefix_tokens,
-            "capture_count": status.capture_count,
-            "restore_count": status.restore_count,
-            "fallback_count": status.fallback_count,
-            "invalidation_count": status.invalidation_count,
-            "failure_reason": status.failure_reason,
-            "last_used": status.last_used,
-            "checkpoint_size_bytes": self._ornith_route_prefix_anchor_state.checkpoint_size,
-            "profile_identity": getattr(profile, "profile_id", None),
-            "template_identity": getattr(profile, "template_sha256", None),
-            "tokenizer_identity": hash_text(ORNITH_ROUTE_TOKENIZER_IDENTITY),
-            "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
-            "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
-        }
+        return client_status.ornith_route_prefix_reuse_status(self)
 
     def qwen36_shell_tool_prefix_reuse_status(self) -> dict[str, object]:
-        with self._qwen36_shell_tool_prefix_lock:
-            status = self._qwen36_shell_tool_prefix_status
-            profile = getattr(self, "model_profile", None)
-            profile_eligible = (
-                getattr(profile, "profile_id", None) == QWEN36_PROFILE_ID
-                and getattr(profile, "verified", False)
-                and self._model_metadata_identity.get("general.file_type") == "15"
-            )
-            spec = self._qwen36_shell_tool_prefix_spec
-            return {
-                "enabled": self.config.qwen36_shell_tool_prefix_reuse_enabled and profile_eligible,
-                "source": self.config.qwen36_shell_tool_prefix_reuse_source,
-                "config_error": self.config.qwen36_shell_tool_prefix_reuse_config_error,
-                "initialized": status.initialized,
-                "prefix_tokens": status.prefix_tokens,
-                "capture_count": status.capture_count,
-                "restore_count": status.restore_count,
-                "fallback_count": status.fallback_count,
-                "invalidation_count": status.invalidation_count,
-                "failure_reason": status.failure_reason,
-                "last_used": status.last_used,
-                "checkpoint_size_bytes": self._qwen36_shell_tool_prefix_anchor_state.checkpoint_size,
-                "checkpoint_identity": QWEN36_SHELL_TOOL_PREFIX_FORMAT_VERSION,
-                "profile_identity": getattr(profile, "profile_id", None),
-                "template_identity": getattr(profile, "template_sha256", None),
-                "tokenizer_identity": hash_text(QWEN36_SHELL_TOOL_TOKENIZER_IDENTITY),
-                "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
-                "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
-                "tool_schema_hash": spec.tool_schema_hash if spec is not None else None,
-            }
+        return client_status.qwen36_shell_tool_prefix_reuse_status(self)
 
     def compatibility_diagnostics(self) -> dict[str, object]:
-        profile = getattr(self, "model_profile", None)
-        if profile is None:
-            return {
-                "model_family": "unknown",
-                "compatibility_profile": "uninitialized",
-                "verified": False,
-                "failure_reason": "model_profile_uninitialized",
-            }
-        diagnostics = profile.diagnostics(thinking_enabled=self.config.thinking)
-        diagnostics["chat_bridge_loaded"] = self.chat_bridge is not None
-        diagnostics["chat_bridge_revision_bound"] = bool(
-            self.chat_bridge is not None and self.chat_bridge.build_identity
-        )
-        return diagnostics
+        return client_status.compatibility_diagnostics(self)
 
     def model_load_status(self) -> dict[str, bool | None]:
-        return {
-            "low_memory": self.config.low_memory,
-            "cpu_repack": self._cpu_repack_enabled,
-        }
+        return client_status.model_load_status(self)
 
     def moe_expert_usage_status(self) -> dict[str, object]:
-        base = {
-            "enabled": self.config.moe_expert_usage_enabled,
-            "available": self.lib.expert_usage_available,
-            "counter_storage_bytes": self.lib.expert_usage_storage_size(),
-            "scope": "process_cpu_backend",
-        }
-        if not self.config.moe_expert_usage_enabled:
-            return base
-        shape = self._moe_expert_usage_shape()
-        if shape is None:
-            return {**base, "error": "model_moe_metadata_unavailable"}
-        counts, tokens = self.lib.expert_usage_snapshot()
-        return {
-            **base, "architecture": shape[0],
-            **summarize_expert_usage(counts, tokens, layers=shape[1], experts=shape[2], active=shape[3]),
-        }
+        return client_status.moe_expert_usage_status(self)
 
     def reset_moe_expert_usage(self) -> dict[str, object]:
         if not self.config.moe_expert_usage_enabled:
