@@ -917,14 +917,22 @@ def _model_identity_for_profile(args) -> "tuple[str, int]":
         return "", 0
 
 
-def _resolve_startup_profile(args, *, calibrator=None) -> Resolution:
+def _resolve_startup_profile(args, *, calibrator=None, model_identity=None) -> Resolution:
     """Walk the precedence chain for this invocation.
 
     Separated from `run_server` so `--show-profile` and the real start resolve
     through exactly the same code: a preview that could disagree with the thing
     it previews would be worse than no preview.
+
+    `model_identity` lets the preview pass the fingerprint it already resolved
+    for the selected model (so it does not silently fall back to the default
+    model's identity); real startup passes nothing and fingerprints from args
+    exactly as before.
     """
-    model_identity, model_bytes = _model_identity_for_profile(args)
+    if model_identity is None:
+        model_identity, model_bytes = _model_identity_for_profile(args)
+    else:
+        model_identity, model_bytes = model_identity
     return resolve_profile(
         cli={
             "threads": args.threads,
@@ -947,8 +955,99 @@ def _resolve_startup_profile(args, *, calibrator=None) -> Resolution:
     )
 
 
+def _resolve_preview_target(args) -> "tuple[str, str, tuple[str, int], bool] | int":
+    """Resolve, read-only, which model `--show-profile` should describe.
+
+    Mirrors the model resolution a real start uses -- an explicit path/id, the
+    shared interactive selection, or the default model -- and returns the
+    display name, a path description, the fingerprint identity, and whether the
+    model is absent locally. It never downloads or loads a model. Returns an int
+    exit code only when an interactive selection is cancelled or invalid.
+    """
+    explicit_model = getattr(args, "model", None)
+    if explicit_model is not None:
+        path = Path(explicit_model)
+        present = path.is_file()
+        disp = str(path) if present else f"{path} (not present locally)"
+        return path.name, disp, _model_identity_for_profile(args), (not present)
+    if getattr(args, "model_id", None) is not None:
+        try:
+            path = resolve_bootstrap_paths(args).model
+        except Exception:
+            path = None
+        present = bool(path and Path(path).is_file())
+        name = Path(path).name if path else str(args.model_id)
+        disp = str(path) if present else (f"{path} (not present locally)" if path else "(unresolved)")
+        return name, disp, _model_identity_for_profile(args), (not present)
+    if _interactive_model_selection_requested(args):
+        chosen = _choose_verified_model(args)
+        if isinstance(chosen, int):
+            return chosen
+        row, _build_bin = chosen
+        if row.local == "AVAILABLE":
+            # Set the resolved path so the fingerprint matches what a real start
+            # would load; no download, no load -- this is still a preview.
+            args.model = Path(row.path_or_action)
+            # Memory mode is part of the same interactive selection and is a
+            # fingerprint axis, so a low-memory-capable model must ask here too;
+            # otherwise the preview would report the standard-mode cache while a
+            # real start under low memory keys a different fingerprint.
+            memory_exit = _select_memory_mode(args, row)
+            if memory_exit is not None:
+                return memory_exit
+            return row.model, row.path_or_action, _model_identity_for_profile(args), False
+        # MISSING: an honest heuristic preview, never a download.
+        return row.model, "(not present locally; downloaded and calibrated on normal startup)", ("", 0), True
+    # Non-interactive with no explicit model: the default a real non-interactive
+    # start would use, named so the operator is never shown an unlabelled generic
+    # profile.
+    try:
+        path = resolve_bootstrap_paths(args).model
+    except Exception:
+        path = None
+    present = bool(path and Path(path).is_file())
+    name = Path(path).name if path else str(DEFAULT_MODEL_ID)
+    disp = str(path) if present else (f"{path} (not present locally)" if path else f"{DEFAULT_MODEL_ID} (default)")
+    return name, disp, _model_identity_for_profile(args), (not present)
+
+
+def _show_profile(args) -> int:
+    """`--show-profile`: report the resolved profile for the model a real start
+    would use, read-only. No calibrator, no model load, no cache mutation."""
+    target = _resolve_preview_target(args)
+    if isinstance(target, int):
+        return target
+    name, path_display, model_identity, missing = target
+    preview = _resolve_startup_profile(args, model_identity=model_identity)
+    print(f"model: {name}")
+    print(f"path: {path_display}")
+    for line in render_profile_lines(preview):
+        print(line)
+    if missing:
+        print("note: this model is not present locally; the values above are a "
+              "heuristic preview -- normal startup downloads it and calibrates once")
+    elif getattr(args, "recalibrate", False):
+        # The cache was deliberately not consulted, so nothing here can say
+        # whether one exists; claiming there is none would guess about a file
+        # this command chose not to read.
+        print("note: --recalibrate shown from the heuristic; any stored "
+              "measurement is left untouched until the server starts")
+    elif preview.cache_path is None:
+        print("note: no cached measurement for this model on this machine yet; "
+              "starting the server normally will calibrate once")
+    return 0
+
+
 def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "show_profile", False):
+        # Preview only, and model-aware: it resolves the model the same way a
+        # real start would (explicit path/id, the shared interactive selection,
+        # or the default), but is strictly read-only -- it never downloads,
+        # loads a context, calibrates, prewarms, binds a socket or touches the
+        # profile cache. Handled before the real selection so the download path
+        # in `_select_startup_model` can never run for a preview.
+        return _show_profile(args)
     selected_interactively = False
     if _interactive_model_selection_requested(args):
         try:
@@ -959,23 +1058,6 @@ def run_server(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("\nmodel selection cancelled", file=sys.stderr)
             return 130
-    if getattr(args, "show_profile", False):
-        # No calibrator: previewing must not load a 20 GiB model or spend a
-        # calibration budget. It shows what the chain resolves to WITHOUT
-        # measuring, and says so when a measurement would have run.
-        preview = _resolve_startup_profile(args)
-        for line in render_profile_lines(preview):
-            print(line)
-        if getattr(args, "recalibrate", False):
-            # The cache was deliberately not consulted, so nothing here can
-            # say whether one exists. Claiming there is none would be a guess
-            # about a file this command chose not to read.
-            print("note: --recalibrate shown from the heuristic; any stored "
-                  "measurement is left untouched until the server starts")
-        elif preview.cache_path is None:
-            print("note: no cached measurement for this machine yet; "
-                  "starting the server normally will calibrate once")
-        return 0
     final_prefix_config = resolve_final_prefix_reuse()
     qwen_route_prefix_config = resolve_qwen_route_prefix_reuse()
     qwen36_shell_tool_prefix_config = resolve_qwen36_shell_tool_prefix_reuse()
@@ -1497,7 +1579,16 @@ def _interactive_model_selection_requested(args: argparse.Namespace) -> bool:
     return args.model is None and args.model_id is None and callable(isatty) and bool(isatty())
 
 
-def _select_startup_model(args: argparse.Namespace) -> int | None:
+def _choose_verified_model(args: argparse.Namespace) -> "tuple[ModelDiscoveryRow, Path] | int":
+    """Discovery + the numbered prompt, shared by real startup and the preview.
+
+    Read-only: it discovers, lists and reads one selection, and returns the
+    chosen row plus the resolved build_bin. It never downloads, sets args, or
+    loads a model -- those are the caller's job -- so `--show-profile` can reuse
+    the exact same selection semantics without the side effects of a real start.
+    Returns an int exit code on discovery failure, no choices, or a
+    cancelled/invalid selection.
+    """
     try:
         build_bin = _resolve_native_runtime(args.llama_root)[1]
         result = discover_models(
@@ -1536,7 +1627,14 @@ def _select_startup_model(args: argparse.Namespace) -> int | None:
     if not 1 <= selection <= len(choices):
         print("error: invalid model selection", file=sys.stderr)
         return 1
-    selected = choices[selection - 1]
+    return choices[selection - 1], build_bin
+
+
+def _select_startup_model(args: argparse.Namespace) -> int | None:
+    chosen = _choose_verified_model(args)
+    if isinstance(chosen, int):
+        return chosen
+    selected, build_bin = chosen
 
     if selected.local == "MISSING":
         return _download_selected_model(args, selected, build_bin=build_bin)
