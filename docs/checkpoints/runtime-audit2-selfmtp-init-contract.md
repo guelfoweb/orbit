@@ -1,6 +1,6 @@
 # RUNTIME-AUDIT-2 — self-MTP initialization boolean contract
 
-Baseline: `4f012ec44c75d37cc772da2239a17b11752d8846`
+Baseline: `bf9df4c9a84b6e250d05047ef567d101a6e428bf`
 Model inference: NONE. No GGUF loaded, no benchmark run.
 
 ## Question
@@ -65,7 +65,7 @@ contract. That surviving mutant is the coverage gap this module closes.
 
 ## Historical intent
 
-Both the code and the docstring arrived together in `dfd6e50` (#268). The
+Both the code and the docstring arrived together in `5ed0746` (#268). The
 fail-closed `return True` sites were present from the first commit, carrying an
 explicit comment:
 

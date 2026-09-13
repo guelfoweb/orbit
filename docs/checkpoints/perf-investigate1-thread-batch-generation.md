@@ -5,8 +5,8 @@ changed.**
 
 | Property | Value |
 |---|---|
-| Repository baseline | `7a64fc11fd289a6bab1a632c3fb2f38be095f3d0` |
-| **Executable/source baseline** | **`aaf544013a1f398e5587c710316a56ccd4d64e7d`** |
+| Repository baseline | `45e7378f5363cb6f6b80b472415c1ebca6e2a06b` |
+| **Executable/source baseline** | **`9e3aaa2dbcffa98cf976e906c3042a625baf1e2d`** |
 | Model inference | YES — 2 model loads, 128 generated tokens |
 | Host `perf_event_paranoid` | **4, unchanged** |
 | Orbit run as root | **No** — both servers ran as uid 1000 |

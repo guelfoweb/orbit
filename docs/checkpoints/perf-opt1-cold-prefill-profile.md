@@ -6,8 +6,8 @@ does not optimize it.
 
 | Property | Value |
 |---|---|
-| Repository baseline (profiling) | `0f2560e24eefce749cc73eec045a0b52ca79dbb2` |
-| **Executable/source baseline** | **`aaf544013a1f398e5587c710316a56ccd4d64e7d`** |
+| Repository baseline (profiling) | `4e48dcd4696ca19c500c54626cf3f14acfca089a` |
+| **Executable/source baseline** | **`9e3aaa2dbcffa98cf976e906c3042a625baf1e2d`** |
 | Model inference | YES — one model load, one long request |
 
 The two differ because PERF-BASELINE-1 and the RSS correction were both
@@ -34,7 +34,7 @@ the correct 35.70 GiB for the same raw value, so the document contradicted
 itself — which is how the bug surfaced. Peak RSS remains **35.70 GiB current vs
 35.78 GiB historical = −0.23 %**, still effectively neutral, so the
 PERF-BASELINE-1 performance verdict is unchanged. Corrected in PR #290
-(`0f2560e2`), docs-only, no rerun.
+(`4e48dcd4`), docs-only, no rerun.
 
 ## Protocol
 

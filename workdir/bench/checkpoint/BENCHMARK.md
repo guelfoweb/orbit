@@ -7,7 +7,7 @@ and strict cache reuse, against MTP off, on the same current artifact.
 
 | item | value |
 |---|---|
-| Orbit HEAD | `10444388f648f50b2762dc89b1910b84249e2ac9` |
+| Orbit HEAD | `5e954dab25141cd1cdc4da41a97ffb9e79e35054` |
 | llama.cpp upstream | `379ac6673b5cd75c7b4e07d1521c50f1e093878c` (b9551) |
 | `source_tree_sha256` | `6c361f995c0734e8b59fb6255d1e55007ee3072dddda9f0d51921a9aaa94b793` |
 | `patchset_v2_sha256` | `8ed0808ca95bf4988e26e6021c6207e1210fac504954bfa450bd04604215e32b` |
@@ -15,8 +15,8 @@ and strict cache reuse, against MTP off, on the same current artifact.
 | shim `.so` | `40d7512f16d44c255a100675a95f3cb7033ae0c66759e03d38c18683d15d9e3d` |
 | model | `Ornith-1.5-35B-Q4_K_M.gguf`, `42739874cc2ccfdb8523b23fbe52e29b2a7555c8176737ca9ca0b5d59859d41f` |
 
-Merged in this mission: `e99bcca6` (EOG canonical identity, PR #275),
-`10444388` (/props self-MTP observability, PR #276).
+Merged in this mission: `9a8f4153` (EOG canonical identity, PR #275),
+`5e954dab` (/props self-MTP observability, PR #276).
 
 ## Hardware and configuration
 

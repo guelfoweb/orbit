@@ -4,7 +4,7 @@ Sixth step of the incremental, behaviour-preserving runtime refactor.
 
 ## Baseline
 
-`ce3444f49c43172ffccf29cff3f89d7e3bc2595c`
+`c291f80d7b82c34434b4a512e32e595c2c6e564c`
 
 ## Path safety (§0A)
 

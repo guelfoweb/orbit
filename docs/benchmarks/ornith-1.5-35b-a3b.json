@@ -11,7 +11,7 @@
     "template_sha256": "f55f52930aa8bf44ab5cb85f99370fcc3c56e9a85640b812086d5330bce5d86b"
   },
   "orbit": {
-    "git_revision": "892cfad36453b55f28f0dcdd50aea7a36450f58e",
+    "git_revision": "aeb8e54c10e9151fb27e53dbcc4c15d875c78c84",
     "backend": "orbit-native",
     "llama_cpp_build_number": 9551,
     "llama_cpp_build_commit": "379ac6673b5cd75c7b4e07d1521c50f1e093878c"

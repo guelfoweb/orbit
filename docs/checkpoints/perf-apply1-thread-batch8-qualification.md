@@ -10,11 +10,11 @@ user meets most often.
 
 | Property | Value |
 |---|---|
-| Repository baseline | `7d2e2c6c4181c6655c1a7bced02081f52182f7e8` |
-| **Executable/source baseline** | **`aaf544013a1f398e5587c710316a56ccd4d64e7d`** |
+| Repository baseline | `06ed21c055ed60ea350b1e9d4f8517647d46fc16` |
+| **Executable/source baseline** | **`9e3aaa2dbcffa98cf976e906c3042a625baf1e2d`** |
 | Classification | **C — REJECTED_CROSS_WORKLOAD_REGRESSION** |
 
-`git diff aaf5440..HEAD -- src/ tests/` = 0 files: every commit since is
+`git diff 9e3aaa2..HEAD -- src/ tests/` = 0 files: every commit since is
 docs-only, so the measured runtime is byte-identical to PERF-OPT-2's.
 
 ## Protocol

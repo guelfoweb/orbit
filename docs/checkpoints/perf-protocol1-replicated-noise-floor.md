@@ -6,8 +6,8 @@ placebo, not an optimization test.
 
 | Property | Value |
 |---|---|
-| Repository baseline | `6aeeaa0f57d0a58c73a6d05967a196bbb2aa72a7` |
-| **Executable/source baseline** | **`aaf544013a1f398e5587c710316a56ccd4d64e7d`** |
+| Repository baseline | `f1fa3ba6f0d72e89d07df0d54a1858be2d636713` |
+| **Executable/source baseline** | **`9e3aaa2dbcffa98cf976e906c3042a625baf1e2d`** |
 | Model inference | YES — 6 model loads |
 
 ## Headline result

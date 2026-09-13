@@ -6,11 +6,11 @@ in every run.
 
 | Property | Value |
 |---|---|
-| Repository baseline | `8dc9fa6ab84be56c1ea58dd0b28fb7a3274e6544` |
-| **Executable/source baseline** | **`aaf544013a1f398e5587c710316a56ccd4d64e7d`** |
+| Repository baseline | `1004858a15cea02c4d557369cb2d8dbd74481c27` |
+| **Executable/source baseline** | **`9e3aaa2dbcffa98cf976e906c3042a625baf1e2d`** |
 | Model inference | YES — 4 model loads, 4 cold-prefill requests |
 
-`git diff aaf5440..HEAD -- src/ tests/` returns 0 files: every commit since the
+`git diff 9e3aaa2..HEAD -- src/ tests/` returns 0 files: every commit since the
 qualified source baseline has been docs-only, so the measured runtime is
 byte-identical to the PERF-BASELINE-1 / PERF-OPT-1 runtime.
 
