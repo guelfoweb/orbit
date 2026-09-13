@@ -1109,6 +1109,21 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `_resolve_startup_profile`. The old behaviour (previewing the absent default
   model's 16-thread heuristic without naming it) is gone; the fingerprint is the
   same `_model_identity_for_profile` real startup uses.
+- RESOLVED (TERMINAL-MARKDOWN-REPORT-RENDERING-1): the terminal-only Markdown
+  contract is in force and enforced by tests. `report.text` is the canonical
+  artifact and stays byte-identical for API, files, sessions, redirects and any
+  non-TTY output; ONLY the interactive REPL presentation renders Markdown, via
+  `orbit.terminal.markdown_report.render_report` (headings, bold, inline code,
+  ordered/unordered lists, fenced code kept verbatim, plain paragraphs). It is
+  used only in the terminal layer (`repl.py`), never in API/session/file paths;
+  it sanitises untrusted report bytes BEFORE adding any escape and keeps every
+  marker, so stripping the escapes returns the sanitised text exactly (rendering
+  changes appearance and nothing else). `supports_ansi()` gates styling, so
+  NO_COLOR, a dumb terminal, a pipe and a redirect all yield raw Markdown with no
+  escape; malformed/unsupported Markdown (e.g. an unclosed fence) degrades to
+  readable plain text; URLs/IoCs/hashes/decoded payloads are reproduced
+  byte-exact. Do NOT route rendered terminal text back into runtime state, and do
+  NOT render outside the interactive TTY presentation layer.
 
 ## RC24 Tool-Loop Convergence
 
