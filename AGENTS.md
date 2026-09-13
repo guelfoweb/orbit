@@ -1948,8 +1948,9 @@ Closed since the release — do not reopen any of them without new evidence:
 last thermal blocker: on a normal AC boot, volatile MMIO **PL2 = 30 W** (PL1
 untouched) sustains **prefill 52.06 / decode 18.56 tok/s** with no throttle and a
 3 °C thermal margin — 30 W is the lowest passing rung and the ladder is closed
-(35 / 40 W not tested). The Dell CPU side of DELL-INTEL-GPU-BENCH-1 is therefore
-measured and the mission may start. History for context: the 17 W AC-boot cap is
+(35 / 40 W not tested). The Dell CPU side of DELL-INTEL-GPU-BENCH-1 was therefore
+measured, the mission ran, and it closed as `GPU_BACKEND_TECHNICAL_STOP` (see the
+DELL-INTEL-GPU-BENCH-1 entry below). History for context: the 17 W AC-boot cap is
 firmware/EC state latched at boot by power source (AC boot → PL2 17 W; battery boot
 → PL2 65 W, proven by DELL-POWER-BATTERY-BOOT-REPRO-1); BIOS `UltraPerformance` is
 disproven as the fix; the uncapped 65 W battery-boot burst hits TjMax; the 30 W
@@ -1958,20 +1959,40 @@ value is a volatile RAPL write, so it is NOT persistent (the next AC boot re-imp
 DELL-POWER-BATTERY-BOOT-REPRO-1 and DELL-POWER-PL2-LADDER-1 in the Post-RC38 entry
 and `workdir/diag/dell_power_audit/RESULTS.md`.
 
-**Before starting DELL-INTEL-GPU-BENCH-1, re-establish PL2 = 30 W** (it is volatile
-and was restored to 17 W after the ladder; a reboot also reverts it), and run BOTH
-the CPU and the external-backend GPU legs under that SAME PL2 = 30 W so the
-comparison is power-matched — or record the exact power state with each leg. Do not
-compare a 30 W CPU number against a GPU run measured at a different PL2.
+The mission below ran under a volatile MMIO **PL2 = 30 W** (PL1 untouched),
+restored to 17 W at mission end; both the CPU and the external-backend iGPU legs
+ran under that same 30 W as a same-system, same-host-policy comparison (NOT
+"power-matched" — the on-package iGPU shares the CPU power/thermal budget).
 
-Recommended next mission (gate now clear): **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
-Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an external compatible backend. The
-Dell CPU side of the comparison is already measured; see the authoritative
-baseline below. Constraints that already apply: native `orbit server` stays
-CPU-first with `gpu_layers=0` and no GPU promise (Anti-Goals); a GPU must be
-measured through an external backend such as `llama-server --base-url`, never
-reported as native `orbit server` performance (Benchmarking); use `bench-core`
-metadata; record the results as a Dell profile without overwriting NUC history.
+- **DELL-INTEL-GPU-BENCH-1 (2026-09-13) — COMPLETED; verdict
+  `GPU_BACKEND_TECHNICAL_STOP` (classification G4, VULKAN_REGRESSION).** External-backend
+  benchmark of the Dell's Intel `xe` iGPU (Vulkan) versus the qualified CPU baseline,
+  same Ornith GGUF (sha `42739874…`), same host policy at PL2 = 30 W, external
+  llama.cpp pinned to Orbit's backend b9551 (`379ac66`), built outside the repo. Orbit
+  was NOT modified. Results:
+  - external CPU leg: **51.65 prefill / 18.70 decode tok/s** — equal to the qualified
+    CPU baseline, so Orbit adds no measurable CPU overhead;
+  - Intel `xe` Vulkan FULL offload (41 layers): **58.8 prefill / 5.71 decode tok/s** —
+    decode **−69 %**; prefill +13 % (below the 15 % bar and irrelevant while decode
+    dominates);
+  - representative 512-prefill + 768-decode raw turn: **CPU 51.0 s vs iGPU 143.2 s
+    (2.81× slower)**.
+  Full offload was CORRECT (output byte-identical to CPU) and STABLE (78 °C, no
+  throttle, no swap thrash), but decode is memory-bandwidth-bound on the UMA iGPU and
+  collapses; every offloaded layer only drags decode toward that figure, so no offload
+  reaches a useful decode gain. PARTIAL offload (10 layers) hit the **95 °C** safety
+  guard and was aborted: the on-package iGPU shares the CPU thermal budget and the
+  CPU-only leg already peaks 91 °C at 30 W, leaving no headroom for a dual load. Vulkan
+  itself was NOT broken (stable, correct, Intel device only — no llvmpipe), so
+  SYCL/Level-Zero is **NOT warranted** (only tested on a G6/Vulkan-specific defect).
+  **Orbit stays CPU-only, `gpu_layers=0`; nothing was integrated** — the outcome is a
+  TECHNICAL_STOP, not GPU_BACKEND_CANDIDATE_FOR_ORBIT. **Reopen ONLY with materially
+  different hardware, driver, or backend evidence.** Constraints honoured: native
+  `orbit server` stayed CPU-first with no GPU promise (Anti-Goals); the GPU was
+  measured only through an external backend, never as native `orbit server`
+  performance (Benchmarking); recorded as a Dell profile without overwriting NUC
+  history. Evidence: `workdir/diag/dell_intel_gpu_bench/` (RESULTS.md, per-candidate
+  JSON/logs, build metadata; machine-local, gitignored).
 
 ### Authoritative Dell CPU CHAT baseline (2026-09-13, `fa67e5a`)
 
