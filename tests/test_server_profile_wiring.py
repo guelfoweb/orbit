@@ -12,10 +12,14 @@ exception costs a server start rather than a cache miss.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -297,6 +301,184 @@ class ResolveStartupProfileTests(unittest.TestCase):
             app_module._resolve_startup_profile(_Args()).fingerprint,
             app_module._resolve_startup_profile(_Args(ctx=4096)).fingerprint,
         )
+
+
+class ShowProfileModelResolutionTests(unittest.TestCase):
+    """SERVER-SHOW-PROFILE-MODEL-RESOLUTION-1: `--show-profile` reports the
+    profile for the model a real start would use, read-only and model-aware."""
+
+    from orbit.native_llama.model_discovery import ModelDiscoveryRow as _Row
+
+    def _tmp_gguf(self, payload: bytes = b"G" * 2048) -> str:
+        with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as handle:
+            handle.write(payload)
+            name = handle.name
+        self.addCleanup(lambda: pathlib.Path(name).unlink(missing_ok=True))
+        return name
+
+    def _run_show_profile(self, args) -> "tuple[int, str]":
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = app_module._show_profile(args)
+        return rc, out.getvalue()
+
+    # T3/T11: an explicit model is resolved exactly, with the shared fingerprint.
+    def test_explicit_model_uses_its_own_identity(self) -> None:
+        path = self._tmp_gguf()
+        name, disp, identity, missing = app_module._resolve_preview_target(_Args(model=path))
+        self.assertEqual(identity, app_module._model_identity_for_profile(_Args(model=path)))
+        self.assertFalse(missing)
+        self.assertIn(pathlib.Path(path).name, name)
+        self.assertEqual(disp, path)
+
+    def test_explicit_missing_model_is_reported_missing_not_calibrated(self) -> None:
+        name, disp, identity, missing = app_module._resolve_preview_target(
+            _Args(model="/nope/not/here.gguf")
+        )
+        self.assertTrue(missing)
+        self.assertEqual(identity, ("", 0))
+        self.assertIn("not present", disp)
+
+    # T1/T2: no explicit model -> resolves through the shared interactive
+    # selection, and the selected model's identity finds its cached profile.
+    def test_interactive_selection_resolves_selected_model(self) -> None:
+        from orbit.native_server.server_profile import store_cached_profile
+
+        path = self._tmp_gguf()
+        row = self._Row("Ornith 1.5 35B-A3B", "AVAILABLE", "VERIFIED", path, model_id="ornith")
+        with mock.patch.object(app_module, "_interactive_model_selection_requested", return_value=True), \
+             mock.patch.object(app_module, "_choose_verified_model", return_value=(row, pathlib.Path("/bin"))):
+            args = _Args()
+            name, disp, identity, missing = app_module._resolve_preview_target(args)
+            self.assertEqual(name, "Ornith 1.5 35B-A3B")
+            self.assertFalse(missing)
+            self.assertEqual(identity, app_module._model_identity_for_profile(_Args(model=path)))
+            self.assertEqual(args.model, pathlib.Path(path))  # resolved, for the real fingerprint
+            # T2: seed a measured profile at that fingerprint; the preview shows it.
+            from orbit.native_server.server_profile import cache_path_for
+            fp = app_module._resolve_startup_profile(_Args(model=path)).fingerprint
+            store_cached_profile(fp, {"threads": 6, "threads_batch": 6, "batch": 256, "ubatch": 128})
+            self.addCleanup(lambda: cache_path_for(fp).unlink(missing_ok=True))
+            rc, text = self._run_show_profile(_Args())  # fresh args, same interactive mocks
+        self.assertEqual(rc, 0)
+        self.assertIn("Ornith 1.5 35B-A3B", text)
+        self.assertIn("threads: 6", text)
+
+    def test_interactive_available_pick_runs_memory_mode_selection(self) -> None:
+        # Memory mode is a fingerprint axis; a low-memory-capable pick must ask
+        # here too, so the preview keys the same fingerprint a real low-memory
+        # start would (not the standard-mode cache entry).
+        path = self._tmp_gguf()
+        row = self._Row("Ornith", "AVAILABLE", "VERIFIED", path, model_id="ornith", low_memory_supported=True)
+
+        def fake_memory_mode(args, selected):
+            args.low_memory = True  # the operator picks low memory
+            return None
+
+        with mock.patch.object(app_module, "_interactive_model_selection_requested", return_value=True), \
+             mock.patch.object(app_module, "_choose_verified_model", return_value=(row, pathlib.Path("/bin"))), \
+             mock.patch.object(app_module, "_select_memory_mode", side_effect=fake_memory_mode) as memory_mode:
+            args = _Args()
+            app_module._resolve_preview_target(args)
+        memory_mode.assert_called_once()
+        self.assertTrue(args.low_memory)
+        self.assertEqual(
+            app_module._resolve_startup_profile(args).fingerprint,
+            app_module._resolve_startup_profile(_Args(model=path, low_memory=True)).fingerprint,
+        )
+
+    def test_interactive_missing_pick_never_downloads(self) -> None:
+        row = self._Row("Gemma 4 26B-A4B", "MISSING", "VERIFIED", "orbit download x/y.gguf", model_id="g")
+        with mock.patch.object(app_module, "_interactive_model_selection_requested", return_value=True), \
+             mock.patch.object(app_module, "_choose_verified_model", return_value=(row, pathlib.Path("/bin"))), \
+             mock.patch.object(app_module, "_download_selected_model", side_effect=AssertionError("no download in preview")):
+            rc, text = self._run_show_profile(_Args())
+        self.assertEqual(rc, 0)
+        self.assertIn("Gemma 4 26B-A4B", text)
+        self.assertIn("not present locally", text)
+
+    def test_interactive_cancel_returns_exit_code(self) -> None:
+        with mock.patch.object(app_module, "_interactive_model_selection_requested", return_value=True), \
+             mock.patch.object(app_module, "_choose_verified_model", return_value=1):
+            self.assertEqual(app_module._show_profile(_Args()), 1)
+
+    # T4/T5/T6: precedence is preserved (partial CLI/env overrides fill only the
+    # missing fields; explicit wins). These reuse the resolver the preview uses.
+    def test_explicit_cli_override_is_authoritative_in_preview(self) -> None:
+        rc, text = self._run_show_profile(_Args(threads=3))
+        self.assertEqual(rc, 0)
+        self.assertIn("threads: 3 (cli)", text)
+
+    def test_partial_cli_override_fills_only_that_field(self) -> None:
+        res = app_module._resolve_startup_profile(_Args(batch=64))
+        self.assertEqual(res.profile.batch, 64)
+        self.assertEqual(res.profile.field_sources["batch"], "cli")
+        self.assertNotEqual(res.profile.field_sources["threads"], "cli")
+
+    # T7: no matching measured cache -> honest heuristic/fallback.
+    def test_no_cached_profile_reports_heuristic_honestly(self) -> None:
+        rc, text = self._run_show_profile(_Args(model="/nope/not/here.gguf"))
+        self.assertEqual(rc, 0)
+        self.assertIn("heuristic", text)
+        self.assertNotIn("cached", text.split("note:")[0])
+
+    # T9/T12: the preview never constructs an inference client / loads a model.
+    def test_preview_never_builds_a_client(self) -> None:
+        with mock.patch.object(app_module, "NativeLlamaClient", side_effect=AssertionError("no load in preview")):
+            rc, text = self._run_show_profile(_Args(model=self._tmp_gguf()))
+        self.assertEqual(rc, 0)
+        self.assertIn("model:", text)
+
+    # T10: the preview never creates or mutates a cache entry.
+    def test_preview_does_not_create_cache_entry(self) -> None:
+        from orbit.native_server.server_profile import cache_path_for
+
+        args = _Args(model=self._tmp_gguf())
+        fp = app_module._resolve_startup_profile(args).fingerprint
+        cache = cache_path_for(fp)
+        self.assertFalse(cache.is_file())
+        self._run_show_profile(_Args(model=args.model))
+        self.assertFalse(cache.is_file(), "a preview must not create a cache entry")
+
+    # T13: non-interactive is safe, names the default, and is deterministic.
+    def test_non_interactive_default_is_named_and_deterministic(self) -> None:
+        with mock.patch.object(app_module, "_interactive_model_selection_requested", return_value=False):
+            rc1, a = self._run_show_profile(_Args())
+            rc2, b = self._run_show_profile(_Args())
+        self.assertEqual((rc1, rc2), (0, 0))
+        self.assertEqual(a, b)
+        self.assertIn("model:", a)
+        self.assertNotIn("\x1b[", a)
+
+    # T5: an ORBIT_* env override remains authoritative in the preview (the
+    # preview uses the same resolver, which reads os.environ).
+    def test_env_override_is_authoritative_in_preview(self) -> None:
+        import os
+
+        with mock.patch.dict(os.environ, {"ORBIT_THREADS": "7"}):
+            rc, text = self._run_show_profile(_Args(model="/nope/not/here.gguf"))
+        self.assertEqual(rc, 0)
+        self.assertIn("threads: 7 (env)", text)
+
+    # T12: the refactor left normal startup selection intact -- an AVAILABLE
+    # pick sets the model and proceeds; a MISSING pick still downloads.
+    def test_select_startup_model_sets_available_pick(self) -> None:
+        row = self._Row("Ornith", "AVAILABLE", "VERIFIED", "/models/ornith.gguf", model_id="ornith")
+        args = _Args()
+        with mock.patch.object(app_module, "_choose_verified_model", return_value=(row, pathlib.Path("/bin"))), \
+             mock.patch.object(app_module, "_select_memory_mode", return_value=None):
+            rc = app_module._select_startup_model(args)
+        self.assertIsNone(rc)
+        self.assertEqual(args.model, pathlib.Path("/models/ornith.gguf"))
+        self.assertEqual(args.model_id, "ornith")
+
+    def test_select_startup_model_downloads_missing_pick(self) -> None:
+        row = self._Row("Gemma", "MISSING", "VERIFIED", "orbit download x/y.gguf", model_id="g")
+        with mock.patch.object(app_module, "_choose_verified_model", return_value=(row, pathlib.Path("/bin"))), \
+             mock.patch.object(app_module, "_download_selected_model", return_value=0) as download:
+            rc = app_module._select_startup_model(_Args())
+        download.assert_called_once()
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":

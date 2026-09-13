@@ -1097,13 +1097,18 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   synthetic), a separate harness from the CHAT-turn baseline below — do not conflate
   them, and keep it a Dell profile, never overwriting NUC history.
   Evidence: `workdir/diag/dell_power_audit/RESULTS.md`, `probe_sustained.json`.
-- Recorded, not fixed: `--show-profile` without a model argument previews the
-  heuristic for the absent default model (16 threads on this box), not the model
-  the interactive pick will load — name the model to preview the real profile; an
-  all-explicit start prints `profile: heuristic` and a `profile cache:` path it did
-  not use; the heuristic fallback on a hybrid 16-core box is 16 threads (the
-  measured-worst profile), so a calibration that exhausts its 90 s budget lands
-  there — a follow-up candidate, not reopened here.
+- RESOLVED (SERVER-SHOW-PROFILE-MODEL-RESOLUTION-1): `--show-profile` is now
+  model-aware and read-only. It resolves the model the same way a real start
+  would — an explicit path/id, the shared interactive selection (`_choose_verified_model`,
+  the same chooser real startup uses), or the default when non-interactive — and
+  prints `model:`/`path:` so the profile is never an unlabelled generic one. A
+  model absent locally is reported as a heuristic preview (no download); the
+  preview never loads a context, calibrates, prewarms, binds a socket or touches
+  the profile cache. Precedence is unchanged (CLI > ORBIT_* env > user profile >
+  cached measured > calibration-at-startup > heuristic) because it reuses
+  `_resolve_startup_profile`. The old behaviour (previewing the absent default
+  model's 16-thread heuristic without naming it) is gone; the fingerprint is the
+  same `_model_identity_for_profile` real startup uses.
 
 ## RC24 Tool-Loop Convergence
 
