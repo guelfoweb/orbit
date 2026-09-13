@@ -303,6 +303,19 @@ class LlamaLibrary:
         # this only moves them before the server binds.
         lib.llama_set_n_threads.argtypes = [c_void_p, c_int32, c_int32]
         lib.llama_set_n_threads.restype = None
+        # Read-back of what the context is actually running on. Diagnostic:
+        # the startup log and `/props` publish these beside the resolved
+        # profile, so "the server runs N threads" is observed from the live
+        # context rather than inferred from the configuration that asked
+        # for it. Nothing decides anything on them.
+        # Guarded like the other optional symbols: a build without them
+        # loses the read-back (the client reports None), not the server.
+        if hasattr(lib, "llama_n_threads"):
+            lib.llama_n_threads.argtypes = [c_void_p]
+            lib.llama_n_threads.restype = c_int32
+        if hasattr(lib, "llama_n_threads_batch"):
+            lib.llama_n_threads_batch.argtypes = [c_void_p]
+            lib.llama_n_threads_batch.restype = c_int32
         lib.llama_synchronize.argtypes = [c_void_p]
         lib.llama_synchronize.restype = None
         lib.llama_time_us.argtypes = []

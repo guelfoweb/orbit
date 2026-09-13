@@ -78,8 +78,11 @@ ENV_CACHE_RAM = "ORBIT_CACHE_RAM"
 
 # Bumped whenever the fingerprint inputs change, so entries written by an older
 # Orbit are ignored rather than silently orphaned under a key nobody computes
-# any more. v2 added low_memory, MTP and expert-usage to the fingerprint.
-PROFILE_FORMAT_VERSION = "orbit-server-profile-v2"
+# any more. v2 added low_memory, MTP and expert-usage to the fingerprint. v3
+# changed the MEASUREMENT (warm-up pass and fewest-threads tie-break): a v2
+# entry may hold a winner chosen from a cold first candidate, so it is
+# re-measured once rather than trusted.
+PROFILE_FORMAT_VERSION = "orbit-server-profile-v3"
 
 # Only these are ever WRITTEN to the cache. A cache entry is a record of what
 # was measured, never of what was resolved -- see `store_cached_profile`.
@@ -446,13 +449,23 @@ def load_cached_profile(
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        # The ordinary post-bump state: nothing under the current key yet,
+        # while the previous version's entry sits beside it. Sweep here too,
+        # or the orphan outlives the recalibration that replaces it.
+        if evict_stale:
+            evict_foreign_versions(environ)
         return None
     if not isinstance(payload, dict):
         return None
     if payload.get("format_version") != PROFILE_FORMAT_VERSION:
-        # Self-cleaning: the file is open, the version is known stale, and
-        # nothing will ever compute this key again. Removing it here avoids a
-        # GC pass and keeps the directory bounded by live combinations.
+        # Self-cleaning, and not only for this file: the version is the first
+        # term of the fingerprint, so a bump changes the KEY and an older entry
+        # lives under a name no current Orbit ever computes. Evicting only the
+        # file just opened would therefore never fire on a real bump and every
+        # calibrated machine would keep an orphan per version forever. The
+        # sweep below is what actually keeps the directory bounded by live
+        # combinations; it is bounded itself by the handful of entries a
+        # machine accumulates.
         #
         # Not on the preview path, though. `--show-profile` reads this too, and
         # a command that only reports must not change the filesystem -- the
@@ -462,6 +475,7 @@ def load_cached_profile(
                 path.unlink()
             except OSError:
                 pass
+            evict_foreign_versions(environ)
         return None
     if payload.get("fingerprint") != fingerprint:
         return None
@@ -485,6 +499,36 @@ def load_cached_profile(
         # able to hand the backend a thread count it would refuse.
         measured[field] = min(MAX_THREADS, max(MIN_THREADS, value))
     return measured or None
+
+
+def evict_foreign_versions(environ: Mapping[str, str] | None = None) -> int:
+    """Unlink every cache entry written under another format version.
+
+    Called from the calibrating (non-preview) load path only. Unreadable or
+    malformed files are left alone -- they are not this Orbit's to judge -- and
+    every failure is swallowed, because housekeeping must never cost a start.
+    Returns how many were removed, for tests and logs.
+    """
+    removed = 0
+    try:
+        entries = list(profile_cache_dir(environ).glob("*.json"))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            payload = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        version = payload.get("format_version")
+        if isinstance(version, str) and version != PROFILE_FORMAT_VERSION:
+            try:
+                entry.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def store_cached_profile(
@@ -878,6 +922,7 @@ __all__ = [
     "detect_topology",
     "discard_cached_profile",
     "env_overrides",
+    "evict_foreign_versions",
     "fallback_profile",
     "heuristic_profile",
     "load_cached_profile",

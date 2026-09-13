@@ -501,6 +501,50 @@ class CacheTests(_Case):
         self.assertIsNone(load_cached_profile(fingerprint, self.env))
         self.assertFalse(path.is_file(), "a stale entry should not accumulate")
 
+    def test_a_previous_version_entry_under_another_key_is_evicted(self) -> None:
+        """The version is part of the key, so a bump orphans the old file.
+
+        Evicting only the file at the current key can never fire after a real
+        bump; the sweep is what removes the pre-bump entry -- and it runs even
+        when nothing exists under the current key yet, which is the ordinary
+        state right after an upgrade.
+        """
+        fingerprint = profile_fingerprint(DELL, model_sha256="model-a", backend_id="b9551")
+        current = cache_path_for(fingerprint, self.env)
+        current.parent.mkdir(parents=True, exist_ok=True)
+        old = current.parent / ("0" * 64 + ".json")
+        old.write_text(json.dumps({
+            "format_version": "orbit-server-profile-v2",
+            "fingerprint": "0" * 64, "threads": 8, "threads_batch": 8,
+        }), encoding="utf-8")
+        unrelated = current.parent / "notes.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+        # A preview leaves everything alone.
+        self.assertIsNone(load_cached_profile(fingerprint, self.env, evict_stale=False))
+        self.assertTrue(old.is_file())
+        # A calibrating load with no current entry sweeps the orphan.
+        self.assertIsNone(load_cached_profile(fingerprint, self.env))
+        self.assertFalse(old.is_file(), "the pre-bump entry must not outlive the bump")
+        self.assertTrue(unrelated.is_file())
+
+    def test_the_sweep_leaves_current_and_unreadable_entries_alone(self) -> None:
+        from orbit.native_server.server_profile import evict_foreign_versions
+
+        directory = cache_path_for("x" * 64, self.env).parent
+        directory.mkdir(parents=True, exist_ok=True)
+        current = directory / ("1" * 64 + ".json")
+        current.write_text(json.dumps({
+            "format_version": PROFILE_FORMAT_VERSION, "fingerprint": "1" * 64, "threads": 6,
+        }), encoding="utf-8")
+        broken = directory / ("2" * 64 + ".json")
+        broken.write_text("{not json", encoding="utf-8")
+        stale = directory / ("3" * 64 + ".json")
+        stale.write_text(json.dumps({"format_version": "orbit-server-profile-v1"}), encoding="utf-8")
+        self.assertEqual(evict_foreign_versions(self.env), 1)
+        self.assertTrue(current.is_file())
+        self.assertTrue(broken.is_file(), "not this Orbit's to judge")
+        self.assertFalse(stale.is_file())
+
     def test_a_preview_resolution_does_not_evict_a_stale_entry(self) -> None:
         """Through `resolve_profile`, not just the helper.
 

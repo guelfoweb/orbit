@@ -1000,7 +1000,9 @@ class IntermediateEvidenceIsShownTests(AutonomousTestBase):
         from orbit.terminal.repl import Repl
 
         source = inspect.getsource(Repl._ask_analysis)
-        head, _, tail = source.partition("if result is None:")
+        # A zero-step run WITH a closing report renders it instead; the
+        # branch below is the one for a run that produced nothing at all.
+        head, _, tail = source.partition("if result is None and run.final_report is None:")
         self.assertTrue(tail, "the no-step branch must exist")
         branch = tail.split("return")[0]
         self.assertIn("run.cancelled", branch)
