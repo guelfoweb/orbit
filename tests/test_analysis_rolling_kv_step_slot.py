@@ -1,6 +1,6 @@
 """Rolling ANALYSIS KV for consecutive STEP turns, through the real wiring.
 
-Stage A (#Stage-A merge 99d63bf) recovered the rolling ANALYSIS anchor for
+Stage A (#Stage-A merge e18843d) recovered the rolling ANALYSIS anchor for
 the control turns and their repairs. The STEP turn stayed cold for two
 measured reasons: the controller renders every STEP as the committed history
 followed by ONE transient user turn -- the per-question guidance, replaced on

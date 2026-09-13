@@ -335,7 +335,11 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
     change, which is a different kind of change with a different risk.
     """
 
-    BASELINE = "0c9d8ba330dc67c7500cbd75c80940c222a3a573"
+    # rc35 release commit, rewritten SHA after the attribution history rewrite.
+    # Its tree (and this file's blob) is byte-identical to the pre-rewrite commit
+    # 0c9d8ba330dc67c7500cbd75c80940c222a3a573, so the baseline the drift check
+    # reads is unchanged; the new SHA is the one that resolves on published history.
+    BASELINE = "29423a5f06668885df2df948797ab2ea24bd0afb"
     NAMES = (
         "ANALYSIS_SYSTEM_PROMPT",
         "ANALYSIS_REPORT_INSTRUCTION",
