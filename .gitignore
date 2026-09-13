@@ -26,3 +26,19 @@ src/orbit/native_llama/vendor/shim/orbit-mtp-dry-run
 src/orbit/native_llama/vendor/shim/orbit-mtp-accept-probe
 src/orbit/native_llama/vendor/shim/orbit-mtp-decode-probe
 src/orbit/native_llama/vendor/shim/orbit-mtp-completion
+
+# Local-only ANALYSIS qualification state. The frozen malware corpus and the
+# frozen diagnostics/oracles are transported by hand between machines and must
+# never be committed; ignoring them here closes the accidental-`git add` gap
+# that MANIFEST.in covers only for sdists. Scope is exactly these three trees —
+# other workdir/ subdirectories still hold untracked scratch next to tracked
+# fixtures, so `git add -A` remains unsafe (see AGENTS.md).
+# workdir/samples/ also holds two TRACKED benign fixtures, so it is ignored by
+# content and those two are re-admitted by name rather than ignoring the
+# directory. The benign trivial_greeting_demo.js is deliberately left ignored:
+# it is untracked and hand-transported like the corpus.
+/workdir/samples/*
+!/workdir/samples/suspicious_dropper_demo.js
+!/workdir/samples/vulnerable_service.py
+/workdir/diag/
+/workdir/campaign/
