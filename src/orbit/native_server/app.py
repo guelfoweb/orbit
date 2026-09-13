@@ -32,7 +32,8 @@ from orbit.native_server.server_profile import (
     resolve_profile,
 )
 from orbit.native_llama.download_cli import _DownloadProgress as DownloadProgress
-from orbit.native_llama.model_discovery import ModelDiscoveryRow, discover_models, format_model_discovery
+from orbit.native_llama.model_discovery import ModelDiscoveryRow, discover_models, format_model_discovery, paint_model_status
+from orbit.terminal.theme import supports_ansi
 from orbit.native_llama.model_download import download_model
 from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.model_registry import default_hf_cache, default_models_dir, get_manifest, local_model_path
@@ -1488,7 +1489,7 @@ def _print_model_discovery(args: argparse.Namespace, paths: NativeLlamaPaths | N
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"model discovery unavailable: {str(exc).strip() or exc.__class__.__name__}", file=sys.stderr)
         return
-    print(format_model_discovery(result), file=sys.stderr)
+    print(format_model_discovery(result, color=supports_ansi(sys.stderr)), file=sys.stderr)
 
 
 def _interactive_model_selection_requested(args: argparse.Namespace) -> bool:
@@ -1508,7 +1509,7 @@ def _select_startup_model(args: argparse.Namespace) -> int | None:
         print(_format_native_bootstrap_error(exc), file=sys.stderr)
         return 1
 
-    print(format_model_discovery(result), file=sys.stderr)
+    print(format_model_discovery(result, color=supports_ansi(sys.stderr)), file=sys.stderr)
     choices = tuple(
         row
         for row in result.rows
@@ -1519,8 +1520,9 @@ def _select_startup_model(args: argparse.Namespace) -> int | None:
         return 1
 
     print("\nVerified models:", file=sys.stderr)
+    color = supports_ansi(sys.stderr)
     for index, row in enumerate(choices, start=1):
-        print(f"  {index}. {row.model} [{row.local}]", file=sys.stderr)
+        print(f"  {index}. {row.model} [{paint_model_status(row.local, color=color)}]", file=sys.stderr)
     print(f"Select model [1-{len(choices)}]: ", end="", file=sys.stderr, flush=True)
     response = sys.stdin.readline()
     if not response:
