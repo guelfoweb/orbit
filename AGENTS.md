@@ -19,7 +19,7 @@ day (DELL-MIGRATION-CLOSURE-1): code, model, corpus and diagnostics are all
 present and verified on the Dell.
 
 ### Baseline (the anchor for a migration)
-- `main == origin/main == 065dd009a753d0973635709fb6402914b43ea438`, tracked tree
+- `main == origin/main == 367104c9f136742ff74556be5d90c02d95799db6`, tracked tree
   clean. Untracked `workdir/` scratch is expected and is NOT dirt to clean up —
   read the staging warning at the end of the RC38 entry before `git add`.
 - Published release: `v0.0.1-rc38` (annotated tag → `d9b2a67`; GitHub pre-release
@@ -27,11 +27,11 @@ present and verified on the Dell.
   assets by convention). Package version stays `0.0.1`; releases are RC tags.
   `d9b2a67` = the rc38 doc/release commit; its qualified PRODUCTION code is
   byte-identical to its parent `7da19f9`.
-- **`main` is four commits AHEAD of the released tag** (`git describe` →
-  `v0.0.1-rc38-4-g065dd00`). **Post-release research HAS started** — see
-  "Post-RC38 (unreleased on `main`)" in Release State for the four commits. Two
-  of them change production behaviour (`cbe577e`, `065dd00`), so the rc38 entry
-  below no longer describes everything `main` does; read both.
+- **`main` is six commits AHEAD of the released tag** (`git describe` →
+  `v0.0.1-rc38-6-g…`). **Post-release research HAS started** — see
+  "Post-RC38 (unreleased on `main`)" in Release State. Three of those commits
+  change production behaviour (`cbe577e`, `065dd00`, `367104c`), so the rc38
+  entry below no longer describes everything `main` does; read both.
 - No in-progress mission. The repository is at a clean, qualified state: each
   post-rc38 commit was qualified, adversarially reviewed to BLOCKER 0 / MAJOR 0
   and pushed on its own branch before merge. Do NOT reopen qualification or
@@ -887,8 +887,8 @@ Release State entry below.
 
 ### Post-RC38 (unreleased on `main`)
 
-Four commits landed after the `v0.0.1-rc38` tag. There is no rc39 tag and no
-release notes file for them: `main` is ahead of the last release, which is a
+Five commits landed after the `v0.0.1-rc38` tag (plus this docs commit). There
+is no rc39 tag and no release notes file for them: `main` is ahead of the last release, which is a
 normal post-release state, not an omission. Do not create a tag or release to
 "fix" it (Permanent Principles). Newest last:
 
@@ -906,6 +906,9 @@ normal post-release state, not an omission. Do not create a tag or release to
   through a precedence chain and may spend ~47 s once per fingerprint measuring
   them. Full contract in "Server Startup Profile (auto-calibration)"; evidence
   in `workdir/diag/autocalibration/`.
+- `367104c` *fix(server): calibrate on warm weights and prefer fewer threads;
+  render a zero-step report* (#324) — **production behaviour change**; the
+  DELL-RUNTIME-AND-IBAN-CLOSURE-1 entry below.
 
 **Empty-plan re-ask invariant (`cbe577e`) — what a future session must not
 undo.** An empty PLAN stays legitimate: a model that has enough evidence may
@@ -938,8 +941,8 @@ This is NOT a licence to add replanning. No new model call beyond the existing
 bounded plan accounting, no sample-specific condition, no infinite replan, no
 REPORT prose parsed to reopen analysis.
 
-**DELL-RUNTIME-AND-IBAN-CLOSURE-1 (2026-09-13, after `065dd00`) — two symptoms,
-two causes, two production fixes.** Evidence: `workdir/diag/dell_runtime_iban_closure/`
+**DELL-RUNTIME-AND-IBAN-CLOSURE-1 (2026-09-13, merged as `367104c`, #324) — two
+symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runtime_iban_closure/`
 (`RESULTS.md` is the record; `mutation_gate.py` 12/12 CAUGHT).
 
 - *Decode fell to ~10 tok/s on the auto profile.* The Dell had REBOOTED at 14:05;
@@ -1760,9 +1763,8 @@ box is not a comparable number; token/cache/rate and correctness are.
 - post-rc38 (unreleased, newest last): `d1c45e6` migration-handoff closure,
   `cbe577e` empty-plan re-ask + atomic `adopt_plan`, `ffc4305` Dell CPU CHAT
   cache baseline, `065dd00` measured server startup profile, then
-  DELL-RUNTIME-AND-IBAN-CLOSURE-1 (calibration warm-up + tie-break, REPL zero-step
-  report, native thread read-back — SHA recorded in the Post-RC38 entry once
-  merged). See the "Post-RC38 (unreleased on `main`)" entry in Release State.
+  `367104c` DELL-RUNTIME-AND-IBAN-CLOSURE-1 (#324: calibration warm-up +
+  tie-break, REPL zero-step report, native thread read-back). See the "Post-RC38 (unreleased on `main`)" entry in Release State.
 - rc38 ANALYSIS arc (post-rc37, #260 → `7da19f9`): see the RC38 Release State
   entry above for the per-capability merge SHAs (network-deny `92a4048`,
   fromCharCode `7fab248`, Chr-offset `6de28ea`, string-array fold `8fd7586`,
