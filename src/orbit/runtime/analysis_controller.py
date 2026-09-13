@@ -120,15 +120,20 @@ class AnalysisController:
     unsupported: bool = False
 
     # -- identity ---------------------------------------------------------
-    def _next_id(self, parent: str | None = None) -> str:
-        """Q1, Q2, ... for plan questions; Q1.1 for a child of Q1.
+    def _next_id(self, parent: str) -> str:
+        """Q1.1 for the first child of Q1, Q1.2 for the next, and so on.
 
         Assigned here and nowhere else. The model never supplies an id, so a
         duplicate, missing or malformed one is not a case to validate -- it is
         a case that cannot arise.
+
+        Children only. `adopt_plan` numbers depth-0 questions from a local
+        counter instead, because it must build the whole plan before recording
+        any of it and this reads the record. The two agree by construction --
+        the local counter starts from this same depth-0 count and increments
+        once per question -- and keeping the unreachable `parent is None`
+        branch here would be a second scheme free to drift from the first.
         """
-        if parent is None:
-            return f"Q{sum(1 for q in self.questions.values() if q.depth == 0) + 1}"
         existing = sum(1 for q in self.questions.values() if q.parent == parent)
         return f"{parent}.{existing + 1}"
 
@@ -148,20 +153,31 @@ class AnalysisController:
                 f"plan declares {len(entries)} questions, more than "
                 f"{MAX_PLAN_QUESTIONS}"
             )
+        # Validated in full before anything is recorded. A plan is one object,
+        # so a plan the controller REFUSES must leave no trace of itself: the
+        # loop used to append each question as it went and raise on a later bad
+        # entry, which left the questions before the bad one adopted -- a run
+        # could then work a question out of a plan that was rejected, and the
+        # caller's repair would plan on top of it. Depth-0 ids are therefore
+        # numbered from the local counter below rather than from `_next_id`,
+        # which reads the record this method must not write until it commits.
         adopted: list[Question] = []
         seen: set[str] = set()
+        depth_zero = sum(1 for q in self.questions.values() if q.depth == 0)
         for entry in entries:
             text, missing = _question_fields(entry)
             key = " ".join(text.lower().split())
             if key in seen:
                 raise ControlError("plan repeats a question")
             seen.add(key)
+            depth_zero += 1
             adopted.append(
-                Question(id=self._next_id(), question=text, missing_fact=missing)
+                Question(id=f"Q{depth_zero}", question=text, missing_fact=missing)
             )
-            self.questions[adopted[-1].id] = adopted[-1]
-            self.states[adopted[-1].id] = QuestionState()
-            self.order.append(adopted[-1].id)
+        for question in adopted:
+            self.questions[question.id] = question
+            self.states[question.id] = QuestionState()
+            self.order.append(question.id)
         self.phase = PHASE_RESOLVE if adopted else PHASE_REPORT
         return adopted
 

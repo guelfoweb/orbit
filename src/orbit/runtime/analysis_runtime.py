@@ -60,6 +60,7 @@ from orbit.runtime.analysis_controller import (
     BLOCKED,
     OPEN,
     MAX_ACTIONS_PER_QUESTION,
+    PHASE_PLAN,
     PHASE_REPORT,
     RESOLVED,
     AnalysisController,
@@ -1325,6 +1326,40 @@ AUTONOMOUS_REPLAN_MESSAGE = (
     "repeat an exhausted action, input or established finding."
 )
 
+# What an autonomous run is told when it planned NOTHING while the runtime was
+# already holding deterministic evidence.
+#
+# An empty plan is legitimate and stays legitimate: it is the honest answer for
+# an artifact whose source explains itself, and §8 of that contract is that a
+# run with nothing to go on still closes honestly rather than inventing work.
+# What this covers is the narrower case where the runtime decoded something
+# before the model was asked anything, and the plan still came back empty.
+#
+# That case is induced, not random. `_evidence_first_instruction` ends with "If
+# it is sufficient, report now", and for an artifact whose whole payload is one
+# decoded stage the rehydrated evidence genuinely can look sufficient -- so an
+# empty plan is the model following the instruction, not failing at it. A
+# measured pair on one artifact bears this out: the same bytes, the same
+# rehydrated PLAN prompt and the same stop reason produced two questions and
+# three actions in one run and zero in another.
+#
+# So this does not argue with the model or assert that work exists. It states
+# what the runtime holds, says plainly what an empty plan means, and offers the
+# same empty plan back as a first-class answer. A model that meant it repeats
+# it and the run reports from the evidence, one call later. A model that had
+# simply not weighed the evidence gets one chance to.
+#
+# It is asked once per run at most, and only from the first PLAN attempt, so it
+# can never compound with the protocol repair beside it.
+EMPTY_PLAN_WITH_EVIDENCE_MESSAGE = (
+    "That plan was empty, but this analysis already holds deterministic "
+    "evidence established before you were asked anything: {summary}. An empty "
+    "plan states that nothing about this artifact still needs investigating. "
+    "If that is right, call submit_analysis_plan again with an empty list and "
+    "the run will report from that evidence. If anything it shows is not yet "
+    "accounted for, name those questions now."
+)
+
 # What the RESOLVE step ADDS to the history, in tokens, and why coverage must
 # reserve it rather than only fitting itself.
 #
@@ -2485,6 +2520,12 @@ class AnalysisRuntime:
     # that fails on its first call still attempted one.
     control_attempts: int = 0
     control_repairs: int = 0
+    # Whether this RUN has already spent its one empty-plan re-ask. Run scope,
+    # not `plan_analysis` scope: PLAN is dispatched a second time when the
+    # evidence-first message is withdrawn by admission, and that withdrawal
+    # happens only when deterministic evidence exists -- the same condition the
+    # re-ask depends on. A flag local to the phase would therefore allow two.
+    _empty_plan_re_asked: bool = False
     last_context_plan: object | None = None
     # Stages the deterministic pass recovered, paired with the evidence each
     # became. Computed once per artifact snapshot and read thereafter.
@@ -2911,6 +2952,38 @@ class AnalysisRuntime:
         for stage, record in self.transform_stages:
             sources.append((stage.kind, record.evidence_id, stage.output))
         return render_indicators(extract_indicators(sources))
+
+    def _deterministic_evidence_summary(self) -> str:
+        """What the preflight established, in one bounded clause, or "".
+
+        The empty string is the load-bearing value: it is what tells
+        `plan_analysis` that an empty plan has nothing behind it and must be
+        taken at face value. Only preflight evidence counts -- transformations
+        and extracted Office modules -- because only that exists before the
+        model has been asked anything, which is the situation this describes.
+
+        Deliberately a count and a kind list, never the decoded bytes. The
+        bytes are already in the prompt this sentence joins, rehydrated from
+        the ids `_evidence_first_instruction` named, and restating them would
+        pay for the payload twice in the one call whose budget matters most.
+        """
+        parts: list[str] = []
+        if self.transform_stages:
+            kinds: list[str] = []
+            for stage, _record in self.transform_stages:
+                if stage.kind not in kinds:
+                    kinds.append(stage.kind)
+            parts.append(
+                f"{len(self.transform_stages)} deterministic transformation"
+                f"{'s' if len(self.transform_stages) != 1 else ''} "
+                f"({', '.join(kinds)})"
+            )
+        if self.office_modules:
+            parts.append(
+                f"{len(self.office_modules)} extracted Office/VBA module"
+                f"{'s' if len(self.office_modules) != 1 else ''}"
+            )
+        return " and ".join(parts)
 
     def authoritative_indicators(self) -> "set[str]":
         """Every network indicator the runtime itself recovered, exactly.
@@ -4296,6 +4369,19 @@ class AnalysisRuntime:
         # to a budget that can afford one good plan, and taking the repair
         # regardless would put the run over a ceiling the analyst set.
         attempts = max(1, min(2, max_calls))
+        # Whether the one empty-plan re-ask has been spent. It shares the
+        # `attempts` budget with the protocol repair rather than adding to it,
+        # so the two can never both run within one call: an attempt is either a
+        # repair or a re-ask, and there is only ever one second attempt.
+        #
+        # The flag that actually bounds it is `self._empty_plan_re_asked`, not
+        # this local. PLAN runs TWICE in a run whose evidence-first message is
+        # withdrawn by admission: `_run_autonomous_locked` calls `plan_analysis`
+        # again with the plain analyst line. Both triggers depend on
+        # `transform_stages` being non-empty, so they coincide by construction
+        # rather than by accident, and a local flag would allow one re-ask per
+        # dispatch instead of one per run.
+        re_asked = False
         for attempt in range(attempts):
             arguments, _text = self._control_call(
                 messages, PLAN_TOOL_SCHEMA, on_progress=on_progress
@@ -4303,11 +4389,93 @@ class AnalysisRuntime:
             calls += 1
             if arguments is not None:
                 try:
-                    controller.adopt_plan(parse_plan_call(arguments))
-                    return calls
+                    adopted = controller.adopt_plan(parse_plan_call(arguments))
                 except ControlError as exc:
                     detail = str(exc)
+                else:
+                    # Four clauses, none redundant. A plan with questions
+                    # needs nothing; an iteration must remain to send the
+                    # re-ask in; a call must survive it; and the run gets one.
+                    # `attempt + 1 >= attempts` subsumes a separate
+                    # `attempts < 2` test -- attempt 0 of 1 is already the last
+                    # iteration -- so there is no such clause.
+                    #
+                    # `re_asked` is deliberately NOT tested: it is implied by
+                    # `_empty_plan_re_asked`, set on the adjacent line with
+                    # nothing between that can raise, and a mutation gate
+                    # showed a guard on it cannot fail independently.
+                    #
+                    # `attempt + 1 >= attempts` is NOT redundant with it, which
+                    # is the trap. The protocol repair below `continue`s
+                    # without touching either flag, so attempt 1 is reachable
+                    # with `_empty_plan_re_asked` still False: a reply with no
+                    # tool call, then a valid empty plan. Arming the re-ask
+                    # there would build a message the exhausted loop never
+                    # sends -- counting a repair the model was never given,
+                    # burning the run's one re-ask on a call that never
+                    # happened, and leaving the phase at PHASE_PLAN.
+                    summary = (
+                        "" if (
+                            adopted
+                            or attempt + 1 >= attempts
+                            # A call must remain for investigating whatever the
+                            # re-ask produces, exactly as COVER requires above.
+                            # The re-ask is more optional than coverage is: the
+                            # run already holds a valid plan, so spending the
+                            # last call to replace an honest empty close with a
+                            # question nothing can act on is strictly worse
+                            # than not asking.
+                            or max_calls < 3
+                            or self._empty_plan_re_asked
+                        )
+                        else self._deterministic_evidence_summary()
+                    )
+                    if not summary:
+                        # Every ordinary outcome: a plan with questions, a
+                        # second empty plan that meant it, an empty plan with
+                        # nothing decoded behind it. The plan stands as
+                        # adopted and `adopt_plan` has already set the phase.
+                        return calls
+                    # Counted where the protocol repair counts itself: at
+                    # dispatch, because this one is about to be sent.
+                    controller.repairs += 1
+                    re_asked = True
+                    self._empty_plan_re_asked = True
+                    # `adopt_plan` refuses a second plan unless the phase is
+                    # still PHASE_PLAN, and the empty adoption just moved it
+                    # to PHASE_REPORT. Nothing else was recorded -- an empty
+                    # plan adds no question, id, state or order entry -- so
+                    # restoring the phase restores the whole pre-plan state.
+                    # The re-asked plan is validated atomically, so a refused
+                    # one cannot leave a question behind either.
+                    controller.phase = PHASE_PLAN
+                    messages = [
+                        *base,
+                        {"role": "user", "content": (
+                            EMPTY_PLAN_WITH_EVIDENCE_MESSAGE.format(
+                                summary=summary
+                            )
+                        )},
+                    ]
+                    continue
             elif _text == PROTOCOL_REPAIR_EXHAUSTED:
+                if re_asked:
+                    # The re-ask could not be parsed. The empty plan adopted on
+                    # the first attempt is still a valid plan, so this is not
+                    # the "model cannot produce the protocol" outcome and must
+                    # not be reported as one.
+                    #
+                    # PHASE_REPORT is exact, not defensive: `adopt_plan` is
+                    # atomic, so a refused re-ask recorded nothing and the
+                    # empty plan is still the whole of the controller's state.
+                    #
+                    # Returns 1, not `calls`: by the rule the branch below
+                    # states, `plan_calls` counts calls that RETURNED INTO
+                    # planning, and exactly one did -- the first. Returning 2
+                    # would over-report; returning 0 would read as "planning
+                    # never ran" and trip the caller's validity gate.
+                    controller.phase = PHASE_REPORT
+                    return 1
                 # Both allowed dispatches are already spent inside
                 # `_control_call`, exactly as at the finish call. Retrying
                 # here would multiply the two bounded layers into four.
@@ -4321,6 +4489,15 @@ class AnalysisRuntime:
                 return 0
             else:
                 detail = "no submit_analysis_plan call was made"
+            if re_asked:
+                # As above: the re-ask produced nothing usable, but the first
+                # attempt produced a plan the controller accepted. Keep it and
+                # report from the evidence rather than declaring the protocol
+                # unsupported for a call that was only ever a second chance.
+                # Atomic adoption again makes PHASE_REPORT exact, and again
+                # exactly one call returned into planning.
+                controller.phase = PHASE_REPORT
+                return 1
             if attempt == 0 and attempts > 1:
                 # Counted here, where the repair is about to be DISPATCHED.
                 # A repair the budget denied was never sent, and reporting it
