@@ -1064,6 +1064,34 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `native_probe.py sustained 768 2` should persistence be considered, preferably through a
   supported Dell/firmware mechanism; a systemd RAPL write at boot is the last resort.
   Evidence: `workdir/diag/dell_power_audit/RESULTS.md`.
+- **DELL-POWER-PL2-LADDER-1 (2026-09-13, docs only) — the lowest safe PL2 is
+  30 W; the ladder is CLOSED and the CPU baseline is READY.** Operator-run on a
+  NORMAL AC boot (MMIO PL1 45 / PL2 17 as found, ~51 °C idle, throttle 0), PL1
+  untouched, root RAPL writes, 17 W restored after the test, no Orbit change. At
+  volatile MMIO **PL2 = 30 W**, `native_probe.py sustained 768 2`
+  (`probe_sustained.json`, 205 samples) measured **prefill 52.06 / decode 18.56
+  tok/s** (cycles 18.73 / 18.39; quarters flat-to-rising every cycle), busy cores
+  3052 / 3492 / 3999 MHz (p10/med/p90), package 71 → **92** → 86 °C — no thermal
+  abort (95 °C guard, 3 °C headroom). By the "only as far as needed" rule 30 W is
+  the FIRST rung meeting the ≥ 18 tok/s target, so **35 / 40 W were NOT tested**
+  and must not be: 30 W already peaks 3 °C under the guard. Two closing witnesses,
+  both acceptable: (1) `throttle_after == throttle_before` exactly ({pkg 0, core 0}
+  both) — no throttle event; (2) the swap 1527 → 1961 MiB (+434) is model-load /
+  residency, NOT decode-window paging — the `before` snapshot predates
+  `client.load()`, the delta matches the 35.3 s mmap of the 21.7 GB GGUF evicting
+  cold desktop pages, and the timed window shows no paging signature (flat/rising
+  decode quarters, RSS FELL 26448 → 25536 MiB cycle-to-cycle, MemAvailable 13 GiB
+  after). The probe samples only temp+MHz per tick, so witness (2) is a behavioural
+  inference, not a per-tick swap series, but conclusive. **Verdict:
+  CPU_BASELINE_READY at PL2 = 30 W (VOLATILE).** Caveats: 30 W is a volatile RAPL
+  write restored to 17 W after the test (the next AC boot re-imposes 17 W — NOT
+  persistent yet); a GPU comparison must run under the SAME PL2 = 30 W (or note the
+  power state) so CPU and GPU are matched; persistence, if wanted, is a later step
+  (supported Dell/firmware mechanism preferred, systemd RAPL write at boot the last
+  resort). This is a standalone-native probe number (512 prefill + 768 decode
+  synthetic), a separate harness from the CHAT-turn baseline below — do not conflate
+  them, and keep it a Dell profile, never overwriting NUC history.
+  Evidence: `workdir/diag/dell_power_audit/RESULTS.md`, `probe_sustained.json`.
 - Recorded, not fixed: `--show-profile` without a model argument previews the
   heuristic for the absent default model (16 threads on this box), not the model
   the interactive pick will load — name the model to preview the real profile; an
@@ -1911,25 +1939,27 @@ Closed since the release — do not reopen any of them without new evidence:
   52 / 18.5 of the previous one, until the cap is understood — that is an operator
   question (adapter, Dell thermal mode, thermald adaptive), not an Orbit mission.
 
-**Gate:** DELL-INTEL-GPU-BENCH-1 is blocked (`CPU_BASELINE_NOT_READY`). The 17 W
-cap is now fully explained: it is firmware/EC state latched at boot by power source
-(AC boot → PL2 17 W; battery boot → PL2 65 W), proven by DELL-POWER-BATTERY-BOOT-REPRO-1.
-BIOS Thermal Management is ALREADY `UltraPerformance` (operator-attested) and is DISPROVEN
-as the fix: on AC it still boots to PL2 17 W (36.7 / 14.9 tok/s), and on battery the
-uncapped 65 W burst still reaches TjMax and aborts decode. Booting on battery is not a fix
-either (the next AC boot re-imposes 17 W). The blocker is purely THERMAL and reduces to ONE
-operator-assisted experiment, NO Orbit code: on a normal AC boot, PL1 untouched, find the
-LOWEST safe PL2 that restores useful decode without reaching thermal limits — ladder PL2
-25 → 30 → 35 → 40 W (only as far as needed), one candidate at a time, abort at ≥ 95 °C,
-reject any candidate with a material throttle-count increase, restore 17 W after every
-test, stop as soon as decode ≥ 18 tok/s at a stable temperature, then sustained-validate
-with `native_probe.py sustained 768 2`. Persist a passing candidate only afterwards,
-preferably via a supported Dell/firmware mechanism (a systemd RAPL write at boot is the
-last resort). See DELL-POWER-PROFILE-AUDIT-1, DELL-POWER-CAP-ROOT-WITNESS-1 and
-DELL-POWER-BATTERY-BOOT-REPRO-1 in the Post-RC38 entry and
-`workdir/diag/dell_power_audit/RESULTS.md`.
+**Gate: CLEARED — `CPU_BASELINE_READY`.** DELL-POWER-PL2-LADDER-1 resolved the
+last thermal blocker: on a normal AC boot, volatile MMIO **PL2 = 30 W** (PL1
+untouched) sustains **prefill 52.06 / decode 18.56 tok/s** with no throttle and a
+3 °C thermal margin — 30 W is the lowest passing rung and the ladder is closed
+(35 / 40 W not tested). The Dell CPU side of DELL-INTEL-GPU-BENCH-1 is therefore
+measured and the mission may start. History for context: the 17 W AC-boot cap is
+firmware/EC state latched at boot by power source (AC boot → PL2 17 W; battery boot
+→ PL2 65 W, proven by DELL-POWER-BATTERY-BOOT-REPRO-1); BIOS `UltraPerformance` is
+disproven as the fix; the uncapped 65 W battery-boot burst hits TjMax; the 30 W
+value is a volatile RAPL write, so it is NOT persistent (the next AC boot re-imposes
+17 W). See DELL-POWER-PROFILE-AUDIT-1, DELL-POWER-CAP-ROOT-WITNESS-1,
+DELL-POWER-BATTERY-BOOT-REPRO-1 and DELL-POWER-PL2-LADDER-1 in the Post-RC38 entry
+and `workdir/diag/dell_power_audit/RESULTS.md`.
 
-Recommended next mission (once the gate clears): **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
+**Before starting DELL-INTEL-GPU-BENCH-1, re-establish PL2 = 30 W** (it is volatile
+and was restored to 17 W after the ladder; a reboot also reverts it), and run BOTH
+the CPU and the external-backend GPU legs under that SAME PL2 = 30 W so the
+comparison is power-matched — or record the exact power state with each leg. Do not
+compare a 30 W CPU number against a GPU run measured at a different PL2.
+
+Recommended next mission (gate now clear): **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
 Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an external compatible backend. The
 Dell CPU side of the comparison is already measured; see the authoritative
 baseline below. Constraints that already apply: native `orbit server` stays
