@@ -473,8 +473,11 @@ class TeardownOrderTests(unittest.TestCase):
 
         source = inspect.getsource(NativeLlamaClient.close)
         free_at = source.index("_free_persistent_mtp_session")
-        ctx_at = source.index("llama_free(self._session.ctx_tgt)")
-        model_at = source.index("llama_model_free(self._model)")
+        # Each handle is taken out of the session before it is freed (so a
+        # concurrent diagnostic reader sees None, never a freed pointer); the
+        # ORDER of the frees is what this asserts.
+        ctx_at = source.index("llama_free(ctx)")
+        model_at = source.index("llama_model_free(model)")
         self.assertLess(free_at, ctx_at, "MTP session must be freed before ctx_tgt")
         self.assertLess(ctx_at, model_at, "ctx_tgt must be freed before the model")
 

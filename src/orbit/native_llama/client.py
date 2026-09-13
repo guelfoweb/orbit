@@ -612,15 +612,19 @@ class NativeLlamaClient:
             assert self.mtmd is not None
             self.mtmd.lib.orbit_mtmd_context_free(self._mtmd_ctx)
             self._mtmd_ctx = None
-        if self._session.sampler:
-            lib.llama_sampler_free(self._session.sampler)
-            self._session.sampler = None
-        if self._session.ctx_tgt:
-            lib.llama_free(self._session.ctx_tgt)
-            self._session.ctx_tgt = None
-        if self._model:
-            lib.llama_model_free(self._model)
-            self._model = None
+        # Each handle is cleared BEFORE it is freed. A diagnostic reader on
+        # another thread (`native_thread_counts` behind `/props`) checks the
+        # handle and then calls into the library; publishing None first turns
+        # that race from a use-after-free into a None.
+        sampler, self._session.sampler = self._session.sampler, None
+        if sampler:
+            lib.llama_sampler_free(sampler)
+        ctx, self._session.ctx_tgt = self._session.ctx_tgt, None
+        if ctx:
+            lib.llama_free(ctx)
+        model, self._model = self._model, None
+        if model:
+            lib.llama_model_free(model)
         # llama.cpp backend globals are process-wide; freeing them per client can
         # corrupt teardown after mixed target-only/MTP client lifetimes.
 
@@ -635,6 +639,28 @@ class NativeLlamaClient:
     def reset_cancel(self) -> None:
         self._session.cancel_requested = False
         self.cancel_event.clear()
+
+    def native_thread_counts(self) -> "tuple[int, int] | None":
+        """`(n_threads, n_threads_batch)` as the live context holds them.
+
+        Diagnostic read-back, distinct from `config.threads`: the config is
+        what Orbit resolved, this is what llama.cpp is running, and the two
+        agree only if every retune along the startup path was undone. None
+        before the context exists or on a backend without the getters, so a
+        caller can publish it without a special case.
+        """
+        ctx = self._session.ctx_tgt
+        if not ctx:
+            return None
+        lib = self.lib.lib
+        read_threads = getattr(lib, "llama_n_threads", None)
+        read_batch = getattr(lib, "llama_n_threads_batch", None)
+        if read_threads is None or read_batch is None:
+            return None
+        try:
+            return int(read_threads(ctx)), int(read_batch(ctx))
+        except Exception:  # diagnostic: ctypes.ArgumentError included, never a failure
+            return None
 
     def load(self, on_progress=None) -> None:
         if self._model or self._session.ctx_tgt:

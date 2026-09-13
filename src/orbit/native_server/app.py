@@ -301,9 +301,22 @@ class OrbitNativeServer:
         }
 
     def runtime_info(self) -> dict[str, Any]:
+        # `threads` is the resolved profile; `native_threads` is the live
+        # context read back through llama.cpp. They are published side by
+        # side so a mismatch is visible from `/props` instead of from a
+        # benchmark that came out slow. Read without `self.lock` on purpose:
+        # `/props` is polled while a completion holds that lock for the whole
+        # decode, and the read is a plain field on the context. The only race
+        # is against `close()` at shutdown, which is narrowed rather than
+        # eliminated: `close()` publishes a None handle before it frees the
+        # context, so a reader that already passed the handle check has a
+        # window of one call. Accepted for a diagnostic on a dying process.
+        native = _native_thread_counts(self.client)
         return {
             "threads": self.client.config.threads,
             "threads_batch": self.client.config.threads_batch,
+            "native_threads": native[0] if native else None,
+            "native_threads_batch": native[1] if native else None,
             "ctx_size": self.client.config.context_tokens,
             "batch_size": self.client.config.batch_size,
             "ubatch_size": self.client.config.ubatch_size,
@@ -473,6 +486,8 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "in_flight": session["in_flight"],
                     "threads": runtime["threads"],
                     "threads_batch": runtime["threads_batch"],
+                    "native_threads": runtime["native_threads"],
+                    "native_threads_batch": runtime["native_threads_batch"],
                     "ctx_size": runtime["ctx_size"],
                     "batch_size": runtime["batch_size"],
                     "ubatch_size": runtime["ubatch_size"],
@@ -825,6 +840,46 @@ def _backend_identity() -> str:
         return ""
 
 
+def _native_thread_counts(client) -> "tuple[int, int] | None":
+    """The live context's thread counts, or None when unobservable.
+
+    Tolerates a client without the read-back (a test double, an older
+    backend) because publishing None is correct there and raising would turn
+    a diagnostic into an outage.
+    """
+    reader = getattr(client, "native_thread_counts", None)
+    if reader is None:
+        return None
+    try:
+        counts = reader()
+    except Exception:
+        return None
+    if not counts:
+        return None
+    try:
+        return int(counts[0]), int(counts[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _log_native_threads(client, stage: str) -> None:
+    """One startup line per lifecycle stage: what the context runs on NOW.
+
+    The resolved profile is printed once; this is printed at every point
+    where the count could have been moved -- after load, after calibration,
+    after the prewarm, at bind -- so a stage that leaves a different count
+    active is visible in the log rather than only in a slow benchmark.
+    """
+    counts = _native_thread_counts(client)
+    if counts is None:
+        print(f"orbit-server native threads: unobservable ({stage})", file=sys.stderr)
+        return
+    print(
+        f"orbit-server native threads: {counts[0]}/{counts[1]} ({stage})",
+        file=sys.stderr,
+    )
+
+
 def _model_identity_for_profile(args) -> "tuple[str, int]":
     """The model bytes a profile was measured against, best-effort.
 
@@ -975,6 +1030,7 @@ def run_server(argv: list[str] | None = None) -> int:
         if not args.verbose_llama_log:
             client.set_quiet_logging()
         client.load()
+        _log_native_threads(client, "after model load")
 
         # Threads are the one measurable field, and this is the only point at
         # which they can be measured: after the weights are resident, before
@@ -1021,6 +1077,7 @@ def run_server(argv: list[str] | None = None) -> int:
 
         for line in render_profile_lines(resolution):
             print(f"orbit-server {line}", file=sys.stderr)
+        _log_native_threads(client, "after profile resolution")
 
         if getattr(getattr(client, "model_profile", None), "profile_id", None) not in (
             QWEN3_CODER_PROFILE_ID,
@@ -1057,6 +1114,7 @@ def run_server(argv: list[str] | None = None) -> int:
         return 1
 
     assert paths is not None
+    _log_native_threads(client, "after prewarm, before bind")
     model_alias = resolve_model_alias(args.alias, paths)
     httpd = ThreadingHTTPServer((args.host, args.port), OrbitNativeHandler)
     httpd.orbit_state = OrbitNativeServer(client=client, model_alias=model_alias)  # type: ignore[attr-defined]

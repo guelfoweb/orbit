@@ -438,12 +438,23 @@ class Repl:
                     on_event=progress_display,
                 )
                 result = run.last_step
-                if result is None:
-                    # No step completed -- cancelled, a backend failure, or a
-                    # zero call budget -- so there is nothing to render and the
-                    # pre-run turn is safe to undo. Why it ended still has to be
-                    # told truthfully: a backend that died must not be reported
-                    # as an analyst interrupt.
+                if result is None and run.final_report is None:
+                    # No step completed AND no closing report -- cancelled, a
+                    # backend failure, or a zero call budget -- so there is
+                    # nothing to render and the pre-run turn is safe to undo.
+                    # Why it ended still has to be told truthfully: a backend
+                    # that died must not be reported as an analyst interrupt.
+                    #
+                    # A zero-step run WITH a report is not this case. A plan
+                    # that was empty twice runs no action, so `steps` is
+                    # empty, but the runtime still closes with a report -- and
+                    # when the deterministic preflight decoded a stage, that
+                    # report carries the decoded body and its indicators. It
+                    # is the run's result; it falls through and is rendered
+                    # below like any other closing report, and nothing is
+                    # rewound: whatever the run appended (a coverage turn and
+                    # its reply; on the pure empty-plan path, nothing) was
+                    # answered by the report the analyst is about to read.
                     renderer.finish(interrupted=True)
                     self._restore_analysis_checkpoint(checkpoint)
                     if run.cancelled:
@@ -544,7 +555,9 @@ class Repl:
                 f"analysis | mode: ANALYSIS | model calls: {result.model_calls} | "
                 f"actions: {1 if result.action_executed else 0} | {elapsed:.1f}s"
             )
-        detail = format_step_diagnostics(result.diagnostics)
+        # A zero-step run has no step diagnostics to append; its cost is
+        # already in the summary's model-call count.
+        detail = format_step_diagnostics(result.diagnostics) if result is not None else ""
         if detail:
             summary += f" | {detail}"
         _print_orbit_summary(summary)

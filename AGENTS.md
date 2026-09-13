@@ -14,19 +14,27 @@ is authoritative; then this file; then release notes.
 ## Current State & Machine-Migration Handoff
 
 Last reconciled against the repository on 2026-09-13 (mission
-DELL-MIGRATION-CLOSURE-1). The NUC → Dell migration is CLOSED: code, model,
-corpus and diagnostics are all present and verified on the Dell.
+POST-RC38-STATE-RECONCILE-1). The NUC → Dell migration closed earlier the same
+day (DELL-MIGRATION-CLOSURE-1): code, model, corpus and diagnostics are all
+present and verified on the Dell.
 
 ### Baseline (the anchor for a migration)
-- `main == origin/main == d9b2a67ecd938e9a330951fee62fb93f38c991bf`, tracked tree
-  clean. (`d9b2a67` = the rc38 doc/release commit; its qualified PRODUCTION code
-  is byte-identical to `7da19f9`.)
+- `main == origin/main == 065dd009a753d0973635709fb6402914b43ea438`, tracked tree
+  clean. Untracked `workdir/` scratch is expected and is NOT dirt to clean up —
+  read the staging warning at the end of the RC38 entry before `git add`.
 - Published release: `v0.0.1-rc38` (annotated tag → `d9b2a67`; GitHub pre-release
   at https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc38, no attached
   assets by convention). Package version stays `0.0.1`; releases are RC tags.
-- No in-progress mission. The repository is at a clean, released, qualified state.
-  Post-release research has NOT started. The next sanctioned action is post-release
-  research (see Suggested Next Objectives); do NOT reopen qualification or
+  `d9b2a67` = the rc38 doc/release commit; its qualified PRODUCTION code is
+  byte-identical to its parent `7da19f9`.
+- **`main` is four commits AHEAD of the released tag** (`git describe` →
+  `v0.0.1-rc38-4-g065dd00`). **Post-release research HAS started** — see
+  "Post-RC38 (unreleased on `main`)" in Release State for the four commits. Two
+  of them change production behaviour (`cbe577e`, `065dd00`), so the rc38 entry
+  below no longer describes everything `main` does; read both.
+- No in-progress mission. The repository is at a clean, qualified state: each
+  post-rc38 commit was qualified, adversarially reviewed to BLOCKER 0 / MAJOR 0
+  and pushed on its own branch before merge. Do NOT reopen qualification or
   optimisation without new measured evidence.
 
 ### Active workstation: the Dell (machine provenance)
@@ -133,9 +141,10 @@ command is:
 TMPDIR=/tmp PYTHONPATH=src python3 -m unittest discover -s tests -q
 ```
 
-Expect **5462 tests, 0 failures, 0 errors, RC=0**. The skip count is
-host-dependent and is NOT a pass/fail signal: 8 recorded on the NUC, **77 on the
-Dell**. All 77 are accounted for by the out-of-repo research artifacts listed
+Expect **0 failures, 0 errors, RC=0**; the test count grows with every mission
+(5462 at rc38, 5588 at `065dd00`, 5622 after DELL-RUNTIME-AND-IBAN-CLOSURE-1 —
+all measured on the Dell). The skip count is host-dependent and is NOT a
+pass/fail signal: 8 recorded on the NUC, **77 on the Dell**. All 77 are accounted for by the out-of-repo research artifacts listed
 above; the 69-skip difference is which of those artifacts each host happened to
 have. A green run is `OK` with a real child RC of 0 — never read the result from
 a shell pipeline.
@@ -159,6 +168,9 @@ reproduced; do NOT rerun the six-sample Ornith campaign for documentation.
 5. `TMPDIR=/tmp` for all runs (a project convention; some sandbox/temp paths assume it).
 6. Qualified analysis server profile: `orbit server --ctx 8192 --threads 6
    --threads-batch 6 --batch 256 --ubatch 128 --think off` (MTP off — the default).
+   Passing all four tuning flags explicitly is deliberate: since `065dd00` an
+   omitted field would be auto-calibrated per machine, and qualification runs on
+   the qualified numbers, not on measured ones.
 7. Performance is host-specific: re-measure with the qualification harness before
    quoting any number; absolute wall time is contention-sensitive.
 
@@ -873,6 +885,113 @@ Release State entry below.
 
 - See `docs/releases/v0.0.1-rc38.md`.
 
+### Post-RC38 (unreleased on `main`)
+
+Four commits landed after the `v0.0.1-rc38` tag. There is no rc39 tag and no
+release notes file for them: `main` is ahead of the last release, which is a
+normal post-release state, not an omission. Do not create a tag or release to
+"fix" it (Permanent Principles). Newest last:
+
+- `d1c45e6` *docs: close the Dell migration handoff* — documentation only.
+- `cbe577e` *fix(analysis): an empty plan is asked once more when the runtime
+  already decoded something* — **production behaviour change**, see the
+  invariants below.
+- `ffc4305` *docs: record the Dell CPU CHAT cache baseline for the GPU mission*
+  — documentation only; closed CHAT-FIRST-TURN-CACHE-REUSE-1 as OUTCOME A (no
+  regression, no production change). The baseline table it produced is under
+  Suggested Next Objectives; evidence in `workdir/diag/chat_prefix_reuse/`.
+- `065dd00` *feat(server): resolve a measured startup profile instead of
+  shipping one machine's numbers* — **production behaviour change**; `orbit
+  server` now resolves `threads`/`threads_batch`/`batch`/`ubatch`/`cache_ram`
+  through a precedence chain and may spend ~47 s once per fingerprint measuring
+  them. Full contract in "Server Startup Profile (auto-calibration)"; evidence
+  in `workdir/diag/autocalibration/`.
+
+**Empty-plan re-ask invariant (`cbe577e`) — what a future session must not
+undo.** An empty PLAN stays legitimate: a model that has enough evidence may
+plan nothing and the run reports from what it holds. The change is narrow. When
+the deterministic transform preflight (which runs in `__post_init__`, before any
+model call) has already established something, `plan_analysis` spends ONE extra
+PLAN call that states what the runtime holds and offers the same empty plan back
+as a first-class answer. The bound is four non-redundant clauses, each load-bearing:
+
+1. a plan that already has questions gets no re-ask;
+2. an iteration must remain to carry it (`attempt + 1 >= attempts`; the loop caps
+   `attempts` at 2);
+3. a call must survive it (`max_calls < 3`, mirroring COVER's spare-call rule) —
+   the re-ask must never replace an honest close with a question nothing can act on;
+4. exactly one per RUN, via the run-scoped `_empty_plan_re_asked`. PLAN is
+   dispatched twice when admission withdraws the evidence-first message, so a
+   phase-local flag would allow two. Do not "simplify" it to phase scope.
+
+With no deterministic evidence `_deterministic_evidence_summary()` is empty and
+nothing changes — one PLAN call, honest closure, no invented work. The same
+commit made `AnalysisController.adopt_plan` atomic: it used to append each
+question as it validated, so a plan REFUSED on a later entry left its earlier
+questions adopted and a repair could plan on top of them. Depth-0 ids now come
+from a local counter because `_next_id` reads a record that must not be written
+before the commit. Qualification: 28 new tests, mutation gate 11/11 applied and
+CAUGHT (`workdir/diag/empty_plan_recovery/mutation_gate.py`), controller suites
+198, QREL-1 114 OK.
+
+This is NOT a licence to add replanning. No new model call beyond the existing
+bounded plan accounting, no sample-specific condition, no infinite replan, no
+REPORT prose parsed to reopen analysis.
+
+**DELL-RUNTIME-AND-IBAN-CLOSURE-1 (2026-09-13, after `065dd00`) — two symptoms,
+two causes, two production fixes.** Evidence: `workdir/diag/dell_runtime_iban_closure/`
+(`RESULTS.md` is the record; `mutation_gate.py` 12/12 CAUGHT).
+
+- *Decode fell to ~10 tok/s on the auto profile.* The Dell had REBOOTED at 14:05;
+  the first `orbit server` on that boot calibrated with the model not yet paged in,
+  measured its FIRST candidate (6 threads) at 25 tok/s prefill under 17,957 major
+  faults, and cached **8 threads** as the winner. A served turn at 8 threads took
+  20.6 s against 10.6 s at 6 (`/props.native_threads` proved the context really ran
+  8). The first candidate after load pays that page-in on EVERY calibration on this
+  box, not only after a reboot (a prefetched page cache reproduced 22,534 faults:
+  a 21.7 GB mmap and a 22 GB process do not both fit beside 12 GB of other cache).
+  Warm, 6 and 8 score within 1-8 % of each other (repeat noise ~5 %) while the
+  real turn is 2× slower at 8. Fix in `server_calibration.py`: one untimed
+  warm-up pass over the same tokens before anything is scored (recorded with
+  `rejected="warmup"`, counted against the budget, can never win), and the
+  FEWEST threads among candidates within `TIE_MARGIN = 0.10` of the top score.
+  `--recalibrate` now caches 6/6 on the Dell.
+- *Separately, this boot runs under a package power cap* (RAPL MMIO PL2 = 17 W,
+  effective min with the 65 W MSR value): explicit 6/6 measures 33-38 tok/s
+  prefill / 12-16 decode instead of the 52 / 18.5 recorded on the previous boot,
+  with 0 involuntary context switches, 3 major faults and no swap traffic during a
+  turn — a frequency ceiling (busy cores 2.3-2.5 GHz; 4 P-cores 2.9 GHz; one core
+  alone still 4.3 GHz). Neither CPU pinning nor the `performance` platform profile
+  lifts it; the remaining levers need root or the operator (adapter / Dell thermal
+  mode / thermald adaptive). **P4 host state — Orbit was NOT modified to compensate,
+  and the "decode ≥ 17" class is not reachable while the cap stands.** The desktop
+  `gpu-xe.sh` applet installed the same day is not the cause (measured).
+- *IBAN "PLAN=[] shows only `no open question requires an action`".* Not the
+  transform, not the re-ask, not report assembly: for a zero-action run `report()`
+  already returns the deterministic-only report with the decoded body, the stage
+  sha and the C2 as a verified indicator, at zero model calls. The REPL's
+  `_ask_analysis` treated `run.last_step is None` as "nothing to render", printed
+  the stop reason, rewound the analyst turn and returned — dropping that report
+  (I4). Fix in `repl.py`: a zero-step run WITH a `final_report` falls through to
+  the ordinary rendering and keeps its turn; without one the old behaviour stands.
+  Reproduced against the real REPL and the real `report()` on IBAN.js
+  (`zero_step_terminal_before.txt` 3 lines → `_after.txt` 41 lines). The one
+  live run the mission allowed planned normally (plan_calls 1, 3 actions, report
+  with C2), so the empty-plan path is covered by the offline reproduction and the
+  unit suites, not by a live PLAN=[].
+- *Diagnostic read-back added:* `NativeLlamaClient.native_thread_counts()`
+  (`llama_n_threads`/`llama_n_threads_batch`), published as
+  `/props.native_threads[_batch]` beside the resolved `threads`, and logged as
+  `orbit-server native threads: N/N (<stage>)` after model load, after profile
+  resolution (post `restore_threads`) and before bind. Never fails a start.
+- Recorded, not fixed: `--show-profile` without a model argument previews the
+  heuristic for the absent default model (16 threads on this box), not the model
+  the interactive pick will load — name the model to preview the real profile; an
+  all-explicit start prints `profile: heuristic` and a `profile cache:` path it did
+  not use; the heuristic fallback on a hybrid 16-core box is 16 threads (the
+  measured-worst profile), so a calibration that exhausts its 90 s budget lands
+  there — a follow-up candidate, not reopened here.
+
 ## RC24 Tool-Loop Convergence
 
 - Orbit now has one production tool loop. The former opt-in agent path,
@@ -1250,6 +1369,15 @@ Release State entry below.
 - If `/props` does not respond, `backend_props: unavailable` must not fail the benchmark.
 - Always record commit/tag, model, ctx, threads, MTP, tools, and prewarm.
 - `scripts/suggest-server-profile.sh` is a conservative starting point, not a guarantee of optimal tuning.
+- **Since `065dd00`, record the RESOLVED profile, not the flags you passed.** Any
+  of `threads`/`threads_batch`/`batch`/`ubatch` you leave unspecified is filled
+  from a cached measurement, a calibration sweep or the heuristic — so two runs
+  launched with identical command lines on the same box can run different
+  profiles (the first start sweeps, later starts read the cache). Only the
+  thread counts are ever MEASURED; `batch`/`ubatch` are fixed before the context
+  a benchmark would need, so they come from cache or heuristic.
+  `orbit server --show-profile` prints the resolution without loading a model;
+  pin every field explicitly for a controlled benchmark.
 - GPU must be measured through an external compatible backend, for example `llama-server --base-url`, not as native `orbit server` performance.
 - Native `orbit server` is CPU-first with `gpu_layers=0`.
 
@@ -1304,8 +1432,20 @@ most consequential line in the calibrator. Candidate table:
 `workdir/diag/autocalibration/`.
 
 Calibration costs ~47 s once per fingerprint (first start 120 s vs 81 s cached,
-on top of a ~24 s prewarm and ~46 s model load). Concurrent server starts each
-measure the other's contention — start them sequentially.
+on top of a ~24 s prewarm and ~46 s model load); with the warm-up below it is
+~75 s and a `--recalibrate` start measured 156 s to healthy. Concurrent server
+starts each measure the other's contention — start them sequentially.
+
+**Warm-up and tie-break (DELL-RUNTIME-AND-IBAN-CLOSURE-1).** The sweep first runs
+one untimed pass with the first candidate, because the first measurement after
+load pays the mmap page-in (17,957-22,534 major faults on the Dell, 25 tok/s
+prefill against 41 warm) and would otherwise hand the win to whichever candidate
+ran second — which is exactly how a fresh boot cached 8 threads. The row is kept
+in the table as `rejected: "warmup"`, scores 0 and counts against the budget. The
+winner is then the FEWEST threads among candidates within `TIE_MARGIN` (10 %) of
+the top score: warm, 6 and 8 scored within 1-8 % on the Dell while a served turn
+was 2× slower at 8, and repeat noise is ~5 %. Read `/props.native_threads` — not
+`threads` — when you need to know what the context is running.
 
 ## Recommended Gates
 
@@ -1332,8 +1472,9 @@ should follow for any tracked change:
      (`TMPDIR=/tmp PYTHONPATH=src python3 -m unittest discover -s tests -q` —
      unittest, never pytest) with a REAL child return code, never one read from a
      shell pipeline (chunk it if the box's memory-pressure heuristic kills a
-     single huge run; 5462 tests / 0 failed at rc38, skips host-dependent: 8 on
-     the NUC, 77 on the Dell);
+     single huge run; 5462 tests / 0 failed at rc38 and 5622 after
+     DELL-RUNTIME-AND-IBAN-CLOSURE-1, skips host-dependent: 8 on the NUC, 77 on
+     the Dell);
    - a mutation gate for any new deterministic capability — each mutant APPLIED
      and CAUGHT on an isolated tree copy (see the transform/OLE/autoexec/kind
      gates under `workdir/diag/*/mutation_gate.py`);
@@ -1616,6 +1757,12 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 ## Main Commits
 
+- post-rc38 (unreleased, newest last): `d1c45e6` migration-handoff closure,
+  `cbe577e` empty-plan re-ask + atomic `adopt_plan`, `ffc4305` Dell CPU CHAT
+  cache baseline, `065dd00` measured server startup profile, then
+  DELL-RUNTIME-AND-IBAN-CLOSURE-1 (calibration warm-up + tie-break, REPL zero-step
+  report, native thread read-back — SHA recorded in the Post-RC38 entry once
+  merged). See the "Post-RC38 (unreleased on `main`)" entry in Release State.
 - rc38 ANALYSIS arc (post-rc37, #260 → `7da19f9`): see the RC38 Release State
   entry above for the per-capability merge SHAs (network-deny `92a4048`,
   fromCharCode `7fab248`, Chr-offset `6de28ea`, string-array fold `8fd7586`,
@@ -1670,9 +1817,20 @@ box is not a comparable number; token/cache/rate and correctness are.
 ## Suggested Next Objectives
 
 Current state (2026-09-13): rc38 is **RELEASED** — tag `v0.0.1-rc38` → `d9b2a67`,
-GitHub pre-release published, main clean. The NUC → Dell migration is CLOSED and
-the Dell is the active workstation. **Post-release research has NOT started.**
-No optimization or analysis mission is pending against the current baseline.
+GitHub pre-release published. The NUC → Dell migration is CLOSED and the Dell is
+the active workstation. **Post-release research is UNDER WAY**: `main` is four
+commits ahead of the tag at `065dd00`, tracked tree clean, no mission in flight.
+Closed since the release — do not reopen any of them without new evidence:
+
+- CHAT-FIRST-TURN-CACHE-REUSE-1 → OUTCOME A, no regression, doc only (`ffc4305`);
+  it produced the Dell CPU baseline immediately below.
+- The empty-plan re-ask and `adopt_plan` atomicity fix (`cbe577e`).
+- The measured server startup profile (`065dd00`).
+- DELL-RUNTIME-AND-IBAN-CLOSURE-1: cold-first-candidate calibration + REPL zero-step
+  report rendering (see the Post-RC38 entry). The Dell currently runs under a 17 W
+  package cap (host state, P4): quote 33-38 / 12-16 tok/s for this boot, not the
+  52 / 18.5 of the previous one, until the cap is understood — that is an operator
+  question (adapter, Dell thermal mode, thermald adaptive), not an Orbit mission.
 
 Recommended next mission: **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
 Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an external compatible backend. The
@@ -1728,7 +1886,10 @@ being matched — a native
 cache are not the same object, so "warm vs warm" needs spelling out.
 
 Raw rates are cache-independent within noise (prefill 47–55 tok/s, decode 17–20
-tok/s, n=1 per cell). Latency differences on this box are evaluated-token count,
+tok/s, n=1 per cell). **These are previous-boot numbers.** After the 14:05 reboot
+the same explicit profile measured 33–38 / 12–16 under a 17 W package cap (see the
+Post-RC38 entry, DELL-RUNTIME-AND-IBAN-CLOSURE-1); check `/props.native_threads`
+and the busy-core frequency before comparing against this table. Latency differences on this box are evaluated-token count,
 not throughput — report evaluated tokens beside any wall time.
 
 **What actually costs you the prefix.** Not "an ANALYSIS run": the trigger is a

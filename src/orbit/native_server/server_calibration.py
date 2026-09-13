@@ -30,6 +30,7 @@ rather than delaying a server start indefinitely.
 
 from __future__ import annotations
 
+import math
 import time
 from ctypes import POINTER, byref, cast, sizeof
 from dataclasses import dataclass, asdict
@@ -67,6 +68,30 @@ CALIBRATION_BUDGET_SECONDS = 90.0
 
 # Swap growth above this is treated as thrashing rather than noise.
 SWAP_GROWTH_TOLERANCE_MIB = 16
+
+# How much better a candidate with MORE threads must score to displace one
+# with fewer. Measured on the Dell (16-core hybrid): with the weights warm, 6
+# and 8 threads scored within 1-8% of each other across three orderings, yet
+# a real cache-restored CHAT turn took 10.6 s at 6 threads and 20.6 s at 8 --
+# the synthetic shape (512-token prefill, 24-token decode, no cache restore,
+# no other load) flatters larger counts relative to a served turn, where
+# extra threads land on the slowest cores and every step waits for them.
+# Repeat measurements of one candidate varied by ~5%. So within this margin
+# the benchmark cannot tell the candidates apart, and the fewer threads are
+# the safer answer: less contention, less power, and the count with a
+# qualified corpus behind it. A larger count still wins when it earns it by
+# more than the noise.
+TIE_MARGIN = 0.10
+
+# Why a warm-up runs first. The model is mmap'd; loading it does not touch
+# every page. The FIRST candidate measured after load pays that page-in --
+# on a fresh boot from NVMe it measured 17,957 major faults and 25 tok/s of
+# prefill where the same thread count, warm, measured 41 tok/s -- and so the
+# candidate that happens to run first loses to whichever runs second. That
+# is how a fresh-boot calibration cached 8 threads on a machine whose warm
+# winner is 6. One untimed pass over the same tokens pays the cost before
+# anything is scored; it is recorded in the table, marked, and can never win.
+WARMUP_REJECTION = "warmup"
 
 
 @dataclass(frozen=True)
@@ -242,10 +267,15 @@ def calibrate_threads(
     corruption, and the cache write itself is atomic.
 
     None means "fall back", and every failure path produces it: no candidates,
-    no tokens, a decode error, the budget exhausted before a single candidate
-    finished, or every candidate rejected for swap. The caller never has to
-    distinguish those to stay correct -- it falls back either way -- but the
-    measurement table is returned alongside so the reason is recoverable.
+    no tokens, every candidate failing to decode, or every candidate rejected
+    for swap. The caller never has to distinguish those to stay correct -- it
+    falls back either way -- but the measurement table is returned alongside
+    so the reason is recoverable.
+
+    The budget bounds the sweep from the SECOND timed candidate on: the warm-up
+    and the first candidate always run, so wall time is at most
+    `budget_seconds` plus one candidate, and a start that exhausted the ceiling
+    still leaves one real measurement behind rather than none.
     """
     # Threads are the only thing this can measure. Asked for anything else --
     # because the operator named the thread counts and left batch unset -- it
@@ -266,24 +296,58 @@ def calibrate_threads(
 
     started = time.perf_counter()
     measurements: list[CandidateMeasurement] = []
-    for threads in picks:
-        if time.perf_counter() - started > budget_seconds:
+    # Untimed in effect: measured like a candidate so it walks the exact same
+    # code path (and pays the same page-in), then excluded from scoring. Its
+    # wall time counts toward the budget like any other work. A swap
+    # rejection it earned is kept beside the marker: the box thrashed, and the
+    # row should say so. A warm-up that fails part-way has not necessarily
+    # paid the page-in, so the first timed candidate may be cold again; the
+    # `warmup:error:` row is what makes that diagnosable afterwards.
+    try:
+        warm = measure_candidate(client, picks[0], tokens=tokens)
+        marker = (
+            WARMUP_REJECTION if warm.rejected is None
+            else f"{WARMUP_REJECTION}:{warm.rejected}"
+        )
+        measurements.append(
+            CandidateMeasurement(**{**asdict(warm), "score": 0.0, "rejected": marker})
+        )
+    except Exception as exc:
+        measurements.append(
+            CandidateMeasurement(
+                threads=int(picks[0]), prefill_tokens=len(tokens),
+                decode_tokens=CALIBRATION_DECODE_TOKENS,
+                prefill_seconds=0.0, decode_seconds=0.0,
+                prefill_tps=0.0, decode_tps=0.0, rss_mib=_rss_mib(),
+                swap_used_mib=_swap_used_mib(), swap_growth_mib=0,
+                score=0.0, rejected=f"{WARMUP_REJECTION}:error:{type(exc).__name__}",
+            )
+        )
+    if on_event:
+        on_event(measurements[-1])
+    for index, threads in enumerate(picks):
+        # The first timed candidate always runs. A warm-up that alone consumed
+        # the ceiling (a slow disk, a contended page cache) would otherwise
+        # produce no usable row at all, cache nothing, and repeat the same
+        # sweep on every start with no signal; one bounded candidate more
+        # leaves a real measurement behind instead. From the second candidate
+        # on, exceeded means abandoned.
+        if index and time.perf_counter() - started > budget_seconds:
             break
         try:
             measurement = measure_candidate(client, threads, tokens=tokens)
         except Exception as exc:
-            measurements.append(
-                CandidateMeasurement(
-                    threads=int(threads), prefill_tokens=len(tokens),
-                    decode_tokens=CALIBRATION_DECODE_TOKENS,
-                    prefill_seconds=0.0, decode_seconds=0.0,
-                    prefill_tps=0.0, decode_tps=0.0, rss_mib=_rss_mib(),
-                    swap_used_mib=_swap_used_mib(), swap_growth_mib=0,
-                    score=0.0, rejected=f"error:{type(exc).__name__}",
-                )
+            measurement = CandidateMeasurement(
+                threads=int(threads), prefill_tokens=len(tokens),
+                decode_tokens=CALIBRATION_DECODE_TOKENS,
+                prefill_seconds=0.0, decode_seconds=0.0,
+                prefill_tps=0.0, decode_tps=0.0, rss_mib=_rss_mib(),
+                swap_used_mib=_swap_used_mib(), swap_growth_mib=0,
+                score=0.0, rejected=f"error:{type(exc).__name__}",
             )
-            continue
         measurements.append(measurement)
+        # Every row reaches the sink, failed ones included, so a listener's
+        # count always matches the table's.
         if on_event:
             on_event(measurement)
 
@@ -291,7 +355,16 @@ def calibrate_threads(
     usable = [m for m in measurements if m.rejected is None and m.score > 0]
     if not usable:
         return None
-    best = max(usable, key=lambda m: m.score)
+    top = max(m.score for m in usable)
+    # Fewest threads among those the benchmark cannot distinguish from the
+    # top score. See TIE_MARGIN for the measurement behind this. The boundary
+    # is inclusive, and `isclose` keeps it so when `top * 0.9` lands an ulp
+    # off a score that was written as exactly that.
+    floor = top * (1.0 - TIE_MARGIN)
+    best = min(
+        (m for m in usable if m.score >= floor or math.isclose(m.score, floor)),
+        key=lambda m: m.threads,
+    )
     # Only the fields actually asked for: an operator who set `--threads 8` and
     # left `--threads-batch` unset gets the measured batch count without their
     # explicit value being contradicted in the returned mapping.
@@ -313,6 +386,8 @@ def restore_threads(client, threads: int, threads_batch: int) -> None:
 
 
 __all__ = [
+    "TIE_MARGIN",
+    "WARMUP_REJECTION",
     "CALIBRATION_BUDGET_SECONDS",
     "CALIBRATION_DECODE_TOKENS",
     "CALIBRATION_PREFILL_TOKENS",
