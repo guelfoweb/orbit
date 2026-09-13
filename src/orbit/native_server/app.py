@@ -417,6 +417,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             qwen_route_prefix = state.client.qwen_route_prefix_reuse_status()
             qwen36_shell_tool_prefix = state.client.qwen36_shell_tool_prefix_reuse_status()
             qwen3_coder_route_prefix = state.client.qwen3_coder_route_prefix_reuse_status()
+            ornith_route_prefix = state.client.ornith_route_prefix_reuse_status()
             final_prefix_config = _final_prefix_reuse_props(state.client)
             self._json(
                 {
@@ -504,6 +505,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "qwen_route_prefix_reuse": qwen_route_prefix,
                     "qwen36_shell_tool_prefix_reuse": qwen36_shell_tool_prefix,
                     "qwen3_coder_route_prefix_reuse": qwen3_coder_route_prefix,
+                    "ornith_route_prefix_reuse": ornith_route_prefix,
                     **_model_load_props(state.client),
                     **final_prefix_config,
                     **_tool_call_healing_props(),
