@@ -490,6 +490,39 @@ class NativeLlamaClient:
             "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
         }
 
+    def ornith_route_prefix_reuse_status(self) -> dict[str, object]:
+        # Observability parity with the Qwen route-prefix accessors above: the
+        # Ornith status object is maintained by the runtime but was never
+        # surfaced, so an Ornith reuse REFUSAL reason was not observable. This
+        # only reads runtime-owned state; it changes no reuse/cache behaviour.
+        status = self._ornith_route_prefix_status
+        profile = getattr(self, "model_profile", None)
+        profile_eligible = (
+            getattr(profile, "profile_id", None) == ORNITH15_PROFILE_ID
+            and getattr(profile, "verified", False)
+            and self._model_metadata_identity.get("general.file_type") == "15"
+        )
+        spec = self._ornith_route_prefix_spec
+        return {
+            "enabled": self.config.ornith_route_prefix_reuse_enabled and profile_eligible,
+            "source": self.config.ornith_route_prefix_reuse_source,
+            "config_error": self.config.ornith_route_prefix_reuse_config_error,
+            "initialized": status.initialized,
+            "prefix_tokens": status.prefix_tokens,
+            "capture_count": status.capture_count,
+            "restore_count": status.restore_count,
+            "fallback_count": status.fallback_count,
+            "invalidation_count": status.invalidation_count,
+            "failure_reason": status.failure_reason,
+            "last_used": status.last_used,
+            "checkpoint_size_bytes": self._ornith_route_prefix_anchor_state.checkpoint_size,
+            "profile_identity": getattr(profile, "profile_id", None),
+            "template_identity": getattr(profile, "template_sha256", None),
+            "tokenizer_identity": hash_text(ORNITH_ROUTE_TOKENIZER_IDENTITY),
+            "prefix_token_hash": spec.prefix_token_hash if spec is not None else None,
+            "prefix_text_hash": spec.invariant_text_hash if spec is not None else None,
+        }
+
     def qwen36_shell_tool_prefix_reuse_status(self) -> dict[str, object]:
         with self._qwen36_shell_tool_prefix_lock:
             status = self._qwen36_shell_tool_prefix_status

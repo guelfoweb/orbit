@@ -736,5 +736,108 @@ class OrnithStartupPrewarmWiringTests(unittest.TestCase):
         )
 
 
+class OrnithRoutePrefixStatusTests(unittest.TestCase):
+    """ORNITH-ROUTE-PREFIX-OBSERVABILITY-1: the Ornith route-prefix status is
+    now exposed through the same accessor shape as the Qwen ones. These tests
+    read runtime-owned state only and assert that reading never mutates it."""
+
+    def _client(self, *, profile=None, enabled=True, file_type="15") -> NativeLlamaClient:
+        paths = NativeLlamaPaths(
+            llama_root=Path("/llama"),
+            build_bin=Path("/llama/build/bin"),
+            library=Path("/llama/build/bin/libllama.so"),
+            model=Path("/models/ornith.gguf"),
+            model_id="legacy-path",
+        )
+        config = NativeClientConfig(
+            qwen_route_prefix_reuse_enabled=False,
+            qwen3_coder_route_prefix_reuse_enabled=False,
+            ornith_route_prefix_reuse_enabled=enabled,
+        )
+        with mock.patch("orbit.native_llama.client.LlamaLibrary"):
+            client = NativeLlamaClient(paths, config)
+        client.model_profile = profile if profile is not None else _profile()
+        client._model_metadata_identity = {
+            "general.architecture": "qwen35moe",
+            "general.file_type": file_type,
+        }
+        return client
+
+    _KEYS = {
+        "enabled", "source", "config_error", "initialized", "prefix_tokens",
+        "capture_count", "restore_count", "fallback_count", "invalidation_count",
+        "failure_reason", "last_used", "checkpoint_size_bytes", "profile_identity",
+        "template_identity", "tokenizer_identity", "prefix_token_hash", "prefix_text_hash",
+    }
+
+    def test_eligible_state_is_represented(self) -> None:
+        from orbit.native_llama.qwen_route_prefix import hash_text
+
+        status = self._client().ornith_route_prefix_reuse_status()
+        self.assertEqual(set(status), self._KEYS)
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["profile_identity"], ORNITH15_PROFILE_ID)
+        self.assertEqual(status["tokenizer_identity"], hash_text(ORNITH_ROUTE_TOKENIZER_IDENTITY))
+        self.assertIsNone(status["failure_reason"])
+        self.assertEqual(status["capture_count"], 0)
+
+    def test_refusal_reason_is_reported(self) -> None:
+        client = self._client()
+        client._ornith_route_prefix_status.failure_reason = "model_profile_ineligible"
+        client._ornith_route_prefix_status.fallback_count = 2
+        status = client.ornith_route_prefix_reuse_status()
+        self.assertEqual(status["failure_reason"], "model_profile_ineligible")
+        self.assertEqual(status["fallback_count"], 2)
+
+    def test_ineligible_profile_and_quantization_report_disabled(self) -> None:
+        self.assertFalse(self._client(profile=_profile(verified=False)).ornith_route_prefix_reuse_status()["enabled"])
+        self.assertFalse(self._client(file_type="7").ornith_route_prefix_reuse_status()["enabled"])
+        self.assertFalse(self._client(enabled=False).ornith_route_prefix_reuse_status()["enabled"])
+
+    def test_uninitialized_profile_is_safe(self) -> None:
+        client = self._client()
+        client.model_profile = None
+        status = client.ornith_route_prefix_reuse_status()
+        self.assertFalse(status["enabled"])
+        self.assertIsNone(status["profile_identity"])
+
+    def test_reading_does_not_mutate_state(self) -> None:
+        import dataclasses
+
+        client = self._client()
+        before = dataclasses.astuple(client._ornith_route_prefix_status)
+        before_state = client._ornith_route_prefix_anchor_state
+        client.ornith_route_prefix_reuse_status()
+        client.ornith_route_prefix_reuse_status()
+        self.assertEqual(dataclasses.astuple(client._ornith_route_prefix_status), before)
+        self.assertIs(client._ornith_route_prefix_anchor_state, before_state)
+
+    def test_qwen_status_is_unaffected(self) -> None:
+        client = self._client()
+        qwen = client.qwen_route_prefix_reuse_status()
+        self.assertIn("failure_reason", qwen)
+        # the Ornith profile is not Qwen, so the Qwen accessor still reports disabled
+        self.assertFalse(qwen["enabled"])
+
+
+class OrnithRoutePrefixPropsWiringTests(unittest.TestCase):
+    """/props must carry the Ornith field, wired like the sibling prefixes."""
+
+    def test_props_payload_exposes_ornith_route_prefix_reuse(self) -> None:
+        import ast
+
+        app_src = (Path(__file__).resolve().parents[1] / "src/orbit/native_server/app.py").read_text()
+        keys = {
+            key.value
+            for node in ast.walk(ast.parse(app_src))
+            if isinstance(node, ast.Dict)
+            for key in node.keys
+            if isinstance(key, ast.Constant)
+        }
+        self.assertIn("ornith_route_prefix_reuse", keys)
+        self.assertIn("qwen_route_prefix_reuse", keys)
+        self.assertIn("ornith_route_prefix_reuse_status()", app_src)
+
+
 if __name__ == "__main__":
     unittest.main()

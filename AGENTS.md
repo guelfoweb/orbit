@@ -2073,10 +2073,15 @@ not a re-prefill). Measured: CHAT 768 → ANALYSIS → CHAT 0 (25 s) → CHAT 76
 EXPECTED — no regression, no production change. Do not reopen the invalidation
 rule to reclaim ~17 s once per transition.
 
-Observability gap, recorded not fixed: `/props` publishes the three Qwen
-prefix-reuse states but no Ornith route-prefix key, and the Ornith
-`QwenRoutePrefixStatus` counters are never emitted, so a REFUSAL reason is not
-observable. Per-request reuse is: `ORBIT_KV_DIAG=1` (+ `ORBIT_KV_DIAG_FILE`) →
+Observability, RESOLVED (ORNITH-ROUTE-PREFIX-OBSERVABILITY-1): `/props` now
+publishes `ornith_route_prefix_reuse` beside the three Qwen prefix-reuse states,
+emitting the Ornith `QwenRoutePrefixStatus` fields (enabled/source/config_error,
+the initialized flag and capture/restore/fallback/invalidation counts,
+`failure_reason`, `last_used`, checkpoint size, and profile/template/tokenizer/
+prefix identities via `client.ornith_route_prefix_reuse_status()`), so an Ornith
+reuse REFUSAL reason is now observable. The change is additive and observational —
+no reuse/cache/route behaviour changed. Per-request reuse is still:
+`ORBIT_KV_DIAG=1` (+ `ORBIT_KV_DIAG_FILE`) →
 `kv_diag_native_cache.cached_tokens`. Two traps: `kv_diag_route_prefix_anchor`
 reports `model_profile_ineligible` for Ornith because it describes the GEMMA
 lineage (correct, easily misread as the Ornith refusal); and on a successful
