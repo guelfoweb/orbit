@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import io
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
 
-from orbit.native_llama.model_discovery import NativeProfileInspector, discover_models, format_model_discovery
+from orbit.native_llama.model_discovery import (
+    ModelDiscoveryResult,
+    ModelDiscoveryRow,
+    NativeProfileInspector,
+    discover_models,
+    format_model_discovery,
+    paint_model_status,
+)
+from orbit.terminal.theme import GREEN, RED, RESET, supports_ansi
 from orbit.native_llama.model_profiles import (
     GEMMA4_PROFILE_ID,
     QWEN36_PROFILE_ID,
@@ -345,6 +355,71 @@ class NativeModelDiscoveryTests(unittest.TestCase):
 
         inspector.assert_called_once_with(model.resolve())
         inspector.close.assert_called_once_with()
+
+
+class ModelStatusColorTests(unittest.TestCase):
+    """SERVER-MODEL-STATUS-COLORS-1: colour only AVAILABLE (green) / MISSING
+    (red), width-safe, and only when colour is enabled."""
+
+    _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+    def _result(self) -> ModelDiscoveryResult:
+        return ModelDiscoveryResult(
+            rows=(
+                ModelDiscoveryRow("Ornith 1.5 35B-A3B", "AVAILABLE", "VERIFIED", "/models/ornith.gguf"),
+                ModelDiscoveryRow("Gemma 4 26B-A4B", "MISSING", "VERIFIED", "orbit download x/y.gguf"),
+                ModelDiscoveryRow("mystery.gguf", "AVAILABLE", "UNVERIFIED", "/models/mystery.gguf"),
+            ),
+            wall_ms=0.0,
+            filesystem_scans=0,
+            metadata_inspections=0,
+        )
+
+    def test_available_is_green_and_missing_is_red(self) -> None:
+        out = format_model_discovery(self._result(), color=True)
+        self.assertIn(f"{GREEN}AVAILABLE{RESET}", out)
+        self.assertIn(f"{RED}MISSING{RESET}", out)
+
+    def test_plain_default_has_no_ansi_and_equals_explicit_plain(self) -> None:
+        default = format_model_discovery(self._result())
+        self.assertEqual(default, format_model_discovery(self._result(), color=False))
+        self.assertNotIn("\x1b[", default)
+
+    def test_colour_preserves_alignment_and_plain_text(self) -> None:
+        colored = format_model_discovery(self._result(), color=True)
+        plain = format_model_discovery(self._result(), color=False)
+        # stripping the escapes must reproduce the exact plain layout byte-for-byte
+        self.assertEqual(self._ANSI.sub("", colored), plain)
+
+    def test_only_the_status_token_is_coloured(self) -> None:
+        out = format_model_discovery(self._result(), color=True)
+        self.assertNotIn(f"{GREEN}VERIFIED", out)
+        self.assertNotIn(f"{RED}VERIFIED", out)
+        self.assertNotIn(f"{GREEN}Ornith", out)
+        coloured = re.findall(r"\x1b\[3\dm(.*?)\x1b\[0m", out)
+        self.assertEqual(set(coloured), {"AVAILABLE", "MISSING"})
+
+    def test_paint_model_status_token(self) -> None:
+        self.assertEqual(paint_model_status("AVAILABLE", color=True), f"{GREEN}AVAILABLE{RESET}")
+        self.assertEqual(paint_model_status("MISSING", color=True), f"{RED}MISSING{RESET}")
+        self.assertEqual(paint_model_status("AVAILABLE", color=False), "AVAILABLE")
+        self.assertEqual(paint_model_status("MISSING", color=False), "MISSING")
+        # unknown / non-availability status is never coloured
+        self.assertEqual(paint_model_status("UNVERIFIED", color=True), "UNVERIFIED")
+        self.assertEqual(paint_model_status("VERIFIED", color=True), "VERIFIED")
+
+    def test_non_tty_stream_forces_plain(self) -> None:
+        color = supports_ansi(io.StringIO())  # a StringIO is not a TTY
+        self.assertFalse(color)
+        self.assertNotIn("\x1b[", format_model_discovery(self._result(), color=color))
+
+    def test_numbered_list_surface_colours_via_shared_helper(self) -> None:
+        # the interactive `Verified models:` list renders its bracketed status
+        # through the same paint_model_status seam, gated on the stderr stream.
+        src = (Path(__file__).resolve().parents[1] / "src/orbit/native_server/app.py").read_text()
+        self.assertIn("paint_model_status(row.local, color=color)", src)
+        self.assertIn("color = supports_ansi(sys.stderr)", src)
+        self.assertIn("format_model_discovery(result, color=supports_ansi(sys.stderr))", src)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import time
 from typing import Callable, Iterable
 
 from orbit.native_llama.bindings import GgmlLogCallback, LlamaLibrary
+from orbit.terminal.theme import GREEN, RED, RESET
 from orbit.native_llama.model_profiles import (
     PROFILE_METADATA_KEYS,
     VERIFIED_NATIVE_MODEL_IDENTITIES,
@@ -157,23 +158,47 @@ def discover_models(
     )
 
 
-def format_model_discovery(result: ModelDiscoveryResult) -> str:
+def paint_model_status(value: str, *, color: bool) -> str:
+    """The visible availability token, coloured only where colour is allowed.
+
+    AVAILABLE is green and MISSING is red; every other status (and the `Local`
+    heading) is returned unchanged. No padding is added, so the caller owns
+    column width and alignment. When `color` is False the value is returned
+    verbatim, so plain output is byte-identical to before.
+    """
+    if not color:
+        return value
+    if value == "AVAILABLE":
+        return f"{GREEN}{value}{RESET}"
+    if value == "MISSING":
+        return f"{RED}{value}{RESET}"
+    return value
+
+
+def format_model_discovery(result: ModelDiscoveryResult, *, color: bool = False) -> str:
     headings = ("Model", "Local", "Support", "Path / action")
     widths = [len(value) for value in headings[:3]]
     for row in result.rows:
         widths[0] = max(widths[0], len(row.model))
         widths[1] = max(widths[1], len(row.local))
         widths[2] = max(widths[2], len(row.support))
-    lines = ["Models:", _format_columns(headings, widths)]
+    lines = ["Models:", _format_columns(headings, widths, color=color)]
     lines.extend(
-        _format_columns((row.model, row.local, row.support, row.path_or_action), widths)
+        _format_columns((row.model, row.local, row.support, row.path_or_action), widths, color=color)
         for row in result.rows
     )
     return "\n".join(lines)
 
 
-def _format_columns(values: tuple[str, str, str, str], widths: list[int]) -> str:
-    return f"{values[0]:<{widths[0]}}  {values[1]:<{widths[1]}}  {values[2]:<{widths[2]}}  {values[3]}"
+def _local_cell(value: str, width: int, *, color: bool) -> str:
+    # Pad by the PLAIN token width, then colour only the visible token, so an
+    # ANSI escape never counts toward the column and alignment is unchanged.
+    return paint_model_status(value, color=color) + " " * (width - len(value))
+
+
+def _format_columns(values: tuple[str, str, str, str], widths: list[int], *, color: bool = False) -> str:
+    local = _local_cell(values[1], widths[1], color=color)
+    return f"{values[0]:<{widths[0]}}  {local}  {values[2]:<{widths[2]}}  {values[3]}"
 
 
 def _local_candidates(
