@@ -1019,15 +1019,51 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   thermald` (thermald excluded as owner); BIOS Thermal Management reads
   `Optimized`; OS profile / SoC slider / dell-pc / EPP never moved it. Owner:
   firmware/EC, set once at boot (this boot started on AC; the boot that measured
-  52 / 18.5 started on battery — the reboot-on-battery reproduction is still
-  pending). Caution: at 56.25 W the package hit TjMax (100 °C) in ~40 s of a
+  52 / 18.5 started on battery — the reboot-on-battery reproduction is now
+  RESOLVED, see DELL-POWER-BATTERY-BOOT-REPRO-1 below). Caution: at 56.25 W the package hit TjMax (100 °C) in ~40 s of a
   2×256-token run and logged 14 throttle events; sustained behaviour is PL1 45 W
   + fan and is NOT yet validated. Persistent fix, in policy order: BIOS Thermal
   Management `UltraPerformance` / BIOS-EC update (firmware route) → last resort a
   volatile RAPL write at boot (prefer `45000000` = PL1; rollback = write
-  `17000000` or reboot). PL2 was restored to 17 W at mission end; the gate stays
+  `17000000` or reboot). [SUPERSEDED by DELL-POWER-BATTERY-BOOT-REPRO-1: BIOS
+  Thermal Management was subsequently set to `UltraPerformance` and is DISPROVEN as
+  the fix — the persistent fix is a safe PL2 found by the ladder in that entry, not a
+  thermal-mode change.] PL2 was restored to 17 W at mission end; the gate stays
   **CPU_BASELINE_NOT_READY** until a persistent state is chosen and
   `native_probe.py sustained 768 2` holds ≥ 18 tok/s below TjMax.
+- **DELL-POWER-BATTERY-BOOT-REPRO-1 (2026-09-13, docs only) — the boot-on-battery
+  discriminator is RESOLVED: the 17 W cap is set by BOOT POWER SOURCE, but the
+  uncapped envelope is thermally infeasible as-is.** After a shutdown and a boot
+  started ON BATTERY (kernel `ACPI: AC: AC Adapter [AC] (off-line)` at the 17:36
+  boot), AC then re-attached, the MMIO package limits came up **PL1 23 W / PL2 65 W**
+  — the 17 W short-term cap ABSENT. Contrast the same day's AC boot `probe_boot1722`:
+  MMIO **[45, 17]**, decode 14.94, prefill 36.7. Both boots were measured with BIOS
+  Thermal Management ALREADY set to `UltraPerformance` (operator-attested), so
+  UltraPerformance neither lifts the AC-boot cap nor tames the battery-boot burst.
+  Same machine/model/profile; the only
+  difference is the power source latched at boot, so the 17 W PL2 is firmware/EC state
+  chosen once at boot by power source (C1 proven — the discriminator the entry above
+  left pending; the good 52 / 18.5 boot had started on battery). On the uncapped boot
+  `native_probe.py sustained 768 2` ran twice from a cold 46 °C package
+  (`probe_sustained_batboot1736{,b}.json`): **prefill 55.3 / 55.4 tok/s** (uncapped, vs
+  ~41 capped), busy cores median ~3.5 GHz / p90 4.27–4.30 GHz (vs ~2.5 capped) — but the
+  package reached **TjMax (98–100 °C) inside the untimed warm-up (512 prefill + 32 decode)
+  plus the first timed prefill**, the 95 °C safety guard aborted decode after 1 token both
+  runs, and hardware `package_throttle_count` went 0 → 34. **Decode never sustained; the
+  ≥ 18 tok/s gate criterion was NOT met.** Lifting the cap (battery boot) is necessary but
+  NOT sufficient — with BIOS Thermal Management already `UltraPerformance` and the OS
+  `balanced` platform profile, the 65 W PL2 burst still hits TjMax on this thin chassis
+  before any sustained decode, and a battery boot is NOT persistent either (the next AC
+  boot re-imposes 17 W). The gate stays **CPU_BASELINE_NOT_READY**; the remaining blocker
+  is purely THERMAL and reduces to ONE operator-assisted experiment, NO Orbit code: on a
+  NORMAL AC boot, PL1 untouched, find the LOWEST safe PL2 that restores useful decode
+  without reaching thermal limits — ladder PL2 **25 → 30 → 35 → 40 W** (only as far as
+  needed), one candidate at a time, abort at ≥ 95 °C, reject any candidate with a material
+  `package_throttle_count` increase, restore the original 17 W after every test, and stop
+  as soon as decode ≥ 18 tok/s at a stable temperature. Only after a safe candidate passes
+  `native_probe.py sustained 768 2` should persistence be considered, preferably through a
+  supported Dell/firmware mechanism; a systemd RAPL write at boot is the last resort.
+  Evidence: `workdir/diag/dell_power_audit/RESULTS.md`.
 - Recorded, not fixed: `--show-profile` without a model argument previews the
   heuristic for the absent default model (16 threads on this box), not the model
   the interactive pick will load — name the model to preview the real profile; an
@@ -1875,9 +1911,23 @@ Closed since the release — do not reopen any of them without new evidence:
   52 / 18.5 of the previous one, until the cap is understood — that is an operator
   question (adapter, Dell thermal mode, thermald adaptive), not an Orbit mission.
 
-**Gate:** DELL-INTEL-GPU-BENCH-1 is blocked (`CPU_BASELINE_NOT_READY`) until the
-17 W package cap is resolved by the operator — see DELL-POWER-PROFILE-AUDIT-1 in
-the Post-RC38 entry and `workdir/diag/dell_power_audit/RESULTS.md`.
+**Gate:** DELL-INTEL-GPU-BENCH-1 is blocked (`CPU_BASELINE_NOT_READY`). The 17 W
+cap is now fully explained: it is firmware/EC state latched at boot by power source
+(AC boot → PL2 17 W; battery boot → PL2 65 W), proven by DELL-POWER-BATTERY-BOOT-REPRO-1.
+BIOS Thermal Management is ALREADY `UltraPerformance` (operator-attested) and is DISPROVEN
+as the fix: on AC it still boots to PL2 17 W (36.7 / 14.9 tok/s), and on battery the
+uncapped 65 W burst still reaches TjMax and aborts decode. Booting on battery is not a fix
+either (the next AC boot re-imposes 17 W). The blocker is purely THERMAL and reduces to ONE
+operator-assisted experiment, NO Orbit code: on a normal AC boot, PL1 untouched, find the
+LOWEST safe PL2 that restores useful decode without reaching thermal limits — ladder PL2
+25 → 30 → 35 → 40 W (only as far as needed), one candidate at a time, abort at ≥ 95 °C,
+reject any candidate with a material throttle-count increase, restore 17 W after every
+test, stop as soon as decode ≥ 18 tok/s at a stable temperature, then sustained-validate
+with `native_probe.py sustained 768 2`. Persist a passing candidate only afterwards,
+preferably via a supported Dell/firmware mechanism (a systemd RAPL write at boot is the
+last resort). See DELL-POWER-PROFILE-AUDIT-1, DELL-POWER-CAP-ROOT-WITNESS-1 and
+DELL-POWER-BATTERY-BOOT-REPRO-1 in the Post-RC38 entry and
+`workdir/diag/dell_power_audit/RESULTS.md`.
 
 Recommended next mission (once the gate clears): **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
 Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an external compatible backend. The
