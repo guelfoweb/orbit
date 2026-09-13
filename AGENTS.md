@@ -987,6 +987,27 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `/props.native_threads[_batch]` beside the resolved `threads`, and logged as
   `orbit-server native threads: N/N (<stage>)` after model load, after profile
   resolution (post `restore_threads`) and before bind. Never fails a start.
+- **DELL-POWER-PROFILE-AUDIT-1 (2026-09-13, docs only) — the 17 W cap audited.**
+  Read-only host audit plus reversible A/B, no Orbit change; record in
+  `workdir/diag/dell_power_audit/RESULTS.md`. Durable facts: the Dell's RAPL
+  **MMIO** package domain carries PL2 = 17 W on this boot while the MSR domain says
+  65 W and the platform itself declares PL2 = 56.25 W (`processor_thermal`
+  00:04.0 `power_limits/`); the effective cap is the lower value. Standalone
+  native 6/6 measures **prefill ~41 / decode ~15.3 tok/s**, stable across three
+  probes and a 2×768-token sustained run (quarters 15.5 → 15.1, package ≤ 73 °C,
+  no throttle events, no swap growth during decode). `powerprofilesctl set
+  performance` switches EPP, the SoC power slider and the dell-pc profile
+  correctly and changes NOTHING (PL2 stays 17 W, decode +1.6 %); a
+  power-saver → balanced cycle does not re-evaluate PL2 either. The charger is a
+  65 W USB-C PD (20 V × 3.25 A), no adapter warning exists, and the only
+  observable difference from the boot that measured 52 / 18.5 is that that boot
+  started on battery (`AC Adapter (off-line)`) and this one on AC. Owner of the
+  17 W value unresolved without root (firmware/EC at boot, or thermald
+  `--adaptive`); package watts are root-only on this kernel. Verdict
+  **CPU_BASELINE_NOT_READY** for the GPU benchmark until the operator recipe in
+  RESULTS.md (turbostat witness, reboot-on-battery reproduction, thermald A/B,
+  volatile PL2 write-back test) settles it. Quote 41 / 15 for this boot; do not
+  compare a GPU run against 52 / 18.5 until the cap is gone.
 - Recorded, not fixed: `--show-profile` without a model argument previews the
   heuristic for the absent default model (16 threads on this box), not the model
   the interactive pick will load — name the model to preview the real profile; an
@@ -1834,7 +1855,11 @@ Closed since the release — do not reopen any of them without new evidence:
   52 / 18.5 of the previous one, until the cap is understood — that is an operator
   question (adapter, Dell thermal mode, thermald adaptive), not an Orbit mission.
 
-Recommended next mission: **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
+**Gate:** DELL-INTEL-GPU-BENCH-1 is blocked (`CPU_BASELINE_NOT_READY`) until the
+17 W package cap is resolved by the operator — see DELL-POWER-PROFILE-AUDIT-1 in
+the Post-RC38 entry and `workdir/diag/dell_power_audit/RESULTS.md`.
+
+Recommended next mission (once the gate clears): **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
 Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an external compatible backend. The
 Dell CPU side of the comparison is already measured; see the authoritative
 baseline below. Constraints that already apply: native `orbit server` stays
