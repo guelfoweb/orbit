@@ -1008,6 +1008,26 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   RESULTS.md (turbostat witness, reboot-on-battery reproduction, thermald A/B,
   volatile PL2 write-back test) settles it. Quote 41 / 15 for this boot; do not
   compare a GPU run against 52 / 18.5 until the cap is gone.
+- **DELL-POWER-CAP-ROOT-WITNESS-1 (2026-09-13, docs only) — the cap is CAUSAL and
+  firmware-owned.** Operator-run root witnesses (`dell_power_audit/root_witness/`):
+  RAPL energy sampled every 2 s shows the package pinned at **16.85–17.00 W** through
+  prefill and decode (4.5 W idle) — the MMIO PL2 is the effective limit. With ONLY
+  PL2 written from 17 W to the platform-declared 56.25 W (volatile), the identical
+  probe measured **prefill 53–60 / decode 19.3–20.4 tok/s** at 37–40 W package —
+  the historical 47–55 / 17–20 — versus 42 / 15.4 at 17 W: causality proven.
+  Nothing re-asserted 17 W during a 30 s watch, the run, or a `systemctl restart
+  thermald` (thermald excluded as owner); BIOS Thermal Management reads
+  `Optimized`; OS profile / SoC slider / dell-pc / EPP never moved it. Owner:
+  firmware/EC, set once at boot (this boot started on AC; the boot that measured
+  52 / 18.5 started on battery — the reboot-on-battery reproduction is still
+  pending). Caution: at 56.25 W the package hit TjMax (100 °C) in ~40 s of a
+  2×256-token run and logged 14 throttle events; sustained behaviour is PL1 45 W
+  + fan and is NOT yet validated. Persistent fix, in policy order: BIOS Thermal
+  Management `UltraPerformance` / BIOS-EC update (firmware route) → last resort a
+  volatile RAPL write at boot (prefer `45000000` = PL1; rollback = write
+  `17000000` or reboot). PL2 was restored to 17 W at mission end; the gate stays
+  **CPU_BASELINE_NOT_READY** until a persistent state is chosen and
+  `native_probe.py sustained 768 2` holds ≥ 18 tok/s below TjMax.
 - Recorded, not fixed: `--show-profile` without a model argument previews the
   heuristic for the absent default model (16 threads on this box), not the model
   the interactive pick will load — name the model to preview the real profile; an
