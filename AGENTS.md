@@ -19,19 +19,23 @@ day (DELL-MIGRATION-CLOSURE-1): code, model, corpus and diagnostics are all
 present and verified on the Dell.
 
 ### Baseline (the anchor for a migration)
-- `main == origin/main == c1e466297f7025dadaa7425fa968c661abdf5305`, tracked tree
-  clean. Untracked `workdir/` scratch is expected and is NOT dirt to clean up —
-  read the staging warning at the end of the RC38 entry before `git add`.
+- `main == origin/main`, tracked tree clean — verify live with
+  `git rev-parse main origin/main` and `git status` (this phrasing stays valid as
+  `main` advances, unlike a pinned HEAD SHA). The now-closed NUC → Dell migration
+  was anchored at the rewritten baseline commit `c1e4662` (a historical anchor, not
+  current HEAD). Untracked `workdir/` scratch is expected and is NOT dirt to clean
+  up — read the staging warning at the end of the RC38 entry before `git add`.
 - Published release: `v0.0.1-rc38` (annotated tag → `95ba0d5`; GitHub pre-release
   at https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc38, no attached
   assets by convention). Package version stays `0.0.1`; releases are RC tags.
   `95ba0d5` = the rc38 doc/release commit; its qualified PRODUCTION code is
   byte-identical to its parent `9181c40`.
-- **`main` is six commits AHEAD of the released tag** (`git describe` →
-  `v0.0.1-rc38-6-g…`). **Post-release research HAS started** — see
-  "Post-RC38 (unreleased on `main`)" in Release State. Three of those commits
-  change production behaviour (`fa67e5a`, `47d6b4b`, `c1e4662`), so the rc38
-  entry below no longer describes everything `main` does; read both.
+- **`main` has advanced beyond the released `v0.0.1-rc38` tag**; `git describe`
+  reports the current offset. **Post-release research HAS started** — see
+  "Post-RC38 (unreleased on `main`)" in Release State. Three post-rc38 commits
+  change production behaviour (`fa67e5a`, `47d6b4b`, `c1e4662`); the remaining
+  post-rc38 commits are documentation. The rc38 entry below no longer describes
+  everything `main` does; read both.
 - No in-progress mission. The repository is at a clean, qualified state: each
   post-rc38 commit was qualified, adversarially reviewed to BLOCKER 0 / MAJOR 0
   and pushed on its own branch before merge. Do NOT reopen qualification or
@@ -702,8 +706,9 @@ Release State entry below.
 ### RC38 (deterministic deobfuscation + Office/VBA + qualified malware corpus)
 
 - Current qualified production code: `9181c4020915cfd1905ce6caf182f57f9d84547e`.
-  It is the PARENT of the released `HEAD == origin/main == 95ba0d5`, not HEAD
-  itself. Consolidates the post-rc37 ANALYSIS arc (#260 → `9181c40`) into a
+  It is the PARENT of the rc38 release commit `95ba0d5` (the commit the
+  `v0.0.1-rc38` tag points at), not that release commit itself. Consolidates the
+  post-rc37 ANALYSIS arc (#260 → `9181c40`) into a
   qualified release candidate. The release commit `95ba0d5` changes only
   `docs/releases/v0.0.1-rc38.md`, this `AGENTS.md` entry, `MANIFEST.in` (the
   `prune workdir` hardening) and `README.md` — nothing under `src/` or `tests/`,
