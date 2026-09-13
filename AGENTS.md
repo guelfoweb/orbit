@@ -1124,6 +1124,27 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   readable plain text; URLs/IoCs/hashes/decoded payloads are reproduced
   byte-exact. Do NOT route rendered terminal text back into runtime state, and do
   NOT render outside the interactive TTY presentation layer.
+- RUNTIME-DECOMPOSITION-CAMPAIGN-1 (deep-refactor gate = OPEN): the behaviour-preserving
+  decomposition of `native_llama/client.py` ran R1-R6. **R1 MERGED** (#336): the eight read-only
+  status/metrics accessors (`*_route_prefix_reuse_status`, `final_prefix_experiment_status`,
+  `compatibility_diagnostics`, `model_load_status`, `moe_expert_usage_status`) moved to the new
+  `native_llama/client_status.py`; client keeps thin delegates (bodies byte-identical, /props
+  unchanged, no cycle). client.py 5416 -> 5262 LOC. **R2-R6 TECHNICAL_STOP**, because each target
+  responsibility is ALREADY owned by a dedicated module and the client residual is correctly
+  RUNTIME-owned orchestration: R2 capability logic -> `capabilities.py` + `artifact_capabilities.py`
+  (residual `supports_vision/audio` is load+decode-coupled); R3 prompt/template -> `chat_template.py`
+  + `chat_bridge.py` + `serialize_profile_messages` + `*_route_prefix` (residual `apply_chat_template`
+  is renderer dispatch that mutates render state); R4 admission -> profile object + session-coupled
+  skip-guards (`native_request_in_flight`/`active_context_present`/`prefill_in_flight`); R5 session/MTP
+  lifecycle -> `mtp_session_lifecycle.py` + `persistent_mtp.py` (client owns its own session/handles
+  intrinsically); R6 rolling-KV/cache -> `rolling_route_anchor.py` + `prefix_anchor.py` +
+  `rolling_anchor_store.py` + `committed_identity.py` (residual is decode-coupled capture/restore
+  orchestration; separating it would drag ctx/session state or change cache identity). Forcing any
+  R2-R6 extraction would drag inference/session state, duplicate client state, or invent an artificial
+  module -- all disallowed. Evidence: `workdir/diag/runtime_decomposition_campaign/`
+  (BASELINE.md, EXTRACTION_MAP.md, FINAL_ARCHITECTURE.md). Public API preserved (31 public methods; method set unchanged from baseline). Do NOT
+  re-attempt R2-R6 without new structural evidence; decomposing the completion/decode path is a
+  separate future mission with its own hot-path qualification.
 
 ## RC24 Tool-Loop Convergence
 
