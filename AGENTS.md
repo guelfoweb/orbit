@@ -1620,13 +1620,102 @@ GitHub pre-release published, main clean. The NUC → Dell migration is CLOSED a
 the Dell is the active workstation. **Post-release research has NOT started.**
 No optimization or analysis mission is pending against the current baseline.
 
-Recommended next mission: **DELL-INTEL-GPU-BENCH-1** — establish the Dell's own
-CPU baseline and investigate its Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an
-external compatible backend. Constraints that already apply: native `orbit server`
-stays CPU-first with `gpu_layers=0` and no GPU promise (Anti-Goals); a GPU must be
+Recommended next mission: **DELL-INTEL-GPU-BENCH-1** — investigate the Dell's
+Intel `xe` iGPU (SYCL/Level-Zero/Vulkan) as an external compatible backend. The
+Dell CPU side of the comparison is already measured; see the authoritative
+baseline below. Constraints that already apply: native `orbit server` stays
+CPU-first with `gpu_layers=0` and no GPU promise (Anti-Goals); a GPU must be
 measured through an external backend such as `llama-server --base-url`, never
 reported as native `orbit server` performance (Benchmarking); use `bench-core`
 metadata; record the results as a Dell profile without overwriting NUC history.
+
+### Authoritative Dell CPU CHAT baseline (2026-09-13, `cbe577e`)
+
+Measured for DELL-INTEL-GPU-BENCH-1 so CPU and GPU are compared under MATCHED
+cache states. Ornith-1.5-35B-A3B Q4_K_M, ctx 8192, threads 6/6, batch 256,
+ubatch 128, think off, MTP off, tools on. Prompt `hi, who are you?`. Evidence and
+raw KV trace: `workdir/diag/chat_prefix_reuse/`.
+
+One CHAT turn is TWO native calls. `cached` below is the route call's, because
+that is the only one a prefix serves; `prompt`/`eval` are the turn's sum. The
+fast turn is route 940/172 with **768 cached**, plus final 38/38 with 0.
+
+| state | prompt | eval | cached (route) | prefill tok/s | decode tok/s | wall |
+|---|---:|---:|---:|---:|---:|---:|
+| cold process, FIRST turn | 978 | 210 | 768 | 52.4 | 18.5 | 7.96 s |
+| warm process, new session | 978 | 210 | 768 | 54.8 | 19.3 | 7.9 s |
+| warm process, new session (repeat) | 978 | 210 | 768 | 55.3 | 19.6 | 7.35 s |
+| warm process, 2nd turn same session | 1115 | 175 | 940 † | 47.1 | 17.0 | 7 s |
+| **no prefix** (see trigger below) | 978 | 978 | **0** | ~53 | ~19 | **25 s** |
+
+† that 940 is the ROLLING checkpoint reusing the conversation's own tokens, a
+different mechanism from the 768 prewarm prefix. Do not read the column as one
+thing.
+
+**A cold Dell PROCESS is not a cold CACHE, and the difference is paid off-book.**
+The startup prewarm captures the 768-token Ornith CHAT route prefix
+(`ornith15-route-prefix-v1`, 77.8 MiB) **before the socket binds** — `app.py:880`
+precedes `app.py:900` — at a measured cost of **23.8 s of blocking prefill and
+state-save on every server start**, whether or not a chat ever happens.
+`ORBIT_KV_PREFIX_PREWARM` defaults to `startup`; the Ornith reuse resolver
+defaults to enabled (`ornith_route_prefix.py:45`) and the env var is opt-OUT
+(`=0` disables). Note bc25fff's own message says "opt-in", which was wrong when
+written — the default has never been False.
+
+**For DELL-INTEL-GPU-BENCH-1 this is the trap to avoid.** An external
+`llama-server --base-url` GPU backend has no equivalent prewarm, so comparing it
+against the 7.96 s row hands Orbit-CPU a 23.8 s head start that the row does not
+show. Either charge the prewarm to the CPU side, compare against the 25 s no-prefix
+row, or start the CPU server with `ORBIT_KV_PREFIX_PREWARM=off` — that is the
+only clean way to get a server with no prefix, since interrupting the prewarm
+with SIGINT exits instead of continuing (`app.py:878-887`). Say which cache is
+being matched — a native
+`llama_state_seq` checkpoint restore and an external server's own slot prompt
+cache are not the same object, so "warm vs warm" needs spelling out.
+
+Raw rates are cache-independent within noise (prefill 47–55 tok/s, decode 17–20
+tok/s, n=1 per cell). Latency differences on this box are evaluated-token count,
+not throughput — report evaluated tokens beside any wall time.
+
+**What actually costs you the prefix.** Not "an ANALYSIS run": the trigger is a
+prompt-cache-MODE change. `_ensure_prompt_cache_mode` (`client.py:1026`) calls
+`reset_session_state` on any change, and that invalidates the Ornith route
+prefix unconditionally (`client.py:1004-1006`) — the `preserve_*` flags beside it
+cover the rolling checkpoint and the Qwen3-Coder prefix, not this one. The mode
+string keys off the actual `tools=` payload (`client.py:1438-1441`), and plain
+CHAT passes none — the route phase is a contextvar label only (`chat.py:577`), so
+route and final are both `chat:thinking=off` and an ordinary turn never resets.
+Verified in the trace: `tools_parameter_present: false` on all seven chat route
+requests. So the prefix survives ordinary chat indefinitely, and these three
+cost the NEXT chat turn:
+
+- an ANALYSIS run (its calls pass `tools=`, then the return to chat is the change);
+- any tool-invoking CHAT turn (`chat.py:1184` passes `tools=tools`);
+- `/reset` — `app.py:120-128` preserves only the Qwen3-Coder prefix, and that is
+  gated on the Qwen3-Coder profile, so Ornith's dies.
+
+**A benchmark run that types `/reset` between iterations lands on the 25 s row
+while believing it is on the 7.96 s row.** Starting a fresh client process does
+not do this; only the `/reset` command reaches that endpoint.
+
+The cost is exactly one turn: the next route call re-captures lazily (the 768
+tokens are a prefix of its own prompt, so the marginal cost is the state save,
+not a re-prefill). Measured: CHAT 768 → ANALYSIS → CHAT 0 (25 s) → CHAT 768 →
+768 → 768. Investigated under CHAT-FIRST-TURN-CACHE-REUSE-1 and closed as
+EXPECTED — no regression, no production change. Do not reopen the invalidation
+rule to reclaim ~17 s once per transition.
+
+Observability gap, recorded not fixed: `/props` publishes the three Qwen
+prefix-reuse states but no Ornith route-prefix key, and the Ornith
+`QwenRoutePrefixStatus` counters are never emitted, so a REFUSAL reason is not
+observable. Per-request reuse is: `ORBIT_KV_DIAG=1` (+ `ORBIT_KV_DIAG_FILE`) →
+`kv_diag_native_cache.cached_tokens`. Two traps: `kv_diag_route_prefix_anchor`
+reports `model_profile_ineligible` for Ornith because it describes the GEMMA
+lineage (correct, easily misread as the Ornith refusal); and on a successful
+first-turn restore the cache event reads `previous_prompt_tokens: 0` /
+`cache_miss_reason: no_previous_prompt` beside `cached_tokens: 768`, because
+those fields compare against the previous prompt, not the anchor. Read
+`cached_tokens`.
 
 Other post-release research candidates (each a separate mission; do NOT bundle):
 - NPU/OpenVINO or DeepSeek/other model research — all post-release, none promised
