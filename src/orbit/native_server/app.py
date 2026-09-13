@@ -24,6 +24,13 @@ from orbit.native_llama.client import (
     _has_open_thought_channel,
 )
 from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_context as native_kv_request_context
+from orbit.native_server.server_calibration import calibrate_threads, restore_threads
+from orbit.native_server.server_profile import (
+    Resolution,
+    detect_topology,
+    render_profile_lines,
+    resolve_profile,
+)
 from orbit.native_llama.download_cli import _DownloadProgress as DownloadProgress
 from orbit.native_llama.model_discovery import ModelDiscoveryRow, discover_models, format_model_discovery
 from orbit.native_llama.model_download import download_model
@@ -799,6 +806,89 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             return True
 
 
+def _backend_identity() -> str:
+    """The vendored llama.cpp revision a profile was measured against.
+
+    A backend rebuild can move inference rates, so a stored measurement should
+    not outlive the build it describes. Read from the vendored provenance
+    manifest; unreadable means an empty identity, which only costs a
+    recalibration.
+    """
+    try:
+        manifest = (
+            Path(__file__).resolve().parents[1]
+            / "native_llama" / "vendor" / "LLAMA_PROVENANCE.json"
+        )
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(payload.get("upstream_tag") or "")
+    except (OSError, ValueError, KeyError):
+        return ""
+
+
+def _model_identity_for_profile(args) -> "tuple[str, int]":
+    """The model bytes a profile was measured against, best-effort.
+
+    A SHA of 20 GiB per start is not affordable, so identity is the resolved
+    path plus its size and mtime -- enough that a different model, or the same
+    path re-downloaded, produces a different fingerprint, which is the property
+    the cache needs. Anything unreadable yields an empty identity, which simply
+    means the profile is not cached across runs.
+    """
+    # Nothing in here may raise: it runs before the model loads, and a profile
+    # that cannot be identified is a cache miss, never a failed start. The
+    # broad excepts are deliberate -- `args` is whatever the caller built, and
+    # a test double or an odd type must cost a recalibration, not a traceback.
+    candidate = getattr(args, "model", None)
+    if not candidate:
+        # The ordinary path: the model comes from `--model-id` (or its default)
+        # through the same resolver the server uses, so a profile is fingerprinted
+        # against the model that will actually load rather than only against an
+        # explicit `--model`. Resolution can legitimately fail here -- a missing
+        # model is reported later, by the real bootstrap, with a better message.
+        try:
+            candidate = resolve_bootstrap_paths(args).model
+        except Exception:
+            candidate = None
+    try:
+        path = Path(candidate) if candidate else None
+        if path is None or not path.is_file():
+            return "", 0
+        stat = path.stat()
+        return f"{path.name}:{stat.st_size}:{int(stat.st_mtime)}", int(stat.st_size)
+    except Exception:
+        return "", 0
+
+
+def _resolve_startup_profile(args, *, calibrator=None) -> Resolution:
+    """Walk the precedence chain for this invocation.
+
+    Separated from `run_server` so `--show-profile` and the real start resolve
+    through exactly the same code: a preview that could disagree with the thing
+    it previews would be worse than no preview.
+    """
+    model_identity, model_bytes = _model_identity_for_profile(args)
+    return resolve_profile(
+        cli={
+            "threads": args.threads,
+            "threads_batch": args.threads_batch,
+            "batch": args.batch,
+            "ubatch": args.ubatch,
+            "cache_ram_mib": None,
+        },
+        topology=detect_topology(),
+        model_bytes=model_bytes,
+        model_sha256=model_identity,
+        backend_id=_backend_identity(),
+        ctx_tokens=args.ctx,
+        low_memory=bool(getattr(args, "low_memory", False)),
+        mtp_enabled=bool(getattr(args, "enable_mtp_experimental", False)),
+        expert_usage_enabled=bool(getattr(args, "moe_expert_usage", False)),
+        calibrator=calibrator,
+        recalibrate=bool(getattr(args, "recalibrate", False)),
+        allow_calibration=calibrator is not None,
+    )
+
+
 def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     selected_interactively = False
@@ -811,12 +901,36 @@ def run_server(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("\nmodel selection cancelled", file=sys.stderr)
             return 130
+    if getattr(args, "show_profile", False):
+        # No calibrator: previewing must not load a 20 GiB model or spend a
+        # calibration budget. It shows what the chain resolves to WITHOUT
+        # measuring, and says so when a measurement would have run.
+        preview = _resolve_startup_profile(args)
+        for line in render_profile_lines(preview):
+            print(line)
+        if getattr(args, "recalibrate", False):
+            # The cache was deliberately not consulted, so nothing here can
+            # say whether one exists. Claiming there is none would be a guess
+            # about a file this command chose not to read.
+            print("note: --recalibrate shown from the heuristic; any stored "
+                  "measurement is left untouched until the server starts")
+        elif preview.cache_path is None:
+            print("note: no cached measurement for this machine yet; "
+                  "starting the server normally will calibrate once")
+        return 0
     final_prefix_config = resolve_final_prefix_reuse()
     qwen_route_prefix_config = resolve_qwen_route_prefix_reuse()
     qwen36_shell_tool_prefix_config = resolve_qwen36_shell_tool_prefix_reuse()
     qwen3_coder_route_prefix_config = resolve_qwen3_coder_route_prefix_reuse()
     ornith_route_prefix_config = resolve_ornith_route_prefix_reuse()
     ornith_analysis_prefix_config = resolve_ornith_analysis_prefix_reuse()
+
+    # Resolved BEFORE the model loads, because batch and ubatch are context
+    # creation parameters and cannot be retuned afterwards. Threads can be, so
+    # they may still be replaced by a measurement below; everything else this
+    # returns is final.
+    resolution = _resolve_startup_profile(args)
+    profile = resolution.profile
 
     paths: NativeLlamaPaths | None = None
     try:
@@ -825,10 +939,10 @@ def run_server(argv: list[str] | None = None) -> int:
             paths,
             NativeClientConfig(
                 context_tokens=args.ctx,
-                threads=args.threads,
-                threads_batch=args.threads_batch,
-                batch_size=args.batch,
-                ubatch_size=args.ubatch,
+                threads=profile.threads,
+                threads_batch=profile.threads_batch,
+                batch_size=profile.batch,
+                ubatch_size=profile.ubatch,
                 thinking=args.think == "on",
                 mtp_probe_enabled=args.enable_mtp_probe,
                 mtp_dry_run_enabled=args.enable_mtp_dry_run,
@@ -861,6 +975,53 @@ def run_server(argv: list[str] | None = None) -> int:
         if not args.verbose_llama_log:
             client.set_quiet_logging()
         client.load()
+
+        # Threads are the one measurable field, and this is the only point at
+        # which they can be measured: after the weights are resident, before
+        # the prefix prewarm and before the socket binds. Running it after the
+        # prewarm would time a checkpoint restore on one candidate and a real
+        # prefill on the next -- the exact warm/cold mismatch the CHAT cache
+        # work turned up. `calibrate_threads` never raises; it returns None and
+        # the pre-load resolution stands.
+        if not resolution.calibrated and (args.threads is None or args.threads_batch is None):
+            measured = _resolve_startup_profile(
+                args,
+                calibrator=lambda *, topology, fields: calibrate_threads(
+                    client, topology=topology, fields=fields
+                ),
+            )
+            if measured.calibrated:
+                resolution = measured
+                profile = measured.profile
+            # Whether or not a winner emerged, the context is left tuned to the
+            # last candidate that ran. Put it back on the resolved counts, or
+            # the server would serve on one thread count while reporting
+            # another.
+            restore_threads(client, profile.threads, profile.threads_batch)
+            # The context now runs on the resolved counts, but `client.config`
+            # still holds the pre-calibration ones -- and it is not decoration:
+            # `/props` publishes it, the smoke harness records it, and both the
+            # native-version and final-prefix identities hash it. Left stale,
+            # one process would report threads it is not using and two
+            # identical runtimes would compute different checkpoint identities.
+            # The config is frozen, so this is the only way to correct it.
+            for field, value in (
+                ("threads", profile.threads),
+                ("threads_batch", profile.threads_batch),
+            ):
+                # Narrow on purpose. A frozen dataclass accepts this; a config
+                # that grew `__slots__` or became a NamedTuple would raise
+                # AttributeError/TypeError, and swallowing everything would
+                # leave `/props` and two identity hashes quietly stale with no
+                # signal. Anything else is a real bug and should surface.
+                try:
+                    object.__setattr__(client.config, field, value)
+                except (AttributeError, TypeError):
+                    pass
+
+        for line in render_profile_lines(resolution):
+            print(f"orbit-server {line}", file=sys.stderr)
+
         if getattr(getattr(client, "model_profile", None), "profile_id", None) not in (
             QWEN3_CODER_PROFILE_ID,
             ORNITH15_PROFILE_ID,
@@ -1152,10 +1313,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hf-cache", type=Path, help="Hugging Face cache root fallback.")
     parser.add_argument("--alias", help="Model name exposed by the server. Defaults to the exact GGUF filename.")
     parser.add_argument("--ctx", type=int, default=8192)
-    parser.add_argument("--threads", type=int, default=6)
-    parser.add_argument("--threads-batch", type=int, default=6)
-    parser.add_argument("--batch", type=int, default=256)
-    parser.add_argument("--ubatch", type=int, default=128)
+    # Default None, not the reference numbers. argparse cannot otherwise tell
+    # `--threads 6` from an unsupplied flag, and the whole precedence contract
+    # rests on that distinction: a value the operator named must never be
+    # measured, cached over, or reported as chosen by Orbit.
+    parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--threads-batch", type=int, default=None)
+    parser.add_argument("--batch", type=int, default=None)
+    parser.add_argument("--ubatch", type=int, default=None)
+    parser.add_argument(
+        "--show-profile",
+        action="store_true",
+        help="Resolve and print the startup profile, then exit without loading a model.",
+    )
+    parser.add_argument(
+        "--recalibrate",
+        action="store_true",
+        help="Discard any cached auto-calibrated profile and measure this machine again.",
+    )
     parser.add_argument("--think", choices=("off", "on"), default="off", help="Default thinking visibility for native server requests.")
     parser.add_argument("--enable-mtp-probe", action="store_true", help="Backend-only MTP load/init probe. No generation.")
     parser.add_argument("--enable-mtp-dry-run", action="store_true", help="Backend-only MTP draft generation dry run. No accept loop or user output.")

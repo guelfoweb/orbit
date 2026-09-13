@@ -59,6 +59,9 @@ def _stub_library() -> SimpleNamespace:
         "llama_sampler_accept",
         "llama_sampler_reset",
         "llama_sampler_free",
+        # Startup calibration retunes a live context's thread counts so the
+        # candidates can share one 20 GiB load.
+        "llama_set_n_threads",
     ]
     return SimpleNamespace(**{name: _Symbol() for name in names})
 
@@ -72,6 +75,7 @@ class NativeBindingsTests(unittest.TestCase):
 
         LlamaLibrary._configure_api(library)
 
+        self.assertEqual(len(library.lib.llama_set_n_threads.argtypes), 3)
         self.assertEqual(len(library.lib.llama_memory_seq_cp.argtypes), 5)
         self.assertEqual(len(library.lib.llama_memory_seq_keep.argtypes), 2)
         self.assertEqual(len(library.lib.llama_state_get_size.argtypes), 1)

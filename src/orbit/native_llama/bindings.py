@@ -295,6 +295,14 @@ class LlamaLibrary:
         lib.llama_batch_free.restype = None
         lib.llama_decode.argtypes = [c_void_p, LlamaBatch]
         lib.llama_decode.restype = c_int32
+        # Retunes an EXISTING context's thread counts. Bound for startup
+        # calibration, which has to compare thread candidates against the same
+        # loaded weights -- reloading a 20 GiB model per candidate would make
+        # measuring cost more than the tuning is worth. Nothing on the request
+        # path calls it; the context is created with the resolved counts and
+        # this only moves them before the server binds.
+        lib.llama_set_n_threads.argtypes = [c_void_p, c_int32, c_int32]
+        lib.llama_set_n_threads.restype = None
         lib.llama_synchronize.argtypes = [c_void_p]
         lib.llama_synchronize.restype = None
         lib.llama_time_us.argtypes = []
