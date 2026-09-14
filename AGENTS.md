@@ -1329,6 +1329,20 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   on colon-packed/unclosed entries; grounding over-claiming the sink argument is the decoded stage) --
   both fixed and regression-tested before merge. Frozen identities unchanged (module sha
   `d034bd8381f4663a`, stage sha `f1fa67e3…`, C2 `http://185.189.58.222/x.exe`, `PHfW.exe`, Start-Process).
+  Live smoke on Ornith (CPU-only Dell): `elapsed=368s model_calls=5 actions=2 repairs=1` -- materially
+  fewer than the pathological 18 calls / 6 actions / 1287s. Zero UnicodeDecodeError, no
+  `get_evidence`, no sandbox EvidenceStore access, no completion-state failure, no false RESOLVED. The
+  report grounds the complete static chain: Document_Open (line 256) statically reaches Shell (line
+  750); the decoded PowerShell downloads `http://185.189.58.222/x.exe` to `%TEMP%\PHfW.exe` via
+  WebClient and launches it with Start-Process (hidden); exact module and stage SHAs cited; runtime
+  execution correctly NOT claimed. The run ended on a bounded `ContextAdmissionError`
+  (required-context-does-not-fit) on a source-window step -- the pre-existing oversized-source limit
+  for this 33k-token sample, not a regression; the report was still produced from evidence. Note: the
+  model hallucinated a sha256 for the remote payload it never fetched (network deny held; nothing was
+  downloaded) -- a general hallucination-guard concern outside this mission's Office-grounding scope,
+  worth a future report-grounding check for fabricated file hashes. First record:
+  `workdir/diag/office_vba_evidence/live_smoke.json` (18-call variant, pre read_file fix);
+  final: `workdir/diag/office_vba_evidence/live_smoke_final.json` (machine-local).
 
 ## RC24 Tool-Loop Convergence
 
