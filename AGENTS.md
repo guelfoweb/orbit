@@ -1189,6 +1189,13 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   #3 (commit built .so binaries + MTP debug reuse) were UNSAFE against the MTP-default-OFF invariant
   and the build-output/technical-stop policy. All six remote branches were deleted (head tips
   recorded in workdir/diag/open_pr_triage/head_tips.txt for recovery).
+- STALE-BRANCH-FINAL-SWEEP-1: the three remaining non-main remote branches were then all
+  deleted (D/B classifications): baseline/opt-in-agent-mode-26b (agent mode is a decided
+  removal; its #155 no-mutation policy already on main), compact-previous-shell-evidence
+  (#97 closed as a correctness-regression experiment), smoke-harness-settled-mtp-props
+  (#103 closed as a failed harness-semantics experiment; settled props already on main).
+  No code ported; tips recorded in workdir/diag/stale_branch_final_sweep/RECOVERY_INVENTORY.md.
+  **origin now holds only `main` plus the release tags.**
 
 ## RC24 Tool-Loop Convergence
 
