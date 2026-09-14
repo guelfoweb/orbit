@@ -2127,6 +2127,67 @@ box is not a comparable number; token/cache/rate and correctness are.
 - Residual limit: this is routing guidance, not a deterministic guarantee; it adds no cache, TTL, fast path, or tool-specific logic.
 - Status: closed work. Do not add more conversation-reuse patches without an observed regression.
 
+## CHAT-LOCAL-CAPABILITY-AWARENESS-1, Local-Host Observation Route Contract
+
+- Released after `v0.0.1-rc39`.
+- Problem: a tool-enabled CHAT request to describe the local machine ("tell me
+  configuration about this computer") was routed to `CHAT`, and the tool-less CHAT
+  final answer replied "I can't see your computer directly" -- despite `system_info`
+  being exposed. Classified C3 (route/prompt contract gap): the route pass classified
+  a locally-observable host request as `CHAT` instead of a `system_info` tool
+  decision. Reproduced live: 2 calls, route -> CHAT, `system_info` never called (rules
+  out C1 tool-exposure and C4 admission).
+- Root cause: the route contract listed "system" tersely and offered a `system_info`
+  example labelled "compact local machine specs", but never bound the class
+  "questions about THIS host itself and its observable configuration" to a
+  local-observation tool task, and the direct-answer/`CHAT` path was available. Once in
+  `CHAT`, the bare `CHAT_SYSTEM_PROMPT` (no tools, no anti-refusal guard) fabricated a
+  "cannot see your computer" reply.
+- Fix (route contract only, `ROUTE_SYSTEM_PROMPT` / `_COMMAND_SYSTEM_TEMPLATE` in
+  `src/orbit/runtime/messages.py`), two coordinated, general edits:
+  1. A rule: requests to describe or inspect this host itself (its OS, CPU, memory,
+     storage, runtime, or overall configuration) are locally observable tool tasks --
+     unless that state is already in the conversation -- and return a tool decision
+     (`system_info`, or a read-only shell command), never a direct answer or a claim
+     that it cannot see the machine.
+  2. An example mapping (`what are this machine's cpu, memory, and os ->
+     {"include_cpu":true,...}`), mirroring the existing `summarize README.md ->
+     {"command":"cat README.md"}` example. Prose alone did NOT flip the router's strong
+     "assistants cannot see your computer" prior in a live smoke; the request ->
+     decision example was the effective, capability-driven lever.
+- Capability-driven, NOT keyword-driven: both edits point at the real observation
+  capability (`system_info` / read-only shell, exposed on every tools-on turn) and
+  demonstrate the mapping generically; no code-level regex/keyword router was added.
+  The pre-existing `_ROUTE_TOOL_RETRY_PROMPT_RE` (consulted only on
+  `finish_reason=="length"`) is unchanged. `CHAT_SYSTEM_PROMPT` is deliberately left
+  unchanged so the no-tool pass is never pushed to fabricate host facts.
+- Scope guards preserved (all covered by deterministic tests): the rule is scoped to
+  "this host itself" and carries an "unless already in the conversation" carve-out
+  (general knowledge like "what is a CPU?" and recap-from-context both stay `CHAT`); it
+  prefers `system_info` but does not force shell; the recap/direct-answer `CHAT`
+  exceptions and the ANALYSIS routing contract are untouched (host questions never
+  become ANALYSIS); shell no-mutation / read-only safety is unchanged.
+- Route prompt is a model-facing contract: its SHA256 pin advanced from `d38e293a...`
+  to `49c689fe...` in `tests/test_automatic_analysis_routing.py`,
+  `tests/test_workflow_mode.py`, and `tests/test_ornith_route_prefix.py`. The change
+  keeps the Ornith route-prefix invariant > 768 tokens; the 768-token prewarm still
+  derives on startup (confirmed live: "prewarm complete (route-prefix): 768 tokens")
+  because the reference is regenerated at runtime from the current prompt.
+- Files touched: `src/orbit/runtime/messages.py`,
+  `tests/test_chat_local_capability_awareness.py` (T1-T8), and the three pin updates.
+- Tests: the new module plus `tests.test_messages`, `tests.test_tool_contract`,
+  `tests.test_shell_guardrails`, `tests.test_automatic_analysis_routing`,
+  `tests.test_ornith_route_prefix`, `tests.test_workflow_mode`, the cross-sample
+  ANALYSIS gate, full unit discovery, compileall, and `git diff --check`.
+- Live smoke (Ornith, tools on): "tell me configuration about this computer" -> route
+  -> `system_info` -> final_from_tool, 2 calls, real host facts (Linux 7.0.0 x86_64;
+  Core Ultra 7 366H 16 cores; 30.9 GiB RAM; 937 GiB disk; Python 3.12.3), no
+  mutation, no "cannot see" claim. Control "what is the capital of France?" -> route ->
+  CHAT direct answer "Paris", no shell. No over-triggering.
+- Residual limit: this is routing guidance, not a deterministic guarantee; it adds no
+  cache, fast path, or code branch. Do not add keyword/regex host routing without an
+  observed regression.
+
 ## #128, Compact Final View for Web Search Errors
 
 - Included in `v0.0.1-rc18`.
