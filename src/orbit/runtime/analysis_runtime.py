@@ -54,7 +54,9 @@ from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
 from orbit.runtime.analysis_ole import extract_office_vba, is_ole_container
 from orbit.runtime.analysis_vba_autoexec import (
     OfficeEventRelationship,
+    OfficeExecutionReach,
     find_office_event_relationships,
+    find_office_execution_reach,
 )
 from orbit.runtime.analysis_controller import (
     BLOCKED,
@@ -235,7 +237,7 @@ def _transform_preamble(stages: "list[tuple[TransformStage, EvidenceRecord]]") -
     return "\n".join(lines)
 
 
-def _office_bootstrap(extraction, office_modules, office_events=()) -> str:
+def _office_bootstrap(extraction, office_modules, office_events=(), office_exec_reach=()) -> str:
     """A PLAN bootstrap describing an Office container and its extracted VBA,
     structure only. It names the container, the module inventory with sizes, and
     the evidence id that holds each module's exact source -- so PLAN knows macro
@@ -278,6 +280,21 @@ def _office_bootstrap(extraction, office_modules, office_events=()) -> str:
             for rel in office_events:
                 lines.append(
                     f"- {rel.module}.{rel.procedure}: {rel.description}"
+                )
+        if office_exec_reach:
+            lines.append(
+                "Static execution reach recovered from the exact module source "
+                "(the entry procedure's own body contains an execution call -- "
+                "this establishes the entrypoint reaches an execution path, not "
+                "that the file was opened or macros were enabled):"
+            )
+            for reach in office_exec_reach:
+                lines.append(
+                    f"- {reach.module}.{reach.procedure} reaches a {reach.sink} "
+                    f"execution call at line {reach.sink_line} of its body "
+                    f"(evidence: {reach.module_evidence_id}). Any decoded "
+                    "command stages are recorded above; whether this specific "
+                    "call passes one is not asserted here."
                 )
     else:
         lines.append(
@@ -2044,9 +2061,34 @@ def _no_progress_observation(evidence_id: str) -> str:
 TRANSFORM_REACQUISITION = "transform_reacquisition"
 
 
+def _extracted_source_authorities(
+    transform_stages: "list[tuple[TransformStage, EvidenceRecord]]",
+    office_modules: "list[tuple[object, EvidenceRecord]]" = (),
+) -> "list[tuple[str, EvidenceRecord]]":
+    """The exact decoded texts the runtime already holds as authoritative
+    evidence, each with the record that carries it: every deterministic stage,
+    and every extracted Office/VBA module source.
+
+    An Office binary yields its macro source through the preflight, exactly, as
+    module evidence; that extracted text is the authoritative source for
+    source-level questions, so an action that only reproduces it establishes
+    nothing new -- the same statement the stage authorities already make, one
+    source further out. The raw binary itself is never an authority here, so
+    legitimate binary inspection is untouched."""
+    authorities: list[tuple[str, EvidenceRecord]] = [
+        (stage.output, record) for stage, record in transform_stages
+    ]
+    for module, record in office_modules:
+        source = getattr(module, "source", None)
+        if isinstance(source, str) and source:
+            authorities.append((source, record))
+    return authorities
+
+
 def _transform_reacquisition(
     result: "AnalysisResult",
     transform_stages: "list[tuple[TransformStage, EvidenceRecord]]",
+    office_modules: "list[tuple[object, EvidenceRecord]]" = (),
 ) -> "tuple[SourceEquivalence | SourceDominance, EvidenceRecord] | None":
     """Whether this execution only re-derived a deterministic stage already held.
 
@@ -2087,11 +2129,11 @@ def _transform_reacquisition(
     stdout = result.stdout
     if not stdout.strip():
         return None
-    for stage, record in transform_stages:
-        equivalence = classify_output(stdout, stage.output)
+    for text, record in _extracted_source_authorities(transform_stages, office_modules):
+        equivalence = classify_output(stdout, text)
         if equivalence is not None:
             return equivalence, record
-        dominated = classify_dominated(stdout, stage.output)
+        dominated = classify_dominated(stdout, text)
         if dominated is not None:
             return dominated, record
     return None
@@ -2964,6 +3006,10 @@ class AnalysisRuntime:
     # static event-handler contract, not a behavioural claim: the body's own
     # evidence establishes what the macro does.
     office_events: list[OfficeEventRelationship] = field(default_factory=list)
+    # Static execution-reach facts: an auto-execution entry procedure whose own
+    # body contains an execution call (Shell/.Run/ShellExecute). Establishes the
+    # entry reaches an execution path, from exact source -- not that it ran.
+    office_exec_reach: list[OfficeExecutionReach] = field(default_factory=list)
     # The snapshot the pass ran against. Its presence -- not the emptiness of
     # the list -- is what makes the pass once-only: an artifact with nothing to
     # decode must not be rescanned on every step.
@@ -3259,20 +3305,30 @@ class AnalysisRuntime:
             # evidence id; the body's own transform evidence establishes what the
             # macro does. Fail-closed: a wrong module/host context, or a name in
             # a comment/string, yields nothing.
-            for rel in find_office_event_relationships(
+            module_events = find_office_event_relationships(
                 module.name,
                 module.source,
                 extraction.stream_inventory,
                 record.evidence_id,
-            ):
+            )
+            for rel in module_events:
                 self.office_events.append(rel)
+            # And, still statically, whether an auto-execution entry procedure's
+            # own body reaches an execution call (Shell/.Run/ShellExecute) -- so
+            # the report can ground "the entrypoint reaches an execution path" in
+            # the exact source, not the model's memory. Not a claim it ran.
+            for reach in find_office_execution_reach(
+                module.name, module.source, module_events, record.evidence_id
+            ):
+                self.office_exec_reach.append(reach)
         # A structural bootstrap for PLAN: the container, the module inventory,
         # and how to read each module's exact source. It names structure only --
         # not what the macros do -- and points at the derived evidence ids. When
         # the container parsed but yielded no module source, the honest note is
         # still surfaced so PLAN is not silently blind.
         bootstrap = _office_bootstrap(
-            extraction, self.office_modules, self.office_events
+            extraction, self.office_modules, self.office_events,
+            self.office_exec_reach,
         )
         if bootstrap:
             self.messages.append({"role": "user", "content": bootstrap})
@@ -3747,7 +3803,7 @@ class AnalysisRuntime:
         when macros are permitted -- and references the module's evidence id for
         the body. It asserts NO behaviour: what the macro does is established by
         that module's own transform evidence, not by the entrypoint name."""
-        if not self.office_events:
+        if not self.office_events and not self.office_exec_reach:
             return ""
         lines = ["## Office auto-execution entrypoints", ""]
         for rel in self.office_events:
@@ -3764,6 +3820,21 @@ class AnalysisRuntime:
                 "the handler Office invokes on this event when macros are "
                 "permitted. It does not establish that the file was opened, that "
                 "macros were enabled, or what the procedure does."
+            )
+        for reach in self.office_exec_reach:
+            lines.append(
+                f"- {reach.module}.{reach.procedure} reaches a {reach.sink} "
+                f"execution call | line {reach.sink_line} of the module source "
+                f"(evidence: {reach.module_evidence_id})"
+            )
+            lines.append(
+                "  Static intra-module reach: the auto-execution entry "
+                "procedure's own body contains this execution call, so the "
+                "entrypoint statically reaches an execution path. Any decoded "
+                "command stages appear in the deterministic transformations "
+                "above; this fact does not by itself prove which value the call "
+                "passes. It does not establish that the file was opened, that "
+                "macros were enabled, or that this call was reached at run time."
             )
         return "\n".join(lines)
 
@@ -4427,7 +4498,9 @@ class AnalysisRuntime:
         # or source-dominated only -- no fuzzy match -- and it asserts the
         # stage's authority rather than weakening it: the recorded decode is
         # the reference the re-derivation is measured against.
-        transform_reacq = _transform_reacquisition(result, self.transform_stages)
+        transform_reacq = _transform_reacquisition(
+            result, self.transform_stages, self.office_modules
+        )
         if transform_reacq is not None:
             verdict, stage_record = transform_reacq
             self.suppressed_duplicates += 1

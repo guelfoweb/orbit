@@ -1287,6 +1287,45 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `defines function ROmYsTcn and invokes it (ROmYsTcn;)` with the outer-container reach kept separate;
   no fabricated IOC, no false RESOLVED, no completion-state failure, no false contradiction banner.
   Record: `workdir/diag/mine_hta_ioc_grounding/live_smoke.json` (machine-local).
+- RESOLVED (OFFICE-EXTRACTED-VBA-EVIDENCE-CLOSURE-1): the frozen Word sample
+  (`99eb1d90…`, sha unchanged) regressed to 18 calls / 6 actions / 1287s with repeated
+  UnicodeDecodeError (reading the raw binary .doc as UTF-8), a hallucinated
+  `orbit_tools.get_evidence`, and a report leaving the Document_Open->payload chain unresolved.
+  - **First causal divergence: O2 (extracted module present but not represented as actionable/readable
+    source).** The Office preflight extracts `ThisDocument` (55039 chars, sha `d034bd8381f4663a`) as
+    authoritative EVIDENCE and recognises the `Document_Open` autoexec entry, but `covered_source_text`
+    and `delivered_source_text` are both None -- no source authority is tied to the extracted module.
+    The sandbox `read_file` targets the raw binary artifact, so a "read the source" action decodes the
+    binary as UTF-8 and fails; source-reacquisition suppression (gated on covered/delivered) cannot
+    fire; and the static Document_Open->execution chain was never surfaced, so the model ran actions
+    to establish it. The 234-char decoded PowerShell stage (sha `f1fa67e3`, C2 `http://185.189.58.222/x.exe`,
+    `PHfW.exe`, Start-Process) is small and already restored evidence-first.
+  - **Fix (all generic, no sample strings, no sandbox change, no budget change):**
+    1. **Static execution-reach** (`analysis_vba_autoexec.find_office_execution_reach` +
+       `OfficeExecutionReach`): for a recognised autoexec procedure, detect whether its OWN body
+       (bounded by its `End Sub` OR the next procedure declaration, whichever is first) statically
+       contains an execution sink (`Shell`/`.Run`/`ShellExecute`), outside comments/strings. Surfaced
+       in the PLAN bootstrap and the report grounding (`office_events_appendix` -> `deterministic_sections`)
+       as "Document_Open reaches a Shell execution call at line 750" -- a static reach, never a claim the
+       macro ran or the document was opened, and (after review) NOT a claim the call's argument is the
+       decoded stage.
+    2. **Extracted-source dominance**: `_transform_reacquisition` generalised (via
+       `_extracted_source_authorities`) to treat each extracted VBA module source as an authority, so a
+       sandbox action that only reproduces the already-extracted source is suppressed (byte-exact or
+       dominated) and not counted -- raw-binary reacquisition of source Orbit already holds is not the
+       preferred path. Fail-closed guards intact: a FAILED read (the UnicodeDecodeError path, stderr
+       non-empty) is never suppressed; the raw binary is never an authority, so legitimate binary
+       inspection is untouched.
+  - **Evidence/tool contract (section 3):** no schema mismatch and no sandbox change -- `get_evidence`/
+    `read_evidence` are absent from the tool schema and system prompt; the valid runtime-owned way to
+    work from the extracted source is `evidence:<id>` conversation rehydration, already documented. The
+    chain grounding removes the NEED to read source at all, so the qualified path is action-free.
+  Tests: `tests/test_analysis_office_execution_reach.py`, `tests/test_analysis_office_source_dominance.py`;
+  causal mutation confirms the reach detector, its body-boundary, and the office-source authority all
+  load-bearing. Independent review returned BLOCKER 0 / MAJOR 2 first pass (cross-procedure false reach
+  on colon-packed/unclosed entries; grounding over-claiming the sink argument is the decoded stage) --
+  both fixed and regression-tested before merge. Frozen identities unchanged (module sha
+  `d034bd8381f4663a`, stage sha `f1fa67e3…`, C2 `http://185.189.58.222/x.exe`, `PHfW.exe`, Start-Process).
 
 ## RC24 Tool-Loop Convergence
 
