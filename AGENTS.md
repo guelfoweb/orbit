@@ -1344,6 +1344,42 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `workdir/diag/office_vba_evidence/live_smoke.json` (18-call variant, pre read_file fix);
   final: `workdir/diag/office_vba_evidence/live_smoke_final.json` (machine-local).
 
+## Server Startup UX Observability (SERVER-STARTUP-UX-OBSERVABILITY-1)
+
+`orbit server` now prints human-readable progress for the long startup phases, so
+the terminal makes clear Orbit is working and not hung. **Presentation only** --
+no startup behavior, ordering, calibration policy, prewarm eligibility/behavior,
+inference/cache/session semantics, or model selection changed; the added lines
+wrap the existing seams and read only metrics those seams already own.
+
+New lines (stderr, same `orbit-server ` prefix as the existing output; plain
+text, no ANSI/cursor, so identical on a TTY and a redirect and honoring
+NO_COLOR/dumb terminals by adding nothing to color):
+- `resolving server profile...` before profile resolution;
+- `server profile: cached auto-calibrated (...)` when the profile is cache-sourced
+  (a cached start never announces a calibration sweep);
+- `loading model: <alias>...` immediately before `client.load()`;
+- when a real calibration sweep runs: `auto-calibrating server profile...`, one
+  `  candidate n/total: threads=T` line per scored candidate (the warm-up walk is
+  excluded), then `calibration complete: threads=…, threads_batch=…` (or
+  `calibration did not settle…` only if the calibrator was actually invoked);
+- when prewarm is enabled: `prewarming route-prefix cache...` /
+  `prewarming analysis-prefix cache...` immediately before each call, and after it
+  a truthful outcome -- `prewarm complete (label): N tokens, X.Xs, K KiB` only on
+  success, `prewarm skipped (label): reason` on skip, `prewarm failed (label):
+  reason` on failure -- from the `NativeRoutePrefixPrefillResult` metrics
+  (absent metrics are omitted, never estimated). Prewarm announcements are
+  suppressed entirely when prewarm is disabled.
+
+The existing `orbit-server` profile/model/listening lines are unchanged (the last
+two stay on stdout for script consumers). Calibration and prewarm progress are
+purely presentation: `calibrate_threads` gets an observational `on_event` only
+(no effect on candidate order/selection/scoring), and each prewarm function is
+still called exactly once with the same arguments. Tests:
+`tests/test_server_startup_observability.py`; causal mutation confirms the
+false-success, warm-up-filter, and prewarm-start-ordering seams load-bearing. No
+fragile per-run timing numbers are recorded here as durable facts.
+
 ## Large-Source Prefill Cost (ANALYSIS-LARGE-SOURCE-PREFILL-DIAG-1 — TECHNICAL_STOP)
 
 Diagnosis of the ~1470s Office analysis wall time, from the retained per-call KV
