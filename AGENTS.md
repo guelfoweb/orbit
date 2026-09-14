@@ -1381,6 +1381,7 @@ floor for genuinely unsatisfiable prompts (a huge history still refuses cleanly,
 before any backend call). `last_rehydration_diag` records requested ids, the
 window, and the ceiling. No corpus sample other than the Office .doc has an
 oversized extracted source, so the cross-sample gate is unaffected.
+Live smoke on Ornith (Office sample) after the fix: `elapsed=1470s model_calls=12 actions=5 stop="no open question requires an action"` -- the run now COMPLETES cleanly instead of ending on ContextAdmissionError (the prior final smoke) or the model-call bound (the digest-guard smoke). ContextAdmissionError=0, UnicodeDecodeError=0, no get_evidence, no EvidenceStore sandbox access, no fabricated payload hash, no network fetch, no false RESOLVED, no repeated source-window loop. The full static chain is grounded (Document_Open->Shell, C2 `http://185.189.58.222/x.exe`, module sha `d034bd83...`, stage sha `f1fa67e3...`, PHfW.exe, Start-Process). Calls 12<19 and actions 5<6 are materially below the pathological run; wall-clock 1470s is marginally above the 1366s pathological run (per-call CPU prefill variance on the 33k-token source -- throughput is explicitly not this mission's goal). The windowing net did not need to fire this trajectory; by construction (deterministic tests + review) no admitted call can exceed ctx. Record: `workdir/diag/office_vba_evidence/live_smoke_oversized_window.json`.
 
 ## Report Digest-Provenance Rule (ANALYSIS-REPORT-FABRICATED-HASH-GUARD-1)
 
