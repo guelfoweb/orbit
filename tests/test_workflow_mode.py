@@ -42,7 +42,7 @@ from orbit.terminal.repl import Repl
 # Pinned literal. The route language gained an ANALYSIS form in the
 # automatic-recognition mission; the pin is updated only alongside the
 # prewarm requalification that a changed route prompt forces.
-ROUTE_PROMPT_SHA256 = "d38e293a1d8fc0efb5371cff08bb5870ffc4faa6b96b889ff2af54ba2b66a38d"
+ROUTE_PROMPT_SHA256 = "49c689fee9029d49c6f624a955403b834acb30aa9a65c3635772a8e510099740"
 
 
 def track_session_workspaces(test) -> list[Path]:

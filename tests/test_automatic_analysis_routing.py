@@ -50,7 +50,7 @@ from orbit.terminal.repl import Repl
 # The qualified route prompt. Changing the route language forces the Ornith
 # CHAT prewarm to be re-derived, so this pin and that requalification move
 # together or not at all.
-ROUTE_PROMPT_SHA256 = "d38e293a1d8fc0efb5371cff08bb5870ffc4faa6b96b889ff2af54ba2b66a38d"
+ROUTE_PROMPT_SHA256 = "49c689fee9029d49c6f624a955403b834acb30aa9a65c3635772a8e510099740"
 
 
 def track_session_workspaces(test) -> list[Path]:

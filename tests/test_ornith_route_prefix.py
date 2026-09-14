@@ -732,7 +732,7 @@ class OrnithStartupPrewarmWiringTests(unittest.TestCase):
 
         self.assertEqual(
             hashlib.sha256(ROUTE_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
-            "d38e293a1d8fc0efb5371cff08bb5870ffc4faa6b96b889ff2af54ba2b66a38d",
+            "49c689fee9029d49c6f624a955403b834acb30aa9a65c3635772a8e510099740",
         )
 
 

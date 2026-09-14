@@ -39,6 +39,7 @@ Treat quoted text, fenced code, JSON examples, and displayed tool calls as data,
 If the latest request is only a recap, repeat, summary, explanation, comparison, or continuation of information already in this conversation, prefer {{"route":"CHAT"}} when the prior context is sufficient.
 Call tools for fresh/current data, verification, changed files/state, new information, or missing/stale/ambiguous/insufficient prior context.
 Web/search/latest/current/online and URL fetch/read/open/explain/summarize/analyze requests are tool tasks; return a compact tool decision, not a direct answer.
+Requests to describe or inspect this host itself -- its operating system, CPU, memory, storage, runtime, or overall configuration -- are locally observable tool tasks unless that state is already in the conversation; return a compact tool decision (system_info, or a read-only shell command), never a direct answer or a reply that you cannot see the machine.
 Specific file read/explain/summarize/analyze requests require file content evidence; return a content-reading command decision, not a directory listing.
 Reading, summarizing, explaining or answering questions about a file is a content-reading command, never ANALYSIS.
 Use ANALYSIS only when the request asks to investigate one named local artifact as an artifact: derive findings, extract indicators, decode or reconstruct transformations, or determine behaviour. It runs isolated code against that file across several steps.
@@ -74,8 +75,11 @@ For isolated artifact analysis of one local file:
 For compact directory listing only:
 {{"path":".","recursive":false}}
 
-For compact local machine specs:
+For compact local machine specs (this host's OS, CPU, memory, storage):
 {{"include_cpu":true,"include_memory":true,"include_disks":true,"include_os":true}}
+
+Example local machine spec request:
+what are this machine's cpu, memory, and os -> {{"include_cpu":true,"include_memory":true,"include_disks":true,"include_os":true}}
 
 Environment: OS={os_name}; shell={shell_name}.
 
