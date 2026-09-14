@@ -1238,6 +1238,47 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `GetSpecialFolder(2) = TemporaryFolder (%TEMP%)` and the verbatim `fso.GetSpecialFolder(2) +
   "/TKFSIK.exe"`, never the Windows folder; C2 and stage sha present; no false contradiction banner.
   Record: `workdir/diag/iban_evidence_grounding/live_smoke.json` (machine-local).
+- RESOLVED / TECHNICAL_STOP (MINE-HTA-IOC-GROUNDING-CLOSURE-1): three defects from a mine.hta run
+  (sample sha `6840b6d84f7c7190…`, unchanged from the frozen corpus). All fixes are generic runtime
+  seams -- no sample strings/domains hardcoded, no domain allowlist, no fuzzy matching, no budget
+  change, no forcing of questions/actions, IOC extraction not weakened.
+  - **Defect A -- XHTML namespace published as a verified IOC (root cause I2, indicator admission).**
+    `<html xmlns="http://www.w3.org/1999/xhtml">` was read by `uris_in` as an ordinary URI and
+    published under Verified indicators. Fix in `analysis_indicators.py`: `uris_in` skips a URI that
+    is the value of an `xmlns`/`xmlns:prefix` declaration, recognised by SYNTAX
+    (`_is_namespace_declaration`) -- the attribute must be a WHOLE token (`(?<![\w.\-:])` so
+    `data-xmlns`/`myxmlns` are not declarations) and the value must be flush against a quote (so a
+    stray `xmlns=` token then a spaced URL is not one). The SAME URI outside xmlns syntax stays an
+    indicator; fail-closed toward keeping the IOC when a truncated look-back cannot see the boundary.
+  - **Defect B -- report doubted an invocation the decoded stage proves (root cause G1, deterministic
+    fact omitted from grounding).** The recovered PowerShell stage defines `function ROmYsTcn` and
+    ends with the bare call `ROmYsTcn;`, yet the report hedged "not whether that routine is actually
+    invoked". Fix in `analysis_runtime.py`: `_stage_entry_invocations` recognises a function a decoded
+    stage both defines and calls argumentless as a bare statement (string/comment-masked via
+    `_code_mask`; `End Sub`/`End Function` closers and keyword names excluded). `stage_invocations()`
+    surfaces it as a deterministic fact in `deterministic_sections()`, stating INNER-stage invocation
+    as established while keeping OUTER-container reach a separate/unresolved question (no full-chain
+    overclaim). `_flag_invocation_contradictions` (both report-grounding paths) flags a report that
+    denies the inner call -- sentence-scoped, suppressed on outer-container hedge language, never on a
+    sentence that shows the call, so the nuanced-correct report the fact block invites is not flagged.
+  - **Defect C -- two "the completion state could not be read" blocks after successful actions
+    (classification C6 bounded model variance -> TECHNICAL_STOP).** The model ran an action, then
+    failed to emit a usable `finish_analysis_question` even after the one allowed repair (saved run:
+    `workdir/diag/multisample_bench/minehta`, Q2 blocked, `control_repairs=3`). The runtime CANNOT
+    infer resolution from an unusable finish without a false RESOLVED, so the bounded block is the
+    honest outcome; there is no safe generic parser/controller seam. Kept as-is; containment pinned by
+    `tests/test_analysis_control_repair_bound.py` (BLOCKED + exact reason + no false RESOLVED + bounded
+    dispatch). Downstream, defects A/B and the existing transform-reacquisition suppression remove the
+    redundant questions/actions that create these finish opportunities.
+  Tests: `tests/test_analysis_namespace_indicator.py`, `tests/test_analysis_stage_invocation.py`, and
+  a containment class in `tests/test_analysis_control_repair_bound.py`; causal mutation confirms A/B
+  seams load-bearing. Independent review returned BLOCKER 1 / MAJOR 2 on the first pass (namespace
+  over-match dropping real endpoints; contradiction false-positive on outer-hedge prose; invocation
+  false-positive inside strings/comments) -- all fixed and regression-tested before merge. Frozen
+  decode identity unchanged (mine.hta stage0 sha `0c6b4253cbd1eb8b`, C2-bearing stage sha
+  `e2214909b2e7c671`, C2 `https://wall5tghf6fdg.api.opensourcesaas.org/ZOdcfNuo/myxwr5cli.bat`); no
+  corpus sample other than mine.hta self-invokes, and namespace exclusion only removes XML/OOXML
+  schema URIs that were never real IOCs.
 
 ## RC24 Tool-Loop Convergence
 

@@ -302,5 +302,42 @@ class TheOtherDomainsAreUnchangedTests(ControlRepairBoundTestBase):
         self.assertEqual(witness.finish_dispatches, CONTROL_DISPATCH_BOUND)
 
 
+class UnreadableCompletionIsSafelyContainedTests(ControlRepairBoundTestBase):
+    """MINE-HTA-IOC-GROUNDING-CLOSURE-1, defect C (TECHNICAL_STOP containment).
+
+    An action succeeds, then the model cannot produce a usable completion call
+    even after the one allowed repair. There is no safe way for the runtime to
+    infer resolution from an unreadable finish -- doing so would be a false
+    RESOLVED -- so the honest, bounded outcome is that the question BLOCKS with
+    "the completion state could not be read". These tests pin that this remains
+    safe: bounded dispatches, no false RESOLVED, an explicit blocked reason.
+    """
+
+    def test_an_unreadable_completion_blocks_the_question(self) -> None:
+        run, witness, escaped, controller = self._run(
+            questions=1, finish=("parse",) * 20, capture_states=True
+        )
+        self.assertIsNone(escaped)
+        state = controller.states["Q1"]
+        self.assertEqual(state.status, analysis_controller.BLOCKED)
+        self.assertEqual(state.reason, "the completion state could not be read")
+
+    def test_an_unreadable_completion_is_never_a_false_resolved(self) -> None:
+        run, _witness, escaped, controller = self._run(
+            questions=2, finish=("parse",) * 20, capture_states=True
+        )
+        self.assertIsNone(escaped)
+        self.assertEqual(list(run.resolved_questions), [])
+        self.assertTrue(
+            all(s.status == analysis_controller.BLOCKED
+                for s in controller.states.values())
+        )
+
+    def test_the_containment_stays_within_the_dispatch_bound(self) -> None:
+        run, witness, escaped, _ = self._run(questions=1, finish=("parse",) * 20)
+        self.assertIsNone(escaped)
+        self.assertEqual(witness.finish_dispatches, CONTROL_DISPATCH_BOUND)
+
+
 if __name__ == "__main__":
     unittest.main()

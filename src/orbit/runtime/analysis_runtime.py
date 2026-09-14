@@ -811,6 +811,209 @@ def _special_folder_contradiction_lines(
     ]
 
 
+#: A function definition in a decoded script stage (PowerShell `function NAME`,
+#: VBScript `Function`/`Sub NAME`). Case-insensitive; the name is a plain
+#: identifier that is NOT itself a keyword (`(?!(?:function|sub|end)\b)`), so
+#: `End Sub` followed by another `Sub` does not read the second keyword as a
+#: name. This is not a language parser -- it names the one construct whose
+#: presence-plus-call is the fact below.
+_STAGE_FUNC_DEF = re.compile(
+    r"(?<![\w$])(function|sub)\s+(?!(?:function|sub|end)\b)([A-Za-z_$][\w$]*)",
+    re.IGNORECASE,
+)
+
+
+def _code_mask(text: str) -> "list[bool]":
+    """A per-character mask: True where a byte is inside a string or a comment.
+
+    A tiny scanner, not a parser -- enough to keep a function name that appears
+    only inside a `"..."`/`'...'` string or a `#`/`'`/`REM` line comment from
+    being read as executable code. It covers the forms PowerShell and VBScript
+    decoded stages actually use; anything it does not recognise stays code, which
+    is the fail-open direction for a MASK (a real call is never hidden).
+    """
+    mask = [False] * len(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ('"', "'"):
+            # A quoted run to the matching quote or the end of the line: a
+            # PowerShell string closes on its quote; a VBScript `'` comment has
+            # none and runs to the line end. Either way the span is not code.
+            quote = ch
+            j = i + 1
+            while j < n and text[j] != quote and text[j] != "\n":
+                j += 1
+            end = j if (j < n and text[j] == quote) else j
+            for k in range(i, min(end + 1, n)):
+                mask[k] = True
+            i = end + 1
+            continue
+        if ch == "#" or text[i:i + 4].lower() == "rem ":
+            # `#` (PowerShell) or `REM ` (VBScript) line comment, to the newline.
+            j = text.find("\n", i)
+            end = n if j < 0 else j
+            for k in range(i, end):
+                mask[k] = True
+            i = end
+            continue
+        i += 1
+    return mask
+
+
+def _stage_entry_invocations(text: str) -> "list[tuple[str, str]]":
+    """Functions a decoded stage both DEFINES and calls as a bare statement.
+
+    The established fact is narrow and structural: the stage defines `NAME` and
+    then invokes it with NO arguments as a statement of its own -- `NAME;`,
+    `NAME()`, `NAME();`, or `NAME`/`NAME()` at the very end of the stage. An
+    argumentless bare call is the entry-point form (the routine that auto-runs
+    when the stage executes); a call that PASSES arguments (`NAME $x`, `NAME(x)`)
+    is an inner helper invocation and is deliberately not matched, because it is
+    not the entry signal and matching it would over-report.
+
+    Definitions and calls inside strings or comments do not count: a name that
+    appears only inside `"..."` or a `#`/`'` comment is text, not code, and
+    asserting it as an executed call would fabricate the fact. Returns
+    `(name, call_form)` for each such function, in first-definition order. This
+    proves the stage's own entry routine is invoked WITHIN the stage; it says
+    nothing about how an outer container reaches the stage.
+    """
+    masked = _code_mask(text)
+    defs: list[str] = []
+    # The exact offset of each definition's NAME, so a call match that lands on
+    # a definition is excluded precisely.
+    def_name_starts: set[int] = set()
+    for match in _STAGE_FUNC_DEF.finditer(text):
+        keyword_start = match.start(1)
+        if masked[keyword_start]:
+            continue  # the `function`/`sub` keyword is inside a string/comment
+        # `End Sub`/`End Function` is a closer, not a definition: the keyword is
+        # immediately preceded by `end` and whitespace.
+        before = text[max(0, keyword_start - 6):keyword_start].lower()
+        if re.search(r"(?<![\w$])end\s+$", before):
+            continue
+        name = match.group(2)
+        def_name_starts.add(match.start(2))
+        if name not in defs:
+            defs.append(name)
+    invoked: list[tuple[str, str]] = []
+    for name in defs:
+        # A bare argumentless call of the defined name, not the definition site.
+        call = re.compile(
+            r"(?<![\w$])" + re.escape(name) + r"\s*(?:\(\s*\))?\s*(?:;|\Z)"
+        )
+        for match in call.finditer(text):
+            if match.start() in def_name_starts:
+                continue  # the definition itself, not a call
+            if masked[match.start()]:
+                continue  # the call sits inside a string or comment
+            form = text[match.start():match.end()].strip()
+            invoked.append((name, form[:40]))
+            break
+    return invoked
+
+
+#: Tokens that, near an "invoke"/"call" word and the invoked function's name,
+#: read as a claim that the routine is NOT (or may not be) invoked. A closed
+#: set, matched literally -- not a similarity measure.
+_INVOCATION_NEGATIONS = (
+    "not ", "never ", "n't ", "no evidence", "unclear", "unconfirmed",
+    "unresolved", "whether ", "may not", "cannot ", "unable to",
+)
+
+#: Words that mark a hedge about the OUTER container's reach rather than the
+#: inner invocation. A sentence that carries one of these is talking about how
+#: the HTA/document/loader reaches the stage -- exactly the separate, possibly
+#: unresolved question the fact block asks the model to raise -- so a negation
+#: there is correct, not a contradiction, and must NOT be flagged.
+_OUTER_CONTAINER_HEDGE = (
+    "outer", "container", "hta", "loader", "document", "wrapper",
+    "reach", "reaches", "reached", "trigger", "auto-run", "autorun",
+    "how the", "whether the file", "on load",
+)
+
+#: Sentence boundaries, for scoping a claim to the clause that makes it. A bare
+#: name and a negation in DIFFERENT sentences are two separate statements, not
+#: one contradiction.
+_SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
+
+
+def _invocation_contradictions(
+    text: str, invocations: "list[tuple[str, str, str]]"
+) -> "list[tuple[str, str, str]]":
+    """Report passages that deny an invocation the decoded stage establishes.
+
+    Scoped to a SENTENCE, not a character window, and split from the hedge the
+    fact block deliberately invites. A sentence flags only when it (a) names the
+    invoked function, (b) carries an invoke/call word AND a negation token, and
+    (c) does NOT read as a hedge about the OUTER container's reach -- because
+    "invoked within the stage, but whether the outer HTA reaches it is unclear"
+    is the correct thing to say, not a contradiction. A sentence that shows the
+    bare call form (`NAME;`/`NAME()`) affirms the invocation and is never
+    flagged. Deterministic and literal; it states the established fact rather
+    than editing the prose, and never fires on a report that does not deny the
+    inner call.
+
+    `invocations` are `(name, call_form, evidence_id)`. Returns the ones the
+    report contradicts, so the caller can state each established invocation.
+    """
+    if not invocations:
+        return []
+    flagged: "dict[str, tuple[str, str, str]]" = {}
+    sentences = _SENTENCE_SPLIT.split(text)
+    for name, form, eid in invocations:
+        needle = name.lower()
+        bare_call = re.compile(r"(?<![\w$])" + re.escape(name) + r"\s*\(?\s*\)?\s*;")
+        for sentence in sentences:
+            low = sentence.lower()
+            if needle not in low:
+                continue
+            if not ("invok" in low or "call" in low):
+                continue
+            if not any(token in low for token in _INVOCATION_NEGATIONS):
+                continue
+            if any(token in low for token in _OUTER_CONTAINER_HEDGE):
+                continue  # a hedge about outer-container reach, not a denial
+            if bare_call.search(sentence):
+                continue  # the sentence shows the call; it affirms, not denies
+            flagged[name] = (name, form, eid)
+            break
+    return [flagged[name] for name, _f, _e in invocations if name in flagged]
+
+
+STAGE_INVOCATION_PREAMBLE = (
+    "Explicit entry-routine invocations recovered from the decoded stages "
+    "(each stage defines the function and calls it as a bare statement) -- these "
+    "are established by the recovered bytes, not inferred:"
+)
+STAGE_INVOCATION_FOOTER = (
+    "Each line establishes that the decoded stage's OWN entry routine is invoked "
+    "within that stage. It does NOT establish how the outer container (the HTA, "
+    "the document, the loader) reaches or executes that stage: that linkage is a "
+    "separate question, unresolved unless other evidence shows it. State the "
+    "inner invocation as established; do not deny it, and do not upgrade it into "
+    "a proven full outer-container execution chain."
+)
+STAGE_INVOCATION_CONTRADICTION_NOTICE = (
+    "INVOCATION MISMATCH: the report questions or denies an invocation the "
+    "decoded stage establishes explicitly. The recovered bytes are authoritative:"
+)
+
+
+def _stage_invocation_contradiction_lines(
+    contradictions: "list[tuple[str, str, str]]",
+) -> list[str]:
+    """One bullet per contradicted invocation, stating the established call."""
+    return [
+        f"- decoded stage evidence:{eid} defines function {name} and invokes it "
+        f"(`{form}`); the routine IS invoked within its stage. Outer-container "
+        "execution of that stage remains a separate, possibly unresolved question."
+        for name, form, eid in contradictions
+    ]
+
+
 DETERMINISTIC_AUTHORITY_PREAMBLE = (
     "The following values were computed by the runtime directly from the "
     "artifact, not by a model. They are exact. Where anything else in this "
@@ -3135,6 +3338,7 @@ class AnalysisRuntime:
             for section in (
                 self.verified_indicators(),
                 self.folder_semantics(),
+                self.stage_invocations(),
                 self.transform_appendix(),
                 self.office_appendix(),
                 self.office_events_appendix(),
@@ -3200,6 +3404,66 @@ class AnalysisRuntime:
         return "\n".join(
             [WSH_SPECIAL_FOLDER_CONTRADICTION_NOTICE, ""]
             + _special_folder_contradiction_lines(contradictions)
+            + ["", text]
+        )
+
+    def _stage_invocations(self) -> "list[tuple[str, str, str]]":
+        """Entry-routine invocations the decoded stages establish, with their
+        evidence ids.
+
+        Reads the recorded transform stages -- the authoritative decoded bytes,
+        not model prose -- so a named invocation can cite the exact stage that
+        proves it. `(name, call_form, evidence_id)` per invoked entry function.
+        """
+        found: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for stage, record in self.transform_stages:
+            for name, form in _stage_entry_invocations(stage.output):
+                if name in seen:
+                    continue
+                seen.add(name)
+                found.append((name, form, record.evidence_id))
+        return found
+
+    def stage_invocations(self) -> str:
+        """Explicit entry-routine invocations recovered from the decoded stages.
+
+        A structural fact the runtime reads exactly -- a decoded stage defines a
+        function and calls it as a bare statement -- surfaced so the model states
+        the inner invocation as established rather than hedging it from memory.
+        Deliberately narrow: it establishes the stage's OWN entry routine runs
+        within the stage, never that an outer container reached the stage. Empty
+        when no decoded stage self-invokes, so it changes nothing otherwise.
+        """
+        invocations = self._stage_invocations()
+        if not invocations:
+            return ""
+        lines = [STAGE_INVOCATION_PREAMBLE]
+        lines.extend(
+            f"- evidence:{eid}: the stage defines function {name} and invokes "
+            f"it (`{form}`)."
+            for name, form, eid in invocations
+        )
+        lines.append(STAGE_INVOCATION_FOOTER)
+        return "\n".join(lines)
+
+    def _flag_invocation_contradictions(self, text: str) -> str:
+        """Prepend a correction when the report denies or doubts an invocation
+        the decoded stage establishes, mirroring the folder-mismatch notice.
+
+        Deterministic and literal: the invocations come from the recovered stage
+        bytes, and the correction states the established call rather than editing
+        the prose. It fires only on a report that names an invoked function and,
+        near that name, both an invoke/call word and a negation from the closed
+        set -- so a report that states the invocation correctly, or does not
+        mention the routine, is untouched.
+        """
+        contradictions = _invocation_contradictions(text, self._stage_invocations())
+        if not contradictions:
+            return text
+        return "\n".join(
+            [STAGE_INVOCATION_CONTRADICTION_NOTICE, ""]
+            + _stage_invocation_contradiction_lines(contradictions)
             + ["", text]
         )
 
@@ -6719,6 +6983,11 @@ class AnalysisRuntime:
         # unsupported address is -- deterministic, and stating the fixed mapping
         # rather than rewriting the prose.
         text = self._flag_special_folder_contradictions(text)
+        # A decoded stage's own entry routine, which the recovered bytes show is
+        # invoked: a report that denies or doubts that specific call is corrected
+        # here, deterministically, without upgrading it into outer-container
+        # execution the evidence may not establish.
+        text = self._flag_invocation_contradictions(text)
         if appendix:
             text = f"{text}\n\n{appendix}"
         _record_report_diagnostics(
@@ -6855,6 +7124,11 @@ class AnalysisRuntime:
         # unsupported address is -- deterministic, and stating the fixed mapping
         # rather than rewriting the prose.
         text = self._flag_special_folder_contradictions(text)
+        # A decoded stage's own entry routine, which the recovered bytes show is
+        # invoked: a report that denies or doubts that specific call is corrected
+        # here, deterministically, without upgrading it into outer-container
+        # execution the evidence may not establish.
+        text = self._flag_invocation_contradictions(text)
         if appendix:
             text = f"{text}\n\n{appendix}"
         return AnalysisReport(
