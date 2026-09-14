@@ -890,12 +890,44 @@ Release State entry below.
 
 - See `docs/releases/v0.0.1-rc38.md`.
 
-### Post-RC38 (unreleased on `main`)
+### RC39 (runtime / diagnostics / terminal-UX qualification over rc38)
 
-Five commits landed after the `v0.0.1-rc38` tag (plus this docs commit). There
-is no rc39 tag and no release notes file for them: `main` is ahead of the last release, which is a
-normal post-release state, not an omission. Do not create a tag or release to
-"fix" it (Permanent Principles). Newest last:
+- Published pre-release: `v0.0.1-rc39` (annotated tag; GitHub pre-release; no
+  attached assets by convention). Package version stays `0.0.1`. Qualified
+  production code: `a526c3622a32dcf7102a35f817851e513e42e9bb`; the release commit
+  adds only `docs/releases/v0.0.1-rc39.md` and this entry, so its production tree
+  is byte-identical to its parent.
+- Bundles the qualified post-rc38 work (RC39-RELEASE-QUALIFICATION-1): measured
+  server startup profile / auto-calibration (`47d6b4b`, `c1e4662`); deterministic
+  zero-action report render + the empty-PLAN fix (`fa67e5a`, `c1e4662`); Ornith
+  route-prefix `/props` observability (#332); model-aware read-only
+  `--show-profile` (#334); terminal model-status colours (#333); terminal-only
+  Markdown report rendering (#335); the R1 status-accessor extraction to
+  `client_status.py` (#336). No model, prompt, controller, KV, cache or report
+  behaviour change.
+- Qualification: full unit discovery RC=0 (0 fail / 0 error, host-dependent skips
+  only); QREL-1 31/31; deterministic corpus gate green incl. the IBAN
+  `js_fromcharcode_offset` stage sha256
+  `5d51e7659955a754d55a83bce9157d8999864ee30a4f3cd5dc752ed0191a7de0` and C2
+  `https://productoslili.cl/cv/cr2.exe`; compileall + `git diff --check` clean; no
+  import cycle; packaging verified from a clean `git archive` (no malware /
+  scratchpad / backups / vendor build outputs) with an install + CLI smoke.
+  Independent release review BLOCKER 0 / MAJOR 0. The heavy six-sample live Ornith
+  campaign was NOT rerun (no analysis/model behaviour changed since rc38; the
+  deterministic reproduction gate is the qualified cheap check).
+- Technical stop carried forward: Intel `xe` iGPU / GPU work (decode ~3x slower
+  than CPU, thermally infeasible on the reference laptop) — Orbit stays CPU-only,
+  `gpu_layers=0`.
+- Next unreleased-development baseline: `main` at/after the rc39 release commit;
+  there is no unreleased production work beyond it.
+- See `docs/releases/v0.0.1-rc39.md`.
+
+### Post-RC38 (bundled into rc39; historical)
+
+The commits below landed after the `v0.0.1-rc38` tag and their production work is
+now RELEASED in `v0.0.1-rc39` (see the RC39 entry above). This section is retained
+as the historical per-commit record (including the Dell power-audit diagnostics).
+Newest last:
 
 - `b465ed6` *docs: close the Dell migration handoff* — documentation only.
 - `fa67e5a` *fix(analysis): an empty plan is asked once more when the runtime
