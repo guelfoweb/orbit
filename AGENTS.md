@@ -1196,6 +1196,41 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   (#103 closed as a failed harness-semantics experiment; settled props already on main).
   No code ported; tips recorded in workdir/diag/stale_branch_final_sweep/RECOVERY_INVENTORY.md.
   **origin now holds only `main` plus the release tags.**
+- RESOLVED (IBAN-EVIDENCE-GROUNDING-CLOSURE-1): two evidence-grounding defects on the
+  IBAN.js path, both fixed at generic runtime seams (never hardcoded, no fuzzy match, no
+  budget change, no PLAN forcing, deterministic authority preserved). Root causes and closures:
+  - **Defect A — redundant re-derivation of a deterministic stage (root cause R4, action
+    admission).** The transform preflight decodes IBAN.js to one authoritative stage (MMGCLZ,
+    564 chars, sha `5d51e765…`) and restores it evidence-first into PLAN, so the answer is
+    already in hand; but action admission suppressed only exact-CODE duplicates
+    (`observation_fingerprint`) and source-reacquisition (output == the covered/delivered
+    SOURCE). Nothing recognised an action whose OUTPUT reproduces a recorded deterministic
+    STAGE, so a re-decode was admitted and counted. Fix: `_transform_reacquisition` in
+    `analysis_runtime.py` generalises "establishes nothing new" to the transform stages —
+    a successful, complete, unaltered, artifact-free stdout that is byte-exact (`classify_output`)
+    or source-dominated (`classify_dominated`) against a recorded stage is suppressed
+    (`action_executed=False`, not counted, NO_PROGRESS pointing at the stage's evidence id),
+    exactly parallel to source reacquisition one seam inward. It triggers on a CORRECT
+    re-derivation and does NOT depend on the observed bad-arithmetic failure (a failure keeps
+    `stderr` non-empty and reaches the model as the failure it is).
+  - **Defect B — report misstated `GetSpecialFolder(2)` as the Windows folder (root cause:
+    runtime never surfaced the platform-constant meaning; the model filled it from memory).**
+    WSH `Scripting.FileSystemObject.GetSpecialFolder(n)` is a closed, documented enum
+    {0=WindowsFolder, 1=SystemFolder, 2=TemporaryFolder(%TEMP%)}. Fix (two runtime-owned seams,
+    never model memory): (1) `folder_semantics()` surfaces the mapping for any defined constant
+    literally present in an authoritative decoded stage as a deterministic fact inside
+    `deterministic_sections()` — fronted by `DETERMINISTIC_AUTHORITY_PREAMBLE` ("quote from here,
+    not memory"); undefined indices fail closed; (2) `_flag_special_folder_contradictions`
+    prepends a correction (mirroring the unsupported-indicator notice) when the report itself
+    writes `GetSpecialFolder(n)` beside the wrong enum name, stating the fixed mapping rather
+    than rewriting prose. Acceptable renderings: `%TEMP%`/temporary folder OR the verbatim
+    expression; `<Windows>\…` for index 2 is prevented at the fact seam.
+  Tests: `tests/test_analysis_transform_reacquisition.py` (12) and
+  `tests/test_analysis_special_folder_semantics.py` (14); causal mutation confirmed both fixes
+  load-bearing. Frozen decode identity unchanged (stage sha `5d51e765…`, C2
+  `https://productoslili.cl/cv/cr2.exe`); no corpus sample other than IBAN uses GetSpecialFolder,
+  so blast radius is IBAN-only. Do NOT hardcode the sample constants, add fuzzy matching, or raise
+  the action budget; the seams are generic to any deterministic stage and any WSH special folder.
 
 ## RC24 Tool-Loop Convergence
 

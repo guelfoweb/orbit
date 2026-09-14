@@ -683,6 +683,134 @@ def _unsupported_indicators(text: str, authoritative: "set[str]") -> list[str]:
     return unsupported
 
 
+#: Windows Script Host `Scripting.FileSystemObject.GetSpecialFolder(n)`
+#: constants. A closed, documented platform enum -- its complete set is these
+#: three values -- resolved from the WSH API definition, never inferred from the
+#: artifact. Surfacing it is a constant lookup keyed on the exact call form, not
+#: language analysis: an index outside this set names no defined constant and is
+#: not surfaced. It exists because the decoded value carries `GetSpecialFolder(2)`
+#: verbatim and a model that resolves that folder from memory gets it wrong (2 is
+#: the temporary folder, not the Windows folder); the runtime knows the mapping
+#: exactly, so it states it rather than leaving it to memory.
+_WSH_SPECIAL_FOLDERS: "dict[int, tuple[str, str]]" = {
+    0: ("WindowsFolder", "the Windows installation directory (%WINDIR%)"),
+    1: ("SystemFolder", "the Windows system directory (%WINDIR%\\System32)"),
+    2: ("TemporaryFolder", "the per-user temporary directory (%TEMP%)"),
+}
+#: The exact call form only: `GetSpecialFolder(<int>)`, optionally spaced. A
+#: bare integer elsewhere is not this constant, so the literal API call is what
+#: is matched -- never a number on its own.
+_GET_SPECIAL_FOLDER = re.compile(r"GetSpecialFolder\s*\(\s*(\d+)\s*\)", re.IGNORECASE)
+
+#: The names the enum defines, so a report that assigns the wrong one to a given
+#: index can be recognised. Lower-cased for a case-insensitive contains-check.
+_SPECIAL_FOLDER_NAMES = {name.lower() for name, _gloss in _WSH_SPECIAL_FOLDERS.values()}
+
+WSH_SPECIAL_FOLDER_PREAMBLE = (
+    "Windows Script Host special-folder constants used by the decoded code "
+    "(Scripting.FileSystemObject.GetSpecialFolder), resolved from the WSH API "
+    "definition -- these are fixed platform constants, not inferences:"
+)
+WSH_SPECIAL_FOLDER_FOOTER = (
+    "Name the folder a GetSpecialFolder(n) call selects using the mapping "
+    "above, not another folder. In particular GetSpecialFolder(2) is the "
+    "temporary folder (%TEMP%), never the Windows or System folder. If in "
+    "doubt, quote the GetSpecialFolder(n) expression verbatim."
+)
+
+
+def _special_folder_constants(texts: "Iterable[str]") -> "list[tuple[int, str, str]]":
+    """Every defined WSH `GetSpecialFolder(n)` constant appearing in the texts.
+
+    `texts` are authoritative decoded strings (stage outputs and artifact
+    views). Ordered by index and de-duplicated. An index not in the closed enum
+    is skipped -- fail closed, never guess a folder for an undefined constant.
+    """
+    seen: "dict[int, tuple[int, str, str]]" = {}
+    for text in texts:
+        if not text:
+            continue
+        for match in _GET_SPECIAL_FOLDER.finditer(text):
+            index = int(match.group(1))
+            if index in _WSH_SPECIAL_FOLDERS and index not in seen:
+                name, gloss = _WSH_SPECIAL_FOLDERS[index]
+                seen[index] = (index, name, gloss)
+    return [seen[index] for index in sorted(seen)]
+
+
+def _special_folder_contradictions(
+    text: str, constants: "list[tuple[int, str, str]]"
+) -> "list[tuple[int, str, str]]":
+    """Report passages that map a GetSpecialFolder(n) to the wrong folder name.
+
+    Fires only on an EXPLICIT mapping the report itself writes: a
+    `GetSpecialFolder(n)` call form paired, within a short window after it, with
+    a special-folder NAME the closed enum assigns to a DIFFERENT index. The
+    check is deterministic and byte-exact on the constant table; it never
+    guesses what the model meant, only that what it wrote contradicts the fixed
+    mapping. Prose that paraphrases the folder without quoting the API token is
+    not caught here -- it is the authoritative fact block's job to keep that
+    right, and the model is told to quote the mapping from it.
+
+    Returns the (index, correct_name, gloss) of each contradicted constant, so
+    the caller can state the correct mapping without selecting a replacement in
+    the prose.
+    """
+    if not constants:
+        return []
+    correct = {index: name for index, name, _gloss in constants}
+    by_index = {index: (index, name, gloss) for index, name, gloss in constants}
+    flagged: "dict[int, tuple[int, str, str]]" = {}
+    lowered = text.lower()
+    matches = list(_GET_SPECIAL_FOLDER.finditer(text))
+    for position, match in enumerate(matches):
+        index = int(match.group(1))
+        if index not in correct:
+            continue
+        # A window after the call form, where a mapping like
+        # "GetSpecialFolder(2) (the WindowsFolder)" would state the name. Bounded
+        # at 80 characters AND at the next GetSpecialFolder call, so a correct
+        # label on a LATER constant cannot bleed into this one's window and be
+        # read as this one's mapping ("GetSpecialFolder(2) (TemporaryFolder) and
+        # GetSpecialFolder(1) (SystemFolder)").
+        stop = match.end() + 80
+        if position + 1 < len(matches):
+            stop = min(stop, matches[position + 1].start())
+        window = lowered[match.end():stop]
+        right = correct[index].lower()
+        # The correct enum name in the window means the report labelled THIS
+        # call correctly; a contrastive clause that also names another folder
+        # ("the TemporaryFolder, not the SystemFolder") is then not a mismatch.
+        # Only an output that names a wrong folder and NOT the right one is one.
+        if right in window:
+            continue
+        for wrong in _SPECIAL_FOLDER_NAMES:
+            if wrong == right:
+                continue
+            if wrong in window:
+                flagged[index] = by_index[index]
+                break
+    return [flagged[index] for index in sorted(flagged)]
+
+
+WSH_SPECIAL_FOLDER_CONTRADICTION_NOTICE = (
+    "SPECIAL-FOLDER MISMATCH: the report maps a Windows Script Host "
+    "GetSpecialFolder constant to the wrong folder. The fixed platform mapping "
+    "is authoritative:"
+)
+
+
+def _special_folder_contradiction_lines(
+    contradictions: "list[tuple[int, str, str]]",
+) -> list[str]:
+    """One bullet per contradicted constant, stating the correct mapping."""
+    return [
+        f"- GetSpecialFolder({index}) = {name}: {gloss}. The report names a "
+        "different folder for it; the mapping above is correct."
+        for index, name, gloss in contradictions
+    ]
+
+
 DETERMINISTIC_AUTHORITY_PREAMBLE = (
     "The following values were computed by the runtime directly from the "
     "artifact, not by a model. They are exact. Where anything else in this "
@@ -1703,6 +1831,98 @@ def _no_progress_observation(evidence_id: str) -> str:
         "execute a deterministic transformation whose algorithm and inputs you "
         "already have, verify existing evidence, or finish if the evidence is "
         "sufficient."
+    )
+
+
+#: How a suppressed re-derivation of a deterministic stage is named in evidence
+#: metadata and in the note the model receives. Parallel to SOURCE_REACQUISITION
+#: (output was the covered source) and SOURCE_DOMINATED (source plus recomputable
+#: properties): the output was a stage the deterministic pass already produced.
+TRANSFORM_REACQUISITION = "transform_reacquisition"
+
+
+def _transform_reacquisition(
+    result: "AnalysisResult",
+    transform_stages: "list[tuple[TransformStage, EvidenceRecord]]",
+) -> "tuple[SourceEquivalence | SourceDominance, EvidenceRecord] | None":
+    """Whether this execution only re-derived a deterministic stage already held.
+
+    The transform preflight decodes the artifact's stages and records each as
+    authoritative evidence before any model call. An action whose output only
+    reproduces one of those stages establishes nothing the session did not
+    already hold -- the source-reacquisition case, one seam inward: the
+    authority compared against is a decoded stage rather than the covered
+    source. It answers the same mechanical question the runtime already asks of
+    the source, so a fact the runtime computed exactly is not investigated a
+    second time on the model's machine.
+
+    Same discipline as `_source_reacquisition`, and for the same reasons: a
+    successful, complete, unaltered, artifact-free output only.
+
+      - a failure (`not result.ok`, or anything on `stderr`) must reach the
+        model as a failure; it has not proven what it would have produced, and
+        the observed redundant runs fail exactly here (bad decode arithmetic),
+        so this deliberately does NOT depend on the arithmetic being wrong.
+      - a truncated output is a prefix, not the output; a program that printed
+        a stage and THEN new findings has the visible bytes of a bare
+        re-derivation, and suppressing it would discard the findings.
+      - a replaced output (U+FFFD substituted for non-UTF-8 bytes) is an
+        altered view, so the comparison would not be over what was printed.
+      - an artifact alongside the output is new state regardless of the stdout,
+        so it defeats the proof.
+
+    The comparison is BYTE-EXACT (`classify_output`) or the source-plus-
+    recomputable-property form (`classify_dominated`) -- never fuzzy, never a
+    partial or similarity match -- against each recorded stage in turn. No
+    stage means no authority and no comparison, leaving every path
+    byte-identical to a run before this existed.
+    """
+    if not result.ok or result.stderr or result.truncated or result.output_replaced:
+        return None
+    if result.artifacts:
+        return None
+    stdout = result.stdout
+    if not stdout.strip():
+        return None
+    for stage, record in transform_stages:
+        equivalence = classify_output(stdout, stage.output)
+        if equivalence is not None:
+            return equivalence, record
+        dominated = classify_dominated(stdout, stage.output)
+        if dominated is not None:
+            return dominated, record
+    return None
+
+
+def _transform_reacquisition_observation(
+    verdict: "SourceEquivalence | SourceDominance",
+    stage_record: "EvidenceRecord",
+) -> str:
+    """What the model is told when its output only re-derived a decoded stage.
+
+    A tool result, not a refusal: the program ran and this is what it produced,
+    and reporting an error would be false. It names the deterministic evidence
+    the output reproduced and where those exact bytes already are, because "you
+    already have this" without a pointer is what drives the re-deriving. It does
+    not say the analysis is finished and does not suggest a direction: what to
+    do instead is the model's decision, not the runtime's.
+    """
+    eid = stage_record.evidence_id
+    dominated = isinstance(verdict, SourceDominance)
+    lead = (
+        "this output is a deterministic transformation the runtime already "
+        "decoded and recorded, together with values computed from it"
+        if dominated
+        else "this output is a deterministic transformation the runtime already "
+        "decoded and recorded"
+    )
+    return (
+        f"{TRANSFORM_REACQUISITION.upper()}: {lead} ({verdict.detail}). It was "
+        "executed, and it established nothing the session did not already hold "
+        "deterministically.\n"
+        f"Those exact bytes are evidence {eid}: name `evidence:{eid}` to get "
+        "them back rather than decoding them again. Reason from the decoded "
+        "value or choose a different unresolved target."
     )
 
 
@@ -2914,11 +3134,73 @@ class AnalysisRuntime:
             section
             for section in (
                 self.verified_indicators(),
+                self.folder_semantics(),
                 self.transform_appendix(),
                 self.office_appendix(),
                 self.office_events_appendix(),
             )
             if section
+        )
+
+    def _authoritative_texts(self) -> "list[str]":
+        """The decoded strings the runtime holds exactly: artifact views and
+        every deterministic stage output.
+
+        The same sources `verified_indicators` and `authoritative_indicators`
+        read, so a fact derived here is derived from the same authority as the
+        indicators rendered beside it.
+        """
+        texts: list[str] = []
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            raw = b""
+        for _label, text in _decoded_views(raw):
+            texts.append(text)
+        for stage, _record in self.transform_stages:
+            texts.append(stage.output)
+        return texts
+
+    def folder_semantics(self) -> str:
+        """WSH special-folder constants in the decoded code, resolved exactly.
+
+        A value the runtime knows to the character -- the meaning of a
+        `GetSpecialFolder(n)` call is a fixed platform constant -- rendered here
+        rather than left to a model that resolves it from memory and gets it
+        wrong. Empty when the decoded code names no such constant, so it changes
+        nothing for an artifact that does not use one.
+        """
+        constants = _special_folder_constants(self._authoritative_texts())
+        if not constants:
+            return ""
+        lines = [WSH_SPECIAL_FOLDER_PREAMBLE]
+        lines.extend(
+            f"- GetSpecialFolder({index}) = {name}: {gloss}."
+            for index, name, gloss in constants
+        )
+        lines.append(WSH_SPECIAL_FOLDER_FOOTER)
+        return "\n".join(lines)
+
+    def _flag_special_folder_contradictions(self, text: str) -> str:
+        """Prepend a correction when the report maps a GetSpecialFolder(n) to
+        the wrong folder, mirroring the unsupported-indicator notice.
+
+        Deterministic and free: the constants come from the same authoritative
+        decoded strings the fact block renders, and the correction states the
+        fixed mapping rather than editing the model's prose. Ahead of the
+        narrative, for the same reason the indicator notice is -- a reader must
+        meet the correction before the claim it repudiates. Empty-handed for a
+        report that quotes no such constant or maps every one correctly, so it
+        changes nothing for a report that was already right.
+        """
+        constants = _special_folder_constants(self._authoritative_texts())
+        contradictions = _special_folder_contradictions(text, constants)
+        if not contradictions:
+            return text
+        return "\n".join(
+            [WSH_SPECIAL_FOLDER_CONTRADICTION_NOTICE, ""]
+            + _special_folder_contradiction_lines(contradictions)
+            + ["", text]
         )
 
     def verified_indicators(self) -> str:
@@ -3869,6 +4151,65 @@ class AnalysisRuntime:
                 ),
                 diagnostics=_diagnostics(None),
                 suppressed_duplicate_of=record.evidence_id,
+            )
+
+        # One seam inward from source reacquisition: the deterministic
+        # transform pass already decoded and recorded the artifact's stages as
+        # authoritative evidence before the model was asked anything, and an
+        # action whose output only reproduces one of those stages re-derives a
+        # fact the session already holds exactly. Judged the same way and after
+        # the source check, so an output that is BOTH the source and a stage is
+        # attributed to the source (the stronger statement) first. Byte-exact
+        # or source-dominated only -- no fuzzy match -- and it asserts the
+        # stage's authority rather than weakening it: the recorded decode is
+        # the reference the re-derivation is measured against.
+        transform_reacq = _transform_reacquisition(result, self.transform_stages)
+        if transform_reacq is not None:
+            verdict, stage_record = transform_reacq
+            self.suppressed_duplicates += 1
+            _notify(
+                on_event, ANALYSIS_STEP_PHASE, "skipped",
+                question=active_question, controller=controller,
+                detail="already-established deterministic evidence, not counted",
+            )
+            observation = _transform_reacquisition_observation(verdict, stage_record)
+            record, raw_record = self._record_action_evidence(
+                calls[0],
+                result,
+                observation,
+                extra={
+                    "suppressed_as": TRANSFORM_REACQUISITION,
+                    # Which deterministic stage this output re-derived, so an
+                    # audit can redo the byte comparison against that record.
+                    "suppressed_against": f"transform:{stage_record.evidence_id}",
+                    "suppression_recognizer": (
+                        verdict.representation
+                        if isinstance(verdict, SourceDominance)
+                        else verdict.recognizer
+                    ),
+                    "suppression_detail": verdict.detail,
+                    "verified_properties": list(
+                        getattr(verdict, "properties", ())
+                    ),
+                },
+            )
+            self._append_tool_result(calls[0], observation, record=record)
+            return AnalysisStepResult(
+                model_calls=1,
+                action_attempted=True,
+                # Executed -- the sandbox ran -- but it established nothing the
+                # session did not already hold deterministically, so it is not
+                # a useful action and feeds the NO_PROGRESS path.
+                action_executed=False,
+                assistant_text=response.content or "",
+                result=result,
+                evidence=record,
+                raw_output_evidence_id=raw_record.evidence_id,
+                artifact_handles=tuple(
+                    f"{WORK_MOUNT}/{a.name}" for a in result.artifacts
+                ),
+                diagnostics=_diagnostics(None),
+                suppressed_duplicate_of=stage_record.evidence_id,
             )
 
         self.actions_executed += 1
@@ -6372,6 +6713,12 @@ class AnalysisRuntime:
                 + ["", UNSUPPORTED_INDICATOR_FOOTER, "",
                    _mark_unsupported_inline(text, unsupported)]
             )
+        # A decoded platform constant the report may have resolved from memory:
+        # the runtime knows GetSpecialFolder(n) exactly, so a report that names
+        # the wrong folder for one is corrected here, the same way an
+        # unsupported address is -- deterministic, and stating the fixed mapping
+        # rather than rewriting the prose.
+        text = self._flag_special_folder_contradictions(text)
         if appendix:
             text = f"{text}\n\n{appendix}"
         _record_report_diagnostics(
@@ -6502,6 +6849,12 @@ class AnalysisRuntime:
                 + ["", UNSUPPORTED_INDICATOR_FOOTER, "",
                    _mark_unsupported_inline(text, unsupported)]
             )
+        # A decoded platform constant the report may have resolved from memory:
+        # the runtime knows GetSpecialFolder(n) exactly, so a report that names
+        # the wrong folder for one is corrected here, the same way an
+        # unsupported address is -- deterministic, and stating the fixed mapping
+        # rather than rewriting the prose.
+        text = self._flag_special_folder_contradictions(text)
         if appendix:
             text = f"{text}\n\n{appendix}"
         return AnalysisReport(
