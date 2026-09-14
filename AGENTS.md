@@ -1344,6 +1344,45 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `workdir/diag/office_vba_evidence/live_smoke.json` (18-call variant, pre read_file fix);
   final: `workdir/diag/office_vba_evidence/live_smoke_final.json` (machine-local).
 
+## Oversized-Source Admission Rule (ANALYSIS-OVERSIZED-SOURCE-WINDOW-CLOSURE-1)
+
+Durable invariant: Orbit never builds a model call it already knows cannot fit
+the context. Root cause of the closed failure was O5/O1: an extracted source can
+be larger than the whole window (the frozen Office VBA module `ThisDocument` is
+~55 KB / far over the 8192 ctx), and naming its evidence id inlined the WHOLE
+record via `_with_evidence_rehydration`, so admission could only refuse -- the run
+then ended on `ContextAdmissionError: required-context-does-not-fit`.
+
+Fix (in `analysis_runtime.py`, no ctx/budget increase, no chunking, no
+summarization): on-demand evidence rehydration is now BOUNDED. `_admit` computes
+the exact input ceiling via `_rehydration_input_limit` (the same
+`ContextBudget.input_limit` arithmetic, read from the backend's own
+`count_chat_tokens` -- not a second tokenizer), and `_bounded_rehydration_block`:
+- reattests every requested id up front (fail-closed on any);
+- delivers each EXACT while the assembled prompt still fits the ceiling;
+- windows the FIRST overflowing EXTRACTED-SOURCE record (metadata
+  `produced_by_phase == analysis_office` or `office_module_name`) to the largest
+  line-aligned exact HEAD window that fits -- binary-searched against the real
+  tokenizer on the full assembled prompt, INCLUDING the withheld-refs of every
+  id that follows it, so the maximized window leaves room and the prompt fits by
+  construction even when the source is not the last requested id;
+- marks the window `windowed_to_fit_context: lines 1..K of L` (partial, never a
+  full-source claim), keeping the full-record sha256 as provenance;
+- NEVER windows a decoded transform stage or an action observation (a computed
+  result must be whole), so the evidence-first opening's existing withdrawal
+  fallback is unchanged; and delivers a fitting record byte-identically to
+  `rehydrated_evidence_block` (small-source behavior unchanged).
+
+Key discipline: window EXTRACTED SOURCE (read material) only; deliver COMPUTED
+evidence whole or withdraw. The window is deterministic (same request -> same
+bytes), so a repeated impossible request is a duplicate the existing action
+bound contains, not a growing loop. `plan_exact_context`'s refusal remains the
+floor for genuinely unsatisfiable prompts (a huge history still refuses cleanly,
+before any backend call). `last_rehydration_diag` records requested ids, the
+window, and the ceiling. No corpus sample other than the Office .doc has an
+oversized extracted source, so the cross-sample gate is unaffected.
+Live smoke on Ornith (Office sample) after the fix: `elapsed=1470s model_calls=12 actions=5 stop="no open question requires an action"` -- the run now COMPLETES cleanly instead of ending on ContextAdmissionError (the prior final smoke) or the model-call bound (the digest-guard smoke). ContextAdmissionError=0, UnicodeDecodeError=0, no get_evidence, no EvidenceStore sandbox access, no fabricated payload hash, no network fetch, no false RESOLVED, no repeated source-window loop. The full static chain is grounded (Document_Open->Shell, C2 `http://185.189.58.222/x.exe`, module sha `d034bd83...`, stage sha `f1fa67e3...`, PHfW.exe, Start-Process). Calls 12<19 and actions 5<6 are materially below the pathological run; wall-clock 1470s is marginally above the 1366s pathological run (per-call CPU prefill variance on the 33k-token source -- throughput is explicitly not this mission's goal). The windowing net did not need to fire this trajectory; by construction (deterministic tests + review) no admitted call can exceed ctx. Record: `workdir/diag/office_vba_evidence/live_smoke_oversized_window.json`.
+
 ## Report Digest-Provenance Rule (ANALYSIS-REPORT-FABRICATED-HASH-GUARD-1)
 
 Durable invariant: a final report may not attribute a concrete cryptographic
