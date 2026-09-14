@@ -315,6 +315,25 @@ class _GateBase(unittest.TestCase):
                 f"{name}: static execution reach changed",
             )
 
+        # -- digest-provenance invariant, per sample: an invented remote-payload
+        # digest (bytes Orbit never fetched -- network deny) must be flagged,
+        # while the sample's real artifact digest, correctly subjected, must not.
+        # This proves the guard is wired for every frozen sample without
+        # depending on whether a sample's URI-string hash happens to coincide
+        # with a decoded-stage digest (for some samples the decoded stage IS the
+        # URL string, so its hash is legitimately a digest of bytes Orbit holds).
+        invented = "1234567890abcdef" * 4  # 64 hex, not any real digest
+        relabel = f"The downloaded payload x.exe has sha256 {invented}."
+        self.assertNotEqual(
+            rt._flag_fabricated_digest_claims(relabel), relabel,
+            f"{name}: an invented remote-payload digest was not flagged",
+        )
+        legit = f"The artifact sha256 is {rt.source.sha256}."
+        self.assertEqual(
+            rt._flag_fabricated_digest_claims(legit), legit,
+            f"{name}: a correct artifact-digest claim was flagged",
+        )
+
 
 class CrossSampleContractTests(_GateBase):
     """One test per sample; a regression in any one fails independently."""

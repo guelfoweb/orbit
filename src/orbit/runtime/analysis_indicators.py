@@ -230,5 +230,9 @@ def render_indicators(indicators: "list[Indicator]") -> str:
                 f"  evidence: {indicator.evidence_id} "
                 f"({indicator.source}, line {indicator.line})"
             )
-        lines.append(f"  sha256: {indicator.sha256}")
+        # Named for its subject: this is the sha256 of the INDICATOR STRING
+        # above, not of any file the address might refer to. Left unqualified it
+        # read as "the endpoint's hash", and a report once relabelled it as the
+        # downloaded payload's digest -- a file whose bytes Orbit never fetched.
+        lines.append(f"  sha256 of this indicator string: {indicator.sha256}")
     return "\n".join(lines)

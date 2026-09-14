@@ -1031,6 +1031,138 @@ def _stage_invocation_contradiction_lines(
     ]
 
 
+# A cryptographic digest, by length: sha256 (64), sha1 (40), md5 (32) hex. Word
+# bounded so a longer hex run (a decoded blob, a key) is not misread as one.
+_DIGEST_HEX = re.compile(
+    r"(?<![0-9a-fA-F])([0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})(?![0-9a-fA-F])"
+)
+_DIGEST_LABEL_ALT = r"sha-?256|sha-?1|sha-?2|md-?5|hash|digest|checksum|fingerprint"
+# The SUBJECT bound to a digest, in the two forms a report actually writes it:
+#   B: "... sha256 [value] of <subject> is/= H"   (subject follows `of`)
+#   A: "<subject>('s)? sha256 [is|=|:] H"          (subject precedes the label)
+# Both capture only the short phrase grammatically attached to the digest, not a
+# wide window -- so a URL mentioned a sentence earlier cannot decide the subject.
+_DIGEST_OF_SUBJECT = re.compile(
+    r"(?:" + _DIGEST_LABEL_ALT + r")\b[^.\n]{0,14}?\bof\s+(?P<subject>[^.\n]{0,40})$",
+    re.IGNORECASE,
+)
+_DIGEST_PRE_SUBJECT = re.compile(
+    r"(?P<subject>[a-z0-9 _./'\-]{0,40}?)\b(?:" + _DIGEST_LABEL_ALT + r")\b"
+    r"[^.\n]{0,14}$",
+    re.IGNORECASE,
+)
+# A FILE object -- something whose digest is establishable ONLY from its bytes.
+# The downloaded payload is the case this guards: under network deny Orbit never
+# holds those bytes, so a digest attributed to one must match bytes Orbit DOES
+# hold or it is unsupported.
+_FILE_SUBJECT = re.compile(
+    r"\b(payload|payloads|executable|executables|binary|binaries|dropper|"
+    r"dropped\s+file|downloaded\s+file|remote\s+file|malware|"
+    r"\S+\.exe|\S+\.dll|\S+\.bin|\S+\.scr|\S+\.ps1)\b",
+    re.IGNORECASE,
+)
+# A STRING object -- a URI / indicator / address. Its sha256 is legitimately the
+# hash of that STRING and is never a file's hash. When the bound subject names a
+# string, the claim is about the string and is left alone, even near a URL.
+_STRING_SUBJECT = re.compile(
+    r"\b(string|url|uri|address|indicator|endpoint|link|domain|hostname)\b",
+    re.IGNORECASE,
+)
+
+
+# Any token bearing a `/`: a URL or a path. Its trailing `.exe`/`.dll` is a URL
+# path component or a location, not a bare filename the runtime holds -- so the
+# digest of such a subject is an address/string hash, never a held file's hash.
+# This is what keeps a correct URI-string hash near a `http://h/x.exe` URL from
+# being misread as a payload-file digest even when the scheme's `:` truncated
+# the "endpoint"/"indicator" noun out of the captured subject.
+_SLASH_TOKEN = re.compile(r"\S*/\S*")
+
+
+def _digest_claim_is_file(subject: str) -> bool:
+    """Whether the bound subject names a FILE whose digest needs its bytes.
+
+    A URL / path (any slash-bearing token) or a string object (URI / indicator /
+    address) is never a file claim, so a correctly labelled URI-string hash near
+    a `.exe` URL -- or with the URL itself as the bound subject -- is left alone.
+    True only for a clear bare-file object (payload, x.exe as a filename, ...).
+    Ambiguous or empty subjects are not file claims: the guard errs toward
+    leaving legitimate prose alone, since a false flag is worse than a miss."""
+    if _SLASH_TOKEN.search(subject):
+        return False
+    if _STRING_SUBJECT.search(subject):
+        return False
+    return bool(_FILE_SUBJECT.search(subject))
+
+
+def _fabricated_digest_claims(
+    text: str,
+    file_bytes_digests: "set[str]",
+    string_digests: "set[str]",
+) -> "list[str]":
+    """Digest claims attributing a hash to a FILE whose bytes Orbit does not hold.
+
+    Narrow by design, because a false flag on a correct report is worse than a
+    missed one. A claim is flagged only when the digest's grammatically bound
+    SUBJECT is a file/payload object (never a URI/indicator string) AND the value
+    is not a digest of bytes the runtime holds (`file_bytes_digests`: artifact,
+    decoded stage, extracted source, or an evidence record's own content). That
+    is exactly the observed defect -- a URI-STRING hash relabelled as the
+    downloaded payload's hash -- and the invented-remote-payload digest, both
+    under the network-deny invariant that means Orbit never holds a fetched
+    file's bytes. `string_digests` is the set of URI/indicator-string hashes; a
+    claim correctly attributed to the string is left alone (the subject names the
+    string), and a value that happens to be BOTH a string hash and a real decoded
+    stage stays a legitimate file-bytes digest.
+
+    A bare hex with no digest label bound to it is a quoted blob, not a claim,
+    and a claim whose subject is unclear is left alone. Returns the flagged
+    values."""
+    lowered = text.lower()
+    flagged: list[str] = []
+    seen: set[str] = set()
+    for match in _DIGEST_HEX.finditer(text):
+        value = match.group(1).lower()
+        if value in seen:
+            continue
+        head = lowered[max(0, match.start() - 80):match.start()]
+        of_match = _DIGEST_OF_SUBJECT.search(head)
+        if of_match:
+            subject = of_match.group("subject")
+        else:
+            pre = _DIGEST_PRE_SUBJECT.search(head)
+            if not pre:
+                continue  # no digest label bound to this hex -> a quoted blob
+            subject = pre.group("subject")
+        if not _digest_claim_is_file(subject):
+            continue
+        if value not in file_bytes_digests:
+            seen.add(value)
+            flagged.append(value)
+    return flagged
+
+
+FABRICATED_DIGEST_NOTICE = (
+    "DIGEST PROVENANCE MISMATCH: the report attributes a cryptographic digest to "
+    "a file/payload whose bytes Orbit does not hold. Orbit computes digests only "
+    "from bytes it has (the artifact, a decoded stage, extracted source, or an "
+    "evidence record); it never fetches a remote payload, so no digest of a "
+    "downloaded file exists. If a flagged value is the sha256 of a URI/indicator "
+    "string, name it as that -- it is not the file's hash. Treat these as "
+    "unsupported:"
+)
+
+
+def _fabricated_digest_lines(values: "list[str]") -> list[str]:
+    return [
+        f"- {value} -- UNSUPPORTED as a file/payload digest: no bytes of that "
+        "object were obtained (network is denied), and no artifact, decoded "
+        "stage, extracted source, or evidence record the runtime holds has this "
+        "digest."
+        for value in values
+    ]
+
+
 DETERMINISTIC_AUTHORITY_PREAMBLE = (
     "The following values were computed by the runtime directly from the "
     "artifact, not by a model. They are exact. Where anything else in this "
@@ -3520,6 +3652,73 @@ class AnalysisRuntime:
         return "\n".join(
             [STAGE_INVOCATION_CONTRADICTION_NOTICE, ""]
             + _stage_invocation_contradiction_lines(contradictions)
+            + ["", text]
+        )
+
+    def _report_digest_provenance(self) -> "tuple[set[str], set[str]]":
+        """The digests the runtime actually computed, split by what they hash.
+
+        Two sets, because the subject decides what a claim may cite:
+          - `file_bytes_digests`: digests of BYTES the runtime holds -- the
+            artifact, each decoded stage (output and input), each extracted
+            Office module source, and each evidence record's own content. These
+            are the only values that can back a claim about a file's contents,
+            including a fetched/dropped payload (only if its bytes are present).
+          - `string_digests`: the sha256 of a recovered URI / indicator STRING.
+            Real and citable as the hash of that string -- but never a file's
+            hash, which is the confusion this guards.
+
+        Reuses existing evidence / transform / indicator metadata; it neither
+        recomputes a digest the runtime already has nor builds a second store.
+        """
+        file_bytes: set[str] = {self.source.sha256}
+        for stage, _record in self.transform_stages:
+            file_bytes.add(stage.output_sha256)
+            file_bytes.add(stage.input_sha256)
+        for module, _record in self.office_modules:
+            source_sha = getattr(module, "source_sha256", None)
+            if isinstance(source_sha, str):
+                file_bytes.add(source_sha)
+        # An evidence record's own content is real bytes the runtime read or
+        # produced -- a file the analysis obtained and stored. Its content digest
+        # is what makes T6 (a payload whose bytes ARE in evidence) legitimate.
+        for record in self.evidence_store.records.values():
+            try:
+                body = self.evidence_store.load_raw(record.evidence_id)
+            except Exception:  # noqa: BLE001 - unreadable content adds no digest
+                continue
+            file_bytes.add(
+                hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest()
+            )
+        string_digests: set[str] = {
+            ind.sha256 for ind in self.canonical_indicators()
+        }
+        # Normalise to lower-case hex for comparison against report text.
+        return (
+            {d.lower() for d in file_bytes},
+            {d.lower() for d in string_digests},
+        )
+
+    def _flag_fabricated_digest_claims(self, text: str) -> str:
+        """Prepend a correction when the report asserts a digest for an object no
+        evidence establishes -- most often a URI-string hash relabelled as the
+        downloaded payload's hash, or an invented remote-file digest under
+        network deny.
+
+        Same discipline as the other grounding guards: it flags a CLAIM (a hex
+        with a digest label) whose value the runtime never computed for that kind
+        of object, states what the value is if anything, and leaves the prose
+        itself intact. A digest correctly attributed to the artifact, a decoded
+        stage, extracted source, an evidence record, or the URI string it hashes
+        is untouched; a bare hex quoted as source text is not a claim.
+        """
+        file_bytes, string_digests = self._report_digest_provenance()
+        values = _fabricated_digest_claims(text, file_bytes, string_digests)
+        if not values:
+            return text
+        return "\n".join(
+            [FABRICATED_DIGEST_NOTICE, ""]
+            + _fabricated_digest_lines(values)
             + ["", text]
         )
 
@@ -7061,6 +7260,10 @@ class AnalysisRuntime:
         # here, deterministically, without upgrading it into outer-container
         # execution the evidence may not establish.
         text = self._flag_invocation_contradictions(text)
+        # A cryptographic digest asserted for an object the evidence does not
+        # establish -- classically a URI-string hash relabelled as the downloaded
+        # payload's hash, or an invented remote-file digest under network deny.
+        text = self._flag_fabricated_digest_claims(text)
         if appendix:
             text = f"{text}\n\n{appendix}"
         _record_report_diagnostics(
@@ -7202,6 +7405,10 @@ class AnalysisRuntime:
         # here, deterministically, without upgrading it into outer-container
         # execution the evidence may not establish.
         text = self._flag_invocation_contradictions(text)
+        # A cryptographic digest asserted for an object the evidence does not
+        # establish -- classically a URI-string hash relabelled as the downloaded
+        # payload's hash, or an invented remote-file digest under network deny.
+        text = self._flag_fabricated_digest_claims(text)
         if appendix:
             text = f"{text}\n\n{appendix}"
         return AnalysisReport(
