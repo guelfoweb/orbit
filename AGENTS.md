@@ -1344,6 +1344,82 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `workdir/diag/office_vba_evidence/live_smoke.json` (18-call variant, pre read_file fix);
   final: `workdir/diag/office_vba_evidence/live_smoke_final.json` (machine-local).
 
+## Cross-Sample Analysis Regression Gate (ANALYSIS-CROSS-SAMPLE-REGRESSION-GATE-1)
+
+`tests/test_analysis_cross_sample_gate.py` is a cheap, model-free deterministic
+gate over the whole qualified corpus. It freezes a per-sample contract of
+runtime-owned facts and asserts them through the real runtime deterministic
+entry points (preflight, `deobfuscate`, `authoritative_indicators` /
+`verified_indicators`, `extract_office_vba` + autoexec/exec-reach,
+`deterministic_sections`, and the invocation / special-folder contradiction
+guards). A regression in ANY frozen sample fails the gate. It runs in well under
+a second, needs no Ornith, and no model call or sandbox action (the gate pins
+each sample's deterministic build at 0 model calls / 0 actions -- a
+construction-time pin, and nothing on this path can reach the network anyway).
+
+**Corpus presence is enforced, not assumed.** The six samples are deliberately
+NOT committed (live malware), so the gate could otherwise skip-to-green on a
+machine that lacks them -- which would defeat a mandatory gate. Two guards close
+that: a PRESENT-but-sha-drifted sample is a hard FAILURE (a modified frozen
+artifact must be re-pinned deliberately, re-confirming its decode facts), never a
+silent skip; and `CorpusPresenceTests` FAILS when any pinned sample is absent
+unless `ORBIT_ALLOW_MISSING_CORPUS=1` is set to waive corpus coverage on a
+deliberately sample-less checkout. On the qualification machine (corpus present)
+the gate therefore runs in full and fails on any regression.
+
+Frozen sample SHAs (current on-disk, authoritative for the gate; the outer file
+SHA drifted from some original oracle SHAs via line-ending re-saves, but the
+decoded CONTENT is unchanged and is what the gate pins):
+
+  | sample | sha256 | verified IOC | key frozen facts |
+  |---|---|---|---|
+  | Fattura981033956.js | b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c | smartmaket.com/1.php?s=AA1789FF-… | 5 XOR stages (S1-S5) |
+  | peXF7I6W.ps1 (YPS) | 5eba3e4538cffbde5d39ba81eb4ed85e9c9cc6065e036503073a43a9478f405d | gibuzuy37v2v.top/1.php?s=mints13 | 0 stages (C2 in raw source) |
+  | mine.hta | 6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d | wall5tghf6fdg.api.opensourcesaas.org/…/myxwr5cli.bat | 6 stages; XHTML namespace FORBIDDEN as IOC; ROmYsTcn self-invocation |
+  | IBAN.js | 86e23fa673271308578daf61e783a00662351bab66d74f5f16e16302ad40d8b8 | productoslili.cl/cv/cr2.exe | stage 5d51e765…; GetSpecialFolder(2)=TemporaryFolder |
+  | 4b863c7…js | e1a3a8937909e56d86692fda412312603951a3ea20abf730d538d2e07fda06a3 | stylegeneration.ma/sirdee.ps1 | 3 stringarray-fold stages |
+  | 99eb1d90…doc | 99eb1d90eb5f0d012f35fcc2a7dedd2229312794354843637ebb7f40b74d0809 | 185.189.58.222/x.exe | module ThisDocument sha d034bd83…; Document_Open→Shell(750); stage f1fa67e3…; PHfW.exe |
+
+Each sample asserts, where applicable: exact transform-stage output SHAs; the
+EXACT verified-indicator set (a shrink is a missing C2, a grow is a fabricated
+or promoted-metadata IOC); forbidden metadata (namespace/schema URIs) absent;
+required report-grounding facts present in `deterministic_sections`; extracted
+module identity (source SHA = source authority); static autoexec entrypoint and
+execution reach; deterministic self-invocation; decoded platform-constant
+semantics; and the contradiction guards flag a wrong claim while leaving a
+correct one. Plus a model-free controller invariant: RESOLVED without a witness
+downgrades to OPEN (no false RESOLVED). Every seam is proven load-bearing by
+causal mutation (dropping/altering one expected fact per seam fails the gate).
+
+### Two-tier analysis qualification policy (MANDATORY)
+
+- **Level 1 — the cross-sample deterministic gate (this file): MANDATORY before
+  merging ANY change that touches** `analysis_runtime`, indicator
+  extraction/admission (`analysis_indicators`), source dominance/delivery,
+  deterministic transforms (`analysis_deobfuscate`), question/action admission,
+  controller completion (`analysis_controller`), Office/VBA relationship
+  extraction (`analysis_vba_autoexec`, `analysis_ole`), report grounding, or the
+  contradiction guards. **Focused test success on only the target sample is
+  insufficient** — the gate is what proves a fix for one sample did not regress
+  another. It is cheap enough to run on every such PR. It requires the pinned
+  corpus in `workdir/samples/` (present on the qualification machine); a
+  sample-less checkout must set `ORBIT_ALLOW_MISSING_CORPUS=1` and thereby
+  knowingly waive corpus coverage.
+- **Level 2 — live Ornith smoke / corpus:** NOT mandatory per PR. Reserved for
+  release qualification; changes that alter prompts, the controller, or
+  model-facing evidence allocation; a deterministic-gate failure that needs
+  deeper investigation; or an explicit campaign qualification. This bounds CPU
+  cost.
+
+### Remaining evidence-driven candidates (recorded, not fixed here)
+
+- **A.** An Office live smoke can still end on a bounded `ContextAdmissionError`
+  on an 8k source-window step for the oversized (33k-token) `.doc`; the report
+  is still produced from evidence. Future oversized-source-window work.
+- **B.** The model may narrate a remote payload sha / detail it never fetched
+  (network deny holds; nothing is downloaded). A future report-grounding guard
+  for fabricated file hashes is the candidate. Neither is in this gate's scope.
+
 ## RC24 Tool-Loop Convergence
 
 - Orbit now has one production tool loop. The former opt-in agent path,
