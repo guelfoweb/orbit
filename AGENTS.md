@@ -1279,6 +1279,14 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `e2214909b2e7c671`, C2 `https://wall5tghf6fdg.api.opensourcesaas.org/ZOdcfNuo/myxwr5cli.bat`); no
   corpus sample other than mine.hta self-invokes, and namespace exclusion only removes XML/OOXML
   schema URIs that were never real IOCs.
+  Live single-smoke on Ornith (CPU-only Dell) after the fix:
+  `RC=0 elapsed=32.1s model_calls=2 actions=0 repairs=0 report=True stop="no open question requires
+  an action"` -- the zero-action path (down from the pathological ~757s / 10-13 calls / 3-4 actions /
+  2 completion failures). Report: XHTML namespace absent from Verified indicators; C2
+  `https://wall5tghf6fdg.api.opensourcesaas.org/ZOdcfNuo/myxwr5cli.bat` present; the invocation fact
+  `defines function ROmYsTcn and invokes it (ROmYsTcn;)` with the outer-container reach kept separate;
+  no fabricated IOC, no false RESOLVED, no completion-state failure, no false contradiction banner.
+  Record: `workdir/diag/mine_hta_ioc_grounding/live_smoke.json` (machine-local).
 
 ## RC24 Tool-Loop Convergence
 
