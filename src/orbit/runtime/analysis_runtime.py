@@ -48,6 +48,7 @@ from orbit.backend.base import (
 from orbit.runtime.context_manager import (
     ContextAdmissionError,
     DEFAULT_NEXT_ACTION_RESERVE,
+    DEFAULT_SAFETY_MARGIN,
     plan_exact_context,
 )
 from orbit.runtime.analysis_deobfuscate import TransformStage, deobfuscate
@@ -3124,6 +3125,9 @@ class AnalysisRuntime:
     # re-ask depends on. A flag local to the phase would therefore allow two.
     _empty_plan_re_asked: bool = False
     last_context_plan: object | None = None
+    # The last bounded-rehydration decision (requested ids, which were windowed
+    # to fit, and the input ceiling), for diagnostics and tests.
+    last_rehydration_diag: object | None = None
     # Stages the deterministic pass recovered, paired with the evidence each
     # became. Computed once per artifact snapshot and read thereafter.
     transform_stages: list[tuple[TransformStage, EvidenceRecord]] = field(
@@ -4171,7 +4175,16 @@ class AnalysisRuntime:
         # something the model asks for, never something a reference triggers
         # by existing -- applied to a prompt the runtime writes itself.
         if rehydrate_evidence:
-            messages, rehydrated = self._with_evidence_rehydration(messages)
+            messages, rehydrated = self._with_evidence_rehydration(
+                messages,
+                tools=tools,
+                next_action_reserve=(
+                    DEFAULT_NEXT_ACTION_RESERVE
+                    if next_action_reserve is None
+                    else next_action_reserve
+                ),
+                output_reserve=max_tokens,
+            )
         else:
             rehydrated = ()
         available, covered = self._compactable_evidence_sets(messages, rehydrated)
@@ -4206,7 +4219,10 @@ class AnalysisRuntime:
         return [dict(message) for message in plan.messages]
 
     def _with_evidence_rehydration(
-        self, messages: list[Message]
+        self, messages: list[Message], *,
+        tools: "list[dict] | None" = None,
+        next_action_reserve: int = DEFAULT_NEXT_ACTION_RESERVE,
+        output_reserve: int = 0,
     ) -> tuple[list[Message], tuple[str, ...]]:
         """Hand back exact archived output the analyst turn asked for by id.
 
@@ -4221,6 +4237,18 @@ class AnalysisRuntime:
         immediately re-inline itself and undo the compaction that just happened.
         Retrieval is something the model asks for, never something a reference
         triggers by existing.
+
+        BOUNDED to the remaining context. An extracted source can be larger than
+        the whole window (the frozen Office VBA module is ~55 KB), and inlining
+        it whole builds a prompt that cannot be admitted -- the run then ends on
+        a ContextAdmissionError. When the requested exact content does not fit
+        the remaining budget, a line-aligned exact HEAD window that DOES fit is
+        delivered instead, with provenance naming the omission. The window is
+        sized by the real backend tokenizer against the actual assembled prompt
+        (never estimated from characters), and it is line-aligned so no encoded
+        or source unit is split mid-line. Nothing is summarized; the decoded
+        stages and static relationships the analysis rests on are already
+        grounded separately, so the window is a convenience, not the evidence.
         """
         latest = None
         for message in reversed(messages):
@@ -4232,15 +4260,177 @@ class AnalysisRuntime:
         )
         if not evidence_ids:
             return messages, ()
+        # The exact input budget, computed the way admission computes it, so the
+        # window is sized against the same ceiling the plan is judged by.
+        input_limit = self._rehydration_input_limit(
+            messages, tools=tools, next_action_reserve=next_action_reserve,
+            output_reserve=output_reserve,
+        )
         try:
-            block = rehydrated_evidence_block(self.evidence_store, evidence_ids)
+            block, diag = self._bounded_rehydration_block(
+                messages, evidence_ids, tools=tools, input_limit=input_limit,
+            )
         except EvidenceRehydrationError as exc:
             # Fail closed: an analysis that cannot re-attest the evidence it
             # asked for must say so, never continue on an approximation.
             raise ContextAdmissionError(
                 f"context admission failed: evidence-rehydration-unavailable:{exc.args[0]}"
             ) from exc
+        self.last_rehydration_diag = diag
         return [*messages, {"role": "system", "content": block}], evidence_ids
+
+    def _rehydration_input_limit(
+        self, messages: list[Message], *, tools: "list[dict] | None",
+        next_action_reserve: int, output_reserve: int,
+    ) -> "int | None":
+        """The admission input ceiling for THIS request, or None if the backend
+        cannot attest exact tokens (then no windowing is attempted).
+
+        Same arithmetic as `ContextBudget.input_limit`, read from the same
+        backend token counter the plan uses -- not a second implementation."""
+        count = getattr(self.backend, "count_chat_tokens", None)
+        if not callable(count):
+            return None
+        thinking = bool(getattr(self.backend, "thinking", False))
+        try:
+            measured = count(messages, tools=tools, thinking=thinking)
+        except (TypeError, ValueError):
+            return None
+        active = getattr(measured, "context_tokens", None)
+        if not isinstance(active, int) or active <= 0:
+            return None
+        configured = self._context_tokens()
+        if isinstance(configured, int) and configured > 0:
+            active = min(active, configured)
+        return max(
+            0,
+            active - output_reserve - next_action_reserve - DEFAULT_SAFETY_MARGIN,
+        )
+
+    def _bounded_rehydration_block(
+        self, messages: list[Message], evidence_ids: "tuple[str, ...]", *,
+        tools: "list[dict] | None", input_limit: "int | None",
+    ) -> "tuple[str, dict]":
+        """The rehydration system block, windowing any requested record whose
+        exact content would push the assembled prompt past `input_limit`.
+
+        Records are taken in request order; each is delivered EXACT while the
+        whole prompt still fits, and the first that does not is delivered as the
+        largest line-aligned head window that fits (binary-searched against the
+        real tokenizer), with a provenance footer. A record after an already
+        windowed one is referenced, not inlined. When the backend cannot attest
+        tokens (`input_limit is None`) the exact block is returned unchanged, so
+        a non-Orbit endpoint behaves exactly as before."""
+        count = getattr(self.backend, "count_chat_tokens", None)
+        thinking = bool(getattr(self.backend, "thinking", False))
+
+        def prompt_tokens(block_text: str) -> "int | None":
+            if input_limit is None or not callable(count):
+                return None
+            candidate = [*messages, {"role": "system", "content": block_text}]
+            try:
+                measured = count(candidate, tools=tools, thinking=thinking)
+            except (TypeError, ValueError):
+                return None
+            return getattr(measured, "tokens", None)
+
+        # Re-attest every requested id up front (fail closed on any), so a later
+        # id in the request cannot slip through unverified and so the window can
+        # be sized against the cost of everything that follows it.
+        resolved: "list[tuple[str, str, EvidenceRecord]]" = []
+        for evidence_id in evidence_ids:
+            raw = self.evidence_store.reattest_exact(evidence_id)
+            record = self.evidence_store.records.get(evidence_id)
+            if raw is None or record is None:
+                raise EvidenceRehydrationError(evidence_id)
+            resolved.append((evidence_id, raw, record))
+
+        def exact_render(evidence_id: str, record: "EvidenceRecord", raw: str) -> str:
+            delimiter = f"orbit-evidence-{record.raw_sha256}"
+            return "\n".join([
+                f"evidence_id: {evidence_id}",
+                f"sha256: {record.raw_sha256}",
+                f"exact_content_begin: {delimiter}",
+                raw,
+                f"exact_content_end: {delimiter}",
+            ])
+
+        def window_render(evidence_id, record, body, kept_lines) -> str:
+            delimiter = f"orbit-evidence-{record.raw_sha256}"
+            return "\n".join([
+                f"evidence_id: {evidence_id}",
+                f"sha256: {record.raw_sha256}",
+                f"windowed_to_fit_context: lines 1..{kept_lines} of "
+                f"{record.raw_lines}, {len(body)} of {record.raw_chars} chars "
+                "(exact head; remainder archived, not lost; decoded stages and "
+                "static relationships are grounded separately)",
+                f"exact_content_begin: {delimiter}",
+                body,
+                f"exact_content_end: {delimiter}",
+            ])
+
+        def withheld_ref(evidence_id, record) -> str:
+            return (
+                f"evidence_id: {evidence_id}\nsha256: {record.raw_sha256}\n"
+                f"content_withheld_to_fit_context: {record.raw_chars} chars "
+                f"archived as {record.raw_ref}"
+            )
+
+        header = "deterministic_evidence_rehydration: exact archived tool output"
+        parts = [header]
+        diag: dict = {"requested_ids": list(evidence_ids), "windowed": [],
+                      "input_limit": input_limit}
+        for index, (evidence_id, raw, record) in enumerate(resolved):
+            exact = exact_render(evidence_id, record, raw)
+            fitted = prompt_tokens("\n".join([*parts, exact]))
+            if input_limit is None or fitted is None or fitted <= input_limit:
+                parts.append(exact)
+                continue
+
+            # Only EXTRACTED SOURCE is windowed. A decoded transform stage or an
+            # action observation is a COMPUTED result the analysis reasons from
+            # exactly -- delivering a partial one could mislead -- so it is left
+            # whole, and if it overflows the caller's existing fallback (the
+            # evidence-first opening's withdrawal) still applies unchanged.
+            # Extracted source is read MATERIAL an analyst pages through; a
+            # line-aligned head window of it, clearly marked, is the safe shrink.
+            metadata = getattr(record, "metadata", {}) or {}
+            is_extracted_source = (
+                metadata.get("produced_by_phase") == ANALYSIS_OFFICE_PHASE
+                or bool(metadata.get("office_module_name"))
+            )
+            if not is_extracted_source:
+                parts.append(exact)
+                continue
+
+            # Everything AFTER this record is withheld once the budget is spent
+            # here; its refs are counted in the window budget so the maximized
+            # window leaves room for them and the assembled prompt still fits --
+            # even when the oversized source is not the last requested id.
+            tail = [withheld_ref(later_id, later_rec)
+                    for later_id, _raw, later_rec in resolved[index + 1:]]
+            raw_lines = raw.splitlines(keepends=True)
+            lo, hi, best = 0, len(raw_lines), 0
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                body = "".join(raw_lines[:mid])
+                candidate = "\n".join(
+                    [*parts, window_render(evidence_id, record, body, mid), *tail]
+                )
+                cost = prompt_tokens(candidate)
+                if cost is not None and cost <= input_limit:
+                    best = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            body = "".join(raw_lines[:best])
+            parts.append(window_render(evidence_id, record, body, best))
+            parts.extend(tail)
+            diag["windowed"].append((evidence_id, best, record.raw_lines))
+            for later_id, _raw, later_rec in resolved[index + 1:]:
+                diag["windowed"].append((later_id, 0, later_rec.raw_lines))
+            break  # the window and the tail render everything that remains
+        return "\n".join(parts), diag
 
     def _compactable_evidence_sets(
         self, messages: list[Message], rehydrated: tuple[str, ...]
