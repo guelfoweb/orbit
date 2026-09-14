@@ -112,5 +112,27 @@ def read_file(path=None, offset=0, limit=MAX_READ_BYTES, **unsupported):
         os.close(descriptor)
     if len(raw) > limit:
         raw = raw[:limit]
-    return raw.decode("utf-8", "strict")
+    try:
+        return raw.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        # A binary artifact (an Office/OLE document, a packed executable) is
+        # not UTF-8 text, and reading it this way fails identically every time
+        # -- the loop a live run spent re-reading a `.doc` as text. The bytes
+        # are NOT silently decoded; the failure is turned into the one move
+        # that makes progress. If source was extracted from this artifact it is
+        # held as evidence in the conversation, reachable by naming its id --
+        # never from inside a program. Legitimate binary inspection is
+        # untouched: read the bytes yourself when the binary structure is the
+        # question.
+        raise ValueError(
+            "these bytes are not UTF-8 text: this path is a binary artifact, "
+            "so reading it as text cannot recover source and re-reading it the "
+            "same way will fail again. Do not re-read it as text. If macro or "
+            "embedded source was extracted from this artifact (an Office/OLE "
+            "document's VBA, for example), that exact source is held as "
+            "evidence in the conversation -- end this action and name "
+            "evidence:<evidence_id> in your reply to get it back. Read the raw "
+            "bytes directly only when the binary structure itself is the "
+            "question."
+        ) from None
 '''

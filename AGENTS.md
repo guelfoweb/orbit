@@ -1316,10 +1316,13 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
        preferred path. Fail-closed guards intact: a FAILED read (the UnicodeDecodeError path, stderr
        non-empty) is never suppressed; the raw binary is never an authority, so legitimate binary
        inspection is untouched.
-  - **Evidence/tool contract (section 3):** no schema mismatch and no sandbox change -- `get_evidence`/
-    `read_evidence` are absent from the tool schema and system prompt; the valid runtime-owned way to
-    work from the extracted source is `evidence:<id>` conversation rehydration, already documented. The
-    chain grounding removes the NEED to read source at all, so the qualified path is action-free.
+  - **Evidence/tool contract (section 3):** the `orbit_tools.read_evidence` stub already fail-closes
+    with a message pointing at `evidence:<id>` conversation rehydration (no EvidenceStore in the
+    sandbox). Added: `orbit_tools.read_file` no longer surfaces a bare `UnicodeDecodeError` on binary
+    bytes -- it raises an actionable error saying the path is a binary artifact, not to re-read it as
+    text, and that extracted source is reachable as `evidence:<id>` (bytes are never silently decoded;
+    legitimate binary inspection is untouched). This is what a live smoke showed the model needed: the
+    repeated raw-`.doc` UTF-8 read loop lands on the one move that makes progress.
   Tests: `tests/test_analysis_office_execution_reach.py`, `tests/test_analysis_office_source_dominance.py`;
   causal mutation confirms the reach detector, its body-boundary, and the office-source authority all
   load-bearing. Independent review returned BLOCKER 0 / MAJOR 2 first pass (cross-procedure false reach

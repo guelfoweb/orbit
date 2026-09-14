@@ -141,6 +141,47 @@ class _Backend:
         return self.chat_stream(messages, **kwargs)
 
 
+class ReadFileBinaryContractTests(unittest.TestCase):
+    """T3: reading a binary artifact as UTF-8 yields an actionable error that
+    names the extracted-source path, not a bare UnicodeDecodeError -- so the
+    model stops re-reading the binary and uses the evidence instead. The bytes
+    are never silently decoded, and UTF-8 text is unaffected."""
+
+    def _tools(self):
+        import types
+        from orbit.runtime.analysis_tools_shim import ORBIT_TOOLS_SOURCE
+        mod = types.ModuleType("orbit_tools")
+        exec(compile(ORBIT_TOOLS_SOURCE, "orbit_tools.py", "exec"), mod.__dict__)
+        return mod
+
+    def test_binary_read_raises_actionable_error(self) -> None:
+        import os
+        import tempfile
+        mod = self._tools()
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "b.doc")
+        with open(path, "wb") as fh:
+            fh.write(b"\xd0\xcf\x11\xe0binary-office-doc")
+        mod._safe_path = lambda v: path
+        with self.assertRaises(ValueError) as ctx:
+            mod.read_file(path)
+        msg = str(ctx.exception)
+        self.assertIn("not UTF-8 text", msg)
+        self.assertIn("evidence:<evidence_id>", msg)
+        self.assertNotIn("�", msg)  # no silent replacement decode
+
+    def test_utf8_text_still_reads(self) -> None:
+        import os
+        import tempfile
+        mod = self._tools()
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "t.txt")
+        with open(path, "wb") as fh:
+            fh.write(b"macro source here")
+        mod._safe_path = lambda v: path
+        self.assertEqual(mod.read_file(path), "macro source here")
+
+
 class ReacquisitionRuntimeTests(unittest.TestCase):
     def test_module_reproduction_suppressed_through_step(self) -> None:
         data = b"x\n"
