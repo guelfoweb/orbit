@@ -2458,6 +2458,46 @@ ran under that same 30 W as a same-system, same-host-policy comparison (NOT
   history. Evidence: `workdir/diag/dell_intel_gpu_bench/` (RESULTS.md, per-candidate
   JSON/logs, build metadata; machine-local, gitignored).
 
+- **DELL-INTEL-NPU-BENCH-1 (2026-09-14) — COMPLETED; verdict
+  `NPU_TECHNICAL_STOP` (classification N5 primary; auxiliary not N9).** External
+  research/benchmark of the Dell's Intel NPU ("Intel(R) AI Boost", PCI `00:0b.0`
+  `8086:b03e`, OpenVINO arch 5010 / NPU 5.x Panther Lake, ~25 TOPS fp16 / ~50 TOPS
+  int8) for Orbit workloads. Kernel `intel_vpu` (ivpu) driver was already healthy
+  (firmware `vpu_50xx_v1.bin`); the NPU userspace stack was missing, so the operator
+  installed Intel NPU driver 1.35.0 + `libze1`/`libtbb12` and granted `/dev/accel/accel0`
+  access. OpenVINO 2026.3.1 then enumerated the NPU (non-root workaround
+  `ZE_ENABLE_ALT_DRIVERS`, since the distro Level-Zero loader 1.16 predates the
+  `vpu`→`npu` driver rename). External path: llama.cpp HEAD `41abbfd` built with
+  `-DGGML_OPENVINO=ON` outside the repo; Orbit vendor `b9551` and all Orbit code UNTOUCHED.
+  Results:
+  - **Real NPU execution proven** (no fallback): tiny matmul `EXECUTION_DEVICES=NPU`
+    (rel err 2.6e-4 vs CPU); Qwen3-0.6B Q4_K_M generated coherent text on NPU.
+  - **Exact Ornith-1.5-35B-A3B Q4_K_M did NOT run on NPU**: OOM-killed during model
+    *load* (peak 26.3 GiB RAM + 8 GiB swap maxed on a 30 GiB host), never reaching graph
+    translation/compile. The OpenVINO backend does not mmap — it loads and requantizes
+    weights into resident memory (~1.6× on-disk), unlike Orbit's native mmap path which
+    loads the same model fine. Device-independent (OV CPU device OOMs identically). ⇒ **N5
+    ORNITH_MEMORY_CONTEXT_BLOCKED.** (Q4_K_M is a supported precision at HEAD, so N4 is
+    NOT the blocker; qwen3moe MoE is unvalidated in this backend — no MoE model in its
+    validation set, max 12B dense — but load never completed so N3 is unverified; NPU is
+    also stateless-only, which would forfeit Orbit's KV-reuse core.)
+  - **Small-model throughput (Qwen3-0.6B Q4_K_M, idle):** NPU 141.3/23.1 prefill/decode
+    tok/s vs native CPU 263.0/**78.5** — NPU decode **3.4× slower**. The NPU offers no
+    throughput win on models it can run.
+  - **Auxiliary concurrent offload (Phase 8 core question):** NPU aux job **segfaulted**
+    under CPU+memory contention, and the concurrent native-CPU Ornith decode fell from
+    ~18.6 to ~8.6 tok/s (>50 % steal of CPU/shared-memory bandwidth). Orbit has no
+    existing auxiliary model workload (deterministic exact-evidence grounding, not
+    embeddings/retrieval); adding one would be inventing new architecture. ⇒ **not N9.**
+  Stable thermals throughout (peak 72 °C, no throttle); package power policy NOT changed.
+  **Orbit stays CPU-only, `gpu_layers=0`; nothing integrated.** Reopen ONLY if a
+  memory-mapped/streaming OV weight loader lands (or host RAM ≥ ~48 GiB) AND MoE +
+  stateful-KV support matures for this backend AND a real Orbit auxiliary workload
+  appears. This is independent of the Intel GPU/Vulkan TECHNICAL_STOP (different device).
+  Evidence: `workdir/diag/dell_intel_npu_bench/` (RESULTS.md, benchmark.md,
+  compatibility.md, device/openvino/correctness captures, build metadata; machine-local,
+  gitignored). External build: `~/LAB/llamacpp-npubench/` (outside Orbit).
+
 ### Authoritative Dell CPU CHAT baseline (2026-09-13, `fa67e5a`)
 
 Measured for DELL-INTEL-GPU-BENCH-1 so CPU and GPU are compared under MATCHED
