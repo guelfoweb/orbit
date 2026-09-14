@@ -24,8 +24,13 @@ from orbit.native_llama.client import (
     _has_open_thought_channel,
 )
 from orbit.native_llama.kv_diag import emit_route_prefix_prewarm_event, request_context as native_kv_request_context
-from orbit.native_server.server_calibration import calibrate_threads, restore_threads
+from orbit.native_server.server_calibration import (
+    WARMUP_REJECTION,
+    calibrate_threads,
+    restore_threads,
+)
 from orbit.native_server.server_profile import (
+    thread_candidates,
     Resolution,
     detect_topology,
     render_profile_lines,
@@ -1038,6 +1043,36 @@ def _show_profile(args) -> int:
     return 0
 
 
+def _startup_note(message: str) -> None:
+    """One line of startup progress, on the same stream and prefix as the
+    existing server lines. Presentation only: line-based, no cursor control,
+    no ANSI, so it is identical on a TTY and a redirect and honors NO_COLOR and
+    dumb terminals by adding nothing to color."""
+    print(f"orbit-server {message}", file=sys.stderr, flush=True)
+
+
+def _report_startup_prewarm(label: str, result: "NativeRoutePrefixPrefillResult") -> None:
+    """Truthful one-line outcome for a prewarm that was announced.
+
+    Never prints success unless the prewarm actually succeeded; a skip or a
+    failure says so, using only metrics the result already carries. Metrics that
+    are absent are simply omitted rather than estimated."""
+    if result.succeeded:
+        parts: list[str] = []
+        if result.prefix_token_count is not None:
+            parts.append(f"{result.prefix_token_count} tokens")
+        if result.prefill_ms is not None:
+            parts.append(f"{result.prefill_ms / 1000:.1f}s")
+        if result.checkpoint_size_bytes is not None:
+            parts.append(f"{result.checkpoint_size_bytes // 1024} KiB")
+        detail = f": {', '.join(parts)}" if parts else ""
+        _startup_note(f"prewarm complete ({label}){detail}")
+    elif result.skipped:
+        _startup_note(f"prewarm skipped ({label}): {result.skip_reason or 'ineligible'}")
+    elif result.attempted:
+        _startup_note(f"prewarm failed ({label}): {result.failed_reason or 'unknown'}")
+
+
 def run_server(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if getattr(args, "show_profile", False):
@@ -1069,8 +1104,14 @@ def run_server(argv: list[str] | None = None) -> int:
     # creation parameters and cannot be retuned afterwards. Threads can be, so
     # they may still be replaced by a measurement below; everything else this
     # returns is final.
+    _startup_note("resolving server profile...")
     resolution = _resolve_startup_profile(args)
     profile = resolution.profile
+    # A cached calibrated profile means the long calibration sweep below will not
+    # run; say so early, before the model load, so the operator knows the wait
+    # ahead is the load and not a calibration.
+    if str(getattr(profile, "source", "")).startswith("cached"):
+        _startup_note("server profile: cached auto-calibrated (no calibration needed)")
 
     paths: NativeLlamaPaths | None = None
     try:
@@ -1114,6 +1155,7 @@ def run_server(argv: list[str] | None = None) -> int:
         )
         if not args.verbose_llama_log:
             client.set_quiet_logging()
+        _startup_note(f"loading model: {resolve_model_alias(args.alias, paths)}...")
         client.load()
         _log_native_threads(client, "after model load")
 
@@ -1125,15 +1167,45 @@ def run_server(argv: list[str] | None = None) -> int:
         # work turned up. `calibrate_threads` never raises; it returns None and
         # the pre-load resolution stands.
         if not resolution.calibrated and (args.threads is None or args.threads_batch is None):
-            measured = _resolve_startup_profile(
-                args,
-                calibrator=lambda *, topology, fields: calibrate_threads(
-                    client, topology=topology, fields=fields
-                ),
-            )
+            # Progress is emitted from INSIDE the calibrator, which the resolver
+            # invokes only when a real sweep is needed. A cached run reaches this
+            # branch too (its thread fields are filled, so `measurable` is empty
+            # and the calibrator is never called), and must NOT announce a sweep
+            # -- so `calibrator_ran` gates the completion line as well.
+            calibrator_ran = {"invoked": False}
+
+            def _startup_calibrator(*, topology, fields):
+                calibrator_ran["invoked"] = True
+                total = len(thread_candidates(topology))
+                _startup_note("auto-calibrating server profile...")
+                seen = {"n": 0}
+
+                def _on_candidate(measurement) -> None:
+                    marker = getattr(measurement, "rejected", None)
+                    if isinstance(marker, str) and marker.startswith(WARMUP_REJECTION):
+                        return  # the warm-up walk is not a scored candidate
+                    seen["n"] += 1
+                    _startup_note(
+                        f"  candidate {seen['n']}/{total}: "
+                        f"threads={measurement.threads}"
+                    )
+
+                return calibrate_threads(
+                    client, topology=topology, fields=fields, on_event=_on_candidate
+                )
+
+            measured = _resolve_startup_profile(args, calibrator=_startup_calibrator)
             if measured.calibrated:
                 resolution = measured
                 profile = measured.profile
+                _startup_note(
+                    f"calibration complete: threads={profile.threads}, "
+                    f"threads_batch={profile.threads_batch}"
+                )
+            elif calibrator_ran["invoked"]:
+                _startup_note(
+                    "calibration did not settle; keeping the pre-load profile"
+                )
             # Whether or not a winner emerged, the context is left tuned to the
             # last candidate that ran. Put it back on the resolved counts, or
             # the server would serve on one thread count while reporting
@@ -1164,11 +1236,21 @@ def run_server(argv: list[str] | None = None) -> int:
             print(f"orbit-server {line}", file=sys.stderr)
         _log_native_threads(client, "after profile resolution")
 
+        # Announce prewarm only when it is actually enabled for this server, so
+        # a build with prewarm switched off stays quiet. The prewarm calls
+        # themselves are unchanged -- each still runs exactly once -- and the
+        # start line is emitted immediately before the expensive call, the
+        # outcome only after it returns.
+        announce_prewarm = route_prefix_prewarm_mode() == PREFIX_PREWARM_STARTUP
         if getattr(getattr(client, "model_profile", None), "profile_id", None) not in (
             QWEN3_CODER_PROFILE_ID,
             ORNITH15_PROFILE_ID,
         ):
-            prewarm_startup_route_prefix(client)
+            if announce_prewarm:
+                _startup_note("prewarming route-prefix cache...")
+            result = prewarm_startup_route_prefix(client)
+            if announce_prewarm:
+                _report_startup_prewarm("route-prefix", result)
         else:
             prewarm_interrupted = False
             previous_sigint = signal.getsignal(signal.SIGINT)
@@ -1180,13 +1262,21 @@ def run_server(argv: list[str] | None = None) -> int:
 
             signal.signal(signal.SIGINT, cancel_startup_prewarm)
             try:
-                prewarm_startup_route_prefix(client)
+                if announce_prewarm:
+                    _startup_note("prewarming route-prefix cache...")
+                route_result = prewarm_startup_route_prefix(client)
+                if announce_prewarm:
+                    _report_startup_prewarm("route-prefix", route_result)
                 # Beside the CHAT capture, never instead of it: the CHAT prewarm
                 # has already run and recorded its result, and this one owns a
                 # separate slot. It is inside the same cancellable window because
                 # it is more startup prefill the operator may want to interrupt.
                 if not prewarm_interrupted:
-                    prewarm_startup_analysis_prefix(client)
+                    if announce_prewarm:
+                        _startup_note("prewarming analysis-prefix cache...")
+                    analysis_result = prewarm_startup_analysis_prefix(client)
+                    if announce_prewarm:
+                        _report_startup_prewarm("analysis-prefix", analysis_result)
             finally:
                 signal.signal(signal.SIGINT, previous_sigint)
             if prewarm_interrupted:
