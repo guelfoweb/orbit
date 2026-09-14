@@ -1344,6 +1344,43 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `workdir/diag/office_vba_evidence/live_smoke.json` (18-call variant, pre read_file fix);
   final: `workdir/diag/office_vba_evidence/live_smoke_final.json` (machine-local).
 
+## Report Digest-Provenance Rule (ANALYSIS-REPORT-FABRICATED-HASH-GUARD-1)
+
+Durable invariant: a final report may not attribute a concrete cryptographic
+digest (sha256/sha1/md5) to a FILE/PAYLOAD unless Orbit holds bytes whose digest
+matches. Root cause of the closed defect was H1/H3: the verified-indicator
+sha256 -- which is the hash of the URI STRING -- was rendered as an unqualified
+`sha256:`, and a live Office report relabelled it as the "downloaded payload's
+sha256" (a file whose bytes were never fetched under network deny). The exact
+fabricated claim previously possible: "the remote payload's sha256 is
+`34a17be5…`" where `34a17be5…` is in fact `sha256("http://185.189.58.222/x.exe")`.
+
+Fix (all generic, in `analysis_runtime.py` + one label in `analysis_indicators.py`):
+- `render_indicators` now labels the indicator digest `sha256 of this indicator
+  string:` so its subject is explicit (H1).
+- `_report_digest_provenance()` splits the digests the runtime already computed
+  into `file_bytes_digests` (artifact, each transform stage output+input, each
+  extracted module source, each evidence record's own content -- bytes Orbit
+  HOLDS) and `string_digests` (sha256 of each recovered URI/indicator STRING).
+  It reuses existing metadata; it builds no second store and recomputes nothing.
+- `_flag_fabricated_digest_claims` (both report paths, before the appendix)
+  flags a digest claim ONLY when the digest's grammatically bound SUBJECT is a
+  file/payload object (never a URI/indicator string) AND the value is not in
+  `file_bytes_digests`. It is deliberately conservative -- a string-hash, a
+  correct artifact/stage/source hash, an ambiguous subject, or a hex quoted as
+  source text is left alone -- because a false flag on a correct report is worse
+  than a missed one. It never touches controller state (no false RESOLVED).
+
+Key discipline: reason about the digest's SUBJECT, not hex shape. The same hex
+under a file subject vs. a string subject is not equivalent; a value that is
+both a URI-string hash and a real decoded-stage digest stays a legitimate
+file-bytes digest. The cross-sample gate carries a per-sample digest invariant
+(an invented remote-payload digest is flagged; the sample's real artifact hash
+is not). Recorded remaining candidate: a value-membership guard cannot bind a
+distant subject through a locative ("the payload downloaded from <url> has
+sha256 …"); it errs toward not flagging there.
+Live smoke on Ornith (Office sample) after the fix: `elapsed=1366s model_calls=19 actions=6` (the pre-existing oversized-source variance for the 33k-token .doc, candidate A -- not from this change). The report retains the full static chain (Document_Open->Shell, C2 `http://185.189.58.222/x.exe`, module sha `d034bd83...`, stage sha `f1fa67e3...`), no UnicodeDecodeError, no network fetch, no false RESOLVED. Critically: NO fabricated remote-payload digest -- the URI-string hash `34a17be5...` appears only in the deterministic appendix, correctly labelled `sha256 of this indicator string:`, and never in the model narrative as a payload hash. Record: `workdir/diag/office_vba_evidence/live_smoke_digest_guard.json`.
+
 ## Cross-Sample Analysis Regression Gate (ANALYSIS-CROSS-SAMPLE-REGRESSION-GATE-1)
 
 `tests/test_analysis_cross_sample_gate.py` is a cheap, model-free deterministic
