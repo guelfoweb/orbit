@@ -1344,6 +1344,43 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `workdir/diag/office_vba_evidence/live_smoke.json` (18-call variant, pre read_file fix);
   final: `workdir/diag/office_vba_evidence/live_smoke_final.json` (machine-local).
 
+## Large-Source Prefill Cost (ANALYSIS-LARGE-SOURCE-PREFILL-DIAG-1 — TECHNICAL_STOP)
+
+Diagnosis of the ~1470s Office analysis wall time, from the retained per-call KV
+trace `workdir/diag/multisample_bench/officedoc/kv.jsonl` (same frozen Office
+sample, 9 calls, 719.5s — representative; no new live run needed). Result:
+**TECHNICAL_STOP, no code change.** There is no previously-uncovered exact-KV
+reuse seam that clears the acceptance bar.
+
+- **Where the time goes:** estimated prefill 371s + decode 347s = 718s ≈ wall.
+  Decode is 48% of compute (3142 generated tokens at ~9 tok/s) and no prefix
+  reuse can reduce it; the two generation-heavy calls (first plan, report; 1095
+  gen tokens each) alone are ~240s (33% of the run).
+- **Reuse is already active and near-optimal:** 30.5% of prompt tokens are reused
+  (the 384-token `ornith_analysis_prefix` plus the STEP and FINISH rolling
+  checkpoints — measured cached 384 / 1058 / 1440 / 2080 across the run). Cold
+  calls are the first-of-lineage (first plan, first step, first finish), a
+  new-question finish (new lineage), and the report.
+- **Cross-phase exact reuse is impossible by construction:** the three phases use
+  distinct system prompts — `ANALYSIS_SYSTEM_PROMPT` (STEP) vs
+  `CONTROL_SYSTEM_PROMPT` (PLAN/FINISH) share only an 84-char (~20-token) opening
+  then diverge; STEP vs REPORT and CONTROL vs REPORT share nothing. So a FINISH
+  after a STEP cannot reuse the STEP's grounding KV. The session-specific
+  grounding (transform preamble + office bootstrap + oversized-source overview)
+  is prefilled once per phase-lineage's first call and cannot be prewarmed (it
+  depends on the artifact).
+- **K-classification: K6** (cache already optimal; remaining cost inherently
+  cold) with **K5** (distinct system prompts legitimately prevent cross-phase
+  reuse). Not K1-K4.
+- **Upper bound:** additional exact-reusable prefix under the constraints (exact
+  identity, no prompt/controller change, no reopening REPORT KV) ≈ 20 tokens
+  ≈ 0.2% of evaluated tokens — far below the >=15% bar. A gain clearing the bar
+  would require unifying the three system prompts (a forbidden prompt change) or
+  reopening REPORT exact-KV (a standing TECHNICAL_STOP). Do NOT add a
+  fifth/sixth checkpoint or prewarm for this; the existing rolling checkpoints
+  and analysis prefix are already optimal for exact-prefix reuse. Full analysis:
+  `workdir/diag/large_source_prefill_diag/DIAG.md` (machine-local).
+
 ## Oversized-Source Admission Rule (ANALYSIS-OVERSIZED-SOURCE-WINDOW-CLOSURE-1)
 
 Durable invariant: Orbit never builds a model call it already knows cannot fit
