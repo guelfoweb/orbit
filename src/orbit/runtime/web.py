@@ -63,9 +63,10 @@ def search_web(query: str, *, max_results: int = MAX_SEARCH_RESULTS) -> str:
         },
     )
     html: str | None = None
+    status = 200
     for attempt in range(1, SEARCH_MAX_ATTEMPTS + 1):
         try:
-            html = _fetch_search_html(request)
+            status, html = _fetch_search_html(request)
             break
         except OSError as exc:
             # A retry is another attempt at the SAME fixed provider request; it opens
@@ -80,6 +81,17 @@ def search_web(query: str, *, max_results: int = MAX_SEARCH_RESULTS) -> str:
                 continue
             return f"error: web search failed after {attempt} attempt(s): {exc}"
     assert html is not None
+    if _is_ddg_challenge(status, html):
+        # WEB-SEARCH-PROVIDER-CHALLENGE-1: the provider returned its anti-bot challenge
+        # page (HTTP 202 + a duckduckgo.com/anomaly.js form), not search results. This
+        # is NOT a legitimate zero-result query, so it must not be reported as an empty
+        # success. No clean keyless fallback exists (DDG Lite serves the same challenge;
+        # Mojeek gates with a captcha), so this surfaces an informative provider-challenge
+        # error. Bounded: the challenge is detected once and never re-fetched in a loop.
+        return (
+            "error: web search unavailable: the search provider (duckduckgo) returned an "
+            "anti-bot challenge instead of results; no results were retrieved"
+        )
     results = _parse_duckduckgo_html(html, max_results=max_results)
     if not results:
         return "web_search_results: true\nresults: none"
@@ -95,11 +107,27 @@ def search_web(query: str, *, max_results: int = MAX_SEARCH_RESULTS) -> str:
     return "\n".join(lines)
 
 
-def _fetch_search_html(request: Request) -> str:
-    """Perform one search HTTP request. Isolated so the retry loop can drive it and
-    tests can stub the network with a single patch point."""
+# DuckDuckGo anti-bot challenge signature (P3: HTTP status AND a provider-specific body
+# marker). The challenge page is served with HTTP 202 and embeds a form posting to
+# `duckduckgo.com/anomaly.js`. BOTH are required: the 202 status distinguishes it from a
+# normal 200 results page (which may legitimately mention "anomaly.js" in a result URL or
+# snippet), and the provider-anchored marker distinguishes it from any other 202. This
+# never keys on "0 results" alone.
+_DDG_CHALLENGE_STATUS = 202
+_DDG_CHALLENGE_MARKER = "duckduckgo.com/anomaly"
+
+
+def _is_ddg_challenge(status: int, html: str) -> bool:
+    return status == _DDG_CHALLENGE_STATUS and _DDG_CHALLENGE_MARKER in html.lower()
+
+
+def _fetch_search_html(request: Request) -> tuple[int, str]:
+    """Perform one search HTTP request, returning (http_status, body). Isolated so the
+    retry loop can drive it and tests can stub the network with a single patch point."""
     with urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
-        return response.read(512_000).decode("utf-8", errors="replace")
+        status = response.getcode() if hasattr(response, "getcode") else 200
+        body = response.read(512_000).decode("utf-8", errors="replace")
+        return status, body
 
 
 def _is_transient_search_error(exc: OSError) -> bool:

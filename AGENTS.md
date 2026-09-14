@@ -2213,6 +2213,51 @@ box is not a comparable number; token/cache/rate and correctness are.
 - Full raw web error/output is not reinjected.
 - No route/tool-loop changes, no MTP changes, no cache/KV changes, and no global budget changes.
 
+## WEB-SEARCH-PROVIDER-CHALLENGE-1, DDG Anti-Bot Challenge Classification (fallback TECHNICAL_STOP)
+
+- Problem: under anti-bot/rate-limit conditions the DuckDuckGo html endpoint returns an
+  HTTP 202 challenge page (a form posting to `duckduckgo.com/anomaly.js`, zero
+  `class="result"` blocks). `search_web` parsed that as `web_search_results: true` /
+  `results: none` -- i.e. a legitimate successful EMPTY search. A provider challenge is
+  not a zero-result query, so this was incorrect and silently hid the failure.
+- Challenge signature (P3): HTTP 202 status AND a provider-specific body marker
+  `duckduckgo.com/anomaly.js`. The body marker is the decisive, stable signal; a normal
+  results page and a legitimate zero-result page do not contain it, so detection is
+  provider-specific and never keys on "0 results" alone. Detection requires BOTH the HTTP 202 status and the provider-anchored marker `duckduckgo.com/anomaly`, so a normal 200 results page that merely mentions "anomaly.js" is never misclassified.
+- Fix (detection-only, `src/orbit/runtime/web.py`): after the bounded retry loop and
+  BEFORE parsing, `_is_ddg_challenge(html)` short-circuits a challenge to an informative
+  error: `error: web search unavailable: the search provider (duckduckgo) returned an
+  anti-bot challenge instead of results; no results were retrieved`. Because the string
+  starts with `error:` and the command is `orbit-web-search`, the evidence layer
+  classifies it as `web_search` status `error` -> `web_search_failed: true` (the #128/#130
+  path), so the model reports the failure and does not answer from general knowledge as
+  if the search succeeded. Previously the same page was classified status `none`.
+- Provider outcome model (internal, reusing the existing error/result string shape):
+  SUCCESS_WITH_RESULTS (`web_search_results: true` + results), SUCCESS_EMPTY
+  (`results: none`, marker absent), PROVIDER_CHALLENGE (the new `error:` above),
+  TRANSIENT_FAILURE / PERMANENT_FAILURE (`web search failed after N attempt(s)`).
+- Fallback: NONE added -- provider TECHNICAL_STOP on fallback. Evidence (this host):
+  DDG html => 202 anomaly.js challenge; DDG Lite => the IDENTICAL anomaly.js challenge
+  (`sv=lite`, same backend), rejected; Mojeek => HTTP 200 "Captcha" page, rejected. No
+  clean keyless HTML source was demonstrably reliable, so per the mission the outcome is
+  challenge detection only, not a second provider. Reopen only with evidence of a clean
+  keyless provider.
+- Retry/challenge interaction: the challenge is an HTTP success (no exception), so it
+  never enters the OSError retry path; a transient-error-then-challenge sequence stays
+  within the existing bounded retry (max 3) and is then classified as a challenge with no
+  further re-fetch (no provider loop). The bounded transient-retry policy is unchanged.
+- Security preserved: ANALYSIS network-deny still runs before any request (zero sockets);
+  `fetch_url`/SSRF/redirect surface untouched; no new endpoint/provider contacted; fixed
+  DDG endpoint, per-attempt timeout, and read cap unchanged. CHAT routing and tool schemas
+  unchanged.
+- Tests: `tests/test_web_search_challenge.py` (challenge != empty; provider-specific
+  marker detection; no second provider; permanent/security not treated as challenge;
+  ANALYSIS deny zero sockets; transient retry unchanged; no loop; provider observable).
+  Causal mutations (challenge->empty, over-detection) both fail the suite.
+- Live smoke (Dante Alighieri): primary DuckDuckGo html, 1 attempt, challenge_detected
+  True, fallback_used False, final provider duckduckgo, 0 results, ~0.20 s, outcome
+  PROVIDER_CHALLENGE (correctly not an empty success).
+
 ## WEB-SEARCH-RELIABILITY-1, Bounded Transient-Failure Retry for CHAT Web Search
 
 - Problem: `search_web` ("orbit-web-search") made a single request to
