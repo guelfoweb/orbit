@@ -1379,6 +1379,7 @@ file-bytes digest. The cross-sample gate carries a per-sample digest invariant
 is not). Recorded remaining candidate: a value-membership guard cannot bind a
 distant subject through a locative ("the payload downloaded from <url> has
 sha256 …"); it errs toward not flagging there.
+Live smoke on Ornith (Office sample) after the fix: `elapsed=1366s model_calls=19 actions=6` (the pre-existing oversized-source variance for the 33k-token .doc, candidate A -- not from this change). The report retains the full static chain (Document_Open->Shell, C2 `http://185.189.58.222/x.exe`, module sha `d034bd83...`, stage sha `f1fa67e3...`), no UnicodeDecodeError, no network fetch, no false RESOLVED. Critically: NO fabricated remote-payload digest -- the URI-string hash `34a17be5...` appears only in the deterministic appendix, correctly labelled `sha256 of this indicator string:`, and never in the model narrative as a payload hash. Record: `workdir/diag/office_vba_evidence/live_smoke_digest_guard.json`.
 
 ## Cross-Sample Analysis Regression Gate (ANALYSIS-CROSS-SAMPLE-REGRESSION-GATE-1)
 
