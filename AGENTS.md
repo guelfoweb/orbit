@@ -2213,6 +2213,57 @@ box is not a comparable number; token/cache/rate and correctness are.
 - Full raw web error/output is not reinjected.
 - No route/tool-loop changes, no MTP changes, no cache/KV changes, and no global budget changes.
 
+## WEB-SEARCH-RELIABILITY-1, Bounded Transient-Failure Retry for CHAT Web Search
+
+- Problem: `search_web` ("orbit-web-search") made a single request to
+  `https://html.duckduckgo.com/html/` and, on any `OSError`, returned
+  `error: web search failed: {exc}` immediately. A transient TCP reset
+  (`<urlopen error [Errno 104] Connection reset by peer>`) therefore failed the
+  whole search. Root cause: **W1 transient TCP reset (ECONNRESET)** -- confirmed by
+  reproducing the exact request code (early probes returned HTTP 200 with results).
+- Fix (smallest generic, `src/orbit/runtime/web.py`): a bounded retry around the
+  search HTTP call. `SEARCH_MAX_ATTEMPTS = 3`; short fixed backoff
+  `SEARCH_RETRY_BACKOFF_SECONDS = (0.5, 1.0)` applied only BEFORE a retry;
+  `_is_transient_search_error` retries ONLY genuinely transient failures --
+  `ConnectionResetError`/`ConnectionAbortedError`/`BrokenPipeError`, timeouts,
+  temporary DNS (`EAI_AGAIN`), and HTTP `{429, 500, 502, 503, 504}`. Everything else
+  (permanent 4xx, NXDOMAIN, connection refused, and any non-`OSError`
+  parser/programming error) is NOT retried and surfaces immediately. On exhaustion the
+  original error is preserved with an attempt count:
+  `error: web search failed after N attempt(s): {exc}`.
+- Bounds: at most 3 attempts; total added delay <= 1.5 s across retries; a permanent
+  failure is never delayed. The retry lives entirely inside `search_web`, so it opens
+  no new URL and adds no model/tool call.
+- Security invariants preserved: the ANALYSIS network-deny check runs BEFORE the retry
+  loop (a denied context opens no socket and never retries); `fetch_url` (the user-URL
+  / SSRF surface) is unchanged and still denies immediately; the fixed DDG endpoint,
+  per-attempt timeout (10 s), and 512 KB read cap are unchanged.
+- Fallback provider: NONE added. The observed failure is transient and resolved by
+  bounded retry; the primary endpoint returns HTTP 200 with results for normal
+  single-query use. Adding a second provider would be complexity the observed failure
+  does not justify (Phase 5).
+- Separately classified (Phase 4) -- W2 anti-bot rate-limit: under a rapid burst of
+  requests from one IP (e.g. this mission's own diagnosis probes), the DDG html
+  endpoint starts returning an HTTP 202 challenge page with zero `class="result"`
+  blocks, which `search_web` reports as `results: none` (a success, not an error).
+  This is NOT the observed ECONNRESET failure and is out of scope here; it is the basis
+  for the recommended next mission (a keyless fallback provider) should the endpoint
+  prove unreliable for normal single-query CHAT use.
+- Tests: `tests/test_web_search_retry.py` (T1-T12: success unchanged; ECONNRESET/
+  timeout/temporary-DNS/429/selected-5xx retry; permanent 4xx/NXDOMAIN/refused and
+  programming errors do not retry; retry bound enforced; final error informative;
+  successful retry returns normal results; ANALYSIS deny and security denial immediate
+  with zero attempts; retry is HTTP-level with one tool result). Causal mutations
+  (disable retry, make permanent errors retryable, remove the bound) each fail the
+  suite. Existing `tests.test_web` success path unchanged.
+- CHAT routing, tool schemas, and ANALYSIS network-deny behavior are unchanged.
+- Live smoke (Dante Alighieri): DuckDuckGo, 1 attempt, no retry, ~0.19 s, status ok --
+  0 results because this host's IP was under the W2 anti-bot rate-limit from the
+  diagnosis burst (a 202 challenge, not an error; retry correctly not triggered). A
+  controlled live demo (one injected ECONNRESET before a real retry) recovered without
+  error in ~0.69 s (0.5 s backoff + real retry), confirming the transient reset the
+  user observed no longer fails the whole search.
+
 ## #132, Reduced final_from_tool Prompt Tokens
 
 - Included in `v0.0.1-rc18`.
