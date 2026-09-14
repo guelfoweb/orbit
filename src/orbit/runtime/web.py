@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import socket
+import time
 from html.parser import HTMLParser
 import re
 from urllib.error import HTTPError, URLError
@@ -15,6 +17,19 @@ from orbit.runtime.analysis_network_policy import (
 
 MAX_SEARCH_RESULTS = 5
 SEARCH_TIMEOUT_SECONDS = 10
+# Bounded retry for transient provider/network failures only (WEB-SEARCH-RELIABILITY-1).
+# A single ECONNRESET/timeout/429/5xx from the search provider is usually transient;
+# retry a small, fixed number of times with short backoff, then surface the real error.
+SEARCH_MAX_ATTEMPTS = 3
+# Backoff (seconds) applied BEFORE the 2nd and 3rd attempts. Never applied to a
+# permanent failure, so a permanent error is not materially delayed.
+SEARCH_RETRY_BACKOFF_SECONDS = (0.5, 1.0)
+# HTTP statuses treated as transient (retryable). All other 4xx are permanent.
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+# OSError errno values treated as transient at the socket layer.
+_TRANSIENT_ERRNOS = frozenset(
+    {errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT, errno.EPIPE}
+)
 DEFAULT_FETCH_TIMEOUT_SECONDS = 10
 MAX_FETCH_TIMEOUT_SECONDS = 15
 DEFAULT_FETCH_MAX_BYTES = 128_000
@@ -47,11 +62,24 @@ def search_web(query: str, *, max_results: int = MAX_SEARCH_RESULTS) -> str:
             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
         },
     )
-    try:
-        with urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
-            html = response.read(512_000).decode("utf-8", errors="replace")
-    except OSError as exc:
-        return f"error: web search failed: {exc}"
+    html: str | None = None
+    for attempt in range(1, SEARCH_MAX_ATTEMPTS + 1):
+        try:
+            html = _fetch_search_html(request)
+            break
+        except OSError as exc:
+            # A retry is another attempt at the SAME fixed provider request; it opens
+            # no new URL and adds no model call. Only genuinely transient failures are
+            # retried, and only while attempts remain; everything else (and the final
+            # attempt) surfaces the real error immediately, with the attempt count.
+            if attempt < SEARCH_MAX_ATTEMPTS and _is_transient_search_error(exc):
+                # Defensive index: stays valid even if SEARCH_MAX_ATTEMPTS is later
+                # raised without extending the backoff tuple.
+                backoff = SEARCH_RETRY_BACKOFF_SECONDS[min(attempt - 1, len(SEARCH_RETRY_BACKOFF_SECONDS) - 1)]
+                time.sleep(backoff)
+                continue
+            return f"error: web search failed after {attempt} attempt(s): {exc}"
+    assert html is not None
     results = _parse_duckduckgo_html(html, max_results=max_results)
     if not results:
         return "web_search_results: true\nresults: none"
@@ -65,6 +93,41 @@ def search_web(query: str, *, max_results: int = MAX_SEARCH_RESULTS) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _fetch_search_html(request: Request) -> str:
+    """Perform one search HTTP request. Isolated so the retry loop can drive it and
+    tests can stub the network with a single patch point."""
+    with urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
+        return response.read(512_000).decode("utf-8", errors="replace")
+
+
+def _is_transient_search_error(exc: OSError) -> bool:
+    """True only for genuinely transient provider/network failures that are safe to
+    retry: connection reset/abort/broken pipe, timeout, temporary DNS failure, and a
+    narrow set of HTTP statuses (429 and selected 5xx). Permanent 4xx, permanent DNS,
+    connection refused, and any non-network error are NOT retried."""
+    if isinstance(exc, HTTPError):
+        # HTTPError is a subclass of URLError, so it must be checked first.
+        return exc.code in _RETRYABLE_HTTP_STATUSES
+    if isinstance(exc, URLError):
+        return _transient_reason(exc.reason)
+    return _transient_reason(exc)
+
+
+def _transient_reason(reason: object) -> bool:
+    if isinstance(
+        reason,
+        (TimeoutError, socket.timeout, ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+    ):
+        return True
+    if isinstance(reason, socket.gaierror):
+        # Only a *temporary* name-resolution failure is retryable; a permanent
+        # NXDOMAIN/unknown-host is not.
+        return reason.errno == getattr(socket, "EAI_AGAIN", object())
+    if isinstance(reason, OSError):
+        return reason.errno in _TRANSIENT_ERRNOS
+    return False
 
 
 def fetch_url_definition() -> dict[str, object]:
