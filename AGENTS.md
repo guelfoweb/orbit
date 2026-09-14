@@ -1178,6 +1178,18 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   re-attempt R2-R6 without new structural evidence; decomposing the completion/decode path is a
   separate future mission with its own hot-path qualification.
 
+- OPEN-PR-TRIAGE-1: the six long-standing open PRs (retained only because they were open during
+  the remote-branch cleanup) were audited against current main and all CLOSED; open-PR count is 0.
+  No code was ported and main is unchanged. #50 route-outcome diagnostics and #91 dynamic completion
+  budget were DUPLICATE (already on main: docs/ROUTE_OUTCOME_OBSERVABILITY.md + emit_route_outcome
+  via 426a969; completion_budget.py resolve_max_tokens via 79bc17d). #45 KV phase-0 baseline was a
+  SUPERSEDED docs-only report (KV route-prefix arc complete, REPORT exact-KV is TECHNICAL_STOP). #33
+  was OBSOLETE (its suggest-server-profile.sh was rewritten into a server_profile wrapper; its
+  final_policy findings-fix gate was never adopted). #1 (promote MTP boundary-split to default) and
+  #3 (commit built .so binaries + MTP debug reuse) were UNSAFE against the MTP-default-OFF invariant
+  and the build-output/technical-stop policy. All six remote branches were deleted (head tips
+  recorded in workdir/diag/open_pr_triage/head_tips.txt for recovery).
+
 ## RC24 Tool-Loop Convergence
 
 - Orbit now has one production tool loop. The former opt-in agent path,
