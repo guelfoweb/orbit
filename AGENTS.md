@@ -1231,6 +1231,13 @@ symptoms, two causes, two production fixes.** Evidence: `workdir/diag/dell_runti
   `https://productoslili.cl/cv/cr2.exe`); no corpus sample other than IBAN uses GetSpecialFolder,
   so blast radius is IBAN-only. Do NOT hardcode the sample constants, add fuzzy matching, or raise
   the action budget; the seams are generic to any deterministic stage and any WSH special folder.
+  Live single-smoke on Ornith (CPU-only Dell, model sha `42739874…` verified out of band) after the
+  fix: `RC=0 elapsed=225.4s model_calls=2 actions=0 report=True stop="no open question requires an
+  action"` — the qualified zero-action path (down from the pre-fix `elapsed=1215.1s model_calls=11
+  actions=3` in `workdir/diag/verify_iban/`). The report renders the deterministic fact
+  `GetSpecialFolder(2) = TemporaryFolder (%TEMP%)` and the verbatim `fso.GetSpecialFolder(2) +
+  "/TKFSIK.exe"`, never the Windows folder; C2 and stage sha present; no false contradiction banner.
+  Record: `workdir/diag/iban_evidence_grounding/live_smoke.json` (machine-local).
 
 ## RC24 Tool-Loop Convergence
 
