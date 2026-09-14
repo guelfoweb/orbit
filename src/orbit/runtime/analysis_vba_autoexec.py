@@ -195,3 +195,129 @@ def find_office_event_relationships(
             )
         )
     return results
+
+
+# --- static execution-reach within an auto-execution procedure --------------
+#
+# The autoexec relationship above establishes the ENTRYPOINT: the procedure
+# Office invokes on the event. This second, still-static fact establishes
+# whether that entry procedure's own body reaches an EXECUTION call -- a VBA
+# `Shell`, a `.Run` on a shell object, `ShellExecute` -- so a report can say
+# "Document_Open reaches an execution path" from the exact source rather than
+# from the model's memory. It is NOT a claim the macro ran or the document was
+# opened; it is the presence of an execution statement inside the entry body.
+
+
+@dataclass(frozen=True)
+class OfficeExecutionReach:
+    """A static fact: an auto-execution procedure's body contains an execution
+    call. `procedure`/`event` identify the entrypoint (from the relationship it
+    was derived from); `sink` names the execution primitive and `sink_line` is
+    1-based into the module source; `module_evidence_id` points at the extracted
+    module that carries the body. Nothing here claims the call ran."""
+
+    host: str
+    module: str
+    procedure: str
+    event: str
+    sink: str
+    sink_line: int
+    module_evidence_id: str
+    contract: str = AUTOEXEC_CONTRACT
+
+
+# VBA execution primitives, matched as calls (never as a variable name). A
+# closed, small set: `Shell(...)`/`Shell "..."`/`Shell var`, `ShellExecute(`,
+# and `.Run(`/`.Run "` on a shell object. Deliberately not open -- a new sink
+# is added here on evidence, not guessed.
+_VBA_EXEC_SINKS: "tuple[tuple[str, re.Pattern[str]], ...]" = (
+    ("Shell", re.compile(r"(?<![\w.])Shell\b[ \t]*(?=[\"(]|[A-Za-z_])", re.IGNORECASE)),
+    ("ShellExecute", re.compile(r"(?<![\w.])ShellExecute\b[ \t]*\(", re.IGNORECASE)),
+    (".Run", re.compile(r"\.[ \t]*Run\b[ \t]*[\"(]", re.IGNORECASE)),
+)
+
+_END_SUB = re.compile(r"^[ \t]*End[ \t]+Sub\b", re.IGNORECASE)
+# The start of ANY procedure declaration (Sub / Function / Property). Used to
+# bound an entry procedure's body: the body ends at its `End Sub` OR at the next
+# declaration, whichever comes first. Without the second bound, a colon-packed
+# or unclosed entry procedure (whose own `End Sub` is not recognised at a line
+# start) would let the scan bleed into the following procedure and attribute
+# THAT procedure's execution call to the entrypoint -- a false reach on exactly
+# the malformed input a maldoc favours.
+_ANY_PROC_DECL = re.compile(
+    r"^[ \t]*(?:(?:Public|Private|Friend|Static)[ \t]+)*"
+    r"(?:Sub|Function|Property)[ \t]",
+    re.IGNORECASE,
+)
+
+
+def _mask_vba_noncode(line: str) -> str:
+    """Blank out string contents and drop a trailing `'` comment, so a sink
+    token inside a string or comment is not matched. A `'` inside a string is
+    not a comment; a `"` toggles the string state."""
+    out: list[str] = []
+    in_string = False
+    for ch in line:
+        if ch == '"':
+            in_string = not in_string
+            out.append('"')
+            continue
+        if ch == "'" and not in_string:
+            break  # comment to end of line
+        out.append(" " if in_string else ch)
+    return "".join(out)
+
+
+def find_office_execution_reach(
+    module_name: str,
+    module_source: str,
+    relationships: "list[OfficeEventRelationship]",
+    module_evidence_id: str,
+) -> "list[OfficeExecutionReach]":
+    """For each auto-execution relationship in THIS module, whether the entry
+    procedure's body statically contains an execution call.
+
+    The body is the exact source between the procedure's `Sub` declaration (the
+    relationship's `line`) and its matching `End Sub`. The first execution sink
+    found in that body -- outside comments and strings -- yields one reach. No
+    relationship, no body, or no sink yields nothing (fail closed). Total by
+    construction: malformed input yields no reach rather than raising."""
+    if not isinstance(module_source, str):
+        return []
+    lines = module_source.splitlines()
+    results: "list[OfficeExecutionReach]" = []
+    for rel in relationships:
+        if rel.module != module_name:
+            continue
+        decl0 = rel.line - 1
+        if decl0 < 0 or decl0 >= len(lines):
+            continue
+        end0 = len(lines)
+        for j in range(decl0 + 1, len(lines)):
+            # The body ends at its own `End Sub` OR at the next procedure
+            # declaration, whichever is first -- so a malformed/unclosed entry
+            # procedure cannot borrow a following procedure's execution call.
+            if _END_SUB.match(lines[j]) or _ANY_PROC_DECL.match(lines[j]):
+                end0 = j
+                break
+        found = False
+        for idx0 in range(decl0 + 1, end0):
+            code = _mask_vba_noncode(lines[idx0])
+            for sink_name, pattern in _VBA_EXEC_SINKS:
+                if pattern.search(code):
+                    results.append(
+                        OfficeExecutionReach(
+                            host=rel.host,
+                            module=module_name,
+                            procedure=rel.procedure,
+                            event=rel.event,
+                            sink=sink_name,
+                            sink_line=idx0 + 1,
+                            module_evidence_id=module_evidence_id,
+                        )
+                    )
+                    found = True
+                    break
+            if found:
+                break
+    return results
