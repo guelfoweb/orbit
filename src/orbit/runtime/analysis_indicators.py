@@ -50,6 +50,48 @@ _PARTS = re.compile(
 MAX_URI_CHARS = 2048
 MAX_INDICATORS = 32
 
+# An XML / XHTML namespace declaration: `xmlns="URI"` or `xmlns:prefix="URI"`.
+# The URI there names a vocabulary, not a network endpoint -- it is document
+# metadata, and publishing it as a verified indicator sends an analyst at a W3C
+# specification. Recognised by SYNTAX (the xmlns attribute immediately before
+# the value), never by a domain list: the SAME URI appearing OUTSIDE this syntax
+# -- a real link in a script -- is a legitimate indicator and is kept.
+#
+# Two boundaries make this precise rather than a substring match:
+#   - `(?<![\w.\-:])` before `xmlns`: the attribute name is the WHOLE token, so a
+#     longer name that merely ENDS in `xmlns` (`data-xmlns`, `myxmlns`) is not a
+#     namespace declaration and its value stays an indicator. Attacker-written
+#     markup cannot evade extraction by embedding the URL in such an attribute.
+#   - a required QUOTE immediately before the URI (`["']\Z`): a real declaration
+#     is always quoted with the value flush against the quote, so `xmlns= http://x`
+#     (a stray token then a URL) is not mistaken for one.
+_XMLNS_DECL = re.compile(r"""(?<![\w.\-:])xmlns(?::[A-Za-z_][\w.\-]*)?\s*=\s*["']\Z""")
+# How far back to look for the attribute. An attribute name plus separators and
+# a quote is a handful of characters; bounding the look-behind keeps the check
+# cheap and stops it spanning unrelated markup.
+_XMLNS_LOOKBACK = 64
+
+
+def _is_namespace_declaration(text: str, start: int) -> bool:
+    """Whether the URI at `start` is the value of an xmlns declaration.
+
+    Context only, by syntax: the bytes immediately before the URI must be a whole
+    `xmlns`/`xmlns:prefix` attribute, its `=`, and its opening quote. A URI that
+    merely looks like a namespace but sits anywhere else is not matched, and a
+    longer attribute that ends in `xmlns` is not a declaration.
+    """
+    lo = max(0, start - _XMLNS_LOOKBACK)
+    match = _XMLNS_DECL.search(text[lo:start])
+    if match is None:
+        return False
+    # If `xmlns` sits at the very start of a TRUNCATED look-back window, the
+    # character before it is unseen and the left boundary cannot be trusted --
+    # fail closed toward KEEPING the indicator (dropping a real IOC is the worse
+    # error). A window that reaches the document start (`lo == 0`) is exact.
+    if match.start() == 0 and lo != 0:
+        return False
+    return True
+
 
 @dataclass(frozen=True)
 class Indicator:
@@ -98,7 +140,13 @@ def uris_in(text: str) -> list[str]:
     far more often punctuation than part of the URI.
     """
     found: list[str] = []
-    for candidate in _URI.findall(text):
+    for match in _URI.finditer(text):
+        # A URI that is the value of an xmlns declaration is document metadata,
+        # not an indicator -- decided by the syntax immediately before it, so a
+        # real endpoint written the same way anywhere else is untouched.
+        if _is_namespace_declaration(text, match.start()):
+            continue
+        candidate = match.group(0)
         # Only characters that end a sentence rather than an address, and only
         # at the very end. A comma or semicolon *inside* a URI is part of the
         # value -- a query separator, a path parameter -- so the character
