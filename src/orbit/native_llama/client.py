@@ -198,6 +198,12 @@ class NativeClientConfig:
     ornith_analysis_prefix_reuse_config_error: str | None = None
     moe_expert_usage_enabled: bool = False
     low_memory: bool = False
+    # Tri-state CPU weight-repack control (llama.cpp `use_extra_bufts`). None
+    # leaves the backend default (repack on); True/False force it. Resolved
+    # upstream by the backend-invocation layer (see server_profile.resolve_cpu_repack)
+    # so this object only carries the decided value. `low_memory` still forces
+    # repack off independently, so this field only acts outside low-memory mode.
+    use_extra_bufts: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -631,6 +637,9 @@ class NativeLlamaClient:
         if self.config.low_memory:
             params.use_extra_bufts = False
             self._cpu_repack_enabled = False
+        elif self.config.use_extra_bufts is not None:
+            params.use_extra_bufts = self.config.use_extra_bufts
+            self._cpu_repack_enabled = bool(self.config.use_extra_bufts)
         params.progress_callback = progress_cb
         params.progress_callback_user_data = None
         return params

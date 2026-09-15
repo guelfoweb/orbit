@@ -34,6 +34,7 @@ from orbit.native_server.server_profile import (
     Resolution,
     detect_topology,
     render_profile_lines,
+    resolve_cpu_repack,
     resolve_profile,
 )
 from orbit.native_llama.download_cli import _DownloadProgress as DownloadProgress
@@ -1116,6 +1117,23 @@ def run_server(argv: list[str] | None = None) -> int:
     paths: NativeLlamaPaths | None = None
     try:
         paths = resolve_bootstrap_paths(args)
+        # CPU weight-repack resolution lives in the backend-invocation layer:
+        # explicit --repack beats ORBIT_CPU_REPACK beats the qualified
+        # per-(machine, model) default beats the backend default. Only the
+        # qualified Dell + Ornith pair defaults to repack off.
+        cpu_repack_cli = {"on": True, "off": False, "auto": None}[
+            getattr(args, "repack", "auto")
+        ]
+        cpu_repack, cpu_repack_source = resolve_cpu_repack(
+            machine_model=detect_topology().machine_model,
+            model_id=getattr(paths, "model_id", "") or "",
+            cli=cpu_repack_cli,
+            environ=os.environ,
+        )
+        if cpu_repack is not None:
+            _startup_note(
+                f"cpu repack: {'on' if cpu_repack else 'off'} ({cpu_repack_source})"
+            )
         client = NativeLlamaClient(
             paths,
             NativeClientConfig(
@@ -1151,6 +1169,7 @@ def run_server(argv: list[str] | None = None) -> int:
                 ornith_analysis_prefix_reuse_config_error=ornith_analysis_prefix_config.validation_error,
                 moe_expert_usage_enabled=args.moe_expert_usage,
                 low_memory=args.low_memory,
+                use_extra_bufts=cpu_repack,
             ),
         )
         if not args.verbose_llama_log:
@@ -1565,6 +1584,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discard any cached auto-calibrated profile and measure this machine again.",
     )
     parser.add_argument("--think", choices=("off", "on"), default="off", help="Default thinking visibility for native server requests.")
+    parser.add_argument("--repack", choices=("on", "off", "auto"), default="auto", help="CPU weight repacking (llama.cpp use_extra_bufts). 'on'/'off' force it; 'auto' (default) uses the qualified per-machine+model default, else the backend default.")
     parser.add_argument("--enable-mtp-probe", action="store_true", help="Backend-only MTP load/init probe. No generation.")
     parser.add_argument("--enable-mtp-dry-run", action="store_true", help="Backend-only MTP draft generation dry run. No accept loop or user output.")
     parser.add_argument("--enable-mtp-accept-probe", action="store_true", help="Backend-only MTP single accept-loop probe. No user output or runtime integration.")
