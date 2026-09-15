@@ -75,6 +75,55 @@ ENV_THREADS_BATCH = "ORBIT_THREADS_BATCH"
 ENV_BATCH = "ORBIT_BATCH"
 ENV_UBATCH = "ORBIT_UBATCH"
 ENV_CACHE_RAM = "ORBIT_CACHE_RAM"
+# CPU weight-repack override (llama.cpp `use_extra_bufts`). Same ORBIT_ prefix
+# and same reason as above. Values: 1/on/true/yes force repack ON,
+# 0/off/false/no force it OFF; anything else (or unset) defers to the profile.
+ENV_CPU_REPACK = "ORBIT_CPU_REPACK"
+
+# The single (machine, model) pair for which CPU weight repack is turned OFF by
+# default, qualified end-to-end (perf, memory, and the IBAN.js analysis oracle)
+# by ORNITH-NOREPACK-* on this exact hardware. Matched by DMI product name and
+# the Orbit registry model id -- NOT by RAM size, CPU family, MoE-ness, or model
+# family -- so no other machine or model inherits the default. Repacking this
+# ~21 GB Q4_K_M model duplicates its weights into anon and overflows this 30 GiB
+# host into swap; leaving it mmap'd removes that with identical analysis output.
+QUALIFIED_NOREPACK_MACHINE = "Dell Pro 5 14 P514260"
+QUALIFIED_NOREPACK_MODEL_ID = "ornith15-35b-a3b-q4-k-m"
+
+
+def resolve_cpu_repack(
+    *,
+    machine_model: str,
+    model_id: str,
+    cli: bool | None = None,
+    environ: "Mapping[str, str] | None" = None,
+) -> "tuple[bool | None, str]":
+    """Decide `use_extra_bufts` (CPU repack) for one backend invocation.
+
+    Returns `(value, source)` where `value` is True (repack on), False (repack
+    off), or None (leave the backend default, which is on). The precedence mirrors
+    the tuning chain -- explicit CLI beats explicit environment beats the
+    qualified per-(machine, model) default beats the backend default -- and an
+    explicit choice at any level is never overridden by a later one. The only
+    built-in default that is not None is the single qualified Dell + Ornith pair.
+    """
+    if cli is not None:
+        return cli, "cli"
+    raw = (environ or {}).get(ENV_CPU_REPACK)
+    if raw is not None:
+        token = raw.strip().lower()
+        if token in ("0", "off", "false", "no"):
+            return False, "env"
+        if token in ("1", "on", "true", "yes"):
+            return True, "env"
+        # An unparseable value is ignored rather than guessed, so a typo never
+        # silently flips an inference setting; fall through to the default.
+    if (
+        machine_model.strip() == QUALIFIED_NOREPACK_MACHINE
+        and model_id == QUALIFIED_NOREPACK_MODEL_ID
+    ):
+        return False, "qualified-dell-ornith"
+    return None, "backend-default"
 
 # Bumped whenever the fingerprint inputs change, so entries written by an older
 # Orbit are ignored rather than silently orphaned under a key nobody computes
@@ -109,6 +158,11 @@ class HostTopology:
     total_ram_mib: int = 0
     available_ram_mib: int = 0
     swap_total_mib: int = 0
+    # DMI product name (Linux), e.g. "Dell Pro 5 14 P514260". Empty when the
+    # machine cannot be identified. A measured fact used only for exact
+    # qualified-machine matching; deliberately NOT part of profile_fingerprint,
+    # so it never changes a cached tuning profile's identity.
+    machine_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -144,7 +198,10 @@ def _meminfo_mib(key: str, meminfo: str) -> int:
 
 
 def detect_topology(
-    *, meminfo_text: str | None = None, cpuinfo_text: str | None = None
+    *,
+    meminfo_text: str | None = None,
+    cpuinfo_text: str | None = None,
+    machine_model_text: str | None = None,
 ) -> HostTopology:
     """Read the machine. Every failure degrades to a smaller number, never a
     larger one, because every consumer of this treats bigger as more permission.
@@ -187,6 +244,18 @@ def detect_topology(
     if not model:
         model = platform.processor() or platform.machine() or ""
 
+    if machine_model_text is not None:
+        machine_model = machine_model_text.strip()
+    else:
+        try:
+            machine_model = (
+                Path("/sys/devices/virtual/dmi/id/product_name")
+                .read_text(encoding="utf-8", errors="replace")
+                .strip()
+            )
+        except OSError:
+            machine_model = ""
+
     return HostTopology(
         cpu_model=model,
         physical_cores=max(1, physical),
@@ -194,6 +263,7 @@ def detect_topology(
         total_ram_mib=_meminfo_mib("MemTotal", meminfo),
         available_ram_mib=_meminfo_mib("MemAvailable", meminfo),
         swap_total_mib=_meminfo_mib("SwapTotal", meminfo),
+        machine_model=machine_model,
     )
 
 
