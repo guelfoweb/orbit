@@ -110,6 +110,7 @@ int main(int argc, char ** argv) {
     llama_backend_init();
 
     auto model_params = llama_model_default_params();
+    model_params.load_mtp = true; // b9551 semantics: NextN tensors are always loaded
     auto ctx_params = llama_context_default_params();
     ctx_params.n_ctx = 8192;
     ctx_params.n_batch = 256;

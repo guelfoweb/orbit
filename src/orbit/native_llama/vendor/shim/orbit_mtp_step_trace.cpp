@@ -677,6 +677,7 @@ int main(int argc, char ** argv) {
     llama_backend_init();
 
     auto model_params = llama_model_default_params();
+    model_params.load_mtp = true; // b9551 semantics: NextN tensors are always loaded
     auto * model_tgt = llama_model_load_from_file(target, model_params);
     auto * model_dft = llama_model_load_from_file(draft, model_params);
     if (!model_tgt || !model_dft) {

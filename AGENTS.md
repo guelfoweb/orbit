@@ -946,7 +946,9 @@ Release State entry below.
     compute profiling in `ggml-cpu.{h,c,cpp}`/`repack.cpp`, the mtmd include in
     `src/CMakeLists.txt`, decode profiling in `llama-context.cpp`, the minimal mtmd
     tool surface in `tools/CMakeLists.txt`. Dropped because now upstream: the
-    masked-embd tensor names (`llama-arch.*`) and the `gemma4-assistant.cpp` hunk.
+    masked-embd tensor names (`llama-arch.*`) and the `gemma4-assistant.cpp` hunk;
+    dropped as dead code: the write-only `last_batch_*` bookkeeping locals in
+    `speculative.cpp::draft()` (never read on b9551).
   - **Provenance:** the pin has NO upstream release tag (`b10968` was never
     published; 41abbfd is the parent of `b10969`), so `upstream_tag` is
     `untagged` and a new optional manifest field `upstream_build_number` (10968)
@@ -967,8 +969,12 @@ Release State entry below.
     `llama_context_params` gained `n_outputs_max_per_seq` (160 bytes). `bindings.py`
     mirrors both; the client pins `load_mode=LLAMA_LOAD_MODE_MMAP` and
     `lazy_mode=LLAMA_LAZY_MODE_OFF` (the qualified b9551 semantics; upstream AUTO
-    would resolve the same on CPU but is not relied upon); vocab-only inspection
-    uses `load_mode=MMAP`. The mtmd bridge recognises the new reviewed profile
+    would resolve the same on CPU but is not relied upon) and `load_mtp=True`:
+    41abbfd skips a model's NextN (MTP) tensors unless asked, whereas b9551 always
+    created them, and an MTP context built on a model without them aborts the
+    process at graph build (`qwen35moe.cpp` NextN assert) — so the client and
+    every MTP shim keep them loaded (the mapped model is the same object as on
+    b9551; MTP itself stays OFF). Vocab-only inspection uses `load_mode=MMAP`. The mtmd bridge recognises the new reviewed profile
     `mtmd-context-v3` (explicit `device` handle after `use_gpu`, 96 bytes; input
     text v2, bitmap `wrapper-v1`) and passes `mtmd_helper_init_opt_default()`;
     the chat bridge takes upstream's `common_json` and exposes
@@ -1006,7 +1012,11 @@ Release State entry below.
     1 got 0) and smoke `shell_error` is "wrong" on both backends.
   - Constraints honoured: MTP stays OFF (helpers/shims only rebuilt); no Qwen3.8
     registry/profile support; no unrelated refactors; production main untouched
-    until the reviewed squash-merge. Independent review BLOCKER 0 / MAJOR 0.
+    until the reviewed squash-merge. Independent adversarial review: first pass
+    BLOCKER 0 / MAJOR 1 (the `load_mtp` default, fixed as above, plus two stale
+    `use_mmap` writes in `scripts/qualify_qwen3_coder.py` and
+    `scripts/evaluation/measure_snapshot_capacity.py` fixed to `load_mode`);
+    delta re-review BLOCKER 0 / MAJOR 0.
   - Post-merge hygiene: rebuild the native runtime on the `main` checkout
     (`python3 scripts/build_native.py`) so `vendor/lib` and the bridge identity
     sidecars match the new provenance; the b9551 binaries are not compatible with

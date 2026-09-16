@@ -172,6 +172,7 @@ const char * context_profile_for() {
             offsetof(Params, cb_eval_user_data) == 64 &&
             optional_batch_max_tokens_offset<Params>() == 72 &&
             optional_progress_callback_offset<Params>() == 80 &&
+            offsetof(Params, progress_callback_user_data) == 88 &&
             sizeof(Params) == 96 &&
             alignof(Params) == 8;
         return v3_layout ? "mtmd-context-v3" : "unsupported";

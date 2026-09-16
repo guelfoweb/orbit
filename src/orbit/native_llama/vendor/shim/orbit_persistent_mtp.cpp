@@ -1943,6 +1943,7 @@ extern "C" void * orbit_mtp_session_create(
     session->rss_peak_kb = session->rss_before_kb;
 
     auto model_params = llama_model_default_params();
+    model_params.load_mtp = true; // b9551 semantics: NextN tensors are always loaded
     session->owns_model_dft = true;
     session->model_dft = llama_model_load_from_file(draft_model_path, model_params);
     session->rss_peak_kb = std::max(session->rss_peak_kb, rss_kb());

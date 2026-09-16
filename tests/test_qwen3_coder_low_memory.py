@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from orbit.native_llama.bindings import LLAMA_LAZY_MODE_OFF, LLAMA_LOAD_MODE_MMAP
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.paths import NativeLlamaPaths
@@ -46,6 +47,18 @@ class Qwen3CoderLowMemoryTests(unittest.TestCase):
             "Use a qualified low-memory profile when supported by the selected model.",
             " ".join(help_text.split()),
         )
+
+    def test_model_load_pins_the_b9551_loading_semantics(self) -> None:
+        # 41abbfd replaced use_mmap/use_mlock/use_direct_io with enums and made a
+        # model's NextN (MTP) tensors optional; the client asks for exactly what
+        # b9551 did: mmap, no lazy tensor reads, NextN tensors present.
+        client = self._client(low_memory=False)
+        with mock.patch("orbit.native_llama.client.inspect_native_model_profile"):
+            params = client._model_load_params(None)
+
+        self.assertEqual(params.load_mode, LLAMA_LOAD_MODE_MMAP)
+        self.assertEqual(params.lazy_mode, LLAMA_LAZY_MODE_OFF)
+        self.assertIs(params.load_mtp, True)
 
     def test_default_preserves_backend_cpu_repack_setting(self) -> None:
         client = self._client(low_memory=False)

@@ -640,6 +640,11 @@ class NativeLlamaClient:
         # upstream's AUTO resolution for both new enums.
         params.load_mode = LLAMA_LOAD_MODE_MMAP
         params.lazy_mode = LLAMA_LAZY_MODE_OFF
+        # b9551 always created a model's NextN (MTP) tensors; 41abbfd skips them
+        # unless asked (load_mtp defaults to false). Keep them loaded so the mapped
+        # model is the same object as before and an MTP context built on this
+        # model (self-MTP probes/shims) cannot hit a missing-tensor assert.
+        params.load_mtp = True
         self._cpu_repack_enabled = bool(params.use_extra_bufts)
         if self.config.low_memory:
             params.use_extra_bufts = False
