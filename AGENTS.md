@@ -1331,12 +1331,18 @@ Release State entry below.
     `/session/reset`; the context manager rewrites history near the 4096
     budget) was never captured again and stayed cold for the server's life
     while pinning the old ~147 MB blob. A second consecutive non-extending
-    route prompt now replaces the checkpoint
-    (`RollingRouteAnchorState.non_extending_misses`, bumped by
-    `_rolling_route_capture_allowed`); a single miss (the post-tool route
-    rendering that diverges before the end) still keeps the older, usually
-    still-extended checkpoint. Reuse authorization is unchanged. Known
-    limits: only the `thinking=off` route<->final switch preserves the
+    route prompt that builds on the first missed one now replaces the
+    checkpoint (`RollingRouteAnchorState.non_extending_misses` /
+    `last_miss_tokens`, recorded by `_rolling_route_capture_allowed` at the
+    whole-prompt capture site, i.e. the CHAT route call and a control-lineage
+    turn without a boundary); reuse then resumes on the third route prompt.
+    A single miss still keeps the older checkpoint, and misses that do not
+    build on each other never replace it: once a session holds tool
+    evidence, every later route prompt is the post-tool window `[system,
+    latest user, evidence]` (a regime, not a one-off), where consecutive
+    prompts share only the head and no capture could ever be restored, so
+    none is made -- exactly as before this mission. Reuse authorization is
+    unchanged. Known limits: only the `thinking=off` route<->final switch preserves the
     checkpoint (thinking on falls cold), and capture/restore transiently hold
     2-3 copies of the blob (~300-450 MB at 1058 tokens) on a host whose model
     is lazily mmapped.
@@ -1368,7 +1374,11 @@ Release State entry below.
     first pass BLOCKER 0 / MAJOR 1 / MINOR 3 / NIT 2 (the chain-break trap
     above, transient blob copies, a fake self-check overstated, stale
     mission-19 wording, the thinking limit) — all addressed or documented;
-    delta re-review DELTA_RESULT. Ornith behaviour unchanged (control above; its tests
+    delta re-review BLOCKER 0 / MAJOR 0 / MINOR 1 / NIT 2 (wasted captures in
+    the post-tool window regime under the plain second-miss rule, the
+    capture-site scope wording, a placeholder) -- the rule was narrowed to
+    "second miss that extends the first" and the docs corrected; second
+    delta re-review DELTA2_RESULT. Ornith behaviour unchanged (control above; its tests
     untouched).
 
 ### Post-RC38 (bundled into rc39; historical)

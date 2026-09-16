@@ -91,8 +91,10 @@ class RollingRouteAnchorState:
     created_at_monotonic: float | None = None
     invalidation_reason: str | None = None
     # Consecutive same-identity route prompts that neither extended this
-    # checkpoint nor replaced it. See `rolling_route_should_replace`.
+    # checkpoint nor replaced it, and the tokens of the latest one. See
+    # `rolling_route_should_replace`.
     non_extending_misses: int = field(default=0, compare=False)
+    last_miss_tokens: list[int] = field(default_factory=list, compare=False, repr=False)
 
     @property
     def valid(self) -> bool:
@@ -219,11 +221,15 @@ def rolling_route_should_replace(
     reset or compacted on the same session) does not evict it on the first
     miss: the next turn's route prompt usually still extends the saved chain,
     and keeping the older useful checkpoint beats keeping the most recent
-    one. It does on the second consecutive miss (`non_extending_misses`,
-    bumped by the capture site): a chain that two route prompts in a row
-    failed to extend is broken, and holding on to it would leave the new
-    conversation cold for the rest of the server's life. Nothing here
-    authorizes reuse -- that stays with `rolling_route_reuse_start`.
+    one. It does on the second consecutive miss when that prompt extends the
+    first missed one (`non_extending_misses` / `last_miss_tokens`, recorded
+    by the capture site): two route prompts in a row that build on each other
+    but not on the checkpoint are a new chain, and holding on to the old one
+    would leave that conversation cold for the rest of the server's life.
+    Misses that do not build on each other (the post-tool window regime,
+    where every route prompt is `[system, latest user, evidence]`) never
+    replace: nothing they capture could be restored. Nothing here authorizes
+    reuse -- that stays with `rolling_route_reuse_start`.
     """
     if not state.valid:
         return True
@@ -231,7 +237,11 @@ def rolling_route_should_replace(
         return True
     if rolling_route_reuse_start(state, prompt_tokens, identity) is not None:
         return True
-    return state.non_extending_misses >= 1
+    return state.non_extending_misses >= 1 and _strictly_extends(prompt_tokens, state.last_miss_tokens)
+
+
+def _strictly_extends(prompt_tokens: list[int], head: list[int]) -> bool:
+    return bool(head) and len(prompt_tokens) > len(head) and prompt_tokens[: len(head)] == head
 
 
 def capture_rolling_route_anchor(

@@ -370,6 +370,22 @@ class ChainBreakRecoveryTest(unittest.TestCase):
         self.assertEqual(client._prepare_memory_with_ornith_rolling_route_anchor(self.B3), 0)
         self.assertEqual(lib.set_data_blobs, [], "a checkpoint the prompt does not extend is never restored")
 
+    def test_two_misses_that_do_not_build_on_each_other_never_replace(self) -> None:
+        # The post-tool window regime: every route prompt is [system, latest
+        # user, evidence], so consecutive prompts share only the head. Nothing
+        # captured there could ever be restored, so nothing is captured.
+        client, lib = self._client_with_a()
+        W1 = ROUTE1[:2] + [401, 402]
+        W2 = ROUTE1[:2] + [403, 404, 405]
+        W3 = ROUTE1[:2] + [406]
+        for window in (W1, W2, W3):
+            self.assertFalse(client._rolling_route_capture_allowed(window, identity()))
+        self.assertEqual(client._rolling_route_anchor_state.tokens, self.CONVERSATION_A, "the chain checkpoint is kept")
+        self.assertEqual(client._rolling_route_anchor_state.non_extending_misses, 3)
+        self.assertEqual(client._rolling_route_anchor_state.last_miss_tokens, W3)
+        # ... and the original chain still reuses when it comes back
+        self.assertEqual(client._prepare_memory_with_ornith_rolling_route_anchor(ROUTE2), len(ROUTE1))
+
     def test_identity_drift_and_invalid_state_replace_regardless(self) -> None:
         state = RollingRouteAnchorState()
         self.assertTrue(rolling_route_should_replace(state, self.B1, identity()))

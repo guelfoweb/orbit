@@ -3944,21 +3944,27 @@ class NativeLlamaClient:
     def _rolling_route_capture_allowed(
         self, prompt_tokens: list[int], identity: RollingRouteIdentity
     ) -> bool:
-        """Whether this route prefill replaces the slot's checkpoint.
+        """Whether this whole-prompt prefill replaces the slot's checkpoint.
 
-        Applies `rolling_route_should_replace` and, when it says keep, records
-        the miss on the stored state so a second consecutive non-extending
-        route prompt (a reset or compacted conversation on the same session)
-        is allowed to take the slot instead of leaving it cold forever. The
-        counter is dropped with the state it belongs to: a capture stores a
-        fresh state.
+        Used at the end-of-prefill capture site (the CHAT route call, and a
+        control-lineage turn whose renderer reported no boundary). Applies
+        `rolling_route_should_replace` and, when it says keep, records the
+        miss and the prompt on the stored state so a second consecutive
+        non-extending route prompt that builds on this one (a reset or
+        compacted conversation on the same session) is allowed to take the
+        slot instead of leaving it cold forever. The record is dropped with
+        the state it belongs to: a capture stores a fresh state.
         """
         slot_state = self._rolling_anchor_state_for(identity)
         if rolling_route_should_replace(slot_state, prompt_tokens, identity):
             return True
         self._store_rolling_anchor_state(
             identity,
-            replace(slot_state, non_extending_misses=slot_state.non_extending_misses + 1),
+            replace(
+                slot_state,
+                non_extending_misses=slot_state.non_extending_misses + 1,
+                last_miss_tokens=list(prompt_tokens),
+            ),
         )
         return False
 
