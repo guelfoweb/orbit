@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlretrieve
 import os
+import re
 import tempfile
 from typing import Callable
 
@@ -59,6 +60,13 @@ def parse_huggingface_spec(spec: str, *, prefer: str = "target") -> DownloadRequ
     return DownloadRequest(repo=manifest_match.repo, file=manifest_match.file)
 
 
+# `<name>-00001-of-00003.gguf`: one shard of a split GGUF. The loader needs
+# every shard beside the first, and this downloader fetches exactly one file,
+# so a split target is refused up front rather than left as a lone first shard
+# the backend cannot open.
+_SPLIT_GGUF_SUFFIX = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
+
+
 def download_model(
     spec: str,
     *,
@@ -72,6 +80,13 @@ def download_model(
         ModelFileSpec(repo=request.repo, file=request.file, cache_glob=""),
         models_dir=models_dir or default_models_dir(),
     )
+    split = _SPLIT_GGUF_SUFFIX.search(request.file)
+    if split and int(split.group(2)) > 1 and not destination.exists():
+        raise ValueError(
+            f"{request.file} is shard {int(split.group(1))} of a split GGUF "
+            f"({int(split.group(2))} shards); orbit download fetches single files only. "
+            f"Place all {int(split.group(2))} shards by hand under {destination.parent}"
+        )
     url = huggingface_resolve_url(request)
     if destination.exists():
         return DownloadResult(path=destination, downloaded=False, url=url)

@@ -28,7 +28,10 @@ three shards) is additionally qualified on the Dell Pro 5 14 reference laptop
 only (30 GiB RAM, beyond-RAM mmap serving): ~3.9 tok/s generation on the first
 request after load and ~5.5 tok/s warm at ctx 4096, 10 threads. The registry
 entry is `qwen38-flash-next-ud-iq1-m`; the three shards must be placed by hand
-(`orbit download` does not fetch split GGUFs). Other quants are unsupported.
+under `<models-dir>/unsloth--Qwen3.8-Flash-Next-GGUF/` (`orbit download`
+refuses split GGUFs), then start with `orbit server --model-id
+qwen38-flash-next-ud-iq1-m` (add `--models-dir` if the shards live outside the
+default `models/` directory). Other quants are unsupported.
 
 **Performance figures are measurements on one CPU-only system**, not universal
 model performance — they vary with hardware, configuration, cache state and

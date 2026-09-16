@@ -11,9 +11,12 @@ keeps its Mission-18 behaviour.
 from __future__ import annotations
 
 import hashlib
+import io
+import os
 import pathlib
 import sys
 import tempfile
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -28,7 +31,8 @@ from orbit.native_llama.bindings import (  # noqa: E402
     LLAMA_LOAD_MODE_MMAP,
 )
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient  # noqa: E402
-from orbit.native_llama.model_discovery import _is_secondary_split_shard  # noqa: E402
+from orbit.native_llama.model_discovery import ModelDiscoveryRow, _is_secondary_split_shard  # noqa: E402
+from orbit.native_llama.model_download import download_model  # noqa: E402
 from orbit.native_llama.model_profiles import (  # noqa: E402
     GEMMA4_PROFILE_ID,
     ORNITH15_PROFILE_ID,
@@ -43,6 +47,7 @@ from orbit.native_llama.model_profiles import (  # noqa: E402
 from orbit.native_llama.model_registry import get_manifest, load_registry  # noqa: E402
 from orbit.native_llama.paths import NativeLlamaPaths  # noqa: E402
 from orbit.native_server import app as app_module  # noqa: E402
+from tests.test_native_server_bootstrap import _FakeHTTPServer, _FakeNativeClient  # noqa: E402
 from orbit.native_server.server_profile import (  # noqa: E402
     ENV_CPU_REPACK,
     ENV_THREADS,
@@ -176,7 +181,7 @@ class FlashNextIdentityTests(unittest.TestCase):
         self.assertEqual(profile.failure_reason, "qwen38_flash_next_template_identity_mismatch")
 
     def test_D_another_qwen38_flash_next_quant_is_not_qualified(self) -> None:
-        for file_type in ("30", "15", "24", ""):  # IQ1_S, Q4_K_M, IQ3_XXS, missing
+        for file_type in ("24", "15", "23", ""):  # IQ1_S, Q4_K_M, IQ3_XXS, missing (LLAMA_FTYPE_MOSTLY_*)
             profile = _detect({**FLASH_NEXT_METADATA, "general.file_type": file_type})
             self.assertFalse(profile.verified, file_type)
             self.assertEqual(profile.profile_id, "unsupported")
@@ -288,7 +293,7 @@ class QualifiedProfileResolutionTests(unittest.TestCase):
         # Right registry id, but the GGUF at that path is another quant, another
         # model, or is not verified at all.
         for detected in (
-            _detect({**FLASH_NEXT_METADATA, "general.file_type": "30"}),   # IQ1_S
+            _detect({**FLASH_NEXT_METADATA, "general.file_type": "24"}),   # IQ1_S
             _detect(QWEN38_27B_METADATA),                                 # verified, different profile
             SimpleNamespace(verified=False, profile_id=QWEN38_FLASH_NEXT_PROFILE_ID),
         ):
@@ -418,6 +423,102 @@ class LoadSemanticsTests(unittest.TestCase):
         self.assertEqual(params.lazy_mode, LLAMA_LAZY_MODE_OFF)
         self.assertIs(params.load_mtp, True)
         self.assertIs(params.use_extra_bufts, True)  # backend default, repack on
+
+
+class ServerWiringTests(unittest.TestCase):
+    """The tier reaches the real start: ctx, load semantics and the preview."""
+
+    def test_run_server_passes_ctx_and_load_semantics_from_the_qualified_tier(self) -> None:
+        qualified = qualified_startup_profile(machine_model=QUALIFIED_NOREPACK_MACHINE,
+                                              model_id=QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID)
+        resolution = SimpleNamespace(
+            profile=SimpleNamespace(source="qualified", threads=10, threads_batch=10, batch=256, ubatch=128),
+            calibrated=False, fingerprint="fp", cache_path=None, calibration_error=None, measurements=None,
+        )
+        seen = {}
+
+        def fake_resolve(args, calibrator=None, qualified=None):
+            seen.setdefault("ctx", args.ctx); seen.setdefault("qualified", qualified)
+            return resolution
+
+        _FakeNativeClient.instances.clear(); _FakeHTTPServer.instances.clear()
+        stderr = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=False))
+            stack.enter_context(mock.patch.object(app_module, "_qualified_startup_profile", return_value=qualified))
+            stack.enter_context(mock.patch.object(app_module, "_resolve_startup_profile", side_effect=fake_resolve))
+            stack.enter_context(mock.patch.object(app_module, "resolve_bootstrap_paths",
+                                                  return_value=SimpleNamespace(model=Path("/m/first.gguf"),
+                                                                               model_id=QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID)))
+            stack.enter_context(mock.patch.object(app_module, "NativeLlamaClient", _FakeNativeClient))
+            stack.enter_context(mock.patch.object(app_module, "ThreadingHTTPServer", _FakeHTTPServer))
+            stack.enter_context(mock.patch.object(app_module, "resolve_model_alias", return_value="Qwen 3.8 Flash Next"))
+            stack.enter_context(mock.patch.object(app_module, "render_profile_lines", return_value=["profile: qualified"]))
+            stack.enter_context(mock.patch.object(app_module, "_log_native_threads", return_value=None))
+            stack.enter_context(mock.patch.object(app_module, "detect_topology", return_value=DELL))
+            stack.enter_context(redirect_stderr(stderr)); stack.enter_context(redirect_stdout(io.StringIO()))
+            code = app_module.run_server(["--model-id", QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID])
+        self.assertEqual(code, 0)
+        config = _FakeNativeClient.instances[0].config
+        self.assertEqual(config.context_tokens, 4096)
+        self.assertEqual((config.threads, config.threads_batch, config.batch_size, config.ubatch_size), (10, 10, 256, 128))
+        self.assertEqual((config.load_mode, config.lazy_mode, config.load_mtp),
+                         (LLAMA_LOAD_MODE_MMAP, LLAMA_LAZY_MODE_ON, False))
+        self.assertIs(config.use_extra_bufts, False)      # qualified-dell-qwen38-flash-next
+        self.assertFalse(config.use_mtp_experimental)
+        self.assertEqual(seen["ctx"], 4096)               # the resolver saw the resolved ctx
+        self.assertIs(seen["qualified"], qualified)       # and the same tier object
+        self.assertIn("qualified profile: qualified-dell-qwen38-flash-next", stderr.getvalue())
+        self.assertIn("ctx: 4096 (qualified)", stderr.getvalue())
+
+    def test_run_server_without_a_tier_keeps_8192_and_the_mission_18_pins(self) -> None:
+        resolution = SimpleNamespace(
+            profile=SimpleNamespace(source="heuristic", threads=6, threads_batch=6, batch=256, ubatch=128),
+            calibrated=False, fingerprint="fp", cache_path=None, calibration_error=None, measurements=None,
+        )
+        _FakeNativeClient.instances.clear(); _FakeHTTPServer.instances.clear()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {"ORBIT_KV_PREFIX_PREWARM": "off"}, clear=False))
+            stack.enter_context(mock.patch.object(app_module, "_qualified_startup_profile", return_value=None))
+            stack.enter_context(mock.patch.object(app_module, "_resolve_startup_profile", return_value=resolution))
+            stack.enter_context(mock.patch.object(app_module, "resolve_bootstrap_paths",
+                                                  return_value=SimpleNamespace(model=Path("/m/v.gguf"), model_id="gemma4-26b-a4b-it-q40")))
+            stack.enter_context(mock.patch.object(app_module, "NativeLlamaClient", _FakeNativeClient))
+            stack.enter_context(mock.patch.object(app_module, "ThreadingHTTPServer", _FakeHTTPServer))
+            stack.enter_context(mock.patch.object(app_module, "resolve_model_alias", return_value="Test"))
+            stack.enter_context(mock.patch.object(app_module, "render_profile_lines", return_value=["profile: heuristic"]))
+            stack.enter_context(mock.patch.object(app_module, "_log_native_threads", return_value=None))
+            stack.enter_context(mock.patch.object(app_module, "detect_topology", return_value=DELL))
+            stack.enter_context(redirect_stderr(io.StringIO())); stack.enter_context(redirect_stdout(io.StringIO()))
+            code = app_module.run_server(["--model", "/m/v.gguf"])
+        self.assertEqual(code, 0)
+        config = _FakeNativeClient.instances[0].config
+        self.assertEqual(config.context_tokens, 8192)
+        self.assertEqual((config.load_mode, config.lazy_mode, config.load_mtp), (None, None, None))
+        self.assertIsNone(config.use_extra_bufts)
+
+    def test_show_profile_preview_of_an_interactive_selection_carries_the_registry_id(self) -> None:
+        row = ModelDiscoveryRow(model="Qwen 3.8 Flash Next", local="AVAILABLE", support="VERIFIED",
+                                path_or_action="/models/x/first.gguf", model_id=QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID)
+        args = _args(model_id=None, model=None)
+        with mock.patch.object(app_module, "_interactive_model_selection_requested", return_value=True), \
+             mock.patch.object(app_module, "_choose_verified_model", return_value=(row, Path("/bin"))), \
+             mock.patch.object(app_module, "_select_memory_mode", return_value=None), \
+             mock.patch.object(app_module, "_model_identity_for_profile", return_value=("id", 1)):
+            target = app_module._resolve_preview_target(args)
+        self.assertNotIsInstance(target, int)
+        self.assertEqual(args.model, Path("/models/x/first.gguf"))
+        self.assertEqual(args.model_id, QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID)  # what a real start sets too
+
+
+class SplitDownloadTests(unittest.TestCase):
+    def test_orbit_download_refuses_a_split_gguf_before_touching_the_network(self) -> None:
+        retrieve = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "split GGUF.*3 shards"):
+                download_model("unsloth/Qwen3.8-Flash-Next-GGUF/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf",
+                               models_dir=Path(tmp), retrieve=retrieve)
+        retrieve.assert_not_called()
 
 
 if __name__ == "__main__":

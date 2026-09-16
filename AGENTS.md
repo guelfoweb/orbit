@@ -1040,10 +1040,17 @@ Release State entry below.
     byte-identical to the verified Qwen3.8 27B template (same `qwen3.6-xml`
     tool envelope). Route-prefix (KV checkpoint) reuse is NOT enabled for this
     hybrid SSM/attention/PLE architecture. Discovery ignores split shards 2..N.
-    `orbit download` does not fetch split GGUFs: place the three shards by hand
-    (on this Dell they live on ext4 under `/var/tmp/orbit-models/…`, symlinked
-    from `models/unsloth--Qwen3.8-Flash-Next-GGUF`; `/home` is ecryptfs and
-    double-caches, which halves the effective page cache for a beyond-RAM model).
+    `orbit download` REFUSES split GGUFs with an explicit message (it fetches
+    single files): place the three shards by hand. On this Dell they live on
+    ext4 under `/var/tmp/orbit-models/unsloth--Qwen3.8-Flash-Next-GGUF/`
+    (`/home` is ecryptfs and double-caches, halving the effective page cache of
+    a beyond-RAM model). Two supported ways to start it: `orbit server
+    --model-id qwen38-flash-next-ud-iq1-m` with `models/unsloth--Qwen3.8-Flash-
+    Next-GGUF` symlinked to that directory (the registry path resolver follows
+    the symlink), or interactive selection / `--show-profile` with
+    `--models-dir /var/tmp/orbit-models` (discovery confines candidates to the
+    resolved models directory and does NOT follow a symlinked subdirectory, so
+    under the symlink layout the interactive menu lists the model as MISSING).
   - **Qualified Dell profile (`server_profile.QualifiedStartupProfile`, keyed
     by DMI product name + registry id and CONFIRMED by a vocab-only GGUF
     inspection before it applies):** ctx 4096, threads 10 / threads_batch 10,
@@ -1054,10 +1061,15 @@ Release State entry below.
     `load_mtp=False` (no NextN tensors; the GGUF has none anyway). Precedence is
     unchanged: CLI > `ORBIT_*` env > user profile > **qualified** > cache /
     calibration / heuristic; `--ctx` defaults to None so the tier can supply
-    4096, every other model still resolves 8192. Existing models keep the
-    Mission-18 pins (mmap, lazy OFF, NextN loaded) and the Ornith Dell no-repack
-    default is untouched. `/props` now also reports `load_mode`/`lazy_mode`/
-    `load_mtp`.
+    4096, every other model still resolves 8192 (the server passes CLI and
+    environment; the user-profile tier exists in the resolver library). The
+    `--show-profile` preview of an interactive selection now carries the
+    registry id, so preview and real start resolve the same tier. Existing
+    models keep the Mission-18 pins (mmap, lazy OFF, NextN loaded) and the
+    Ornith Dell no-repack default is untouched; like Ornith, the repack default
+    keys on the registry id alone (a `--model-id … --model <other file>` start
+    gets repack OFF but no tuning tier). `/props` now also reports
+    `load_mode`/`lazy_mode`/`load_mtp`.
   - **Tests:** `tests/test_qwen38_flash_next_enablement.py` (A exact pair
     resolves, incl. the app-level GGUF confirmation; B other machine; C other
     model on the Dell; D other quant / other model / unverified never qualified;
@@ -1087,7 +1099,11 @@ Release State entry below.
     2.7 GiB during the load's read-ahead (other processes evicted) and stayed
     flat through decode.
   - Full non-live suite RC=0; cross-sample gate green; no tokenizer/template
-    fixture re-baselined. Independent review BLOCKER 0 / MAJOR 0.
+    fixture re-baselined. Independent adversarial review: first pass BLOCKER 0 /
+    MAJOR 2 (interactive `--show-profile` preview lacked the registry id;
+    discovery cannot see the symlinked layout — both fixed/documented above,
+    plus the split-GGUF download refusal and a `run_server` wiring test);
+    delta re-review BLOCKER 0 / MAJOR 0.
 
 ### Post-RC38 (bundled into rc39; historical)
 

@@ -941,11 +941,6 @@ def _model_identity_for_profile(args) -> "tuple[str, int]":
 # every qualified corpus run.
 DEFAULT_CTX_TOKENS = 8192
 
-# Sentinel for "not looked up yet" so callers that already resolved the
-# qualified profile can pass it (or None) without a second GGUF inspection.
-_UNRESOLVED = object()
-
-
 def _qualified_startup_profile(args) -> "QualifiedStartupProfile | None":
     """The qualified startup profile for this invocation, or None.
 
@@ -993,7 +988,7 @@ def _resolve_ctx(args, qualified: "QualifiedStartupProfile | None") -> "tuple[in
 
 
 def _resolve_startup_profile(
-    args, *, calibrator=None, model_identity=None, qualified=_UNRESOLVED
+    args, *, calibrator=None, model_identity=None, qualified=None
 ) -> Resolution:
     """Walk the precedence chain for this invocation.
 
@@ -1004,14 +999,15 @@ def _resolve_startup_profile(
     `model_identity` lets the preview pass the fingerprint it already resolved
     for the selected model (so it does not silently fall back to the default
     model's identity); real startup passes nothing and fingerprints from args
-    exactly as before.
+    exactly as before. `qualified` is the `QualifiedStartupProfile` the caller
+    looked up once (`_qualified_startup_profile`) and hands to every resolution
+    of the same start, so preview, start and the post-load re-resolution never
+    disagree and the GGUF is inspected once; None means no tier applies.
     """
     if model_identity is None:
         model_identity, model_bytes = _model_identity_for_profile(args)
     else:
         model_identity, model_bytes = model_identity
-    if qualified is _UNRESOLVED:
-        qualified = _qualified_startup_profile(args)
     ctx_tokens, _ctx_source = _resolve_ctx(args, qualified)
     return resolve_profile(
         cli={
@@ -1066,9 +1062,12 @@ def _resolve_preview_target(args) -> "tuple[str, str, tuple[str, int], bool] | i
             return chosen
         row, _build_bin = chosen
         if row.local == "AVAILABLE":
-            # Set the resolved path so the fingerprint matches what a real start
-            # would load; no download, no load -- this is still a preview.
+            # Set the resolved path AND the registry id so the fingerprint and
+            # the qualified (machine, model) tier match what a real start would
+            # use (`_select_startup_model` sets both); no download, no load --
+            # this is still a preview.
             args.model = Path(row.path_or_action)
+            args.model_id = row.model_id
             # Memory mode is part of the same interactive selection and is a
             # fingerprint axis, so a low-memory-capable model must ask here too;
             # otherwise the preview would report the standard-mode cache while a
@@ -1195,6 +1194,7 @@ def run_server(argv: list[str] | None = None) -> int:
             f"batch {qualified.batch}/{qualified.ubatch}, lazy_mode {qualified.lazy_mode}, "
             f"load_mtp {'on' if qualified.load_mtp else 'off'})"
         )
+    _startup_note(f"ctx: {args.ctx} ({ctx_source})")
     resolution = _resolve_startup_profile(args, qualified=qualified)
     profile = resolution.profile
     # A cached calibrated profile means the long calibration sweep below will not
@@ -1209,7 +1209,7 @@ def run_server(argv: list[str] | None = None) -> int:
         # CPU weight-repack resolution lives in the backend-invocation layer:
         # explicit --repack beats ORBIT_CPU_REPACK beats the qualified
         # per-(machine, model) default beats the backend default. Only the
-        # qualified Dell + Ornith pair defaults to repack off.
+        # qualified Dell pairs (Ornith, Qwen3.8 Flash Next) default to repack off.
         cpu_repack_cli = {"on": True, "off": False, "auto": None}[
             getattr(args, "repack", "auto")
         ]

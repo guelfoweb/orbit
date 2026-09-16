@@ -451,7 +451,7 @@ class NativeLlamaClient:
     def compatibility_diagnostics(self) -> dict[str, object]:
         return client_status.compatibility_diagnostics(self)
 
-    def model_load_status(self) -> dict[str, bool | None]:
+    def model_load_status(self) -> dict[str, bool | int | None]:
         return client_status.model_load_status(self)
 
     def moe_expert_usage_status(self) -> dict[str, object]:
