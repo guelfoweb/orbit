@@ -1150,7 +1150,9 @@ Release State entry below.
     models directory still works; H advisory silent in good configurations,
     text for the bad one, and never changes what the download CLI does; I
     unrelated config keys preserved and still loaded by the terminal client;
-    plus the `orbit config` CLI itself).
+    plus the `orbit config` CLI itself, its dispatch through `orbit`, the
+    filesystem-first size probe, the unwritable config directory, the
+    symlinked config file and the relative persisted value).
   - **Real CLI smoke (ext4 temp dir, throwaway HOME):** `orbit config
     models-dir` printed the default; setting `/var/tmp/orbit-smoke-…/models`
     created it and recorded it; `orbit download` of a model already placed
