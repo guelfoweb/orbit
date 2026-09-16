@@ -24,7 +24,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orbit.backend import ChatResult, LlamaServerBackend
-from orbit.native_llama.bindings import ChatBridgeLibrary, LlamaLibrary
+from orbit.native_llama.bindings import LLAMA_LOAD_MODE_MMAP, ChatBridgeLibrary, LlamaLibrary
 from orbit.native_llama.chat_bridge import chat_bridge_filename
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.paths import resolve_legacy_paths
@@ -190,7 +190,7 @@ def inspect_model(model: Path, output: Path, template_output: Path) -> dict[str,
     lib.ggml_backend_load_all()
     params = lib.llama_model_default_params()
     params.vocab_only = True
-    params.use_mmap = True
+    params.load_mode = LLAMA_LOAD_MODE_MMAP
     params.check_tensors = True
     native_model = lib.llama_model_load_from_file(os.fsencode(model), params)
     if not native_model:

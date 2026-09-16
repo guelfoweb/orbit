@@ -1,4 +1,5 @@
 #include "chat.h"
+#include "json.h"
 #include "llama.h"
 
 #include "nlohmann/json.hpp"
@@ -112,8 +113,10 @@ ORBIT_EXPORT int orbit_chat_bridge_render(
         return -1;
     }
     try {
-        const json messages = json::parse(messages_json);
-        const json tools = json::parse(tools_json);
+        // upstream chat.h takes its own common_json wrapper (41abbfd); nlohmann
+        // stays for the bridge's own output document only.
+        const common_json messages = common_json::parse(messages_json);
+        const common_json tools = common_json::parse(tools_json);
         if (!messages.is_array() || !tools.is_array()) {
             throw std::invalid_argument("messages and tools must be arrays");
         }
@@ -144,7 +147,10 @@ ORBIT_EXPORT int orbit_chat_bridge_render(
             {"format", common_chat_format_name(params.format)},
             {"supports_thinking", params.supports_thinking},
             {"thinking_start_tag", params.thinking_start_tag},
-            {"thinking_end_tag", params.thinking_end_tag},
+            // upstream now carries a list of end tags; keep the scalar key (first
+            // tag, or empty) for existing readers and expose the full list beside it.
+            {"thinking_end_tag", params.thinking_end_tags.empty() ? std::string() : params.thinking_end_tags.front()},
+            {"thinking_end_tags", params.thinking_end_tags},
             {"additional_stops", params.additional_stops},
         };
         return copy_result(result.dump(), output, output_size);

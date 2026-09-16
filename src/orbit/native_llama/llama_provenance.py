@@ -18,6 +18,9 @@ class LlamaProvenance:
     source_tree_sha256: str
     patchset_sha256: str
     patched_paths: tuple[str, ...] = ()
+    # Upstream's own build number (its `git rev-list --count`), recorded when the
+    # pinned commit carries no `bNNNN` release tag to derive it from.
+    upstream_build_number: int | None = None
 
 
 def load_llama_provenance(source_root: Path) -> LlamaProvenance:
@@ -93,7 +96,14 @@ def _from_payload(payload: object) -> LlamaProvenance:
         raise RuntimeError("invalid llama.cpp patchset path list")
     if len(set(patched_paths)) != len(patched_paths):
         raise RuntimeError("duplicate llama.cpp patchset path")
-    return LlamaProvenance(**values, patched_paths=tuple(patched_paths))
+    build_number = payload.get("upstream_build_number")
+    if build_number is not None and (
+        isinstance(build_number, bool) or not isinstance(build_number, int) or build_number <= 0
+    ):
+        raise RuntimeError("invalid llama.cpp upstream build number")
+    return LlamaProvenance(
+        **values, patched_paths=tuple(patched_paths), upstream_build_number=build_number
+    )
 
 
 def _git(root: Path, *args: str) -> str:

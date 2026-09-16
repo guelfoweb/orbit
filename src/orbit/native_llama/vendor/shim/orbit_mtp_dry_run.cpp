@@ -110,6 +110,7 @@ int main(int argc, char ** argv) {
     llama_backend_init();
 
     auto model_params = llama_model_default_params();
+    model_params.load_mtp = true; // b9551 semantics: NextN tensors are always loaded
     auto ctx_params = llama_context_default_params();
     ctx_params.n_ctx = 8192;
     ctx_params.n_batch = 256;
@@ -222,7 +223,7 @@ int main(int argc, char ** argv) {
     common_speculative_get_draft_params(spec, 0) = {
         /* .drafting = */ true,
         /* .n_max    = */ 3,
-        /* .n_past   = */ (llama_pos) prompt.size(),
+        /* .pos0     = */ (llama_pos) prompt.size(),
         /* .id_last  = */ sampled,
         /* .prompt   = */ &prompt,
         /* .result   = */ &draft,

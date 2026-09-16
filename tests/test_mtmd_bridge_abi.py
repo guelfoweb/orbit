@@ -19,8 +19,11 @@ from orbit.native_llama.mtmd_bridge import _build_identity, validate_mtmd_bridge
 from orbit.native_llama.native_names import platform_runtime_libs, runtime_library_filename
 
 
-EXPECTED_COMMIT = "379ac6673b5cd75c7b4e07d1521c50f1e093878c"
-EXPECTED_TAG = "b9551"
+EXPECTED_COMMIT = "41abbfd599fbdd3470fcae0a1fb6530ad8403cd7"
+# 41abbfd carries no upstream release tag; its build number (10968, the parent of
+# b10969) is recorded explicitly in the manifest instead.
+EXPECTED_TAG = "untagged"
+EXPECTED_BUILD_NUMBER = 10968
 
 
 class MtmdBridgeAbiTests(unittest.TestCase):
@@ -36,15 +39,54 @@ class MtmdBridgeAbiTests(unittest.TestCase):
         self.assertEqual(provenance.upstream_tag, EXPECTED_TAG)
         self.assertEqual(provenance.source_tree_sha256, source_tree_sha256(BUNDLED_SOURCE_ROOT))
         self.assertEqual(len(provenance.patchset_sha256), 64)
-        # 63 since the pending-state diagnostic patched common/speculative.h;
-        # the count is derived by the provenance generator, not hand-maintained.
-        self.assertEqual(len(provenance.patched_paths), 63)
+        # 56 at the 41abbfd pin (46 whitespace-normalised upstream files plus the
+        # 10 Orbit-patched sources); the count is derived by the provenance
+        # generator, not hand-maintained.
+        self.assertEqual(len(provenance.patched_paths), 56)
+        self.assertEqual(provenance.upstream_build_number, EXPECTED_BUILD_NUMBER)
+
+    def test_untagged_pin_carries_an_explicit_build_number(self) -> None:
+        base = {
+            "format": 1,
+            "upstream_commit": EXPECTED_COMMIT,
+            "upstream_tag": "untagged",
+            "source_tree_sha256": "0" * 64,
+            "patchset_sha256": "1" * 64,
+            "patched_paths": [],
+        }
+        from orbit.native_llama.llama_provenance import _from_payload
+
+        self.assertIsNone(_from_payload(dict(base)).upstream_build_number)
+        self.assertEqual(_from_payload({**base, "upstream_build_number": 10968}).upstream_build_number, 10968)
+        for bad in (0, -1, "10968", True, 1.5):
+            with self.assertRaisesRegex(RuntimeError, "build number"):
+                _from_payload({**base, "upstream_build_number": bad})
+
+    def test_cmake_build_number_falls_back_to_the_recorded_upstream_number(self) -> None:
+        provenance = LlamaProvenance(
+            upstream_commit=EXPECTED_COMMIT,
+            upstream_tag="untagged",
+            source_tree_sha256="0" * 64,
+            patchset_sha256="1" * 64,
+            upstream_build_number=10968,
+        )
+        with mock.patch("orbit.native_llama.build_cli.load_llama_provenance", return_value=provenance):
+            self.assertIn("-DLLAMA_BUILD_NUMBER=10968", _cmake_provenance_args(BUNDLED_SOURCE_ROOT))
+        tagged = LlamaProvenance(
+            upstream_commit=EXPECTED_COMMIT,
+            upstream_tag="b9551",
+            source_tree_sha256="0" * 64,
+            patchset_sha256="1" * 64,
+            upstream_build_number=10968,
+        )
+        with mock.patch("orbit.native_llama.build_cli.load_llama_provenance", return_value=tagged):
+            self.assertIn("-DLLAMA_BUILD_NUMBER=9551", _cmake_provenance_args(BUNDLED_SOURCE_ROOT))
 
     def test_cmake_build_metadata_uses_vendor_not_parent_git(self) -> None:
         arguments = _cmake_provenance_args(BUNDLED_SOURCE_ROOT)
 
         self.assertIn(f"-DLLAMA_BUILD_COMMIT={EXPECTED_COMMIT}", arguments)
-        self.assertIn("-DLLAMA_BUILD_NUMBER=9551", arguments)
+        self.assertIn(f"-DLLAMA_BUILD_NUMBER={EXPECTED_BUILD_NUMBER}", arguments)
 
     def test_bridge_must_be_co_located_with_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,14 +253,19 @@ class MtmdBridgeAbiTests(unittest.TestCase):
         (DEFAULT_VENDOR_BUILD_BIN / runtime_library_filename("orbit-mtmd-bridge")).exists(),
         "native mtmd bridge is not built",
     )
-    def test_current_native_bridge_reports_supported_v1_abi(self) -> None:
+    def test_current_native_bridge_reports_supported_v3_abi(self) -> None:
+        # 41abbfd: mtmd_context_params carries an explicit device handle plus the
+        # batching/progress fields (96 bytes), mtmd_input_text carries text_len
+        # (24 bytes) and the bitmap helper returns the {bitmap, video_ctx} wrapper.
         library = MtmdLibrary(DEFAULT_VENDOR_BUILD_BIN)
 
-        self.assertEqual(library.manifest["abi_profile"], "mtmd-context-v1")
-        self.assertEqual(library.manifest["mtmd_context_params"]["size"], 56)
-        self.assertEqual(library.manifest["mtmd_input_text"]["profile"], "mtmd-input-text-v1")
-        self.assertEqual(library.manifest["mtmd_input_text"]["size"], 16)
-        self.assertEqual(library.manifest["bitmap_result"], "pointer-v1")
+        self.assertEqual(library.manifest["abi_profile"], "mtmd-context-v3")
+        self.assertEqual(library.manifest["mtmd_context_params"]["size"], 96)
+        self.assertEqual(library.manifest["mtmd_context_params"]["batch_max_tokens"], 72)
+        self.assertEqual(library.manifest["mtmd_context_params"]["progress_callback"], 80)
+        self.assertEqual(library.manifest["mtmd_input_text"]["profile"], "mtmd-input-text-v2")
+        self.assertEqual(library.manifest["mtmd_input_text"]["size"], 24)
+        self.assertEqual(library.manifest["bitmap_result"], "wrapper-v1")
         self.assertEqual(library.manifest["upstream_commit"], EXPECTED_COMMIT)
 
 

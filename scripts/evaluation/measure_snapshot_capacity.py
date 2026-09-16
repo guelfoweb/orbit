@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from orbit.native_llama.bindings import LlamaLibrary  # noqa: E402
+from orbit.native_llama.bindings import LLAMA_LOAD_MODE_MMAP, LlamaLibrary  # noqa: E402
 from orbit.runtime.completion_shadow import (  # noqa: E402
     VERIFIER_A_INSTRUCTION,
     VERIFIER_B_INSTRUCTION,
@@ -43,7 +43,7 @@ class VocabTokenizer:
         lib.llama_backend_init()
         params = lib.llama_model_default_params()
         params.vocab_only = True
-        params.use_mmap = True
+        params.load_mode = LLAMA_LOAD_MODE_MMAP
         self._model = lib.llama_model_load_from_file(str(model_path).encode(), params)
         if not self._model:
             raise RuntimeError("vocab-only load failed")

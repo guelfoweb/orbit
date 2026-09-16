@@ -91,8 +91,9 @@ the Dell**:
 - The native libraries under `src/orbit/native_llama/vendor/lib/*.so*` are build
   OUTPUTS; the vendored SOURCE is tracked, so rebuild them on the new machine with
   `python3 scripts/build_native.py` rather than copying binaries. Built and
-  present on the Dell (llama.cpp `b9551`), together with the six MTP shim
-  binaries and both Orbit bridges.
+  present on the Dell (llama.cpp `41abbfd`, since
+  LLAMA-BACKEND-41ABBFD-UPGRADE-18), together with the six MTP shim binaries
+  and both Orbit bridges.
 
 ### Machine-local research artifacts that were NOT transported (expected, not a defect)
 These live OUTSIDE the repository and outside `workdir/`. They gate unit-test
@@ -918,9 +919,109 @@ Release State entry below.
 - Technical stop carried forward: Intel `xe` iGPU / GPU work (decode ~3x slower
   than CPU, thermally infeasible on the reference laptop) — Orbit stays CPU-only,
   `gpu_layers=0`.
-- Next unreleased-development baseline: `main` at/after the rc39 release commit;
-  there is no unreleased production work beyond it.
+- Next unreleased-development baseline: `main` at/after the rc39 release commit.
+  Unreleased production work beyond it: the backend re-pin
+  LLAMA-BACKEND-41ABBFD-UPGRADE-18 (see Post-RC39).
 - See `docs/releases/v0.0.1-rc39.md`.
+
+### Post-RC39 (unreleased on `main`)
+
+- **LLAMA-BACKEND-41ABBFD-UPGRADE-18 (2026-09-16, #354) — vendored llama.cpp
+  backend re-pinned from `b9551`/`379ac667` to
+  `41abbfd599fbdd3470fcae0a1fb6530ad8403cd7`. PRODUCTION BACKEND CHANGE; no
+  runtime, prompt, controller, KV, cache or report behaviour change.**
+  Prerequisite: MTP-CARRYOVER-PORT-GATE (PASS, research branch
+  `research/ssd-expert-streaming`, `research/ssd_expert_streaming/mtp_carryover_gate/`:
+  model-free harness, 9 scenarios, b9551 vs 41abbfd transcripts byte-identical).
+  - **Vendoring rule (derived from the b9551 tree, reused verbatim):** subset =
+    `cmake/ common/ ggml/ include/ src/ vendor/ tools/CMakeLists.txt tools/mtmd/`
+    (minus README/requirements/test media/tests) + root `CMakeLists.txt .gitignore
+    LICENSE`; every file normalised by stripping trailing whitespace and blank
+    lines at EOF (so `git diff --check` stays clean). At 41abbfd: 1798 files,
+    1791 upstream paths omitted, 46 normalisation-only files, 10 files carrying
+    Orbit patches → 56 declared patched paths. Orbit patches carried: the MTP
+    carryover diagnostics in `common/speculative.{cpp,h}` (qualified port; both
+    Orbit `reset_pending`/`pending_state` and upstream `get_state`/`set_state`
+    APIs), scheduler profiling in `ggml-backend.cpp`, expert-usage telemetry +
+    compute profiling in `ggml-cpu.{h,c,cpp}`/`repack.cpp`, the mtmd include in
+    `src/CMakeLists.txt`, decode profiling in `llama-context.cpp`, the minimal mtmd
+    tool surface in `tools/CMakeLists.txt`. Dropped because now upstream: the
+    masked-embd tensor names (`llama-arch.*`) and the `gemma4-assistant.cpp` hunk;
+    dropped as dead code: the write-only `last_batch_*` bookkeeping locals in
+    `speculative.cpp::draft()` (never read on b9551).
+  - **Provenance:** the pin has NO upstream release tag (`b10968` was never
+    published; 41abbfd is the parent of `b10969`), so `upstream_tag` is
+    `untagged` and a new optional manifest field `upstream_build_number` (10968)
+    feeds `LLAMA_BUILD_NUMBER`. `source_tree_sha256`
+    `166e8a8c933e0445de27af3c30347fe61d116bf0ee850d093a4749bcdf18da83`;
+    legacy `patchset_sha256` slot re-defined with a documented algorithm
+    (`orbit-unified-diff-v1`, sha256 over the concatenated unified diffs of the
+    declared patched paths) = `07b1a48d13610cc7fc51c63d6bbb0d6be8788f3faaf88a8d66770372ecfb5cb0`;
+    `patchset_v2_sha256` `f50b7229db767cbd5bc5ef1f69bb39156bbe4578ee7a143b3c5d3a3a1dda4e84`;
+    `omitted_upstream_paths_sha256` reproduced with its original algorithm (sha256
+    of the compact-JSON sorted list). Server calibration identity now keys on the
+    commit for an untagged pin (`native_server/app.py::_backend_identity`).
+    Provenance v2 tests now RUN on the Dell (`~/LAB/llama.cpp` provisioned as a
+    41abbfd worktree of `~/LAB/llamacpp-io-overlap`), which is why the full-suite
+    skip count dropped from 77 to 47.
+  - **ABI:** `llama_model_params` replaced `use_mmap/use_direct_io/use_mlock` by
+    `load_mode`/`lazy_mode` enums and added `load_mtp` (80 bytes);
+    `llama_context_params` gained `n_outputs_max_per_seq` (160 bytes). `bindings.py`
+    mirrors both; the client pins `load_mode=LLAMA_LOAD_MODE_MMAP` and
+    `lazy_mode=LLAMA_LAZY_MODE_OFF` (the qualified b9551 semantics; upstream AUTO
+    would resolve the same on CPU but is not relied upon) and `load_mtp=True`:
+    41abbfd skips a model's NextN (MTP) tensors unless asked, whereas b9551 always
+    created them, and an MTP context built on a model without them aborts the
+    process at graph build (`qwen35moe.cpp` NextN assert) — so the client and
+    every MTP shim keep them loaded (the mapped model is the same object as on
+    b9551; MTP itself stays OFF). Vocab-only inspection uses `load_mode=MMAP`. The mtmd bridge recognises the new reviewed profile
+    `mtmd-context-v3` (explicit `device` handle after `use_gpu`, 96 bytes; input
+    text v2, bitmap `wrapper-v1`) and passes `mtmd_helper_init_opt_default()`;
+    the chat bridge takes upstream's `common_json` and exposes
+    `thinking_end_tags` beside the scalar `thinking_end_tag`; the MTP helper shims
+    use the renamed draft-params field `pos0`. Native ABI gate (bridge-reported
+    sizeof/alignof/offsetof vs the ctypes mirrors) passed before any model load.
+  - **Qualification (Dell, PL2 sysfs 65 W this boot, both legs on the same boot,
+    qualified Ornith profile `--ctx 8192 --threads 6 --threads-batch 6 --batch 256
+    --ubatch 128 --think off`, repack OFF by the qualified Dell+Ornith default,
+    which keys on machine+model and is unaffected):** build 51 s, 0 errors;
+    `test_native*` 495 OK; full discovery **5857 tests OK, RC=0, 47 skips**;
+    cross-sample deterministic gate 11/11; compileall + `git diff --check` clean;
+    template sha `f55f5293…` and tokenizer identities (`bae97cc0…` Ornith/Qwen
+    route, `c9ecf356…` Qwen3-Coder route) IDENTICAL to b9551 — no drift.
+    Live (candidate 41abbfd vs production b9551 rebuilt from `main`): smoke
+    `simple_chat` and `pwd_followup` correct on both; `core-v1` fixtures
+    `simple_chat`/`pwd_route` PASS on both, `json_artifact` PASS on 41abbfd
+    (FAIL on b9551 today), **prefill/decode 53.4/20.3 tok/s (41abbfd, n=2) vs
+    53.1/20.5 tok/s (b9551, n=2)** — within noise; tool-call generation smoke
+    corpus (8 samples): completion 1.0 on both, every semantic rate delta 0,
+    generation wall −428 ms median (`compare_tool_call_generation.py` reports
+    `incomparable` only because the capability manifest is Gemma-4-only, so
+    `capability_unavailable` on BOTH legs — pre-existing for Ornith). Live IBAN
+    oracle (`scripts/live_validate_analysis.py`, IBAN.js `86e23fa6…`): the report
+    carries the decode stage `5d51e7659955a754…`, the C2
+    `productoslili.cl/cv/cr2.exe` and the `GetSpecialFolder(2)`=TemporaryFolder
+    fact on BOTH backends (41abbfd: 431 s, 9 calls, 2 actions, ended on repeated
+    action failures with Q1/Q2 open; b9551 today: 511 s, 15 calls, 4 actions,
+    ended on "no new evidence" with Q1/Q1.1 open; the 2026-09-13 reference
+    resolved both under repack ON, before #353). The trajectory variance is
+    model-side and present on production too; the corpus contract (deterministic
+    facts complete and correct, bounded honesty) holds on both.
+  - **Pre-existing on production b9551 today, NOT introduced here (tracked, out
+    of scope):** `core-v1` `pwd_final` fails (`tool_call_count_mismatch`, expected
+    1 got 0) and smoke `shell_error` is "wrong" on both backends.
+  - Constraints honoured: MTP stays OFF (the MTP helpers/shims only follow the
+    renamed `pos0` field and the `load_mtp` pin, then rebuild); no Qwen3.8
+    registry/profile support; no unrelated refactors; production main untouched
+    until the reviewed squash-merge. Independent adversarial review: first pass
+    BLOCKER 0 / MAJOR 1 (the `load_mtp` default, fixed as above, plus two stale
+    `use_mmap` writes in `scripts/qualify_qwen3_coder.py` and
+    `scripts/evaluation/measure_snapshot_capacity.py` fixed to `load_mode`);
+    delta re-review BLOCKER 0 / MAJOR 0.
+  - Post-merge hygiene: rebuild the native runtime on the `main` checkout
+    (`python3 scripts/build_native.py`) so `vendor/lib` and the bridge identity
+    sidecars match the new provenance; the b9551 binaries are not compatible with
+    the new manifest and the bridge refuses them.
 
 ### Post-RC38 (bundled into rc39; historical)
 
@@ -1666,7 +1767,7 @@ causal mutation (dropping/altering one expected fact per seam fails the gate).
 - Python no longer exposes upstream mtmd structures. The mandatory co-located `liborbit-mtmd-bridge` accepts primitive values and opaque handles, constructs `mtmd_context_params` and `mtmd_input_text` from the compiled headers, and adapts reviewed bitmap return profiles.
 - The bridge rejects unknown context, input-text, bitmap, or capability ABI layouts before mmproj initialization. Core ctypes structures passed by value are checked against bridge-reported `sizeof`, `alignof`, and relevant `offsetof` values.
 - Bridge reuse is revision-bound. Its identity covers compiler/version, bridge flags, native CMake configuration, relevant source/header hashes, every co-located runtime-library hash, the bridge artifact hash, upstream provenance, and the Orbit patchset hash. Missing or mismatched identity fails explicitly.
-- Current vendor provenance is upstream `b9551` at `379ac6673b5cd75c7b4e07d1521c50f1e093878c`, source-tree hash `4adb967e643363e7dc4d01d632b3a8471e0df2ec84ff304d364dc182f63e7ee1`, and Orbit patchset hash `dea2f205ed2a73d09ad203e08ba85545474742dbb0191f4f1a9b3a86beb4b435`.
+- Current vendor provenance is upstream `41abbfd599fbdd3470fcae0a1fb6530ad8403cd7` (no upstream release tag; build number `10968`, the parent of `b10969`, recorded as `upstream_build_number`), source-tree hash `166e8a8c933e0445de27af3c30347fe61d116bf0ee850d093a4749bcdf18da83`, Orbit patchset hash `07b1a48d13610cc7fc51c63d6bbb0d6be8788f3faaf88a8d66770372ecfb5cb0` (`orbit-unified-diff-v1`) and reproducible v2 attestation `f50b7229db767cbd5bc5ef1f69bb39156bbe4578ee7a143b3c5d3a3a1dda4e84`. Previous pin: `b9551` / `379ac667` (LLAMA-BACKEND-41ABBFD-UPGRADE-18).
 - Native CMake builds receive vendor commit/build metadata explicitly. `LLAMA_COMMIT` must never be inferred from the enclosing Orbit repository.
 - This hardening does not update the production llama.cpp revision. See `docs/NATIVE_MTMD_ABI.md`.
 
@@ -2491,6 +2592,8 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 ## Main Commits
 
+- post-rc39 (unreleased): LLAMA-BACKEND-41ABBFD-UPGRADE-18 (#354) — vendored
+  llama.cpp backend b9551 → 41abbfd; see the Post-RC39 entry in Release State.
 - post-rc38 (unreleased, newest last): `b465ed6` migration-handoff closure,
   `fa67e5a` empty-plan re-ask + atomic `adopt_plan`, `c9ace69` Dell CPU CHAT
   cache baseline, `47d6b4b` measured server startup profile, then
