@@ -11,6 +11,7 @@ from orbit.backend.llama_server import LlamaServerBackend, LlamaServerError
 from orbit.dev.bench_core import main as bench_core_main
 from orbit.dev.release_confidence import main as release_confidence_main
 from orbit.native_llama.download_cli import main as native_download_main
+from orbit.native_llama.model_store import main as config_main
 from orbit.native_server.app import run_server
 from orbit.runtime import ChatRuntime
 from orbit.runtime.artifacts import cleanup_stale_artifact_entries
@@ -62,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "download":
         return native_download_main(argv)
+    if argv and argv[0] == "config":
+        return config_main(argv[1:])
     if argv and argv[0] == "server":
         return run_server(argv[1:])
     if argv and argv[0] == "bench-core":

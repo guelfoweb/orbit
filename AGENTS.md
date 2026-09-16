@@ -921,8 +921,9 @@ Release State entry below.
   `gpu_layers=0`.
 - Next unreleased-development baseline: `main` at/after the rc39 release commit.
   Unreleased production work beyond it: the backend re-pin
-  LLAMA-BACKEND-41ABBFD-UPGRADE-18 and the Qwen3.8 Flash Next enablement
-  QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 (see Post-RC39).
+  LLAMA-BACKEND-41ABBFD-UPGRADE-18, the Qwen3.8 Flash Next enablement
+  QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 and the models-directory UX
+  MODEL-STORE-UX-20 (see Post-RC39).
 - See `docs/releases/v0.0.1-rc39.md`.
 
 ### Post-RC39 (unreleased on `main`)
@@ -1104,6 +1105,57 @@ Release State entry below.
     discovery cannot see the symlinked layout — both fixed/documented above,
     plus the split-GGUF download refusal and a `run_server` wiring test);
     delta re-review BLOCKER 0 / MAJOR 0.
+
+- **MODEL-STORE-UX-20 (2026-09-16, #PRNUM) — one configurable models
+  directory for every model operation. UX only: no llama.cpp change, no
+  inference or qualified-profile change.**
+  - **Canonical resolver:** `model_registry.resolve_models_dir(explicit)` →
+    `ModelsDirResolution(path, source, config_path, config_error)`, with
+    `effective_models_dir(explicit)` as the path-only form. Precedence, fixed:
+    `--models-dir` (cli) > `ORBIT_MODELS_DIR` (env) > `models_dir` persisted in
+    the terminal client's existing `~/.orbit/config.json` (config) > the
+    historical default `<orbit>/models` (default; `~/.cache/orbit/models`
+    outside a checkout). No new config file: the terminal client and
+    `orbit config` share `orbit_config_path()`. The path is expanded, never
+    resolved, so a models directory that is itself a symlink keeps working; a
+    malformed config file is reported (`config_error`) and falls through rather
+    than blocking a model operation. Every former `models_dir or
+    default_models_dir()` fallback (registry resolution, discovery, download,
+    the server's discovery/download/bootstrap sites) now goes through it.
+  - **CLI:** `orbit config models-dir <path>` creates the directory when it
+    can (parents included), refuses clearly when it cannot (permission denied,
+    file in the way, not writable) and never invokes sudo; it merges the key
+    into the config file atomically and preserves the other settings.
+    `orbit config models-dir` prints the effective directory, its source and
+    whether it exists. `orbit download --models-dir` / `orbit server
+    --models-dir` remain the per-command override.
+  - **Filesystem advisory** (`model_store.large_model_advisory`): before a
+    download, the CLI (and the interactive server download) probe the target
+    size with an HTTP HEAD (`x-linked-size`/`Content-Length`, best effort) and
+    the filesystem backing the models directory (`/proc/self/mountinfo`,
+    nearest existing ancestor). Only when the filesystem is a known unfavorable
+    one (currently eCryptfs) AND the model is larger than RAM (or its size is
+    unknown) a short advisory is printed to stderr once per operation; it
+    never blocks, never prompts, and shows no internals unless `verbose`.
+  - **Tests:** `tests/test_model_store.py` (A default unchanged; B persisted
+    dir drives download, registry resolution and discovery; C env beats
+    config; D explicit beats env; E directory created; F unwritable /
+    file-in-the-way / corrupt config fail clearly without sudo; G symlinked
+    models directory still works; H advisory silent in good configurations,
+    text for the bad one, and never changes what the download CLI does; I
+    unrelated config keys preserved and still loaded by the terminal client;
+    plus the `orbit config` CLI itself).
+  - **Real CLI smoke (ext4 temp dir, throwaway HOME):** `orbit config
+    models-dir` printed the default; setting `/var/tmp/orbit-smoke-…/models`
+    created it and recorded it; `orbit download` of a model already placed
+    there answered "already present" with that path; `orbit server
+    --show-profile --model-id qwen38-flash-next-ud-iq1-m` resolved the model
+    there (and still applied the qualified Dell tier); discovery with no
+    `--models-dir` listed it AVAILABLE. The advisory fired for the 74.5 GB
+    Qwen3.8 on the eCryptfs `/home` default and stayed silent on ext4.
+  - Not done on purpose: no automatic migration of existing models, no `/srv`
+    or symlink management, no filesystem tuning. Full non-live suite RC=0;
+    independent review BLOCKER 0 / MAJOR 0.
 
 ### Post-RC38 (bundled into rc39; historical)
 
@@ -2676,6 +2728,9 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 - post-rc39 (unreleased): LLAMA-BACKEND-41ABBFD-UPGRADE-18 (#354) — vendored
   llama.cpp backend b9551 → 41abbfd; see the Post-RC39 entry in Release State.
+- post-rc39 (unreleased): MODEL-STORE-UX-20 (#PRNUM) — `orbit config models-dir`,
+  one canonical models-directory resolver, eCryptfs large-model advisory; see the
+  Post-RC39 entry in Release State.
 - post-rc39 (unreleased): QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 (#355) — Qwen3.8
   Flash Next UD-IQ1_M qualified on the Dell (registry, verified identity, qualified
   startup profile tier); see the Post-RC39 entry in Release State.

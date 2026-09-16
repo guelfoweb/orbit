@@ -48,9 +48,10 @@ from orbit.native_llama.model_discovery import (
     paint_model_status,
 )
 from orbit.terminal.theme import supports_ansi
-from orbit.native_llama.model_download import download_model
+from orbit.native_llama.model_download import download_model, huggingface_resolve_url, parse_huggingface_spec
+from orbit.native_llama.model_store import large_model_advisory, remote_content_length
 from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID
-from orbit.native_llama.model_registry import default_hf_cache, default_models_dir, get_manifest, local_model_path
+from orbit.native_llama.model_registry import default_hf_cache, effective_models_dir, get_manifest, local_model_path
 from orbit.native_llama.paths import (
     DEFAULT_LLAMA_ROOT,
     DEFAULT_MODEL_ID,
@@ -1769,7 +1770,7 @@ def _print_model_discovery(args: argparse.Namespace, paths: NativeLlamaPaths | N
             build_bin = None
     try:
         result = discover_models(
-            models_dir=args.models_dir or default_models_dir(),
+            models_dir=effective_models_dir(args.models_dir),
             hf_cache=args.hf_cache or default_hf_cache(),
             explicit_model=args.model,
             build_bin=build_bin,
@@ -1798,7 +1799,7 @@ def _choose_verified_model(args: argparse.Namespace) -> "tuple[ModelDiscoveryRow
     try:
         build_bin = _resolve_native_runtime(args.llama_root)[1]
         result = discover_models(
-            models_dir=args.models_dir or default_models_dir(),
+            models_dir=effective_models_dir(args.models_dir),
             hf_cache=args.hf_cache or default_hf_cache(),
             build_bin=build_bin,
         )
@@ -1906,7 +1907,13 @@ def _download_selected_model(
         print("error: invalid download confirmation", file=sys.stderr)
         return 1
 
-    models_dir = args.models_dir or default_models_dir()
+    models_dir = effective_models_dir(args.models_dir)
+    advisory = large_model_advisory(
+        models_dir,
+        model_bytes=remote_content_length(huggingface_resolve_url(parse_huggingface_spec(target))),
+    )
+    if advisory:
+        print(advisory, file=sys.stderr)
     progress = DownloadProgress()
     try:
         try:
