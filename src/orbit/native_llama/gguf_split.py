@@ -24,6 +24,7 @@ SPLIT_TENSORS_KEY = "split.tensors.count"
 _SPLIT_KEYS = frozenset({SPLIT_COUNT_KEY, SPLIT_NO_KEY, SPLIT_TENSORS_KEY})
 _SCALAR_FORMATS = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
 _HEADER_CAP = 64 * 1024 * 1024  # a GGUF header larger than this is not a model we serve
+_MAX_ARRAY_DEPTH = 4  # gguf-split/convert never nest deeper; a crafted file must not recurse us
 
 
 @dataclass(frozen=True)
@@ -58,8 +59,6 @@ def parse_split_name(name: str) -> SplitName | None:
     index, count = int(match.group("index")), int(match.group("count"))
     if count < 1 or index < 1 or index > count:
         raise ValueError(f"malformed split GGUF name: {name} (shard {index} of {count})")
-    if len(match.group("index")) != len(match.group("count")):
-        raise ValueError(f"malformed split GGUF name: {name} (inconsistent zero padding)")
     return SplitName(
         base=match.group("base"), index=index, count=count, width=len(match.group("count")), ext=match.group("ext")
     )
@@ -117,8 +116,16 @@ def read_gguf_header(path: Path, *, keys: frozenset[str] | None = None) -> GGUFH
                 if keys is None or key in keys:
                     kv[key] = value
             return GGUFHeader(version=version, tensor_count=tensor_count, kv=kv)
-    except (struct.error, EOFError, UnicodeDecodeError) as exc:
+    except _HeaderError as exc:
+        raise ValueError(f"{path.name}: {exc}") from None
+    except (struct.error, EOFError, OverflowError, MemoryError, RecursionError, TypeError) as exc:
+        # Every way a crafted or damaged header can go wrong is one answer:
+        # "not a header we accept", never a crash of the caller.
         raise ValueError(f"{path.name}: truncated or malformed GGUF header ({exc.__class__.__name__})") from None
+
+
+class _HeaderError(ValueError):
+    """A structural problem found while reading; reported with the file name."""
 
 
 class _Reader:
@@ -129,7 +136,7 @@ class _Reader:
     def read(self, size: int) -> bytes:
         self.consumed += size
         if self.consumed > _HEADER_CAP:
-            raise ValueError("GGUF header exceeds the supported size")
+            raise _HeaderError("GGUF header exceeds the supported size")
         data = self.handle.read(size)
         if len(data) != size:
             raise EOFError("unexpected end of file")
@@ -140,22 +147,28 @@ class _Reader:
 
     def string(self) -> str:
         (length,) = self.unpack("<Q")
-        return self.read(length).decode("utf-8")
+        # Metadata strings we merely skip over must not be able to fail the
+        # parse; a token table with a non-UTF-8 entry is still a valid GGUF.
+        return self.read(length).decode("utf-8", errors="replace")
 
-    def value(self, kind: int, *, keep: bool):
+    def value(self, kind: int, *, keep: bool, depth: int = 0):
         if kind == 8:
             return self.string()
         if kind == 9:
+            if depth >= _MAX_ARRAY_DEPTH:
+                raise _HeaderError("GGUF metadata arrays nested too deeply")
             (item_kind,) = self.unpack("<I")
             (length,) = self.unpack("<Q")
             if item_kind in _SCALAR_FORMATS and not keep:
                 self.read(struct.calcsize(_SCALAR_FORMATS[item_kind]) * length)
                 return None
-            items = [self.value(item_kind, keep=keep) for _ in range(length)]
+            if length > _HEADER_CAP:
+                raise _HeaderError("GGUF metadata array is implausibly long")
+            items = [self.value(item_kind, keep=keep, depth=depth + 1) for _ in range(length)]
             return items if keep else None
         fmt = _SCALAR_FORMATS.get(kind)
         if fmt is None:
-            raise ValueError(f"unknown GGUF value type {kind}")
+            raise _HeaderError(f"unknown GGUF value type {kind}")
         return self.unpack(fmt)[0]
 
 
@@ -198,20 +211,29 @@ def validate_split_set(first: Path) -> SplitValidation:
         except ValueError as exc:
             problems.append(str(exc))
             continue
-        count = header.kv.get(SPLIT_COUNT_KEY)
-        number = header.kv.get(SPLIT_NO_KEY)
-        tensors = header.kv.get(SPLIT_TENSORS_KEY)
+        for key in (SPLIT_COUNT_KEY, SPLIT_NO_KEY, SPLIT_TENSORS_KEY):
+            if key in header.kv and _split_int(header.kv[key]) is None:
+                problems.append(f"{shard.name}: {key} is not an integer")
+        count = _split_int(header.kv.get(SPLIT_COUNT_KEY))
+        number = _split_int(header.kv.get(SPLIT_NO_KEY))
+        tensors = _split_int(header.kv.get(SPLIT_TENSORS_KEY))
         if count != split.count:
             problems.append(f"{shard.name}: split.count is {count}, filename says {split.count}")
         if number != position:
             problems.append(f"{shard.name}: split.no is {number}, expected {position}")
         if tensors is not None:
             if first_tensors is None:
-                first_tensors = int(tensors)
-            elif int(tensors) != first_tensors:
-                problems.append(f"{shard.name}: split.tensors.count is {int(tensors)}, "
+                first_tensors = tensors
+            elif tensors != first_tensors:
+                problems.append(f"{shard.name}: split.tensors.count is {tensors}, "
                                 f"disagrees with the first shard ({first_tensors})")
     return SplitValidation(first, split.count, shards, tuple(problems))
+
+
+def _split_int(value) -> int | None:
+    """The split.* keys are integers; anything else (a crafted array, a string)
+    reads as "not there" and is reported as a mismatch, never a crash."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def split_problems(path: Path) -> tuple[str, ...]:

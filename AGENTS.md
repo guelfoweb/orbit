@@ -1172,7 +1172,7 @@ Release State entry below.
     qualify_qwen3_coder.py` default routed through the resolver; test F now
     forbids process spawning); delta re-review BLOCKER 0 / MAJOR 0.
 
-- **GGUF-MULTISHARD-DOWNLOAD-21 (2026-09-16, #PRNUM) — native split GGUF
+- **GGUF-MULTISHARD-DOWNLOAD-21 (2026-09-16, #357) — native split GGUF
   download. No llama.cpp change, no profile/inference change, MODEL-STORE-UX-20
   semantics untouched; single-file `orbit download` byte-for-byte as before.**
   - **Split detection (`native_llama/gguf_split.py`):** a file name matching
@@ -1180,20 +1180,30 @@ Release State entry below.
     written by `gguf-split`) is a shard; any other `.gguf` is a single file and
     keeps every historical contract. The sibling set is derived from the name
     alone (same base, same padding width, indices 1..M, never scraped from the
-    repo); index 0, index > count, count 0 or inconsistent padding is a
-    malformed name and is refused before any network request. Shard 1 is the
-    canonical entry of the set.
+    repo); index 0, index > count or count 0 is a malformed name and is
+    refused before any network request. Shard 1 is the canonical entry of the
+    set. Known corner: a lone `<base>-00001-of-00001.gguf` without split keys
+    (nothing real writes one) is treated as a one-shard set and reported
+    INCOMPLETE instead of going through the single-file path.
   - **Download / resume (`model_download.py`):** `download_model` routes split
     names to `_download_split_set`: for every shard in order it reuses a shard
     that already exists and is sound (non-empty, header parses, `split.no` /
     `split.count` match its position), refuses (does not overwrite) a present
     file that is not a valid shard, otherwise runs `fetch_resumable`: bytes go
     to `<shard>.part` under an `flock`ed `<shard>.lock` (one writer per
-    destination; a second writer fails cleanly), an existing `.part` is
-    continued with `Range: bytes=<size>-` (206 appends, 200 restarts from
-    zero, 416 means already complete), the received size is checked against
-    `Content-Length`/`Content-Range` (`DownloadIncomplete` keeps the `.part`
-    for the next run), then fsync + atomic `os.replace` to the final name. A
+    destination; a second writer fails cleanly; the lock file is removed on
+    release and its inode re-checked after locking, so an orphaned inode can
+    never give two writers the same path), the ETag of the first 200 answer
+    is kept in `<shard>.part.etag`, and an existing `.part` is continued with
+    `Range: bytes=<size>-` + `If-Range: <etag>`: 206 appends only when
+    `Content-Range` starts exactly at the partial size (otherwise the partial
+    is discarded and the fetch restarts), 200 restarts from zero, and 416 —
+    which the real `urlopen` raises as `HTTPError` — finalizes the partial
+    only when its size equals the `Content-Range: bytes */N` total (a stale,
+    oversized partial is discarded and re-fetched). A server that declares no
+    size is refused before anything is written (`DownloadIncomplete`); a short
+    transfer against the declared size keeps the `.part` for the next run;
+    then fsync + atomic `os.replace` to the final name + directory fsync. A
     shard therefore never exists under its final name unless it is complete.
     Progress/UX: `orbit download <repo>/<first shard>` and the interactive
     server download print `shard i/N: <name> (already present|downloading|
@@ -1206,15 +1216,22 @@ Release State entry below.
     `split.tensors.count` agrees with the first shard; the pure-Python header
     reader parses only the KV section (arrays skipped, 64 MiB cap) — the real
     3-shard Qwen3.8 set validates in ~0.2 s. After a download the set is
-    validated; on a problem, shards fetched in this run that are named in the
-    problem are removed (a pre-existing user file is never deleted) and the
-    command fails with the problem list. `resolve_model` (server / `--model-id`)
+    validated; on a problem, shards fetched in this run whose OWN header is
+    wrong are removed, a cross-shard disagreement (tensor counts) deletes
+    nothing because it does not say which file is wrong, a pre-existing user
+    file is never deleted, and the command fails with the problem list. The
+    reader turns every crafted-header failure (deep array nesting, implausible
+    lengths, non-integer split keys, unknown value types; non-UTF-8 strings
+    are tolerated) into a named problem, never a crash of discovery or the
+    server. `resolve_model` (server / `--model-id`)
     refuses an incomplete split target with the exact `orbit download` command
     to resume it.
   - **Discovery:** an incomplete split set (missing/empty/corrupt/inconsistent
     shard) is a `local=INCOMPLETE` row (existing `local` column, painted
     yellow) — a registry model shows its name, `support=VERIFIED` and the
-    `orbit download …` action; an unregistered set shows INCOMPLETE/UNVERIFIED.
+    `orbit download …` action when the set sits in the registry repo's own
+    `<owner>--<repo>/` directory; any other incomplete set (unregistered, or a
+    same-named set elsewhere) shows INCOMPLETE/UNVERIFIED under its file name.
     Only a fully valid set is AVAILABLE. Shards 2..N never appear as rows and
     the backend only ever receives the first shard's path.
   - **Tests:** `tests/test_gguf_multishard.py` (A–J + failure matrix, all
@@ -1226,14 +1243,25 @@ Release State entry below.
     missing, existing 1 + missing 2/3 fetches only 2/3, canonical models dir
     respected, first shard only reaches the backend, Qwen3.8 registry download
     end-to-end (CLI lines, re-run reports "already present"), one writer per
-    destination. `test_qwen38_flash_next_enablement.SplitDownloadTests` now
-    pins the expansion seam instead of the removed refusal.
+    destination, raised-416 finalization of a fully written partial, stale
+    oversized partial discarded on 416, 206 at the wrong offset restarted,
+    server without a declared size refused, `If-Range` with the recorded ETag,
+    cross-shard disagreement keeps the fetched shards, crafted headers
+    (nesting, array-typed split keys, unknown types) → INCOMPLETE.
+    `test_qwen38_flash_next_enablement.SplitDownloadTests` now pins the
+    expansion seam instead of the removed refusal. Independent adversarial
+    review: first pass BLOCKER 0 / MAJOR 2 / MINOR 5 (416 raised by urllib
+    never finalized a full partial, stale partial finalized on 416, undeclared
+    size finalized, lock-inode race, crafted-header crashes, cleanup policy,
+    weak assertion) — all fixed; delta re-review BLOCKER 0 / MAJOR 0.
   - **Local smoke:** temp store hard-linked to the real 3-shard Qwen3.8 set →
     `validate_split_set` complete in 0.2 s, discovery AVAILABLE/VERIFIED, `orbit
     download` prints three "already present" lines with zero requests; with
     shard 3 unlinked → INCOMPLETE + `resolve_model` refusal with the resume
     command; a synthetic 3-shard set served by a local HTTP server with an
-    injected mid-shard drop resumed from the `.part` size on the second run.
+    injected mid-shard drop resumed from the `.part` size on the second run,
+    and a full-size `.part` left "before the rename" finalized through the
+    real urllib 416 path.
 
 ### Post-RC38 (bundled into rc39; historical)
 
@@ -2809,7 +2837,7 @@ box is not a comparable number; token/cache/rate and correctness are.
 - post-rc39 (unreleased): MODEL-STORE-UX-20 (#356) — `orbit config models-dir`,
   one canonical models-directory resolver, eCryptfs large-model advisory; see the
   Post-RC39 entry in Release State.
-- post-rc39 (unreleased): GGUF-MULTISHARD-DOWNLOAD-21 (#PRNUM) — native split
+- post-rc39 (unreleased): GGUF-MULTISHARD-DOWNLOAD-21 (#357) — native split
   GGUF download (`orbit download <repo>/<first shard>` fetches, resumes and
   validates the whole set; discovery AVAILABLE/INCOMPLETE by first shard); see
   the Post-RC39 entry in Release State.

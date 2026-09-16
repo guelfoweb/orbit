@@ -159,7 +159,7 @@ def discover_models(
         rows=rows,
         wall_ms=(time.monotonic() - started) * 1000.0,
         filesystem_scans=scan_count,
-        metadata_inspections=len(inspections) if inspector is not None else 0,
+        metadata_inspections=sum(1 for item in inspections if not item.incomplete) if inspector is not None else 0,
     )
 
 
@@ -317,8 +317,15 @@ def _rows(
                 continue
             # A registry model whose split set is on disk but not whole is
             # INCOMPLETE, not MISSING: the same download command resumes it.
+            store_dir = manifest.target.repo.replace("/", "--")
             partial = next(
-                (item for item in inspections if item.incomplete and item.path.name == Path(manifest.target.file).name),
+                (
+                    item
+                    for item in inspections
+                    if item.incomplete
+                    and item.path.name == Path(manifest.target.file).name
+                    and item.path.parent.name == store_dir
+                ),
                 None,
             )
             if partial is not None:

@@ -993,6 +993,7 @@ class NativeServerBootstrapTests(unittest.TestCase):
             "ggml-org/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf",
             models_dir=models_dir,
             progress=mock.ANY,
+            on_shard=mock.ANY,
         )
         self.assertEqual(len(captured_args), 1)
         self.assertEqual(captured_args[0].model, downloaded_path.resolve())

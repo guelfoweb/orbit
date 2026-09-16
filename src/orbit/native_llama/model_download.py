@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen, urlretrieve
+import contextlib
 import fcntl
 import os
+import re
 import tempfile
 from typing import Callable
 
@@ -117,6 +120,8 @@ def download_model(
 _CHUNK = 1 << 20
 _PART_SUFFIX = ".part"
 _LOCK_SUFFIX = ".lock"
+_ETAG_SUFFIX = ".part.etag"
+_CONTENT_RANGE = re.compile(r"^bytes (?:(?P<start>\d+)-(?P<end>\d+)|\*)/(?:(?P<total>\d+)|\*)$")
 
 
 class DownloadIncomplete(RuntimeError):
@@ -129,7 +134,7 @@ def _download_split_set(request, split, requested: Path, *, progress, opener, on
     prefix = request.file.rsplit("/", 1)[0] + "/" if "/" in request.file else ""
     shards = tuple(directory / name for name in split.siblings())
     first = shards[0]
-    fetched: list[Path] = []
+    fetched: list[tuple[int, Path]] = []
     for position, shard in enumerate(shards, start=1):
         sibling_request = DownloadRequest(repo=request.repo, file=f"{prefix}{shard.name}")
         url = huggingface_resolve_url(sibling_request)
@@ -144,14 +149,15 @@ def _download_split_set(request, split, requested: Path, *, progress, opener, on
         action = "resume" if _part_path(shard).exists() and _part_path(shard).stat().st_size > 0 else "download"
         _notify(on_shard, position, split.count, shard.name, action)
         fetch_resumable(url, shard, opener=opener, progress=progress)
-        fetched.append(shard)
+        fetched.append((position, shard))
     validation = validate_split_set(first)
     if not validation.complete:
-        # Anything WE just fetched that does not validate is discarded so it
-        # cannot pass for a complete shard later; pre-existing files are the
-        # user's and are only reported.
-        for shard in fetched:
-            if any(problem.startswith(f"{shard.name}:") for problem in validation.problems):
+        # A shard WE just fetched whose own header is wrong is discarded so it
+        # cannot pass for a sound shard later. A cross-shard disagreement
+        # (tensor counts) does not say which file is wrong, so nothing is
+        # deleted for it; pre-existing files are the user's and only reported.
+        for position, shard in fetched:
+            if not _shard_is_sound(shard, position - 1, split.count):
                 shard.unlink(missing_ok=True)
         raise ValueError("split GGUF set is not consistent: " + "; ".join(validation.problems))
     return DownloadResult(path=first, downloaded=bool(fetched), url=huggingface_resolve_url(
@@ -182,71 +188,185 @@ def fetch_resumable(url: str, destination: Path, *, opener=None, progress: Downl
                     chunk_size: int = _CHUNK) -> Path:
     """Fetch `url` into `destination` through a persistent `<name>.part` file.
 
-    A partial file is continued with an HTTP Range request (a server that
-    ignores the range restarts it). The final name appears only after the
-    declared size has been written, by an atomic rename, so a partial transfer
-    never looks complete. One writer per destination is enforced with a lock
-    file; a second concurrent caller fails instead of corrupting the file.
+    A partial file is continued with an HTTP Range request (`If-Range` with
+    the ETag recorded when it was started, so a changed remote object restarts
+    it). 206 appends only when the server's `Content-Range` starts exactly at
+    the partial size; 200 restarts from zero; 416 ("range not satisfiable")
+    finalizes the partial only when its size equals the `Content-Range` total,
+    otherwise the stale partial is discarded and the fetch starts over. A
+    transfer whose size the server does not declare is never finalized. The
+    final name appears only after the declared size has been written, by an
+    atomic rename followed by a directory fsync, so a partial transfer never
+    looks complete. One writer per destination is enforced with a lock file; a
+    second concurrent caller fails instead of corrupting the file.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     part = _part_path(destination)
+    etag_path = destination.with_name(destination.name + _ETAG_SUFFIX)
     lock_path = destination.with_name(destination.name + _LOCK_SUFFIX)
-    with lock_path.open("a+b") as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise RuntimeError(f"another download is already writing {destination.name}; wait for it to finish") from None
-        try:
+    with _destination_lock(lock_path):
+        for _attempt in range(2):
             existing = part.stat().st_size if part.exists() else 0
-            headers = {"Range": f"bytes={existing}-"} if existing > 0 else {}
-            with (opener or urlopen)(Request(url, headers=headers), timeout=60) as response:
+            headers: dict[str, str] = {}
+            if existing > 0:
+                headers["Range"] = f"bytes={existing}-"
+                etag = _read_small(etag_path)
+                if etag:
+                    headers["If-Range"] = etag
+            try:
+                response = (opener or urlopen)(Request(url, headers=headers), timeout=60)
+            except HTTPError as exc:
+                # urllib raises for 416; a fake opener may return it instead
+                # (handled below). Both mean "your offset is past the end".
+                if exc.code != 416 or existing == 0:
+                    raise
+                if _content_range_total(exc.headers) == existing:
+                    _finalize(part, destination, etag_path)
+                    return destination
+                _discard(part, etag_path)
+                continue
+            with response:
                 status = int(getattr(response, "status", 200) or 200)
-                total: int | None = None
+                if status == 416 and existing > 0:
+                    if _content_range_total(response.headers) == existing:
+                        _finalize(part, destination, etag_path)
+                        return destination
+                    _discard(part, etag_path)
+                    continue
                 if status == 206 and existing > 0:
+                    start, total = _content_range(response.headers)
+                    if total is None and _content_length(response.headers) is not None:
+                        total = existing + _content_length(response.headers)
+                    if start is not None and start != existing:
+                        _discard(part, etag_path)
+                        continue
                     mode = "ab"
-                    content_range = response.headers.get("Content-Range") or ""
-                    if "/" in content_range and content_range.rsplit("/", 1)[1].isdigit():
-                        total = int(content_range.rsplit("/", 1)[1])
-                    elif (response.headers.get("Content-Length") or "").isdigit():
-                        total = existing + int(response.headers.get("Content-Length"))
-                elif status == 416 and existing > 0:
-                    # The server says our offset is at or past the end: the
-                    # partial file already holds everything it will ever send.
-                    mode = None
-                    total = existing
                 else:
+                    # 200: the server ignored the range (or there was none) —
+                    # whatever partial we had is replaced from byte zero.
                     mode = "wb"
                     existing = 0
-                    if (response.headers.get("Content-Length") or "").isdigit():
-                        total = int(response.headers.get("Content-Length"))
+                    total = _content_length(response.headers)
+                    _remember_etag(etag_path, response.headers.get("ETag"))
+                if total is None:
+                    raise DownloadIncomplete(
+                        f"{destination.name}: the server did not declare the file size, so completion "
+                        f"cannot be verified; the transfer was not started"
+                    )
                 written = existing
-                if mode is not None:
-                    with part.open(mode) as handle:
+                with part.open(mode) as handle:
+                    if progress is not None:
+                        progress(written, total)
+                    while True:
+                        data = response.read(chunk_size)
+                        if not data:
+                            break
+                        handle.write(data)
+                        written += len(data)
                         if progress is not None:
-                            progress(written, total or 0)
-                        while True:
-                            data = response.read(chunk_size)
-                            if not data:
-                                break
-                            handle.write(data)
-                            written += len(data)
-                            if progress is not None:
-                                progress(written, total or 0)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-            if total is not None and written != total:
+                            progress(written, total)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            if written != total:
                 raise DownloadIncomplete(
                     f"{destination.name}: received {written} of {total} bytes; run the download again to resume"
                 )
             if written == 0:
                 raise DownloadIncomplete(f"{destination.name}: the server sent no data")
-            os.replace(part, destination)
+            _finalize(part, destination, etag_path)
+            return destination
+        raise DownloadIncomplete(f"{destination.name}: the partial file could not be resumed; run the download again")
+
+
+@contextlib.contextmanager
+def _destination_lock(lock_path: Path):
+    """Exclusive, non-blocking ownership of a destination. The lock file is
+    removed on release; because a waiter may have opened the old inode, the
+    inode is re-checked after locking so two writers can never both own the
+    same path."""
+    for _attempt in range(16):
+        lock = lock_path.open("a+b")
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock.close()
+            raise RuntimeError(f"another download is already writing {lock_path.name[: -len(_LOCK_SUFFIX)]}; "
+                               f"wait for it to finish") from None
+        try:
+            current = lock_path.stat().st_ino
+        except FileNotFoundError:
+            current = None
+        if current != os.fstat(lock.fileno()).st_ino:
+            lock.close()  # we locked an inode the previous owner already removed
+            continue
+        try:
+            yield lock
         finally:
-            # All writes are done by now (success or failure), so the lock file
-            # can go while still held: a later writer creates a fresh one.
+            # All writes are done by now (success or failure), so the lock
+            # file can go while still held: a later writer creates a fresh one.
             lock_path.unlink(missing_ok=True)
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-    return destination
+            lock.close()
+        return
+    raise RuntimeError(f"could not take the download lock for {lock_path.name[: -len(_LOCK_SUFFIX)]}")
+
+
+def _finalize(part: Path, destination: Path, etag_path: Path) -> None:
+    os.replace(part, destination)
+    etag_path.unlink(missing_ok=True)
+    _fsync_directory(destination.parent)
+
+
+def _discard(part: Path, etag_path: Path) -> None:
+    part.unlink(missing_ok=True)
+    etag_path.unlink(missing_ok=True)
+
+
+def _fsync_directory(directory: Path) -> None:
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _read_small(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _remember_etag(etag_path: Path, etag: str | None) -> None:
+    if etag:
+        etag_path.write_text(etag.strip(), encoding="utf-8")
+    else:
+        etag_path.unlink(missing_ok=True)
+
+
+def _content_length(headers) -> int | None:
+    value = (headers.get("Content-Length") or "").strip() if headers is not None else ""
+    return int(value) if value.isdigit() else None
+
+
+def _content_range(headers) -> tuple[int | None, int | None]:
+    """(start, total) from `Content-Range: bytes S-E/T`; None for what is absent."""
+    value = (headers.get("Content-Range") or "").strip() if headers is not None else ""
+    match = _CONTENT_RANGE.match(value)
+    if match is None:
+        return None, None
+    start = int(match.group("start")) if match.group("start") else None
+    total = int(match.group("total")) if match.group("total") else None
+    return start, total
+
+
+def _content_range_total(headers) -> int | None:
+    return _content_range(headers)[1]
 
 
 def download_all_for_repo(

@@ -21,6 +21,8 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from urllib.error import HTTPError  # noqa: E402
+
 from orbit.native_llama import download_cli  # noqa: E402
 from orbit.native_llama.gguf_split import (  # noqa: E402
     is_secondary_shard,
@@ -77,29 +79,41 @@ class FakeHTTP:
     transfer stop after n payload bytes (simulating a dropped connection);
     `ignore_range` makes the server answer 200 to a ranged request."""
 
-    def __init__(self, files: dict[str, bytes], *, fail_after: dict[str, int] | None = None, ignore_range: bool = False):
+    def __init__(self, files: dict[str, bytes], *, fail_after: dict[str, int] | None = None, ignore_range: bool = False,
+                 raise_416: bool = False, etag: str | None = None, no_length: bool = False, shift_start: int = 0):
         self.files = files
         self.fail_after = dict(fail_after or {})
         self.ignore_range = ignore_range
+        self.raise_416 = raise_416        # like urllib: non-2xx is an HTTPError, not a response
+        self.etag = etag
+        self.no_length = no_length        # a server that never declares Content-Length
+        self.shift_start = shift_start    # a server whose 206 starts elsewhere than asked
         self.requests: list[tuple[str, str | None]] = []
+        self.headers_seen: list[dict[str, str]] = []
 
     def __call__(self, request, timeout=None):
         url = request.full_url
         rng = request.headers.get("Range")
         self.requests.append((url, rng))
+        self.headers_seen.append(dict(request.headers))
         if url not in self.files:
             raise OSError(f"404 {url}")
         body = self.files[url]
         start = 0
         status = 200
-        headers = {"Content-Length": str(len(body))}
+        headers = {} if self.no_length else {"Content-Length": str(len(body))}
+        if self.etag:
+            headers["ETag"] = self.etag
         if rng and not self.ignore_range:
             start = int(rng.split("=")[1].rstrip("-"))
             if start >= len(body):
+                if self.raise_416:
+                    raise HTTPError(url, 416, "Range Not Satisfiable", {"Content-Range": f"bytes */{len(body)}"}, None)
                 status = 416
                 headers = {"Content-Range": f"bytes */{len(body)}"}
                 body = b""
             else:
+                start = max(0, start + self.shift_start)
                 status = 206
                 headers = {"Content-Range": f"bytes {start}-{len(body)-1}/{len(body)}",
                            "Content-Length": str(len(body) - start)}
@@ -236,6 +250,42 @@ class ValidationTests(unittest.TestCase):
             self.assertIn("unsupported GGUF version", split_problems(root / QWEN_FIRST)[0])
             self.assertFalse(validate_split_set(root / "m-00004-of-00003.gguf").complete)  # malformed name
 
+    def test_F_crafted_headers_never_crash_validation_or_discovery(self) -> None:
+        def nested_arrays(depth: int) -> bytes:
+            inner = struct.pack("<IQ", 0, 0)  # empty u8 array
+            for _ in range(depth):
+                inner = struct.pack("<IQ", 9, 1) + inner
+            kv = _kv_string("x") + struct.pack("<I", 9) + inner
+            return struct.pack("<IIQQ", 0x46554747, 3, 0, 1) + kv + b"P" * 8
+
+        def header_with(kv_blobs: list[bytes]) -> bytes:
+            return struct.pack("<IIQQ", 0x46554747, 3, 0, len(kv_blobs)) + b"".join(kv_blobs) + b"P" * 8
+
+        u16 = lambda key, v: _kv_string(key) + struct.pack("<I", 2) + struct.pack("<H", v)  # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "models" / "o--r"; root.mkdir(parents=True)
+            first = root / "t-00001-of-00002.gguf"
+            (root / "t-00002-of-00002.gguf").write_bytes(gguf_bytes(count=2, number=1))
+            # thousands of nested arrays: a bounded ValueError, not a RecursionError
+            first.write_bytes(nested_arrays(5000))
+            self.assertEqual(split_problems(first), ("t-00001-of-00002.gguf: GGUF metadata arrays nested too deeply",))
+            # split.tensors.count carried as an array instead of an integer
+            array_kv = _kv_string("split.tensors.count") + struct.pack("<I", 9) + struct.pack("<IQ", 5, 1) + struct.pack("<i", 3)
+            first.write_bytes(header_with([u16("split.no", 0), u16("split.count", 2), array_kv]))
+            self.assertEqual(split_problems(first), ("t-00001-of-00002.gguf: split.tensors.count is not an integer",))
+            # a non-UTF-8 string in skipped metadata is tolerated: only the split keys matter
+            bad_string = _kv_string("s") + struct.pack("<I", 8) + struct.pack("<Q", 3) + b"\xff\xfe\xfd"
+            first.write_bytes(header_with([bad_string, u16("split.no", 0), u16("split.count", 2),
+                                           _kv_string("split.tensors.count") + struct.pack("<I", 5) + struct.pack("<i", 1224)]))
+            self.assertEqual(split_problems(first), ())
+            # unknown value type
+            first.write_bytes(header_with([_kv_string("k") + struct.pack("<I", 99)]))
+            self.assertEqual(split_problems(first), ("t-00001-of-00002.gguf: unknown GGUF value type 99",))
+            result = discover_models(models_dir=Path(tmp) / "models", hf_cache=Path(tmp) / "hf",
+                                     inspector=mock.Mock(side_effect=AssertionError("not inspected")))
+            self.assertEqual({r.model: r.local for r in result.rows if r.model.startswith("t-")},
+                             {"t-00001-of-00002.gguf": "INCOMPLETE"})
+
 
 class DownloadTests(unittest.TestCase):
     def test_J_requesting_the_first_shard_downloads_the_whole_set(self) -> None:
@@ -346,16 +396,93 @@ class DownloadTests(unittest.TestCase):
 
     def test_F_a_corrupt_downloaded_shard_is_discarded_and_reported(self) -> None:
         files = shard_set()
-        files["Qwen3.8-Flash-Next-UD-IQ1_M-00003-of-00003.gguf"] = gguf_bytes(count=3, number=2, tensors=5)  # inconsistent
+        third = "Qwen3.8-Flash-Next-UD-IQ1_M-00003-of-00003.gguf"
+        files[third] = gguf_bytes(count=3, number=1)  # served bytes carry the wrong split.no
         http = FakeHTTP(_urls(QWEN_REPO, files))
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "not consistent.*00003-of-00003.gguf: split.tensors.count is 5"):
+            with self.assertRaisesRegex(ValueError, "not consistent.*00003-of-00003.gguf: split.no is 1, expected 2"):
                 download_model(f"{QWEN_REPO}/{QWEN_FIRST}", models_dir=Path(tmp), opener=http)
             store = Path(tmp) / "unsloth--Qwen3.8-Flash-Next-GGUF"
             self.assertTrue((store / QWEN_FIRST).exists())
-            # the set is not complete; shards we fetched that fail their own
-            # check are removed, so nothing partial masquerades as complete
+            self.assertFalse((store / third).exists())          # the bad shard we fetched is gone
+            self.assertFalse((store / (third + ".part")).exists())
             self.assertFalse(validate_split_set(store / QWEN_FIRST).complete)
+
+    def test_F_a_cross_shard_disagreement_reports_but_deletes_nothing(self) -> None:
+        # The user's shard 1 comes from another build (sound header, other
+        # tensor count): the two shards we fetched are correct and are kept.
+        files = shard_set()
+        http = FakeHTTP(_urls(QWEN_REPO, files))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "unsloth--Qwen3.8-Flash-Next-GGUF"; store.mkdir(parents=True)
+            (store / QWEN_FIRST).write_bytes(gguf_bytes(count=3, number=0, tensors=77))
+            with self.assertRaisesRegex(ValueError, "split.tensors.count is 1224, disagrees with the first shard \(77\)"):
+                download_model(f"{QWEN_REPO}/{QWEN_FIRST}", models_dir=Path(tmp), opener=http)
+            self.assertEqual(sorted(p.name for p in store.iterdir()), sorted(files))
+            self.assertEqual((store / list(files)[1]).read_bytes(), files[list(files)[1]])
+
+    def test_a_raised_416_with_the_full_partial_finalizes_it(self) -> None:
+        # urllib raises HTTPError for 416; a fully written .part (crash before
+        # the rename) must finalize, not fail forever.
+        files = shard_set()
+        http = FakeHTTP(_urls(QWEN_REPO, files), raise_416=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "unsloth--Qwen3.8-Flash-Next-GGUF"; store.mkdir(parents=True)
+            second = "Qwen3.8-Flash-Next-UD-IQ1_M-00002-of-00003.gguf"
+            (store / (second + ".part")).write_bytes(files[second])
+            result = download_model(f"{QWEN_REPO}/{QWEN_FIRST}", models_dir=Path(tmp), opener=http)
+            self.assertTrue(result.downloaded)
+            self.assertEqual((store / second).read_bytes(), files[second])
+            self.assertEqual([r for r in http.requests if r[1]], [(f"{HF}/{QWEN_REPO}/resolve/main/{second}", f"bytes={len(files[second])}-")])
+            self.assertEqual(sorted(p.name for p in store.iterdir()), sorted(files))
+
+    def test_a_416_for_an_oversized_stale_partial_discards_it_and_restarts(self) -> None:
+        for raise_416 in (True, False):
+            with self.subTest(raise_416=raise_416), tempfile.TemporaryDirectory() as tmp:
+                url = "https://example.invalid/x.gguf"
+                body = b"N" * 100
+                http = FakeHTTP({url: body}, raise_416=raise_416)
+                dest = Path(tmp) / "x.gguf"
+                (Path(tmp) / "x.gguf.part").write_bytes(b"S" * 200)   # from another revision
+                fetch_resumable(url, dest, opener=http)
+                self.assertEqual(dest.read_bytes(), body)
+                self.assertEqual([r[1] for r in http.requests], ["bytes=200-", None])
+                self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["x.gguf"])
+
+    def test_a_206_that_does_not_start_at_the_partial_size_restarts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            url = "https://example.invalid/x.gguf"
+            body = bytes(range(256)) * 4
+            http = FakeHTTP({url: body}, shift_start=-7)
+            dest = Path(tmp) / "x.gguf"
+            (Path(tmp) / "x.gguf.part").write_bytes(body[:300])
+            fetch_resumable(url, dest, opener=http)
+            self.assertEqual(dest.read_bytes(), body)
+            self.assertEqual([r[1] for r in http.requests], ["bytes=300-", None])
+
+    def test_a_server_without_a_declared_size_is_refused_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            url = "https://example.invalid/x.gguf"
+            http = FakeHTTP({url: b"Q" * 50}, no_length=True)
+            dest = Path(tmp) / "x.gguf"
+            with self.assertRaisesRegex(DownloadIncomplete, "did not declare the file size"):
+                fetch_resumable(url, dest, opener=http)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), [])  # no .part, no final, no lock
+
+    def test_a_resume_sends_if_range_with_the_recorded_etag(self) -> None:
+        url = "https://example.invalid/x.gguf"
+        body = b"E" * 500
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "x.gguf"
+            http = FakeHTTP({url: body}, etag='"abc123"', fail_after={url: 120})
+            with self.assertRaises(ConnectionResetError):
+                fetch_resumable(url, dest, opener=http)
+            self.assertEqual((Path(tmp) / "x.gguf.part.etag").read_text(), '"abc123"')
+            fetch_resumable(url, dest, opener=http)
+            self.assertEqual(http.headers_seen[1].get("If-range"), '"abc123"')
+            self.assertEqual(http.headers_seen[1].get("Range"), "bytes=120-")
+            self.assertEqual(dest.read_bytes(), body)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["x.gguf"])
 
     def test_F_a_present_but_wrong_shard_is_reported_not_overwritten(self) -> None:
         files = shard_set()
@@ -448,6 +575,16 @@ class DiscoveryTests(unittest.TestCase):
             resolved = resolve_model(get_manifest(QWEN_ID), models_dir=Path(tmp) / "models", hf_cache=Path(tmp) / "hf")
             self.assertEqual(resolved.target_path, store / QWEN_FIRST)
             self.assertEqual(local_model_path(get_manifest(QWEN_ID).target, models_dir=Path(tmp) / "models"), store / QWEN_FIRST)
+
+    def test_a_same_named_incomplete_set_in_another_repo_is_not_the_registry_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "models" / "someone--else"; store.mkdir(parents=True)
+            (store / QWEN_FIRST).write_bytes(gguf_bytes(count=3, number=0))
+            result = discover_models(models_dir=Path(tmp) / "models", hf_cache=Path(tmp) / "hf",
+                                     inspector=mock.Mock(side_effect=AssertionError("not inspected")))
+            rows = {r.model: r for r in result.rows}
+            self.assertEqual(rows["Qwen 3.8 Flash Next"].local, "MISSING")
+            self.assertEqual((rows[QWEN_FIRST].local, rows[QWEN_FIRST].support), ("INCOMPLETE", "UNVERIFIED"))
 
     def test_an_unregistered_incomplete_set_is_shown_incomplete_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
