@@ -919,9 +919,98 @@ Release State entry below.
 - Technical stop carried forward: Intel `xe` iGPU / GPU work (decode ~3x slower
   than CPU, thermally infeasible on the reference laptop) — Orbit stays CPU-only,
   `gpu_layers=0`.
-- Next unreleased-development baseline: `main` at/after the rc39 release commit;
-  there is no unreleased production work beyond it.
+- Next unreleased-development baseline: `main` at/after the rc39 release commit.
+  Unreleased production work beyond it: the backend re-pin
+  LLAMA-BACKEND-41ABBFD-UPGRADE-18 (see Post-RC39).
 - See `docs/releases/v0.0.1-rc39.md`.
+
+### Post-RC39 (unreleased on `main`)
+
+- **LLAMA-BACKEND-41ABBFD-UPGRADE-18 (2026-09-16, #354) — vendored llama.cpp
+  backend re-pinned from `b9551`/`379ac667` to
+  `41abbfd599fbdd3470fcae0a1fb6530ad8403cd7`. PRODUCTION BACKEND CHANGE; no
+  runtime, prompt, controller, KV, cache or report behaviour change.**
+  Prerequisite: MTP-CARRYOVER-PORT-GATE (PASS, research branch
+  `research/ssd-expert-streaming`, `research/ssd_expert_streaming/mtp_carryover_gate/`:
+  model-free harness, 9 scenarios, b9551 vs 41abbfd transcripts byte-identical).
+  - **Vendoring rule (derived from the b9551 tree, reused verbatim):** subset =
+    `cmake/ common/ ggml/ include/ src/ vendor/ tools/CMakeLists.txt tools/mtmd/`
+    (minus README/requirements/test media/tests) + root `CMakeLists.txt .gitignore
+    LICENSE`; every file normalised by stripping trailing whitespace and blank
+    lines at EOF (so `git diff --check` stays clean). At 41abbfd: 1798 files,
+    1791 upstream paths omitted, 46 normalisation-only files, 10 files carrying
+    Orbit patches → 56 declared patched paths. Orbit patches carried: the MTP
+    carryover diagnostics in `common/speculative.{cpp,h}` (qualified port; both
+    Orbit `reset_pending`/`pending_state` and upstream `get_state`/`set_state`
+    APIs), scheduler profiling in `ggml-backend.cpp`, expert-usage telemetry +
+    compute profiling in `ggml-cpu.{h,c,cpp}`/`repack.cpp`, the mtmd include in
+    `src/CMakeLists.txt`, decode profiling in `llama-context.cpp`, the minimal mtmd
+    tool surface in `tools/CMakeLists.txt`. Dropped because now upstream: the
+    masked-embd tensor names (`llama-arch.*`) and the `gemma4-assistant.cpp` hunk.
+  - **Provenance:** the pin has NO upstream release tag (`b10968` was never
+    published; 41abbfd is the parent of `b10969`), so `upstream_tag` is
+    `untagged` and a new optional manifest field `upstream_build_number` (10968)
+    feeds `LLAMA_BUILD_NUMBER`. `source_tree_sha256`
+    `166e8a8c933e0445de27af3c30347fe61d116bf0ee850d093a4749bcdf18da83`;
+    legacy `patchset_sha256` slot re-defined with a documented algorithm
+    (`orbit-unified-diff-v1`, sha256 over the concatenated unified diffs of the
+    declared patched paths) = `07b1a48d13610cc7fc51c63d6bbb0d6be8788f3faaf88a8d66770372ecfb5cb0`;
+    `patchset_v2_sha256` `f50b7229db767cbd5bc5ef1f69bb39156bbe4578ee7a143b3c5d3a3a1dda4e84`;
+    `omitted_upstream_paths_sha256` reproduced with its original algorithm (sha256
+    of the compact-JSON sorted list). Server calibration identity now keys on the
+    commit for an untagged pin (`native_server/app.py::_backend_identity`).
+    Provenance v2 tests now RUN on the Dell (`~/LAB/llama.cpp` provisioned as a
+    41abbfd worktree of `~/LAB/llamacpp-io-overlap`), which is why the full-suite
+    skip count dropped from 77 to 47.
+  - **ABI:** `llama_model_params` replaced `use_mmap/use_direct_io/use_mlock` by
+    `load_mode`/`lazy_mode` enums and added `load_mtp` (80 bytes);
+    `llama_context_params` gained `n_outputs_max_per_seq` (160 bytes). `bindings.py`
+    mirrors both; the client pins `load_mode=LLAMA_LOAD_MODE_MMAP` and
+    `lazy_mode=LLAMA_LAZY_MODE_OFF` (the qualified b9551 semantics; upstream AUTO
+    would resolve the same on CPU but is not relied upon); vocab-only inspection
+    uses `load_mode=MMAP`. The mtmd bridge recognises the new reviewed profile
+    `mtmd-context-v3` (explicit `device` handle after `use_gpu`, 96 bytes; input
+    text v2, bitmap `wrapper-v1`) and passes `mtmd_helper_init_opt_default()`;
+    the chat bridge takes upstream's `common_json` and exposes
+    `thinking_end_tags` beside the scalar `thinking_end_tag`; the MTP helper shims
+    use the renamed draft-params field `pos0`. Native ABI gate (bridge-reported
+    sizeof/alignof/offsetof vs the ctypes mirrors) passed before any model load.
+  - **Qualification (Dell, PL2 sysfs 65 W this boot, both legs on the same boot,
+    qualified Ornith profile `--ctx 8192 --threads 6 --threads-batch 6 --batch 256
+    --ubatch 128 --think off`, repack OFF by the qualified Dell+Ornith default,
+    which keys on machine+model and is unaffected):** build 51 s, 0 errors;
+    `test_native*` 495 OK; full discovery **5857 tests OK, RC=0, 47 skips**;
+    cross-sample deterministic gate 11/11; compileall + `git diff --check` clean;
+    template sha `f55f5293…` and tokenizer identities (`bae97cc0…` Ornith/Qwen
+    route, `c9ecf356…` Qwen3-Coder route) IDENTICAL to b9551 — no drift.
+    Live (candidate 41abbfd vs production b9551 rebuilt from `main`): smoke
+    `simple_chat` and `pwd_followup` correct on both; `core-v1` fixtures
+    `simple_chat`/`pwd_route` PASS on both, `json_artifact` PASS on 41abbfd
+    (FAIL on b9551 today), **prefill/decode 53.4/20.3 tok/s (41abbfd, n=2) vs
+    53.1/20.5 tok/s (b9551, n=2)** — within noise; tool-call generation smoke
+    corpus (8 samples): completion 1.0 on both, every semantic rate delta 0,
+    generation wall −428 ms median (`compare_tool_call_generation.py` reports
+    `incomparable` only because the capability manifest is Gemma-4-only, so
+    `capability_unavailable` on BOTH legs — pre-existing for Ornith). Live IBAN
+    oracle (`scripts/live_validate_analysis.py`, IBAN.js `86e23fa6…`): the report
+    carries the decode stage `5d51e7659955a754…`, the C2
+    `productoslili.cl/cv/cr2.exe` and the `GetSpecialFolder(2)`=TemporaryFolder
+    fact on BOTH backends (41abbfd: 431 s, 9 calls, 2 actions, ended on repeated
+    action failures with Q1/Q2 open; b9551 today: 511 s, 15 calls, 4 actions,
+    ended on "no new evidence" with Q1/Q1.1 open; the 2026-09-13 reference
+    resolved both under repack ON, before #353). The trajectory variance is
+    model-side and present on production too; the corpus contract (deterministic
+    facts complete and correct, bounded honesty) holds on both.
+  - **Pre-existing on production b9551 today, NOT introduced here (tracked, out
+    of scope):** `core-v1` `pwd_final` fails (`tool_call_count_mismatch`, expected
+    1 got 0) and smoke `shell_error` is "wrong" on both backends.
+  - Constraints honoured: MTP stays OFF (helpers/shims only rebuilt); no Qwen3.8
+    registry/profile support; no unrelated refactors; production main untouched
+    until the reviewed squash-merge. Independent review BLOCKER 0 / MAJOR 0.
+  - Post-merge hygiene: rebuild the native runtime on the `main` checkout
+    (`python3 scripts/build_native.py`) so `vendor/lib` and the bridge identity
+    sidecars match the new provenance; the b9551 binaries are not compatible with
+    the new manifest and the bridge refuses them.
 
 ### Post-RC38 (bundled into rc39; historical)
 
@@ -2492,6 +2581,8 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 ## Main Commits
 
+- post-rc39 (unreleased): LLAMA-BACKEND-41ABBFD-UPGRADE-18 (#354) — vendored
+  llama.cpp backend b9551 → 41abbfd; see the Post-RC39 entry in Release State.
 - post-rc38 (unreleased, newest last): `b465ed6` migration-handoff closure,
   `fa67e5a` empty-plan re-ask + atomic `adopt_plan`, `c9ace69` Dell CPU CHAT
   cache baseline, `47d6b4b` measured server startup profile, then
