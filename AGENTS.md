@@ -921,7 +921,8 @@ Release State entry below.
   `gpu_layers=0`.
 - Next unreleased-development baseline: `main` at/after the rc39 release commit.
   Unreleased production work beyond it: the backend re-pin
-  LLAMA-BACKEND-41ABBFD-UPGRADE-18 (see Post-RC39).
+  LLAMA-BACKEND-41ABBFD-UPGRADE-18 and the Qwen3.8 Flash Next enablement
+  QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 (see Post-RC39).
 - See `docs/releases/v0.0.1-rc39.md`.
 
 ### Post-RC39 (unreleased on `main`)
@@ -1022,6 +1023,71 @@ Release State entry below.
     (`python3 scripts/build_native.py`) so `vendor/lib` and the bridge identity
     sidecars match the new provenance; the b9551 binaries are not compatible with
     the new manifest and the bridge refuses them.
+
+- **QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 (2026-09-16, #355) — Qwen3.8 Flash
+  Next UD-IQ1_M qualified for production on the Dell. MODEL ENABLEMENT ONLY: no
+  llama.cpp change, MTP off, no ExpertStore/prefetch, existing model defaults
+  untouched.** Decision **QWEN38_PRODUCTION_QUALIFIED**.
+  - **Registry / identity:** new entry `qwen38-flash-next-ud-iq1-m` (profile
+    `orbit-qwen38-flash-next-native-v1`, architecture `qwen4exp`, repo
+    `unsloth/Qwen3.8-Flash-Next-GGUF`, target = first shard
+    `Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf`; the three shards total
+    74,538,755,776 B). The profile verifies the GGUF's own metadata:
+    `general.name` "Qwen3.8 Flash Next", `general.file_type` **31** (IQ1_M — any
+    other Flash Next quant is `qwen38_flash_next_quantization_identity_mismatch`,
+    unsupported), tokenizer gpt2/qwen35, bos/eos 248044/248046, 48 blocks, 512
+    experts / 10 used, and the chat template sha `12827f24…`, which is
+    byte-identical to the verified Qwen3.8 27B template (same `qwen3.6-xml`
+    tool envelope). Route-prefix (KV checkpoint) reuse is NOT enabled for this
+    hybrid SSM/attention/PLE architecture. Discovery ignores split shards 2..N.
+    `orbit download` does not fetch split GGUFs: place the three shards by hand
+    (on this Dell they live on ext4 under `/var/tmp/orbit-models/…`, symlinked
+    from `models/unsloth--Qwen3.8-Flash-Next-GGUF`; `/home` is ecryptfs and
+    double-caches, which halves the effective page cache for a beyond-RAM model).
+  - **Qualified Dell profile (`server_profile.QualifiedStartupProfile`, keyed
+    by DMI product name + registry id and CONFIRMED by a vocab-only GGUF
+    inspection before it applies):** ctx 4096, threads 10 / threads_batch 10,
+    batch 256 / ubatch 128, one slot, gpu_layers 0, CPU repack OFF
+    (`qualified-dell-qwen38-flash-next`), MTP OFF, `load_mode=MMAP`,
+    `lazy_mode=ON` (the 26.8 GiB per-layer token-embedding table is read on
+    demand; with lazy OFF the loader would MAP_POPULATE the whole 74.5 GB file),
+    `load_mtp=False` (no NextN tensors; the GGUF has none anyway). Precedence is
+    unchanged: CLI > `ORBIT_*` env > user profile > **qualified** > cache /
+    calibration / heuristic; `--ctx` defaults to None so the tier can supply
+    4096, every other model still resolves 8192. Existing models keep the
+    Mission-18 pins (mmap, lazy OFF, NextN loaded) and the Ornith Dell no-repack
+    default is untouched. `/props` now also reports `load_mode`/`lazy_mode`/
+    `load_mtp`.
+  - **Tests:** `tests/test_qwen38_flash_next_enablement.py` (A exact pair
+    resolves, incl. the app-level GGUF confirmation; B other machine; C other
+    model on the Dell; D other quant / other model / unverified never qualified;
+    E CLI/env/user-profile beat the tier for threads, batch, ctx and repack; F
+    Ornith unchanged; G Gemma/Qwen3.6/Qwen3.8-27B profiles and registry order
+    unchanged; H load_mode/lazy_mode/load_mtp reach `llama_model_params`).
+  - **Load smoke (real `orbit server --model-id qwen38-flash-next-ud-iq1-m`,
+    no tuning flags):** `/props`: architecture qwen4exp, verified profile, quant
+    UD-IQ1_M, ctx 4096, threads 10/10, batch 256/128, parallel_slots 1, repack
+    False, mtp off, load_mode 1 / lazy_mode 2 / load_mtp False; server up in 20 s
+    (mmap), no OOM, zero errors in the llama log.
+  - **Correctness smoke (temperature 0, think off):** factual (two sentences),
+    instruction (`["Python","JavaScript","C++"]`), reasoning ($20 total → $30
+    change, step by step), code (`is_palindrome` isalnum/lower/reverse), JSON
+    (valid object with the three requested keys) — all coherent, no repetition,
+    no invalid tokens, no qwen4exp state errors; consistent with the retained
+    research IQ1_M answers.
+  - **Performance (256-token decode, essay prompt, PL1 45 W / PL2 30 W MMIO
+    confirmed, ext4):** post-load first request **3.91 tok/s** (rolling-32
+    3.5–4.2, last-half 4.0, prefill 12.8 tok/s, 37 MiB read/token, 2.5 MiB
+    faulted/token); warm repeat **5.50 tok/s** (rolling-32 5.1–6.3, last-half
+    5.5, prefill 19.1 tok/s, 2.5 MiB read/token); CPU ~6.3–6.6 cores busy; no
+    progressive degradation; package ≤ 69 °C, no throttle. Both at or above the
+    research baseline (cold 2.7 / warm 3.3 with a cache-busted 26 GiB cgroup).
+    Memory: peak RSS 27.8 GiB of which RssFile 27.6 GiB and **RssAnon 328 MiB**
+    (no repack buffers), process VmSwap ≤ 220 MiB; system swap grew from 0.3 to
+    2.7 GiB during the load's read-ahead (other processes evicted) and stayed
+    flat through decode.
+  - Full non-live suite RC=0; cross-sample gate green; no tokenizer/template
+    fixture re-baselined. Independent review BLOCKER 0 / MAJOR 0.
 
 ### Post-RC38 (bundled into rc39; historical)
 
@@ -2594,6 +2660,9 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 - post-rc39 (unreleased): LLAMA-BACKEND-41ABBFD-UPGRADE-18 (#354) — vendored
   llama.cpp backend b9551 → 41abbfd; see the Post-RC39 entry in Release State.
+- post-rc39 (unreleased): QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 (#355) — Qwen3.8
+  Flash Next UD-IQ1_M qualified on the Dell (registry, verified identity, qualified
+  startup profile tier); see the Post-RC39 entry in Release State.
 - post-rc38 (unreleased, newest last): `b465ed6` migration-handoff closure,
   `fa67e5a` empty-plan re-ask + atomic `adopt_plan`, `c9ace69` Dell CPU CHAT
   cache baseline, `47d6b4b` measured server startup profile, then
