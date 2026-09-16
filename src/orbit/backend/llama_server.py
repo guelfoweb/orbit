@@ -41,7 +41,12 @@ from orbit.runtime.analysis_runtime import (
     ANALYSIS_STEP_PHASE,
 )
 from orbit.backend.base import RecoverableBackendError, ToolCallParseError
-from orbit.runtime.kv_diag import current_phase, current_tools_mode, enabled as kv_diag_enabled
+from orbit.runtime.kv_diag import (
+    current_phase,
+    current_route_history_continuation,
+    current_tools_mode,
+    enabled as kv_diag_enabled,
+)
 from orbit.runtime.tool_healing import tool_call_healing_status
 
 
@@ -128,6 +133,7 @@ class LlamaServerBackend:
                 ),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
                 final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
+                route_history_continuation=_route_history_continuation_requested(native_backend=native_backend),
             )
         )
         _attach_native_kv_diag_payload(payload, native_backend=native_backend)
@@ -173,6 +179,7 @@ class LlamaServerBackend:
                 ),
                 allow_mtp_experimental=_allow_mtp_experimental_requested(native_backend=native_backend),
                 final_prefix_experiment=_final_prefix_experiment_requested(native_backend=native_backend),
+                route_history_continuation=_route_history_continuation_requested(native_backend=native_backend),
             )
         )
         _attach_native_kv_diag_payload(payload, native_backend=native_backend)
@@ -1120,6 +1127,23 @@ def _route_prefix_anchor_requested(*, native_backend: bool) -> bool:
     if not prefix_anchor_enabled():
         return False
     return current_phase() == "route" and current_tools_mode() == "on"
+
+
+def _route_history_continuation_requested(*, native_backend: bool) -> bool:
+    """Whether this call's reply will extend the route history (see chat.py).
+
+    Only within the region the runtime declared, and only for the final
+    family of phases: the route call itself, and anything else that happens
+    to run inside that region, never carries it.
+    """
+    if not native_backend:
+        return False
+    if not prefix_anchor_enabled():
+        return False
+    if not current_route_history_continuation():
+        return False
+    phase = current_phase()
+    return isinstance(phase, str) and phase.startswith("chat_final")
 
 
 #: The analysis phases that join the rolling ANALYSIS lineage.

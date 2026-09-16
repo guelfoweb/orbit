@@ -924,7 +924,8 @@ Release State entry below.
   LLAMA-BACKEND-41ABBFD-UPGRADE-18, the Qwen3.8 Flash Next enablement
   QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19, the models-directory UX
   MODEL-STORE-UX-20, the split-GGUF download GGUF-MULTISHARD-DOWNLOAD-21 and
-  the Qwen3.8 prompt-cache reuse fix QWEN38-PROMPT-CACHE-REUSE-22 (see
+  the Qwen3.8 prompt-cache reuse fix QWEN38-PROMPT-CACHE-REUSE-22 and the
+  post-final route-checkpoint advance QWEN38-POST-FINAL-ROUTE-CACHE-23 (see
   Post-RC39).
 - See `docs/releases/v0.0.1-rc39.md`.
 
@@ -1384,6 +1385,166 @@ Release State entry below.
     the second one captured), the third reuses 1084 tokens (1175 in / 91
     evaluated). Ornith behaviour unchanged (control above; its tests
     untouched).
+
+- **QWEN38-POST-FINAL-ROUTE-CACHE-23 (2026-09-16, #359) -- the Qwen3.8 route
+  checkpoint advances past the committed reply while the model is idle.
+  Decision POST_FINAL_ROUTE_REUSE_FIXED.**
+  - **Production symptom (reproduced on main d20643f, fresh session, `hi` /
+    a ~350-word essay request / "capital of France, one word", max-tokens
+    600, `ORBIT_KV_DIAG=1 ORBIT_KV_DIAG_TOKENS=1`):** turn 1 1091 in / 1091
+    eval / 0 cached, 2m34s; turn 2 1183 in / 125 eval / 1058 cached, 498
+    out, 3m03s; turn 3 1693 in / 586 eval / 1107 cached, output `Paris`,
+    46 s at 7.9 tok/s prefill. Every turn is a route call (command system
+    prompt + history; turns 2 and 3 aborted by the terminal after one
+    generated token because the model answered directly) followed by a
+    `chat_final_retry` (chat system prompt + latest user turn: 76 / 62
+    tokens).
+  - **Exact attribution (token ids, offline re-render through the same
+    bridge and `llama_tokenize` = the live ids, hash-equal on every captured
+    call):** the turn-3 route prompt is 1631 tokens; the first 1107 are the
+    turn-2 route prompt (restored from the rolling checkpoint); the 524
+    evaluated tokens are the 498-token previous reply -- token-identical to
+    the ids the final call generated (`|trim` in the template, no
+    retokenization drift) -- plus 26 tokens of framing: `<|im_end|>\n
+    <|im_start|>user\n` (5), the 12-token question, `<|im_end|>\n` (2) and
+    the generation prompt `<|im_start|>assistant\n<think>\n\n</think>\n\n`
+    (7). The final retry adds 62 evaluated tokens of its own. Nothing else.
+  - **Architectural constraint:** route and final prompts share 3 tokens
+    (`<|im_start|>system\n`) and diverge inside the system prompt, so the
+    final's native state can never serve the next route prompt; the
+    checkpoint the route lineage holds ends at the turn-2 generation prompt
+    and cannot contain a reply that did not exist yet. No existing state
+    contains the reply in route context (option A negative): the route call
+    generates a decision (or is aborted), the final decodes the reply under
+    a different head. The only exact-prefix seam is option B: decode the
+    reply in ROUTE context on top of the restored route checkpoint.
+  - **Design (smallest causal; `rolling_route_anchor.py`,
+    `rolling_anchor_store.py`, `client.py`, `native_server/app.py`,
+    `runtime/chat.py`, `backend/llama_server.py`, `payloads.py`,
+    `protocol.py`):**
+    - the runtime declares, around the final-family calls of a turn whose
+      reply will be appended to the history its route prompts are rendered
+      from (`ChatRuntime._route_history_continuation()`: no evidence in the
+      session, no post-tool window), a `route_history_continuation` request
+      flag; the backend sends it only for `chat_final*` phases inside that
+      region (`_route_history_continuation_requested`). The backend never
+      infers it from the prompt;
+    - the route checkpoint now records the messages and tools it was
+      rendered from (`RollingRouteAnchorState.render_messages/render_tools`,
+      route lineage only);
+    - after a declared final that stopped on its own (finish `stop`, not
+      cancelled, not a stop sequence, no tool call, non-empty content) the
+      native server starts a thread that takes the model lock once the
+      response's request has released it and calls
+      `NativeLlamaClient.advance_route_checkpoint_after_final(content)`: the
+      head every next route prompt starts with is found template-agnostically
+      (`rolling_shadow_head`: the same history + the reply rendered with two
+      sentinel user turns; their common text is the head, accepted only if
+      the checkpoint is its exact token prefix and it is a strict token
+      prefix of both sentinel tokenizations), the route blob is restored, the
+      delta is prefilled one prompt batch at a time, and the result is
+      captured into a separate `route_shadow` slot
+      (`ROLLING_ROUTE_SHADOW_STRATEGY_ID`). The route checkpoint is kept: a
+      next prompt that does not extend the shadow (the runtime committed
+      different text, a compacted history) still meets the checkpoint it
+      would have met before. The next route call restores whichever of the
+      two is the longest exact prefix under the unchanged exact-prefix rule,
+      and skips the restore entirely when the live committed sequence
+      already is that checkpoint (the shadow leaves it resident);
+    - preemption: every request raises a waiter count before blocking on
+      the model lock; the shadow checks it before rendering or restoring
+      anything (`request_waiting`, ~0 cost) and between prompt batches, and a
+      shadow that yields is captured at the exact boundary it reached (a
+      shorter checkpoint, never a wrong one). Preemption never goes through
+      `cancel()`; an external `/cancel` that lands inside a batch (abort
+      callback, rc=2, the range decoder still counted the batch) discards
+      the unknown state. A later declared final supersedes an unrun shadow
+      (serial); `/session/reset` invalidates the shadow with the other slots;
+      the identity (session, reset generation, template, tools, ctx,
+      thinking) is re-derived and compared whole before any work; a
+      checkpoint the turn's route prompt missed (`non_extending_misses`) or
+      a head past the context budget is refused; server shutdown cancels
+      and joins a running shadow before the context is freed; the last
+      completion can no longer be continued natively afterwards and the
+      runtime's `/continue` falls back to the prompt continuation on a
+      refused native continuation. Gated to `POST_FINAL_ROUTE_SHADOW_PROFILE_IDS
+      = {Qwen3.8 Flash Next}`; Ornith stays out (its rolling behaviour is
+      qualified as it stands and its prefill is an order of magnitude faster).
+    - the abort path of `complete_prompt` (the terminal aborting a route
+      stream that is not a decision) now invalidates the committed sequence
+      and still emits the cache event (`cancelled=true`); `ORBIT_KV_DIAG_TOKENS=1`
+      adds exact prompt / generated ids to the cache events.
+  - **Cost accounting (measured on the real model):** the shadow is the SAME
+    work the next route call paid (503 tokens = 498 reply + 5 framing;
+    29.5-35.2 s at 14-17 tok/s, one batch of 64), moved into the idle gap
+    after the reply is delivered; extra compute = one blob restore before it
+    and one capture after it (~0.2 s), no extra model call. Delivery of the
+    visible reply is not delayed (the thread takes the lock after the
+    request released it). Memory: a second resident blob between the final
+    and the next route -- route 1631 tokens = 163 MB + shadow 1637 tokens =
+    163 MB; server RssAnon 634 MB after the run vs the 328 MiB baseline --
+    superseded at the next route capture; the same 2-3 transient copies as
+    every capture/restore. With no gap at all (the next message sent the
+    instant the reply ends) the shadow is preempted before or at its first
+    batch and the turn costs what it cost before (44 s vs 46 s).
+  - **Before / after (same prompts, deterministic, token-identical outputs on
+    all runs, `Paris`):**
+
+    | scenario | turn-3 input | cached | evaluated | cache % | prefill tok/s | wall |
+    |---|---:|---:|---:|---:|---:|---:|
+    | before (d20643f) | 1693 | 1107 | 586 | 65% | 7.9 | 46 s |
+    | after, 120 s think gap | 1693 | 1610 | 83 | 95% | 8.0-9.3 | 11-14 s |
+    | after, 10 s think gap (shadow preempted after 192 of 503 tokens, partial banked) | 1693 | 1299 | 394 | 77% | 8.7 | 30 s |
+    | after, no gap | 1693 | 1107 | 586 | 65% | 8.2 | 44 s |
+    | no-cache control (`ORBIT_KV_PREFIX_ANCHOR=off`, no anchor, no shadow) | 1693 | 0 | 1693 | 0% | 10.0 | 2m08s |
+
+    The 83 evaluated tokens are the 21-token route suffix (question, close,
+    generation prompt) plus the 62-token final retry: the previous reply is
+    never re-evaluated on the route turn. In the 10 s case the request that
+    arrived mid-shadow waited for the running 64-token batch (shadow elapsed
+    11.4 s for a 10.0 s gap) and the route then evaluated only the 311 tokens
+    the shadow had not reached. Turn 2 is unchanged in every run (the
+    terminal sent it with no gap; shadow preempted at 0.2-0.26 s, before its
+    first batch). Session cache 67% (120 s gap) / 59% (10 s) vs 55% before
+    and 0% with anchors off. Generated token ids are identical, call by
+    call, across before / after (all gaps) / no-cache -- the cached path
+    produces exactly the no-cache output.
+  - **Prewarm audit (no change made):** route-prefix prewarm NOT active for
+    Qwen3.8 (`prewarm skipped (route-prefix): model_profile_ineligible`:
+    the fixed-head lineages require `route_prefix_reuse_supported` /
+    `gemma_prefix_reuse_supported`, both False for this profile); analysis-
+    prefix prewarm NOT active (Ornith-only lineage, opt-in env unset). The
+    fixed head that could theoretically be prewarmed: route 1048 tokens
+    (everything before the first user turn's text), analysis 610 tokens with
+    the analysis tool schema (282 without). The full qwen4exp seq blob
+    round-trip (proven bit-identical in #358 and exercised by every shadow)
+    makes such a prewarm technically safe under the exact-prefix rule; it is
+    a separate decision.
+  - **Gates:** `tests/test_post_final_route_shadow.py` (43: head finding and
+    refusals over the real-shaped fake template, short / 450-token reply,
+    next short turn with state identical to a cold decode, boundary
+    preemption and partial capture, request-waiting skip, in-batch and
+    between-batch cancels, reset, session change, failed restore / decode,
+    mismatch fallback to the route checkpoint, cold fallback, miss and budget
+    guards, profile gate incl. Ornith unchanged, wiring through
+    `complete_prompt`, server scheduling / preemption / supersession /
+    shutdown, runtime declaration with and without evidence, backend flag,
+    continuation fallback); focused cache/session/server modules green;
+    cross-sample ANALYSIS gate green; full non-live suite RC=0 (5994 tests, 45 skipped);
+    independent review first pass BLOCKER 0 / MAJOR 3 / MINOR 8 / NIT 3
+    (preemption granularity + unmeasured, second blob + redundant restore,
+    shutdown while decoding; continuation, cancel side effects, missed
+    checkpoint, stale shadow thread, docstring, budget, test depth, diag
+    attribution) -- all addressed; delta re-review BLOCKER 0 / MAJOR 0 /
+    MINOR 2 / NIT 3 (stop flag for a shadow still waiting for the lock,
+    between-batch cancel discarding a known state, serial outside the lock,
+    a dead test line, comment) -- all addressed. Ornith behaviour unchanged
+    (its tests untouched and green; it is not in the shadow profile set).
+    Known limits: a reply that the runtime post-processes differently from
+    the server's content (cited evidence, error stubs) yields a shadow the
+    next route prompt does not extend -- the route checkpoint still serves,
+    the shadow decode is wasted; thinking on and MTP keep the shadow off with
+    the rolling checkpoint itself.
 
 ### Post-RC38 (bundled into rc39; historical)
 

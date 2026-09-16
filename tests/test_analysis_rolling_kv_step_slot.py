@@ -1046,9 +1046,10 @@ class LifecycleTest(unittest.TestCase):
         self.assertIsNone(ref(), "the replaced checkpoint must not be retained anywhere")
         self.assertIs(client._rolling_step_anchor_state, second)
 
-    def test_the_store_holds_exactly_four_slots(self) -> None:
-        """Route, control, STEP, and (ANALYSIS-FINISH-PREFILL-1) control history."""
-        self.assertEqual(RollingAnchorStore.__slots__, ("_route", "_analysis", "_step", "_control_history"))
+    def test_the_store_holds_exactly_five_slots(self) -> None:
+        """Route, control, STEP, (ANALYSIS-FINISH-PREFILL-1) control history,
+        and (QWEN38-POST-FINAL-ROUTE-CACHE-23) the route shadow."""
+        self.assertEqual(RollingAnchorStore.__slots__, ("_route", "_analysis", "_step", "_control_history", "_route_shadow"))
 
 
 if __name__ == "__main__":

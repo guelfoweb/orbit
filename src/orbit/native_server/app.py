@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import select
@@ -123,10 +124,127 @@ class OrbitNativeServer:
         self.client = client
         self.model_alias = model_alias
         self.lock = threading.Lock()
+        # Requests waiting for (or holding) the model. The post-final route
+        # shadow runs between requests and yields to the first one that
+        # arrives: it never starts while one waits, and it stops at the next
+        # prompt batch when one does.
+        self._waiters = 0
+        self._waiters_lock = threading.Lock()
+        self._route_shadow_thread: threading.Thread | None = None
+        self._route_shadow_serial = 0
+        self._route_shadow_stopping = False
+        self.last_route_shadow: dict[str, Any] | None = None
         self.native_backend_capabilities = safe_native_capability_manifest(
             client,
             final_system_prompt=FINAL_FROM_TOOL_SYSTEM_PROMPT,
         )
+
+    @contextlib.contextmanager
+    def _model_lock(self):
+        """Hold the model for a request, announcing the wait first.
+
+        The waiter count is what preempts a running route shadow, so it is
+        raised BEFORE blocking on the lock and lowered only once the lock is
+        released: a shadow that starts while a request is on its way would
+        otherwise cost that request up to one whole shadow.
+        """
+        guard = self._waiters_guard()
+        with guard:
+            self._waiters = self.__dict__.get("_waiters", 0) + 1
+        try:
+            with self.lock:
+                yield
+        finally:
+            with guard:
+                self._waiters -= 1
+
+    def _waiters_guard(self) -> threading.Lock:
+        # Created on demand: a server built without `__init__` (several tests
+        # do) must still take the model lock exactly as before.
+        guard = self.__dict__.get("_waiters_lock")
+        if guard is None:
+            guard = threading.Lock()
+            self._waiters_lock = guard
+        return guard
+
+    def _requests_waiting(self) -> bool:
+        return self.__dict__.get("_waiters", 0) > 0
+
+    def _schedule_route_shadow(self, request: ChatRequest, *, content: str, finish_reason: str, stopped: bool, tool_calls) -> bool:
+        """Advance the route checkpoint past this reply, after it is delivered.
+
+        Only for a call the runtime declared as extending the route history,
+        and only when the reply is exactly what the runtime will commit: it
+        stopped on its own (not cancelled, not cut by the budget, not by a
+        stop sequence, not empty) and carries no tool call. The work runs on
+        its own thread and takes the model lock only after this request has
+        released it, so it never delays the completion; the handler writes
+        the response while the shadow may already be decoding. The next
+        request preempts it at a prompt-batch boundary. A later shadow
+        supersedes an earlier one that has not run yet: a final followed by
+        its retry commits the retry's reply, never the first.
+        """
+        if not request.route_history_continuation:
+            return False
+        if finish_reason != "stop" or stopped or tool_calls or not content.strip():
+            return False
+        advance = getattr(self.client, "advance_route_checkpoint_after_final", None)
+        if not callable(advance):
+            return False
+        with self._waiters_guard():
+            self._route_shadow_serial += 1
+            serial = self._route_shadow_serial
+        thread = threading.Thread(
+            target=self._run_route_shadow,
+            args=(advance, content, serial),
+            name="orbit-route-shadow",
+            daemon=True,
+        )
+        self._route_shadow_thread = thread
+        thread.start()
+        return True
+
+    def _run_route_shadow(self, advance, content: str, serial: int) -> None:
+        with self.lock:
+            if self.__dict__.get("_route_shadow_stopping"):
+                self.last_route_shadow = {"status": "skipped", "reason": "stopping"}
+                return
+            if serial != self._route_shadow_serial:
+                self.last_route_shadow = {"status": "skipped", "reason": "superseded"}
+                return
+            if self._requests_waiting():
+                self.last_route_shadow = {"status": "skipped", "reason": "request_waiting"}
+                return
+            try:
+                with native_kv_request_context(
+                    endpoint="/route-shadow",
+                    payload={"_orbit_kv_phase": "route_shadow", "_orbit_kv_tools_mode": "on"},
+                ):
+                    self.last_route_shadow = advance(content, should_cancel=self._requests_waiting)
+            except Exception as exc:  # never let a shadow take the server down
+                self.last_route_shadow = {"status": "skipped", "reason": "error", "error": str(exc)}
+
+    def stop_route_shadow(self, timeout: float | None = 30.0) -> None:
+        """Cancel a running shadow and wait for it: the context is about to go.
+
+        A shadow still waiting for the lock behind an in-flight request must
+        not start once that request drains, so the stop is also a flag it
+        checks before doing anything.
+        """
+        self._route_shadow_stopping = True
+        thread = self._route_shadow_thread
+        if thread is None or not thread.is_alive():
+            return
+        cancel = getattr(self.client, "cancel", None)
+        if callable(cancel):
+            cancel()
+        thread.join(timeout)
+
+    def wait_for_route_shadow(self, timeout: float | None = None) -> None:
+        """Join the last scheduled shadow, for tests and diagnostics."""
+        thread = self._route_shadow_thread
+        if thread is not None:
+            thread.join(timeout)
 
     def chat(self, payload: dict[str, Any], *, on_token=None, on_progress=None, should_cancel=None) -> dict[str, Any]:
         request = parse_chat_request(payload)
@@ -134,15 +252,15 @@ class OrbitNativeServer:
         return self.complete(request, on_token=on_token, on_progress=on_progress, should_cancel=should_cancel)
 
     def moe_expert_usage_status(self) -> dict[str, object]:
-        with self.lock:
+        with self._model_lock():
             return self.client.moe_expert_usage_status()
 
     def reset_moe_expert_usage(self) -> dict[str, object]:
-        with self.lock:
+        with self._model_lock():
             return self.client.reset_moe_expert_usage()
 
     def reset_session(self) -> dict[str, object]:
-        with self.lock:
+        with self._model_lock():
             profile = getattr(self.client, "model_profile", None)
             preserve_coder_checkpoint = bool(
                 getattr(profile, "verified", False)
@@ -176,7 +294,7 @@ class OrbitNativeServer:
             if on_token:
                 on_token(text)
 
-        with self.lock:
+        with self._model_lock():
             thinking = self.client.config.thinking if request.thinking is None else request.thinking
             final_prefix_experiment = request.final_prefix_experiment and _is_final_from_tool_prompt(request.messages)
             qwen_route_prefix_anchor = (
@@ -238,6 +356,9 @@ class OrbitNativeServer:
         # after this transport-level finish reason is preserved.
         if tool_calls and finish_reason not in {"cancelled", "length"}:
             finish_reason = "tool_calls"
+        self._schedule_route_shadow(
+            request, content=content, finish_reason=finish_reason, stopped=stopped, tool_calls=tool_calls
+        )
         return native_chat_response(
             content=content,
             model=self.model_alias,
@@ -257,7 +378,7 @@ class OrbitNativeServer:
         )
 
     def continue_current(self, request: ContinueRequest, *, on_token=None, on_progress=None, should_cancel=None) -> dict[str, Any]:
-        with self.lock:
+        with self._model_lock():
             thinking = self.client.config.thinking if request.thinking is None else request.thinking
             completion = self.client.continue_chat_text_current_context(
                 max_tokens=request.max_tokens,
@@ -356,7 +477,7 @@ class OrbitNativeServer:
         # The Qwen bridge keeps the parser associated with its latest render.
         # Serialize inspection with completion so concurrent token accounting
         # cannot replace parser state while generated text is being decoded.
-        with self.lock:
+        with self._model_lock():
             tokens, rendered_hash, token_hash = self.client.inspect_chat_tokens(
                 messages,
                 tools=tools,
@@ -370,7 +491,7 @@ class OrbitNativeServer:
         }
 
     def count_artifact_content_tokens(self, messages: list[dict[str, Any]]) -> dict[str, int | str]:
-        with self.lock:
+        with self._model_lock():
             tokens, rendered_hash, token_hash = self.client.inspect_artifact_content_tokens(messages)
         return {
             "tokens": tokens,
@@ -435,6 +556,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
             qwen3_coder_route_prefix = state.client.qwen3_coder_route_prefix_reuse_status()
             ornith_route_prefix = state.client.ornith_route_prefix_reuse_status()
             final_prefix_config = _final_prefix_reuse_props(state.client)
+            route_shadow = state.last_route_shadow
             self._json(
                 {
                     "model_path": str(state.client.paths.model),
@@ -522,6 +644,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "qwen36_shell_tool_prefix_reuse": qwen36_shell_tool_prefix,
                     "qwen3_coder_route_prefix_reuse": qwen3_coder_route_prefix,
                     "ornith_route_prefix_reuse": ornith_route_prefix,
+                    "route_shadow": route_shadow,
                     **_model_load_props(state.client),
                     **final_prefix_config,
                     **_tool_call_healing_props(),
@@ -1414,6 +1537,9 @@ def run_server(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\norbit-server stopped", flush=True)
     finally:
+        # A post-final route shadow may be inside llama_decode on its own
+        # thread; the context must not be freed underneath it.
+        httpd.orbit_state.stop_route_shadow()  # type: ignore[attr-defined]
         client.close()
         httpd.server_close()
     return 0

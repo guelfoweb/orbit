@@ -23,7 +23,7 @@ from __future__ import annotations
 import time
 from ctypes import c_ubyte
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Callable
 
 ROLLING_ROUTE_STRATEGY_ID = "ornith15-rolling-route-v1"
 
@@ -58,6 +58,19 @@ ROLLING_STEP_STRATEGY_ID = "ornith15-rolling-analysis-step-v1"
 # it closes, because the history between them is append-only. It lives in its
 # own slot so the repair keeps Stage A's longer checkpoint untouched.
 ROLLING_CONTROL_HISTORY_STRATEGY_ID = "ornith15-rolling-control-history-v1"
+
+# The CHAT route lineage's second checkpoint: the route checkpoint advanced
+# past the assistant reply the final call just committed. A turn is two calls
+# with different fixed heads -- the route prompt and the tools-free final --
+# so the final's own state can never serve the next route prompt, and the
+# next route prompt re-evaluated the whole reply (measured: 498 of 524
+# evaluated tokens on a ~2.6k-character answer). The shadow is that reply
+# decoded in ROUTE context on top of the restored route checkpoint, after the
+# final's output has already been delivered. It lives in its own slot so the
+# route checkpoint it extends stays available: a next route prompt that does
+# not extend the shadow (the runtime committed different text, the history
+# was compacted) still meets the checkpoint it would have met without it.
+ROLLING_ROUTE_SHADOW_STRATEGY_ID = "ornith15-rolling-route-shadow-v1"
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,13 @@ class RollingRouteAnchorState:
     # `rolling_route_should_replace`.
     non_extending_misses: int = field(default=0, compare=False)
     last_miss_tokens: list[int] = field(default_factory=list, compare=False, repr=False)
+    # The route lineage only: the messages and tools the checkpointed prompt
+    # was rendered from, so the post-final shadow can render the same history
+    # extended by the committed reply through the same renderer. None on
+    # every other lineage and on a checkpoint taken without them, which means
+    # no shadow can be built from it.
+    render_messages: list[dict[str, Any]] | None = field(default=None, compare=False, repr=False)
+    render_tools: list[dict[str, Any]] | None = field(default=None, compare=False, repr=False)
 
     @property
     def valid(self) -> bool:
@@ -207,6 +227,86 @@ def rolling_step_boundary(
     if prompt_tokens[:n] != head_tokens:
         return None
     return n
+
+
+# Two user turns that differ in their first character. The head shared by
+# their renders is, by construction, everything the template emits before the
+# user's text -- whatever the template is.
+SHADOW_SENTINEL_USER_TURNS = ("a", "9")
+
+
+def rolling_shadow_head(
+    checkpoint_tokens: list[int],
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    assistant_content: str,
+    render: Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], str],
+    tokenize: Callable[[str], list[int]],
+) -> tuple[list[int] | None, str]:
+    """The tokens every next route prompt starts with, or (None, why not).
+
+    The next route prompt renders `messages` + the committed assistant reply
+    + the user's next turn + the generation prompt. Its head -- everything
+    before the user's text -- is what can be decoded now, and it is found
+    without knowing the template: the same history is rendered with two
+    sentinel user turns that differ in their first character, and the text
+    both renders share is exactly that head. Nothing is guessed about how
+    the template opens a user turn or closes an assistant one.
+
+    Accepted only when its tokens (1) still begin with the checkpoint's own
+    tokens -- a template that renders history differently once another turn
+    follows would break the chain, and then no shadow is taken -- (2) extend
+    them, and (3) are a strict token-prefix of BOTH sentinel renders'
+    tokenizations, so the boundary is not inside a token and does not depend
+    on what the user types next. Every refusal returns None; None means the
+    route checkpoint stays exactly as it is.
+
+    Note that (3) is checked against the sentinels, not against every
+    possible user turn: a turn whose first characters could merge with the
+    opener's last token under the tokenizer would make the next prompt miss
+    the shadow and fall back to the route checkpoint -- a cost, never a
+    wrong state. On the qualified template user content is trimmed before
+    it is rendered, so no user turn starts with whitespace that could merge
+    with the opener's trailing newline.
+    """
+    if not checkpoint_tokens:
+        return None, "no_checkpoint"
+    if not assistant_content or not assistant_content.strip():
+        return None, "empty_assistant_content"
+    history = [*[dict(message) for message in messages], {"role": "assistant", "content": assistant_content}]
+    try:
+        renders = [
+            render([*history, {"role": "user", "content": sentinel}], tools)
+            for sentinel in SHADOW_SENTINEL_USER_TURNS
+        ]
+    except Exception:
+        return None, "render_failed"
+    head_text = _common_text_prefix(renders[0], renders[1])
+    if not head_text:
+        return None, "empty_head"
+    try:
+        head_tokens = tokenize(head_text)
+        full_tokens = [tokenize(text) for text in renders]
+    except Exception:
+        return None, "tokenize_failed"
+    n_checkpoint = len(checkpoint_tokens)
+    if len(head_tokens) <= n_checkpoint:
+        return None, "head_does_not_extend_checkpoint"
+    if head_tokens[:n_checkpoint] != checkpoint_tokens:
+        return None, "checkpoint_not_a_prefix_of_head"
+    for tokens in full_tokens:
+        if len(tokens) <= len(head_tokens) or tokens[: len(head_tokens)] != head_tokens:
+            return None, "head_not_a_token_prefix"
+    return head_tokens, "ok"
+
+
+def _common_text_prefix(left: str, right: str) -> str:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return left[:index]
 
 
 def rolling_route_should_replace(

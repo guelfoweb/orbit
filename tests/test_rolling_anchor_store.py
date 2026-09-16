@@ -21,6 +21,7 @@ if str(SRC) not in sys.path:
 from orbit.native_llama.rolling_anchor_store import RollingAnchorStore
 from orbit.native_llama.rolling_route_anchor import (
     ROLLING_ANALYSIS_STRATEGY_ID,
+    ROLLING_ROUTE_SHADOW_STRATEGY_ID,
     ROLLING_ROUTE_STRATEGY_ID,
     RollingRouteAnchorState,
     RollingRouteIdentity,
@@ -155,6 +156,26 @@ class InvalidationTests(unittest.TestCase):
             "an analysis checkpoint surviving a reset is exactly the stale "
             "reuse the identity check exists to prevent",
         )
+
+    def test_the_route_shadow_has_its_own_slot_and_is_invalidated_too(self) -> None:
+        """The post-final shadow extends the route checkpoint but never
+        replaces it: a next route prompt that does not extend the shadow must
+        still meet the checkpoint it was built from."""
+        store = RollingAnchorStore()
+        route_id = _identity()
+        shadow_id = _identity(ROLLING_ROUTE_SHADOW_STRATEGY_ID)
+        self.assertEqual(RollingAnchorStore.slot_for(shadow_id), "route_shadow")
+        store.store(route_id, _state([1, 2], route_id))
+        store.store(shadow_id, _state([1, 2, 3, 4], shadow_id))
+        self.assertEqual(store.state_for(route_id).tokens, [1, 2])
+        self.assertEqual(store.state_for(shadow_id).tokens, [1, 2, 3, 4])
+        self.assertIs(store.route_shadow_state, store.state_for(shadow_id))
+
+        store.invalidate("session_reset")
+
+        self.assertFalse(store.state_for(route_id).valid)
+        self.assertFalse(store.state_for(shadow_id).valid, "a reset destroys the shadow with the conversation")
+        self.assertEqual(store.state_for(shadow_id).invalidation_reason, "session_reset")
 
     def test_invalidation_records_the_reason(self) -> None:
         store = RollingAnchorStore()

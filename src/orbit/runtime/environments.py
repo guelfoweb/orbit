@@ -8,7 +8,7 @@ import re
 import time
 
 from orbit.backend import ChatResult
-from orbit.backend.base import Message, StreamProgress
+from orbit.backend.base import Message, RecoverableBackendError, StreamProgress
 from orbit.runtime.completion_budget import CompletionBudget, resolve_max_tokens
 from orbit.runtime.continue_controller import ContinueController
 from orbit.runtime.document_search import (
@@ -1773,16 +1773,34 @@ class ContinueEnvironment:
             )
             return ContinueResult(result=result, used_native_continue=False, used_prompt_fallback=True)
         if self.runtime.can_continue_last_response() and hasattr(self.runtime.backend, "continue_current"):
-            result = ContinueController(
-                backend=self.runtime.backend,
-                thinking=self.runtime._thinking(),
-                merge_results=merge_chat_results,
-            ).continue_until_settled(
-                max_tokens=max_tokens,
-                on_final_delta=on_final_delta,
-                on_progress=on_progress,
-                max_passes=3,
-            )
+            try:
+                result = ContinueController(
+                    backend=self.runtime.backend,
+                    thinking=self.runtime._thinking(),
+                    merge_results=merge_chat_results,
+                ).continue_until_settled(
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    max_passes=3,
+                )
+            except RecoverableBackendError:
+                # Any recoverable backend refusal -- typically "no active
+                # continuation state", because the post-final route shadow
+                # replaced the last completion's context after a reply that
+                # stopped on its own -- falls back to the prompt continuation
+                # instead of surfacing an error; a backend that is down fails
+                # that call the same way it would have failed the native one.
+                result = self._continue_with_prompt_fallback(
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_final_delta=on_final_delta,
+                    on_progress=on_progress,
+                    on_model_step=on_model_step,
+                    on_phase_start=on_phase_start,
+                    loop=1,
+                )
+                return ContinueResult(result=result, used_native_continue=False, used_prompt_fallback=True)
             if on_phase_start:
                 on_phase_start(
                     ModelPhaseStart(

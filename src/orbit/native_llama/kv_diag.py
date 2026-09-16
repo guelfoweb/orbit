@@ -38,6 +38,20 @@ def enabled() -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def token_ids_enabled() -> bool:
+    """Whether cache events carry the exact token ids, not only their hashes.
+
+    Off by default: a prompt's ids are the conversation itself, and the
+    hashes already let a trace be checked against a re-render. On for a
+    reproduction that has to attribute every evaluated token to the text it
+    came from, which a count or a hash cannot do.
+    """
+    if not enabled():
+        return False
+    value = os.environ.get("ORBIT_KV_DIAG_TOKENS", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def reset_diagnostics_for_tests() -> None:
     global _REQUEST_IDS
     _REQUEST_IDS = count(1)
@@ -77,6 +91,7 @@ def emit_prompt_cache_event(
     cancelled: bool,
     slot_id: str,
     component_tokens: dict[str, Any] | None = None,
+    generated_tokens: list[int] | None = None,
 ) -> None:
     if not enabled():
         return
@@ -129,6 +144,11 @@ def emit_prompt_cache_event(
             reused_prompt_tokens=reused_prompt_tokens,
         ),
     }
+    if token_ids_enabled():
+        event["prompt_token_ids"] = [int(token) for token in prompt_tokens]
+        event["generated_token_ids"] = (
+            [int(token) for token in generated_tokens] if generated_tokens is not None else None
+        )
     _emit(event)
     if component_tokens is not None and _is_final_or_retry_phase(request.phase if request else None):
         _emit_prompt_component_tokens_event(
@@ -278,6 +298,16 @@ def _emit_evidence_card_tokens_event(
         "has_summary": bool(card.get("has_summary")),
         "is_error_status": bool(card.get("is_error_status")),
     }
+    _emit(event)
+
+
+def emit_route_shadow_event(metadata: dict[str, Any]) -> None:
+    """The post-final route shadow: what it did, or why it declined."""
+    if not enabled():
+        return
+    event: dict[str, Any] = {"event": "kv_diag_route_shadow"}
+    for key, value in metadata.items():
+        event[key] = value if isinstance(value, (bool, int, float, str)) or value is None else str(value)
     _emit(event)
 
 

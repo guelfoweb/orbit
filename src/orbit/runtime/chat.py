@@ -56,6 +56,7 @@ from orbit.runtime.final_policy import (
 )
 from orbit.runtime.file_input_resolver import FileInputResolver
 from orbit.runtime.kv_diag import (
+    route_history_continuation_context,
     current_phase,
     emit_evidence_lineage,
     emit_route_outcome,
@@ -706,16 +707,17 @@ class ChatRuntime:
                             retry_reason="control_channel_markup",
                         )
                         route_outcome_emitted = True
-                    first = self._transport_environment().chat_final(
-                        self._with_final_evidence_context(with_chat_system_prompt(self.messages)),
-                        temperature=temperature,
-                        max_tokens=resolve_max_tokens("chat", max_tokens),
-                        on_final_delta=on_final_delta,
-                        on_progress=on_progress,
-                        on_model_step=on_model_step,
-                        on_phase_start=on_phase_start,
-                        loop=2,
-                    )
+                    with self._route_history_continuation():
+                        first = self._transport_environment().chat_final(
+                            self._with_final_evidence_context(with_chat_system_prompt(self.messages)),
+                            temperature=temperature,
+                            max_tokens=resolve_max_tokens("chat", max_tokens),
+                            on_final_delta=on_final_delta,
+                            on_progress=on_progress,
+                            on_model_step=on_model_step,
+                            on_phase_start=on_phase_start,
+                            loop=2,
+                        )
                     retried_empty_final = True
                 if first.finish_reason == "length":
                     retry_reason = route_abort_reason or "length_without_decision"
@@ -742,7 +744,7 @@ class ChatRuntime:
                         previous_finish_reason=first.finish_reason,
                     )
                     if on_final_delta is None:
-                        with model_call_context(phase="chat_final_retry", tools_mode="on"):
+                        with self._route_history_continuation(), model_call_context(phase="chat_final_retry", tools_mode="on"):
                             first = self.backend.chat(
                                 retry_messages,
                                 temperature=temperature,
@@ -750,7 +752,7 @@ class ChatRuntime:
                             )
                     else:
                         streamed_final_retry = True
-                        with model_call_context(phase="chat_final_retry", tools_mode="on"):
+                        with self._route_history_continuation(), model_call_context(phase="chat_final_retry", tools_mode="on"):
                             first = self.backend.chat_stream(
                                 retry_messages,
                                 temperature=temperature,
@@ -770,16 +772,17 @@ class ChatRuntime:
                         )
                         route_outcome_emitted = True
                     retried_empty_final = True
-                    first = self._transport_environment().chat_final(
-                        self._with_final_evidence_context(self.messages),
-                        temperature=temperature,
-                        max_tokens=resolve_max_tokens("chat", max_tokens),
-                        on_final_delta=on_final_delta,
-                        on_progress=on_progress,
-                        on_model_step=on_model_step,
-                        on_phase_start=on_phase_start,
-                        loop=2,
-                    )
+                    with self._route_history_continuation():
+                        first = self._transport_environment().chat_final(
+                            self._with_final_evidence_context(self.messages),
+                            temperature=temperature,
+                            max_tokens=resolve_max_tokens("chat", max_tokens),
+                            on_final_delta=on_final_delta,
+                            on_progress=on_progress,
+                            on_model_step=on_model_step,
+                            on_phase_start=on_phase_start,
+                            loop=2,
+                        )
                 if not route_outcome_emitted:
                     _emit_route_outcome_for_result(
                         first,
@@ -799,7 +802,7 @@ class ChatRuntime:
             return self._remember_visible_result_streamed(_visible_delta, _delta_sink, first)
         if decision.route == ToolRoute.CHAT:
             chat_messages = self._chat_final_messages()
-            with model_call_context(phase="chat_final", tools_mode="on"):
+            with self._route_history_continuation(), model_call_context(phase="chat_final", tools_mode="on"):
                 result = self._chat_final(
                     chat_messages,
                     temperature=temperature,
@@ -1408,6 +1411,20 @@ class ChatRuntime:
         if self._should_use_post_tool_route_window():
             return self._post_tool_route_messages()
         return self._with_route_evidence_context(with_command_system_prompt(self.messages))
+
+    def _route_history_continuation(self):
+        """Declare the final calls whose reply extends the route history.
+
+        True exactly when this turn's route prompt was rendered from
+        `self.messages` as they stand (no post-tool window) and the final
+        prompt is rendered from the same messages with no evidence context,
+        so the reply appended afterwards is what the next route prompt will
+        show right after this turn's route prompt. With evidence in the
+        session both projections change, and nothing is declared. The
+        backend decides on its own whether it can use the declaration.
+        """
+        plain = self.evidence_store is None or not self.evidence_store.recent_records(1)
+        return route_history_continuation_context(plain and not self._should_use_post_tool_route_window())
 
     def _should_use_post_tool_route_window(self) -> bool:
         if self.evidence_store is None or not self.evidence_store.recent_records(1):
