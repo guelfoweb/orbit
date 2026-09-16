@@ -44,6 +44,7 @@ from .model_profiles import (
     ORNITH15_PROFILE_ID,
     PROFILE_METADATA_KEYS,
     QWEN36_PROFILE_ID,
+    QWEN38_FLASH_NEXT_PROFILE_ID,
     QWEN3_CODER_PROFILE_ID,
     SELF_MTP_CAPABILITY,
     NativeModelProfile,
@@ -133,6 +134,13 @@ from .persistent_mtp import (
     run_persistent_mtp_completion,
 )
 from .session_state import DEFAULT_NATIVE_SESSION_ID, NativeSessionSnapshot, NativeSessionState
+
+# Profiles whose CHAT route calls may use the rolling route checkpoint (the
+# conversation's own route prompt, captured at the prefill boundary and
+# restored on the next route call under the exact-prefix rule). Membership is
+# a qualification decision: the state round-trip has to be demonstrated on the
+# real model. The ANALYSIS rolling lineage stays Ornith-only.
+ROLLING_ROUTE_PROFILE_IDS = frozenset({ORNITH15_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID})
 
 
 DEFAULT_MEDIA_MARKER = "<__media__>"
@@ -991,7 +999,7 @@ class NativeLlamaClient:
         # state holds the conversation's own tokens.
         preserve_ornith_rolling_route_checkpoint = (
             getattr(profile, "verified", False)
-            and profile_id == ORNITH15_PROFILE_ID
+            and profile_id in ROLLING_ROUTE_PROFILE_IDS
             and qualified_transition
         )
         self.reset_session_state(
@@ -3696,17 +3704,23 @@ class NativeLlamaClient:
 
 
     def _ornith_rolling_route_eligible(self, *, route_prefix_anchor: bool, tools: list[dict] | None, thinking: bool) -> bool:
-        """Only verified Ornith route calls take the rolling strategy.
+        """Only verified route calls of a qualified profile take the rolling strategy.
 
         The route signal is the anchor flag the runtime already sets from its
-        own phase; the backend never infers phase from the prompt.
+        own phase; the backend never infers phase from the prompt. The
+        qualified profiles are the hybrid (attention + recurrent) models whose
+        whole sequence state round-trips through `llama_state_seq_get_data` /
+        `llama_state_seq_set_data`: Ornith, and since
+        QWEN38-PROMPT-CACHE-REUSE-22 Qwen3.8 Flash Next (`qwen4exp`, whose
+        `llama_memory_hybrid_idx` serializes the attention KV, the DeltaNet
+        recurrent state and the indexer cache together).
         """
         if not route_prefix_anchor:
             return False
         profile = getattr(self, "model_profile", None)
         if not getattr(profile, "verified", False):
             return False
-        if getattr(profile, "profile_id", None) != ORNITH15_PROFILE_ID:
+        if getattr(profile, "profile_id", None) not in ROLLING_ROUTE_PROFILE_IDS:
             return False
         if thinking:
             return False
