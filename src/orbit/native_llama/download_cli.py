@@ -36,13 +36,19 @@ def _download(args: argparse.Namespace) -> int:
     models_dir = effective_models_dir(args.models_dir)
     _print_large_model_advisory(args, models_dir)
     progress = _DownloadProgress()
+
+    def on_shard(index: int, count: int, name: str, action: str) -> None:
+        progress.finish()
+        label = {"present": "already present", "download": "downloading", "resume": "resuming"}[action]
+        print(f"shard {index}/{count}: {name} ({label})", flush=True)
+
     try:
         if args.all:
             if args.mmproj:
                 print("error: --all cannot be combined with --mmproj", file=sys.stderr)
                 return 1
             repo = args.spec or get_manifest(DEFAULT_MODEL_ID).target.repo
-            batch = download_all_for_repo(repo, models_dir=models_dir, progress=progress)
+            batch = download_all_for_repo(repo, models_dir=models_dir, progress=progress, on_shard=on_shard)
             progress.finish()
             for result in batch.results:
                 action = "downloaded" if result.downloaded else "already present"
@@ -56,6 +62,7 @@ def _download(args: argparse.Namespace) -> int:
             models_dir=models_dir,
             prefer="mmproj" if args.mmproj else "target",
             progress=progress,
+            on_shard=on_shard,
         )
         progress.finish()
     except Exception as exc:

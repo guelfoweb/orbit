@@ -70,6 +70,7 @@ class CliDownloadDispatchTests(unittest.TestCase):
             "ggml-org/gemma-4-26B-A4B-it-GGUF",
             models_dir=mock.ANY,
             progress=mock.ANY,
+            on_shard=mock.ANY,
         )
 
     def test_download_without_spec_fails_when_not_all(self) -> None:

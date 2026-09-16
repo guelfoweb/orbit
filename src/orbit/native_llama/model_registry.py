@@ -8,6 +8,7 @@ import json
 import os
 from typing import Any, Mapping
 
+from orbit.native_llama.gguf_split import split_problems
 from orbit.native_llama.model_profiles import verified_native_model_identity
 
 
@@ -373,6 +374,14 @@ def resolve_model(
     target_path = target_override or _resolve_file(manifest.target, models_dir=local_root, hf_cache=cache_root)
     if target_path is None or not target_path.exists():
         raise FileNotFoundError(f"target model not found: {manifest.target.repo}:{manifest.target.file}")
+    problems = split_problems(target_path)
+    if problems:
+        # A split GGUF is one artifact: the backend opens the first shard and
+        # needs every sibling, so an incomplete set is "not found", said plainly.
+        raise FileNotFoundError(
+            f"target model is incomplete: {problems[0]}; "
+            f"run `orbit download {manifest.target.repo}/{manifest.target.file}` to fetch the missing shards"
+        )
 
     mmproj_path: Path | None = None
     multimodal_fallback_reason: str | None = None
