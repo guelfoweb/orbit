@@ -134,6 +134,18 @@ class IdentityHelperTests(unittest.TestCase):
     def test_the_backend_identity_is_a_string_and_never_raises(self) -> None:
         self.assertIsInstance(app_module._backend_identity(), str)
 
+    def test_the_backend_identity_prefers_the_release_tag(self) -> None:
+        payload = {"upstream_tag": "b9551", "upstream_commit": "379ac6673b5cd75c7b4e07d1521c50f1e093878c"}
+        with mock.patch.object(pathlib.Path, "read_text", return_value=__import__("json").dumps(payload)):
+            self.assertEqual(app_module._backend_identity(), "b9551")
+
+    def test_an_untagged_pin_is_identified_by_its_commit(self) -> None:
+        # 41abbfd has no upstream release tag; the calibration cache must still
+        # key on THIS pin rather than on the shared word "untagged".
+        payload = {"upstream_tag": "untagged", "upstream_commit": "41abbfd599fbdd3470fcae0a1fb6530ad8403cd7"}
+        with mock.patch.object(pathlib.Path, "read_text", return_value=__import__("json").dumps(payload)):
+            self.assertEqual(app_module._backend_identity(), "41abbfd599fb")
+
 
 class ConfigCorrectionTests(unittest.TestCase):
     """The calibrated counts must reach `client.config`, not only the context.

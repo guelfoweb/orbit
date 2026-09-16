@@ -25,6 +25,8 @@ from .bindings import (
     MtmdLibrary,
     llama_token,
     llama_pos,
+    LLAMA_LAZY_MODE_OFF,
+    LLAMA_LOAD_MODE_MMAP,
 )
 from .chat_bridge import chat_bridge_filename
 from .committed_identity import CommittedIdentity, AttributeBackedIdentity
@@ -633,6 +635,11 @@ class NativeLlamaClient:
                     f"{QWEN3_CODER_PROFILE_ID}; detected={profile.profile_id}"
                 )
         params = self.lib.lib.llama_model_default_params()
+        # Pin the qualified b9551 loading semantics explicitly (use_mmap=true,
+        # no mlock/direct-io, no on-demand tensor reads) rather than relying on
+        # upstream's AUTO resolution for both new enums.
+        params.load_mode = LLAMA_LOAD_MODE_MMAP
+        params.lazy_mode = LLAMA_LAZY_MODE_OFF
         self._cpu_repack_enabled = bool(params.use_extra_bufts)
         if self.config.low_memory:
             params.use_extra_bufts = False

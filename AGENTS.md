@@ -91,8 +91,9 @@ the Dell**:
 - The native libraries under `src/orbit/native_llama/vendor/lib/*.so*` are build
   OUTPUTS; the vendored SOURCE is tracked, so rebuild them on the new machine with
   `python3 scripts/build_native.py` rather than copying binaries. Built and
-  present on the Dell (llama.cpp `b9551`), together with the six MTP shim
-  binaries and both Orbit bridges.
+  present on the Dell (llama.cpp `41abbfd`, since
+  LLAMA-BACKEND-41ABBFD-UPGRADE-18), together with the six MTP shim binaries
+  and both Orbit bridges.
 
 ### Machine-local research artifacts that were NOT transported (expected, not a defect)
 These live OUTSIDE the repository and outside `workdir/`. They gate unit-test
@@ -1666,7 +1667,7 @@ causal mutation (dropping/altering one expected fact per seam fails the gate).
 - Python no longer exposes upstream mtmd structures. The mandatory co-located `liborbit-mtmd-bridge` accepts primitive values and opaque handles, constructs `mtmd_context_params` and `mtmd_input_text` from the compiled headers, and adapts reviewed bitmap return profiles.
 - The bridge rejects unknown context, input-text, bitmap, or capability ABI layouts before mmproj initialization. Core ctypes structures passed by value are checked against bridge-reported `sizeof`, `alignof`, and relevant `offsetof` values.
 - Bridge reuse is revision-bound. Its identity covers compiler/version, bridge flags, native CMake configuration, relevant source/header hashes, every co-located runtime-library hash, the bridge artifact hash, upstream provenance, and the Orbit patchset hash. Missing or mismatched identity fails explicitly.
-- Current vendor provenance is upstream `b9551` at `379ac6673b5cd75c7b4e07d1521c50f1e093878c`, source-tree hash `4adb967e643363e7dc4d01d632b3a8471e0df2ec84ff304d364dc182f63e7ee1`, and Orbit patchset hash `dea2f205ed2a73d09ad203e08ba85545474742dbb0191f4f1a9b3a86beb4b435`.
+- Current vendor provenance is upstream `41abbfd599fbdd3470fcae0a1fb6530ad8403cd7` (no upstream release tag; build number `10968`, the parent of `b10969`, recorded as `upstream_build_number`), source-tree hash `166e8a8c933e0445de27af3c30347fe61d116bf0ee850d093a4749bcdf18da83`, Orbit patchset hash `07b1a48d13610cc7fc51c63d6bbb0d6be8788f3faaf88a8d66770372ecfb5cb0` (`orbit-unified-diff-v1`) and reproducible v2 attestation `f50b7229db767cbd5bc5ef1f69bb39156bbe4578ee7a143b3c5d3a3a1dda4e84`. Previous pin: `b9551` / `379ac667` (LLAMA-BACKEND-41ABBFD-UPGRADE-18).
 - Native CMake builds receive vendor commit/build metadata explicitly. `LLAMA_COMMIT` must never be inferred from the enclosing Orbit repository.
 - This hardening does not update the production llama.cpp revision. See `docs/NATIVE_MTMD_ABI.md`.
 

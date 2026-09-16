@@ -1,10 +1,11 @@
 #pragma once
 
-#include <nlohmann/json_fwd.hpp>
+#include "json-schema.h"
+#include "json.h"
 
 #include <memory>
+#include <set>
 #include <unordered_map>
-#include <unordered_set>
 #include <string>
 #include <string_view>
 #include <functional>
@@ -245,7 +246,8 @@ struct common_peg_until_parser {
 struct common_peg_schema_parser {
     common_peg_parser_id child;
     std::string name;
-    std::shared_ptr<nlohmann::ordered_json> schema;
+    common_chat_schema_document_ptr doc;  // owns node
+    const common_chat_schema * node = nullptr;
 
     // Indicates if the GBNF should accept a raw string that matches the schema.
     bool raw;
@@ -275,6 +277,11 @@ struct common_peg_gbnf_parser {
     std::string grammar;
 };
 
+struct common_peg_ac_parser {
+    common_peg_parser_id child;
+    std::vector<std::string> delimiters;
+};
+
 // Variant holding all parser types
 using common_peg_parser_variant = std::variant<
     common_peg_epsilon_parser,
@@ -296,7 +303,8 @@ using common_peg_parser_variant = std::variant<
     common_peg_ref_parser,
     common_peg_atomic_parser,
     common_peg_tag_parser,
-    common_peg_gbnf_parser
+    common_peg_gbnf_parser,
+    common_peg_ac_parser
 >;
 
 class common_peg_arena {
@@ -326,8 +334,8 @@ class common_peg_arena {
 
     std::string dump(common_peg_parser_id id) const;
 
-    nlohmann::json to_json() const;
-    static common_peg_arena from_json(const nlohmann::json & j);
+    common_json to_json() const;
+    static common_peg_arena from_json(const common_json & j);
 
     std::string save() const;
     void load(const std::string & data);
@@ -335,7 +343,7 @@ class common_peg_arena {
     friend class common_peg_parser_builder;
 
   private:
-    std::string dump_impl(common_peg_parser_id id, std::unordered_set<common_peg_parser_id> & visited) const;
+    std::string dump_impl(common_peg_parser_id id, std::set<common_peg_parser_id> & visited) const;
 
     common_peg_parser_id add_parser(common_peg_parser_variant parser);
     void add_rule(const std::string & name, common_peg_parser_id id);
@@ -482,9 +490,11 @@ class common_peg_parser_builder {
     // A marker, i.e. text delimited by a pair of <> or []
     common_peg_parser marker();
 
-    // Wraps a parser with JSON schema metadata for grammar generation.
-    // Used internally to convert JSON schemas to GBNF grammar rules.
-    common_peg_parser schema(const common_peg_parser & p, const std::string & name, const nlohmann::ordered_json & schema, bool raw = false);
+    // Wraps a parser with the schema its GBNF is generated from, a node of the document that owns it
+    common_peg_parser schema(const common_peg_parser & p, const std::string & name, common_chat_schema_document_ptr doc, const common_chat_schema & node, bool raw = false);
+
+    // Parses the JSON schema into a document of its own
+    common_peg_parser schema(const common_peg_parser & p, const std::string & name, const common_json & schema, bool raw = false);
 
     // Creates a named rule, stores it in the grammar, and returns a ref.
     // If trigger=true, marks this rule as an entry point for lazy grammar generation.
@@ -513,6 +523,13 @@ class common_peg_parser_builder {
     // Wraps a child parser but emits a custom GBNF grammar string instead of
     // the child's grammar. Parsing delegates entirely to the child.
     common_peg_parser gbnf(const common_peg_parser & p, const std::string & grammar) { return add(common_peg_gbnf_parser{p, grammar}); }
+
+    // Wraps a child parser but emits a GBNF grammar built from the Aho-Corasick
+    // automaton of `delimiters`, matching everything up to and including the
+    // first delimiter. Parsing delegates entirely to the child, which is
+    // responsible for consuming the delimiter (e.g. until(D) + literal(D)).
+    common_peg_parser ac(const common_peg_parser & p, const std::vector<std::string> & delimiters);
+    common_peg_parser ac(const common_peg_parser & p, const std::string & delimiter) { return ac(p, std::vector<std::string>{delimiter}); }
 
     void set_root(const common_peg_parser & p);
 

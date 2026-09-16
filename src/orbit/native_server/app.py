@@ -844,7 +844,12 @@ def _backend_identity() -> str:
             / "native_llama" / "vendor" / "LLAMA_PROVENANCE.json"
         )
         payload = json.loads(manifest.read_text(encoding="utf-8"))
-        return str(payload.get("upstream_tag") or "")
+        tag = str(payload.get("upstream_tag") or "")
+        if tag and tag != "untagged":
+            return tag
+        # A pin without an upstream release tag (41abbfd) is identified by its
+        # commit, so two untagged pins never share one calibration entry.
+        return str(payload.get("upstream_commit") or "")[:12]
     except (OSError, ValueError, KeyError):
         return ""
 

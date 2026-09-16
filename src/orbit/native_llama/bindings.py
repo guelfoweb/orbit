@@ -34,6 +34,18 @@ llama_token = c_int32
 llama_pos = c_int32
 llama_seq_id = c_int32
 
+# enum llama_load_mode / enum llama_lazy_mode (llama.h, upstream 41abbfd). These
+# replaced the use_mmap / use_direct_io / use_mlock booleans of llama_model_params.
+LLAMA_LOAD_MODE_AUTO = -1
+LLAMA_LOAD_MODE_NONE = 0
+LLAMA_LOAD_MODE_MMAP = 1
+LLAMA_LOAD_MODE_MLOCK = 2
+LLAMA_LOAD_MODE_MMAP_MLOCK = 3
+LLAMA_LOAD_MODE_DIRECT_IO = 4
+LLAMA_LAZY_MODE_OFF = 0
+LLAMA_LAZY_MODE_AUTO = 1
+LLAMA_LAZY_MODE_ON = 2
+
 
 _CDLL_CACHE: dict[tuple[str, int], CDLL] = {}
 _RUNTIME_FAMILY_LOCK = threading.Lock()
@@ -116,19 +128,19 @@ class LlamaModelParams(Structure):
         ("tensor_buft_overrides", c_void_p),
         ("n_gpu_layers", c_int32),
         ("split_mode", c_int),
+        ("load_mode", c_int),
+        ("lazy_mode", c_int),
         ("main_gpu", c_int32),
         ("tensor_split", POINTER(c_float)),
         ("progress_callback", LlamaProgressCallback),
         ("progress_callback_user_data", c_void_p),
         ("kv_overrides", c_void_p),
         ("vocab_only", c_bool),
-        ("use_mmap", c_bool),
-        ("use_direct_io", c_bool),
-        ("use_mlock", c_bool),
         ("check_tensors", c_bool),
         ("use_extra_bufts", c_bool),
         ("no_host", c_bool),
         ("no_alloc", c_bool),
+        ("load_mtp", c_bool),
     ]
 
 
@@ -140,6 +152,7 @@ class LlamaContextParams(Structure):
         ("n_seq_max", c_uint32),
         ("n_rs_seq", c_uint32),
         ("n_outputs_max", c_uint32),
+        ("n_outputs_max_per_seq", c_uint32),
         ("n_threads", c_int32),
         ("n_threads_batch", c_int32),
         ("ctx_type", c_int),

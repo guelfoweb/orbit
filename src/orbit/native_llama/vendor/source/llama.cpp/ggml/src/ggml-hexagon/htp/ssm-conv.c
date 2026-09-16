@@ -4,7 +4,6 @@
 
 #include <HAP_farf.h>
 #include <HAP_mem.h>
-#include <HAP_perf.h>
 #include <HAP_ps.h>
 #include <hexagon_protos.h>
 #include <hexagon_types.h>
@@ -16,8 +15,9 @@
 #include "ggml-common.h"
 #include "htp-ctx.h"
 #include "hex-dma.h"
+#include "hex-profile.h"
 #include "htp-ops.h"
-#include "htp-ops.h"
+#include "htp-tensor.h"
 #include "hvx-utils.h"
 
 #define htp_ssm_conv_tensors_preamble                           \
@@ -63,6 +63,8 @@ struct htp_ssm_conv_context {
     uint32_t nrows_per_thread;
     uint32_t d_inner_tile;
     uint64_t t_start;
+    uint32_t row_start;
+    uint32_t nrows;
 };
 
 #define htp_ssm_conv_preamble                                                   \
@@ -74,9 +76,6 @@ struct htp_ssm_conv_context {
 // Scalar FP32 SSM_CONV implementation
 static void ssm_conv_thread_f32_f32(unsigned int nth, unsigned int ith, void *data) {
     htp_ssm_conv_preamble;
-
-    uint64_t t1, t2;
-    t1 = HAP_perf_get_qtimer_count();
 
     const uint32_t d_conv  = src1->ne[0];
     const uint32_t d_inner = src0->ne[1];
@@ -95,13 +94,16 @@ static void ssm_conv_thread_f32_f32(unsigned int nth, unsigned int ith, void *da
 
     // Calculate row range for this thread
     const uint32_t d_inner_per_thread = scctx->nrows_per_thread;
-    const uint32_t d_inner_start = d_inner_per_thread * ith;
-    const uint32_t d_inner_end   = MIN(d_inner_start + d_inner_per_thread, d_inner);
+    const uint32_t d_inner_start = scctx->row_start + d_inner_per_thread * ith;
+    const uint32_t d_inner_end   = MIN(d_inner_start + d_inner_per_thread, scctx->row_start + scctx->nrows);
 
     // No work for this thread
     if (d_inner_start >= d_inner_end) {
         return;
     }
+
+    struct htp_thread_trace * tr = &octx->ctx->trace[ith];
+    htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, (uint16_t) d_inner_start);
 
     for (uint32_t i3 = 0; i3 < n_s; ++i3) {
         for (uint32_t i2 = 0; i2 < n_t; ++i2) {
@@ -121,12 +123,12 @@ static void ssm_conv_thread_f32_f32(unsigned int nth, unsigned int ith, void *da
         }
     }
 
-    t2 = HAP_perf_get_qtimer_count();
+    htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, (uint16_t) d_inner_end);
 
-    FARF(HIGH, "ssm-conv-f32 %d/%d: %ux%ux%ux%u (%u:%u) * %ux%ux%ux%u -> %ux%ux%ux%u usec %u\n",
+    FARF(HIGH, "ssm-conv-f32 %d/%d: %ux%ux%ux%u (%u:%u) * %ux%ux%ux%u -> %ux%ux%ux%u\n",
          ith, nth, src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], d_inner_start, d_inner_end,
          src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3], dst->ne[0], dst->ne[1],
-         dst->ne[2], dst->ne[3], (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+         dst->ne[2], dst->ne[3]);
 }
 
 
@@ -183,24 +185,25 @@ static inline void hvx_transpose_32x32_f32(HVX_Vector m[32]) {
 // transposed into VTCM.
 //
 // VTCM layouts (per thread):
-//   src1_T : {d_inner_per_thread, d_conv}   — staged once per launch (small).
-//   src0_T : {d_inner_tile,     ncs}        — staged per d_inner-tile.
+//   src1_T : {d_inner_stride, d_conv}       - staged once per launch (small).
+//   src0_T : {d_inner_tile,     ncs}        - staged per d_inner-tile.
 //
 // d_inner_tile is chosen so that per-thread VTCM stays under the budget.
 // Each thread iterates ceil(d_inner_per_thread d_inner_tile) tiles serially.
 #define HTP_SSM_CONV_VTCM_BUDGET (1u << 20) // 1 MiB per thread
 
-// Scalar transpose: src1 {d_conv, d_inner} (DDR) -> {d_inner_per_thread, d_conv} (VTCM)
+// Scalar transpose: src1 {d_conv, d_inner} (DDR) -> {d_inner_stride, d_conv} (VTCM)
 static inline void transpose_src1(const float * src1_data,
                                   uint32_t      src1_stride_inner,
                                   uint32_t      i1_off,
                                   uint32_t      d_inner_per_thread,
+                                  uint32_t      d_inner_stride,
                                   uint32_t      d_conv,
                                   float *       src1_T) {
     for (uint32_t i = 0; i < d_inner_per_thread; ++i) {
         const float * src_row = src1_data + (i1_off + i) * src1_stride_inner;
         for (uint32_t j = 0; j < d_conv; ++j) {
-            src1_T[j * d_inner_per_thread + i] = src_row[j];
+            src1_T[j * d_inner_stride + i] = src_row[j];
         }
     }
 }
@@ -256,9 +259,6 @@ static inline void transpose_src0_block(const float * src0_block,
 static void ssm_conv_thread_f32_f32_hvx(unsigned int nth, unsigned int ith, void *data) {
     htp_ssm_conv_preamble;
 
-    uint64_t t1, t2;
-    t1 = HAP_perf_get_qtimer_count();
-
     const uint32_t d_conv  = src1->ne[0];
     const uint32_t d_inner = src0->ne[1];
     const uint32_t n_t     = dst->ne[1];
@@ -272,14 +272,18 @@ static void ssm_conv_thread_f32_f32_hvx(unsigned int nth, unsigned int ith, void
     const uint32_t dst_stride_seq    = dst->nb[2]  / sizeof(float);
 
     const uint32_t dr  = scctx->nrows_per_thread;
-    const uint32_t ir0 = dr * ith;
-    const uint32_t ir1 = MIN(ir0 + dr, d_inner);
+    const uint32_t ir0 = scctx->row_start + dr * ith;
+    const uint32_t ir1 = MIN(ir0 + dr, scctx->row_start + scctx->nrows);
 
     if (ir0 >= ir1) {
         return;
     }
 
+    struct htp_thread_trace * tr = &octx->ctx->trace[ith];
+    htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, (uint16_t) ir0);
+
     const uint32_t d_inner_per_thread = ir1 - ir0;
+    const uint32_t d_inner_stride     = scctx->nrows_per_thread;
     const uint32_t d_inner_tile       = scctx->d_inner_tile;
 
     const float * src0_data = (const float *) src0->data;
@@ -290,8 +294,8 @@ static void ssm_conv_thread_f32_f32_hvx(unsigned int nth, unsigned int ith, void
     float * src0_T = (float *)(octx->src0_spad.data + ith * octx->src0_spad.size_per_thread);
     float * src1_T = (float *)(octx->src1_spad.data + ith * octx->src1_spad.size_per_thread);
 
-    // Stage src1 weights once into VTCM in {d_inner_per_thread, d_conv} layout.
-    transpose_src1(src1_data, src1_stride_inner, ir0, d_inner_per_thread, d_conv, src1_T);
+    // Stage src1 weights once into VTCM in {d_inner_stride, d_conv} layout.
+    transpose_src1(src1_data, src1_stride_inner, ir0, d_inner_per_thread, d_inner_stride, d_conv, src1_T);
 
     const uint32_t C_TILE = VLEN_FP32;
 
@@ -314,101 +318,121 @@ static void ssm_conv_thread_f32_f32_hvx(unsigned int nth, unsigned int ith, void
                     HVX_Vector acc = hvx_vec_splat_f32(0.0f);
                     for (uint32_t j = 0; j < d_conv; ++j) {
                         HVX_Vector x = *(const HVX_Vector *) (src0_T + (t + j) * d_inner_tile + cb);
-                        HVX_Vector w = *(const HVX_Vector *) (src1_T + j * d_inner_per_thread + tile_off + cb);
+                        HVX_Vector w = *(const HVX_Vector *) (src1_T + j * d_inner_stride + tile_off + cb);
                         acc          = Q6_Vqf32_vadd_Vqf32Vqf32(acc, Q6_Vqf32_vmpy_VsfVsf(x, w));
                     }
-                    HVX_Vector res = Q6_Vsf_equals_Vqf32(acc);
 
-                    float * dst_ptr = dst_data + i3 * dst_stride_seq + t * dst_stride_token + (ir0 + tile_off + cb);
+                    HVX_Vector y = Q6_Vsf_equals_Vqf32(acc);
+
+                    float * dst_ptr = dst_data + (ir0 + tile_off + cb) + t * dst_stride_token + i3 * dst_stride_seq;
                     if (cb_n == C_TILE) {
-                        *(HVX_UVector *) dst_ptr = res;
+                        *(HVX_UVector *) dst_ptr = y;
                     } else {
-                        hvx_vec_store_u(dst_ptr, cb_n * sizeof(float), res);
+                        hvx_vec_store_u(dst_ptr, cb_n * sizeof(float), y);
                     }
                 }
             }
         }
     }
 
-    t2 = HAP_perf_get_qtimer_count();
+    htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, (uint16_t) ir1);
 
-    FARF(HIGH, "ssm-conv-f32-hvx %d/%d: %ux%ux%ux%u (%u:%u) tile=%u * %ux%ux%ux%u -> %ux%ux%ux%u usec %u\n",
-         ith, nth, src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], ir0, ir1, d_inner_tile,
+    FARF(HIGH, "ssm-conv-f32-hvx %d/%d: %ux%ux%ux%u (%u:%u) * %ux%ux%ux%u -> %ux%ux%ux%u\n",
+         ith, nth, src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], ir0, ir1,
          src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3], dst->ne[0], dst->ne[1],
-         dst->ne[2], dst->ne[3], (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+         dst->ne[2], dst->ne[3]);
 }
 
 int op_ssm_conv_f32(struct htp_ops_context * octx) {
-    htp_ssm_conv_tensors_preamble;
+    const struct htp_tensor * src0 = octx->src[0];
+    const struct htp_tensor * src1 = octx->src[1];
+    const struct htp_tensor * dst  = octx->dst;
 
     if (src0->type != HTP_TYPE_F32 || src1->type != HTP_TYPE_F32 || dst->type != HTP_TYPE_F32) {
-        FARF(ERROR, "ssm_conv: only (F32 x F32 -> F32) OPs supported");
         return HTP_STATUS_NO_SUPPORT;
     }
-
-    struct htp_ssm_conv_context scctx = { 0 };
-    scctx.octx = octx;
 
     const uint32_t d_conv  = src1->ne[0];
     const uint32_t d_inner = src0->ne[1];
     const uint32_t n_t     = dst->ne[1];  // tokens per sequence
     const uint32_t n_s     = dst->ne[2];  // number of sequences in the batch
 
-    const uint32_t n_threads = MIN(octx->n_threads, d_inner);
+    if (octx->flags & HTP_OPFLAGS_SKIP_COMPUTE) {
+        return HTP_STATUS_OK;
+    }
 
-    if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
-        uint32_t use_hvx = 0;
-        if (d_inner >= VLEN_FP32 && n_t >= VLEN_FP32) {
-            use_hvx = 1;
-        }
+    uint32_t row_start = 0;
+    uint32_t nrows     = d_inner;
 
-        scctx.nrows_per_thread  = (d_inner + n_threads - 1) / n_threads;
-        scctx.nrows_per_thread += (scctx.nrows_per_thread & 1);
+    if (octx->ctx->mdev.count > 1) {
+        const uint32_t elems_per_chunk = VLEN_FP32;
+        const struct htp_tensor_mdev_range range = htp_tensor_mdev_partition(d_inner, htp_tensor_mdev_data_aligned(dst) ? elems_per_chunk : 0, octx->ctx->mdev.idx, octx->ctx->mdev.count, &octx->ctx->mdev.count_div);
+        row_start = range.start;
+        nrows     = range.count;
+    }
 
-        const uint32_t d_inner_per_thread = scctx.nrows_per_thread;
-        const uint32_t ncs                = src0->ne[0];
+    if (nrows == 0) {
+        return HTP_STATUS_OK;
+    }
 
-        const uint32_t src1_T_size = hex_round_up(d_conv * d_inner_per_thread * sizeof(float), 256);
-        const uint32_t src0_T_max = HTP_SSM_CONV_VTCM_BUDGET > src1_T_size ? HTP_SSM_CONV_VTCM_BUDGET - src1_T_size : 0;
+    const uint32_t n_threads = octx->n_threads;
 
-        uint32_t d_inner_tile = (src0_T_max / sizeof(float)) / ncs;
-        d_inner_tile -= (d_inner_tile % VLEN_FP32);
-        if (d_inner_tile == 0) {
-            FARF(HIGH, "ssm_conv-f32: inner tile rounds to 0 (ncs=%u), falling back to scalar\n", ncs);
+    struct htp_ssm_conv_context scctx = { 0 };
+    scctx.octx      = octx;
+    scctx.row_start = row_start;
+    scctx.nrows     = nrows;
+
+    uint32_t use_hvx = 0;
+    if (nrows >= VLEN_FP32 && n_t >= VLEN_FP32) {
+        use_hvx = 1;
+    }
+
+    const uint32_t raw_rpt = fastdiv(nrows + n_threads - 1, &octx->n_threads_div);
+    scctx.nrows_per_thread = hex_round_up(raw_rpt, VLEN_FP32);
+
+    const uint32_t d_inner_per_thread = scctx.nrows_per_thread;
+    const uint32_t ncs                = src0->ne[0];
+
+    const uint32_t src1_T_size = hex_round_up(d_conv * d_inner_per_thread * sizeof(float), 256);
+    const uint32_t src0_T_max = HTP_SSM_CONV_VTCM_BUDGET > src1_T_size ? HTP_SSM_CONV_VTCM_BUDGET - src1_T_size : 0;
+
+    uint32_t d_inner_tile = (src0_T_max / sizeof(float)) / ncs;
+    d_inner_tile -= (d_inner_tile % VLEN_FP32);
+    if (d_inner_tile == 0) {
+        FARF(HIGH, "ssm_conv-f32: inner tile rounds to 0 (ncs=%u), falling back to scalar\n", ncs);
+        use_hvx = 0;
+    } else {
+        scctx.d_inner_tile = d_inner_tile;
+
+        octx->src0_spad.size_per_thread = hex_round_up(d_inner_tile * ncs * sizeof(float), 256);
+        octx->src1_spad.size_per_thread = src1_T_size;
+        octx->dst_spad.size_per_thread  = 0;
+
+        octx->src0_spad.size = octx->src0_spad.size_per_thread * n_threads;
+        octx->src1_spad.size = octx->src1_spad.size_per_thread * n_threads;
+        octx->dst_spad.size  = 0;
+
+        octx->src0_spad.data = octx->ctx->vtcm_base;
+        octx->src1_spad.data = octx->src0_spad.data + octx->src0_spad.size;
+        octx->src0_spad.src  = NULL;
+        octx->src1_spad.src  = NULL;
+
+        const size_t total_spad = octx->src0_spad.size + octx->src1_spad.size;
+        if (total_spad > octx->ctx->vtcm_size) {
+            FARF(HIGH, "ssm_conv-f32: scratchpad %zu exceeds VTCM %zu, falling back to scalar\n",
+                 total_spad, octx->ctx->vtcm_size);
             use_hvx = 0;
-        } else {
-            scctx.d_inner_tile = d_inner_tile;
-
-            octx->src0_spad.size_per_thread = hex_round_up(d_inner_tile * ncs * sizeof(float), 256);
-            octx->src1_spad.size_per_thread = src1_T_size;
-            octx->dst_spad.size_per_thread  = 0;
-
-            octx->src0_spad.size = octx->src0_spad.size_per_thread * n_threads;
-            octx->src1_spad.size = octx->src1_spad.size_per_thread * n_threads;
-            octx->dst_spad.size  = 0;
-
-            octx->src0_spad.data = octx->ctx->vtcm_base;
-            octx->src1_spad.data = octx->src0_spad.data + octx->src0_spad.size;
-            octx->src0_spad.src  = NULL;
-            octx->src1_spad.src  = NULL;
-
-            const size_t total_spad = octx->src0_spad.size + octx->src1_spad.size;
-            if (total_spad > octx->ctx->vtcm_size) {
-                FARF(HIGH, "ssm_conv-f32: scratchpad %zu exceeds VTCM %zu, falling back to scalar\n",
-                     total_spad, octx->ctx->vtcm_size);
-                use_hvx = 0;
-            }
         }
+    }
 
-        FARF(HIGH, "ssm-conv-f32: (%ux%ux%ux%u) x (%ux%ux%ux%u) -> (%ux%ux%ux%u) : use_hvx %d\n", src0->ne[0],
-             src0->ne[1], src0->ne[2], src0->ne[3], src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3], dst->ne[0],
-             dst->ne[1], dst->ne[2], dst->ne[3], use_hvx);
+    FARF(HIGH, "ssm-conv-f32: (%ux%ux%ux%u) x (%ux%ux%ux%u) -> (%ux%ux%ux%u) : use_hvx %d\n", src0->ne[0],
+         src0->ne[1], src0->ne[2], src0->ne[3], src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3], dst->ne[0],
+         dst->ne[1], dst->ne[2], dst->ne[3], use_hvx);
 
-        if (use_hvx) {
-            worker_pool_run_func(octx->ctx->worker_pool, ssm_conv_thread_f32_f32_hvx, &scctx, n_threads);
-        } else {
-            worker_pool_run_func(octx->ctx->worker_pool, ssm_conv_thread_f32_f32, &scctx, n_threads);
-        }
+    if (use_hvx) {
+        work_queue_run(octx->ctx->work_queue, ssm_conv_thread_f32_f32_hvx, &scctx, n_threads);
+    } else {
+        work_queue_run(octx->ctx->work_queue, ssm_conv_thread_f32_f32, &scctx, n_threads);
     }
 
     return HTP_STATUS_OK;

@@ -71,6 +71,12 @@ template <typename T>
 struct has_text_len<T, std::void_t<decltype(std::declval<T &>().text_len)>> : std::true_type {};
 
 template <typename T, typename = void>
+struct has_device : std::false_type {};
+
+template <typename T>
+struct has_device<T, std::void_t<decltype(std::declval<T &>().device)>> : std::true_type {};
+
+template <typename T, typename = void>
 struct has_bitmap_wrapper : std::false_type {};
 
 template <typename T>
@@ -82,10 +88,15 @@ using bitmap_init_result = decltype(mtmd_helper_bitmap_init_from_buf(
     static_cast<mtmd_context *>(nullptr),
     static_cast<const unsigned char *>(nullptr),
     size_t{0},
-    false));
+    false,
+    mtmd_helper_init_opt_default()));
 
 template <typename Params>
 void initialize_optional_context_fields(Params & params) {
+    if constexpr (has_device<Params>::value) {
+        // No explicit device: mtmd picks the backend from use_gpu (CPU for Orbit).
+        params.device = nullptr;
+    }
     if constexpr (has_batch_max_tokens<Params>::value) {
         params.batch_max_tokens = 1024;
     }
@@ -117,39 +128,6 @@ orbit_mtmd_bitmap * wrap_bitmap_result(Result result) {
     return handle.release();
 }
 
-const char * abi_profile() {
-#ifdef ORBIT_MTMD_FORCE_UNSUPPORTED_ABI
-    return "unsupported";
-#endif
-    const bool common_offsets =
-        offsetof(mtmd_context_params, use_gpu) == 0 &&
-        offsetof(mtmd_context_params, print_timings) == 1 &&
-        offsetof(mtmd_context_params, n_threads) == 4 &&
-        offsetof(mtmd_context_params, image_marker) == 8 &&
-        offsetof(mtmd_context_params, media_marker) == 16 &&
-        offsetof(mtmd_context_params, flash_attn_type) == 24 &&
-        offsetof(mtmd_context_params, warmup) == 28 &&
-        offsetof(mtmd_context_params, image_min_tokens) == 32 &&
-        offsetof(mtmd_context_params, image_max_tokens) == 36 &&
-        offsetof(mtmd_context_params, cb_eval) == 40 &&
-        offsetof(mtmd_context_params, cb_eval_user_data) == 48 &&
-        alignof(mtmd_context_params) == 8;
-    if (!common_offsets) {
-        return "unsupported";
-    }
-    if (!has_batch_max_tokens<mtmd_context_params>::value &&
-        !has_progress_callback<mtmd_context_params>::value &&
-        sizeof(mtmd_context_params) == 56) {
-        return "mtmd-context-v1";
-    }
-    if (has_batch_max_tokens<mtmd_context_params>::value &&
-        has_progress_callback<mtmd_context_params>::value &&
-        sizeof(mtmd_context_params) == 80) {
-        return "mtmd-context-v2";
-    }
-    return "unsupported";
-}
-
 template <typename Params>
 size_t optional_batch_max_tokens_offset() {
     if constexpr (has_batch_max_tokens<Params>::value) {
@@ -172,6 +150,67 @@ size_t optional_text_len_offset() {
         return offsetof(Text, text_len);
     }
     return SIZE_MAX;
+}
+
+template <typename Params>
+const char * context_profile_for() {
+    if constexpr (has_device<Params>::value) {
+        // mtmd-context-v3 (upstream 41abbfd): an explicit `device` handle follows
+        // use_gpu, shifting every later field; batching and progress fields present.
+        const bool v3_layout =
+            offsetof(Params, use_gpu) == 0 &&
+            offsetof(Params, device) == 8 &&
+            offsetof(Params, print_timings) == 16 &&
+            offsetof(Params, n_threads) == 20 &&
+            offsetof(Params, image_marker) == 24 &&
+            offsetof(Params, media_marker) == 32 &&
+            offsetof(Params, flash_attn_type) == 40 &&
+            offsetof(Params, warmup) == 44 &&
+            offsetof(Params, image_min_tokens) == 48 &&
+            offsetof(Params, image_max_tokens) == 52 &&
+            offsetof(Params, cb_eval) == 56 &&
+            offsetof(Params, cb_eval_user_data) == 64 &&
+            optional_batch_max_tokens_offset<Params>() == 72 &&
+            optional_progress_callback_offset<Params>() == 80 &&
+            sizeof(Params) == 96 &&
+            alignof(Params) == 8;
+        return v3_layout ? "mtmd-context-v3" : "unsupported";
+    } else {
+        const bool common_offsets =
+            offsetof(Params, use_gpu) == 0 &&
+            offsetof(Params, print_timings) == 1 &&
+            offsetof(Params, n_threads) == 4 &&
+            offsetof(Params, image_marker) == 8 &&
+            offsetof(Params, media_marker) == 16 &&
+            offsetof(Params, flash_attn_type) == 24 &&
+            offsetof(Params, warmup) == 28 &&
+            offsetof(Params, image_min_tokens) == 32 &&
+            offsetof(Params, image_max_tokens) == 36 &&
+            offsetof(Params, cb_eval) == 40 &&
+            offsetof(Params, cb_eval_user_data) == 48 &&
+            alignof(Params) == 8;
+        if (!common_offsets) {
+            return "unsupported";
+        }
+        if (!has_batch_max_tokens<Params>::value &&
+            !has_progress_callback<Params>::value &&
+            sizeof(Params) == 56) {
+            return "mtmd-context-v1";
+        }
+        if (has_batch_max_tokens<Params>::value &&
+            has_progress_callback<Params>::value &&
+            sizeof(Params) == 80) {
+            return "mtmd-context-v2";
+        }
+        return "unsupported";
+    }
+}
+
+const char * abi_profile() {
+#ifdef ORBIT_MTMD_FORCE_UNSUPPORTED_ABI
+    return "unsupported";
+#endif
+    return context_profile_for<mtmd_context_params>();
 }
 
 template <typename Result>
@@ -451,7 +490,8 @@ ORBIT_EXPORT orbit_mtmd_bitmap * orbit_mtmd_bitmap_init_from_buf(
             last_error = "invalid bitmap input";
             return nullptr;
         }
-        return wrap_bitmap_result(mtmd_helper_bitmap_init_from_buf(ctx->value, data, size, placeholder));
+        return wrap_bitmap_result(mtmd_helper_bitmap_init_from_buf(
+            ctx->value, data, size, placeholder, mtmd_helper_init_opt_default()));
     }, static_cast<orbit_mtmd_bitmap *>(nullptr));
 }
 

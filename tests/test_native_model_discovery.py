@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from orbit.native_llama.bindings import LLAMA_LOAD_MODE_MMAP
 from orbit.native_llama.model_discovery import (
     ModelDiscoveryResult,
     ModelDiscoveryRow,
@@ -312,7 +313,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
         self.assertNotIn("wall_ms", output)
 
     def test_native_inspection_is_vocab_only_and_releases_model(self) -> None:
-        params = SimpleNamespace(vocab_only=False, use_mmap=False, check_tensors=False)
+        params = SimpleNamespace(vocab_only=False, load_mode=None, check_tensors=False)
         native_model = object()
         lib = mock.Mock()
         lib.llama_model_default_params.return_value = params
@@ -327,7 +328,7 @@ class NativeModelDiscoveryTests(unittest.TestCase):
             inspector.close()
 
         self.assertTrue(params.vocab_only)
-        self.assertTrue(params.use_mmap)
+        self.assertEqual(params.load_mode, LLAMA_LOAD_MODE_MMAP)
         self.assertTrue(params.check_tensors)
         self.assertFalse(profile.verified)
         lib.ggml_backend_load_all.assert_called_once_with()

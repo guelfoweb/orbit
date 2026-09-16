@@ -223,7 +223,12 @@ def _validate_llama_root(root: Path) -> Path | str:
 def _cmake_provenance_args(source_root: Path) -> list[str]:
     provenance = load_llama_provenance(source_root)
     tag_match = re.fullmatch(r"b([0-9]+)", provenance.upstream_tag)
-    build_number = tag_match.group(1) if tag_match else "0"
+    if tag_match:
+        build_number = tag_match.group(1)
+    elif provenance.upstream_build_number is not None:
+        build_number = str(provenance.upstream_build_number)
+    else:
+        build_number = "0"
     return [
         f"-DLLAMA_BUILD_COMMIT={provenance.upstream_commit}",
         f"-DLLAMA_BUILD_NUMBER={build_number}",

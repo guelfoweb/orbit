@@ -7,7 +7,7 @@ import glob
 import time
 from typing import Callable, Iterable
 
-from orbit.native_llama.bindings import GgmlLogCallback, LlamaLibrary
+from orbit.native_llama.bindings import LLAMA_LOAD_MODE_MMAP, GgmlLogCallback, LlamaLibrary
 from orbit.terminal.theme import GREEN, RED, RESET
 from orbit.native_llama.model_profiles import (
     PROFILE_METADATA_KEYS,
@@ -81,7 +81,7 @@ def inspect_native_model_profile(binding: LlamaLibrary, path: Path) -> NativeMod
     lib = binding.lib
     params = lib.llama_model_default_params()
     params.vocab_only = True
-    params.use_mmap = True
+    params.load_mode = LLAMA_LOAD_MODE_MMAP
     params.check_tensors = True
     model = lib.llama_model_load_from_file(str(path).encode(), params)
     if not model:

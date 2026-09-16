@@ -222,7 +222,7 @@ int main(int argc, char ** argv) {
     common_speculative_get_draft_params(spec, 0) = {
         /* .drafting = */ true,
         /* .n_max    = */ 3,
-        /* .n_past   = */ (llama_pos) prompt.size(),
+        /* .pos0     = */ (llama_pos) prompt.size(),
         /* .id_last  = */ sampled,
         /* .prompt   = */ &prompt,
         /* .result   = */ &draft,
