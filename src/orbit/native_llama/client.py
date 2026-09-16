@@ -206,6 +206,14 @@ class NativeClientConfig:
     # so this object only carries the decided value. `low_memory` still forces
     # repack off independently, so this field only acts outside low-memory mode.
     use_extra_bufts: bool | None = None
+    # Backend loading semantics (llama_model_params.load_mode / lazy_mode /
+    # load_mtp). None keeps the qualified legacy-model pins from the 41abbfd
+    # upgrade (mmap, no lazy tensor reads, NextN tensors loaded); a qualified
+    # startup profile supplies the exact values its research qualification
+    # ran with (see server_profile.QualifiedStartupProfile).
+    load_mode: int | None = None
+    lazy_mode: int | None = None
+    load_mtp: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -443,7 +451,7 @@ class NativeLlamaClient:
     def compatibility_diagnostics(self) -> dict[str, object]:
         return client_status.compatibility_diagnostics(self)
 
-    def model_load_status(self) -> dict[str, bool | None]:
+    def model_load_status(self) -> dict[str, bool | int | None]:
         return client_status.model_load_status(self)
 
     def moe_expert_usage_status(self) -> dict[str, object]:
@@ -638,13 +646,23 @@ class NativeLlamaClient:
         # Pin the qualified b9551 loading semantics explicitly (use_mmap=true,
         # no mlock/direct-io, no on-demand tensor reads) rather than relying on
         # upstream's AUTO resolution for both new enums.
-        params.load_mode = LLAMA_LOAD_MODE_MMAP
-        params.lazy_mode = LLAMA_LAZY_MODE_OFF
+        params.load_mode = (
+            LLAMA_LOAD_MODE_MMAP if self.config.load_mode is None else self.config.load_mode
+        )
+        params.lazy_mode = (
+            LLAMA_LAZY_MODE_OFF if self.config.lazy_mode is None else self.config.lazy_mode
+        )
         # b9551 always created a model's NextN (MTP) tensors; 41abbfd skips them
         # unless asked (load_mtp defaults to false). Keep them loaded so the mapped
         # model is the same object as before and an MTP context built on this
-        # model (self-MTP probes/shims) cannot hit a missing-tensor assert.
-        params.load_mtp = True
+        # model (self-MTP probes/shims) cannot hit a missing-tensor assert. A
+        # qualified profile may turn them off for a model served without MTP.
+        params.load_mtp = True if self.config.load_mtp is None else bool(self.config.load_mtp)
+        self._model_load_semantics = {
+            "load_mode": int(params.load_mode),
+            "lazy_mode": int(params.lazy_mode),
+            "load_mtp": bool(params.load_mtp),
+        }
         self._cpu_repack_enabled = bool(params.use_extra_bufts)
         if self.config.low_memory:
             params.use_extra_bufts = False

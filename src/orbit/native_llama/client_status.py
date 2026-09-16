@@ -186,10 +186,15 @@ def compatibility_diagnostics(client: "NativeLlamaClient") -> dict[str, object]:
     return diagnostics
 
 
-def model_load_status(client: "NativeLlamaClient") -> dict[str, bool | None]:
+def model_load_status(client: "NativeLlamaClient") -> dict[str, bool | int | None]:
+    semantics = getattr(client, "_model_load_semantics", None) or {}
     return {
         "low_memory": client.config.low_memory,
         "cpu_repack": client._cpu_repack_enabled,
+        # llama_model_params values the model was (or will be) loaded with.
+        "load_mode": semantics.get("load_mode"),
+        "lazy_mode": semantics.get("lazy_mode"),
+        "load_mtp": semantics.get("load_mtp"),
     }
 
 

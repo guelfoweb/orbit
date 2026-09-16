@@ -31,14 +31,22 @@ from orbit.native_server.server_calibration import (
 )
 from orbit.native_server.server_profile import (
     thread_candidates,
+    QualifiedStartupProfile,
     Resolution,
     detect_topology,
+    qualified_startup_profile,
     render_profile_lines,
     resolve_cpu_repack,
     resolve_profile,
 )
 from orbit.native_llama.download_cli import _DownloadProgress as DownloadProgress
-from orbit.native_llama.model_discovery import ModelDiscoveryRow, discover_models, format_model_discovery, paint_model_status
+from orbit.native_llama.model_discovery import (
+    ModelDiscoveryRow,
+    NativeProfileInspector,
+    discover_models,
+    format_model_discovery,
+    paint_model_status,
+)
 from orbit.terminal.theme import supports_ansi
 from orbit.native_llama.model_download import download_model
 from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID
@@ -928,7 +936,60 @@ def _model_identity_for_profile(args) -> "tuple[str, int]":
         return "", 0
 
 
-def _resolve_startup_profile(args, *, calibrator=None, model_identity=None) -> Resolution:
+# The context size a start uses when neither the operator (`--ctx`) nor a
+# qualified (machine, model) profile names one. The reference number behind
+# every qualified corpus run.
+DEFAULT_CTX_TOKENS = 8192
+
+def _qualified_startup_profile(args) -> "QualifiedStartupProfile | None":
+    """The qualified startup profile for this invocation, or None.
+
+    Matched by DMI product name and the registry model id (`--model-id` or
+    the interactive selection), then CONFIRMED against the GGUF's own metadata
+    through the same vocab-only inspection discovery uses: the tier applies
+    only when the file at the registry path detects as the verified qualified
+    artifact (architecture, model name, quantization, template). A legacy
+    `--model <path>` start carries no registry id and never matches, and
+    nothing here may raise -- an unidentifiable model simply gets no
+    qualified tier.
+    """
+    model_id = getattr(args, "model_id", None)
+    if not model_id:
+        return None
+    try:
+        machine = detect_topology().machine_model
+    except Exception:
+        return None
+    candidate = qualified_startup_profile(machine_model=machine, model_id=str(model_id))
+    if candidate is None:
+        return None
+    try:
+        paths = resolve_bootstrap_paths(args)
+        inspector = NativeProfileInspector(paths.build_bin)
+        try:
+            profile = inspector(paths.model)
+        finally:
+            inspector.close()
+    except Exception:
+        return None
+    if not (getattr(profile, "verified", False) and profile.profile_id == candidate.profile_id):
+        return None
+    return candidate
+
+
+def _resolve_ctx(args, qualified: "QualifiedStartupProfile | None") -> "tuple[int, str]":
+    """`--ctx` beats the qualified profile beats the reference default."""
+    explicit = getattr(args, "ctx", None)
+    if explicit is not None:
+        return int(explicit), "cli"
+    if qualified is not None:
+        return qualified.ctx, "qualified"
+    return DEFAULT_CTX_TOKENS, "default"
+
+
+def _resolve_startup_profile(
+    args, *, calibrator=None, model_identity=None, qualified=None
+) -> Resolution:
     """Walk the precedence chain for this invocation.
 
     Separated from `run_server` so `--show-profile` and the real start resolve
@@ -938,12 +999,16 @@ def _resolve_startup_profile(args, *, calibrator=None, model_identity=None) -> R
     `model_identity` lets the preview pass the fingerprint it already resolved
     for the selected model (so it does not silently fall back to the default
     model's identity); real startup passes nothing and fingerprints from args
-    exactly as before.
+    exactly as before. `qualified` is the `QualifiedStartupProfile` the caller
+    looked up once (`_qualified_startup_profile`) and hands to every resolution
+    of the same start, so preview, start and the post-load re-resolution never
+    disagree and the GGUF is inspected once; None means no tier applies.
     """
     if model_identity is None:
         model_identity, model_bytes = _model_identity_for_profile(args)
     else:
         model_identity, model_bytes = model_identity
+    ctx_tokens, _ctx_source = _resolve_ctx(args, qualified)
     return resolve_profile(
         cli={
             "threads": args.threads,
@@ -953,10 +1018,11 @@ def _resolve_startup_profile(args, *, calibrator=None, model_identity=None) -> R
             "cache_ram_mib": None,
         },
         topology=detect_topology(),
+        qualified_profile=qualified.tuning_fields() if qualified is not None else None,
         model_bytes=model_bytes,
         model_sha256=model_identity,
         backend_id=_backend_identity(),
-        ctx_tokens=args.ctx,
+        ctx_tokens=ctx_tokens,
         low_memory=bool(getattr(args, "low_memory", False)),
         mtp_enabled=bool(getattr(args, "enable_mtp_experimental", False)),
         expert_usage_enabled=bool(getattr(args, "moe_expert_usage", False)),
@@ -996,9 +1062,12 @@ def _resolve_preview_target(args) -> "tuple[str, str, tuple[str, int], bool] | i
             return chosen
         row, _build_bin = chosen
         if row.local == "AVAILABLE":
-            # Set the resolved path so the fingerprint matches what a real start
-            # would load; no download, no load -- this is still a preview.
+            # Set the resolved path AND the registry id so the fingerprint and
+            # the qualified (machine, model) tier match what a real start would
+            # use (`_select_startup_model` sets both); no download, no load --
+            # this is still a preview.
             args.model = Path(row.path_or_action)
+            args.model_id = row.model_id
             # Memory mode is part of the same interactive selection and is a
             # fingerprint axis, so a low-memory-capable model must ask here too;
             # otherwise the preview would report the standard-mode cache while a
@@ -1029,9 +1098,14 @@ def _show_profile(args) -> int:
     if isinstance(target, int):
         return target
     name, path_display, model_identity, missing = target
-    preview = _resolve_startup_profile(args, model_identity=model_identity)
+    qualified = _qualified_startup_profile(args)
+    preview = _resolve_startup_profile(args, model_identity=model_identity, qualified=qualified)
+    ctx_tokens, ctx_source = _resolve_ctx(args, qualified)
     print(f"model: {name}")
     print(f"path: {path_display}")
+    if qualified is not None:
+        print(f"qualified profile: {qualified.source}")
+    print(f"ctx: {ctx_tokens} ({ctx_source})")
     for line in render_profile_lines(preview):
         print(line)
     if missing:
@@ -1111,7 +1185,17 @@ def run_server(argv: list[str] | None = None) -> int:
     # they may still be replaced by a measurement below; everything else this
     # returns is final.
     _startup_note("resolving server profile...")
-    resolution = _resolve_startup_profile(args)
+    qualified = _qualified_startup_profile(args)
+    args.ctx, ctx_source = _resolve_ctx(args, qualified)
+    if qualified is not None:
+        _startup_note(
+            f"qualified profile: {qualified.source} "
+            f"(ctx {qualified.ctx}, threads {qualified.threads}/{qualified.threads_batch}, "
+            f"batch {qualified.batch}/{qualified.ubatch}, lazy_mode {qualified.lazy_mode}, "
+            f"load_mtp {'on' if qualified.load_mtp else 'off'})"
+        )
+    _startup_note(f"ctx: {args.ctx} ({ctx_source})")
+    resolution = _resolve_startup_profile(args, qualified=qualified)
     profile = resolution.profile
     # A cached calibrated profile means the long calibration sweep below will not
     # run; say so early, before the model load, so the operator knows the wait
@@ -1125,7 +1209,7 @@ def run_server(argv: list[str] | None = None) -> int:
         # CPU weight-repack resolution lives in the backend-invocation layer:
         # explicit --repack beats ORBIT_CPU_REPACK beats the qualified
         # per-(machine, model) default beats the backend default. Only the
-        # qualified Dell + Ornith pair defaults to repack off.
+        # qualified Dell pairs (Ornith, Qwen3.8 Flash Next) default to repack off.
         cpu_repack_cli = {"on": True, "off": False, "auto": None}[
             getattr(args, "repack", "auto")
         ]
@@ -1175,6 +1259,9 @@ def run_server(argv: list[str] | None = None) -> int:
                 moe_expert_usage_enabled=args.moe_expert_usage,
                 low_memory=args.low_memory,
                 use_extra_bufts=cpu_repack,
+                load_mode=qualified.load_mode if qualified is not None else None,
+                lazy_mode=qualified.lazy_mode if qualified is not None else None,
+                load_mtp=qualified.load_mtp if qualified is not None else None,
             ),
         )
         if not args.verbose_llama_log:
@@ -1218,7 +1305,9 @@ def run_server(argv: list[str] | None = None) -> int:
                     client, topology=topology, fields=fields, on_event=_on_candidate
                 )
 
-            measured = _resolve_startup_profile(args, calibrator=_startup_calibrator)
+            measured = _resolve_startup_profile(
+                args, calibrator=_startup_calibrator, qualified=qualified
+            )
             if measured.calibrated:
                 resolution = measured
                 profile = measured.profile
@@ -1569,7 +1658,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--models-dir", type=Path, help="Orbit local models directory.")
     parser.add_argument("--hf-cache", type=Path, help="Hugging Face cache root fallback.")
     parser.add_argument("--alias", help="Model name exposed by the server. Defaults to the exact GGUF filename.")
-    parser.add_argument("--ctx", type=int, default=8192)
+    # Default None so a qualified (machine, model) profile can supply its own
+    # ctx; an unsupplied flag otherwise resolves to DEFAULT_CTX_TOKENS.
+    parser.add_argument("--ctx", type=int, default=None)
     # Default None, not the reference numbers. argparse cannot otherwise tell
     # `--threads 6` from an unsupplied flag, and the whole precedence contract
     # rests on that distinction: a value the operator named must never be

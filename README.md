@@ -23,6 +23,16 @@ for a tool. Linux x86_64 CPU-only is the qualified platform.
 | [Qwen3-Coder 30B-A3B](https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF) | ~26.0 tok/s | ~10.7 tok/s | ~3.0 s | ~18.4 s | ~31.3 GiB |
 | [Ornith 1.5 35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) | ~29.0 tok/s | ~8.3 tok/s | ~36.8 s cold / ~8.4 s warm | ~49.0 s | ~35.8 GiB |
 
+Qwen 3.8 Flash Next (`unsloth/Qwen3.8-Flash-Next-GGUF`, UD-IQ1_M, 74.5 GB across
+three shards) is additionally qualified on the Dell Pro 5 14 reference laptop
+only (30 GiB RAM, beyond-RAM mmap serving): ~3.9 tok/s generation on the first
+request after load and ~5.5 tok/s warm at ctx 4096, 10 threads. The registry
+entry is `qwen38-flash-next-ud-iq1-m`; the three shards must be placed by hand
+under `<models-dir>/unsloth--Qwen3.8-Flash-Next-GGUF/` (`orbit download`
+refuses split GGUFs), then start with `orbit server --model-id
+qwen38-flash-next-ud-iq1-m` (add `--models-dir` if the shards live outside the
+default `models/` directory). Other quants are unsupported.
+
 **Performance figures are measurements on one CPU-only system**, not universal
 model performance — they vary with hardware, configuration, cache state and
 workload. The reference system is a NUC10 Intel Core i7-10710U (6 cores / 12

@@ -6,6 +6,11 @@ import unittest
 from unittest import mock
 
 from orbit.native_llama.bindings import LLAMA_LAZY_MODE_OFF, LLAMA_LOAD_MODE_MMAP
+
+# What model_load_status() reports for the llama_model_params load semantics:
+# the qualified legacy pins once _model_load_params ran, None before any load.
+LOADED_SEMANTICS = {"load_mode": LLAMA_LOAD_MODE_MMAP, "lazy_mode": LLAMA_LAZY_MODE_OFF, "load_mtp": True}
+UNLOADED_SEMANTICS = {"load_mode": None, "lazy_mode": None, "load_mtp": None}
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.model_profiles import QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.paths import NativeLlamaPaths
@@ -66,7 +71,7 @@ class Qwen3CoderLowMemoryTests(unittest.TestCase):
             params = client._model_load_params(None)
 
         self.assertTrue(params.use_extra_bufts)
-        self.assertEqual(client.model_load_status(), {"low_memory": False, "cpu_repack": True})
+        self.assertEqual(client.model_load_status(), {"low_memory": False, "cpu_repack": True, **LOADED_SEMANTICS})
         inspect.assert_not_called()
 
     def test_low_memory_disables_repack_only_for_verified_qwen3_coder(self) -> None:
@@ -78,7 +83,7 @@ class Qwen3CoderLowMemoryTests(unittest.TestCase):
             params = client._model_load_params(None)
 
         self.assertFalse(params.use_extra_bufts)
-        self.assertEqual(client.model_load_status(), {"low_memory": True, "cpu_repack": False})
+        self.assertEqual(client.model_load_status(), {"low_memory": True, "cpu_repack": False, **LOADED_SEMANTICS})
         inspect.assert_called_once_with(client.lib, client.paths.model)
 
     def test_unsupported_or_unverified_profiles_fail_before_model_load(self) -> None:
@@ -162,16 +167,16 @@ class Qwen3CoderLowMemoryTests(unittest.TestCase):
                 self.assertFalse(client._qwen3_coder_route_prefix_anchor_state.valid)
                 self.assertEqual(
                     client.model_load_status(),
-                    {"low_memory": True, "cpu_repack": False},
+                    {"low_memory": True, "cpu_repack": False, **UNLOADED_SEMANTICS},
                 )
 
-    def test_diagnostics_expose_only_mode_and_repack_state(self) -> None:
+    def test_diagnostics_expose_only_mode_repack_and_load_semantics(self) -> None:
         client = self._client(low_memory=True)
         client._cpu_repack_enabled = False
 
         self.assertEqual(
             _model_load_props(client),
-            {"low_memory": True, "cpu_repack": False},
+            {"low_memory": True, "cpu_repack": False, **UNLOADED_SEMANTICS},
         )
 
 
