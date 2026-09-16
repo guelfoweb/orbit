@@ -416,7 +416,7 @@ class DownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = Path(tmp) / "unsloth--Qwen3.8-Flash-Next-GGUF"; store.mkdir(parents=True)
             (store / QWEN_FIRST).write_bytes(gguf_bytes(count=3, number=0, tensors=77))
-            with self.assertRaisesRegex(ValueError, "split.tensors.count is 1224, disagrees with the first shard \(77\)"):
+            with self.assertRaisesRegex(ValueError, r"split.tensors.count is 1224, disagrees with the first shard \(77\)"):
                 download_model(f"{QWEN_REPO}/{QWEN_FIRST}", models_dir=Path(tmp), opener=http)
             self.assertEqual(sorted(p.name for p in store.iterdir()), sorted(files))
             self.assertEqual((store / list(files)[1]).read_bytes(), files[list(files)[1]])

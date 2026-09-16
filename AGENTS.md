@@ -923,8 +923,9 @@ Release State entry below.
   Unreleased production work beyond it: the backend re-pin
   LLAMA-BACKEND-41ABBFD-UPGRADE-18, the Qwen3.8 Flash Next enablement
   QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19, the models-directory UX
-  MODEL-STORE-UX-20 and the split-GGUF download GGUF-MULTISHARD-DOWNLOAD-21
-  (see Post-RC39).
+  MODEL-STORE-UX-20, the split-GGUF download GGUF-MULTISHARD-DOWNLOAD-21 and
+  the Qwen3.8 prompt-cache reuse fix QWEN38-PROMPT-CACHE-REUSE-22 (see
+  Post-RC39).
 - See `docs/releases/v0.0.1-rc39.md`.
 
 ### Post-RC39 (unreleased on `main`)
@@ -1040,8 +1041,10 @@ Release State entry below.
     unsupported), tokenizer gpt2/qwen35, bos/eos 248044/248046, 48 blocks, 512
     experts / 10 used, and the chat template sha `12827f24…`, which is
     byte-identical to the verified Qwen3.8 27B template (same `qwen3.6-xml`
-    tool envelope). Route-prefix (KV checkpoint) reuse is NOT enabled for this
-    hybrid SSM/attention/PLE architecture. Discovery ignores split shards 2..N.
+    tool envelope). Route-prefix (KV checkpoint) reuse was NOT enabled for this
+    hybrid SSM/attention/PLE architecture in this mission (the rolling route
+    checkpoint was qualified for it in QWEN38-PROMPT-CACHE-REUSE-22).
+    Discovery ignores split shards 2..N.
     (`orbit download` refused split GGUFs in this mission; native split
     download landed in GGUF-MULTISHARD-DOWNLOAD-21.) On this Dell the shards live on
     ext4 under `/var/tmp/orbit-models/unsloth--Qwen3.8-Flash-Next-GGUF/`
@@ -1266,6 +1269,121 @@ Release State entry below.
     injected mid-shard drop resumed from the `.part` size on the second run,
     and a full-size `.part` left "before the rename" finalized through the
     real urllib 416 path.
+
+- **QWEN38-PROMPT-CACHE-REUSE-22 (2026-09-16, #358) — Qwen3.8 Flash Next
+  gets cross-turn prompt-cache reuse. Decision QWEN38_CACHE_REUSE_FIXED.**
+  - **Production symptom (reproduced on main 2538ba4, fresh session, "hi" /
+    "hello again", max-tokens 32):** turn 1 1091 in / 1091 eval / 0 cached,
+    turn 2 1135 in / 1135 eval / 0 cached; `/status` after 4 model calls:
+    cache 0 (0%), 2226 prefill, 23 decode. Server diagnostics
+    (`ORBIT_KV_DIAG=1`): every route call `kv_diag_route_prefix_anchor
+    fallback=model_profile_ineligible`, every strict-append attempt
+    `prefix_mismatch_at_token_3, seq_rm_result=false, memory_cleared`.
+  - **Exact reusable prefix (token ids, not text):** the turn-1 route prompt
+    (1058 tokens) is a strict prefix of the turn-2 route prompt (1083);
+    reusable 1058, new suffix 25. The turn's tools-free final prompt (33
+    tokens) shares 3 tokens with the route prompt, so the two prompt families
+    alternate every turn.
+  - **First causal failure:** a policy gate, not a backend limit. The rolling
+    route checkpoint (`rolling_route_anchor.py`; capture at the prefill
+    boundary, restore on the next route call under the exact-prefix rule) is
+    the only mechanism that bridges route -> final -> route, and both its
+    eligibility gate (`_ornith_rolling_route_eligible`) and the mode-switch
+    preservation (`_ensure_prompt_cache_mode`) required `profile_id ==
+    ORNITH15_PROFILE_ID`. The fixed-head lineages are separately closed for
+    this artifact (no dispatch branch, `general.file_type` 31). The generic
+    strict-append path then cannot help: the final prompt replaces the
+    committed sequence, and `llama_memory_seq_rm(p0>0)` is refused by the
+    hybrid recurrent memory, so every route call falls to a cold prefill.
+  - **qwen4exp state semantics (llama.cpp 41abbfd):** the memory is
+    `llama_memory_hybrid_idx` (full attention every 4th layer, Gated DeltaNet
+    recurrent layers, plus a per-token indexer KV cache for the sparse
+    attention, `qwen4exp.attention.indexer.*`). `state_write`/`state_read`
+    serialize attention KV, recurrent state and indexer cache in one seq blob
+    (indexer as a pure suffix; the indexer restore adopts the attention
+    layout). `llama_memory_recurrent::seq_rm` refuses a partial range unless
+    the per-token rollback budget `n_rs_seq` covers it, and Orbit grants
+    `n_rs_seq` only for MTP. Real-model proof (`llama_state_seq_get_data` /
+    `set_data`, 1058-token prefix, checkpoint 147.3 MB, capture 0.09 s,
+    restore 0.01 s): post-suffix logits hash and argmax identical to the
+    baseline after clear+restore AND after restoring over a live state
+    contaminated with 300 unrelated tokens (the contaminated state without
+    restore differs); `seq_rm(seq0, 1058, -1)` -> false. Decoding the same
+    1083 tokens in one batch layout twice is deterministic, and a different
+    ubatch layout (whole prompt vs prefix+suffix) changes the float logits
+    while keeping the argmax — so checkpoint round-trips are judged against
+    the layout they replace, and output-level equality is judged at the
+    token level.
+  - **Ornith control (same 4 turns, same runtime):** turn 1 768 cached (the
+    fixed-head startup prewarm), turns 2–4 1058 / 1083 / 1122 cached; session
+    cache 87%. Qwen3.8 diverged only at the rolling eligibility gate; it has
+    no prewarm lineage, so its turn 1 stays cold by design.
+  - **Fix (smallest causal):** `client.ROLLING_ROUTE_PROFILE_IDS = {Ornith,
+    Qwen3.8 Flash Next}` consumed by the route eligibility gate and the
+    tools<->chat preservation rule. No prompt special-casing, no metric
+    changes, no change to the exact-prefix rule, the strict-append authority,
+    the ANALYSIS lineage (still Ornith-only), the fixed-head lineages,
+    profiles or inference. `route_prefix_reuse_supported` stays False (it
+    gates the fixed-head lineages). Review follow-up (shared rolling code,
+    Ornith included): `rolling_route_should_replace` kept an older checkpoint
+    against every non-extending route prompt, so a conversation reset or
+    compacted on the same session (terminal `/reset` does not reach
+    `/session/reset`; the context manager rewrites history near the 4096
+    budget) was never captured again and stayed cold for the server's life
+    while pinning the old ~147 MB blob. A non-extending route prompt that
+    builds on the latest missed one now replaces the checkpoint (`RollingRouteAnchorState.non_extending_misses` /
+    `last_miss_tokens`, recorded by `_rolling_route_capture_allowed` at the
+    whole-prompt capture site, i.e. the CHAT route call and a control-lineage
+    turn without a boundary); reuse then resumes on the third route prompt.
+    A single miss still keeps the older checkpoint, and misses that do not
+    build on each other never replace it: once a session holds tool
+    evidence, every later route prompt is the post-tool window `[system,
+    latest user, evidence]` (a regime, not a one-off), where consecutive
+    prompts share only the head and no capture could ever be restored, so
+    none is made -- exactly as before this mission. Reuse authorization is
+    unchanged. Known limits: only the `thinking=off` route<->final switch preserves the
+    checkpoint (thinking on falls cold), and capture/restore transiently hold
+    2-3 copies of the blob (~300-450 MB at 1058 tokens) on a host whose model
+    is lazily mmapped.
+  - **Correctness gates:** `tests/test_qwen38_rolling_route_reuse.py`:
+    eligibility (Flash Next in, every other profile still out, thinking /
+    MTP / unverified / final calls still blocked, ANALYSIS lineage
+    unchanged), preservation across the route->final->route switch (thinking
+    and multimodal transitions still destroy), and a hybrid fake memory
+    (recurrent state = function of the whole history, partial `seq_rm`
+    refused, one blob for KV + recurrent) driven through the real
+    `_prepare_memory_with_ornith_rolling_route_anchor` + strict-append gate:
+    route 2 restores exactly the route-1 blob once, reuses exactly 1058-style
+    committed prefix, never calls a partial `seq_rm`, and the live recurrent
+    state equals route-1's (a KV-only restore is shown to be caught); a
+    divergent route falls cold with no stale state; equal-length prompts,
+    other sessions, reset generations and tool schemas never reuse. Live:
+    the 4-turn chat with reuse and the same chat with the route anchor
+    request switched off (`ORBIT_KV_PREFIX_ANCHOR=off` on the client, same
+    prompts, cached=0) produced byte-identical responses and identical per-turn output token counts (14 / 9 / 8 / 8).
+  - **Post-fix metrics (same simple chat):** turn 1 1091 in / 1091 eval /
+    0 cached, wall 2m07s (cold, prefill 7.8 tok/s); turn 2 1135 in / 77
+    eval / 1058 cached (route call: 1083 prompt, 25 evaluated; final call
+    52), wall 10 s; turn 3 1170 in / 87 eval / 1083 cached, 12 s; turn 4
+    1192 in / 79 eval / 1113 cached, 10 s; session cache 3254 (71%) over 8
+    calls. Evaluated tokens per turn are the new suffix plus the tools-free
+    final prompt, never the ~1100-token prefix.
+  - **Gates:** focused cache/session modules green; cross-sample ANALYSIS
+    gate green; full non-live suite RC=0 (5944 tests, 45 skipped); independent review
+    first pass BLOCKER 0 / MAJOR 1 / MINOR 3 / NIT 2 (the chain-break trap
+    above, transient blob copies, a fake self-check overstated, stale
+    mission-19 wording, the thinking limit) — all addressed or documented;
+    delta re-review BLOCKER 0 / MAJOR 0 / MINOR 1 / NIT 2 (wasted captures in
+    the post-tool window regime under the plain second-miss rule, the
+    capture-site scope wording, a placeholder) -- the rule was narrowed to
+    "second miss that extends the first" and the docs corrected; second
+    delta re-review BLOCKER 0 / MAJOR 0 / MINOR 0 / NIT 2 (wording "first
+    missed" -> "latest missed", the placeholder), fixed. Live recovery check
+    on the real model with the final rule (`hi`, `/reset`, three turns):
+    the two route prompts after the reset are cold (1093 / 1143 evaluated,
+    the second one captured), the third reuses 1084 tokens (1175 in / 91
+    evaluated). Ornith behaviour unchanged (control above; its tests
+    untouched).
 
 ### Post-RC38 (bundled into rc39; historical)
 
@@ -2845,6 +2963,10 @@ box is not a comparable number; token/cache/rate and correctness are.
   GGUF download (`orbit download <repo>/<first shard>` fetches, resumes and
   validates the whole set; discovery AVAILABLE/INCOMPLETE by first shard); see
   the Post-RC39 entry in Release State.
+- post-rc39 (unreleased): QWEN38-PROMPT-CACHE-REUSE-22 (#358) — Qwen3.8 Flash
+  Next route calls use the rolling route checkpoint (cross-turn reuse 0% -> 71%
+  on the simple chat, outputs identical); see the Post-RC39 entry in Release
+  State.
 - post-rc39 (unreleased): QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 (#355) — Qwen3.8
   Flash Next UD-IQ1_M qualified on the Dell (registry, verified identity, qualified
   startup profile tier); see the Post-RC39 entry in Release State.
