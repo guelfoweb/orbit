@@ -512,13 +512,23 @@ class ServerWiringTests(unittest.TestCase):
 
 
 class SplitDownloadTests(unittest.TestCase):
-    def test_orbit_download_refuses_a_split_gguf_before_touching_the_network(self) -> None:
+    def test_orbit_download_expands_the_split_set_and_never_uses_the_single_file_path(self) -> None:
+        # GGUF-MULTISHARD-DOWNLOAD-21: the first shard names the whole set; the
+        # single-file `retrieve` path is never used for it. Full coverage lives in
+        # tests/test_gguf_multishard.py; here only the expansion seam is pinned.
         retrieve = mock.Mock()
+        seen: list[str] = []
+
+        def opener(request, timeout=None):
+            seen.append(request.full_url)
+            raise OSError("offline")
+
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "split GGUF.*3 shards"):
+            with self.assertRaises(OSError):
                 download_model("unsloth/Qwen3.8-Flash-Next-GGUF/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf",
-                               models_dir=Path(tmp), retrieve=retrieve)
+                               models_dir=Path(tmp), retrieve=retrieve, opener=opener)
         retrieve.assert_not_called()
+        self.assertEqual(seen, ["https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf"])
 
 
 if __name__ == "__main__":

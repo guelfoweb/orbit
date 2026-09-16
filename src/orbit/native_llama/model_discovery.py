@@ -4,12 +4,12 @@ from ctypes import create_string_buffer
 from dataclasses import dataclass
 from pathlib import Path
 import glob
-import re
 import time
 from typing import Callable, Iterable
 
 from orbit.native_llama.bindings import LLAMA_LOAD_MODE_MMAP, GgmlLogCallback, LlamaLibrary
-from orbit.terminal.theme import GREEN, RED, RESET
+from orbit.native_llama.gguf_split import is_secondary_shard, parse_split_name, split_problems
+from orbit.terminal.theme import GREEN, RED, RESET, YELLOW
 from orbit.native_llama.model_profiles import (
     PROFILE_METADATA_KEYS,
     VERIFIED_NATIVE_MODEL_IDENTITIES,
@@ -58,6 +58,10 @@ class ModelDiscoveryResult:
 class _Inspection:
     path: Path
     profile: NativeModelProfile | None
+    # Non-empty when `path` is the first shard of a split GGUF whose set is
+    # missing or inconsistent shards; such a file is never inspected natively
+    # and never reported AVAILABLE.
+    incomplete: tuple[str, ...] = ()
 
 
 class NativeProfileInspector:
@@ -173,6 +177,8 @@ def paint_model_status(value: str, *, color: bool) -> str:
         return f"{GREEN}{value}{RESET}"
     if value == "MISSING":
         return f"{RED}{value}{RESET}"
+    if value == "INCOMPLETE":
+        return f"{YELLOW}{value}{RESET}"
     return value
 
 
@@ -251,13 +257,9 @@ def _local_candidates(
     return tuple(unique_files.values()), scan_count
 
 
-_SPLIT_SHARD_SUFFIX = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
-
-
 def _is_secondary_split_shard(name: str) -> bool:
     """True for shard 2..N of a split GGUF; only the first shard names a model."""
-    match = _SPLIT_SHARD_SUFFIX.search(name)
-    return bool(match and match.group(1) != "00001")
+    return is_secondary_shard(name)
 
 
 def _confined_regular_path(path: Path, root: Path) -> Path | None:
@@ -271,6 +273,12 @@ def _confined_regular_path(path: Path, root: Path) -> Path | None:
 
 
 def _inspect(path: Path, inspector: ProfileInspector | None) -> _Inspection:
+    try:
+        problems = split_problems(path) if parse_split_name(path.name) is not None else ()
+    except ValueError as exc:
+        problems = (str(exc),)
+    if problems:
+        return _Inspection(path=path, profile=None, incomplete=tuple(problems))
     if inspector is None:
         return _Inspection(path=path, profile=None)
     try:
@@ -307,10 +315,18 @@ def _rows(
         if not matches:
             if manifest is None:
                 continue
+            # A registry model whose split set is on disk but not whole is
+            # INCOMPLETE, not MISSING: the same download command resumes it.
+            partial = next(
+                (item for item in inspections if item.incomplete and item.path.name == Path(manifest.target.file).name),
+                None,
+            )
+            if partial is not None:
+                consumed.add(partial.path)
             rows.append(
                 ModelDiscoveryRow(
                     model=manifest.display_name,
-                    local="MISSING",
+                    local="INCOMPLETE" if partial is not None else "MISSING",
                     support="VERIFIED",
                     path_or_action=f"orbit download {manifest.target.repo}/{manifest.target.file}",
                     model_id=manifest.id,
@@ -337,7 +353,7 @@ def _rows(
         rows.append(
             ModelDiscoveryRow(
                 model=item.path.name,
-                local="AVAILABLE",
+                local="INCOMPLETE" if item.incomplete else "AVAILABLE",
                 support=support,
                 path_or_action=str(item.path),
             )

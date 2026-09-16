@@ -315,7 +315,7 @@ class AdvisoryTests(unittest.TestCase):
             args = SimpleNamespace(spec="owner/repo/model.gguf", all=False, mmproj=False, models_dir=str(store))
             calls = []
 
-            def fake_download(spec, *, models_dir, prefer, progress):
+            def fake_download(spec, *, models_dir, prefer, progress, **_kw):
                 calls.append((spec, models_dir, prefer)); return DownloadResult(path=models_dir / "m.gguf", downloaded=True, url="u")
 
             stderr = io.StringIO()

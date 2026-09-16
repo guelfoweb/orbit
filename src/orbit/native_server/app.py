@@ -1916,9 +1916,15 @@ def _download_selected_model(
     if advisory:
         print(advisory, file=sys.stderr)
     progress = DownloadProgress()
+
+    def on_shard(index: int, count: int, name: str, action: str) -> None:
+        progress.finish()
+        label = {"present": "already present", "download": "downloading", "resume": "resuming"}[action]
+        print(f"shard {index}/{count}: {name} ({label})", file=sys.stderr, flush=True)
+
     try:
         try:
-            downloaded = download_model(target, models_dir=models_dir, progress=progress)
+            downloaded = download_model(target, models_dir=models_dir, progress=progress, on_shard=on_shard)
         finally:
             progress.finish()
     except Exception as exc:

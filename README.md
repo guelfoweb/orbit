@@ -27,10 +27,11 @@ Qwen 3.8 Flash Next (`unsloth/Qwen3.8-Flash-Next-GGUF`, UD-IQ1_M, 74.5 GB across
 three shards) is additionally qualified on the Dell Pro 5 14 reference laptop
 only (30 GiB RAM, beyond-RAM mmap serving): ~3.9 tok/s generation on the first
 request after load and ~5.5 tok/s warm at ctx 4096, 10 threads. The registry
-entry is `qwen38-flash-next-ud-iq1-m`; the three shards must be placed by hand
-under `<models directory>/unsloth--Qwen3.8-Flash-Next-GGUF/` (`orbit download`
-refuses split GGUFs), then start with `orbit server --model-id
-qwen38-flash-next-ud-iq1-m`. Other quants are unsupported.
+entry is `qwen38-flash-next-ud-iq1-m`; fetch the three shards with
+`orbit download unsloth/Qwen3.8-Flash-Next-GGUF/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf`
+(or place them by hand under `<models directory>/unsloth--Qwen3.8-Flash-Next-GGUF/`),
+then start with `orbit server --model-id qwen38-flash-next-ud-iq1-m`. Other
+quants are unsupported.
 
 ### Model directory
 
@@ -53,6 +54,15 @@ larger than the machine's RAM (or whose size cannot be determined) onto a
 filesystem known to slow such models down (eCryptfs home directories), Orbit
 prints a short advisory and continues; on other filesystems it stays silent
 and makes no extra network request.
+
+Split GGUFs (`<name>-00001-of-00003.gguf` and its siblings) are one model:
+`orbit download <repo>/<first shard>` derives the whole set from the name,
+fetches the shards in order (one `shard i/N` line each), reuses shards already
+present, resumes an interrupted shard from where it stopped, and only finalizes
+a shard once its full size has arrived. The set is validated afterwards (every
+shard present, GGUF header, matching split index and count) and the model menu
+lists it by its first shard as AVAILABLE, or INCOMPLETE with the download
+command to run when a shard is missing or damaged.
 
 **Performance figures are measurements on one CPU-only system**, not universal
 model performance — they vary with hardware, configuration, cache state and
