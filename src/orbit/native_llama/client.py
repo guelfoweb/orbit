@@ -2824,10 +2824,7 @@ class NativeLlamaClient:
             # Skipped when a boundary checkpoint was taken above: the full
             # prompt extends it, so this would replace the reusable checkpoint
             # with the one that cannot be.
-            slot_state = self._rolling_anchor_state_for(rolling_route_identity)
-            if rolling_route_should_replace(
-                slot_state, prompt_tokens, rolling_route_identity
-            ):
+            if self._rolling_route_capture_allowed(prompt_tokens, rolling_route_identity):
                 captured, _capture_meta = capture_rolling_route_anchor(
                     lib,
                     self._session.ctx_tgt,
@@ -3943,6 +3940,27 @@ class NativeLlamaClient:
     def _rolling_anchor_slot(self, identity: RollingRouteIdentity | None) -> str:
         """Delegate: see `RollingAnchorStore.slot_for`."""
         return RollingAnchorStore.slot_for(identity)
+
+    def _rolling_route_capture_allowed(
+        self, prompt_tokens: list[int], identity: RollingRouteIdentity
+    ) -> bool:
+        """Whether this route prefill replaces the slot's checkpoint.
+
+        Applies `rolling_route_should_replace` and, when it says keep, records
+        the miss on the stored state so a second consecutive non-extending
+        route prompt (a reset or compacted conversation on the same session)
+        is allowed to take the slot instead of leaving it cold forever. The
+        counter is dropped with the state it belongs to: a capture stores a
+        fresh state.
+        """
+        slot_state = self._rolling_anchor_state_for(identity)
+        if rolling_route_should_replace(slot_state, prompt_tokens, identity):
+            return True
+        self._store_rolling_anchor_state(
+            identity,
+            replace(slot_state, non_extending_misses=slot_state.non_extending_misses + 1),
+        )
+        return False
 
     def _rolling_anchor_state_for(self, identity: RollingRouteIdentity | None) -> RollingRouteAnchorState:
         """Delegate: see `RollingAnchorStore.state_for`."""

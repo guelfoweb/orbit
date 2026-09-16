@@ -90,6 +90,9 @@ class RollingRouteAnchorState:
     checkpoint_data: bytes | None = field(default=None, repr=False, compare=False)
     created_at_monotonic: float | None = None
     invalidation_reason: str | None = None
+    # Consecutive same-identity route prompts that neither extended this
+    # checkpoint nor replaced it. See `rolling_route_should_replace`.
+    non_extending_misses: int = field(default=0, compare=False)
 
     @property
     def valid(self) -> bool:
@@ -211,17 +214,24 @@ def rolling_route_should_replace(
 ) -> bool:
     """Whether this prefill should become the new checkpoint.
 
-    Only a prompt continuing the tracked chain replaces it. This is what lets
-    the checkpoint survive the final call that wipes live KV: the final prompt
-    shares almost nothing with the route chain, so it must not evict the state
-    the next route depends on. Keeping the older useful checkpoint beats
-    keeping the most recent one.
+    A prompt continuing the tracked chain replaces it. A prompt that does not
+    (a post-tool route rendering that diverges before the end, a conversation
+    reset or compacted on the same session) does not evict it on the first
+    miss: the next turn's route prompt usually still extends the saved chain,
+    and keeping the older useful checkpoint beats keeping the most recent
+    one. It does on the second consecutive miss (`non_extending_misses`,
+    bumped by the capture site): a chain that two route prompts in a row
+    failed to extend is broken, and holding on to it would leave the new
+    conversation cold for the rest of the server's life. Nothing here
+    authorizes reuse -- that stays with `rolling_route_reuse_start`.
     """
     if not state.valid:
         return True
     if state.identity != identity:
         return True
-    return rolling_route_reuse_start(state, prompt_tokens, identity) is not None
+    if rolling_route_reuse_start(state, prompt_tokens, identity) is not None:
+        return True
+    return state.non_extending_misses >= 1
 
 
 def capture_rolling_route_anchor(

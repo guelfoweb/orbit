@@ -13,9 +13,13 @@ blob, which is exactly what the rolling checkpoint captures and restores.
 The fake library below models what matters about that memory: the recurrent
 state only ever reflects the latest position (so a partial `seq_rm` is refused,
 as `llama_memory_recurrent::seq_rm` does), and the seq-state blob carries the
-recurrent state alongside the KV cells. A restore that brought back only the KV
-cells, or that tried to roll the recurrent state back with `seq_rm`, fails the
-recurrent-state assertions here.
+recurrent state alongside the KV cells. What is pinned is the client's
+contract with that memory: the whole captured blob is restored through the seq
+state API, no partial `seq_rm` is ever attempted, a non-extending prompt falls
+cold with no stale state, and the live recurrent state after a restore is the
+checkpoint's. The proof that the real blob carries the recurrent half is the
+real-model probe recorded in AGENTS.md (bit-identical logits after restore,
+also over a contaminated live state); it cannot be a unit test.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from orbit.native_llama.rolling_route_anchor import (
     RollingRouteAnchorState,
     RollingRouteIdentity,
     capture_rolling_route_anchor,
+    rolling_route_should_replace,
 )
 
 ROUTE1 = [100, 101, 102, 103, 104, 105]          # system + "hi" + assistant header
@@ -271,9 +276,10 @@ class HybridStateRoundTripTest(unittest.TestCase):
         self.assertEqual(client._session.cached_prompt_tokens, ROUTE2)
         self.assertEqual(len(ROUTE2) - reused, 4, "only the new suffix is left to prefill")
 
-    def test_a_kv_only_restore_would_be_caught(self) -> None:
-        # The assertion above is sensitive to the recurrent half of the blob:
-        # a library that restored only the KV cells leaves the wrong state.
+    def test_the_recurrent_assertion_is_sensitive_to_a_kv_only_restore(self) -> None:
+        # A self-check of the fake, so the recurrent assertion above cannot
+        # pass vacuously: a library that restored only the KV cells leaves
+        # the final prompt's recurrent state in place, and that is detected.
         client, lib, _state = self._turn_one()
 
         def kv_only_set_data(ctx, buffer, size, seq_id):
@@ -310,6 +316,65 @@ class HybridStateRoundTripTest(unittest.TestCase):
             with self.subTest(override=override):
                 self.assertEqual(client._prepare_memory_with_ornith_rolling_route_anchor(ROUTE2), 0)
                 self.assertEqual(lib.set_data_blobs, [])
+
+
+class ChainBreakRecoveryTest(unittest.TestCase):
+    """Review follow-up: a conversation reset or compacted on the same session
+    produces route prompts that never extend the stored checkpoint. The first
+    such prompt keeps the older checkpoint (a post-tool route rendering is a
+    one-off miss); the second consecutive one takes the slot, so reuse resumes
+    instead of staying off for the server's life."""
+
+    CONVERSATION_A = ROUTE1
+    B1 = [300, 301, 302, 303]          # a new conversation on the same session
+    B2 = B1 + [304, 305]
+    B3 = B2 + [306]
+
+    def _client_with_a(self):
+        client, lib = flash_next_client()
+        lib.decode(self.CONVERSATION_A)
+        state, _ = capture_rolling_route_anchor(lib, client._session.ctx_tgt, prompt_tokens=self.CONVERSATION_A, identity=identity())
+        client._rolling_route_anchor_state = state
+        return client, lib
+
+    def test_one_miss_keeps_the_older_checkpoint(self) -> None:
+        client, _ = self._client_with_a()
+        self.assertFalse(client._rolling_route_capture_allowed(self.B1, identity()))
+        self.assertEqual(client._rolling_route_anchor_state.tokens, self.CONVERSATION_A)
+        self.assertEqual(client._rolling_route_anchor_state.non_extending_misses, 1)
+        self.assertTrue(client._rolling_route_anchor_state.valid, "the miss does not invalidate anything")
+
+    def test_an_extending_prompt_after_one_miss_still_reuses_and_captures(self) -> None:
+        client, _ = self._client_with_a()
+        client._rolling_route_capture_allowed(self.B1, identity())          # the transient miss
+        self.assertEqual(client._prepare_memory_with_ornith_rolling_route_anchor(ROUTE2), len(ROUTE1))
+        self.assertTrue(client._rolling_route_capture_allowed(ROUTE2, identity()), "the chain continues: capture")
+
+    def test_the_second_consecutive_miss_takes_the_slot(self) -> None:
+        client, lib = self._client_with_a()
+        self.assertFalse(client._rolling_route_capture_allowed(self.B1, identity()))
+        self.assertTrue(client._rolling_route_capture_allowed(self.B2, identity()), "second miss: replace")
+        # ... as the capture site would now do:
+        lib.llama_memory_clear("mem", True); lib.decode(self.B2)
+        state, _ = capture_rolling_route_anchor(lib, client._session.ctx_tgt, prompt_tokens=self.B2, identity=identity())
+        client._rolling_route_anchor_state = state
+        self.assertEqual(client._rolling_route_anchor_state.non_extending_misses, 0, "a fresh capture starts clean")
+        lib.llama_memory_clear("mem", True); lib.decode(FINAL)
+        self.assertEqual(client._prepare_memory_with_ornith_rolling_route_anchor(self.B3), len(self.B2), "reuse resumes")
+        self.assertEqual(lib.recurrent, fold(self.B2))
+
+    def test_the_miss_counter_never_authorizes_reuse(self) -> None:
+        client, lib = self._client_with_a()
+        client._rolling_route_capture_allowed(self.B1, identity())
+        client._rolling_route_capture_allowed(self.B2, identity())
+        self.assertEqual(client._prepare_memory_with_ornith_rolling_route_anchor(self.B3), 0)
+        self.assertEqual(lib.set_data_blobs, [], "a checkpoint the prompt does not extend is never restored")
+
+    def test_identity_drift_and_invalid_state_replace_regardless(self) -> None:
+        state = RollingRouteAnchorState()
+        self.assertTrue(rolling_route_should_replace(state, self.B1, identity()))
+        client, _ = self._client_with_a()
+        self.assertTrue(client._rolling_route_capture_allowed(self.B1, identity(reset_generation=1)))
 
 
 if __name__ == "__main__":

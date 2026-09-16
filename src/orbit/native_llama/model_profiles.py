@@ -407,7 +407,9 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             # attention + indexer) IQ1_M artifact. Cross-turn reuse comes from
             # the rolling route checkpoint instead (client.ROLLING_ROUTE_PROFILE_IDS,
             # QWEN38-PROMPT-CACHE-REUSE-22), whose state round-trip was proven
-            # on the real model.
+            # on the real model. Like Ornith's, that checkpoint only survives
+            # the thinking=off route<->final switch: a turn with thinking on
+            # falls cold.
             route_prefix_reuse_supported=False,
         )
 
