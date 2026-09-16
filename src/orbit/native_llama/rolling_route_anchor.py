@@ -221,11 +221,12 @@ def rolling_route_should_replace(
     reset or compacted on the same session) does not evict it on the first
     miss: the next turn's route prompt usually still extends the saved chain,
     and keeping the older useful checkpoint beats keeping the most recent
-    one. It does on the second consecutive miss when that prompt extends the
-    first missed one (`non_extending_misses` / `last_miss_tokens`, recorded
-    by the capture site): two route prompts in a row that build on each other
-    but not on the checkpoint are a new chain, and holding on to the old one
-    would leave that conversation cold for the rest of the server's life.
+    one. It does on a later miss when that prompt extends the latest missed
+    one (`last_miss_tokens`, recorded by the capture site on every miss;
+    `non_extending_misses` counts them): two route prompts in a row that
+    build on each other but not on the checkpoint are a new chain, and
+    holding on to the old one would leave that conversation cold for the
+    rest of the server's life.
     Misses that do not build on each other (the post-tool window regime,
     where every route prompt is `[system, latest user, evidence]`) never
     replace: nothing they capture could be restored. Nothing here authorizes

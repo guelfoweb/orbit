@@ -1330,9 +1330,8 @@ Release State entry below.
     compacted on the same session (terminal `/reset` does not reach
     `/session/reset`; the context manager rewrites history near the 4096
     budget) was never captured again and stayed cold for the server's life
-    while pinning the old ~147 MB blob. A second consecutive non-extending
-    route prompt that builds on the first missed one now replaces the
-    checkpoint (`RollingRouteAnchorState.non_extending_misses` /
+    while pinning the old ~147 MB blob. A non-extending route prompt that
+    builds on the latest missed one now replaces the checkpoint (`RollingRouteAnchorState.non_extending_misses` /
     `last_miss_tokens`, recorded by `_rolling_route_capture_allowed` at the
     whole-prompt capture site, i.e. the CHAT route call and a control-lineage
     turn without a boundary); reuse then resumes on the third route prompt.
@@ -1378,7 +1377,12 @@ Release State entry below.
     the post-tool window regime under the plain second-miss rule, the
     capture-site scope wording, a placeholder) -- the rule was narrowed to
     "second miss that extends the first" and the docs corrected; second
-    delta re-review DELTA2_RESULT. Ornith behaviour unchanged (control above; its tests
+    delta re-review BLOCKER 0 / MAJOR 0 / MINOR 0 / NIT 2 (wording "first
+    missed" -> "latest missed", the placeholder), fixed. Live recovery check
+    on the real model with the final rule (`hi`, `/reset`, three turns):
+    the two route prompts after the reset are cold (1093 / 1143 evaluated,
+    the second one captured), the third reuses 1084 tokens (1175 in / 91
+    evaluated). Ornith behaviour unchanged (control above; its tests
     untouched).
 
 ### Post-RC38 (bundled into rc39; historical)

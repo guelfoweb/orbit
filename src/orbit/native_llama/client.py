@@ -3949,10 +3949,10 @@ class NativeLlamaClient:
         Used at the end-of-prefill capture site (the CHAT route call, and a
         control-lineage turn whose renderer reported no boundary). Applies
         `rolling_route_should_replace` and, when it says keep, records the
-        miss and the prompt on the stored state so a second consecutive
-        non-extending route prompt that builds on this one (a reset or
-        compacted conversation on the same session) is allowed to take the
-        slot instead of leaving it cold forever. The record is dropped with
+        miss and the prompt on the stored state so the next non-extending
+        route prompt that builds on this latest miss (a reset or compacted
+        conversation on the same session) is allowed to take the slot
+        instead of leaving it cold forever. The record is dropped with
         the state it belongs to: a capture stores a fresh state.
         """
         slot_state = self._rolling_anchor_state_for(identity)
