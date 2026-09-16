@@ -202,25 +202,10 @@ def validate_split_set(first: Path) -> SplitValidation:
     problems: list[str] = []
     first_tensors: int | None = None
     for position, shard in enumerate(shards):
-        file_problems = _file_problems(shard)
-        if file_problems:
-            problems.extend(file_problems)
+        own, tensors = _own_header(shard, position, split.count)
+        if own:
+            problems.extend(own)
             continue
-        try:
-            header = read_gguf_header(shard, keys=_SPLIT_KEYS)
-        except ValueError as exc:
-            problems.append(str(exc))
-            continue
-        for key in (SPLIT_COUNT_KEY, SPLIT_NO_KEY, SPLIT_TENSORS_KEY):
-            if key in header.kv and _split_int(header.kv[key]) is None:
-                problems.append(f"{shard.name}: {key} is not an integer")
-        count = _split_int(header.kv.get(SPLIT_COUNT_KEY))
-        number = _split_int(header.kv.get(SPLIT_NO_KEY))
-        tensors = _split_int(header.kv.get(SPLIT_TENSORS_KEY))
-        if count != split.count:
-            problems.append(f"{shard.name}: split.count is {count}, filename says {split.count}")
-        if number != position:
-            problems.append(f"{shard.name}: split.no is {number}, expected {position}")
         if tensors is not None:
             if first_tensors is None:
                 first_tensors = tensors
@@ -228,6 +213,39 @@ def validate_split_set(first: Path) -> SplitValidation:
                 problems.append(f"{shard.name}: split.tensors.count is {tensors}, "
                                 f"disagrees with the first shard ({first_tensors})")
     return SplitValidation(first, split.count, shards, tuple(problems))
+
+
+def shard_header_problems(shard: Path, position: int, count: int) -> tuple[str, ...]:
+    """What is wrong with ONE shard on its own: existence, non-empty, a header
+    that parses, integer split keys, `split.count` equal to the name's count
+    and `split.no` equal to its 0-based position. Cross-shard checks live in
+    `validate_split_set`."""
+    return _own_header(Path(shard), position, count)[0]
+
+
+def _own_header(shard: Path, position: int, count: int) -> tuple[tuple[str, ...], int | None]:
+    """(own problems, split.tensors.count) for one shard, reading its header once."""
+    file_problems = _file_problems(shard)
+    if file_problems:
+        return tuple(file_problems), None
+    try:
+        header = read_gguf_header(shard, keys=_SPLIT_KEYS)
+    except ValueError as exc:
+        return (str(exc),), None
+    problems: list[str] = []
+    for key, expected in ((SPLIT_COUNT_KEY, count), (SPLIT_NO_KEY, position), (SPLIT_TENSORS_KEY, None)):
+        if key not in header.kv:
+            value = None
+        elif _split_int(header.kv[key]) is None:
+            problems.append(f"{shard.name}: {key} is not an integer")
+            continue
+        else:
+            value = _split_int(header.kv[key])
+        if key == SPLIT_COUNT_KEY and value != expected:
+            problems.append(f"{shard.name}: split.count is {value}, filename says {expected}")
+        elif key == SPLIT_NO_KEY and value != expected:
+            problems.append(f"{shard.name}: split.no is {value}, expected {expected}")
+    return tuple(problems), _split_int(header.kv.get(SPLIT_TENSORS_KEY))
 
 
 def _split_int(value) -> int | None:

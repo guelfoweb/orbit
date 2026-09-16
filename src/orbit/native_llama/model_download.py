@@ -11,7 +11,7 @@ import re
 import tempfile
 from typing import Callable
 
-from orbit.native_llama.gguf_split import parse_split_name, read_gguf_header, validate_split_set
+from orbit.native_llama.gguf_split import parse_split_name, shard_header_problems, validate_split_set
 from orbit.native_llama.model_registry import (
     ModelManifest,
     ModelFileSpec,
@@ -157,7 +157,7 @@ def _download_split_set(request, split, requested: Path, *, progress, opener, on
         # (tensor counts) does not say which file is wrong, so nothing is
         # deleted for it; pre-existing files are the user's and only reported.
         for position, shard in fetched:
-            if not _shard_is_sound(shard, position - 1, split.count):
+            if _own_header_problems(shard, position - 1, split.count):
                 shard.unlink(missing_ok=True)
         raise ValueError("split GGUF set is not consistent: " + "; ".join(validation.problems))
     return DownloadResult(path=first, downloaded=bool(fetched), url=huggingface_resolve_url(
@@ -171,13 +171,13 @@ def _notify(on_shard, index: int, count: int, name: str, action: str) -> None:
 
 def _shard_is_sound(path: Path, number: int, count: int) -> bool:
     """A present shard is reused only when its header says what its name says."""
-    try:
-        if path.stat().st_size == 0:
-            return False
-        header = read_gguf_header(path, keys=frozenset({"split.no", "split.count"}))
-    except (OSError, ValueError):
-        return False
-    return header.kv.get("split.no") == number and header.kv.get("split.count") == count
+    return not _own_header_problems(path, number, count)
+
+
+def _own_header_problems(path: Path, number: int, count: int) -> tuple[str, ...]:
+    """What is wrong with one shard on its own (existence, header, split keys
+    and their types); the same rules `validate_split_set` applies per shard."""
+    return shard_header_problems(path, number, count)
 
 
 def _part_path(destination: Path) -> Path:
@@ -220,7 +220,9 @@ def fetch_resumable(url: str, destination: Path, *, opener=None, progress: Downl
                 # (handled below). Both mean "your offset is past the end".
                 if exc.code != 416 or existing == 0:
                     raise
-                if _content_range_total(exc.headers) == existing:
+                total_416 = _content_range_total(exc.headers)
+                exc.close()
+                if total_416 == existing:
                     _finalize(part, destination, etag_path)
                     return destination
                 _discard(part, etag_path)

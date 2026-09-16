@@ -1253,7 +1253,11 @@ Release State entry below.
     review: first pass BLOCKER 0 / MAJOR 2 / MINOR 5 (416 raised by urllib
     never finalized a full partial, stale partial finalized on 416, undeclared
     size finalized, lock-inode race, crafted-header crashes, cleanup policy,
-    weak assertion) — all fixed; delta re-review BLOCKER 0 / MAJOR 0.
+    weak assertion) — all fixed; delta re-review on the fix commit BLOCKER 0
+    / MAJOR 0 / MINOR 0 / NIT 6, of which three were folded in afterwards
+    (cleanup judges a fetched shard by the same per-shard rules as validation
+    via `shard_header_problems`, the caught 416 `HTTPError` is closed, a
+    non-integer split key is reported once).
   - **Local smoke:** temp store hard-linked to the real 3-shard Qwen3.8 set →
     `validate_split_set` complete in 0.2 s, discovery AVAILABLE/VERIFIED, `orbit
     download` prints three "already present" lines with zero requests; with
