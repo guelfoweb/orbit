@@ -73,6 +73,18 @@
         "file": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
         "cache_glob": "models--unsloth--Qwen3-Coder-30B-A3B-Instruct-GGUF/snapshots/*/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
       }
+    },
+    {
+      "id": "qwen38-flash-next-ud-iq1-m",
+      "display_name": "Qwen 3.8 Flash Next",
+      "profile_id": "orbit-qwen38-flash-next-native-v1",
+      "backend": "native-llama",
+      "architecture": "qwen4exp",
+      "target": {
+        "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+        "file": "Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf",
+        "cache_glob": "models--unsloth--Qwen3.8-Flash-Next-GGUF/snapshots/*/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf"
+      }
     }
   ]
 }

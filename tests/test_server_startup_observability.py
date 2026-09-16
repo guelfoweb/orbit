@@ -108,7 +108,7 @@ class _RunServerHarness(unittest.TestCase):
         stderr, stdout = io.StringIO(), io.StringIO()
         resolve_calls = {"n": 0}
 
-        def fake_resolve(args, calibrator=None):
+        def fake_resolve(args, calibrator=None, qualified=None):
             resolve_calls["n"] += 1
             entry = resolutions[min(resolve_calls["n"] - 1, len(resolutions) - 1)]
             res, invoke = entry if isinstance(entry, tuple) else (entry, False)

@@ -59,6 +59,9 @@ from dataclasses import dataclass, asdict, replace, fields
 from pathlib import Path
 from typing import Mapping
 
+from orbit.native_llama.bindings import LLAMA_LAZY_MODE_ON, LLAMA_LOAD_MODE_MMAP
+from orbit.native_llama.model_profiles import QWEN38_FLASH_NEXT_PROFILE_ID
+
 # The reference numbers. They remain the fallback because they are the only
 # values with a qualified corpus behind them, and a machine we cannot measure
 # is better served by a profile that is known to work somewhere than by one
@@ -89,6 +92,15 @@ ENV_CPU_REPACK = "ORBIT_CPU_REPACK"
 # host into swap; leaving it mmap'd removes that with identical analysis output.
 QUALIFIED_NOREPACK_MACHINE = "Dell Pro 5 14 P514260"
 QUALIFIED_NOREPACK_MODEL_ID = "ornith15-35b-a3b-q4-k-m"
+# The second qualified pair (QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19): the same
+# Dell running Qwen3.8 Flash Next UD-IQ1_M. Repacking a 74.5 GB beyond-RAM
+# model would allocate multi-GB anonymous buffers on this 30 GiB host; the
+# research qualification ran with repack OFF.
+QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID = "qwen38-flash-next-ud-iq1-m"
+QUALIFIED_NOREPACK_MODEL_IDS = {
+    QUALIFIED_NOREPACK_MODEL_ID: "qualified-dell-ornith",
+    QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID: "qualified-dell-qwen38-flash-next",
+}
 
 
 def resolve_cpu_repack(
@@ -118,12 +130,78 @@ def resolve_cpu_repack(
             return True, "env"
         # An unparseable value is ignored rather than guessed, so a typo never
         # silently flips an inference setting; fall through to the default.
-    if (
-        machine_model.strip() == QUALIFIED_NOREPACK_MACHINE
-        and model_id == QUALIFIED_NOREPACK_MODEL_ID
-    ):
-        return False, "qualified-dell-ornith"
+    qualified_source = QUALIFIED_NOREPACK_MODEL_IDS.get(model_id)
+    if machine_model.strip() == QUALIFIED_NOREPACK_MACHINE and qualified_source is not None:
+        return False, qualified_source
     return None, "backend-default"
+
+
+@dataclass(frozen=True)
+class QualifiedStartupProfile:
+    """The complete startup profile qualified for one exact (machine, model) pair.
+
+    It sits in the precedence chain between the operator's explicit values
+    (CLI, ORBIT_* environment, user profile) and the cache / calibration /
+    heuristic tiers: an evidence-backed default that never overrides anything
+    the operator said. The values are the research qualification's, recorded
+    verbatim -- not tuning targets -- and `ctx` plus the backend loading
+    semantics travel with them because the qualification ran with exactly
+    those.
+    """
+
+    model_id: str
+    # The verified GGUF profile the file must detect as before the tier applies
+    # (architecture, model name, quantization, template), so a different quant
+    # or a renamed file at the registry path never inherits the numbers.
+    profile_id: str
+    source: str
+    ctx: int
+    threads: int
+    threads_batch: int
+    batch: int
+    ubatch: int
+    # llama_model_params.load_mode / lazy_mode / load_mtp.
+    load_mode: int
+    lazy_mode: int
+    load_mtp: bool
+
+    def tuning_fields(self) -> "dict[str, int]":
+        return {
+            "threads": self.threads,
+            "threads_batch": self.threads_batch,
+            "batch": self.batch,
+            "ubatch": self.ubatch,
+        }
+
+
+QUALIFIED_STARTUP_PROFILES: "dict[tuple[str, str], QualifiedStartupProfile]" = {
+    (QUALIFIED_NOREPACK_MACHINE, QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID): QualifiedStartupProfile(
+        model_id=QUALIFIED_QWEN38_FLASH_NEXT_MODEL_ID,
+        profile_id=QWEN38_FLASH_NEXT_PROFILE_ID,
+        source="qualified-dell-qwen38-flash-next",
+        # Research qualification on the Dell (QWEN38-SMALLER-QUANT-RESOLUTION-16):
+        # CPU only, one slot, gpu_layers 0, repack OFF, MTP OFF, ext4, 45/30 W.
+        ctx=4096,
+        threads=10,
+        threads_batch=10,
+        batch=256,
+        ubatch=128,
+        # mmap, on-demand reads for the arch-marked tensors (the 26.8 GiB
+        # per-layer token-embedding table would otherwise be populated up
+        # front), and no NextN/MTP tensors: the model is served for plain
+        # decoding only.
+        load_mode=LLAMA_LOAD_MODE_MMAP,
+        lazy_mode=LLAMA_LAZY_MODE_ON,
+        load_mtp=False,
+    ),
+}
+
+
+def qualified_startup_profile(
+    *, machine_model: str, model_id: str
+) -> "QualifiedStartupProfile | None":
+    """The qualified profile for this exact pair, or None for every other pair."""
+    return QUALIFIED_STARTUP_PROFILES.get((machine_model.strip(), model_id))
 
 # Bumped whenever the fingerprint inputs change, so entries written by an older
 # Orbit are ignored rather than silently orphaned under a key nobody computes
@@ -717,6 +795,7 @@ def resolve_profile(
     topology: HostTopology,
     environ: Mapping[str, str] | None = None,
     user_profile: "Mapping[str, int] | None" = None,
+    qualified_profile: "Mapping[str, int] | None" = None,
     model_bytes: int = 0,
     model_sha256: str = "",
     model_arch: str = "",
@@ -767,6 +846,10 @@ def resolve_profile(
     contribute(env_overrides(environ), "env")
     if user_profile:
         contribute(user_profile, "user-profile")
+    # The qualified (machine, model) tier: below everything explicit, above
+    # anything measured or guessed. See `QualifiedStartupProfile`.
+    if qualified_profile:
+        contribute(qualified_profile, "qualified")
 
     fingerprint = profile_fingerprint(
         topology,
@@ -854,6 +937,8 @@ def resolve_profile(
         source = f"cached auto-calibrated ({', '.join(cached_fields)})"
     elif all(sources.get(field) in ("cli", "env", "user-profile") for field in _FIELDS):
         source = "explicit"
+    elif any(sources.get(field) == "qualified" for field in _FIELDS):
+        source = "qualified"
     else:
         source = "heuristic"
 

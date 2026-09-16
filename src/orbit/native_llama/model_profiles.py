@@ -18,6 +18,15 @@ QWEN38_VERIFIED_MODEL_NAME = "Qwen3.8-27B"
 QWEN38_OFFICIAL_TEMPLATE_SHA256 = "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
 QWEN38_VERIFIED_FILE_TYPE = "15"
 QWEN38_VERIFIED_QUANTIZATION = "Q4_K_M"
+# Qwen3.8 Flash Next: the `qwen4exp` MoE preview (48 blocks, 512 experts, 10
+# used). Exactly one artifact is qualified for production, Unsloth UD-IQ1_M
+# (general.file_type 31 = LLAMA_FTYPE_MOSTLY_IQ1_M), by
+# QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19; its GGUF embeds byte-for-byte the
+# official Qwen3.8 chat template already pinned for the 27B model.
+QWEN38_FLASH_NEXT_PROFILE_ID = "orbit-qwen38-flash-next-native-v1"
+QWEN38_FLASH_NEXT_VERIFIED_MODEL_NAME = "Qwen3.8 Flash Next"
+QWEN38_FLASH_NEXT_VERIFIED_FILE_TYPE = "31"
+QWEN38_FLASH_NEXT_VERIFIED_QUANTIZATION = "UD-IQ1_M"
 # Metadata keys read when identifying a model profile. Every key any pinned
 # identity below compares must appear here: a key absent from this set is read
 # as the empty string, which silently fails the comparison and reports a
@@ -46,6 +55,10 @@ PROFILE_METADATA_KEYS = frozenset(
         "qwen35moe.block_count",
         "qwen35moe.expert_count",
         "qwen35moe.expert_used_count",
+        "qwen4exp.context_length",
+        "qwen4exp.block_count",
+        "qwen4exp.expert_count",
+        "qwen4exp.expert_used_count",
     }
 )
 
@@ -193,6 +206,9 @@ VERIFIED_NATIVE_MODEL_IDENTITIES = (
         ),
     ),
     VerifiedNativeModelIdentity(QWEN38_PROFILE_ID, QWEN38_VERIFIED_MODEL_NAME, "qwen35"),
+    VerifiedNativeModelIdentity(
+        QWEN38_FLASH_NEXT_PROFILE_ID, QWEN38_FLASH_NEXT_VERIFIED_MODEL_NAME, "qwen4exp"
+    ),
     VerifiedNativeModelIdentity(
         QWEN3_CODER_PROFILE_ID,
         QWEN3_CODER_VERIFIED_MODEL_NAME,
@@ -351,6 +367,46 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             route_prefix_reuse_supported=True,
         )
 
+    qwen38_flash_next_identity = (
+        architecture == "qwen4exp"
+        and model_name == QWEN38_FLASH_NEXT_VERIFIED_MODEL_NAME
+        and tokenizer_model == "gpt2"
+        and tokenizer_pre == "qwen35"
+        and file_type == QWEN38_FLASH_NEXT_VERIFIED_FILE_TYPE
+        and metadata.get("tokenizer.ggml.bos_token_id", "").strip() == "248044"
+        and metadata.get("tokenizer.ggml.eos_token_id", "").strip() == "248046"
+        and metadata.get("qwen4exp.context_length", "").strip() == "262144"
+        and metadata.get("qwen4exp.block_count", "").strip() == "48"
+        and metadata.get("qwen4exp.expert_count", "").strip() == "512"
+        and metadata.get("qwen4exp.expert_used_count", "").strip() == "10"
+        and template_hash == QWEN38_OFFICIAL_TEMPLATE_SHA256
+    )
+    if qwen38_flash_next_identity:
+        return NativeModelProfile(
+            profile_id=QWEN38_FLASH_NEXT_PROFILE_ID,
+            family="qwen3.8-flash-next",
+            model_name=model_name,
+            architecture=architecture,
+            renderer="llama.cpp-jinja",
+            reasoning_protocol="qwen-think",
+            # Same template bytes (sha256) as the verified Qwen3.8 27B pin, so
+            # the same <tool_call>/<function=>/<parameter=> envelope and
+            # <tool_response> results.
+            tool_call_protocol="qwen3.6-xml",
+            history_serialization="qwen-leading-system-only",
+            verified=True,
+            failure_reason=None,
+            template_source="gguf-embedded-official",
+            template_sha256=template_hash,
+            thinking_supported=True,
+            mtp_supported=False,
+            gemma_prefix_reuse_supported=False,
+            verified_quantization=QWEN38_FLASH_NEXT_VERIFIED_QUANTIZATION,
+            # KV-checkpoint route-prefix reuse is not qualified for this hybrid
+            # (SSM + attention + PLE) architecture: enablement only.
+            route_prefix_reuse_supported=False,
+        )
+
     qwen3_coder_identity = (
         architecture == "qwen3moe"
         and model_name == QWEN3_CODER_VERIFIED_MODEL_NAME
@@ -451,6 +507,18 @@ def _unverified_reason(
         if template_hash != QWEN38_OFFICIAL_TEMPLATE_SHA256:
             return "qwen38_template_identity_mismatch"
         return "qwen38_metadata_identity_mismatch"
+    if architecture == "qwen4exp":
+        if model_name != QWEN38_FLASH_NEXT_VERIFIED_MODEL_NAME:
+            return "qwen38_flash_next_model_identity_mismatch"
+        if tokenizer_model != "gpt2" or tokenizer_pre != "qwen35":
+            return "qwen38_flash_next_tokenizer_identity_mismatch"
+        if file_type != QWEN38_FLASH_NEXT_VERIFIED_FILE_TYPE:
+            # Only UD-IQ1_M is qualified; any other Qwen3.8 Flash Next quant
+            # (IQ1_S, Q2_K_XL, IQ3_XXS, ...) stays unsupported until qualified.
+            return "qwen38_flash_next_quantization_identity_mismatch"
+        if template_hash != QWEN38_OFFICIAL_TEMPLATE_SHA256:
+            return "qwen38_flash_next_template_identity_mismatch"
+        return "qwen38_flash_next_metadata_identity_mismatch"
     if architecture == "qwen3moe":
         if model_name != QWEN3_CODER_VERIFIED_MODEL_NAME:
             return "qwen3_coder_model_identity_mismatch"

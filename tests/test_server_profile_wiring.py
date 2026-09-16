@@ -57,9 +57,12 @@ class ParserDefaultTests(unittest.TestCase):
         self.assertEqual(args.batch, FALLBACK_BATCH)
         self.assertEqual(args.ubatch, FALLBACK_UBATCH)
 
-    def test_ctx_keeps_its_default(self) -> None:
-        """ctx is NOT auto-resolved: it is a capability, not tuning."""
-        self.assertEqual(self.parse([]).ctx, 8192)
+    def test_ctx_defaults_to_none_and_resolves_to_the_reference_size(self) -> None:
+        """ctx is never measured: --ctx beats a qualified profile beats 8192."""
+        self.assertIsNone(self.parse([]).ctx)
+        self.assertEqual(self.parse(["--ctx", "4096"]).ctx, 4096)
+        self.assertEqual(app_module._resolve_ctx(self.parse([]), None), (app_module.DEFAULT_CTX_TOKENS, "default"))
+        self.assertEqual(app_module.DEFAULT_CTX_TOKENS, 8192)
 
     def test_the_new_flags_exist_and_default_off(self) -> None:
         args = self.parse([])

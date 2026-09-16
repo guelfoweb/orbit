@@ -4,6 +4,7 @@ from ctypes import create_string_buffer
 from dataclasses import dataclass
 from pathlib import Path
 import glob
+import re
 import time
 from typing import Callable, Iterable
 
@@ -219,7 +220,11 @@ def _local_candidates(
     for pattern in ("*.gguf", "*/*.gguf"):
         scan_count += 1
         for path in models_dir.glob(pattern):
-            if path.name not in auxiliary_names and not path.name.startswith(("mmproj-", "mtp-")):
+            if (
+                path.name not in auxiliary_names
+                and not path.name.startswith(("mmproj-", "mtp-"))
+                and not _is_secondary_split_shard(path.name)
+            ):
                 confined = _confined_regular_path(path, models_dir)
                 if confined is not None:
                     paths.add(confined)
@@ -244,6 +249,15 @@ def _local_candidates(
             continue
         unique_files.setdefault((stat_result.st_dev, stat_result.st_ino), path)
     return tuple(unique_files.values()), scan_count
+
+
+_SPLIT_SHARD_SUFFIX = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
+
+
+def _is_secondary_split_shard(name: str) -> bool:
+    """True for shard 2..N of a split GGUF; only the first shard names a model."""
+    match = _SPLIT_SHARD_SUFFIX.search(name)
+    return bool(match and match.group(1) != "00001")
 
 
 def _confined_regular_path(path: Path, root: Path) -> Path | None:
