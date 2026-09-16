@@ -28,6 +28,10 @@ class ChatRequest:
     # The analysis STEP turn, within the rolling lineage: it checkpoints
     # before its transient last user turn and in a slot of its own.
     analysis_step_anchor: bool = False
+    # A final call whose reply the runtime will commit to the same history
+    # its route prompts are rendered from: once delivered, that reply may be
+    # decoded in route context ahead of the next route call.
+    route_history_continuation: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
         final_prefix_experiment=payload.get("final_prefix_experiment") is True,
         artifact_content=payload.get("artifact_content") is True,
         analysis_step_anchor=payload.get("analysis_step_anchor") is True,
+        route_history_continuation=payload.get("route_history_continuation") is True,
     )
 
 

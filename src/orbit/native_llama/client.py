@@ -37,7 +37,7 @@ from .chat_template import NativeMessage, RoutePromptSegments, render_gemma4_cha
 from .events import NativeCompletion, NativePhase, NativeProgress, NativeTimings
 from .expert_usage import summarize_expert_usage
 from . import client_status
-from .kv_diag import build_prompt_component_tokens, emit_decode_kv_state, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_strict_append_miss, enabled as kv_diag_enabled
+from .kv_diag import build_prompt_component_tokens, emit_decode_kv_state, emit_prompt_cache_event, emit_route_prefix_anchor_event, emit_route_shadow_event, emit_strict_append_miss, enabled as kv_diag_enabled
 from .multimodal import flatten_message_content, prepare_multimodal_messages
 from .artifact_capabilities import verified_artifact_supports
 from .model_profiles import (
@@ -63,6 +63,7 @@ from .paths import NativeLlamaPaths
 from .rolling_route_anchor import (
     ROLLING_ANALYSIS_STRATEGY_ID,
     ROLLING_CONTROL_HISTORY_STRATEGY_ID,
+    ROLLING_ROUTE_SHADOW_STRATEGY_ID,
     ROLLING_ROUTE_STRATEGY_ID,
     ROLLING_STEP_STRATEGY_ID,
     RollingRouteAnchorState,
@@ -74,6 +75,7 @@ from .rolling_route_anchor import (
     restore_rolling_route_anchor,
     rolling_route_reuse_start,
     rolling_route_should_replace,
+    rolling_shadow_head,
 )
 from .prefix_anchor import (
     PrefixAnchorState,
@@ -141,6 +143,12 @@ from .session_state import DEFAULT_NATIVE_SESSION_ID, NativeSessionSnapshot, Nat
 # a qualification decision: the state round-trip has to be demonstrated on the
 # real model. The ANALYSIS rolling lineage stays Ornith-only.
 ROLLING_ROUTE_PROFILE_IDS = frozenset({ORNITH15_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID})
+# The profiles whose route checkpoint is advanced past the committed reply
+# after a final call (QWEN38-POST-FINAL-ROUTE-CACHE-23). A subset of the
+# rolling set: the mechanism is generic, but each profile is admitted on its
+# own measured evidence. Ornith prefills an order of magnitude faster and its
+# rolling behaviour is qualified as it stands, so it stays out until measured.
+POST_FINAL_ROUTE_SHADOW_PROFILE_IDS = frozenset({QWEN38_FLASH_NEXT_PROFILE_ID})
 
 
 DEFAULT_MEDIA_MARKER = "<__media__>"
@@ -1561,6 +1569,13 @@ class NativeLlamaClient:
             rolling_route_identity=rolling_route_identity,
             rolling_boundary_suffix=rolling_boundary_suffix,
             rolling_boundary_head=rolling_boundary_head,
+            rolling_route_messages=(
+                [dict(message) for message in messages]
+                if rolling_route_identity is not None
+                and rolling_route_identity.strategy_id == ROLLING_ROUTE_STRATEGY_ID
+                else None
+            ),
+            rolling_route_tools=[dict(tool) for tool in (tools or [])],
             route_anchor_segments=route_anchor_segments,
             qwen_route_anchor_plan=qwen_route_anchor_plan,
             qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -2268,6 +2283,8 @@ class NativeLlamaClient:
         rolling_route_identity: RollingRouteIdentity | None = None,
         rolling_boundary_suffix: str | None = None,
         rolling_boundary_head: str | None = None,
+        rolling_route_messages: list[NativeMessage] | None = None,
+        rolling_route_tools: list[dict] | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -2314,6 +2331,8 @@ class NativeLlamaClient:
                 rolling_route_identity=rolling_route_identity,
                 rolling_boundary_suffix=rolling_boundary_suffix,
                 rolling_boundary_head=rolling_boundary_head,
+                rolling_route_messages=rolling_route_messages,
+                rolling_route_tools=rolling_route_tools,
                 route_anchor_segments=route_anchor_segments,
                 qwen_route_anchor_plan=qwen_route_anchor_plan,
                 qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
@@ -2577,6 +2596,8 @@ class NativeLlamaClient:
         rolling_route_identity: RollingRouteIdentity | None = None,
         rolling_boundary_suffix: str | None = None,
         rolling_boundary_head: str | None = None,
+        rolling_route_messages: list[NativeMessage] | None = None,
+        rolling_route_tools: list[dict] | None = None,
         kv_diag_messages: list[NativeMessage] | None = None,
         on_progress=None,
         on_token=None,
@@ -2825,25 +2846,40 @@ class NativeLlamaClient:
             # prompt extends it, so this would replace the reusable checkpoint
             # with the one that cannot be.
             if self._rolling_route_capture_allowed(prompt_tokens, rolling_route_identity):
-                captured, _capture_meta = capture_rolling_route_anchor(
-                    lib,
-                    self._session.ctx_tgt,
-                    prompt_tokens=prompt_tokens,
-                    identity=rolling_route_identity,
+                self._capture_whole_prompt_checkpoint(
+                    prompt_tokens,
+                    rolling_route_identity,
+                    render_messages=rolling_route_messages,
+                    render_tools=rolling_route_tools,
                 )
-                # A failed capture must not discard a still-usable checkpoint.
-                if captured.valid:
-                    self._store_rolling_anchor_state(rolling_route_identity, captured)
         self.last_committed_generated_tokens = []
-        generated, gen_ms, cancelled = self._generate_from_current_context(
-            max_tokens=max_tokens,
-            on_progress=on_progress,
-            on_token=on_token,
-            should_cancel=should_cancel,
-            sampler_override=sampler_override,
-            utf8_errors=utf8_errors,
-            request_timing=request_timing,
-        )
+        try:
+            generated, gen_ms, cancelled = self._generate_from_current_context(
+                max_tokens=max_tokens,
+                on_progress=on_progress,
+                on_token=on_token,
+                should_cancel=should_cancel,
+                sampler_override=sampler_override,
+                utf8_errors=utf8_errors,
+                request_timing=request_timing,
+            )
+        except Exception:
+            # A generation that raised (the runtime aborting a route stream it
+            # can already tell is not a decision, a dropped connection) has
+            # decoded an unknown number of tokens past the prompt. The
+            # sequence now resident is not the committed one, and the trace
+            # still needs the call: report it as cancelled, then re-raise.
+            self._invalidate_committed_sequence()
+            emit_prompt_cache_event(
+                prompt_tokens=prompt_tokens,
+                previous_prompt_tokens=previous_prompt_tokens,
+                reused_prompt_tokens=reused,
+                output_tokens=len(self.last_committed_generated_tokens),
+                cancelled=True,
+                slot_id=self._session.session_id,
+                generated_tokens=list(self.last_committed_generated_tokens),
+            )
+            raise
         component_tokens = None
         if kv_diag_enabled() and kv_diag_messages is not None:
             component_tokens = build_prompt_component_tokens(
@@ -2868,6 +2904,7 @@ class NativeLlamaClient:
             cancelled=cancelled,
             slot_id=self._session.session_id,
             component_tokens=component_tokens,
+            generated_tokens=list(self.last_committed_generated_tokens),
         )
         if anchor_metadata is not None:
             anchor_metadata["cached_tokens"] = reused
@@ -3968,6 +4005,39 @@ class NativeLlamaClient:
         )
         return False
 
+    def _capture_whole_prompt_checkpoint(
+        self,
+        prompt_tokens: list[int],
+        identity: RollingRouteIdentity,
+        *,
+        render_messages: list[NativeMessage] | None,
+        render_tools: list[dict] | None,
+    ) -> RollingRouteAnchorState:
+        """The end-of-prefill capture: the prompt, and only the prompt.
+
+        On the route lineage the state also records what the prompt was
+        rendered from, which is what the post-final shadow re-renders, and
+        the previous shadow is superseded: whether this prompt extended it
+        or not, the checkpoint just taken is the one the next shadow builds
+        on. A failed capture must not discard a still-usable checkpoint.
+        """
+        captured, _capture_meta = capture_rolling_route_anchor(
+            self.lib.lib,
+            self._session.ctx_tgt,
+            prompt_tokens=prompt_tokens,
+            identity=identity,
+        )
+        if not captured.valid:
+            return captured
+        if identity.strategy_id == ROLLING_ROUTE_STRATEGY_ID:
+            captured = replace(captured, render_messages=render_messages, render_tools=render_tools)
+            self._store_rolling_anchor_state(
+                replace(identity, strategy_id=ROLLING_ROUTE_SHADOW_STRATEGY_ID),
+                RollingRouteAnchorState(),
+            )
+        self._store_rolling_anchor_state(identity, captured)
+        return captured
+
     def _rolling_anchor_state_for(self, identity: RollingRouteIdentity | None) -> RollingRouteAnchorState:
         """Delegate: see `RollingAnchorStore.state_for`."""
         return self._rolling_anchor_store().state_for(identity)
@@ -3996,6 +4066,17 @@ class NativeLlamaClient:
         # to pass, which is what rejects a stale checkpoint within a lineage.
         state = self._rolling_anchor_state_for(identity)
         reuse_start = rolling_route_reuse_start(state, prompt_tokens, identity)
+        if identity is not None and identity.strategy_id == ROLLING_ROUTE_STRATEGY_ID:
+            # The route checkpoint advanced past the committed reply, when
+            # the post-final shadow took one. Same exact-prefix rule under
+            # its own identity; the longer exact match wins, and a shadow
+            # this prompt does not extend is simply not chosen -- the route
+            # checkpoint it was built from is still here to serve.
+            shadow_identity = replace(identity, strategy_id=ROLLING_ROUTE_SHADOW_STRATEGY_ID)
+            shadow_state = self._rolling_anchor_state_for(shadow_identity)
+            shadow_start = rolling_route_reuse_start(shadow_state, prompt_tokens, shadow_identity)
+            if shadow_start is not None and (reuse_start is None or shadow_start > reuse_start):
+                identity, state, reuse_start = shadow_identity, shadow_state, shadow_start
         if identity is not None and identity.strategy_id == ROLLING_ANALYSIS_STRATEGY_ID:
             # A control turn may be served by either of its two checkpoints:
             # the Stage A one (which its repair extends) or the history one
@@ -4014,6 +4095,11 @@ class NativeLlamaClient:
                 identity, state, reuse_start = history_identity, history_state, history_start
         if reuse_start is None:
             return self._prepare_memory_for_prompt(prompt_tokens)
+        if list(self._committed().tokens) == list(state.tokens):
+            # The live sequence already IS this checkpoint (a post-final
+            # shadow leaves it resident and recorded): nothing to restore.
+            self._session.cached_prompt_tokens = list(state.tokens)
+            return self._prepare_memory_for_prompt(prompt_tokens)
         ok, restored, _meta = restore_rolling_route_anchor(
             self.lib.lib, self._session.ctx_tgt, state
         )
@@ -4028,6 +4114,167 @@ class NativeLlamaClient:
         self._session.committed_sequence_tokens = list(state.tokens)
         self._session.cached_prompt_tokens = list(state.tokens)
         return self._prepare_memory_for_prompt(prompt_tokens)
+
+    def post_final_route_shadow_eligible(self) -> bool:
+        """Whether this profile advances its route checkpoint after a final."""
+        profile = getattr(self, "model_profile", None)
+        if not getattr(profile, "verified", False):
+            return False
+        if getattr(profile, "profile_id", None) not in POST_FINAL_ROUTE_SHADOW_PROFILE_IDS:
+            return False
+        if self.config.thinking:
+            return False
+        if self.config.use_mtp_experimental or self._session.mtp_enabled:
+            return False
+        return True
+
+    def advance_route_checkpoint_after_final(
+        self, assistant_content: str, *, should_cancel=None
+    ) -> dict[str, object]:
+        """Decode the committed reply in ROUTE context, after the final call.
+
+        The next route prompt is the checkpointed route prompt followed by
+        the reply the final call just committed, the user's next turn and the
+        generation prompt. Only the reply is known now, so only the reply --
+        plus whatever the template emits before the user's text -- is decoded:
+        the route checkpoint is restored, the delta is prefilled on top of it,
+        and the result is captured into the shadow slot. Same work the next
+        route call would have done, done while the model is otherwise idle.
+
+        Preemptible: `should_cancel` is polled between prompt batches, and a
+        shadow stopped early is captured at the exact boundary it reached --
+        the tokens resident are exactly the tokens recorded, so a partial
+        shadow is a shorter checkpoint, never a wrong one. Every refusal
+        leaves the route checkpoint untouched. The live sequence afterwards is
+        the shadow's, so the last completion can no longer be continued from
+        the current context; this is called only after a final that stopped
+        on its own, which is not the case continuation exists for.
+        """
+        started = time.monotonic()
+        metadata: dict[str, object] = {"status": "skipped", "reason": None}
+
+        def skipped(reason: str) -> dict[str, object]:
+            metadata["reason"] = reason
+            metadata["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+            emit_route_shadow_event(metadata)
+            return metadata
+
+        if not self._session.ctx_tgt or not self._vocab:
+            return skipped("native_client_not_loaded")
+        if self._session.in_flight:
+            return skipped("native_request_in_flight")
+        if not self.post_final_route_shadow_eligible():
+            return skipped("model_profile_ineligible")
+        state = self._rolling_route_anchor_state
+        if not state.valid or state.identity is None:
+            return skipped("no_route_checkpoint")
+        if state.identity.strategy_id != ROLLING_ROUTE_STRATEGY_ID or state.render_messages is None:
+            return skipped("checkpoint_without_render_inputs")
+        identity = self._rolling_route_identity(tools=state.render_tools)
+        if state.identity != identity:
+            # Session, reset generation, template, policy: anything that
+            # changed since the capture makes those tokens someone else's.
+            return skipped("checkpoint_identity_stale")
+        if state.non_extending_misses > 0:
+            # This turn's route prompt did not extend the checkpoint (a
+            # compacted or reset conversation kept the older one): a reply
+            # decoded on top of it could never be restored either.
+            return skipped("checkpoint_missed_this_turn")
+        if should_cancel is not None and should_cancel():
+            # A request is already on its way: not worth a render or a restore.
+            return skipped("request_waiting")
+        metadata["checkpoint_tokens"] = len(state.tokens)
+        head_tokens, reason = rolling_shadow_head(
+            state.tokens,
+            messages=state.render_messages,
+            tools=state.render_tools,
+            assistant_content=assistant_content,
+            render=lambda messages, tools: self.apply_chat_template(messages, tools=tools, thinking=False),
+            tokenize=self.tokenize,
+        )
+        if head_tokens is None:
+            return skipped(reason)
+        n_head = len(head_tokens)
+        metadata["shadow_tokens"] = n_head
+        metadata["delta_tokens"] = n_head - len(state.tokens)
+        if n_head > int(self.config.context_tokens):
+            # The next route prompt cannot fit either; the context manager
+            # will rewrite the history before it is sent.
+            return skipped("context_budget")
+        lib = self.lib.lib
+        self.reset_cancel()
+        ok, restored, _meta = restore_rolling_route_anchor(lib, self._session.ctx_tgt, state)
+        self._store_rolling_anchor_state(state.identity, restored)
+        # Whatever happens below, the last completion's context is gone.
+        self._session.continuation_ready = False
+        if not ok:
+            self._clear_target_memory()
+            return skipped("checkpoint_restore_failed")
+        token_array = (llama_token * n_head)(*head_tokens)
+        step = max(1, min(self.config.progress_step, self.config.batch_size))
+        processed = len(state.tokens)
+        # One prompt batch at a time, preemption checked in between: a shadow
+        # that yields holds exactly `processed` tokens, and yielding never
+        # goes through `cancel()` (which would also drop the fixed-head
+        # checkpoints of a profile that owns some). A cancel that arrives any
+        # other way -- `/cancel` with nothing in flight -- can hit the abort
+        # callback inside a running batch, after which the resident sequence
+        # is unknown; that case is told apart below and dropped, never captured.
+        preempted = False
+        try:
+            while processed < n_head:
+                if (should_cancel is not None and should_cancel()) or self.cancel_event.is_set():
+                    # Both are boundary yields: nothing has run since the
+                    # last batch completed, so `processed` is exactly resident.
+                    preempted = True
+                    break
+                processed = self._decode_prompt_range(
+                    token_array,
+                    processed=processed,
+                    end=min(n_head, processed + step),
+                    step=step,
+                    total=n_head,
+                    reused=len(state.tokens),
+                )
+                if self.cancel_event.is_set():
+                    # Set DURING the batch: the abort callback may have cut
+                    # it short and the range decoder still counted it.
+                    self._clear_target_memory()
+                    self.reset_cancel()
+                    return skipped("cancelled")
+        except Exception as exc:
+            # The sequence is unknown past the checkpoint: drop it entirely.
+            self._clear_target_memory()
+            self.reset_cancel()
+            metadata["error"] = str(exc)
+            return skipped("decode_failed")
+        self.reset_cancel()
+        metadata["decoded_tokens"] = processed - len(state.tokens)
+        metadata["preempted"] = preempted
+        if processed <= len(state.tokens):
+            # Nothing decoded: the live sequence is the checkpoint itself.
+            self._session.cached_prompt_tokens = list(state.tokens)
+            self._committed().adopt(state.tokens)
+            return skipped("preempted_before_first_batch")
+        shadow_tokens = head_tokens[:processed]
+        shadow_identity = replace(identity, strategy_id=ROLLING_ROUTE_SHADOW_STRATEGY_ID)
+        captured, capture_meta = capture_rolling_route_anchor(
+            lib, self._session.ctx_tgt, prompt_tokens=shadow_tokens, identity=shadow_identity
+        )
+        # The live sequence is exactly `shadow_tokens` either way; record it
+        # so the strict-append rule can serve the next route prompt even if
+        # the capture below failed.
+        self._session.cached_prompt_tokens = list(shadow_tokens)
+        self._committed().adopt(shadow_tokens)
+        if not captured.valid:
+            metadata["capture_fallback_reason"] = capture_meta.get("fallback_reason")
+            return skipped("checkpoint_capture_failed")
+        self._store_rolling_anchor_state(shadow_identity, captured)
+        metadata["status"] = "partial" if processed < n_head else "advanced"
+        metadata["checkpoint_size_bytes"] = captured.checkpoint_size
+        metadata["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+        emit_route_shadow_event(metadata)
+        return metadata
 
     def _prepare_memory_with_route_anchor(self, plan: _RouteAnchorRuntimePlan) -> tuple[int, int, dict[str, object]]:
         if not self._session.ctx_tgt:

@@ -209,6 +209,9 @@ class CaptureGuardTest(unittest.TestCase):
         if cancelled:
             client.cancel_event.set()
         client._session = _Session()
+        from types import SimpleNamespace
+
+        client.lib = SimpleNamespace(lib=object())
 
         captured_calls: list[list[int]] = []
 
@@ -235,6 +238,10 @@ class CaptureGuardTest(unittest.TestCase):
                 "capture_at": None,
                 # Nor is it the STEP lineage, whose guard is skipped outright.
                 "step_lineage": False,
+                # What the route prompt was rendered from, recorded on the
+                # checkpoint for the post-final shadow (QWEN38-POST-FINAL-ROUTE-CACHE-23).
+                "rolling_route_messages": [{"role": "user", "content": "hi"}],
+                "rolling_route_tools": [],
             }
             exec(source, exec_globals)
         finally:

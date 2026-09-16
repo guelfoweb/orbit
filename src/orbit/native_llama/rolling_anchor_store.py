@@ -34,6 +34,7 @@ from __future__ import annotations
 from .rolling_route_anchor import (
     ROLLING_ANALYSIS_STRATEGY_ID,
     ROLLING_CONTROL_HISTORY_STRATEGY_ID,
+    ROLLING_ROUTE_SHADOW_STRATEGY_ID,
     ROLLING_STEP_STRATEGY_ID,
     RollingRouteAnchorState,
     RollingRouteIdentity,
@@ -44,7 +45,7 @@ from .rolling_route_anchor import (
 class RollingAnchorStore:
     """The single owner of the rolling-anchor checkpoint slots."""
 
-    __slots__ = ("_route", "_analysis", "_step", "_control_history")
+    __slots__ = ("_route", "_analysis", "_step", "_control_history", "_route_shadow")
 
     def __init__(self) -> None:
         self._route = RollingRouteAnchorState()
@@ -54,6 +55,11 @@ class RollingAnchorStore:
         # transient user turns), which the NEXT FINISH extends. Kept apart
         # from `_analysis`, whose checkpoint the repair extends.
         self._control_history = RollingRouteAnchorState()
+        # The CHAT route checkpoint advanced past the last committed reply
+        # (see `ROLLING_ROUTE_SHADOW_STRATEGY_ID`). Kept apart from `_route`
+        # so the checkpoint it extends survives a shadow the next route
+        # prompt turns out not to extend.
+        self._route_shadow = RollingRouteAnchorState()
 
     @staticmethod
     def slot_for(identity: RollingRouteIdentity | None) -> str:
@@ -68,6 +74,8 @@ class RollingAnchorStore:
             return "step"
         if identity is not None and identity.strategy_id == ROLLING_CONTROL_HISTORY_STRATEGY_ID:
             return "control_history"
+        if identity is not None and identity.strategy_id == ROLLING_ROUTE_SHADOW_STRATEGY_ID:
+            return "route_shadow"
         return "route"
 
     @property
@@ -86,6 +94,10 @@ class RollingAnchorStore:
     def control_history_state(self) -> RollingRouteAnchorState:
         return self._control_history
 
+    @property
+    def route_shadow_state(self) -> RollingRouteAnchorState:
+        return self._route_shadow
+
     def state_for(self, identity: RollingRouteIdentity | None) -> RollingRouteAnchorState:
         """What is stored in the slot this identity addresses.
 
@@ -99,6 +111,8 @@ class RollingAnchorStore:
             return self._step or RollingRouteAnchorState()
         if slot == "control_history":
             return self._control_history or RollingRouteAnchorState()
+        if slot == "route_shadow":
+            return self._route_shadow or RollingRouteAnchorState()
         return self._route
 
     def store(
@@ -112,6 +126,8 @@ class RollingAnchorStore:
             self._step = state
         elif slot == "control_history":
             self._control_history = state
+        elif slot == "route_shadow":
+            self._route_shadow = state
         else:
             self._route = state
 
@@ -138,3 +154,6 @@ class RollingAnchorStore:
         history = self._control_history
         if history is not None and (history.valid or history.identity is not None):
             self._control_history = invalidate_rolling_route_anchor(history, reason)
+        shadow = self._route_shadow
+        if shadow is not None and (shadow.valid or shadow.identity is not None):
+            self._route_shadow = invalidate_rolling_route_anchor(shadow, reason)

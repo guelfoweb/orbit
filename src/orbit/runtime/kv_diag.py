@@ -18,6 +18,12 @@ from orbit.runtime.session_memory import estimate_message_tokens, estimate_text_
 
 _PHASE: contextvars.ContextVar[str | None] = contextvars.ContextVar("orbit_kv_diag_phase", default=None)
 _TOOLS_MODE: contextvars.ContextVar[str | None] = contextvars.ContextVar("orbit_kv_diag_tools_mode", default=None)
+# Declared by the runtime around the final calls of a turn whose reply will be
+# appended to the very history the route prompts are rendered from. The
+# backend reads it, never infers it from the prompt.
+_ROUTE_HISTORY_CONTINUATION: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "orbit_route_history_continuation", default=False
+)
 _REQUEST: contextvars.ContextVar["_RequestState | None"] = contextvars.ContextVar("orbit_kv_diag_request", default=None)
 _CALL_IDS = count(1)
 _REQUEST_IDS = count(1)
@@ -71,6 +77,20 @@ def current_tools_mode() -> str | None:
 
 def current_phase() -> str | None:
     return _PHASE.get()
+
+
+def current_route_history_continuation() -> bool:
+    return bool(_ROUTE_HISTORY_CONTINUATION.get())
+
+
+@contextlib.contextmanager
+def route_history_continuation_context(enabled: bool) -> Iterator[None]:
+    """Mark the final calls whose committed reply extends the route history."""
+    token = _ROUTE_HISTORY_CONTINUATION.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _ROUTE_HISTORY_CONTINUATION.reset(token)
 
 
 @contextlib.contextmanager

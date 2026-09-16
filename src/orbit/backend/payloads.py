@@ -28,6 +28,7 @@ class ChatPayloadOptions:
     allow_mtp_experimental: bool | None = None
     final_prefix_experiment: bool = False
     artifact_content: bool = False
+    route_history_continuation: bool = False
 
 
 def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
@@ -44,6 +45,8 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
         payload["stream"] = True
     if options.route_prefix_anchor:
         payload["route_prefix_anchor"] = True
+    if options.route_history_continuation:
+        payload["route_history_continuation"] = True
     if options.qwen_route_prefix_anchor:
         payload["qwen_route_prefix_anchor"] = True
     if options.qwen36_shell_tool_prefix_anchor:
