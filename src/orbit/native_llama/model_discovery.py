@@ -21,7 +21,7 @@ from orbit.native_llama.model_profiles import (
 from orbit.native_llama.model_registry import (
     ModelManifest,
     default_hf_cache,
-    default_models_dir,
+    effective_models_dir,
     load_registry,
 )
 
@@ -127,7 +127,7 @@ def discover_models(
     manifests: Iterable[ModelManifest] | None = None,
 ) -> ModelDiscoveryResult:
     started = time.monotonic()
-    local_root = models_dir or default_models_dir()
+    local_root = models_dir or effective_models_dir()
     cache_root = hf_cache or default_hf_cache()
     supported = tuple(load_registry() if manifests is None else manifests)
     candidates, scan_count = _local_candidates(

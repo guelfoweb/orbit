@@ -5,7 +5,8 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 import glob
 import json
-from typing import Any
+import os
+from typing import Any, Mapping
 
 from orbit.native_llama.model_profiles import verified_native_model_identity
 
@@ -72,6 +73,89 @@ def default_models_dir(start: Path | None = None) -> Path:
     if root is not None:
         return root / "models"
     return default_orbit_model_cache()
+
+
+# The one user-facing model-directory setting. It lives in the same persistent
+# file the terminal client already reads (`~/.orbit/config.json`), under this
+# key; `orbit config models-dir` writes it. The environment variable is the
+# per-invocation override; an explicit `--models-dir` beats both.
+MODELS_DIR_CONFIG_KEY = "models_dir"
+MODELS_DIR_ENV = "ORBIT_MODELS_DIR"
+
+
+def orbit_config_path(environ: "Mapping[str, str] | None" = None) -> Path:
+    env = os.environ if environ is None else environ
+    home = env.get("HOME")
+    base = Path(home).expanduser() if home else Path.home()
+    return base / ".orbit" / "config.json"
+
+
+@dataclass(frozen=True)
+class ModelsDirResolution:
+    """The effective models directory and which precedence level chose it."""
+
+    path: Path
+    source: str  # "cli" | "env" | "config" | "default"
+    config_path: Path
+    config_error: str | None = None
+
+
+def resolve_models_dir(
+    explicit: "Path | str | None" = None,
+    *,
+    environ: "Mapping[str, str] | None" = None,
+    config_path: Path | None = None,
+    start: Path | None = None,
+) -> ModelsDirResolution:
+    """The canonical models-directory resolution every model operation shares.
+
+    Precedence, highest first: an explicit `--models-dir` (`explicit`), the
+    `ORBIT_MODELS_DIR` environment variable, the `models_dir` value persisted
+    by `orbit config models-dir`, and finally the historical default
+    (`<orbit>/models`, or `~/.cache/orbit/models` outside a checkout). Nothing
+    else participates. The path is expanded but NOT resolved, so a models
+    directory that is itself a symlink keeps working exactly as before. An
+    unreadable or malformed config file never blocks a model operation: it is
+    reported through `config_error` and the resolution falls through.
+    """
+    env = os.environ if environ is None else environ
+    path = config_path or orbit_config_path(env)
+    if explicit is not None and str(explicit).strip():
+        return ModelsDirResolution(Path(explicit).expanduser(), "cli", path)
+    from_env = env.get(MODELS_DIR_ENV)
+    if from_env is not None and from_env.strip():
+        return ModelsDirResolution(Path(from_env).expanduser(), "env", path)
+    persisted, error = _persisted_models_dir(path)
+    if persisted is not None:
+        return ModelsDirResolution(persisted, "config", path, error)
+    return ModelsDirResolution(default_models_dir(start), "default", path, error)
+
+
+def effective_models_dir(explicit: "Path | str | None" = None) -> Path:
+    """`resolve_models_dir(...).path` for callers that only need the directory."""
+    return resolve_models_dir(explicit).path
+
+
+def _persisted_models_dir(config_path: Path) -> "tuple[Path | None, str | None]":
+    try:
+        if not config_path.is_file():
+            return None, None
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"{config_path}: {exc}"
+    if not isinstance(data, dict):
+        return None, f"{config_path}: root value must be an object"
+    value = data.get(MODELS_DIR_CONFIG_KEY)
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or not value.strip():
+        return None, f"{config_path}: {MODELS_DIR_CONFIG_KEY} must be a non-empty string"
+    expanded = Path(value).expanduser()
+    if not expanded.is_absolute():
+        # A relative value would land models somewhere different on every
+        # `cd`; `orbit config models-dir` always records absolute paths.
+        return None, f"{config_path}: {MODELS_DIR_CONFIG_KEY} must be an absolute path (got {value!r})"
+    return expanded, None
 
 
 def local_model_path(spec: ModelFileSpec, *, models_dir: Path) -> Path:
@@ -284,7 +368,7 @@ def resolve_model(
     mmproj_override: Path | None = None,
     draft_mtp_override: Path | None = None,
 ) -> ResolvedModel:
-    local_root = models_dir or default_models_dir()
+    local_root = models_dir or effective_models_dir()
     cache_root = hf_cache or default_hf_cache()
     target_path = target_override or _resolve_file(manifest.target, models_dir=local_root, hf_cache=cache_root)
     if target_path is None or not target_path.exists():

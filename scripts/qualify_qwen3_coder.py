@@ -25,6 +25,7 @@ if str(SRC) not in sys.path:
 
 from orbit.backend import ChatResult, LlamaServerBackend
 from orbit.native_llama.bindings import LLAMA_LOAD_MODE_MMAP, ChatBridgeLibrary, LlamaLibrary
+from orbit.native_llama.model_registry import effective_models_dir
 from orbit.native_llama.chat_bridge import chat_bridge_filename
 from orbit.native_llama.client import NativeClientConfig, NativeLlamaClient
 from orbit.native_llama.paths import resolve_legacy_paths
@@ -40,7 +41,7 @@ from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT, ROUTE_SYSTEM_PROMPT
 from orbit.runtime.tools import tool_definitions
 
 
-DEFAULT_MODEL = ROOT / "models/unsloth--Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+DEFAULT_MODEL = effective_models_dir() / "unsloth--Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
 MANIFEST_VERSION = 1
 MIN_MODEL_BYTES = 10_000_000_000
 CONTROL_MARKERS = ("<think>", "</think>", "<tool_call>", "</tool_call>", "<|tool_call>")

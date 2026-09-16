@@ -11,7 +11,7 @@ from typing import Callable
 from orbit.native_llama.model_registry import (
     ModelManifest,
     ModelFileSpec,
-    default_models_dir,
+    effective_models_dir,
     load_registry,
     local_model_path,
 )
@@ -78,7 +78,7 @@ def download_model(
     request = parse_huggingface_spec(spec, prefer=prefer)
     destination = local_model_path(
         ModelFileSpec(repo=request.repo, file=request.file, cache_glob=""),
-        models_dir=models_dir or default_models_dir(),
+        models_dir=models_dir or effective_models_dir(),
     )
     split = _SPLIT_GGUF_SUFFIX.search(request.file)
     if split and int(split.group(2)) > 1 and not destination.exists():

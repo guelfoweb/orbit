@@ -7,12 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orbit.native_llama.model_registry import orbit_config_path
 from orbit.runtime.messages import DEFAULT_SYSTEM_PROMPT
 from orbit.terminal.think_mode import DEFAULT_THINKING, normalize_think_spec
 from orbit.terminal.tool_mode import ToolSpec, normalize_tool_spec
 
 
-DEFAULT_CONFIG_PATH = Path.home() / ".orbit" / "config.json"
+# One config file for the terminal client and `orbit config models-dir`.
+DEFAULT_CONFIG_PATH = orbit_config_path()
 MIN_TIMEOUT_SECONDS = 1.0
 MAX_TIMEOUT_SECONDS = 3600.0
 MIN_MAX_TOKENS = 32

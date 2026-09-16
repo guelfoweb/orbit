@@ -28,10 +28,31 @@ three shards) is additionally qualified on the Dell Pro 5 14 reference laptop
 only (30 GiB RAM, beyond-RAM mmap serving): ~3.9 tok/s generation on the first
 request after load and ~5.5 tok/s warm at ctx 4096, 10 threads. The registry
 entry is `qwen38-flash-next-ud-iq1-m`; the three shards must be placed by hand
-under `<models-dir>/unsloth--Qwen3.8-Flash-Next-GGUF/` (`orbit download`
+under `<models directory>/unsloth--Qwen3.8-Flash-Next-GGUF/` (`orbit download`
 refuses split GGUFs), then start with `orbit server --model-id
-qwen38-flash-next-ud-iq1-m` (add `--models-dir` if the shards live outside the
-default `models/` directory). Other quants are unsupported.
+qwen38-flash-next-ud-iq1-m`. Other quants are unsupported.
+
+### Model directory
+
+Models live in one directory shared by `orbit download`, model discovery and
+`orbit server`. By default it is `models/` inside the Orbit checkout
+(`~/.cache/orbit/models` when Orbit runs outside a checkout). To keep models
+somewhere else (another disk, a faster filesystem):
+
+```bash
+orbit config models-dir /mnt/data/orbit-models   # creates it if needed
+orbit config models-dir                          # shows the effective directory and why
+```
+
+Precedence: `--models-dir` on a single command > `ORBIT_MODELS_DIR` >
+`orbit config models-dir` > the default. Existing models are never moved
+automatically; copy them into the new directory (same `<owner>--<repo>/` layout)
+if you want them found there. The setting is stored in `~/.orbit/config.json`
+next to the terminal client's options. Before downloading a model that is
+larger than the machine's RAM (or whose size cannot be determined) onto a
+filesystem known to slow such models down (eCryptfs home directories), Orbit
+prints a short advisory and continues; on other filesystems it stays silent
+and makes no extra network request.
 
 **Performance figures are measurements on one CPU-only system**, not universal
 model performance — they vary with hardware, configuration, cache state and
