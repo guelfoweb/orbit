@@ -1010,7 +1010,8 @@ Release State entry below.
   - **Pre-existing on production b9551 today, NOT introduced here (tracked, out
     of scope):** `core-v1` `pwd_final` fails (`tool_call_count_mismatch`, expected
     1 got 0) and smoke `shell_error` is "wrong" on both backends.
-  - Constraints honoured: MTP stays OFF (helpers/shims only rebuilt); no Qwen3.8
+  - Constraints honoured: MTP stays OFF (the MTP helpers/shims only follow the
+    renamed `pos0` field and the `load_mtp` pin, then rebuild); no Qwen3.8
     registry/profile support; no unrelated refactors; production main untouched
     until the reviewed squash-merge. Independent adversarial review: first pass
     BLOCKER 0 / MAJOR 1 (the `load_mtp` default, fixed as above, plus two stale
