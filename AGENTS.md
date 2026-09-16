@@ -1106,7 +1106,7 @@ Release State entry below.
     plus the split-GGUF download refusal and a `run_server` wiring test);
     delta re-review BLOCKER 0 / MAJOR 0.
 
-- **MODEL-STORE-UX-20 (2026-09-16, #PRNUM) — one configurable models
+- **MODEL-STORE-UX-20 (2026-09-16, #356) — one configurable models
   directory for every model operation. UX only: no llama.cpp change, no
   inference or qualified-profile change.**
   - **Canonical resolver:** `model_registry.resolve_models_dir(explicit)` →
@@ -1129,14 +1129,20 @@ Release State entry below.
     `orbit config models-dir` prints the effective directory, its source and
     whether it exists. `orbit download --models-dir` / `orbit server
     --models-dir` remain the per-command override.
-  - **Filesystem advisory** (`model_store.large_model_advisory`): before a
-    download, the CLI (and the interactive server download) probe the target
-    size with an HTTP HEAD (`x-linked-size`/`Content-Length`, best effort) and
-    the filesystem backing the models directory (`/proc/self/mountinfo`,
-    nearest existing ancestor). Only when the filesystem is a known unfavorable
-    one (currently eCryptfs) AND the model is larger than RAM (or its size is
-    unknown) a short advisory is printed to stderr once per operation; it
-    never blocks, never prompts, and shows no internals unless `verbose`.
+  - **Filesystem advisory** (`model_store.download_advisory`): before a
+    download, the CLI and the interactive server download check the filesystem
+    backing the models directory FIRST (`/proc/self/mountinfo`, nearest
+    existing ancestor); only when it is a known unfavorable one (currently
+    eCryptfs) and the file is not already present do they probe the target
+    size with an HTTP HEAD (`x-linked-size`/`Content-Length`, best effort,
+    10 s timeout). A short advisory is printed to stderr once per operation
+    when the model is larger than RAM or its size is unknown; it never blocks,
+    never prompts, shows no internals unless `verbose`, and a download onto a
+    healthy filesystem or of an already-present file stays a purely local
+    operation (no network request). The terminal client's `--config PATH`
+    alternative file is not consulted for `models_dir`; the resolver always
+    reads `~/.orbit/config.json`. A relative persisted value is reported via
+    `config_error` and ignored (the CLI always records absolute paths).
   - **Tests:** `tests/test_model_store.py` (A default unchanged; B persisted
     dir drives download, registry resolution and discovery; C env beats
     config; D explicit beats env; E directory created; F unwritable /
@@ -1154,8 +1160,14 @@ Release State entry below.
     `--models-dir` listed it AVAILABLE. The advisory fired for the 74.5 GB
     Qwen3.8 on the eCryptfs `/home` default and stayed silent on ext4.
   - Not done on purpose: no automatic migration of existing models, no `/srv`
-    or symlink management, no filesystem tuning. Full non-live suite RC=0;
-    independent review BLOCKER 0 / MAJOR 0.
+    or symlink management, no filesystem tuning. Full non-live suite RC=0.
+    Independent adversarial review: first pass BLOCKER 0 / MAJOR 1 (the size
+    probe ran before the filesystem check, adding a network round trip to
+    every download, fixed as above) plus minors (config dir checked before
+    creating the models dir; symlinked config rewritten in place; relative
+    persisted value reported; `orbit --help` lists `config`; `scripts/
+    qualify_qwen3_coder.py` default routed through the resolver; test F now
+    forbids process spawning); delta re-review BLOCKER 0 / MAJOR 0.
 
 ### Post-RC38 (bundled into rc39; historical)
 
@@ -2728,7 +2740,7 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 - post-rc39 (unreleased): LLAMA-BACKEND-41ABBFD-UPGRADE-18 (#354) — vendored
   llama.cpp backend b9551 → 41abbfd; see the Post-RC39 entry in Release State.
-- post-rc39 (unreleased): MODEL-STORE-UX-20 (#PRNUM) — `orbit config models-dir`,
+- post-rc39 (unreleased): MODEL-STORE-UX-20 (#356) — `orbit config models-dir`,
   one canonical models-directory resolver, eCryptfs large-model advisory; see the
   Post-RC39 entry in Release State.
 - post-rc39 (unreleased): QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19 (#355) — Qwen3.8

@@ -49,7 +49,7 @@ from orbit.native_llama.model_discovery import (
 )
 from orbit.terminal.theme import supports_ansi
 from orbit.native_llama.model_download import download_model, huggingface_resolve_url, parse_huggingface_spec
-from orbit.native_llama.model_store import large_model_advisory, remote_content_length
+from orbit.native_llama.model_store import download_advisory
 from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID
 from orbit.native_llama.model_registry import default_hf_cache, effective_models_dir, get_manifest, local_model_path
 from orbit.native_llama.paths import (
@@ -1908,9 +1908,10 @@ def _download_selected_model(
         return 1
 
     models_dir = effective_models_dir(args.models_dir)
-    advisory = large_model_advisory(
+    advisory = download_advisory(
         models_dir,
-        model_bytes=remote_content_length(huggingface_resolve_url(parse_huggingface_spec(target))),
+        url=huggingface_resolve_url(parse_huggingface_spec(target)),
+        destination=local_model_path(manifest.target, models_dir=models_dir),
     )
     if advisory:
         print(advisory, file=sys.stderr)

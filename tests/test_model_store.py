@@ -41,10 +41,13 @@ from orbit.native_llama.model_registry import (  # noqa: E402
 )
 from orbit.native_llama.model_store import (  # noqa: E402
     ModelsDirConfigError,
+    download_advisory,
     filesystem_type,
     large_model_advisory,
     persist_models_dir,
 )
+from orbit.terminal import cli as terminal_cli  # noqa: E402
+import subprocess  # noqa: E402
 from orbit.terminal.config import DEFAULT_CONFIG_PATH, add_config_arguments, load_app_config  # noqa: E402
 import argparse  # noqa: E402
 
@@ -186,11 +189,15 @@ class PersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"; existing = _write_config(home, {"timeout": 42})
             locked = Path(tmp) / "locked"; locked.mkdir(); locked.chmod(stat.S_IRUSR | stat.S_IXUSR)
+            forbidden = mock.Mock(side_effect=AssertionError("Orbit must never spawn a process here"))
             try:
-                with self.assertRaises(ModelsDirConfigError) as ctx:
-                    persist_models_dir(locked / "orbit-models", environ=_env(home))
+                with mock.patch.object(subprocess, "Popen", forbidden), mock.patch.object(subprocess, "run", forbidden), \
+                     mock.patch.object(os, "system", forbidden), mock.patch.object(os, "execvp", forbidden):
+                    with self.assertRaises(ModelsDirConfigError) as ctx:
+                        persist_models_dir(locked / "orbit-models", environ=_env(home))
             finally:
                 locked.chmod(stat.S_IRWXU)
+            forbidden.assert_not_called()
             message = str(ctx.exception)
             self.assertIn("permission denied", message)
             self.assertIn("never runs sudo", message)
@@ -199,6 +206,35 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(json.loads(existing.read_text()), {"timeout": 42})
             with self.assertRaisesRegex(ModelsDirConfigError, "a file with that name exists"):
                 persist_models_dir(existing, environ=_env(home))
+
+    @unittest.skipIf(os.geteuid() == 0, "permission checks are meaningless as root")
+    def test_F_an_unwritable_config_location_creates_no_models_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"; (home / ".orbit").mkdir(parents=True)
+            (home / ".orbit").chmod(stat.S_IRUSR | stat.S_IXUSR)
+            target = Path(tmp) / "store"
+            try:
+                with self.assertRaisesRegex(ModelsDirConfigError, "not writable"):
+                    persist_models_dir(target, environ=_env(home))
+            finally:
+                (home / ".orbit").chmod(stat.S_IRWXU)
+            self.assertFalse(target.exists())  # nothing half-done on disk
+
+    def test_a_symlinked_config_file_is_rewritten_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"; dotfiles = Path(tmp) / "dotfiles" / "orbit.json"
+            dotfiles.parent.mkdir(); dotfiles.write_text(json.dumps({"timeout": 7}))
+            (home / ".orbit").mkdir(parents=True); (home / ".orbit" / "config.json").symlink_to(dotfiles)
+            persist_models_dir(Path(tmp) / "store", environ=_env(home))
+            self.assertTrue((home / ".orbit" / "config.json").is_symlink())
+            self.assertEqual(json.loads(dotfiles.read_text()), {"timeout": 7, MODELS_DIR_CONFIG_KEY: str(Path(tmp) / "store")})
+
+    def test_a_relative_persisted_value_is_reported_not_guessed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"; _write_config(home, {MODELS_DIR_CONFIG_KEY: "rel/models"})
+            resolution = resolve_models_dir(environ=_env(home))
+            self.assertEqual((resolution.path, resolution.source), (default_models_dir(), "default"))
+            self.assertIn("absolute path", resolution.config_error or "")
 
     def test_F_a_corrupt_config_file_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -284,21 +320,39 @@ class AdvisoryTests(unittest.TestCase):
 
             stderr = io.StringIO()
             with mock.patch.object(download_cli, "download_model", side_effect=fake_download), \
-                 mock.patch.object(download_cli, "remote_content_length", return_value=80 * GIB), \
-                 mock.patch.object(download_cli, "large_model_advisory", return_value="ADVISORY") as advisory, \
+                 mock.patch.object(download_cli, "download_advisory", return_value="ADVISORY") as advisory, \
                  redirect_stderr(stderr), redirect_stdout(io.StringIO()):
                 self.assertEqual(download_cli._download(args), 0)
             self.assertEqual(calls, [("owner/repo/model.gguf", store, "target")])
             self.assertIn("ADVISORY", stderr.getvalue())
             self.assertEqual(advisory.call_count, 1)  # once per operation
-            # and a failing probe is swallowed: the download still runs, silently
+            self.assertEqual(advisory.call_args.kwargs["destination"], store / "owner--repo" / "model.gguf")
+            # and a failing helper is swallowed: the download still runs, silently
             calls.clear(); stderr = io.StringIO()
             with mock.patch.object(download_cli, "download_model", side_effect=fake_download), \
-                 mock.patch.object(download_cli, "remote_content_length", side_effect=RuntimeError("no network")), \
+                 mock.patch.object(download_cli, "download_advisory", side_effect=RuntimeError("no network")), \
                  redirect_stderr(stderr), redirect_stdout(io.StringIO()):
                 self.assertEqual(download_cli._download(args), 0)
             self.assertEqual(len(calls), 1)
             self.assertNotIn("ADVISORY", stderr.getvalue())
+
+    def test_H_the_size_probe_only_runs_on_an_unfavorable_filesystem(self) -> None:
+        probe = mock.Mock(return_value=80 * GIB)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp); present = store / "present.gguf"; present.write_bytes(b"x")
+            with mock.patch.object(model_store, "filesystem_type", return_value="ext4"), \
+                 mock.patch.object(model_store, "total_memory_bytes", return_value=32 * GIB):
+                self.assertIsNone(download_advisory(store, url="u", size_probe=probe))
+            probe.assert_not_called()  # a healthy filesystem stays offline
+            with mock.patch.object(model_store, "filesystem_type", return_value="ecryptfs"), \
+                 mock.patch.object(model_store, "total_memory_bytes", return_value=32 * GIB):
+                self.assertIsNone(download_advisory(store, url="u", destination=present, size_probe=probe))
+                probe.assert_not_called()  # already present: nothing to advise, no network
+                text = download_advisory(store, url="u", destination=store / "missing.gguf", size_probe=probe)
+                self.assertIn("larger than the system RAM", text)
+                probe.assert_called_once_with("u")
+                broken = mock.Mock(side_effect=RuntimeError("dns hang"))
+                self.assertIsNone(download_advisory(store, url="u", size_probe=broken))
 
 
 class ConfigCliTests(unittest.TestCase):
@@ -325,6 +379,12 @@ class ConfigCliTests(unittest.TestCase):
             self.assertIn("source: orbit config models-dir", out)
             code, out, _ = self._run(["models-dir"], _env(home, ORBIT_MODELS_DIR=str(Path(tmp) / "env")))
             self.assertIn("source: ORBIT_MODELS_DIR", out)
+
+    def test_orbit_cli_dispatches_and_documents_the_config_command(self) -> None:
+        self.assertIn("orbit config models-dir [PATH]", terminal_cli.build_parser().format_help())
+        with mock.patch("orbit.terminal.cli.config_main", return_value=5) as mocked:
+            self.assertEqual(terminal_cli.main(["config", "models-dir", "/x"]), 5)
+        mocked.assert_called_once_with(["models-dir", "/x"])
 
     def test_setting_while_the_environment_overrides_says_so(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

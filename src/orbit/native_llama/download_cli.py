@@ -10,8 +10,8 @@ from orbit.native_llama.model_download import (
     huggingface_resolve_url,
     parse_huggingface_spec,
 )
-from orbit.native_llama.model_registry import effective_models_dir, get_manifest
-from orbit.native_llama.model_store import large_model_advisory, remote_content_length
+from orbit.native_llama.model_registry import ModelFileSpec, effective_models_dir, get_manifest, local_model_path
+from orbit.native_llama.model_store import download_advisory
 from orbit.native_llama.paths import DEFAULT_MODEL_ID
 
 
@@ -77,10 +77,10 @@ def _print_large_model_advisory(args: argparse.Namespace, models_dir: Path) -> N
         if not spec:
             return
         request = parse_huggingface_spec(spec, prefer="mmproj" if args.mmproj else "target")
-        advisory = large_model_advisory(
-            models_dir,
-            model_bytes=remote_content_length(huggingface_resolve_url(request)),
+        destination = local_model_path(
+            ModelFileSpec(repo=request.repo, file=request.file, cache_glob=""), models_dir=models_dir
         )
+        advisory = download_advisory(models_dir, url=huggingface_resolve_url(request), destination=destination)
     except Exception:
         return
     if advisory:

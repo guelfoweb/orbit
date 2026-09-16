@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  orbit server [options]\n"
             "  orbit bench-core [options]\n"
             "  orbit release-confidence [options]\n"
+            "  orbit config models-dir [PATH]\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

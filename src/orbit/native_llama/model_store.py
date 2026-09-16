@@ -60,6 +60,18 @@ def persist_models_dir(
     target = Path(raw).expanduser()
     if not target.is_absolute():
         target = Path.cwd() / target
+    # The config file first: creating the models directory and then failing
+    # to record it would leave a directory the user did not ask for.
+    path = config_path or resolve_models_dir(environ=environ).config_path
+    data = _read_config_object(path)
+    _prepare_config_dir(path)
+    _create_models_dir(target)
+    data[MODELS_DIR_CONFIG_KEY] = str(target)
+    _write_config_object(path, data)
+    return target
+
+
+def _create_models_dir(target: Path) -> None:
     try:
         target.mkdir(parents=True, exist_ok=True)
     except PermissionError:
@@ -80,11 +92,24 @@ def persist_models_dir(
             "Choose a directory you can write to (Orbit never runs sudo for you)."
         )
 
-    path = config_path or resolve_models_dir(environ=environ).config_path
-    data = _read_config_object(path)
-    data[MODELS_DIR_CONFIG_KEY] = str(target)
-    _write_config_object(path, data)
-    return target
+
+def _prepare_config_dir(path: Path) -> None:
+    real = _config_write_target(path)
+    try:
+        real.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ModelsDirConfigError(f"cannot create {real.parent}: {exc.strerror or exc}") from None
+    if not os.access(real.parent, os.W_OK | os.X_OK):
+        raise ModelsDirConfigError(f"cannot write {real}: {real.parent} is not writable by this user")
+
+
+def _config_write_target(path: Path) -> Path:
+    """The file to replace: a symlinked config file is rewritten in place of
+    its target, so a config kept in a dotfiles repository stays one file."""
+    try:
+        return path.resolve() if path.is_symlink() else path
+    except OSError:
+        return path
 
 
 def _read_config_object(path: Path) -> dict:
@@ -104,15 +129,16 @@ def _read_config_object(path: Path) -> dict:
 
 
 def _write_config_object(path: Path, data: dict) -> None:
+    real = _config_write_target(path)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=path.parent)
+        real.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=real.parent)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2)
             handle.write("\n")
-        os.replace(tmp_name, path)
+        os.replace(tmp_name, real)
     except OSError as exc:
-        raise ModelsDirConfigError(f"cannot write {path}: {exc.strerror or exc}") from None
+        raise ModelsDirConfigError(f"cannot write {real}: {exc.strerror or exc}") from None
 
 
 def describe_models_dir(resolution: ModelsDirResolution) -> str:
@@ -183,7 +209,11 @@ def total_memory_bytes(meminfo: str | None = None) -> int | None:
 
 
 def remote_content_length(url: str, *, timeout: float = 10.0, opener=urlopen) -> int | None:
-    """Best-effort size of a download target via HEAD; None when unknown."""
+    """Best-effort size of a download target via HEAD; None when unknown.
+
+    `opener` is bound at definition time: tests inject it rather than patching
+    `urlopen` on this module.
+    """
     try:
         with opener(Request(url, method="HEAD"), timeout=timeout) as response:
             for header in ("x-linked-size", "Content-Length"):
@@ -234,6 +264,35 @@ def large_model_advisory(
         ram = f"{mem_total / 2**30:.1f} GiB" if mem_total is not None else "unknown"
         text += f"(model {size}, RAM {ram}, filesystem {fs_type}; existing models are not moved)\n"
     return text.rstrip("\n")
+
+
+def download_advisory(
+    models_dir: Path,
+    *,
+    url: str,
+    destination: Path | None = None,
+    verbose: bool = False,
+    size_probe=remote_content_length,
+) -> str | None:
+    """The advisory for one download, or None; never raises, never hangs a
+    healthy configuration.
+
+    The filesystem is checked FIRST and the size probe (an HTTP HEAD) is only
+    issued when it is unfavorable and the file is not already present, so a
+    download onto ext4 -- or a re-run for a model already on disk -- stays the
+    purely local operation it always was.
+    """
+    try:
+        fs_type = filesystem_type(models_dir)
+        if fs_type not in UNFAVORABLE_FILESYSTEMS:
+            return None
+        if destination is not None and destination.exists():
+            return None
+        return large_model_advisory(
+            models_dir, model_bytes=size_probe(url), filesystem=fs_type, verbose=verbose
+        )
+    except Exception:
+        return None
 
 
 # --- `orbit config` ---------------------------------------------------------

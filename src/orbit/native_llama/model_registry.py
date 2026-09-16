@@ -150,7 +150,12 @@ def _persisted_models_dir(config_path: Path) -> "tuple[Path | None, str | None]"
         return None, None
     if not isinstance(value, str) or not value.strip():
         return None, f"{config_path}: {MODELS_DIR_CONFIG_KEY} must be a non-empty string"
-    return Path(value).expanduser(), None
+    expanded = Path(value).expanduser()
+    if not expanded.is_absolute():
+        # A relative value would land models somewhere different on every
+        # `cd`; `orbit config models-dir` always records absolute paths.
+        return None, f"{config_path}: {MODELS_DIR_CONFIG_KEY} must be an absolute path (got {value!r})"
+    return expanded, None
 
 
 def local_model_path(spec: ModelFileSpec, *, models_dir: Path) -> Path:

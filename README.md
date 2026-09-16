@@ -35,8 +35,9 @@ qwen38-flash-next-ud-iq1-m`. Other quants are unsupported.
 ### Model directory
 
 Models live in one directory shared by `orbit download`, model discovery and
-`orbit server`. By default it is `models/` inside the Orbit checkout. To keep
-models somewhere else (another disk, a faster filesystem):
+`orbit server`. By default it is `models/` inside the Orbit checkout
+(`~/.cache/orbit/models` when Orbit runs outside a checkout). To keep models
+somewhere else (another disk, a faster filesystem):
 
 ```bash
 orbit config models-dir /mnt/data/orbit-models   # creates it if needed
@@ -46,9 +47,12 @@ orbit config models-dir                          # shows the effective directory
 Precedence: `--models-dir` on a single command > `ORBIT_MODELS_DIR` >
 `orbit config models-dir` > the default. Existing models are never moved
 automatically; copy them into the new directory (same `<owner>--<repo>/` layout)
-if you want them found there. Before a download that is larger than the
-machine's RAM onto a filesystem known to slow such models down (eCryptfs home
-directories), Orbit prints a short advisory and continues.
+if you want them found there. The setting is stored in `~/.orbit/config.json`
+next to the terminal client's options. Before downloading a model that is
+larger than the machine's RAM (or whose size cannot be determined) onto a
+filesystem known to slow such models down (eCryptfs home directories), Orbit
+prints a short advisory and continues; on other filesystems it stays silent
+and makes no extra network request.
 
 **Performance figures are measurements on one CPU-only system**, not universal
 model performance — they vary with hardware, configuration, cache state and
