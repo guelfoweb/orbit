@@ -1,266 +1,153 @@
 # Orbit
 
-Orbit is a small Python-first local AI runtime designed for CPU-only machines. It
-supports a limited set of compatible and verified models, listed in
-[Supported Models](#supported-models) below. The primary path is the native Orbit
-server backend, using vendored llama.cpp/ggml libraries built and loaded by
-Orbit. It does not require an external `llama-server` process for normal use.
+Orbit is a Python local-AI runtime for CPU-only machines. Chat with a local
+model, work with files, and let the model use tools when needed. Linux x86_64
+is the qualified platform.
 
-Orbit stays model-driven: the runtime enforces safety, size, timeout, context and
-tool-contract boundaries; the model decides whether to answer directly or reach
-for a tool. Linux x86_64 CPU-only is the qualified platform.
+**Qwen3.8 Flash Next UD-IQ1_M** is the highlighted model. It is qualified on a
+Dell Pro 5 14 with an Intel Core Ultra 7 366H, 30 GiB usable RAM and NVMe
+storage. Its 74.5 GB model is larger than RAM, so storage speed matters. Other
+verified models are listed [below](#supported-models).
 
-<p align="center">
-  <img src="docs/orbit-cli.png" alt="Orbit CLI" width="900">
-</p>
-
-## Supported Models
-
-| Model | Prefill | Generation | Tools-on chat | Tool + final | Peak RAM |
-|---|---:|---:|---:|---:|---:|
-| [Gemma 4 26B-A4B](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF) | ~24.2 tok/s | ~7.1 tok/s | ~3.0 s | ~20.9 s | ~29.4 GiB |
-| [Qwen 3.6 35B-A3B](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF) | ~31.8 tok/s | ~7.6 tok/s | ~6.1 s | ~23.8 s | ~36.4 GiB |
-| [Qwen3-Coder 30B-A3B](https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF) | ~26.0 tok/s | ~10.7 tok/s | ~3.0 s | ~18.4 s | ~31.3 GiB |
-| [Ornith 1.5 35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) | ~29.0 tok/s | ~8.3 tok/s | ~36.8 s cold / ~8.4 s warm | ~49.0 s | ~35.8 GiB |
-
-Qwen 3.8 Flash Next (`unsloth/Qwen3.8-Flash-Next-GGUF`, UD-IQ1_M, 74.5 GB across
-three shards) is additionally qualified on the Dell Pro 5 14 reference laptop
-only (30 GiB RAM, beyond-RAM mmap serving): ~3.9 tok/s generation on the first
-request after load and ~5.5 tok/s warm at ctx 4096, 10 threads. The registry
-entry is `qwen38-flash-next-ud-iq1-m`; fetch the three shards with
-`orbit download unsloth/Qwen3.8-Flash-Next-GGUF/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf`
-(or place them by hand under `<models directory>/unsloth--Qwen3.8-Flash-Next-GGUF/`),
-then start with `orbit server --model-id qwen38-flash-next-ud-iq1-m`. Other
-quants are unsupported.
-
-### Model directory
-
-Models live in one directory shared by `orbit download`, model discovery and
-`orbit server`. By default it is `models/` inside the Orbit checkout
-(`~/.cache/orbit/models` when Orbit runs outside a checkout). To keep models
-somewhere else (another disk, a faster filesystem):
-
-```bash
-orbit config models-dir /mnt/data/orbit-models   # creates it if needed
-orbit config models-dir                          # shows the effective directory and why
-```
-
-Precedence: `--models-dir` on a single command > `ORBIT_MODELS_DIR` >
-`orbit config models-dir` > the default. Existing models are never moved
-automatically; copy them into the new directory (same `<owner>--<repo>/` layout)
-if you want them found there. The setting is stored in `~/.orbit/config.json`
-next to the terminal client's options. Before downloading a model that is
-larger than the machine's RAM (or whose size cannot be determined) onto a
-filesystem known to slow such models down (eCryptfs home directories), Orbit
-prints a short advisory and continues; on other filesystems it stays silent
-and makes no extra network request.
-
-Split GGUFs (`<name>-00001-of-00003.gguf` and its siblings) are one model:
-`orbit download <repo>/<first shard>` derives the whole set from the name,
-fetches the shards in order (one `shard i/N` line each), reuses shards already
-present, resumes an interrupted shard from where it stopped, and only finalizes
-a shard once its full size has arrived. The set is validated afterwards (every
-shard present, GGUF header, matching split index and count) and the model menu
-lists it by its first shard as AVAILABLE, or INCOMPLETE with the download
-command to run when a shard is missing or damaged.
-
-**Performance figures are measurements on one CPU-only system**, not universal
-model performance — they vary with hardware, configuration, cache state and
-workload. The reference system is a NUC10 Intel Core i7-10710U (6 cores / 12
-threads), 64 GB RAM, no GPU; Linux, llama.cpp b9551, `ctx=8192`, 6 threads,
-batch/ubatch 256/128, thinking off.
-
-The Ornith row was measured with the qualification harness in this repository
-and every figure is reproducible from
-[its benchmark record](docs/benchmarks/ornith-1.5-35b-a3b.md). The first three
-rows predate that harness and could not be reproduced from any data kept in the
-repository; treat them as indicative until they are re-measured. Tools-on chat
-in particular is dominated by route-prefix cache state rather than model speed.
-
-`--low-memory` is supported only for Qwen3-Coder 30B-A3B. On the system above it
-cut peak RSS from ~31.3 to ~18.3 GiB, costing ~13.9% on prefill and ~1% on
-decode.
-
-## Requirements
-
-- Python 3.11 or newer, on Linux
-- CMake, to build the vendored native libraries
-- Enough RAM for the model you choose (24 GB practical minimum)
+Orbit includes its own vendored llama.cpp backend. The build below compiles it;
+there is no separate llama.cpp installation or external inference server to set up.
 
 ## Install
 
+You need Python 3.11 or newer, Git, CMake and a C/C++ build toolchain. RAM and
+storage requirements depend on the model; the Qwen configuration above is a
+measured setup, not a minimum requirement for every model or machine.
+
+On Debian/Ubuntu with Python 3.11 or newer:
+
 ```bash
+sudo apt install git build-essential cmake python3-venv
 git clone https://github.com/guelfoweb/orbit.git
 cd orbit
-sudo apt install cmake
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e .
-```
-
-Build the vendored native libraries if they are not already present:
-
-```bash
+python3 -m pip install -e .
 python3 scripts/build_native.py
 ```
 
-To inspect the host and see a recommended configuration:
+## Choose a model directory
+
+Downloads and the server use the same model directory. The default is `models/`
+in the checkout, or `~/.cache/orbit/models` outside a checkout.
+
+To use another disk, set a writable directory before downloading. Replace this
+example path with yours:
 
 ```bash
-scripts/suggest-server-profile.sh
+orbit config models-dir /mnt/data/orbit-models
+orbit config models-dir
 ```
 
-## First run
+The first command creates the directory if needed and saves the setting; the
+second shows the effective directory. Existing models are not moved. If you
+copy them, retain the `<owner>--<repo>/` subdirectories.
 
-**1. Start the server** in one terminal. It loads the model and stays running:
+A command's `--models-dir` override takes precedence over `ORBIT_MODELS_DIR`,
+then the saved setting, then the default. For a model larger than RAM, use fast
+local storage; Orbit warns about known unsuitable filesystems such as eCryptfs.
+
+## Run
+
+Start the server from your activated environment:
 
 ```bash
-orbit server --ctx 16384 --batch 256 --ubatch 128
+orbit server
 ```
 
-`--ctx` sets the context window and the largest input that fits in one model
-call. Larger contexts need more memory, mostly for the KV cache; if a document
-does not fit, Orbit reports the minimum required.
+Choose **Qwen 3.8 Flash Next** from the model menu. If it is missing, confirm the
+offered download, or choose another verified model. Orbit selects the startup
+profile; normal use needs no tuning flags.
 
-**2. Start the CLI** in another terminal:
+Leave this terminal running. Wait for the `listening on` message before chatting.
+On the qualified Qwen setup, startup includes a synchronous warm-up that can take
+a few minutes. It moves work to startup to shorten the first request; it does
+not reduce total computation.
+
+Open a second terminal in the checkout:
 
 ```bash
+. .venv/bin/activate
 orbit
 ```
 
-**3. Chat.** The default mode — ask a question, get an answer. The model may use
-the exposed tools on its own.
+Ask a question, or try `Use system_info to describe this computer.` Tools are
+on by default; the model chooses when to use them.
 
-**4. Analyse a file.** Orbit routes to ANALYSIS by itself when a request is
-clearly about inspecting a local artifact:
+Useful commands inside the chat:
 
-```
-analyze ~/samples/loader.js and tell me what it reads from disk
-```
+| Command | Purpose |
+|---|---|
+| `/help` | List available commands. |
+| `/status` | Inspect the active model and runtime settings. |
+| `/reset` | Clear the conversation and saved session. |
+| `/exit` | Close the chat client. |
 
-You can also enter it explicitly, and leave the same way:
+The server stays open when the client exits. Stop it with Ctrl-C when finished.
+For command-line options, use `orbit --help` or `orbit server --help`.
 
-```
-/analysis path/to/artifact    # start an analysis
-/report                       # answer from evidence already collected, running nothing
-/chat                         # back to normal chat
-```
+## Download models separately
 
-**5. Choose how analysis advances.** By default each step returns to you. To let
-a run continue on its own:
-
-```
-/autonomous on     # or: /autonomous off, or /autonomous to see the current setting
-```
-
-`/help` lists every command.
-
-Other server flags: `--low-memory`, and `--model /path/to/model.gguf` to pick a
-file explicitly. Without `--ctx` the default is 8192. For one shot without the
-interactive session:
+You can download before starting the server:
 
 ```bash
-orbit --workdir workdir --think off "hi, how are you?"
+orbit download unsloth/Qwen3.8-Flash-Next-GGUF/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf
 ```
 
-## Chat and Analysis
+This command downloads **all three shards**, about **74.5 GB total**. They form
+one model: keep them together and choose its single entry in the model menu.
+Orbit shows progress for each shard, resumes interrupted downloads, reuses
+complete shards and validates the set. Rerun the same command to finish missing
+or interrupted shards.
 
-**ANALYSIS** inspects one local artifact in an isolated workspace. The model
-writes a short Python program, Orbit runs it in a sandbox with no network and a
-read-only copy of the artifact, and the output is recorded with its provenance.
-One model call performs at most one action, and everything derived stays in the
-session workspace. Reports are plain text.
+Other verified model repositories and exact GGUF filenames are in the
+[model registry](src/orbit/native_llama/model_registry.json).
+`orbit download --help` lists download options.
 
-### Guided vs autonomous
+## Supported models
 
-ANALYSIS is **guided by default**: it advances one step at a time and control
-returns to you after each, so you steer by typing the next instruction —
-`continue` included.
+These are the verified model/quantization combinations. Verification does not
+extend to every quantization or similarly named model.
 
-Switch at any time, without restarting Orbit:
+| Model | Verified quantization |
+|---|---|
+| **Qwen3.8 Flash Next** | **UD-IQ1_M**, three shards |
+| Ornith 1.5 35B-A3B | Q4_K_M |
+| Qwen3.8 27B | Q4_K_M |
+| Qwen 3.6 35B-A3B | Q4_K_M |
+| Qwen3-Coder 30B-A3B Instruct | Q4_K_M |
+| Gemma 4 26B-A4B | Q4_0 |
 
-```
-/autonomous          # show the current state
-/autonomous on       # continue automatically
-/autonomous off      # back to guided
-```
+Qwen Flash Next's automatic Dell profile uses ctx 4096, threads 10/10,
+batch/ubatch 256/128, one slot, CPU repack off and MTP off. These settings and
+its startup warm-up are qualified for that setup; other hardware and models
+can resolve different defaults.
 
-The setting belongs to the running CLI process. It survives `/chat` ↔
-`/analysis` transitions within that session, and is not persisted globally — a
-new `orbit` starts guided again.
+Static artifact analysis is qualified with **Ornith 1.5**. In an Ornith session,
+use `/analysis path/to/artifact` to begin and `/chat` to return to chat.
+Analysis handles one local artifact at a time without executing the input or
+fetching remote payloads. Advanced usage lives in [docs/](docs/).
 
-**Autonomous** continues by itself while each step produces verifiably new
-evidence, stopping on completion, when progress stalls, or at a hard bound of 12
-actions. Every ending but a cancellation produces one grounded report. Ctrl-C
-stops a run immediately.
+## Observed performance
 
-It is off by default, and opt-in for cost rather than correctness: a step that
-measures something new counts as progress whether or not the measurement was
-worth making, so an artifact with little to derive can still attract many
-actions. Whether that trade is worthwhile is the operator's call.
+This is a production observation, not a comparison between models:
 
-### Deterministic deobfuscation
+| Model and hardware | Workload | Prefill | Decode |
+|---|---|---:|---:|
+| Qwen3.8 Flash Next UD-IQ1_M; Dell Core Ultra 7 366H, 30 GiB RAM, NVMe, CPU-only | 119-token final prompt, 419-token answer after startup warm-up and two short turns | 10.2 tok/s | 2.8 tok/s |
 
-Some obfuscation is not a judgement call: when a script hands a decoder a string
-literal and a constant key, the decoded bytes are already determined by the file.
-Orbit computes those itself, before the model reasons, and records each decoded
-stage as evidence with exact provenance (which bytes, which rule, which
-parameters, the output digest). Nothing is executed — it is parsing and
-arithmetic over inert text, and an ambiguous or runtime-dependent case is refused
-(fail-closed) rather than guessed.
+Measured on 2026-09-17 at Orbit `de93c14`, with the Qwen profile above,
+temperature 0 and thinking off. Rates are native per-call measurements; cached
+input is not counted as evaluated prefill. This bounded conversation is not a
+steady-state throughput benchmark.
 
-Supported families (each exercised by a frozen corpus sample):
-
-- JScript / PowerShell numeric-XOR array decoders;
-- VBScript / PowerShell `Chr(n − constant)` offset loops;
-- JavaScript `String.fromCharCode` over constant arithmetic;
-- `javascript-obfuscator`-style string-array ProgID folding (base64/RC4 helpers);
-- VBA byte-array offset + `StrReverse` / `Replace` / `Split` command decoders.
-
-The recovered value (e.g. a PowerShell command or a C2 URL) flows through the
-same canonical-indicator machinery as any other evidence. A decoded URL is an
-indicator only — it is never fetched.
-
-### Office / OLE documents
-
-Orbit recognises OLE2/CFB Microsoft Office documents with a bounded, pure-Python
-reader, decompresses the embedded VBA project (MS-OVBA) without executing any
-macro or invoking any application, and exposes each module's exact source as
-provenance-backed evidence. It also marks standard macro entrypoints
-(`Document_Open`, `AutoOpen`, `Workbook_Open`, …) as Office auto-execution event
-handlers when the module and host context prove that semantics — a static
-relationship ("the procedure the host invokes on this event when macros are
-permitted"), not a claim that the document was ever opened or that the macro ran.
-
-## Limitations
-
-- Linux x86_64 CPU-only is the qualified platform. macOS may work; Windows is
-  not a target. There is no GPU path.
-- Analysis handles one artifact per session, and the sandbox has no network.
-- Autonomous analysis is opt-in and may do unnecessary work on trivial
-  artifacts (see above).
-- Analysis is qualified on the Ornith 1.5 profile. Other verified profiles fall
-  back to ordinary cold behaviour rather than failing.
-- The analysis prefix is captured lazily by the first analysis step, which costs
-  that step and benefits every later one. Eager capture at startup is opt-in.
-- Analysis is static only: no malware, macro, or decoded script is ever
-  executed, and no remote payload is retrieved. There is no dynamic sandbox.
-- Deterministic deobfuscation covers the families listed above. An unsupported
-  obfuscation family is not decoded — it fails closed, and the model analyses
-  what it can from the source rather than guessing a decode.
-- The Office auto-execution taxonomy is intentionally small: the qualified Word
-  and Excel core events (`Document_*`, `AutoOpen`/`AutoClose`/`AutoExec`,
-  `Workbook_*`, `Auto_Open`). Other hosts and callbacks are not classified.
-- A model run may reach its action/call ceiling on a complex artifact while the
-  deterministic evidence is already complete; the grounded report still carries
-  the deterministic facts regardless of where the model stopped.
-
-## Configuration
-
-Behaviour is controlled by CLI flags and in-session commands. Two environment
-variables are supported for startup configuration only:
-
-- `ORBIT_ANALYSIS_AUTONOMOUS=1` — start with autonomous analysis already on.
-  `/autonomous on` is the normal way; this only helps a scripted start.
-- `ORBIT_ORNITH_ANALYSIS_PREFIX_PREWARM=1` — capture the analysis prefix eagerly
-  at startup instead of lazily on first use.
+In the same run, startup warm-up took 150.5 s, the server was ready after
+175.4 s, and the first short turn took 12.5 s. Peak server RSS was 27.3 GiB.
+Longer conversations can take substantially more time even with route caching,
+because final answers still need their conversation context. Timing depends on
+the prompt, reply length, model/page-cache warmth, storage and host load.
+These figures do not describe Ornith, the other verified models, or other CPUs.
