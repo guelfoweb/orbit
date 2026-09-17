@@ -402,15 +402,9 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             mtp_supported=False,
             gemma_prefix_reuse_supported=False,
             verified_quantization=QWEN38_FLASH_NEXT_VERIFIED_QUANTIZATION,
-            # The fixed-head route-prefix lineages (startup prewarm, Q4_K_M
-            # boundary contract) are not derived for this hybrid (DeltaNet +
-            # attention + indexer) IQ1_M artifact. Cross-turn reuse comes from
-            # the rolling route checkpoint instead (client.ROLLING_ROUTE_PROFILE_IDS,
-            # QWEN38-PROMPT-CACHE-REUSE-22), whose state round-trip was proven
-            # on the real model. Like Ornith's, that checkpoint only survives
-            # the thinking=off route<->final switch: a turn with thinking on
-            # falls cold.
-            route_prefix_reuse_supported=False,
+            # Full sequence state at an unchanged native decode-call boundary.
+            # Runtime eligibility additionally pins the qualified configuration.
+            route_prefix_reuse_supported=True,
         )
 
     qwen3_coder_identity = (
