@@ -925,8 +925,8 @@ Release State entry below.
   QWEN38-ORBIT-PRODUCTION-ENABLEMENT-19, the models-directory UX
   MODEL-STORE-UX-20, the split-GGUF download GGUF-MULTISHARD-DOWNLOAD-21 and
   the Qwen3.8 prompt-cache reuse fix QWEN38-PROMPT-CACHE-REUSE-22 and the
-  post-final route-checkpoint advance QWEN38-POST-FINAL-ROUTE-CACHE-23 (see
-  Post-RC39).
+  post-final route-checkpoint advance QWEN38-POST-FINAL-ROUTE-CACHE-23 and
+  aligned startup prewarm QWEN38-ALIGNED-ROUTE-PREWARM-25 (see Post-RC39).
 - See `docs/releases/v0.0.1-rc39.md`.
 
 ### Post-RC39 (unreleased on `main`)
@@ -1545,6 +1545,40 @@ Release State entry below.
     next route prompt does not extend -- the route checkpoint still serves,
     the shadow decode is wasted; thinking on and MTP keep the shadow off with
     the rolling checkpoint itself.
+
+- **QWEN38-ALIGNED-ROUTE-PREWARM-25 (2026-09-17) — synchronous Qwen3.8
+  startup ROUTE prewarm. Decision QWEN38_ALIGNED_PREWARM_FIXED.**
+  - Baseline `69225ba98f1c957432ca81c5dc66af5dff89cbe7`. Native equivalence
+    passed before production edits. Actual invariant prefix: 1048 token IDs;
+    longest safe unchanged native-call boundary: 1024, dynamically derived.
+    Both first-user prompts give byte-identical complete ROUTE state, zero
+    logit delta and identical greedy output. 960 also passes, ruling out
+    batch/ubatch divisibility; 32+32 instead of the last 64-token call fails
+    even at 1024. Preserve the qualified **decode-call sequence**, not a
+    hypothetical GDN token-chunk rule. The old #359 theoretical full-prefix
+    safety note is superseded: the rejected 1048 boundary is not safe under
+    the required cold-equivalence contract and was not retried here.
+  - Existing synchronous ChatML prewarm, Qwen switch/slot, exact-prefix key
+    and full-state primitive; no scheduler. Qualified configuration only:
+    ctx 4096, threads 10/10, batch 256, ubatch 128, progress 64, GPU 0, repack off,
+    low-memory off, mmap/lazy on, MTP off. Identity covers all model shards,
+    backend, tokenizer/template, prompt/tools, ctx and state configuration.
+    Reset/cancel/close/reload invalidate the prefix; failed restore clears
+    partial native state. Lazy capture polls queued-request disconnects.
+  - Dell first ROUTE: 1058 input, 0→1024 cached, 1058→34 evaluated;
+    prefill 132.828→4.606 s; full first turn 144.250→16.921 s, identical output.
+    **Computation moved to startup:** prewarm 146.387 s, 139.62 MiB blob;
+    RSS 8.72→25.73 GiB including model warming; 46.09 GiB storage reads.
+    No total-compute or end-to-end startup-plus-request gain is claimed.
+  - Rolling second ROUTE: 1092 input/1058 cached/34 evaluated. Long reply
+    shadow: 1133→1603 tokens in 30.837 s; next ROUTE 1624/1603/21 after 120 s idle.
+    Ornith behavior and Qwen ANALYSIS prewarm remain unchanged (Qwen off).
+  - Gates: focused 482, cross-sample 11, full 6012 (45 skips), all RC=0;
+    seven isolated mutants caught; compileall/diff check pass; independent
+    review BLOCKER 0 / MAJOR 0 after fixing queued-disconnect callback loss.
+    Details, hashes, costs, lifecycle limits and artifact locations:
+    [qualification](docs/checkpoints/qwen38-aligned-route-prewarm-25.md).
+    Mission closed; do not start another optimization automatically.
 
 ### Post-RC38 (bundled into rc39; historical)
 

@@ -168,7 +168,7 @@ class FlashNextIdentityTests(unittest.TestCase):
         self.assertTrue(profile.thinking_supported)
         self.assertFalse(profile.mtp_supported)
         self.assertFalse(profile.gemma_prefix_reuse_supported)
-        self.assertFalse(profile.route_prefix_reuse_supported)
+        self.assertTrue(profile.route_prefix_reuse_supported)
 
     def test_the_template_pin_is_the_official_qwen38_template(self) -> None:
         # The real artifact embeds the template whose sha256 is already pinned

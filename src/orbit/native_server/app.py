@@ -51,7 +51,7 @@ from orbit.native_llama.model_discovery import (
 from orbit.terminal.theme import supports_ansi
 from orbit.native_llama.model_download import download_model, huggingface_resolve_url, parse_huggingface_spec
 from orbit.native_llama.model_store import download_advisory
-from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID
+from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID
 from orbit.native_llama.model_registry import default_hf_cache, effective_models_dir, get_manifest, local_model_path
 from orbit.native_llama.paths import (
     DEFAULT_LLAMA_ROOT,
@@ -1482,6 +1482,7 @@ def run_server(argv: list[str] | None = None) -> int:
         if getattr(getattr(client, "model_profile", None), "profile_id", None) not in (
             QWEN3_CODER_PROFILE_ID,
             ORNITH15_PROFILE_ID,
+            QWEN38_FLASH_NEXT_PROFILE_ID,
         ):
             if announce_prewarm:
                 _startup_note("prewarming route-prefix cache...")
@@ -1508,7 +1509,7 @@ def run_server(argv: list[str] | None = None) -> int:
                 # has already run and recorded its result, and this one owns a
                 # separate slot. It is inside the same cancellable window because
                 # it is more startup prefill the operator may want to interrupt.
-                if not prewarm_interrupted:
+                if not prewarm_interrupted and client.model_profile.profile_id != QWEN38_FLASH_NEXT_PROFILE_ID:
                     if announce_prewarm:
                         _startup_note("prewarming analysis-prefix cache...")
                     analysis_result = prewarm_startup_analysis_prefix(client)
@@ -1614,7 +1615,7 @@ def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefix
         _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
         return result
     profile = getattr(client, "model_profile", None)
-    if getattr(profile, "profile_id", None) in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID):
+    if getattr(profile, "profile_id", None) in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID):
         try:
             result = client.capture_qwen3_coder_route_prefix_prefill_only(
                 system_prompt=ROUTE_SYSTEM_PROMPT,

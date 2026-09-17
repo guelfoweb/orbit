@@ -9,6 +9,7 @@ from typing import Callable, Mapping, Sequence
 QWEN_ROUTE_PREFIX_ENV = "ORBIT_QWEN_ROUTE_PREFIX_REUSE"
 QWEN_ROUTE_PREFIX_TOKEN_COUNT = 768
 QWEN_ROUTE_PREFIX_FORMAT_VERSION = "qwen36-route-prefix-v1"
+QWEN38_ROUTE_PREFIX_FORMAT_VERSION = "qwen38-aligned-route-prefix-v1"
 QWEN_ROUTE_TOKENIZER_IDENTITY = "gpt2:qwen35"
 
 
@@ -70,10 +71,11 @@ def derive_qwen_route_prefix_spec(
     render_reference: Callable[[str], str],
     tokenize: Callable[[str], list[int]],
     prefix_token_count: int = QWEN_ROUTE_PREFIX_TOKEN_COUNT,
+    decode_alignment: int | None = None,
 ) -> tuple[QwenRoutePrefixSpec | None, str | None]:
     if not system_prompt:
         return None, "missing_route_system_prompt"
-    if len(full_tokens) <= prefix_token_count:
+    if decode_alignment is None and len(full_tokens) <= prefix_token_count:
         return None, "route_prompt_too_short"
 
     first = render_reference("A-orbit-qwen-route-boundary")
@@ -81,7 +83,18 @@ def derive_qwen_route_prefix_spec(
     first_tokens = tokenize(first)
     second_tokens = tokenize(second)
     token_lcp = _longest_common_prefix(first_tokens, second_tokens)
-    if token_lcp <= prefix_token_count:
+    if decode_alignment is not None:
+        # A checkpoint must not split a native decode call from the cold
+        # prefill. Derive the longest such boundary from actual token IDs;
+        # batch/ubatch divisibility alone does not establish equivalence.
+        if decode_alignment <= 0:
+            return None, "invalid_decode_alignment"
+        prefix_token_count = token_lcp // decode_alignment * decode_alignment
+        if prefix_token_count == 0:
+            return None, "stable_token_boundary_unavailable"
+        if len(full_tokens) <= prefix_token_count:
+            return None, "route_prompt_too_short"
+    elif token_lcp <= prefix_token_count:
         return None, "stable_token_boundary_unavailable"
 
     prefix = tuple(first_tokens[:prefix_token_count])

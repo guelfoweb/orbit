@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .expert_usage import summarize_expert_usage
-from .model_profiles import ORNITH15_PROFILE_ID, QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID
+from .model_profiles import ORNITH15_PROFILE_ID, QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID
 from .ornith_route_prefix import ORNITH_ROUTE_TOKENIZER_IDENTITY
 from .qwen36_shell_tool_prefix import (
     QWEN36_SHELL_TOOL_PREFIX_FORMAT_VERSION,
@@ -54,6 +54,13 @@ def qwen_route_prefix_reuse_status(client: "NativeLlamaClient") -> dict[str, obj
         and getattr(profile, "verified", False)
         and client._model_metadata_identity.get("general.file_type") == "15"
     )
+    if getattr(profile, "profile_id", None) == QWEN38_FLASH_NEXT_PROFILE_ID:
+        profile_eligible = (
+            getattr(profile, "verified", False)
+            and getattr(profile, "route_prefix_reuse_supported", False)
+            and client._model_metadata_identity.get("general.file_type") == "31"
+            and client._qwen38_route_prefix_config_eligible()
+        )
     spec = client._qwen_route_prefix_spec
     return {
         "enabled": client.config.qwen_route_prefix_reuse_enabled and profile_eligible,

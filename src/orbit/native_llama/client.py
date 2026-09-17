@@ -26,6 +26,7 @@ from .bindings import (
     llama_token,
     llama_pos,
     LLAMA_LAZY_MODE_OFF,
+    LLAMA_LAZY_MODE_ON,
     LLAMA_LOAD_MODE_MMAP,
 )
 from .chat_bridge import chat_bridge_filename
@@ -52,6 +53,7 @@ from .model_profiles import (
     supports_low_memory_mode,
     verified_native_model_identity,
 )
+from .gguf_split import split_sibling_names
 from .model_discovery import inspect_native_model_profile
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
@@ -86,6 +88,7 @@ from .prefix_anchor import (
 )
 from .qwen_route_prefix import (
     QWEN_ROUTE_PREFIX_FORMAT_VERSION,
+    QWEN38_ROUTE_PREFIX_FORMAT_VERSION,
     QWEN_ROUTE_PREFIX_TOKEN_COUNT,
     QWEN_ROUTE_TOKENIZER_IDENTITY,
     QwenRoutePrefixSpec,
@@ -578,6 +581,8 @@ class NativeLlamaClient:
             self._invalidate_qwen_route_prefix(
                 "model_reload", profile_id=QWEN3_CODER_PROFILE_ID
             )
+        if getattr(getattr(self, "model_profile", None), "profile_id", None) == QWEN38_FLASH_NEXT_PROFILE_ID:
+            self._invalidate_qwen_route_prefix("model_reload", profile_id=QWEN38_FLASH_NEXT_PROFILE_ID)
         self._invalidate_qwen36_shell_tool_prefix("model_reload")
         # A reload installs a brand-new context: any recorded sequence refers
         # to memory that no longer exists, possibly from a different model.
@@ -1025,6 +1030,7 @@ class NativeLlamaClient:
         if getattr(profile, "verified", False) and profile_id in (
             QWEN3_CODER_PROFILE_ID,
             ORNITH15_PROFILE_ID,
+            QWEN38_FLASH_NEXT_PROFILE_ID,
         ):
             self._invalidate_qwen_route_prefix(reason, profile_id=profile_id)
 
@@ -1247,10 +1253,10 @@ class NativeLlamaClient:
     ) -> NativeRoutePrefixPrefillResult:
         profile = getattr(self, "model_profile", None)
         profile_id = getattr(profile, "profile_id", None)
-        # Both ChatML-family route-prefix profiles capture identically; only
+        # These ChatML-family route-prefix profiles capture identically; only
         # the rendered tokens and the config switch differ.
         if (
-            profile_id not in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID)
+            profile_id not in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID)
             or not getattr(profile, "verified", False)
             or not getattr(profile, "route_prefix_reuse_supported", False)
         ):
@@ -1266,6 +1272,8 @@ class NativeLlamaClient:
             reuse_enabled = (
                 self.config.ornith_route_prefix_reuse_enabled
                 if profile_id == ORNITH15_PROFILE_ID
+                else self.config.qwen_route_prefix_reuse_enabled
+                if profile_id == QWEN38_FLASH_NEXT_PROFILE_ID
                 else self.config.qwen3_coder_route_prefix_reuse_enabled
             )
         if not reuse_enabled:
@@ -1298,7 +1306,7 @@ class NativeLlamaClient:
 
             # This boundary fixture is rendered but its dynamic suffix is never
             # decoded. The shared Qwen planner independently proves that the
-            # captured 768 tokens are invariant across distinct user suffixes.
+            # captured tokens are invariant across distinct user suffixes.
             messages: list[NativeMessage] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "A-orbit-qwen-route-boundary"},
@@ -2647,7 +2655,16 @@ class NativeLlamaClient:
         if final_plan is not None:
             processed_start, reused = self._prepare_memory_with_final_prefix(final_plan, prompt_tokens)
         elif qwen_route_anchor_plan is not None:
-            processed_start, reused = self._prepare_memory_with_qwen_route_anchor(qwen_route_anchor_plan)
+            # A queued disconnected request may have had its cancel event
+            # cleared at request start. Recheck the caller's latched callback
+            # during Qwen38's lazy capture, just as cold prefill does.
+            cancel_kwargs = (
+                {"should_cancel": should_cancel}
+                if qwen_route_anchor_plan.profile_id == QWEN38_FLASH_NEXT_PROFILE_ID else {}
+            )
+            processed_start, reused = self._prepare_memory_with_qwen_route_anchor(
+                qwen_route_anchor_plan, **cancel_kwargs
+            )
         elif qwen36_shell_tool_anchor_plan is not None:
             processed_start, reused = self._prepare_memory_with_qwen36_shell_tool_anchor(
                 qwen36_shell_tool_anchor_plan
@@ -2982,6 +2999,24 @@ class NativeLlamaClient:
                 raise RuntimeError(f"llama_decode failed during prefill: {decode_rc}")
         return processed
 
+    def _qwen38_route_prefix_config_eligible(self) -> bool:
+        # Native evidence covers this call layout and state configuration only.
+        # 960 and 1024 pass; splitting a 64-token call into 32+32 fails even
+        # at 1024. Do not generalize this to batch/ubatch or GDN alignment.
+        config = self.config
+        return (
+            (config.context_tokens, config.threads, config.threads_batch,
+             config.batch_size, config.ubatch_size, config.progress_step,
+             config.gpu_layers) == (4096, 10, 10, 256, 128, 64, 0)
+            and config.use_extra_bufts is False
+            and not config.low_memory
+            and config.load_mode == LLAMA_LOAD_MODE_MMAP
+            and config.lazy_mode == LLAMA_LAZY_MODE_ON
+            and config.load_mtp is False
+            and not config.use_mtp_experimental
+            and not self._session.mtp_enabled
+        )
+
     def _qwen_route_anchor_plan_for_prompt(
         self,
         messages: list[NativeMessage],
@@ -3006,6 +3041,13 @@ class NativeLlamaClient:
             enabled = self.config.qwen_route_prefix_reuse_enabled
             prefix_token_count = QWEN_ROUTE_PREFIX_TOKEN_COUNT
             derive_spec = derive_qwen_route_prefix_spec
+        elif profile_id == QWEN38_FLASH_NEXT_PROFILE_ID:
+            enabled = self.config.qwen_route_prefix_reuse_enabled
+            if not self._qwen38_route_prefix_config_eligible():
+                self._invalidate_qwen_route_prefix("qwen38_state_config_unqualified", profile_id=profile_id)
+                self._record_qwen_route_prefix_fallback("qwen38_state_config_unqualified", profile_id=profile_id)
+                return None
+            derive_spec = derive_qwen_route_prefix_spec
         elif profile_id == QWEN3_CODER_PROFILE_ID:
             enabled = self.config.qwen3_coder_route_prefix_reuse_enabled
             prefix_token_count = QWEN3_CODER_ROUTE_PREFIX_TOKEN_COUNT
@@ -3021,7 +3063,8 @@ class NativeLlamaClient:
         if not getattr(profile, "verified", False) or not getattr(profile, "route_prefix_reuse_supported", False):
             self._record_qwen_route_prefix_fallback("model_profile_ineligible", profile_id=profile_id)
             return None
-        if self._model_metadata_identity.get("general.file_type") != "15":
+        file_type = "31" if profile_id == QWEN38_FLASH_NEXT_PROFILE_ID else "15"
+        if self._model_metadata_identity.get("general.file_type") != file_type:
             self._record_qwen_route_prefix_fallback("qwen_quantization_unverified", profile_id=profile_id)
             return None
         if thinking:
@@ -3089,6 +3132,8 @@ class NativeLlamaClient:
                     full_tokens=prompt_tokens,
                     render_reference=render_reference,
                     tokenize=self.tokenize,
+                    **({"decode_alignment": min(self.config.progress_step, self.config.batch_size)}
+                       if profile_id == QWEN38_FLASH_NEXT_PROFILE_ID else {}),
                 )
             except Exception as exc:
                 spec = None
@@ -3116,12 +3161,18 @@ class NativeLlamaClient:
                 return None
             self._set_qwen_route_prefix_spec(profile_id, spec)
 
-        if list(prompt_tokens[:prefix_token_count]) != list(spec.prefix_tokens):
+        prefix_token_count = len(spec.prefix_tokens)
+        if len(prompt_tokens) <= prefix_token_count or list(prompt_tokens[:prefix_token_count]) != list(spec.prefix_tokens):
             self._invalidate_qwen_route_prefix("production_prefix_changed", profile_id=profile_id)
             self._record_qwen_route_prefix_fallback("production_prefix_changed", profile_id=profile_id)
             return None
 
-        state_kwargs = self._qwen_route_prefix_state_kwargs(spec, profile_id=profile_id)
+        try:
+            state_kwargs = self._qwen_route_prefix_state_kwargs(spec, profile_id=profile_id)
+        except (OSError, ValueError):
+            self._invalidate_qwen_route_prefix("model_identity_unavailable", profile_id=profile_id)
+            self._record_qwen_route_prefix_fallback("model_identity_unavailable", profile_id=profile_id)
+            return None
         prefix_hash = compute_prefix_anchor_key(**state_kwargs)
         return _QwenRouteAnchorRuntimePlan(
             prefix_tokens=list(spec.prefix_tokens),
@@ -3488,7 +3539,9 @@ class NativeLlamaClient:
             return self._ornith_analysis_prefix_status
         return self._qwen_route_prefix_status
 
-    def _prepare_memory_with_qwen_route_anchor(self, plan: _QwenRouteAnchorRuntimePlan) -> tuple[int, int]:
+    def _prepare_memory_with_qwen_route_anchor(
+        self, plan: _QwenRouteAnchorRuntimePlan, *, should_cancel=None,
+    ) -> tuple[int, int]:
         if not self._session.ctx_tgt:
             raise RuntimeError("native client not loaded")
         state = self._qwen_route_prefix_state_for_profile(plan.profile_id)
@@ -3531,7 +3584,7 @@ class NativeLlamaClient:
             step=step,
             total=len(plan.prefix_tokens),
             on_progress=None,
-            should_cancel=None,
+            should_cancel=should_cancel,
         )
         if processed != len(plan.prefix_tokens) or self.cancel_event.is_set():
             self._clear_target_memory()
@@ -3582,7 +3635,11 @@ class NativeLlamaClient:
     ) -> dict[str, str | None]:
         profile = self.model_profile
         profile_id = profile_id or getattr(profile, "profile_id", QWEN36_PROFILE_ID)
-        if profile_id == QWEN3_CODER_PROFILE_ID:
+        if profile_id == QWEN38_FLASH_NEXT_PROFILE_ID:
+            format_version = QWEN38_ROUTE_PREFIX_FORMAT_VERSION
+            tokenizer_identity = QWEN_ROUTE_TOKENIZER_IDENTITY
+            tools_mode = "qwen38-aligned-route-tools-on-thinking-off"
+        elif profile_id == QWEN3_CODER_PROFILE_ID:
             format_version = QWEN3_CODER_ROUTE_PREFIX_FORMAT_VERSION
             tokenizer_identity = QWEN3_CODER_ROUTE_TOKENIZER_IDENTITY
             tools_mode = "qwen3-coder-route-tools-on-thinking-off"
@@ -3607,6 +3664,16 @@ class NativeLlamaClient:
             model_file_identity = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
         except OSError:
             model_file_identity = {"size": None, "mtime_ns": None}
+        if profile_id == QWEN38_FLASH_NEXT_PROFILE_ID:
+            # In-memory, client-owned checkpoints; no persisted or shared model
+            # cache. Include all shards using the existing GGUF split resolver.
+            shards = []
+            for name in split_sibling_names(self.paths.model.name):
+                path = self.paths.model.with_name(name).resolve()
+                stat = path.stat()  # Missing/changed sets fail closed in the planner.
+                shards.append((str(path), stat.st_dev, stat.st_ino, stat.st_size,
+                               stat.st_mtime_ns, stat.st_ctime_ns))
+            model_file_identity["shards"] = shards
         model_identity = hash_text(
             json.dumps(
                 {
@@ -3633,6 +3700,11 @@ class NativeLlamaClient:
                 f"{runtime_library_filename('llama')}:batch={self.config.batch_size}:"
                 f"ubatch={self.config.ubatch_size}:step={self.config.progress_step}:"
                 f"threads={self.config.threads}:threads_batch={self.config.threads_batch}"
+                + (f":gpu={self.config.gpu_layers}:repack={self.config.use_extra_bufts}:"
+                   f"low_memory={self.config.low_memory}:load={self.config.load_mode}:"
+                   f"lazy={self.config.lazy_mode}:load_mtp={self.config.load_mtp}:"
+                   f"mtp={self.config.use_mtp_experimental}"
+                   if profile_id == QWEN38_FLASH_NEXT_PROFILE_ID else "")
             ),
             "tools_mode": tools_mode,
         }
