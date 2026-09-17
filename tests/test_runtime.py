@@ -1082,7 +1082,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("legacy raw", rendered)
         self.assertFalse(any(message.get("role") == "tool" for message in messages))
 
-    def test_chat_final_retry_excerpts_long_assistant_when_evidence_is_available(self) -> None:
+    def test_chat_final_retry_preserves_long_assistant_when_evidence_is_available(self) -> None:
         raw = "\n".join(f"line-{index}" for index in range(20))
         assistant_lines = "\n".join(f"assistant-copy-{index}" for index in range(20))
         assistant_answer = f"The previous answer copied the output:\n{assistant_lines}"
@@ -1112,9 +1112,7 @@ class RuntimeTests(unittest.TestCase):
         assistant_messages = [message for message in messages if message.get("role") == "assistant"]
         self.assertEqual(len(assistant_messages), 1)
         assistant_content = str(assistant_messages[0].get("content", ""))
-        self.assertLessEqual(len(assistant_content), 203)
-        self.assertTrue(assistant_content.endswith("..."))
-        self.assertNotIn("assistant-copy-19", assistant_content)
+        self.assertEqual(assistant_content, assistant_answer)
         rendered = "\n".join(str(message.get("content", "")) for message in messages)
         self.assertIn("evidence_context:", rendered)
         self.assertIn(record.raw_ref, rendered)
@@ -1166,8 +1164,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("line-0", rendered)
         self.assertIn("line-119", rendered)
         self.assertNotIn("legacy raw", rendered)
-        self.assertNotIn("previous final answer " * 20, rendered)
-        self.assertIn("previous final answer", rendered)
+        self.assertIn("previous final answer " * 200, rendered)
         self.assertIn("...", rendered)
         self.assertFalse(any(message.get("role") == "tool" for message in messages))
 

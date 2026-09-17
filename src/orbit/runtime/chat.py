@@ -1569,19 +1569,16 @@ class ChatRuntime:
             )
 
     def _chat_final_retry_messages(self) -> list[Message]:
-        messages: list[Message] = []
-        latest_user = _latest_user_message(self.messages)
-        if self.evidence_store is not None and self.evidence_store.recent_records(1):
-            assistant = _latest_operational_assistant_message(self.messages)
-        else:
-            assistant = _latest_short_assistant_message(self.messages)
-        # The user turn comes first: a rebuilt window that opens with the
-        # assistant is not a conversation the admission validator can parse,
-        # and the turn fails before inference with no answer at all.
-        if latest_user is not None:
-            messages.append(latest_user)
-        if assistant is not None:
-            messages.append(assistant)
+        # Retry from committed conversation in its original order. Route output
+        # and retry/guard instructions are call-local, not part of self.messages.
+        # Keep the existing evidence-card view of tool activity: neither tool
+        # result bodies nor assistant tool-call envelopes belong in this final.
+        messages = [
+            dict(message)
+            for message in self.messages
+            if message.get("role") != "tool"
+            and not (message.get("role") == "assistant" and message.get("tool_calls"))
+        ]
         return self._with_chat_final_retry_evidence_context(with_chat_system_prompt(messages), consumer_phase="chat_final_retry")
 
     def chat_final_completion_repair_messages(self, repair_instruction: str) -> list[Message] | None:

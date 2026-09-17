@@ -146,7 +146,7 @@ class SelectionUnchangedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             built = _runtime(_seeded_store(tmp))._chat_final_retry_messages()
             user_turns = [m for m in built if m.get("role") == "user"]
-            self.assertEqual(len(user_turns), 1, "user turn duplicated")
+            self.assertEqual(user_turns, [m for m in TWO_TURN_HISTORY if m["role"] == "user"])
 
     def test_input_history_is_not_mutated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
