@@ -1580,6 +1580,19 @@ Release State entry below.
     [qualification](docs/checkpoints/qwen38-aligned-route-prewarm-25.md).
     Mission closed; do not start another optimization automatically.
 
+- **CHAT-FINAL-RETRY-HISTORY-27 (2026-09-17) — preserve conversation in final retry.**
+  Production closure 26 found `CEDAR` recall returning `None`, also with zero
+  cached tokens. The runtime retry projection changed `U1,A1,U2` to `U2,A1`.
+  It now preserves committed conversation and session memory in order and in
+  full; raw tool messages/tool-call envelopes remain excluded in favor of the
+  existing evidence cards. Transient route/guard messages remain call-local.
+  Prompt text, cache layers, native backend and qualified profiles are unchanged.
+  Normal and explicitly cold live recall both return `CEDAR`, with identical
+  77-token final prompts and output IDs; system_info smoke passes. Longer retry
+  prompts are an intentional correctness cost. See
+  [qualification](docs/checkpoints/chat-final-retry-history-27.md).
+  Do not resume production closure or optimization automatically after merge.
+
 ### Post-RC38 (bundled into rc39; historical)
 
 The commits below landed after the `v0.0.1-rc38` tag and their production work is
