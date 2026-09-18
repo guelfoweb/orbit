@@ -16,12 +16,14 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
-from orbit.backend.base import ChatResult
+from orbit.backend.base import ChatResult, TokenCount
 from orbit.runtime.analysis_runtime import (
     ANALYSIS_TOOL_NAME,
     AUTONOMOUS_CONTINUATION_MESSAGE,
+    AUTONOMOUS_REPAIR_CONTEXT,
     AUTONOMOUS_REPAIR_MESSAGE,
     AUTONOMOUS_REPLAN_MESSAGE,
     MAX_AUTONOMOUS_ACTIONS,
@@ -47,6 +49,24 @@ BROKEN = (
 )
 FIXED = BROKEN.replace("chr(t ^ 7)", "chr(int(t) ^ 7)")
 READ = "import orbit_tools; print(orbit_tools.read_file('/workspace/input')[:60])"
+
+# The exact exception class and wording reproduced in production.  The input is
+# inert fixture text; the mistake is confined to Python's ``open`` contract.
+BYTES_BROKEN = (
+    "import orbit_tools\n"
+    "src = orbit_tools.read_file(orbit_tools.SOURCE_PATH)\n"
+    "print('LEN', len(src))\n"
+    "with open(orbit_tools.WORK_ROOT + '/copy.txt', 'w', encoding=b'utf-8') as out:\n"
+    "    out.write(src[:20])\n"
+)
+BYTES_FIXED = BYTES_BROKEN.replace("encoding=b'utf-8'", "encoding='utf-8'")
+MISSING_EVIDENCE_PATH = (
+    "try:\n"
+    "    with open('/workspace/evidence/ev_missing', 'rb') as source:\n"
+    "        print(source.read())\n"
+    "except OSError as exc:\n"
+    "    print(type(exc).__name__, exc)\n"
+)
 
 
 def _tool_call(code: str, *, call_id: str = "call_1") -> ChatResult:
@@ -137,6 +157,7 @@ class RecordingBackend:
         self.control_calls = 0
         self.instructions: list[str] = []
         self.delivered: list[str] = []
+        self.action_requests: list[list[dict]] = []
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
                     on_delta, on_progress=None):
@@ -154,6 +175,7 @@ class RecordingBackend:
                 f"model invoked {self.calls + 1} times; only {len(self._responses)} scripted"
             )
         users = [m for m in messages if m.get("role") == "user"]
+        self.action_requests.append(deepcopy(messages))
         self.instructions.append(users[-1]["content"] if users else "")
         # The whole user context, not just its last line. Under the
         # structured controller the last line is the per-question guidance,
@@ -167,6 +189,28 @@ class RecordingBackend:
         if response.content:
             on_delta(response.content)
         return response
+
+
+class ExactRecordingBackend(RecordingBackend):
+    """The same scripted model behind Orbit's exact admission interface."""
+
+    thinking = False
+
+    def supports_exact_context_admission(self) -> bool:
+        return True
+
+    def model_info(self):
+        class _Info:
+            context_length = 8192
+        return _Info()
+
+    def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+        return TokenCount(
+            tokens=100,
+            context_tokens=8192,
+            rendered_hash="a" * 64,
+            token_hash="b" * 64,
+        )
 
 
 class RepairTestBase(unittest.TestCase):
@@ -256,7 +300,12 @@ class GenericContractTests(unittest.TestCase):
     )
 
     def test_the_repair_message_names_no_technique_or_error_class(self) -> None:
-        lowered = AUTONOMOUS_REPAIR_MESSAGE.lower()
+        lowered = "\n".join((
+            AUTONOMOUS_REPAIR_MESSAGE,
+            AUTONOMOUS_REPAIR_CONTEXT.format(
+                evidence_refs="evidence:ev_000000000000_0000000000000000"
+            ),
+        )).lower()
         for term in self.FORBIDDEN:
             with self.subTest(term=term):
                 self.assertNotIn(term, lowered)
@@ -283,6 +332,68 @@ class GenericContractTests(unittest.TestCase):
 
 
 class RepairFlowTests(RepairTestBase):
+    def test_exact_str_bytes_failure_reaches_the_immediate_repair_request(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy the first twenty source characters to scratch."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 1)
+        self.assertGreaterEqual(len(backend.action_requests), 2)
+        repair_request = backend.action_requests[1]
+        rendered = json.dumps(repair_request, ensure_ascii=False)
+        self.assertEqual(rendered.count(AUTONOMOUS_REPAIR_MESSAGE), 1)
+        self.assertIn("encoding=b'utf-8'", rendered)
+        self.assertIn(
+            "open() argument 'encoding' must be str or None, not bytes", rendered
+        )
+        repair_users = [
+            message["content"] for message in repair_request
+            if message.get("role") == "user"
+            and AUTONOMOUS_REPAIR_MESSAGE in message.get("content", "")
+        ]
+        self.assertEqual(len(repair_users), 1)
+        self.assertEqual(repair_users[0].count("evidence:"), 2)
+        self.assertIn("never a sandbox path", repair_users[0])
+        self.assertNotIn("/workspace/evidence", repair_users[0])
+        self.assertIn(
+            "deterministic_evidence_rehydration: exact archived tool output",
+            rendered,
+        )
+        self.assertEqual(rendered.count("exact_content_begin:"), 2)
+        self.assertNotIn('"arguments": "[archived]"', rendered)
+        repair_history = [
+            message for message in runtime.messages
+            if message.get("role") == "user"
+            and AUTONOMOUS_REPAIR_MESSAGE in message.get("content", "")
+        ]
+        self.assertEqual(len(repair_history), 1)
+        self.assertEqual(
+            (runtime.workspace.scratch_root / "copy.txt").read_text(encoding="utf-8"),
+            SOURCE[:20],
+        )
+        self.assertEqual(run.open_questions, ("Q1",))
+
+    def test_missing_evidence_path_does_not_false_resolve_the_question(self) -> None:
+        backend = RecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(MISSING_EVIDENCE_PATH, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy the first twenty source characters to scratch."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False)
+
+        self.assertEqual(run.repairs, 1)
+        self.assertEqual(run.resolved_questions, ())
+        self.assertIn("Q1", run.open_questions)
+        self.assertEqual(run.steps[1].result.status, "ok")
+        self.assertIn("FileNotFoundError", run.steps[1].result.stdout)
+
     def test_failure_then_repair_then_success(self) -> None:
         backend = RecordingBackend(
             _tool_call(BROKEN), _tool_call(FIXED, call_id="call_2"), _prose("decoded")
@@ -317,13 +428,18 @@ class RepairFlowTests(RepairTestBase):
         runtime = self.runtime(backend)
         runtime.run_autonomous("analyse", finalize=False)
 
-        history = "\n".join(
-            str(m.get("content", "")) for m in runtime.messages
-        ) + json.dumps([
-            m.get("tool_calls") for m in runtime.messages if m.get("tool_calls")
-        ])
-        self.assertIn("chr(t ^ 7)", history, "the submitted code is preserved")
-        self.assertIn("TypeError", history, "the traceback is preserved")
+        immediate_repair = json.dumps(
+            backend.action_requests[1], ensure_ascii=False
+        )
+        self.assertIn(
+            "chr(t ^ 7)", immediate_repair, "the submitted code is preserved"
+        )
+        self.assertIn(
+            "unsupported operand type(s) for ^: 'str' and 'int'",
+            immediate_repair,
+            "the traceback is preserved",
+        )
+        self.assertEqual(immediate_repair.count(AUTONOMOUS_REPAIR_MESSAGE), 1)
 
     def test_the_correction_adds_state_and_the_offer_does_not_depend_on_ERROR(self) -> None:
         """A raised program still writes its traceback, so the ledger calls it

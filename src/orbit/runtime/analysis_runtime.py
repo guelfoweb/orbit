@@ -1940,6 +1940,40 @@ AUTONOMOUS_REPAIR_MESSAGE = (
     "proves more evidence is required."
 )
 
+# Appended only to the one bounded action-repair turn.  The archived result is
+# requested through the existing evidence-rehydration contract, which both
+# restores the exact traceback and prevents admission from archiving the
+# assistant program that produced it.  The path sentence distinguishes that
+# conversation protocol from the sandbox filesystem without adding a new
+# evidence mount or another way to read host files.
+AUTONOMOUS_REPAIR_CONTEXT = (
+    "Keep the failed action's investigation objective. The exact failed "
+    "execution records are requested as {evidence_refs}; Orbit restores them "
+    "in this prompt. An evidence id is a conversation reference, never a sandbox "
+    "path. Inside execute_analysis, read the artifact only at "
+    "/workspace/input and use /workspace/work only for scratch files."
+)
+
+
+def _action_repair_message(step: "AnalysisStepResult") -> str:
+    """The existing repair instruction plus its exact owned failure record."""
+    record = step.evidence
+    if record is None or not record.evidence_id:
+        return AUTONOMOUS_REPAIR_MESSAGE
+    evidence_ids = [record.evidence_id]
+    if (
+        isinstance(step.raw_output_evidence_id, str)
+        and step.raw_output_evidence_id
+        and step.raw_output_evidence_id not in evidence_ids
+    ):
+        evidence_ids.append(step.raw_output_evidence_id)
+    return "\n".join((
+        AUTONOMOUS_REPAIR_MESSAGE,
+        AUTONOMOUS_REPAIR_CONTEXT.format(
+            evidence_refs=", ".join(f"evidence:{eid}" for eid in evidence_ids)
+        ),
+    ))
+
 
 # What the runtime returns instead of re-running an experiment the session has
 # already run against this exact state.
@@ -5588,7 +5622,11 @@ class AnalysisRuntime:
         return calls
 
     def _resolve_messages(
-        self, controller: "AnalysisController", question: "Question"
+        self,
+        controller: "AnalysisController",
+        question: "Question",
+        *,
+        current_instruction: str | None = None,
     ) -> "list[Message]":
         """The transient context for working one question.
 
@@ -5598,7 +5636,7 @@ class AnalysisRuntime:
         """
         state = controller.states[question.id]
         remaining = MAX_ACTIONS_PER_QUESTION - state.actions
-        return [
+        messages = [
             *self.messages,
             {"role": "user", "content": (
                 f"Work on this question and nothing else:\n"
@@ -5611,6 +5649,16 @@ class AnalysisRuntime:
                 "yours to report later, whether or not it is asked here."
             )},
         ]
+        # `step()` appends its analyst message after this transient controller
+        # view is built.  Normally the controller question is the complete
+        # instruction for the call.  A repair is different: the next call must
+        # receive the repair directive immediately, while the failed action is
+        # still the one it is meant to correct.  Put that operation-owned
+        # instruction last so evidence:<id> is also the latest-user request
+        # recognised by the existing exact rehydration path.
+        if current_instruction is not None:
+            messages.append({"role": "user", "content": current_instruction})
+        return messages
 
     def _finish_messages(
         self, question: "Question", observation: str, evidence_id: str
@@ -6230,7 +6278,11 @@ class AnalysisRuntime:
                     on_progress=on_progress,
                     on_delta=on_delta,
                     controller_messages=(
-                        self._resolve_messages(controller, active)
+                        self._resolve_messages(
+                            controller,
+                            active,
+                            current_instruction=message if repairing else None,
+                        )
                         if active is not None else None
                     ),
                     on_event=on_event,
@@ -6688,7 +6740,7 @@ class AnalysisRuntime:
                 # the opposite of what a fixable program needs. Costs one
                 # model call from the existing ceiling and no extra action
                 # budget; the correction itself is an ordinary action.
-                message = AUTONOMOUS_REPAIR_MESSAGE
+                message = _action_repair_message(step)
                 repair_pending = False
                 repairing = True
                 repairs += 1

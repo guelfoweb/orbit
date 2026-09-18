@@ -481,6 +481,9 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
         "AUTONOMOUS_REPAIR_MESSAGE": (
             "5358c64e548cf4ad2c22fc8ca2ffa252ee490ae21e33de616dc8be00a46b5c81"
         ),
+        "AUTONOMOUS_REPAIR_CONTEXT": (
+            "711f04e1fc71675cd9886b07ec0ccda6d5b01a3d5ac32f80567d9fadd52daf99"
+        ),
     }
 
     # ANALYSIS-EVIDENCE-FIRST-1. Model-facing text that lives in a function
