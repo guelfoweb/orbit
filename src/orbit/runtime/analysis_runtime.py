@@ -5972,6 +5972,9 @@ class AnalysisRuntime:
         # licence to explore.
         if plan and not cancelled and model_calls < max_model_calls:
             controller = AnalysisController()
+            # PLAN builds call-local messages; it never opens a turn in
+            # self.messages. Its failure paths therefore own no incomplete
+            # history to close, including when admission retries PLAN.
             # Measured, not returned -- the same reason as the completion
             # call below. `plan_analysis` reports its spend on the way out,
             # and the handlers underneath leave by paths that return nothing,
@@ -6016,7 +6019,6 @@ class AnalysisRuntime:
                 model_calls += self.model_calls - plan_spent_before
                 cancelled = True
                 stop_reason = STOP_CANCELLED
-                self._close_incomplete_turn()
             except ToolCallParseError:
                 model_calls += self.model_calls - plan_spent_before
                 # The model answered twice in a shape the grammar refuses --
@@ -6028,7 +6030,6 @@ class AnalysisRuntime:
                 # subclasses `RecoverableBackendError`, so the broader clause
                 # below would otherwise swallow it and report a server fault
                 # for something the server did correctly.
-                self._close_incomplete_turn()
                 controller.unsupported = True
             except (ContextAdmissionError, TimeoutError, RecoverableBackendError) as exc:
                 model_calls += self.model_calls - plan_spent_before
@@ -6054,7 +6055,6 @@ class AnalysisRuntime:
                     isinstance(exc, ContextAdmissionError)
                     and message is not analyst_message
                 ):
-                    self._close_incomplete_turn()
                     message = analyst_message
                     plan_spent_before = self.model_calls
                     try:
@@ -6072,7 +6072,6 @@ class AnalysisRuntime:
                         RecoverableBackendError,
                     ) as retry_exc:
                         model_calls += self.model_calls - plan_spent_before
-                        self._close_incomplete_turn()
                         plan_failed = True
                         stop_reason = (
                             f"{STOP_BACKEND_ERROR}: "
@@ -6085,7 +6084,6 @@ class AnalysisRuntime:
                     # and discards the cause the analyst needs to act on. The
                     # cause is preserved verbatim, exactly as the step handler
                     # reports the same three types.
-                    self._close_incomplete_turn()
                     plan_failed = True
                     stop_reason = f"{STOP_BACKEND_ERROR}: {type(exc).__name__}: {exc}"
         shadow = ShadowLedger() if shadow_enabled() else None
