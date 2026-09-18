@@ -30,6 +30,7 @@ from .bindings import (
     LLAMA_LOAD_MODE_MMAP,
 )
 from .chat_bridge import chat_bridge_filename
+from .finish_parameter_order import reorder_finish_parameters, exact_finish_arguments
 from .committed_identity import CommittedIdentity, AttributeBackedIdentity
 from .mtp_session_lifecycle import MtpSessionLifecycle
 from .final_prefix_store import FinalPrefixExperimentStatus, FinalPrefixStore
@@ -1971,6 +1972,26 @@ class NativeLlamaClient:
             if not timings.cancelled and timings.output_tokens < max_tokens:
                 raise
             parsed = self._parse_profile_output(raw_content, partial=True)
+
+        if (
+            not timings.cancelled
+            and timings.output_tokens < max_tokens
+            and not parsed.content
+            and not parsed.reasoning_content
+            and not parsed.tool_calls
+            and getattr(getattr(self, "model_profile", None), "tool_call_protocol", None) == "qwen3.6-xml"
+        ):
+            reordered = reorder_finish_parameters(raw_content, tools)
+            if reordered is not None:
+                wire, expected = reordered
+                try:
+                    candidate = self._parse_profile_output(wire, partial=False)
+                except RuntimeError:
+                    pass
+                else:
+                    if (not candidate.content and not candidate.reasoning_content
+                            and exact_finish_arguments(candidate.tool_calls, expected)):
+                        parsed = candidate
 
         if (not tools or not parsed.tool_calls) and parsed.content.startswith(emitted_content):
             emit_visible(parsed.content[len(emitted_content) :])
