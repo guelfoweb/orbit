@@ -479,10 +479,10 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
     # subject for a single call. It names no error class and no correction.
     POST_BASELINE_DIGESTS = {
         "AUTONOMOUS_REPAIR_MESSAGE": (
-            "5358c64e548cf4ad2c22fc8ca2ffa252ee490ae21e33de616dc8be00a46b5c81"
+            "67cac250b787165f39f02c927f1c648c2d21d9baf1bd763505af72b7a95374d5"
         ),
         "AUTONOMOUS_REPAIR_CONTEXT": (
-            "711f04e1fc71675cd9886b07ec0ccda6d5b01a3d5ac32f80567d9fadd52daf99"
+            "1a8acca60a42bd50f339316fe4289933e84b5abfee64c599268efc6f52c878ff"
         ),
     }
 

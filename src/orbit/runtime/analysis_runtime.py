@@ -1934,10 +1934,9 @@ COVER_UNRESERVED_TERMS = (
 # more evidence really is required -- and a runtime that insisted on a retry
 # there would be arguing with a model that had correctly changed its mind.
 AUTONOMOUS_REPAIR_MESSAGE = (
-    "The previous analysis execution failed. Review the submitted action and "
-    "its traceback above. If it is locally correctable, submit one corrected "
-    "execution now. Do not return to source observation unless the error "
-    "proves more evidence is required."
+    "The last execution failed. Review its submitted action and traceback. "
+    "If locally correctable, submit one corrected execution now. Inspect "
+    "source only if the error proves more evidence is needed."
 )
 
 # Appended only to the one bounded action-repair turn.  The archived result is
@@ -1947,11 +1946,9 @@ AUTONOMOUS_REPAIR_MESSAGE = (
 # conversation protocol from the sandbox filesystem without adding a new
 # evidence mount or another way to read host files.
 AUTONOMOUS_REPAIR_CONTEXT = (
-    "Keep the failed action's investigation objective. The exact failed "
-    "execution records are requested as {evidence_refs}; Orbit restores them "
-    "in this prompt. An evidence id is a conversation reference, never a sandbox "
-    "path. Inside execute_analysis, read the artifact only at "
-    "/workspace/input and use /workspace/work only for scratch files."
+    "Keep its objective. Exact failure: {evidence_refs}. Evidence ids are "
+    "references, never sandbox paths. execute_analysis: artifact "
+    "/workspace/input; scratch /workspace/work."
 )
 
 
@@ -1961,10 +1958,19 @@ def _action_repair_message(step: "AnalysisStepResult") -> str:
     if record is None or not record.evidence_id:
         return AUTONOMOUS_REPAIR_MESSAGE
     evidence_ids = [record.evidence_id]
+    # Explicit observation_truncated=False establishes that the ordinary
+    # evidence record contains the complete stdout/stderr needed for repair.
+    # Rehydrating the raw sidecar as well would duplicate that failure content.
+    # When the observation was shortened, keep both identities: the ordinary
+    # record protects the assistant action/tool turn from compaction and the raw
+    # record supplies the omitted bytes.  Missing legacy metadata fails
+    # closed by retaining both records.
+    observation_complete = record.metadata.get("observation_truncated") is False
     if (
         isinstance(step.raw_output_evidence_id, str)
         and step.raw_output_evidence_id
         and step.raw_output_evidence_id not in evidence_ids
+        and not observation_complete
     ):
         evidence_ids.append(step.raw_output_evidence_id)
     return "\n".join((

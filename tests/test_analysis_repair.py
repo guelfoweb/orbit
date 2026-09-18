@@ -30,6 +30,7 @@ from orbit.runtime.analysis_runtime import (
     MAX_AUTONOMOUS_MODEL_CALLS,
     STOP_BACKEND_ERROR,
     AnalysisRuntime,
+    _action_repair_message,
     _is_locally_repairable,
     acquire_analysis_source,
 )
@@ -68,6 +69,11 @@ MISSING_EVIDENCE_PATH = (
     "except OSError as exc:\n"
     "    print(type(exc).__name__, exc)\n"
 )
+TRUNCATED_BROKEN = (
+    "print('x' * 4000)\n"
+    "raise RuntimeError('bounded fixture failure')\n"
+)
+TRUNCATED_FIXED = "print('corrected')\n"
 
 
 def _tool_call(code: str, *, call_id: str = "call_1") -> ChatResult:
@@ -390,14 +396,14 @@ class RepairFlowTests(RepairTestBase):
             and AUTONOMOUS_REPAIR_MESSAGE in message.get("content", "")
         ]
         self.assertEqual(len(repair_users), 1)
-        self.assertEqual(repair_users[0].count("evidence:"), 2)
-        self.assertIn("never a sandbox path", repair_users[0])
+        self.assertEqual(repair_users[0].count("evidence:"), 1)
+        self.assertIn("never sandbox paths", repair_users[0])
         self.assertNotIn("/workspace/evidence", repair_users[0])
         self.assertIn(
             "deterministic_evidence_rehydration: exact archived tool output",
             rendered,
         )
-        self.assertEqual(rendered.count("exact_content_begin:"), 2)
+        self.assertEqual(rendered.count("exact_content_begin:"), 1)
         self.assertNotIn('"arguments": "[archived]"', rendered)
         repair_history = [
             message for message in runtime.messages
@@ -410,6 +416,53 @@ class RepairFlowTests(RepairTestBase):
             SOURCE[:20],
         )
         self.assertEqual(run.open_questions, ("Q1",))
+
+    def test_truncated_failure_also_requests_its_complete_raw_sidecar(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(TRUNCATED_BROKEN),
+            _tool_call(TRUNCATED_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Exercise the bounded failure fixture."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 1)
+        repair_request = backend.action_requests[1]
+        repair_users = [
+            message["content"] for message in repair_request
+            if message.get("role") == "user"
+            and AUTONOMOUS_REPAIR_MESSAGE in message.get("content", "")
+        ]
+        self.assertEqual(len(repair_users), 1)
+        self.assertEqual(repair_users[0].count("evidence:"), 2)
+        rendered = json.dumps(repair_request, ensure_ascii=False)
+        self.assertEqual(rendered.count("exact_content_begin:"), 2)
+        self.assertIn("bounded fixture failure", rendered)
+
+    def test_missing_truncation_metadata_keeps_the_raw_sidecar(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy source to scratch."],
+        )
+        runtime = self.runtime(backend)
+        first = runtime.step("run fixture")
+        self.assertIsNotNone(first.evidence)
+        legacy = type(first.evidence)(
+            **{
+                **first.evidence.__dict__,
+                "metadata": {
+                    key: value for key, value in first.evidence.metadata.items()
+                    if key != "observation_truncated"
+                },
+            }
+        )
+        message = _action_repair_message(
+            type(first)(**{**first.__dict__, "evidence": legacy})
+        )
+        self.assertEqual(message.count("evidence:"), 2)
 
     def test_missing_evidence_path_does_not_false_resolve_the_question(self) -> None:
         backend = RecordingBackend(
@@ -491,9 +544,9 @@ class RepairFlowTests(RepairTestBase):
 
     def test_unavailable_exact_failure_record_stops_before_model_dispatch(self) -> None:
         backend = ExactRecordingBackend(
-            _tool_call(BYTES_BROKEN),
-            _tool_call(BYTES_FIXED, call_id="call_2"),
-            plan_questions=["Copy source to scratch."],
+            _tool_call(TRUNCATED_BROKEN),
+            _tool_call(TRUNCATED_FIXED, call_id="call_2"),
+            plan_questions=["Exercise the bounded failure fixture."],
         )
         runtime = self.runtime(backend)
         reattest = self.store.reattest_exact
@@ -513,6 +566,32 @@ class RepairFlowTests(RepairTestBase):
         self.assertIn("evidence-rehydration-unavailable", run.stop_reason)
         self.assertFalse((runtime.workspace.scratch_root / "copy.txt").exists())
         self.assertNotEqual(runtime.messages[-1].get("role"), "user")
+
+    def test_complete_failure_does_not_require_its_duplicate_raw_sidecar(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy source to scratch."],
+        )
+        runtime = self.runtime(backend)
+        reattest = self.store.reattest_exact
+
+        def missing_raw(evidence_id, *args, **kwargs):
+            record = self.store.records.get(evidence_id)
+            if record is not None and record.metadata.get("kind") == "raw_action_output":
+                return None
+            return reattest(evidence_id, *args, **kwargs)
+
+        self.store.reattest_exact = missing_raw
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 1)
+        self.assertGreaterEqual(backend.calls, 2)
+        self.assertEqual(
+            (runtime.workspace.scratch_root / "copy.txt").read_text(encoding="utf-8"),
+            SOURCE[:20],
+        )
 
     def test_failure_then_repair_then_success(self) -> None:
         backend = RecordingBackend(
