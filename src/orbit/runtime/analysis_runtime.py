@@ -1934,11 +1934,51 @@ COVER_UNRESERVED_TERMS = (
 # more evidence really is required -- and a runtime that insisted on a retry
 # there would be arguing with a model that had correctly changed its mind.
 AUTONOMOUS_REPAIR_MESSAGE = (
-    "The previous analysis execution failed. Review the submitted action and "
-    "its traceback above. If it is locally correctable, submit one corrected "
-    "execution now. Do not return to source observation unless the error "
-    "proves more evidence is required."
+    "The last execution failed. Review its submitted action and traceback. "
+    "If locally correctable, submit one corrected execution now. Inspect "
+    "source only if the error proves more evidence is needed."
 )
+
+# Appended only to the one bounded action-repair turn.  The archived result is
+# requested through the existing evidence-rehydration contract, which both
+# restores the exact traceback and prevents admission from archiving the
+# assistant program that produced it.  The path sentence distinguishes that
+# conversation protocol from the sandbox filesystem without adding a new
+# evidence mount or another way to read host files.
+AUTONOMOUS_REPAIR_CONTEXT = (
+    "Keep its objective. Exact failure: {evidence_refs}. Evidence ids are "
+    "references, never sandbox paths. execute_analysis: artifact "
+    "/workspace/input; scratch /workspace/work."
+)
+
+
+def _action_repair_message(step: "AnalysisStepResult") -> str:
+    """The existing repair instruction plus its exact owned failure record."""
+    record = step.evidence
+    if record is None or not record.evidence_id:
+        return AUTONOMOUS_REPAIR_MESSAGE
+    evidence_ids = [record.evidence_id]
+    # Explicit observation_truncated=False establishes that the ordinary
+    # evidence record contains the complete stdout/stderr needed for repair.
+    # Rehydrating the raw sidecar as well would duplicate that failure content.
+    # When the observation was shortened, keep both identities: the ordinary
+    # record protects the assistant action/tool turn from compaction and the raw
+    # record supplies the omitted bytes.  Missing legacy metadata fails
+    # closed by retaining both records.
+    observation_complete = record.metadata.get("observation_truncated") is False
+    if (
+        isinstance(step.raw_output_evidence_id, str)
+        and step.raw_output_evidence_id
+        and step.raw_output_evidence_id not in evidence_ids
+        and not observation_complete
+    ):
+        evidence_ids.append(step.raw_output_evidence_id)
+    return "\n".join((
+        AUTONOMOUS_REPAIR_MESSAGE,
+        AUTONOMOUS_REPAIR_CONTEXT.format(
+            evidence_refs=", ".join(f"evidence:{eid}" for eid in evidence_ids)
+        ),
+    ))
 
 
 # What the runtime returns instead of re-running an experiment the session has
@@ -2919,6 +2959,18 @@ def _is_locally_repairable(step: "AnalysisStepResult") -> bool:
         and result.status == "error"
         and bool(result.stderr.strip())
     )
+
+
+def _question_still_owns_repair(
+    controller: "AnalysisController | None", question: "Question | None"
+) -> bool:
+    """Whether another action may still belong to the failed action's owner."""
+    if controller is None:
+        return True
+    if question is None or controller.active != question.id:
+        return False
+    state = controller.states.get(question.id)
+    return state is not None and state.status == OPEN and controller.may_act()
 
 
 def _raw_action_output(result: AnalysisResult) -> str:
@@ -5588,7 +5640,11 @@ class AnalysisRuntime:
         return calls
 
     def _resolve_messages(
-        self, controller: "AnalysisController", question: "Question"
+        self,
+        controller: "AnalysisController",
+        question: "Question",
+        *,
+        current_instruction: str | None = None,
     ) -> "list[Message]":
         """The transient context for working one question.
 
@@ -5598,7 +5654,7 @@ class AnalysisRuntime:
         """
         state = controller.states[question.id]
         remaining = MAX_ACTIONS_PER_QUESTION - state.actions
-        return [
+        messages = [
             *self.messages,
             {"role": "user", "content": (
                 f"Work on this question and nothing else:\n"
@@ -5611,6 +5667,16 @@ class AnalysisRuntime:
                 "yours to report later, whether or not it is asked here."
             )},
         ]
+        # `step()` appends its analyst message after this transient controller
+        # view is built.  Normally the controller question is the complete
+        # instruction for the call.  A repair is different: the next call must
+        # receive the repair directive immediately, while the failed action is
+        # still the one it is meant to correct.  Put that operation-owned
+        # instruction last so evidence:<id> is also the latest-user request
+        # recognised by the existing exact rehydration path.
+        if current_instruction is not None:
+            messages.append({"role": "user", "content": current_instruction})
+        return messages
 
     def _finish_messages(
         self, question: "Question", observation: str, evidence_id: str
@@ -6230,7 +6296,11 @@ class AnalysisRuntime:
                     on_progress=on_progress,
                     on_delta=on_delta,
                     controller_messages=(
-                        self._resolve_messages(controller, active)
+                        self._resolve_messages(
+                            controller,
+                            active,
+                            current_instruction=message if repairing else None,
+                        )
                         if active is not None else None
                     ),
                     on_event=on_event,
@@ -6277,8 +6347,13 @@ class AnalysisRuntime:
                 # Every other refusal still ends the run, including a second
                 # one on the plain line -- retrying that would spend the
                 # ceiling on a request already known not to fit.
+                # A repair is also never withdrawn: its evidence references
+                # own the failed program and exact traceback. Dispatching
+                # without them would turn a refused repair into an unrelated
+                # action while still charging it to the failed question.
                 if (
                     isinstance(exc, ContextAdmissionError)
+                    and not repairing
                     and message is not analyst_message
                 ):
                     # Bounded by identity, not by a counter: the retry sets
@@ -6559,7 +6634,11 @@ class AnalysisRuntime:
             # every path -- a step that is not an eligible failure must not
             # inherit an offer armed earlier.
             was_repairing, repairing = repairing, False
-            repair_pending = _is_locally_repairable(step) and not was_repairing
+            repair_pending = (
+                _is_locally_repairable(step)
+                and not was_repairing
+                and _question_still_owns_repair(controller, active)
+            )
 
             if record.classification == ERROR:
                 consecutive_errors += 1
@@ -6688,7 +6767,7 @@ class AnalysisRuntime:
                 # the opposite of what a fixable program needs. Costs one
                 # model call from the existing ceiling and no extra action
                 # budget; the correction itself is an ordinary action.
-                message = AUTONOMOUS_REPAIR_MESSAGE
+                message = _action_repair_message(step)
                 repair_pending = False
                 repairing = True
                 repairs += 1

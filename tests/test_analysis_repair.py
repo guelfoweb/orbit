@@ -16,17 +16,21 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
-from orbit.backend.base import ChatResult
+from orbit.backend.base import ChatResult, TokenCount
 from orbit.runtime.analysis_runtime import (
     ANALYSIS_TOOL_NAME,
     AUTONOMOUS_CONTINUATION_MESSAGE,
+    AUTONOMOUS_REPAIR_CONTEXT,
     AUTONOMOUS_REPAIR_MESSAGE,
     AUTONOMOUS_REPLAN_MESSAGE,
     MAX_AUTONOMOUS_ACTIONS,
     MAX_AUTONOMOUS_MODEL_CALLS,
+    STOP_BACKEND_ERROR,
     AnalysisRuntime,
+    _action_repair_message,
     _is_locally_repairable,
     acquire_analysis_source,
 )
@@ -47,6 +51,29 @@ BROKEN = (
 )
 FIXED = BROKEN.replace("chr(t ^ 7)", "chr(int(t) ^ 7)")
 READ = "import orbit_tools; print(orbit_tools.read_file('/workspace/input')[:60])"
+
+# The exact exception class and wording reproduced in production.  The input is
+# inert fixture text; the mistake is confined to Python's ``open`` contract.
+BYTES_BROKEN = (
+    "import orbit_tools\n"
+    "src = orbit_tools.read_file(orbit_tools.SOURCE_PATH)\n"
+    "print('LEN', len(src))\n"
+    "with open(orbit_tools.WORK_ROOT + '/copy.txt', 'w', encoding=b'utf-8') as out:\n"
+    "    out.write(src[:20])\n"
+)
+BYTES_FIXED = BYTES_BROKEN.replace("encoding=b'utf-8'", "encoding='utf-8'")
+MISSING_EVIDENCE_PATH = (
+    "try:\n"
+    "    with open('/workspace/evidence/ev_missing', 'rb') as source:\n"
+    "        print(source.read())\n"
+    "except OSError as exc:\n"
+    "    print(type(exc).__name__, exc)\n"
+)
+TRUNCATED_BROKEN = (
+    "print('x' * 4000)\n"
+    "raise RuntimeError('bounded fixture failure')\n"
+)
+TRUNCATED_FIXED = "print('corrected')\n"
 
 
 def _tool_call(code: str, *, call_id: str = "call_1") -> ChatResult:
@@ -69,7 +96,11 @@ def _prose(text: str) -> ChatResult:
     )
 
 
-def _control_reply(offered: "list[str]", plan_questions: "list[str]") -> ChatResult:
+def _control_reply(
+    offered: "list[str]",
+    plan_questions: "list[str]",
+    finish_decision: "dict | None" = None,
+) -> ChatResult:
     """A valid answer to whichever control tool was offered."""
     if "submit_analysis_plan" in offered:
         name = "submit_analysis_plan"
@@ -81,7 +112,10 @@ def _control_reply(offered: "list[str]", plan_questions: "list[str]") -> ChatRes
         }
     else:
         name = "finish_analysis_question"
-        arguments = {"status": "still_open", "answer_summary": "more to do"}
+        arguments = (
+            finish_decision if finish_decision is not None
+            else {"status": "still_open", "answer_summary": "more to do"}
+        )
     return ChatResult(
         content="", model="m", finish_reason="stop",
         tool_calls=[{
@@ -126,17 +160,22 @@ class RecordingBackend:
     """Serves scripted responses and records the analyst line that drove each."""
 
     def __init__(
-        self, *responses: ChatResult, plan_questions: "list[str] | None" = None
+        self,
+        *responses: ChatResult,
+        plan_questions: "list[str] | None" = None,
+        finish_decisions: "list[dict] | None" = None,
     ) -> None:
         self._responses = list(responses)
         self._plan_questions = (
             [f"Repair fixture question {i + 1}" for i in range(6)]
             if plan_questions is None else list(plan_questions)
         )
+        self._finish_decisions = list(finish_decisions or [])
         self.calls = 0
         self.control_calls = 0
         self.instructions: list[str] = []
         self.delivered: list[str] = []
+        self.action_requests: list[list[dict]] = []
 
     def chat_stream(self, messages, *, temperature, max_tokens, tools=None,
                     on_delta, on_progress=None):
@@ -148,12 +187,18 @@ class RecordingBackend:
             # repair fixture would have to interleave control turns and the
             # repair assertions would move for a reason unrelated to repair.
             self.control_calls += 1
-            return _control_reply(offered, self._plan_questions)
+            decision = (
+                self._finish_decisions.pop(0)
+                if "finish_analysis_question" in offered and self._finish_decisions
+                else None
+            )
+            return _control_reply(offered, self._plan_questions, decision)
         if self.calls >= len(self._responses):
             raise AssertionError(
                 f"model invoked {self.calls + 1} times; only {len(self._responses)} scripted"
             )
         users = [m for m in messages if m.get("role") == "user"]
+        self.action_requests.append(deepcopy(messages))
         self.instructions.append(users[-1]["content"] if users else "")
         # The whole user context, not just its last line. Under the
         # structured controller the last line is the per-question guidance,
@@ -167,6 +212,44 @@ class RecordingBackend:
         if response.content:
             on_delta(response.content)
         return response
+
+
+class ExactRecordingBackend(RecordingBackend):
+    """The same scripted model behind Orbit's exact admission interface."""
+
+    thinking = False
+
+    def supports_exact_context_admission(self) -> bool:
+        return True
+
+    def model_info(self):
+        class _Info:
+            context_length = 8192
+        return _Info()
+
+    def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+        return TokenCount(
+            tokens=100,
+            context_tokens=8192,
+            rendered_hash="a" * 64,
+            token_hash="b" * 64,
+        )
+
+
+class RefusingRepairBackend(ExactRecordingBackend):
+    """Only the exact rehydrated repair request exceeds its context."""
+
+    def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+        rehydrated = any(
+            "deterministic_evidence_rehydration:" in str(message.get("content", ""))
+            for message in messages
+        )
+        return TokenCount(
+            tokens=7000 if rehydrated else 100,
+            context_tokens=8192,
+            rendered_hash="a" * 64,
+            token_hash="b" * 64,
+        )
 
 
 class RepairTestBase(unittest.TestCase):
@@ -256,7 +339,12 @@ class GenericContractTests(unittest.TestCase):
     )
 
     def test_the_repair_message_names_no_technique_or_error_class(self) -> None:
-        lowered = AUTONOMOUS_REPAIR_MESSAGE.lower()
+        lowered = "\n".join((
+            AUTONOMOUS_REPAIR_MESSAGE,
+            AUTONOMOUS_REPAIR_CONTEXT.format(
+                evidence_refs="evidence:ev_000000000000_0000000000000000"
+            ),
+        )).lower()
         for term in self.FORBIDDEN:
             with self.subTest(term=term):
                 self.assertNotIn(term, lowered)
@@ -283,6 +371,228 @@ class GenericContractTests(unittest.TestCase):
 
 
 class RepairFlowTests(RepairTestBase):
+    def test_exact_str_bytes_failure_reaches_the_immediate_repair_request(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy the first twenty source characters to scratch."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 1)
+        self.assertGreaterEqual(len(backend.action_requests), 2)
+        repair_request = backend.action_requests[1]
+        rendered = json.dumps(repair_request, ensure_ascii=False)
+        self.assertEqual(rendered.count(AUTONOMOUS_REPAIR_MESSAGE), 1)
+        self.assertIn("encoding=b'utf-8'", rendered)
+        self.assertIn(
+            "open() argument 'encoding' must be str or None, not bytes", rendered
+        )
+        repair_users = [
+            message["content"] for message in repair_request
+            if message.get("role") == "user"
+            and AUTONOMOUS_REPAIR_MESSAGE in message.get("content", "")
+        ]
+        self.assertEqual(len(repair_users), 1)
+        self.assertEqual(repair_users[0].count("evidence:"), 1)
+        self.assertIn("never sandbox paths", repair_users[0])
+        self.assertNotIn("/workspace/evidence", repair_users[0])
+        self.assertIn(
+            "deterministic_evidence_rehydration: exact archived tool output",
+            rendered,
+        )
+        self.assertEqual(rendered.count("exact_content_begin:"), 1)
+        self.assertNotIn('"arguments": "[archived]"', rendered)
+        repair_history = [
+            message for message in runtime.messages
+            if message.get("role") == "user"
+            and AUTONOMOUS_REPAIR_MESSAGE in message.get("content", "")
+        ]
+        self.assertEqual(len(repair_history), 1)
+        self.assertEqual(
+            (runtime.workspace.scratch_root / "copy.txt").read_text(encoding="utf-8"),
+            SOURCE[:20],
+        )
+        self.assertEqual(run.open_questions, ("Q1",))
+
+    def test_truncated_failure_also_requests_its_complete_raw_sidecar(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(TRUNCATED_BROKEN),
+            _tool_call(TRUNCATED_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Exercise the bounded failure fixture."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 1)
+        repair_request = backend.action_requests[1]
+        repair_users = [
+            message["content"] for message in repair_request
+            if message.get("role") == "user"
+            and AUTONOMOUS_REPAIR_MESSAGE in message.get("content", "")
+        ]
+        self.assertEqual(len(repair_users), 1)
+        self.assertEqual(repair_users[0].count("evidence:"), 2)
+        rendered = json.dumps(repair_request, ensure_ascii=False)
+        self.assertEqual(rendered.count("exact_content_begin:"), 2)
+        self.assertIn("bounded fixture failure", rendered)
+
+    def test_missing_truncation_metadata_keeps_the_raw_sidecar(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy source to scratch."],
+        )
+        runtime = self.runtime(backend)
+        first = runtime.step("run fixture")
+        self.assertIsNotNone(first.evidence)
+        legacy = type(first.evidence)(
+            **{
+                **first.evidence.__dict__,
+                "metadata": {
+                    key: value for key, value in first.evidence.metadata.items()
+                    if key != "observation_truncated"
+                },
+            }
+        )
+        message = _action_repair_message(
+            type(first)(**{**first.__dict__, "evidence": legacy})
+        )
+        self.assertEqual(message.count("evidence:"), 2)
+
+    def test_missing_evidence_path_does_not_false_resolve_the_question(self) -> None:
+        backend = RecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(MISSING_EVIDENCE_PATH, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy the first twenty source characters to scratch."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False)
+
+        self.assertEqual(run.repairs, 1)
+        self.assertEqual(run.resolved_questions, ())
+        self.assertIn("Q1", run.open_questions)
+        self.assertEqual(run.steps[1].result.status, "ok")
+        self.assertIn("FileNotFoundError", run.steps[1].result.stdout)
+
+    def test_a_blocked_question_cannot_send_its_repair_to_the_next_question(self) -> None:
+        backend = RecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call("print('Q2 observation')", call_id="call_2"),
+            plan_questions=["Copy source to scratch.", "Identify one observation."],
+            finish_decisions=[
+                {"status": "blocked", "answer_summary": "cannot continue"},
+                {"status": "resolved", "answer_summary": "observed"},
+            ],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 0)
+        self.assertEqual(len(backend.action_requests), 2)
+        second = json.dumps(backend.action_requests[1], ensure_ascii=False)
+        self.assertNotIn(AUTONOMOUS_REPAIR_MESSAGE, second)
+        self.assertIn("Identify one observation.", second)
+        self.assertNotIn("Keep the failed action's investigation objective", second)
+        self.assertIn("Q1", run.open_questions)
+        self.assertIn("Q2", run.resolved_questions)
+
+    def test_an_exhausted_question_cannot_bypass_its_action_limit_with_repair(self) -> None:
+        backend = RecordingBackend(
+            _tool_call("print('partial')"),
+            _tool_call(BYTES_BROKEN, call_id="call_2"),
+            _tool_call("print('Q2 observation')", call_id="call_3"),
+            plan_questions=["Copy source to scratch.", "Identify one observation."],
+            finish_decisions=[
+                {"status": "still_open", "answer_summary": "not yet"},
+                {"status": "still_open", "answer_summary": "not yet"},
+                {"status": "resolved", "answer_summary": "observed"},
+            ],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 0)
+        self.assertEqual(len(backend.action_requests), 3)
+        third = json.dumps(backend.action_requests[2], ensure_ascii=False)
+        self.assertNotIn(AUTONOMOUS_REPAIR_MESSAGE, third)
+        self.assertIn("Identify one observation.", third)
+        self.assertIn("Q1", run.open_questions)
+        self.assertIn("Q2", run.resolved_questions)
+
+    def test_repair_context_admission_failure_stops_before_model_dispatch(self) -> None:
+        backend = RefusingRepairBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            plan_questions=["Copy source to scratch."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(run.repairs, 1)
+        self.assertTrue(run.stop_reason.startswith(STOP_BACKEND_ERROR))
+        self.assertIn("required-context-does-not-fit", run.stop_reason)
+        self.assertFalse((runtime.workspace.scratch_root / "copy.txt").exists())
+        self.assertNotEqual(runtime.messages[-1].get("role"), "user")
+
+    def test_unavailable_exact_failure_record_stops_before_model_dispatch(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(TRUNCATED_BROKEN),
+            _tool_call(TRUNCATED_FIXED, call_id="call_2"),
+            plan_questions=["Exercise the bounded failure fixture."],
+        )
+        runtime = self.runtime(backend)
+        reattest = self.store.reattest_exact
+
+        def missing_raw(evidence_id, *args, **kwargs):
+            record = self.store.records.get(evidence_id)
+            if record is not None and record.metadata.get("kind") == "raw_action_output":
+                return None
+            return reattest(evidence_id, *args, **kwargs)
+
+        self.store.reattest_exact = missing_raw
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(run.actions_executed, 1)
+        self.assertTrue(run.stop_reason.startswith(STOP_BACKEND_ERROR))
+        self.assertIn("evidence-rehydration-unavailable", run.stop_reason)
+        self.assertFalse((runtime.workspace.scratch_root / "copy.txt").exists())
+        self.assertNotEqual(runtime.messages[-1].get("role"), "user")
+
+    def test_complete_failure_does_not_require_its_duplicate_raw_sidecar(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            _prose("done"),
+            plan_questions=["Copy source to scratch."],
+        )
+        runtime = self.runtime(backend)
+        reattest = self.store.reattest_exact
+
+        def missing_raw(evidence_id, *args, **kwargs):
+            record = self.store.records.get(evidence_id)
+            if record is not None and record.metadata.get("kind") == "raw_action_output":
+                return None
+            return reattest(evidence_id, *args, **kwargs)
+
+        self.store.reattest_exact = missing_raw
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 1)
+        self.assertGreaterEqual(backend.calls, 2)
+        self.assertEqual(
+            (runtime.workspace.scratch_root / "copy.txt").read_text(encoding="utf-8"),
+            SOURCE[:20],
+        )
+
     def test_failure_then_repair_then_success(self) -> None:
         backend = RecordingBackend(
             _tool_call(BROKEN), _tool_call(FIXED, call_id="call_2"), _prose("decoded")
@@ -317,13 +627,18 @@ class RepairFlowTests(RepairTestBase):
         runtime = self.runtime(backend)
         runtime.run_autonomous("analyse", finalize=False)
 
-        history = "\n".join(
-            str(m.get("content", "")) for m in runtime.messages
-        ) + json.dumps([
-            m.get("tool_calls") for m in runtime.messages if m.get("tool_calls")
-        ])
-        self.assertIn("chr(t ^ 7)", history, "the submitted code is preserved")
-        self.assertIn("TypeError", history, "the traceback is preserved")
+        immediate_repair = json.dumps(
+            backend.action_requests[1], ensure_ascii=False
+        )
+        self.assertIn(
+            "chr(t ^ 7)", immediate_repair, "the submitted code is preserved"
+        )
+        self.assertIn(
+            "unsupported operand type(s) for ^: 'str' and 'int'",
+            immediate_repair,
+            "the traceback is preserved",
+        )
+        self.assertEqual(immediate_repair.count(AUTONOMOUS_REPAIR_MESSAGE), 1)
 
     def test_the_correction_adds_state_and_the_offer_does_not_depend_on_ERROR(self) -> None:
         """A raised program still writes its traceback, so the ledger calls it
