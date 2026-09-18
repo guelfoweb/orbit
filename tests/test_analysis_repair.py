@@ -28,6 +28,7 @@ from orbit.runtime.analysis_runtime import (
     AUTONOMOUS_REPLAN_MESSAGE,
     MAX_AUTONOMOUS_ACTIONS,
     MAX_AUTONOMOUS_MODEL_CALLS,
+    STOP_BACKEND_ERROR,
     AnalysisRuntime,
     _is_locally_repairable,
     acquire_analysis_source,
@@ -89,7 +90,11 @@ def _prose(text: str) -> ChatResult:
     )
 
 
-def _control_reply(offered: "list[str]", plan_questions: "list[str]") -> ChatResult:
+def _control_reply(
+    offered: "list[str]",
+    plan_questions: "list[str]",
+    finish_decision: "dict | None" = None,
+) -> ChatResult:
     """A valid answer to whichever control tool was offered."""
     if "submit_analysis_plan" in offered:
         name = "submit_analysis_plan"
@@ -101,7 +106,10 @@ def _control_reply(offered: "list[str]", plan_questions: "list[str]") -> ChatRes
         }
     else:
         name = "finish_analysis_question"
-        arguments = {"status": "still_open", "answer_summary": "more to do"}
+        arguments = (
+            finish_decision if finish_decision is not None
+            else {"status": "still_open", "answer_summary": "more to do"}
+        )
     return ChatResult(
         content="", model="m", finish_reason="stop",
         tool_calls=[{
@@ -146,13 +154,17 @@ class RecordingBackend:
     """Serves scripted responses and records the analyst line that drove each."""
 
     def __init__(
-        self, *responses: ChatResult, plan_questions: "list[str] | None" = None
+        self,
+        *responses: ChatResult,
+        plan_questions: "list[str] | None" = None,
+        finish_decisions: "list[dict] | None" = None,
     ) -> None:
         self._responses = list(responses)
         self._plan_questions = (
             [f"Repair fixture question {i + 1}" for i in range(6)]
             if plan_questions is None else list(plan_questions)
         )
+        self._finish_decisions = list(finish_decisions or [])
         self.calls = 0
         self.control_calls = 0
         self.instructions: list[str] = []
@@ -169,7 +181,12 @@ class RecordingBackend:
             # repair fixture would have to interleave control turns and the
             # repair assertions would move for a reason unrelated to repair.
             self.control_calls += 1
-            return _control_reply(offered, self._plan_questions)
+            decision = (
+                self._finish_decisions.pop(0)
+                if "finish_analysis_question" in offered and self._finish_decisions
+                else None
+            )
+            return _control_reply(offered, self._plan_questions, decision)
         if self.calls >= len(self._responses):
             raise AssertionError(
                 f"model invoked {self.calls + 1} times; only {len(self._responses)} scripted"
@@ -207,6 +224,22 @@ class ExactRecordingBackend(RecordingBackend):
     def count_chat_tokens(self, messages, *, tools=None, thinking=False):
         return TokenCount(
             tokens=100,
+            context_tokens=8192,
+            rendered_hash="a" * 64,
+            token_hash="b" * 64,
+        )
+
+
+class RefusingRepairBackend(ExactRecordingBackend):
+    """Only the exact rehydrated repair request exceeds its context."""
+
+    def count_chat_tokens(self, messages, *, tools=None, thinking=False):
+        rehydrated = any(
+            "deterministic_evidence_rehydration:" in str(message.get("content", ""))
+            for message in messages
+        )
+        return TokenCount(
+            tokens=7000 if rehydrated else 100,
             context_tokens=8192,
             rendered_hash="a" * 64,
             token_hash="b" * 64,
@@ -393,6 +426,93 @@ class RepairFlowTests(RepairTestBase):
         self.assertIn("Q1", run.open_questions)
         self.assertEqual(run.steps[1].result.status, "ok")
         self.assertIn("FileNotFoundError", run.steps[1].result.stdout)
+
+    def test_a_blocked_question_cannot_send_its_repair_to_the_next_question(self) -> None:
+        backend = RecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call("print('Q2 observation')", call_id="call_2"),
+            plan_questions=["Copy source to scratch.", "Identify one observation."],
+            finish_decisions=[
+                {"status": "blocked", "answer_summary": "cannot continue"},
+                {"status": "resolved", "answer_summary": "observed"},
+            ],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 0)
+        self.assertEqual(len(backend.action_requests), 2)
+        second = json.dumps(backend.action_requests[1], ensure_ascii=False)
+        self.assertNotIn(AUTONOMOUS_REPAIR_MESSAGE, second)
+        self.assertIn("Identify one observation.", second)
+        self.assertNotIn("Keep the failed action's investigation objective", second)
+        self.assertIn("Q1", run.open_questions)
+        self.assertIn("Q2", run.resolved_questions)
+
+    def test_an_exhausted_question_cannot_bypass_its_action_limit_with_repair(self) -> None:
+        backend = RecordingBackend(
+            _tool_call("print('partial')"),
+            _tool_call(BYTES_BROKEN, call_id="call_2"),
+            _tool_call("print('Q2 observation')", call_id="call_3"),
+            plan_questions=["Copy source to scratch.", "Identify one observation."],
+            finish_decisions=[
+                {"status": "still_open", "answer_summary": "not yet"},
+                {"status": "still_open", "answer_summary": "not yet"},
+                {"status": "resolved", "answer_summary": "observed"},
+            ],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(run.repairs, 0)
+        self.assertEqual(len(backend.action_requests), 3)
+        third = json.dumps(backend.action_requests[2], ensure_ascii=False)
+        self.assertNotIn(AUTONOMOUS_REPAIR_MESSAGE, third)
+        self.assertIn("Identify one observation.", third)
+        self.assertIn("Q1", run.open_questions)
+        self.assertIn("Q2", run.resolved_questions)
+
+    def test_repair_context_admission_failure_stops_before_model_dispatch(self) -> None:
+        backend = RefusingRepairBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            plan_questions=["Copy source to scratch."],
+        )
+        runtime = self.runtime(backend)
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(run.actions_executed, 1)
+        self.assertEqual(run.repairs, 1)
+        self.assertTrue(run.stop_reason.startswith(STOP_BACKEND_ERROR))
+        self.assertIn("required-context-does-not-fit", run.stop_reason)
+        self.assertFalse((runtime.workspace.scratch_root / "copy.txt").exists())
+        self.assertNotEqual(runtime.messages[-1].get("role"), "user")
+
+    def test_unavailable_exact_failure_record_stops_before_model_dispatch(self) -> None:
+        backend = ExactRecordingBackend(
+            _tool_call(BYTES_BROKEN),
+            _tool_call(BYTES_FIXED, call_id="call_2"),
+            plan_questions=["Copy source to scratch."],
+        )
+        runtime = self.runtime(backend)
+        reattest = self.store.reattest_exact
+
+        def missing_raw(evidence_id, *args, **kwargs):
+            record = self.store.records.get(evidence_id)
+            if record is not None and record.metadata.get("kind") == "raw_action_output":
+                return None
+            return reattest(evidence_id, *args, **kwargs)
+
+        self.store.reattest_exact = missing_raw
+        run = runtime.run_autonomous("analyse", finalize=False, cover=False)
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(run.actions_executed, 1)
+        self.assertTrue(run.stop_reason.startswith(STOP_BACKEND_ERROR))
+        self.assertIn("evidence-rehydration-unavailable", run.stop_reason)
+        self.assertFalse((runtime.workspace.scratch_root / "copy.txt").exists())
+        self.assertNotEqual(runtime.messages[-1].get("role"), "user")
 
     def test_failure_then_repair_then_success(self) -> None:
         backend = RecordingBackend(

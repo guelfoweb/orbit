@@ -2955,6 +2955,18 @@ def _is_locally_repairable(step: "AnalysisStepResult") -> bool:
     )
 
 
+def _question_still_owns_repair(
+    controller: "AnalysisController | None", question: "Question | None"
+) -> bool:
+    """Whether another action may still belong to the failed action's owner."""
+    if controller is None:
+        return True
+    if question is None or controller.active != question.id:
+        return False
+    state = controller.states.get(question.id)
+    return state is not None and state.status == OPEN and controller.may_act()
+
+
 def _raw_action_output(result: AnalysisResult) -> str:
     """The complete output of one action, for durable retention.
 
@@ -6329,8 +6341,13 @@ class AnalysisRuntime:
                 # Every other refusal still ends the run, including a second
                 # one on the plain line -- retrying that would spend the
                 # ceiling on a request already known not to fit.
+                # A repair is also never withdrawn: its evidence references
+                # own the failed program and exact traceback. Dispatching
+                # without them would turn a refused repair into an unrelated
+                # action while still charging it to the failed question.
                 if (
                     isinstance(exc, ContextAdmissionError)
+                    and not repairing
                     and message is not analyst_message
                 ):
                     # Bounded by identity, not by a counter: the retry sets
@@ -6611,7 +6628,11 @@ class AnalysisRuntime:
             # every path -- a step that is not an eligible failure must not
             # inherit an offer armed earlier.
             was_repairing, repairing = repairing, False
-            repair_pending = _is_locally_repairable(step) and not was_repairing
+            repair_pending = (
+                _is_locally_repairable(step)
+                and not was_repairing
+                and _question_still_owns_repair(controller, active)
+            )
 
             if record.classification == ERROR:
                 consecutive_errors += 1
