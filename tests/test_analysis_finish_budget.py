@@ -117,7 +117,7 @@ class FinishBudgetTests(_Case):
         self.assertEqual(rt.control_repairs, 1)
 
     def test_complete_control_is_accepted_but_incomplete_control_never_applied(self):
-        for reason in ['tool_calls', 'stop', 'eos', 'length', 'empty_response', None]:
+        for reason in ['tool_calls', 'stop', 'eos', 'length', None]:
             with self.subTest(reason=reason):
                 rt = self.setup_finish(1000)
                 c = AnalysisController();c.adopt_plan([_question('Original broad question')]);q=c.activate_next()
@@ -296,25 +296,88 @@ class FinishBudgetTests(_Case):
         self.assertEqual(rt.messages, history)
 
     def test_cutoff_keeps_prior_open_answer_and_citations(self):
+        for reason in ('length', 'empty_response'):
+            with self.subTest(reason=reason):
+                rt = self._runtime(_Model(plan=[_question('Original broad question')]))
+                run = self._run(rt, cover=False)
+                eid = run.last_step.evidence.evidence_id
+                c = AnalysisController()
+                c.adopt_plan([_question('Original broad question')])
+                q = c.activate_next()
+                rt._apply_decision(c, parse_finish_call({
+                    'status': 'still_open', 'answer_summary': 'Established partial observation; wider question remains open.',
+                    'evidence_ids': [eid],
+                }), eid)
+                prior = copy.deepcopy(c.states[q.id])
+                self.assertEqual(prior.status, 'open')
+                self.assertEqual(prior.evidence_ids, (eid,))
+                rt.backend = ExactFinishBackend(1000)
+                original = rt.backend.chat_stream
+                with mock.patch.object(rt.backend, 'chat_stream', side_effect=lambda *a, **kw: replace(original(*a, **kw), finish_reason=reason)):
+                    rt.finish_question(c, q, 'Later bounded observation', eid, max_calls=2)
+                state = c.states[q.id]
+                self.assertEqual(state.status, 'blocked')
+                self.assertEqual(state.summary, prior.summary)
+                self.assertEqual(state.evidence_ids, prior.evidence_ids)
+                self.assertEqual(len(c.questions), 1)
+
+    def test_empty_control_uses_existing_repair_and_recounts_its_cap(self):
+        # Native Qwen: 38 generated tokens ended at EOG, but the unavailable
+        # read_artifact tool was correctly rejected; the response was empty.
         rt = self._runtime(_Model(plan=[_question('Original broad question')]))
         run = self._run(rt, cover=False)
         eid = run.last_step.evidence.evidence_id
-        c = AnalysisController()
-        c.adopt_plan([_question('Original broad question')])
-        q = c.activate_next()
-        rt._apply_decision(c, parse_finish_call({
-            'status': 'still_open', 'answer_summary': 'Established partial observation; wider question remains open.',
-            'evidence_ids': [eid],
-        }), eid)
-        prior = copy.deepcopy(c.states[q.id])
-        self.assertEqual(prior.status, 'open')
-        self.assertEqual(prior.evidence_ids, (eid,))
-        rt.backend = ExactFinishBackend(1000)
+        rt.backend = ExactFinishBackend(lambda ms: 2070 if any('That could not be used' in str(m.get('content')) for m in ms) else 2022)
+        c = AnalysisController();c.adopt_plan([_question('Original broad question')]);q=c.activate_next()
         original = rt.backend.chat_stream
-        with mock.patch.object(rt.backend, 'chat_stream', side_effect=lambda *a, **kw: replace(original(*a, **kw), finish_reason='length')):
-            rt.finish_question(c, q, 'Later bounded observation', eid, max_calls=2)
-        state = c.states[q.id]
-        self.assertEqual(state.status, 'blocked')
-        self.assertEqual(state.summary, prior.summary)
-        self.assertEqual(state.evidence_ids, prior.evidence_ids)
-        self.assertEqual(len(c.questions), 1)
+        caps = []
+        def generate(messages, **kw):
+            caps.append(kw['max_tokens'])
+            response = original(messages, **kw)
+            if len(caps) == 1:
+                return replace(response, content='', tool_calls=[], finish_reason='empty_response', completion_tokens=38)
+            return response
+        with mock.patch.object(rt.backend, 'chat_stream', side_effect=generate):
+            calls = rt.finish_question(c, q, 'Bounded observation', eid, max_calls=2)
+        self.assertEqual(calls, 2)
+        self.assertEqual(caps, [1818, 1770])
+        self.assertEqual(c.repairs, 1)
+        self.assertEqual(c.states[q.id].status, 'answered_unverified')
+        self.assertEqual(c.states[q.id].evidence_ids, (eid,))
+        self.assertEqual(c.questions[q.id].question, 'Original broad question')
+
+    def test_empty_response_label_cannot_authorize_attached_control(self):
+        rt = self.setup_finish(1000)
+        c=AnalysisController();c.adopt_plan([_question('Original question')]);q=c.activate_next()
+        original = rt.backend.chat_stream
+        with mock.patch.object(rt.backend, 'chat_stream', side_effect=lambda *a, **kw: replace(original(*a, **kw), finish_reason='empty_response')), mock.patch.object(rt, '_apply_decision') as apply:
+            calls = rt.finish_question(c, q, 'Observation', 'ev', max_calls=2)
+        apply.assert_not_called()
+        self.assertEqual(calls, 2)
+        self.assertEqual(c.states[q.id].status, 'blocked')
+
+    def test_empty_after_internal_repair_cannot_get_a_third_dispatch(self):
+        rt=self.setup_finish(1000)
+        c=AnalysisController();c.adopt_plan([_question('Original question')]);q=c.activate_next()
+        original=rt.backend.chat_stream
+        seen=[]
+        def generate(*a, **kw):
+            seen.append(kw['max_tokens'])
+            if len(seen)==1:
+                raise LlamaServerToolCallParseError('malformed first control')
+            return replace(original(*a, **kw), tool_calls=[], finish_reason='empty_response')
+        with mock.patch.object(rt.backend,'chat_stream',side_effect=generate):
+            calls=rt.finish_question(c,q,'Observation','ev',max_calls=2)
+        self.assertEqual(calls,2)
+        self.assertEqual(len(seen),2)
+        self.assertEqual(c.states[q.id].status,'blocked')
+
+    def test_empty_response_cannot_repair_without_a_remaining_call(self):
+        rt=self.setup_finish(1000)
+        c=AnalysisController();c.adopt_plan([_question('Original question')]);q=c.activate_next()
+        original=rt.backend.chat_stream
+        with mock.patch.object(rt.backend,'chat_stream',side_effect=lambda *a,**kw: replace(original(*a,**kw),tool_calls=[],finish_reason='empty_response')):
+            calls=rt.finish_question(c,q,'Observation','ev',max_calls=1)
+        self.assertEqual(calls,1)
+        self.assertEqual(c.repairs,0)
+        self.assertEqual(c.states[q.id].status,'blocked')
