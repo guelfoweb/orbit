@@ -165,7 +165,8 @@ class ReportVisibilityTestBase(unittest.TestCase):
         analysis.evidence_store.add(
             "execute_analysis", "an action finding",
             metadata={"tool_call_id": "c1", "user_turn_id": "t1",
-                      "produced_by_phase": "analysis_action"},
+                      "produced_by_phase": "analysis_action",
+                      "analysis_source_sha256": analysis.source.sha256},
         )
 
 
@@ -192,8 +193,8 @@ class StreamedPathTests(ReportVisibilityTestBase):
         output = self._render(analysis)
 
         self.assertLess(
-            output.index(PROSE), output.index(HEADING),
-            "deterministic evidence is rendered after the reasoning about it",
+            output.index(HEADING), output.index(PROSE),
+            "runtime facts precede optional unverified narrative",
         )
 
     def test_the_whole_report_text_is_not_printed_again(self) -> None:
@@ -266,7 +267,7 @@ class ZeroModelCallPathTests(ReportVisibilityTestBase):
         analysis = self._analysis("var x = 1;\n")
         output = self._render(analysis)
 
-        self.assertIn(NO_EVIDENCE_REPORT, output)
+        self.assertIn("No evidence records were retained.", output)
 
     def test_the_deterministic_notice_accompanies_the_appendix(self) -> None:
         """When an artifact DECODES but produced no action findings, the closing
@@ -284,7 +285,7 @@ class ZeroModelCallPathTests(ReportVisibilityTestBase):
 
         # The deterministic decode IS evidence: the "no evidence" notice is gone.
         self.assertNotIn(NO_EVIDENCE_REPORT, output)
-        self.assertIn(DETERMINISTIC_ONLY_REPORT.split("{", 1)[0], output)
+        self.assertIn("Runtime-attested facts", output)
         self.assertEqual(output.count(HEADING), 1)
         self.assertIn("NOTICE-AND-STAGE", output)
 
@@ -304,7 +305,7 @@ class ZeroModelCallPathTests(ReportVisibilityTestBase):
         analysis._admit = _refuse
         output = self._render(analysis)
 
-        self.assertIn("could not be composed", output)
+        self.assertIn("admission_refused", output)
         self.assertIn("REFUSAL-TEXT", output)
 
     def test_a_refused_report_still_shows_the_appendix_once(self) -> None:
@@ -739,6 +740,7 @@ class ReportDossierAdmissionTests(unittest.TestCase):
                 metadata={
                     "tool_call_id": f"call_{index}", "user_turn_id": "turn_0",
                     "status": "ok", "produced_by_phase": "analysis_step",
+                    "analysis_source_sha256": __import__("hashlib").sha256(self.SOURCE.encode()).hexdigest(),
                 },
             )
 

@@ -916,8 +916,8 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
         report = runtime.report("what is it")
 
         self.assertTrue(
-            report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE),
-            "the rejection must lead the report, not trail it",
+            report.text.index(UNSUPPORTED_INDICATOR_NOTICE) < report.text.index("## Confirmed findings"),
+            "the warning must precede the unverified narrative",
         )
         # The model's own words are still quoted, because repudiating a claim
         # requires showing it.
@@ -975,7 +975,7 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
         report = runtime.report("what is it")
 
         body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1].lstrip("\n")
-        body = body.split("\n\n## Verified indicators")[0]
+        body = body.rsplit("\n```\n\n## Limits and unknowns", 1)[0]
         self.assertEqual(body.replace(UNSUPPORTED_INLINE_MARK, ""), narrative)
         # And the untouched original is kept for audit.
         self.assertEqual(report.model_text, narrative)
@@ -1023,7 +1023,7 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
         ))
         report = runtime.report("what is it")
 
-        body = report.text.split("## Verified indicators")[0]
+        body = report.text.split("## Optional model narrative", 1)[1]
         self.assertIn(self.DECODED_URL, body)
         self.assertNotIn(token, body, "the token must not survive into the report")
         # Nothing is flagged: a resolved reference is a recovered value.
@@ -1128,7 +1128,7 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
 
         report = runtime.report("what is it")
 
-        self.assertTrue(report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE))
+        self.assertTrue(report.text.index(UNSUPPORTED_INDICATOR_NOTICE) < report.text.index("## Confirmed findings"))
         self.assertIn(wrong + UNSUPPORTED_INLINE_MARK, report.text)
 
     def test_a_fabricated_query_on_a_real_host_is_flagged(self) -> None:
@@ -1186,7 +1186,7 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
 
         report = runtime.report("what is it")
 
-        self.assertTrue(report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE))
+        self.assertTrue(report.text.index(UNSUPPORTED_INDICATOR_NOTICE) < report.text.index("## Confirmed findings"))
         notice = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[0]
         self.assertIn(wrong, notice)
 
@@ -1198,9 +1198,11 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
         removing any of its three layers passed the suite.
         """
         runtime = self._runtime(backend)
-        runtime.messages.append(
-            {"role": "user", "content": "artifact", "source_covered": True}
-        )
+        from orbit.runtime.analysis_runtime import _cover_message, SourceCoverage, COVERAGE_COMPLETE
+        coverage = SourceCoverage(runtime._snapshot_text(), COVERAGE_COMPLETE,
+                                  runtime.source.sha256, runtime.source.size_bytes)
+        runtime.messages.append({"role": "user", "source_covered": True,
+                                 "content": _cover_message(coverage, runtime.source, runtime._cover_preamble())})
         runtime.messages.append({"role": "assistant", "content": "seen"})
         self.assertTrue(runtime.source_covered)
         self.assertEqual(runtime._reportable_records(), [])
@@ -1442,7 +1444,7 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
 
         report = runtime.report("what is it")
 
-        self.assertTrue(report.text.startswith(UNSUPPORTED_INDICATOR_NOTICE))
+        self.assertTrue(report.text.index(UNSUPPORTED_INDICATOR_NOTICE) < report.text.index("## Confirmed findings"))
         notice = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[0]
         self.assertIn(wrong, notice)  # kept in the error record
         body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]

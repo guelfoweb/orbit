@@ -163,7 +163,7 @@ class SilentTerminationTests(_Case):
         with self._no_action():
             run = runtime.run_autonomous("Analyse it.", finalize=True)
         opening = SOURCE_TOO_LARGE_REPORT.split("{", 1)[0].rstrip()
-        self.assertTrue(run.final_report.text.lstrip().startswith(opening))
+        self.assertIn(opening, run.final_report.text)
         # The artifact metadata is present and exact.
         self.assertIn(str(len(OVERSIZED)), run.final_report.text)
         self.assertIn(runtime.source.sha256, run.final_report.text)
@@ -199,7 +199,7 @@ class SilentTerminationTests(_Case):
         self.assertIsNotNone(run.final_report)
         # Covered run is NOT an oversized block.
         opening = SOURCE_TOO_LARGE_REPORT.split("{", 1)[0].rstrip()
-        self.assertFalse(run.final_report.text.lstrip().startswith(opening))
+        self.assertNotIn(opening, run.final_report.text)
 
     def test_a6_non_empty_plan_path_unchanged(self) -> None:
         """A6: a run that adopts a question and acts still reports normally."""
@@ -208,22 +208,23 @@ class SilentTerminationTests(_Case):
 
         def one_finding(**_kwargs):
             return AnalysisResult(status="ok", code_sha256="c" * 64,
-                                  input_sha256="i" * 64, stdout="FINDING",
+                                  input_sha256=runtime.source.sha256, stdout="FINDING",
                                   stderr="", exit_status=0, duration_seconds=0.1)
         with mock.patch.object(module, "execute_analysis", one_finding):
             run = runtime.run_autonomous("Analyse it.", finalize=True)
         self.assertGreaterEqual(run.actions_executed, 1)
-        self.assertIsNotNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
 
-    def test_a7_cancellation_still_synthesises_no_report(self) -> None:
-        """A7: a cancelled run produces no closing report."""
+    def test_a7_cancellation_keeps_a_document_without_narrative(self) -> None:
+        """A7: cancellation preserves its record without another model call."""
         class _Cancel(_ScriptedModel):
             def reply(self, tools):
                 raise KeyboardInterrupt
         runtime = self._runtime(_Cancel(plan=[]), OVERSIZED)
         run = runtime.run_autonomous("Analyse it.", finalize=True)
         self.assertTrue(run.cancelled)
-        self.assertIsNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
+        self.assertEqual(run.final_report.model_calls, 0)
         self.assertEqual(run.stop_reason, STOP_CANCELLED)
 
     def test_a8_backend_failure_is_not_labelled_source_too_large(self) -> None:
@@ -238,8 +239,7 @@ class SilentTerminationTests(_Case):
         # evidence; the closing result, if any, must not claim oversize.
         if run.final_report is not None:
             opening = SOURCE_TOO_LARGE_REPORT.split("{", 1)[0].rstrip()
-            self.assertFalse(
-                run.final_report.text.lstrip().startswith(opening))
+            self.assertNotIn(opening, run.final_report.text)
 
     def test_a9_not_eligible_source_is_not_called_oversized(self) -> None:
         """A9 (honesty boundary): a binary / non-UTF-8 artifact that cannot be
@@ -255,9 +255,8 @@ class SilentTerminationTests(_Case):
         self.assertFalse(run.source_covered)
         self.assertIsNotNone(run.final_report)
         opening = SOURCE_TOO_LARGE_REPORT.split("{", 1)[0].rstrip()
-        self.assertFalse(run.final_report.text.lstrip().startswith(opening))
-        self.assertTrue(
-            run.final_report.text.lstrip().startswith(NO_EVIDENCE_REPORT))
+        self.assertNotIn(opening, run.final_report.text)
+        self.assertIn(NO_EVIDENCE_REPORT, run.final_report.text)
 
     def test_a9b_non_attesting_backend_is_not_called_oversized(self) -> None:
         """A9 (honesty boundary): a backend that cannot attest exact tokens
@@ -275,7 +274,7 @@ class SilentTerminationTests(_Case):
         self.assertFalse(run.source_covered)
         self.assertIsNotNone(run.final_report)
         opening = SOURCE_TOO_LARGE_REPORT.split("{", 1)[0].rstrip()
-        self.assertFalse(run.final_report.text.lstrip().startswith(opening))
+        self.assertNotIn(opening, run.final_report.text)
 
     def test_a10_report_text_contract_valid(self) -> None:
         """A10: the closing result is a well-formed AnalysisReport."""

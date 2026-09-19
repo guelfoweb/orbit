@@ -357,10 +357,9 @@ class PreflightIntegrationTests(unittest.TestCase):
         # backend=None is safe: this path returns deterministically, no model call
         report = rt.report("What does this do?")
         self.assertEqual(report.model_calls, 0)
-        self.assertFalse(report.text.lstrip().startswith(NO_EVIDENCE_REPORT))
-        self.assertTrue(
-            report.text.startswith(OFFICE_ONLY_REPORT.split("{", 1)[0][:40])
-        )
+        self.assertNotIn(NO_EVIDENCE_REPORT, report.text)
+        self.assertTrue(report.document_complete)
+        self.assertIn("## Runtime-attested facts", report.text)
         # ...and the macro source is present in the same report.
         self.assertIn("Extracted VBA modules", report.text)
         self.assertIn(WITNESS_MODULE, report.text)

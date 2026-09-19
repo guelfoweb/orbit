@@ -39,3 +39,31 @@ legacy `resolved` events as unverified legacy answers.
 This separation alone does not validate arbitrary model narrative or guarantee
 report generation. It does not import an objective catalogue or infer evidence
 obligations from question text.
+
+
+## The runtime document and optional narrative
+
+`report.text` is canonical Markdown shared by the terminal, API and saved
+session. It contains the original questions and proposed answers, stop reason,
+source identity and coverage, re-attested deterministic results, observations,
+raw action records, provenance and committed non-system history. These remain
+available after the temporary workspace closes; artifact handles themselves
+have session lifetime and are not durable download links.
+
+`document_complete=true` means the retained mandatory records passed their
+identity and re-attestation checks at composition. It does not mean every
+question was verified, or that the sample's complete behaviour is known.
+Missing, withdrawn or incompatible evidence is named and makes the document
+incomplete. Historical prose-only reports have unknown completeness (`null`).
+
+The existing single report generation is optional. Admission refusal, empty,
+truncated, cancelled or failed narrative leaves the runtime document available.
+Only a stopped complete narrative is published, explicitly unverified. Raw
+incomplete output remains in `model_text` for diagnostics. `evidence_ids`
+names the document's retained evidence; `narrative_evidence_ids` identifies the
+bounded selection actually sent to the optional model call. They are distinct.
+
+Saved sessions retain documents outside CHAT messages. Saving later CHAT turns
+preserves this archive; unreadable existing archives are not overwritten.
+The live recorder's RC=0 gates document completeness and investigation
+lifecycle, not truth of free-form model conclusions.

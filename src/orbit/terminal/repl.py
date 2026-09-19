@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Callable
 
 from orbit.backend.base import ChatResult, StreamPromptMetrics
@@ -527,23 +527,8 @@ class Repl:
                 # text, which is the only thing that may be rendered as
                 # Markdown. `render_report` sanitises before it styles.
                 print(render_report(run.final_report.text), flush=True)
-            elif run.final_report is not None:
-                # The prose streamed, so `final_report.text` would repeat it --
-                # but the deterministic appendix is attached after the stream
-                # finishes and so has never been shown. Same omission the
-                # `/report` path had, on the path that produces the most
-                # evidence: without this, a run that decodes an address
-                # computes it, attests it, and never tells anyone. Sanitized
-                # for the same reason as the branch above: this print does not
-                # pass the renderer, and the content is decoded artifact bytes.
-                appendix = self.analysis.deterministic_sections()
-                if appendix:
-                    print("\n")
-                    # `render_report` sanitises before it styles, so this is
-                    # the same protection the plain print had, with the
-                    # Markdown structure shown instead of spelled. Off a
-                    # terminal it returns the sanitised text unchanged.
-                    print(render_report(appendix), flush=True)
+            if run.final_report is not None:
+                self._save_session(analysis_report=asdict(run.final_report))
             replans = f" | replans: {run.replans}" if run.replans else ""
             summary = (
                 f"analysis | mode: ANALYSIS | model calls: {run.model_calls} | "
@@ -1009,29 +994,9 @@ class Repl:
             print(runtime_error_text(exc), file=sys.stderr)
             return
         renderer.finish()
-        if report.model_calls == 0:
-            # Nothing was streamed, so this branch carries the whole report --
-            # NO_EVIDENCE_REPORT, a refusal notice, or either of those with the
-            # deterministic appendix already attached by `report()`. Sanitized
-            # because it is a print that never passed the renderer's boundary.
+        if not renderer.rendered_visible_text:
             print(render_report(report.text), flush=True)
-        else:
-            # The model's prose reached the terminal through `on_delta` as it
-            # was generated. The appendix did not: `report()` attaches it to
-            # `report.text` after the stream has finished, so printing only
-            # what was streamed drops it silently -- and it is the half of the
-            # report that does not depend on the model having mentioned
-            # anything. Printing `report.text` here instead would repeat the
-            # prose the analyst has already watched arrive, so only the part
-            # that was never shown is printed.
-            appendix = self.analysis.deterministic_sections()
-            if appendix:
-                # Two breaks, not one: streamed deltas leave the cursor
-                # mid-line, so a single newline only closes it and the heading
-                # would butt against the prose. `report.text` joins the two
-                # halves with a blank line, and the terminal should match.
-                print("\n")
-                print(render_report(appendix), flush=True)
+        self._save_session(analysis_report=asdict(report))
         elapsed = time.monotonic() - started
         summary = (
             f"report | mode: ANALYSIS | model calls: {report.model_calls} | "
@@ -1088,16 +1053,22 @@ class Repl:
             return
         self._ask_continue()
 
-    def _save_session(self) -> None:
+    def _save_session(self, *, analysis_report: dict | None = None) -> None:
         if not self.session:
             return
-        self.session.save(
-            messages=self.runtime.persistent_messages(),
-            workdir=self.config.workdir,
-            model=self.backend.display_model_name() or "unknown",
-            base_url=self.config.base_url,
-            workflow_mode=str(self.workflow_mode),
-        )
+        try:
+            self.session.save(
+                messages=self.runtime.persistent_messages(),
+                workdir=self.config.workdir,
+                model=self.backend.display_model_name() or "unknown",
+                base_url=self.config.base_url,
+                workflow_mode=str(self.workflow_mode),
+                analysis_report=analysis_report,
+            )
+        except (OSError, ValueError) as exc:
+            # Preserve the live session and its report when the archive cannot
+            # be safely updated. SessionStore leaves the existing file intact.
+            print(f"error: session was not saved: {exc}", file=sys.stderr)
 
     def _save_history(self) -> None:
         if self.history:
