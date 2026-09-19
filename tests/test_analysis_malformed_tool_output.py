@@ -435,15 +435,29 @@ class InternalFailuresStillPropagateTest(MalformedToolOutputTestBase):
         with self.assertRaises(RuntimeError):
             runtime.step("go")
 
-    def test_step_does_not_wrap_the_model_call_in_a_try(self) -> None:
-        source = (SRC / "orbit" / "runtime" / "analysis_runtime.py").read_text(encoding="utf-8")
-        # Anchored on the definition line only: the signature gained keyword
-        # progress callbacks, and pinning the whole parameter list would make
-        # this guard fail for a reason that has nothing to do with guarding.
-        start = source.index("    def step(")
-        head = source[start : source.index("self.model_calls += 1", start)]
+    def test_owned_turn_cleanup_reraises_internal_errors_unchanged(self) -> None:
+        from unittest import mock
 
-        self.assertNotIn("try:", head, "the model call must not be broadly guarded")
+        # STEP may use try/re-raise to roll back its own transient turn. The
+        # contract is propagation, not absence of that syntax: neither an
+        # admission bug nor a backend bug may become a model refusal/retry.
+        for site, spent in (("_admit", 0), ("chat_stream", 1)):
+            with self.subTest(site=site):
+                runtime, backend = self.runtime([("x", [])])
+                runtime.messages.append({"role": "user", "content": "Committed preamble"})
+                history = list(runtime.messages)
+                error = RuntimeError("internal defect")
+                owner = runtime if site == "_admit" else backend
+                with mock.patch.object(owner, site, side_effect=error) as failing:
+                    with self.assertRaises(RuntimeError) as caught:
+                        runtime.step("go")
+                self.assertIs(caught.exception, error)
+                failing.assert_called_once()
+                self.assertEqual(runtime.messages, history)
+                self.assertEqual(runtime.analyst_turns, 0)
+                self.assertEqual(runtime.model_calls, spent)
+                self.assertEqual(runtime.actions_executed, 0)
+                self.assertFalse(runtime.evidence_store.records)
 
     def test_structural_rejection_only_inspects_parsed_output(self) -> None:
         source = (SRC / "orbit" / "runtime" / "analysis_runtime.py").read_text(encoding="utf-8")
