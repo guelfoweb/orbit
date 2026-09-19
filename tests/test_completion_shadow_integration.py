@@ -548,7 +548,7 @@ class ShadowCancellationTests(AutonomousTestBase):
         )
         self.assertEqual(cancelled.answered_unverified_questions, ())
 
-    def test_a_cancellation_leaves_no_report(self) -> None:
+    def test_a_cancellation_retains_a_report_without_more_generation(self) -> None:
         """Consistent with every other cancellation path in the runtime."""
         import os
 
@@ -563,7 +563,8 @@ class ShadowCancellationTests(AutonomousTestBase):
              ):
             run = runtime.run_autonomous("go", finalize=True)
         self.assertTrue(run.cancelled)
-        self.assertIsNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
+        self.assertEqual(run.final_report.model_calls, 0)
 
     def test_system_exit_is_not_turned_into_shadow_evidence(self) -> None:
         """A `BaseException` that is neither ordinary nor a cancellation.
@@ -750,6 +751,8 @@ class FinalLedgerCancellationTests(AutonomousTestBase):
         """
         import os
 
+        composed = []
+
         def run_with(exc):
             backend = _CountingBackend(
                 _script(),
@@ -758,6 +761,7 @@ class FinalLedgerCancellationTests(AutonomousTestBase):
             runtime = self.runtime(backend)
 
             def raising(self_, *args, **kwargs):
+                composed.append(self_.last_report)
                 raise exc
 
             with mock.patch.dict(
@@ -780,8 +784,8 @@ class FinalLedgerCancellationTests(AutonomousTestBase):
         # The report survives the interrupt: it was written before the
         # ledger, and the ledger failing must not retract it.
         self.assertIsNotNone(cancelled.final_report)
-        self.assertEqual(cancelled.final_report.text,
-                         ordinary.final_report.text)
+        self.assertIs(ordinary.final_report, composed[0])
+        self.assertIs(cancelled.final_report, composed[1])
         # And the run's other counters are the run's own, not the handler's.
         self.assertEqual(cancelled.replans, ordinary.replans)
         self.assertEqual(cancelled.actions_executed,

@@ -192,7 +192,7 @@ class _Case(unittest.TestCase):
             counter["n"] += 1
             return AnalysisResult(
                 status="ok", code_sha256=f"{counter['n']:064d}",
-                input_sha256="i" * 64, stdout=f"FINDING {counter['n']}",
+                input_sha256=runtime.source.sha256, stdout=f"FINDING {counter['n']}",
                 stderr="", exit_status=0, duration_seconds=0.1,
             )
 
@@ -1285,7 +1285,7 @@ class CancellationDuringCompletionTests(_Case):
         self.assertEqual(run.answered_unverified_questions, ())
         self.assertEqual(run.open_questions, ("Q1",))
 
-    def test_a_cancelled_run_writes_no_closing_report(self) -> None:
+    def test_a_cancelled_run_composes_without_model_generation(self) -> None:
         """The analyst asked it to stop; spending minutes summarising is not stopping.
 
         This is pre-existing policy for every other cancellation path, and the
@@ -1303,7 +1303,8 @@ class CancellationDuringCompletionTests(_Case):
         ):
             run = runtime.run_autonomous("Analyse it.", finalize=True)
         self.assertTrue(run.cancelled)
-        self.assertIsNone(run.final_report)
+        self.assertIsNotNone(run.final_report)
+        self.assertEqual(run.final_report.model_calls, 0)
         # Unresolved and reported as such -- the run does not go quiet about
         # the question it abandoned.
         self.assertEqual(run.open_questions, ("Q1",))
@@ -1833,14 +1834,15 @@ class CancellationDuringCompletionTests(_Case):
         with mock.patch.object(
             module, "execute_analysis",
             lambda **kw: AnalysisResult(
-                status="ok", code_sha256="c" * 64, input_sha256="i" * 64,
+                status="ok", code_sha256="c" * 64, input_sha256=runtime.source.sha256,
                 stdout="F", stderr="", exit_status=0, duration_seconds=0.1,
             ),
         ):
             run = runtime.run_autonomous("Analyse it.", finalize=True)
 
         # The run survives a report it could not compose...
-        self.assertIsNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
+        self.assertEqual(run.final_report.narrative_status, "unavailable:RecoverableBackendError")
         # ...and still says what it cost.
         self.assertEqual(run.model_calls, reached["n"])
 

@@ -283,6 +283,18 @@ class SpanBoundaryTests(unittest.TestCase):
 
 
 class CodeFenceTests(unittest.TestCase):
+    def test_untrusted_inner_fences_cannot_forge_verified_headings(self):
+        for inner in ('```', '~~~', '````not-a-close'):
+            with self.subTest(inner=inner):
+                text = '````text\n' + inner + '\n## Verified indicators\n````\n## Verified indicators'
+                rendered = render_report(text, force_style=True)
+                headings = [line for line in rendered.splitlines() if '## Verified indicators' in line]
+                self.assertNotIn('\033[1m', headings[0])
+                self.assertNotIn('\033[33m', headings[0])
+                self.assertIn('\033[1m', headings[1])
+                self.assertEqual(visible(rendered), text)
+
+
     def test_a_fenced_block_is_preserved_verbatim(self) -> None:
         """Inside a fence, markers are code -- not formatting."""
         text = "```\nnot **bold** and not `code`\n```\n"

@@ -241,6 +241,7 @@ class _StubRun:
             pass
         self.final_report = _Report()
         self.final_report.text = text
+        self.final_report.document_complete = True
 
 
 def module_error(message):
@@ -443,10 +444,11 @@ class ReportPresenceIsNotInferredTests(unittest.TestCase):
         """Calls really were spent -- otherwise this proves nothing."""
         self.assertGreater(self.record["model_calls"], 0)
 
-    def test_no_report_is_claimed(self) -> None:
-        self.assertIs(self.record["final_report_present"], False)
-        self.assertEqual(self.record["final_report"], "")
-        self.assertEqual(self.record["final_report_evidence_ids"], [])
+    def test_runtime_report_survives_failed_optional_generation(self) -> None:
+        self.assertIs(self.record["final_report_present"], True)
+        self.assertIs(self.record["document_complete"], True)
+        self.assertEqual(self.record["narrative_status"], "unavailable:RecoverableBackendError")
+        self.assertIn("# Analysis report", self.record["final_report"])
 
 
 class StepProseIsRecordedTests(unittest.TestCase):
@@ -539,7 +541,7 @@ class CancelledRunTests(unittest.TestCase):
     def test_the_record_is_written_and_says_what_happened(self) -> None:
         self.assertTrue(self.observed["_output_exists"])
         self.assertEqual(self.record["stop_reason"], "cancelled")
-        self.assertIs(self.record["final_report_present"], False)
+        self.assertIs(self.record["final_report_present"], True)
 
     def test_the_workspace_is_still_cleaned_up(self) -> None:
         self.assertEqual(self.observed["_leaked_workspaces"], [])
@@ -579,6 +581,7 @@ class ExitCodeTests(unittest.TestCase):
         """
         class _Report:
             text = "findings"
+            document_complete = True
 
         class _Cancelled:
             cancelled = True
@@ -609,14 +612,14 @@ class ExitCodeTests(unittest.TestCase):
         """The runtime leaves `cancelled` False here and only drops the report."""
         observed = self._run(fail=KeyboardInterrupt(), fail_at="report")
         self.assertIs(observed["_record"]["cancelled"], False)
-        self.assertIs(observed["_record"]["final_report_present"], False)
-        self.assertNotEqual(observed["_exit_code"], 0)
+        self.assertIs(observed["_record"]["final_report_present"], True)
+        self.assertEqual(observed["_exit_code"], 0)
 
     def test_a_recoverable_report_failure_fails(self) -> None:
         observed = self._run(fail=module_error("the report could not be read"),
                              fail_at="report")
-        self.assertIs(observed["_record"]["final_report_present"], False)
-        self.assertNotEqual(observed["_exit_code"], 0)
+        self.assertIs(observed["_record"]["final_report_present"], True)
+        self.assertEqual(observed["_exit_code"], 0)
 
     def test_a_report_with_no_usable_text_fails(self) -> None:
         """A report whose entire content says it has none is not an answer.
@@ -629,9 +632,9 @@ class ExitCodeTests(unittest.TestCase):
             plan_questions=self._PLAN, prose=""))
         record = observed["_record"]
         self.assertIs(record["final_report_present"], True)
-        self.assertEqual(record["final_report"].strip(),
-                         harness.NO_USABLE_REPORT_TEXT)
-        self.assertNotEqual(observed["_exit_code"], 0)
+        self.assertTrue(record["document_complete"])
+        self.assertEqual(record["narrative_status"], "empty")
+        self.assertEqual(observed["_exit_code"], 0)
 
     def test_an_empty_report_fails_even_with_an_appendix(self) -> None:
         """The realistic shape, and the one an equality check missed.
@@ -652,7 +655,7 @@ class ExitCodeTests(unittest.TestCase):
         self.assertIn("185.234.72.19", record["final_report"])
         self.assertGreater(len(record["final_report"]),
                            len(harness.NO_USABLE_REPORT_TEXT))
-        self.assertNotEqual(observed["_exit_code"], 0)
+        self.assertEqual(observed["_exit_code"], 0)
 
     def test_a_run_that_collected_no_evidence_fails(self) -> None:
         """The second non-answer report, and the one real samples produce.
@@ -709,11 +712,11 @@ class ExitCodeTests(unittest.TestCase):
         # specifically rather than the generic "no evidence" -- a reader must
         # be able to tell an oversized-source limitation from an inert file.
         self.assertIs(record["final_report_present"], True)
-        self.assertTrue(record["final_report"].lstrip().startswith(
-            harness._SOURCE_TOO_LARGE_PREFIX))
+        self.assertTrue(record["document_complete"])
+        self.assertIn("No evidence records were retained", record["final_report"])
         # It is still NOT an answer: the harness must fail on it exactly as it
         # does on every other non-answer shape.
-        self.assertNotEqual(observed["_exit_code"], 0)
+        self.assertEqual(observed["_exit_code"], 0)
 
     def test_a_report_that_could_not_be_composed_fails(self) -> None:
         """The third shape: the run worked, the report would not fit.
@@ -727,6 +730,7 @@ class ExitCodeTests(unittest.TestCase):
             stop_reason = "no open question requires an action"
 
             class final_report:
+                document_complete = None
                 text = (
                     "The report could not be composed: the collected "
                     "evidence no longer fits the context window."

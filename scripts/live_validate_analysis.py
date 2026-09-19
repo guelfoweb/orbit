@@ -128,6 +128,9 @@ def _report_of(run) -> dict:
     return {
         "final_report_present": report is not None,
         "final_report": (report.text or "") if report is not None else "",
+        "document_complete": report.document_complete if report else None,
+        "report_limitations": list(report.limitations) if report else [],
+        "narrative_status": report.narrative_status if report else None,
         "final_report_evidence_ids": (
             list(report.evidence_ids or ()) if report is not None else []
         ),
@@ -138,36 +141,13 @@ def _report_of(run) -> dict:
 
 
 def _exit_code(error, run) -> int:
-    """Zero only for a run that finished and produced a report.
+    """Zero requires a complete runtime document and no interrupted investigation.
 
-    `$?` is what gates a validation, so it has to mean "this run answered
-    the question it was started for". Three ways of not doing that all
-    looked like success:
-
-    An exception never arrives for a cancellation. The runtime CONTAINS a
-    `KeyboardInterrupt` -- it ends the run and reports it -- so `error`
-    stays None. And it is not contained the same way everywhere: an
-    interrupt during the closing report leaves `cancelled` False and only
-    drops the report, which is the likeliest interrupt of all, the closing
-    report being the longest single generation in a run.
-
-    A backend failure mid-loop ends the run with its cause in `stop_reason`
-    and no exception either.
-
-    And a run whose report could not be composed has done the work but not
-    delivered the answer. Reading `final_report_present` is what catches all
-    three, including shapes not enumerated here: the harness exists to say
-    whether a run reached a finite report, so not reaching one is a failure
-    however it came about.
+    This is a document/lifecycle gate, not certification of proposed answers.
+    OPEN, BLOCKED and ANSWERED_UNVERIFIED questions may all be faithfully
+    reported. Optional narrative refusal or truncation does not discard that
+    record; absent or unreattestable mandatory evidence still fails the gate.
     """
-    # `cancelled` is tested even though a cancelled run currently never
-    # carries a report, which makes this term redundant TODAY. It is not
-    # dead code: that redundancy is a property of `run_autonomous`, whose
-    # closing report is guarded by `if not cancelled and ...` -- another
-    # module, and nothing here pins it. Relax that guard and a Ctrl-C run
-    # gains a report, passes the test below, and exits 0: the silent
-    # failure this gate exists to prevent, reintroduced from a distance.
-    # A redundant condition is cheaper than that coupling.
     if error or run is None or run.cancelled or run.final_report is None:
         return 1
     # The one failure a report does NOT reveal. A backend that dies mid-run
@@ -175,25 +155,11 @@ def _exit_code(error, run) -> int:
     # so far, so a report exists while the investigation was cut short. The
     # stop reason is the only place that is recorded, `error` being None for
     # a failure the runtime contained.
+    if run.final_report.document_complete is not True:
+        return 1
     if str(run.stop_reason or "").startswith(STOP_BACKEND_ERROR):
         return 1
-    # A report exists but says it has nothing to say. When the model returns
-    # empty prose the runtime substitutes a placeholder, so presence alone
-    # passes while the analyst is handed a report whose prose is an admission
-    # that there is none.
-    #
-    # `startswith`, not equality: the runtime appends its deterministic
-    # appendix AFTER the placeholder, and any artifact carrying a URI or an
-    # address produces one. Equality therefore matched only artifacts with no
-    # indicators at all -- the rare case -- and passed the common one, which
-    # is every real sample this harness is pointed at. Not `in` either: a
-    # genuine report that quotes the phrase must still pass.
-    # Prefix, not substring. The trade is deliberate and asymmetric: a
-    # substring test would fail any genuine report that quotes one of these
-    # phrases, which is a plausible thing for an analyst-facing report to do,
-    # while a prefix test only misjudges a report that OPENS by echoing the
-    # runtime's own lowercase placeholder verbatim -- which would require the
-    # model to reproduce a string it is never shown.
+    # Legacy prose-only placeholders never qualify as a complete document.
     if (run.final_report.text or "").lstrip().startswith(
         NON_ANSWER_REPORT_PREFIXES
     ):
