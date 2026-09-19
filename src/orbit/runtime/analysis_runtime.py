@@ -36,7 +36,7 @@ import shutil
 import stat
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -1387,10 +1387,11 @@ FINISH_TOOL_SCHEMA: dict[str, Any] = {
     "function": {
         "name": FINISH_TOOL_NAME,
         "description": (
-            "Report what the action just run established about the question "
-            "you were working on. Answer `still_open` if it did not settle "
-            "the question and `blocked` if it cannot be settled -- both are "
-            "real answers and the report will say so."
+            "Report what the action just run established about the question you "
+            "were working on. Answer `still_open` if it did not settle the question "
+            "and `blocked` if it cannot be settled -- both are real answers and "
+            "the report will say so. "
+            "Use `resolved` only with a non-empty answer_summary and no child_question."
         ),
         "parameters": {
             "type": "object",
@@ -2385,6 +2386,7 @@ CANCELLED_QUESTION_REASON = (
 #: let a reply claim the repair allowance was spent -- which costs only the
 #: model its own second attempt, but is a collision that need not exist.
 PROTOCOL_REPAIR_EXHAUSTED = "\x00protocol-repair-exhausted"
+INCOMPLETE_FINISH_GENERATION = "\x00finish-generation-incomplete"
 STOP_BACKEND_ERROR = "backend error"
 
 MAX_SESSION_SCRATCH_BYTES = 64 * 1024 * 1024
@@ -5394,6 +5396,23 @@ class AnalysisRuntime:
                 # would multiply the two layers into four dispatches for one
                 # question -- measured, not feared.
                 return None, PROTOCOL_REPAIR_EXHAUSTED
+        if allowed == FINISH_TOOL_NAME:
+            reason = str(getattr(response, "finish_reason", "") or "unknown").lower()
+            if reason in ("cancelled", "canceled"):
+                raise KeyboardInterrupt("FINISH generation cancelled")
+            if reason == "timeout":
+                raise TimeoutError("FINISH generation timed out")
+            if reason == "error":
+                raise RecoverableBackendError("FINISH generation failed")
+            if reason == "empty_response":
+                # A completed but unusable control response (e.g. an unknown
+                # tool) may reach the existing bounded missing-call repair.
+                # Its arguments are never accepted, even if present.
+                return None, response.content or ""
+            if reason not in ("stop", "tool_calls", "eos"):
+                # Even complete-looking arguments do not authorize a decision
+                # from interrupted generation. Do not multiply repair layers.
+                return None, f"{INCOMPLETE_FINISH_GENERATION}:{reason}"
         text = response.content or ""
         if _unencodable(text):
             text = text.encode("utf-8", "replace").decode("utf-8")
@@ -5407,6 +5426,69 @@ class AnalysisRuntime:
                 return None, text
             return arguments, text
         return None, text
+
+    def _admit_finish(
+        self, messages: list[Message], schema: dict[str, Any],
+    ) -> tuple[list[Message], int]:
+        """Share exact remaining context with FINISH, without dropping evidence.
+
+        First use the existing admission/compaction policy and qualified cap.
+        Only a new capacity rejection may reduce output. Its complete prompt
+        view (including rehydration) is then frozen: neither of the two exact
+        rechecks is allowed to compact or rehydrate it again.
+        """
+        maximum = self.effective_max_tokens
+        if maximum <= 0:
+            raise ContextAdmissionError("FINISH has no positive output allowance")
+        self.last_context_plan = None
+        try:
+            return self._admit(
+                _control_context(messages), max_tokens=maximum,
+                tools=[schema], next_action_reserve=0,
+            ), maximum
+        except ContextAdmissionError:
+            rejected = self.last_context_plan
+            if rejected is None or rejected.reason not in (
+                "required-context-does-not-fit", "invalid-or-exhausted-reserve",
+            ):
+                raise
+        frozen = copy.deepcopy(list(rejected.messages))
+
+        def exact(reserve):
+            return plan_exact_context(
+                frozen, backend=self.backend, output_reserve=reserve,
+                next_action_reserve=0, configured_context_tokens=self._context_tokens(),
+                tools=[schema], thinking=bool(getattr(self.backend, "thinking", False)),
+                # No available/covered IDs: this view must not shrink again.
+            )
+
+        capacity = exact(0)
+        self.last_context_plan = capacity
+        if not capacity.admitted or list(capacity.messages) != frozen:
+            raise ContextAdmissionError(f"FINISH capacity unavailable: {capacity.reason}")
+        maximum = min(maximum, capacity.input_limit - capacity.tokens_after)
+        if maximum <= 0:
+            self.last_context_plan = replace(
+                capacity, status="blocked", reason="finish-output-capacity-exhausted",
+            )
+            raise ContextAdmissionError("FINISH output capacity exhausted")
+        admitted = exact(maximum)
+        self.last_context_plan = admitted
+        if (not admitted.admitted or list(admitted.messages) != frozen
+                or admitted.tokens_after != capacity.tokens_after
+                or admitted.input_limit + maximum != capacity.input_limit):
+            self.last_context_plan = replace(
+                admitted, status="blocked", reason="finish-frozen-context-changed-or-no-longer-fits",
+            )
+            raise ContextAdmissionError("FINISH frozen context changed or no longer fits")
+        if rejected.compacted_turns:
+            self.context_compactions += 1
+            self.last_context_plan = replace(
+                admitted, status="compacted", tokens_before=rejected.tokens_before,
+                compacted_turns=rejected.compacted_turns,
+                externalized_evidence_ids=rejected.externalized_evidence_ids,
+            )
+        return [dict(m) for m in admitted.messages], maximum
 
     def _control_dispatch(
         self,
@@ -5425,12 +5507,14 @@ class AnalysisRuntime:
         `model_calls` was still incremented after the return, it made every
         cancelled run report one model call fewer than it made.
         """
-        admitted = self._admit(
-            _control_context(messages),
-            max_tokens=self.effective_max_tokens,
-            tools=[schema],
-            next_action_reserve=0,
-        )
+        maximum = self.effective_max_tokens
+        if schema["function"]["name"] == FINISH_TOOL_NAME:
+            admitted, maximum = self._admit_finish(messages, schema)
+        else:
+            admitted = self._admit(
+                _control_context(messages), max_tokens=maximum,
+                tools=[schema], next_action_reserve=0,
+            )
         self.control_attempts += 1
         # Counted here, beside `control_attempts`, for the reason the
         # docstring gives: a call that raises still reached the model and
@@ -5455,7 +5539,7 @@ class AnalysisRuntime:
             response = self.backend.chat_stream(
                 admitted,
                 temperature=self.temperature,
-                max_tokens=self.effective_max_tokens,
+                max_tokens=maximum,
                 tools=[schema],
                 # A control exchange produces no analyst-visible prose, so
                 # nothing here renders the deltas -- but `on_delta` is required
@@ -5735,31 +5819,29 @@ class AnalysisRuntime:
         after one repair the question is blocked. A model's `resolved` proposal
         ends operational work with an unverified answer, never a proof.
 
-        `max_calls` is the calls this finish may still spend against the run's
-        ceiling. The first attempt is always taken -- the loop only entered
-        here because a call remained -- but the repair is a second dispatch,
-        so it is offered only when a call remains for it. Without this a finish
-        admitted at the last call spent two and put the run one over its
-        documented ceiling.
+        `max_calls` further constrains the existing two-dispatch allowance.
+        Count actual dispatches, including a parser repair inside _control_call:
+        a repaired but schema-invalid result must not earn a third call.
         """
         calls = 0
+        spent_at_entry = self.model_calls
+        allowance = 2 if max_calls is None else min(2, max_calls)
         messages = self._finish_messages(question, observation, evidence_id)
         for attempt in range(2):
-            remaining = None if max_calls is None else max_calls - calls
-            # Every dispatch here -- this attempt and the repair inside
-            # `_control_call` -- counts against the run ceiling. The first
-            # attempt is covered by the loop's own guard, but a second attempt
-            # or a repair is only taken while a call remains for it; otherwise
-            # the question closes on the reply already in hand rather than
-            # spending past the bound. `remaining <= 0` on a later attempt
-            # means the budget is gone.
-            if remaining is not None and remaining <= 0 and attempt > 0:
+            remaining = allowance - calls
+            if remaining <= 0:
                 break
             arguments, _text = self._control_call(
                 messages, FINISH_TOOL_SCHEMA, on_progress=on_progress,
-                repair_budget=None if remaining is None else remaining - 1,
+                repair_budget=remaining - 1,
             )
-            calls += 1
+            calls = self.model_calls - spent_at_entry
+            if _text.startswith(INCOMPLETE_FINISH_GENERATION + ":"):
+                reason = _text.partition(":")[2]
+                controller.exhaust_active(
+                    f"FINISH generation did not complete ({reason}); no decision was accepted"
+                )
+                return calls
             if arguments is not None:
                 try:
                     decision = parse_finish_call(arguments)
@@ -5773,13 +5855,11 @@ class AnalysisRuntime:
                 # `_control_call`. Retrying here is what turned a bound of
                 # two into four, so the question closes now on the same
                 # outcome a second failure reaches below.
-                controller.close_active(
-                    BLOCKED, reason="the completion state could not be read"
-                )
+                controller.exhaust_active("the completion state could not be read")
                 return calls
             else:
                 detail = f"no {FINISH_TOOL_NAME} call was made"
-            if attempt == 0:
+            if attempt == 0 and calls < allowance:
                 controller.repairs += 1
                 messages = [
                     *messages,
@@ -5789,9 +5869,7 @@ class AnalysisRuntime:
                     )},
                 ]
                 continue
-            controller.close_active(
-                BLOCKED, reason="the completion state could not be read"
-            )
+            controller.exhaust_active("the completion state could not be read")
         return calls
 
     def _apply_decision(
