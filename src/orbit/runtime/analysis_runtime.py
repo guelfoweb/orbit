@@ -1387,10 +1387,11 @@ FINISH_TOOL_SCHEMA: dict[str, Any] = {
     "function": {
         "name": FINISH_TOOL_NAME,
         "description": (
-            "Propose the outcome of work on the current question, not a verified "
-            "fact. Use `resolved` only with a non-empty answer_summary and no "
-            "child_question. Use `still_open` while work remains, or `blocked` "
-            "if it cannot be settled."
+            "Report what the action just run established about the question you "
+            "were working on. Answer `still_open` if it did not settle the question "
+            "and `blocked` if it cannot be settled -- both are real answers and "
+            "the report will say so. "
+            "Use `resolved` only with a non-empty answer_summary and no child_question."
         ),
         "parameters": {
             "type": "object",
