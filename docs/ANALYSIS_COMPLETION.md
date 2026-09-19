@@ -88,3 +88,10 @@ A completed but unusable `empty_response` is not a truncated generation. It
 may use the existing missing-control repair, but none of its tool arguments
 can commit a proposal. Exhausting that repair preserves prior OPEN summaries
 and citations, just as an interrupted FINISH does.
+
+The FINISH tool description exposes the same cross-field completion rule as
+the parser: `resolved` requires a non-empty `answer_summary` and no
+`child_question`. A remaining dependency is not an operationally finished
+answer. Rejection never converts the status or discards the child to accept
+the call. The existing repair carries the parser's exact rejection when a
+call remains; exhaustion blocks the question without committing the proposal.
