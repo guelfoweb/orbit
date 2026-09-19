@@ -83,3 +83,8 @@ Cancellation and outages retain the existing stop handlers; insufficient space
 causes a controlled stop with the runtime report. Parser and schema repairs
 share the existing two-dispatch ceiling, including when both kinds of failure
 occur in one FINISH phase.
+
+A completed but unusable `empty_response` is not a truncated generation. It
+may use the existing missing-control repair, but none of its tool arguments
+can commit a proposal. Exhausting that repair preserves prior OPEN summaries
+and citations, just as an interrupted FINISH does.

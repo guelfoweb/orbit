@@ -5403,6 +5403,11 @@ class AnalysisRuntime:
                 raise TimeoutError("FINISH generation timed out")
             if reason == "error":
                 raise RecoverableBackendError("FINISH generation failed")
+            if reason == "empty_response":
+                # A completed but unusable control response (e.g. an unknown
+                # tool) may reach the existing bounded missing-call repair.
+                # Its arguments are never accepted, even if present.
+                return None, response.content or ""
             if reason not in ("stop", "tool_calls", "eos"):
                 # Even complete-looking arguments do not authorize a decision
                 # from interrupted generation. Do not multiply repair layers.
@@ -5849,9 +5854,7 @@ class AnalysisRuntime:
                 # `_control_call`. Retrying here is what turned a bound of
                 # two into four, so the question closes now on the same
                 # outcome a second failure reaches below.
-                controller.close_active(
-                    BLOCKED, reason="the completion state could not be read"
-                )
+                controller.exhaust_active("the completion state could not be read")
                 return calls
             else:
                 detail = f"no {FINISH_TOOL_NAME} call was made"
@@ -5865,9 +5868,7 @@ class AnalysisRuntime:
                     )},
                 ]
                 continue
-            controller.close_active(
-                BLOCKED, reason="the completion state could not be read"
-            )
+            controller.exhaust_active("the completion state could not be read")
         return calls
 
     def _apply_decision(
