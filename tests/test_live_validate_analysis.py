@@ -966,7 +966,7 @@ class RecordedFieldsTests(unittest.TestCase):
         self.assertEqual(repaired["plan_calls"], 2)
         self.assertEqual(len(record["steps"]), 3)
         self.assertEqual(len(record["progress"]), 3)
-        self.assertEqual(record["resolved_questions"], ["Q1", "Q2", "Q3"])
+        self.assertEqual(record["answered_unverified_questions"], ["Q1", "Q2", "Q3"])
 
     def test_an_uncovered_artifact_reports_no_cover_call(self) -> None:
         """`source_covered` and `cover_calls` are read, not assumed true."""
@@ -981,14 +981,14 @@ class RecordedFieldsTests(unittest.TestCase):
             {"question": "is pickle reachable", "missing_fact": "needs a run"},
         ]))["_record"]
         self.assertEqual(record["open_questions"], ["Q1"])
-        self.assertEqual(record["resolved_questions"], [])
+        self.assertEqual(record["answered_unverified_questions"], [])
 
     def test_the_controller_shape_is_recorded_truthfully(self) -> None:
         self.assertTrue(self.record["source_covered"])
         self.assertEqual(self.record["cover_calls"], 1)
         self.assertEqual(self.record["plan_calls"], 1)
         self.assertEqual(self.record["initial_questions"], 1)
-        self.assertEqual(self.record["resolved_questions"], ["Q1"])
+        self.assertEqual(self.record["answered_unverified_questions"], ["Q1"])
         self.assertEqual(self.record["open_questions"], [])
         self.assertEqual(self.record["actions_executed"], 1)
         self.assertEqual(self.record["progress"], ["NEW_CONTENT"])

@@ -546,7 +546,7 @@ class ShadowCancellationTests(AutonomousTestBase):
             cancelled.actions_executed, ordinary.actions_executed,
             "the run continued past the cancellation",
         )
-        self.assertEqual(cancelled.resolved_questions, ())
+        self.assertEqual(cancelled.answered_unverified_questions, ())
 
     def test_a_cancellation_leaves_no_report(self) -> None:
         """Consistent with every other cancellation path in the runtime."""
@@ -733,10 +733,10 @@ class FinalLedgerCancellationTests(AutonomousTestBase):
         self.assertEqual(cancelled.replans, ordinary.replans)
         # The premise, asserted: some are settled and some are not, so the
         # comparison below can actually distinguish.
-        self.assertTrue(ordinary.resolved_questions)
+        self.assertTrue(ordinary.answered_unverified_questions)
         self.assertTrue(ordinary.open_questions)
-        self.assertEqual(cancelled.resolved_questions,
-                         ordinary.resolved_questions)
+        self.assertEqual(cancelled.answered_unverified_questions,
+                         ordinary.answered_unverified_questions)
         self.assertEqual(cancelled.open_questions, ordinary.open_questions)
 
     def test_a_finalized_run_keeps_its_closing_report(self) -> None:
@@ -1199,7 +1199,7 @@ class CheckpointCancellationTests(AutonomousTestBase):
         run, states = self._states_at_end(
             KeyboardInterrupt(), budget=self.RESOLVED_AT_CHECKPOINT_BUDGET
         )
-        resolved = [q for q, (s, _) in states.items() if s == "resolved"]
+        resolved = [q for q, (s, _) in states.items() if s == "answered_unverified"]
         self.assertGreater(len(resolved), 0)
         # Nothing that was resolved carries a cancellation reason.
         for qid in resolved:
@@ -1533,9 +1533,9 @@ class RunStartCancellationTests(AutonomousTestBase):
     def test_nothing_is_resolved_by_the_cancellation(self) -> None:
         """A run stopped before any question was selected resolved none."""
         run, states = self._states_at_end(KeyboardInterrupt(), questions=5)
-        resolved = [q for q, (s, _) in states.items() if s == "resolved"]
+        resolved = [q for q, (s, _) in states.items() if s == "answered_unverified"]
         self.assertEqual(resolved, [])
-        self.assertEqual(list(run.resolved_questions), [])
+        self.assertEqual(list(run.answered_unverified_questions), [])
 
     def test_nothing_is_blocked_by_the_cancellation(self) -> None:
         blocked = [
@@ -1555,7 +1555,7 @@ class RunStartCancellationTests(AutonomousTestBase):
         cancellation rather than of the fixture.
         """
         _, states = self._states_at_end(RuntimeError("unopenable"), questions=3)
-        self.assertTrue(any(s == "resolved" for s, _ in states.values()))
+        self.assertTrue(any(s == "answered_unverified" for s, _ in states.values()))
 
     # -- what the cancellation must preserve --------------------------------
     def test_a_cancellation_keeps_the_work_already_done(self) -> None:

@@ -186,7 +186,7 @@ class LargeSourceControllerTests(_Case):
         with self._range_action():
             run = rt.run_autonomous("Analyse it.", finalize=True)
         self.assertGreaterEqual(run.actions_executed, 1)
-        self.assertIn("Q1", run.resolved_questions)
+        self.assertIn("Q1", run.answered_unverified_questions)
 
     def test_b7_multi_region_evidence_supports_one_question(self) -> None:
         """Two distinct region reads both run (distinct bytes) and accumulate."""

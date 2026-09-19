@@ -280,6 +280,9 @@ def main() -> int:
                 "initial_questions": run.initial_questions,
                 "child_questions": run.child_questions,
                 "resolved_questions": list(run.resolved_questions),
+                "answered_unverified_questions": list(run.answered_unverified_questions),
+                "unverified_questions": list(run.unverified_questions),
+                "legacy_resolved_questions": list(run.legacy_resolved_questions),
                 "open_questions": list(run.open_questions),
                 # Named for free actions, but the runtime fills it from the
                 # controller's `rejected_children`: child questions the

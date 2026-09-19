@@ -32,6 +32,7 @@ from orbit.runtime.analysis_controller import (  # noqa: E402
     PHASE_REPORT,
     PHASE_RESOLVE,
     RESOLVED,
+    ANSWERED_UNVERIFIED,
     AnalysisController,
     ControlError,
     parse_finish_call,
@@ -190,7 +191,7 @@ class PerQuestionBudgetTests(unittest.TestCase):
             controller.record_action()
         controller.exhaust_active("limit reached")
         self.assertEqual(controller.states["Q1"].status, BLOCKED)
-        self.assertNotEqual(controller.states["Q1"].status, RESOLVED)
+        self.assertNotEqual(controller.states["Q1"].status, ANSWERED_UNVERIFIED)
         # And the run continues with the next question.
         self.assertEqual(controller.activate_next().id, "Q2")
 
@@ -344,7 +345,7 @@ class DossierTests(unittest.TestCase):
         controller.activate_next()
         controller.exhaust_active("out of attempts")
         dossier = controller.dossier()
-        self.assertIn("Q1 [RESOLVED]", dossier)
+        self.assertIn("Q1 [ANSWERED_UNVERIFIED]", dossier)
         self.assertIn("Q2 [BLOCKED]", dossier)
         self.assertIn("Q3 [OPEN]", dossier)
         self.assertIn("out of attempts", dossier)
@@ -369,7 +370,8 @@ class DossierTests(unittest.TestCase):
         controller.close_active(RESOLVED, evidence_ids=("ev",), summary="answered")
         counts = controller.counts()
         self.assertEqual(counts["questions"], 2)
-        self.assertEqual(counts["resolved"], 1)
+        self.assertEqual(counts["resolved"], 0)
+        self.assertEqual(counts["answered_unverified"], 1)
         self.assertEqual(counts["open"], 1)
         self.assertEqual(counts["actions"], 1)
 
@@ -464,7 +466,7 @@ class RowIntegrityTests(unittest.TestCase):
         # Ids come from state, not from text, so a forgery cannot enter them.
         self.assertEqual(list(controller.order), ["Q1"])
         self.assertEqual(
-            [q for q in controller.order if controller.states[q].status != RESOLVED],
+            [q for q in controller.order if controller.states[q].status != ANSWERED_UNVERIFIED],
             ["Q1"],
         )
 
