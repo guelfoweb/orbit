@@ -1862,7 +1862,8 @@ class AnalysisReportTest(AnalysisRuntimeTestBase):
 
         self.assertEqual(backend.calls, 0, "nothing to ground a report in")
         self.assertEqual(report.model_calls, 0)
-        self.assertEqual(report.text, NO_EVIDENCE_REPORT)
+        self.assertTrue(report.document_complete)
+        self.assertIn("No evidence records were retained.", report.text)
 
     def test_a_report_makes_exactly_one_model_call(self) -> None:
         runtime, backend = self._with_evidence(prose_response("Confirmed: three strings."))
@@ -1942,8 +1943,9 @@ class AnalysisReportTest(AnalysisRuntimeTestBase):
         sent = json.dumps(backend.seen_messages[-1], default=str)
         self.assertIn("evidence:<id>", sent, "citation contract stated")
         self.assertIn("unresolved", sent.lower())
-        self.assertTrue(report.evidence_ids, "the report names what it read")
-        for evidence_id in report.evidence_ids:
+        self.assertTrue(report.narrative_evidence_ids, "the optional prompt names its evidence")
+        self.assertTrue(set(report.narrative_evidence_ids) <= set(report.evidence_ids))
+        for evidence_id in report.narrative_evidence_ids:
             self.assertIn(evidence_id, sent)
 
     def test_the_report_context_never_carries_the_whole_history(self) -> None:
@@ -2038,7 +2040,8 @@ class AnalysisReportTest(AnalysisRuntimeTestBase):
 
         report = runtime.report()
 
-        self.assertIn("no usable text", report.text)
+        self.assertTrue(report.document_complete)
+        self.assertEqual(report.narrative_status, "empty")
         self.assertEqual(report.model_calls, 1)
 
     def test_the_session_still_works_after_a_report(self) -> None:

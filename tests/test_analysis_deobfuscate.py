@@ -724,7 +724,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
         appendix = runtime.transform_appendix().lower()
         for word in ("c2", "command and control", "malicious", "payload", "attacker"):
             with self.subTest(word=word):
-                self.assertNotIn(word, appendix)
+                # Digests and random evidence IDs may contain the bytes "c2";
+                # they are provenance, not a semantic label.
+                self.assertNotRegex(appendix, r"\b" + word + r"\b")
 
 
 class WrongDecodeRefusalTests(unittest.TestCase):
@@ -865,7 +867,8 @@ class ReportIntegrationTests(unittest.TestCase):
         runtime.evidence_store.add(
             "execute_analysis", "an action finding",
             metadata={"tool_call_id": "c1", "user_turn_id": "t1",
-                      "produced_by_phase": "analysis_action"},
+                      "produced_by_phase": "analysis_action",
+                      "analysis_source_sha256": runtime.source.sha256},
         )
 
         def _refuse(*_args, **_kwargs):
@@ -878,15 +881,16 @@ class ReportIntegrationTests(unittest.TestCase):
         self.assertIn("## Deterministic transformations", report.text)
         self.assertIn(uri, report.text)
 
-    def test_a_refused_report_still_raises_when_there_is_nothing_to_render(self) -> None:
-        """The guard rescues the appendix; it does not hide the failure."""
+    def test_a_refused_narrative_keeps_the_action_record_without_transforms(self) -> None:
+        """The mandatory record survives even without deterministic transforms."""
         from orbit.runtime.context_manager import ContextAdmissionError
 
         runtime = self._runtime("var x = 1;\n")
         runtime.evidence_store.add(
             "execute_analysis", "an action finding",
             metadata={"tool_call_id": "c1", "user_turn_id": "t1",
-                      "produced_by_phase": "analysis_action"},
+                      "produced_by_phase": "analysis_action",
+                      "analysis_source_sha256": runtime.source.sha256},
         )
 
         def _refuse(*_args, **_kwargs):
@@ -894,8 +898,10 @@ class ReportIntegrationTests(unittest.TestCase):
 
         runtime._admit = _refuse
         self.assertEqual(runtime.transform_stages, [])
-        with self.assertRaises(ContextAdmissionError):
-            runtime.report("summarise")
+        report = runtime.report("summarise")
+        self.assertTrue(report.document_complete)
+        self.assertEqual(report.narrative_status, "unavailable:ContextAdmissionError")
+        self.assertIn("an action finding", report.text)
 
     def test_the_appendix_stands_without_any_action_findings(self) -> None:
         """What the artifact determines does not depend on findings about it."""
@@ -931,7 +937,8 @@ class ReportIntegrationTests(unittest.TestCase):
         runtime.evidence_store.add(
             "execute_analysis", "an action finding",
             metadata={"tool_call_id": "c1", "user_turn_id": "t1",
-                      "produced_by_phase": "analysis_action"},
+                      "produced_by_phase": "analysis_action",
+                      "analysis_source_sha256": runtime.source.sha256},
         )
 
         report = runtime.report("summarise")

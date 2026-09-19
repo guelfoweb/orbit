@@ -1642,7 +1642,7 @@ class BoundedReplanTests(AutonomousTestBase):
 
 
 class GroundedFinalizationTests(AutonomousTestBase):
-    """Every ending that is not a cancellation produces one grounded answer."""
+    """Every ending keeps a record; only optional narrative spends a call."""
 
     def _run(self, *responses, questions: int = 0, **kw):
         backend = ScriptedBackend(*responses)
@@ -1662,7 +1662,8 @@ class GroundedFinalizationTests(AutonomousTestBase):
 
         self.assertEqual(run.stop_reason, STOP_COMPLETE)
         self.assertIsNotNone(run.final_report)
-        self.assertEqual(run.final_report.text, "REPORT")
+        self.assertEqual(run.final_report.model_text, "REPORT")
+        self.assertTrue(run.final_report.document_complete)
 
     def test_a_protective_stop_produces_a_grounded_report(self) -> None:
         same = emit("x")
@@ -1674,7 +1675,8 @@ class GroundedFinalizationTests(AutonomousTestBase):
 
         self.assertTrue(run.stop_reason.startswith(STOP_NO_PROGRESS))
         self.assertIsNotNone(run.final_report)
-        self.assertEqual(run.final_report.text, "REPORT")
+        self.assertEqual(run.final_report.model_text, "REPORT")
+        self.assertTrue(run.final_report.document_complete)
 
     def test_the_report_is_told_the_run_stopped_early(self) -> None:
         """A reader must not mistake a bounded stop for a finished analysis."""
@@ -1734,7 +1736,7 @@ class GroundedFinalizationTests(AutonomousTestBase):
         self.assertNotIn("REPORT", [m.get("content") for m in runtime.messages])
         self.assertEqual(runtime.messages[-1]["role"], "assistant")
 
-    def test_cancellation_does_not_finalise(self) -> None:
+    def test_cancellation_keeps_a_document_without_generating(self) -> None:
         """The analyst asked it to stop; another model call is not stopping."""
 
         class CancelStepsOnly(ScriptedBackend):
@@ -1755,7 +1757,7 @@ class GroundedFinalizationTests(AutonomousTestBase):
         run = self.runtime(backend).run_autonomous("inspect it")
 
         self.assertTrue(run.cancelled)
-        self.assertIsNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
         # No closing call was spent: the analyst asked for the run to stop.
         # Asserted on the tool surface too, because a finalization attempt that
         # was itself interrupted would also leave `final_report` None -- only
@@ -1776,7 +1778,7 @@ class GroundedFinalizationTests(AutonomousTestBase):
         run = self.runtime(backend).run_autonomous("inspect it")
 
         self.assertEqual(run.stop_reason, STOP_COMPLETE)
-        self.assertIsNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
         self.assertEqual(run.actions_executed, 1)
         self.assertTrue(
             self.store.reattest_exact(run.steps[0].evidence.evidence_id)
@@ -1804,7 +1806,7 @@ class GroundedFinalizationTests(AutonomousTestBase):
 
         run = runtime.run_autonomous("inspect it")  # must not raise
 
-        self.assertIsNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
         self.assertEqual(run.actions_executed, 2)
         self.assertEqual(run.stop_reason, STOP_COMPLETE)
         self.assertGreater(len(runtime.messages), 2)
@@ -1812,13 +1814,13 @@ class GroundedFinalizationTests(AutonomousTestBase):
             if step.evidence is not None:
                 self.assertTrue(self.store.reattest_exact(step.evidence.evidence_id))
 
-    def test_a_run_with_no_steps_produces_no_report(self) -> None:
+    def test_a_run_with_no_steps_retains_the_cancellation_record(self) -> None:
         class Dead(ScriptedBackend):
             def chat_stream(self, messages, **kwargs):
                 raise KeyboardInterrupt
 
         run = self.runtime(Dead()).run_autonomous("inspect it")
-        self.assertIsNone(run.final_report)
+        self.assertTrue(run.final_report.document_complete)
 
 
 # --- soft action budget with a hard ceiling ---------------------------------
@@ -2140,7 +2142,7 @@ class SoftActionBudgetTests(AutonomousTestBase):
 
         self.assertEqual(run.stop_reason, STOP_SOFT_MAX_ACTIONS)
         self.assertIsNotNone(run.final_report)
-        self.assertEqual(run.final_report.text, "REPORT")
+        self.assertEqual(run.final_report.model_text, "REPORT")
         self.assertEqual(backend.seen_tools.count([]), 1)
 
     def test_the_report_runs_exactly_once_after_the_hard_ceiling(self) -> None:

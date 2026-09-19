@@ -158,11 +158,16 @@ class RetentionDoesNotChangeBehaviourTests(_DiagnosticTestBase):
                     "Analyse it.", finalize=True, max_model_calls=20
                 )
                 runtime.close()
+            text = run.final_report.text if run.final_report else None
+            if text is not None:
+                text = text.replace(runtime.source.original_path, '<source>')
+                for index, eid in enumerate(runtime.evidence_store.records):
+                    text = text.replace(eid, f'<record-{index}>')
             return (
                 run.stop_reason, run.model_calls, run.actions_executed,
                 len(run.steps), run.plan_calls, run.initial_questions,
                 list(run.answered_unverified_questions), list(run.open_questions),
-                run.final_report.text if run.final_report else None,
+                text,
             )
 
         self.assertEqual(observe(None), observe(self._retain_dir()))

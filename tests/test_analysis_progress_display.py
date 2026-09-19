@@ -153,15 +153,31 @@ def run_trajectory(*, on_event=None, outputs=None, finalize=True, raise_on_step=
         out = queue.pop(0) if queue else f"FINDING {len(dispatched)}\n"
         dispatched.append(out)
         return AnalysisResult(status="ok", code_sha256=hashlib.sha256(kw["code"].encode()).hexdigest(),
-                              input_sha256="i" * 64, stdout=out, stderr="", exit_status=0, duration_seconds=0.1)
+                              input_sha256=SHA, stdout=out, stderr="", exit_status=0, duration_seconds=0.1)
 
     try:
-        with mock.patch.object(module, "execute_analysis", sandbox):
+        # Stable generated evidence identities make the two independent
+        # presentation fixtures byte-comparable, including reference hashes.
+        from itertools import count
+        from types import SimpleNamespace
+        identities = count()
+        with mock.patch('orbit.runtime.evidence.uuid.uuid4',
+                        side_effect=lambda: SimpleNamespace(hex=f'{next(identities):012x}' + '0' * 20)), \
+             mock.patch.object(module, "execute_analysis", sandbox):
             run = runtime.run_autonomous("Analyse it.", cover=False, finalize=finalize,
                                          max_model_calls=18, max_actions=8, on_event=on_event)
     finally:
         runtime.close()
     return run, runtime, dispatched, backend
+
+
+def document_identity_view(run, runtime):
+    if run.final_report is None:
+        return None
+    text = run.final_report.text.replace(runtime.source.original_path, '<source>')
+    for index, eid in enumerate(runtime.evidence_store.records):
+        text = text.replace(eid, f'<record-{index}>')
+    return text
 
 
 def fingerprint(run, runtime, dispatched, backend) -> dict:
@@ -179,7 +195,7 @@ def fingerprint(run, runtime, dispatched, backend) -> dict:
         "backend_calls": [c["n"] for c in backend.chat_calls],
         "tools_per_call": [tuple(t["function"]["name"] for t in (c["tools"] or [])) for c in backend.chat_calls],
         "evidence": len(runtime.evidence_store.records),
-        "report_text": run.final_report.text if run.final_report is not None else None,
+        "report_text": document_identity_view(run, runtime),
         "cancelled": run.cancelled,
     }
 
@@ -288,8 +304,8 @@ class ZeroDeltaTests(unittest.TestCase):
         self.assertTrue(rec.events)
 
     def test_t13_report_text_is_byte_identical(self) -> None:
-        base = run_trajectory()[0].final_report.text
-        with_sink = run_trajectory(on_event=_Recorder())[0].final_report.text
+        base = document_identity_view(*run_trajectory()[:2])
+        with_sink = document_identity_view(*run_trajectory(on_event=_Recorder())[:2])
         self.assertEqual(base, with_sink)
         self.assertIn("REPORT:", base)
 
@@ -517,13 +533,22 @@ def run_trajectory_with_generation(*, on_event=None, on_step=None, on_progress=N
     def sandbox(**kw):
         out = queue.pop(0) if queue else "FINDING\n"
         return AnalysisResult(status="ok", code_sha256=hashlib.sha256(kw["code"].encode()).hexdigest(),
-                              input_sha256="i" * 64, stdout=out, stderr="", exit_status=0, duration_seconds=0.1)
+                              input_sha256=SHA, stdout=out, stderr="", exit_status=0, duration_seconds=0.1)
 
     try:
-        with mock.patch.object(module, "execute_analysis", sandbox):
-            return runtime.run_autonomous("Analyse it.", cover=False, finalize=True, max_model_calls=18,
-                                          max_actions=8, on_event=on_event, on_step=on_step,
-                                          on_progress=on_progress)
+        # Stable generated evidence identities make the two independent
+        # presentation fixtures byte-comparable, including reference hashes.
+        from itertools import count
+        from types import SimpleNamespace
+        identities = count()
+        with mock.patch('orbit.runtime.evidence.uuid.uuid4',
+                        side_effect=lambda: SimpleNamespace(hex=f'{next(identities):012x}' + '0' * 20)), \
+             mock.patch.object(module, "execute_analysis", sandbox):
+            run = runtime.run_autonomous("Analyse it.", cover=False, finalize=True, max_model_calls=18,
+                                         max_actions=8, on_event=on_event, on_step=on_step,
+                                         on_progress=on_progress)
+            run._document_identity_view = document_identity_view(run, runtime)
+            return run
     finally:
         runtime.close()
 
@@ -595,7 +620,7 @@ class RealRendererWithStepBlocksTests(unittest.TestCase):
         # and the progress lines are there, whole, once each
         self.assertEqual(sum(1 for r in cand_rows if r == "[analysis] Q1/3 Answer proposed (unverified)"), 1)
         self.assertEqual(cand_run.model_calls, base_run.model_calls)
-        self.assertEqual(cand_run.final_report.text, base_run.final_report.text)
+        self.assertEqual(cand_run._document_identity_view, base_run._document_identity_view)
 
     def test_no_wait_row_is_drawn_between_an_outcome_line_and_its_block(self) -> None:
         cand_raw, _ = self._capture(display=True)
