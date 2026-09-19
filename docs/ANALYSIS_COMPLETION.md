@@ -67,3 +67,19 @@ Saved sessions retain documents outside CHAT messages. Saving later CHAT turns
 preserves this archive; unreadable existing archives are not overwritten.
 The live recorder's RC=0 gates document completeness and investigation
 lifecycle, not truth of free-form model conclusions.
+
+FINISH uses its existing prompt admission and compaction policy first. If only
+capacity blocks that request, it freezes the complete resulting view, including
+rehydrated evidence, and measures it again with the production tokenizer. Its
+output cap is the smaller of the qualified phase limit (2048), any lower explicit
+limit, and the effective context minus safety (256) and exact input tokens.
+Admission and generation use that same cap; a repair measures its own request.
+PLAN, STEP, REPORT, context size and action limits are unchanged.
+
+This cap is a limit, not a promise that every schema-valid answer can fit.
+FINISH accepts proposals only from completed generation. A parseable control in
+a length-limited, cancelled or failed response commits no model decision.
+Cancellation and outages retain the existing stop handlers; insufficient space
+causes a controlled stop with the runtime report. Parser and schema repairs
+share the existing two-dispatch ceiling, including when both kinds of failure
+occur in one FINISH phase.
