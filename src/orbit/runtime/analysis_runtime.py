@@ -5798,6 +5798,7 @@ class AnalysisRuntime:
             *self.messages,
             {"role": "user", "content": (
                 f"The question was: {question.question}\n"
+                f"What was missing: {question.missing_fact}\n"
                 f"The action produced (evidence {evidence_id}):\n{observation}\n"
                 "Call finish_analysis_question to say what this established."
             )},
