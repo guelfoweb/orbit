@@ -42,6 +42,7 @@ from orbit.runtime.analysis_runtime import (  # noqa: E402
     AnalysisWorkspace,
     OPEN,
     RESOLVED,
+    ANSWERED_UNVERIFIED,
     _invocation_contradictions,
     _special_folder_constants,
     _special_folder_contradictions,
@@ -442,7 +443,7 @@ class NoFalseResolvedInvariantTests(unittest.TestCase):
         c.adopt_plan([{"question": "Q?", "missing_fact": "M"}])
         c.activate_next()
         c.close_active(RESOLVED, evidence_ids=("ev_1",), summary="the answer")
-        self.assertEqual(c.states[c.order[0]].status, RESOLVED)
+        self.assertEqual(c.states[c.order[0]].status, ANSWERED_UNVERIFIED)
 
 
 if __name__ == "__main__":

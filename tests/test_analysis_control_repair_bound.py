@@ -120,7 +120,7 @@ class TheDispatchBoundIsTotalTests(ControlRepairBoundTestBase):
         run, witness, escaped, _ = self._run(questions=2)
         self.assertIsNone(escaped)
         self.assertEqual(witness.finish_dispatches, 0, "no failures scripted")
-        self.assertEqual(list(run.resolved_questions), ["Q1", "Q2"])
+        self.assertEqual(list(run.answered_unverified_questions), ["Q1", "Q2"])
 
     def test_one_failure_then_a_valid_reply_costs_two(self) -> None:
         run, witness, escaped, _ = self._run(
@@ -228,7 +228,7 @@ class RepeatedParseFailureClosesHonestlyTests(ControlRepairBoundTestBase):
             self.assertEqual(
                 state.reason, "the completion state could not be read"
             )
-        self.assertEqual(list(run.resolved_questions), [])
+        self.assertEqual(list(run.answered_unverified_questions), [])
 
     def test_the_run_continues_to_the_next_question(self) -> None:
         """A blocked question ends itself, not the analysis."""
@@ -327,7 +327,7 @@ class UnreadableCompletionIsSafelyContainedTests(ControlRepairBoundTestBase):
             questions=2, finish=("parse",) * 20, capture_states=True
         )
         self.assertIsNone(escaped)
-        self.assertEqual(list(run.resolved_questions), [])
+        self.assertEqual(list(run.answered_unverified_questions), [])
         self.assertTrue(
             all(s.status == analysis_controller.BLOCKED
                 for s in controller.states.values())

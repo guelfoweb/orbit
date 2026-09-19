@@ -475,7 +475,7 @@ class RepairFlowTests(RepairTestBase):
         run = runtime.run_autonomous("analyse", finalize=False)
 
         self.assertEqual(run.repairs, 1)
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
         self.assertIn("Q1", run.open_questions)
         self.assertEqual(run.steps[1].result.status, "ok")
         self.assertIn("FileNotFoundError", run.steps[1].result.stdout)
@@ -500,7 +500,7 @@ class RepairFlowTests(RepairTestBase):
         self.assertIn("Identify one observation.", second)
         self.assertNotIn("Keep the failed action's investigation objective", second)
         self.assertIn("Q1", run.open_questions)
-        self.assertIn("Q2", run.resolved_questions)
+        self.assertIn("Q2", run.answered_unverified_questions)
 
     def test_an_exhausted_question_cannot_bypass_its_action_limit_with_repair(self) -> None:
         backend = RecordingBackend(
@@ -523,7 +523,7 @@ class RepairFlowTests(RepairTestBase):
         self.assertNotIn(AUTONOMOUS_REPAIR_MESSAGE, third)
         self.assertIn("Identify one observation.", third)
         self.assertIn("Q1", run.open_questions)
-        self.assertIn("Q2", run.resolved_questions)
+        self.assertIn("Q2", run.answered_unverified_questions)
 
     def test_repair_context_admission_failure_stops_before_model_dispatch(self) -> None:
         backend = RefusingRepairBackend(

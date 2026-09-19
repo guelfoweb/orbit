@@ -28,6 +28,7 @@ from orbit.runtime.analysis_controller import (
     BLOCKED,
     OPEN,
     RESOLVED,
+    ANSWERED_UNVERIFIED,
     AnalysisController,
     ControlError,
     parse_finish_call,
@@ -119,7 +120,7 @@ class CloseActiveContractTests(unittest.TestCase):
     def test_resolved_complete_resolves(self):
         c = self._one_open()
         c.close_active(RESOLVED, evidence_ids=("ev_x",), summary="decodes to X")
-        self.assertEqual(c.states[c.active].status, RESOLVED)
+        self.assertEqual(c.states[c.active].status, ANSWERED_UNVERIFIED)
 
     def test_blocked_needs_no_witness(self):
         c = self._one_open()
@@ -215,7 +216,7 @@ class IbanShapeReproductionTests(unittest.TestCase):
         run = runtime.run_autonomous("Analyse this artifact.", finalize=False)
         # The one question must not be falsely resolved. It stays open or ends
         # blocked once its action budget is spent -- never resolved-with-nothing.
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
         # And the run stayed bounded (did not loop unbounded on the refusal).
         self.assertLessEqual(run.actions_executed, 4)
 
@@ -234,7 +235,7 @@ class IbanShapeReproductionTests(unittest.TestCase):
         run = runtime.run_autonomous("Analyse this artifact.", finalize=False)
         # MAX_ACTIONS_PER_QUESTION is 2, so the single question spends at most 2.
         self.assertLessEqual(run.actions_executed, 2)
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
 
     def test_scripted_hollow_resolved_is_rejected_at_parse(self):
         # Direct proof at the contract boundary: the exact hollow decision the

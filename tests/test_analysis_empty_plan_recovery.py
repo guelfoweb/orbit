@@ -228,14 +228,14 @@ class DecodedEvidenceTests(_Case):
         self.assertEqual(run.plan_calls, 2)
         self.assertEqual(run.initial_questions, 1)
         self.assertEqual(run.actions_executed, 1)
-        self.assertEqual(run.resolved_questions, ("Q1",))
+        self.assertEqual(run.answered_unverified_questions, ("Q1",))
 
     def test_question_ids_start_at_Q1_after_an_empty_adoption(self) -> None:
         """An empty adoption records nothing, so the re-ask is a clean slate."""
         model = _Model([[], [_question("a"), _question("b")]])
         runtime = self._runtime(model, DECODED_SOURCE.encode())
         run = self._run(runtime)
-        self.assertEqual(set(run.resolved_questions), {"Q1", "Q2"})
+        self.assertEqual(set(run.answered_unverified_questions), {"Q1", "Q2"})
 
 
 class HonestClosureTests(_Case):

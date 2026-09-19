@@ -30,6 +30,7 @@ from orbit.runtime.analysis_controller import (  # noqa: E402
     OPEN,
     MAX_ACTIONS_PER_QUESTION,
     RESOLVED,
+    ANSWERED_UNVERIFIED,
 )
 from orbit.runtime.analysis_runtime import (  # noqa: E402
     ANALYSIS_TOOL_NAME,
@@ -222,7 +223,7 @@ class AssociationWithoutProseTests(_Case):
         run = self._run(runtime)
         self.assertEqual(model.prose, "")
         self.assertEqual(run.actions_executed, 1)
-        self.assertEqual(run.resolved_questions, ("Q1",))
+        self.assertEqual(run.answered_unverified_questions, ("Q1",))
 
     def test_no_question_tag_is_required_anywhere(self) -> None:
         model = _Model(plan=[_question("a"), _question("b")])
@@ -230,7 +231,7 @@ class AssociationWithoutProseTests(_Case):
         runtime = self._runtime(model)
         run = self._run(runtime)
         self.assertEqual(run.actions_executed, 2)
-        self.assertEqual(set(run.resolved_questions), {"Q1", "Q2"})
+        self.assertEqual(set(run.answered_unverified_questions), {"Q1", "Q2"})
 
     def test_the_analysis_tool_schema_has_no_question_field(self) -> None:
         """Association is positional, so nothing was added to the call."""
@@ -249,14 +250,14 @@ class SequencingTests(_Case):
         run = self._run(runtime)
         self.assertEqual(run.initial_questions, 3)
         self.assertEqual(run.actions_executed, 3)
-        self.assertEqual(list(run.resolved_questions), ["Q1", "Q2", "Q3"])
+        self.assertEqual(list(run.answered_unverified_questions), ["Q1", "Q2", "Q3"])
         self.assertEqual(run.stop_reason, STOP_LEDGER_EXHAUSTED)
 
     def test_runtime_assigns_the_ids(self) -> None:
         model = _Model(plan=[_question("a"), _question("b")])
         runtime = self._runtime(model)
         run = self._run(runtime)
-        self.assertEqual(list(run.resolved_questions), ["Q1", "Q2"])
+        self.assertEqual(list(run.answered_unverified_questions), ["Q1", "Q2"])
 
 
 class BudgetTests(_Case):
@@ -273,7 +274,7 @@ class BudgetTests(_Case):
         runtime = self._runtime(model)
         run = self._run(runtime)
         self.assertEqual(run.actions_executed, 2)
-        self.assertEqual(run.resolved_questions, ("Q1",))
+        self.assertEqual(run.answered_unverified_questions, ("Q1",))
 
     def test_the_limit_blocks_and_the_run_continues(self) -> None:
         model = _Model(
@@ -284,7 +285,7 @@ class BudgetTests(_Case):
         runtime = self._runtime(model)
         run = self._run(runtime)
         self.assertIn("Q1", run.open_questions)      # blocked, not resolved
-        self.assertIn("Q2", run.resolved_questions)
+        self.assertIn("Q2", run.answered_unverified_questions)
         self.assertEqual(run.stop_reason, STOP_LEDGER_EXHAUSTED)
 
 
@@ -326,7 +327,7 @@ class MalformedControlTests(_Case):
 
         runtime = self._runtime(_BadFinish(plan=[_question("a")]))
         run = self._run(runtime)
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
         self.assertIn("Q1", run.open_questions)
 
     def test_no_run_ever_falls_back_to_the_free_form_loop(self) -> None:
@@ -505,7 +506,7 @@ class ReportSeamTests(_Case):
             ],
         )
         run, _prompt = self._run_and_capture(model)
-        self.assertEqual(run.resolved_questions, ("Q1",))
+        self.assertEqual(run.answered_unverified_questions, ("Q1",))
         self.assertEqual(run.open_questions, ("Q2",))
 
 
@@ -661,7 +662,7 @@ class PlanStateTests(_Case):
         run = self._run(runtime)
         self.assertGreater(run.plan_calls, 0)
         self.assertEqual(run.initial_questions, 2)
-        self.assertEqual(list(run.resolved_questions), ["Q1", "Q2"])
+        self.assertEqual(list(run.answered_unverified_questions), ["Q1", "Q2"])
 
     def test_zero_questions_is_only_ever_a_planned_answer(self) -> None:
         # `initial_questions == 0` may only be reached by asking. A run that
@@ -899,7 +900,7 @@ class ControlRepairTests(_Case):
         run = self._run(runtime)
         self.assertEqual(run.control_repairs, 1)
         self.assertEqual(run.initial_questions, 1)
-        self.assertEqual(list(run.resolved_questions), ["Q1"])
+        self.assertEqual(list(run.answered_unverified_questions), ["Q1"])
 
     # C. both the call and its repair parse-fail: unsupported, no fallback.
     def test_a_second_parse_failure_is_unsupported(self) -> None:
@@ -958,7 +959,7 @@ class ControlRepairTests(_Case):
         runtime = self._strict(model)
         run = self._run(runtime)
         self.assertEqual(run.initial_questions, 1)
-        self.assertEqual(list(run.resolved_questions), ["Q1"])
+        self.assertEqual(list(run.answered_unverified_questions), ["Q1"])
 
     # G. the same repair covers a question completion, not only PLAN.
     def test_a_completion_parse_failure_is_repaired_once(self) -> None:
@@ -1281,7 +1282,7 @@ class CancellationDuringCompletionTests(_Case):
         model = _InterruptingModel(plan=[_question("is pickle reachable?")])
         runtime = self._runtime(model)
         run = self._run(runtime)
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
         self.assertEqual(run.open_questions, ("Q1",))
 
     def test_a_cancelled_run_writes_no_closing_report(self) -> None:
@@ -1306,7 +1307,7 @@ class CancellationDuringCompletionTests(_Case):
         # Unresolved and reported as such -- the run does not go quiet about
         # the question it abandoned.
         self.assertEqual(run.open_questions, ("Q1",))
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
 
     def test_the_runtime_blocks_the_question_with_the_exact_reason(self) -> None:
         """Production's own `exhaust_active` call, asserted on production's state.
@@ -1491,7 +1492,7 @@ class CancellationDuringCompletionTests(_Case):
         self.assertFalse(run.cancelled)
         self.assertNotEqual(run.stop_reason, module.STOP_CANCELLED)
         # Nothing recorded an answer, so nothing claims one.
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
         self.assertEqual(run.open_questions, ("Q1",))
         # And the spend is counted here too, against the backend.
         self.assertEqual(run.model_calls, len(self.backend.chat_calls))
@@ -1897,9 +1898,9 @@ class CancellationDuringCompletionTests(_Case):
                       if controller.states[qid].status == OPEN]
         self.assertTrue(still_open, "the run did not stop early")
         for qid in still_open:
-            self.assertNotIn(qid, run.resolved_questions)
+            self.assertNotIn(qid, run.answered_unverified_questions)
         # And the run stopped rather than working through them.
-        self.assertLess(len(run.resolved_questions), len(controller.order))
+        self.assertLess(len(run.answered_unverified_questions), len(controller.order))
 
     def test_cancelling_blocks_a_question_the_budget_left_open(self) -> None:
         """The case a sweep of plan sizes alone does not reach.
@@ -2007,7 +2008,7 @@ class CancellationDuringCompletionTests(_Case):
         self.assertEqual(len(run.steps), 1)
         # Q2 was never activated, never acted on, and is still open.
         self.assertEqual(built[0].states["Q2"].actions, 0)
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
         self.assertEqual(run.open_questions, ("Q1", "Q2"))
         # The step that ran IS classified and rendered -- it is real work the
         # analyst must see -- but nothing after it runs, so the cancellation
@@ -2021,7 +2022,7 @@ class CancellationDuringCompletionTests(_Case):
         runtime = self._runtime(model)
         run = self._run(runtime)
         self.assertFalse(run.cancelled)
-        self.assertEqual(run.resolved_questions, ("Q1",))
+        self.assertEqual(run.answered_unverified_questions, ("Q1",))
         self.assertEqual(run.open_questions, ())
 
 
@@ -2080,7 +2081,7 @@ class PlanFailureDomainTests(ControlRepairTests):
         run = self._run(runtime)
         self.assertEqual(run.actions_executed, 0)
         self.assertEqual(run.initial_questions, 0)
-        self.assertEqual(run.resolved_questions, ())
+        self.assertEqual(run.answered_unverified_questions, ())
 
     # -- the server's failure ---------------------------------------------
     def test_a_backend_outage_is_not_blamed_on_the_model(self) -> None:
@@ -2289,7 +2290,7 @@ class StalledQuestionYieldsToTheNextTests(_Case):
         # stalled. Under the defect this list ended at Q2.
         self.assertIn("Q3", owners, owners)
         states = {qid: st.status for qid, st in controller.states.items()}
-        self.assertEqual(states["Q1"], RESOLVED, states)
+        self.assertEqual(states["Q1"], ANSWERED_UNVERIFIED, states)
         self.assertEqual(states["Q2"], BLOCKED, states)
         # Blocked for its OWN repetition, and never quietly resolved.
         self.assertIn("repeated", controller.states["Q2"].reason)
@@ -2341,7 +2342,7 @@ class StalledQuestionYieldsToTheNextTests(_Case):
         )
         self.assertEqual(controller.states["Q1"].status, BLOCKED)
         self.assertNotIn(
-            RESOLVED,
+            ANSWERED_UNVERIFIED,
             {st.status for st in controller.states.values()},
         )
 
@@ -2388,7 +2389,7 @@ class StalledQuestionYieldsToTheNextTests(_Case):
         )
         # Blocked, never resolved: nothing was answered here.
         statuses = {st.status for st in controller.states.values()}
-        self.assertNotIn(RESOLVED, statuses, statuses)
+        self.assertNotIn(ANSWERED_UNVERIFIED, statuses, statuses)
 
     def test_a_stall_on_the_last_affordable_action_does_not_buy_another(
         self,

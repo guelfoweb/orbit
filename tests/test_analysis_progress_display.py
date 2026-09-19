@@ -173,7 +173,7 @@ def fingerprint(run, runtime, dispatched, backend) -> dict:
         "steps": [(s.action_attempted, s.action_executed, bool(s.suppressed_duplicate_of)) for s in run.steps],
         "progress": [p.classification for p in run.progress],
         "stop": run.stop_reason,
-        "resolved": tuple(run.resolved_questions),
+        "resolved": tuple(run.answered_unverified_questions),
         "open": tuple(run.open_questions),
         "dispatched": list(dispatched),
         "backend_calls": [c["n"] for c in backend.chat_calls],
@@ -245,10 +245,10 @@ class EventStreamTests(unittest.TestCase):
         questions = [e.question_id for e in self._events("question")]
         self.assertEqual(questions, ["Q1", "Q2", "Q3"], "each question announced once, in order")
         self.assertGreater(self.rec.events.index(self._events("question")[2]), self.rec.events.index(blocked[0]))
-        self.assertEqual(tuple(self.result.resolved_questions), ("Q1", "Q3"))
+        self.assertEqual(tuple(self.result.answered_unverified_questions), ("Q1", "Q3"))
 
     def test_t7_q1_resolved_then_q2_announced(self) -> None:
-        resolved = self._events("resolved")
+        resolved = self._events("answered_unverified")
         self.assertEqual([e.question_id for e in resolved], ["Q1", "Q3"])
         checking = self._events("checking")
         self.assertEqual([e.question_id for e in checking], ["Q1", "Q3"], "no completion is checked for a suppressed step")
@@ -399,11 +399,11 @@ class DisplayTests(unittest.TestCase):
                          "only Q2's second step earns the line; the first step of a question is the question line")
         for expected in ("[analysis] Planning investigation", "[analysis] Q1/3 Investigating:",
                          "[analysis] Q1/3 Running: sandboxed analysis",
-                         "[analysis] Q1/3 Checking completion", "[analysis] Q1/3 Resolved",
+                         "[analysis] Q1/3 Checking completion", "[analysis] Q1/3 Answer proposed (unverified)",
                          "[analysis] Q2/3 Investigating:", "[analysis] Q2/3 Skipped: already-known source",
                          "[analysis] Q2/3 Replanning after no progress",
                          "[analysis] Q2/3 Blocked: no new evidence: strategy repeated",
-                         "[analysis] Q3/3 Investigating:", "[analysis] Q3/3 Resolved",
+                         "[analysis] Q3/3 Investigating:", "[analysis] Q3/3 Answer proposed (unverified)",
                          "[analysis] Stopped:", "[analysis] Composing report"):
             self.assertIn(expected, joined, expected)
         self.assertLess(len(renderer.lines), 40, "one line per transition, never per token")
@@ -460,7 +460,7 @@ class DisplayTests(unittest.TestCase):
             for e in self._events():
                 display(e)
         text = out.getvalue()
-        self.assertIn("[analysis] Q1/3 Resolved", text)
+        self.assertIn("[analysis] Q1/3 Answer proposed (unverified)", text)
         self.assertNotIn("\x1b", text)
 
     def test_on_a_terminal_lines_are_dim_and_complete(self) -> None:
@@ -593,7 +593,7 @@ class RealRendererWithStepBlocksTests(unittest.TestCase):
         # PLAN's and FINISH's lines too); the report streams and is erased.
         self.assertEqual(committed(cand_rows), cand_run.model_calls - 1)
         # and the progress lines are there, whole, once each
-        self.assertEqual(sum(1 for r in cand_rows if r == "[analysis] Q1/3 Resolved"), 1)
+        self.assertEqual(sum(1 for r in cand_rows if r == "[analysis] Q1/3 Answer proposed (unverified)"), 1)
         self.assertEqual(cand_run.model_calls, base_run.model_calls)
         self.assertEqual(cand_run.final_report.text, base_run.final_report.text)
 
@@ -601,7 +601,7 @@ class RealRendererWithStepBlocksTests(unittest.TestCase):
         cand_raw, _ = self._capture(display=True)
         rows = _screen(cand_raw)
         for i, row in enumerate(rows):
-            if row.startswith("[analysis]") and any(k in row for k in ("Resolved", "Blocked", "Skipped")):
+            if row.startswith("[analysis]") and any(k in row for k in ("Answer proposed (unverified)", "Blocked", "Skipped")):
                 following = [r for r in rows[i + 1:i + 3] if r]
                 self.assertTrue(following, row)
                 self.assertFalse(following[0].startswith("analysis · working"), f"wait row under {row!r}")
@@ -612,12 +612,12 @@ class RealRendererWithStepBlocksTests(unittest.TestCase):
 
         def sink(event):
             seen.append(event.event)
-            if event.event == "resolved":
+            if event.event == "answered_unverified":
                 raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
             run_trajectory_with_generation(on_event=sink)
-        self.assertIn("resolved", seen)
+        self.assertIn("answered_unverified", seen)
 
 
 class ReplWiringTests(unittest.TestCase):
