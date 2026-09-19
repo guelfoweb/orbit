@@ -2824,16 +2824,6 @@ class AutonomousRunResult:
         return True
 
 
-def _stopped_at_generation_limit(response: Any) -> bool:
-    """Whether generation was cut off by the budget rather than finishing.
-
-    `length` is the backend's own word for "I stopped because I ran out", so
-    it is read rather than inferred from token counts, which would need this
-    module to know the effective limit at the point of judgement.
-    """
-    return str(getattr(response, "finish_reason", "") or "").lower() == "length"
-
-
 def _tool_argument_chars(calls: list[dict[str, Any]]) -> int:
     """Total size of the generated tool arguments, never their content.
 
@@ -4150,7 +4140,7 @@ class AnalysisRuntime:
         claimed: set[str] = set()
         for call in calls:
             if not isinstance(call, dict):
-                # Not ours to repair: the structural gate rejects it downstream
+                # Not ours to repair: the structural gate rejects it
                 # with its own message rather than being handed a fabricated id.
                 normalized.append(call)
                 continue
@@ -4646,8 +4636,13 @@ class AnalysisRuntime:
         pass through it: a partially generated call is not valid JSON, and
         showing it would put unparsed model output on the analyst's screen.
         """
+        # This invocation owns precisely this transient turn. Admission and
+        # transport failures must not leave it behind for a fallback, nor may
+        # a caller's cleanup delete an earlier committed user/evidence turn.
+        turn = {"role": "user", "content": analyst_message}
+        turn_index = len(self.messages)
         self.analyst_turns += 1
-        self.messages.append({"role": "user", "content": analyst_message})
+        self.messages.append(turn)
 
         def _capture(text: str) -> None:
             if on_delta is not None and text:
@@ -4660,30 +4655,49 @@ class AnalysisRuntime:
         # A controller run supplies its own transient context for the active
         # question; control prompting must not accumulate in the append-only
         # history. Everything else about the step is unchanged.
-        admitted = self._admit(
-            list(controller_messages if controller_messages is not None
-                 else self.messages),
-            max_tokens=self.effective_max_tokens,
-            tools=[ANALYSIS_TOOL_SCHEMA],
-        )
-        # Counted at dispatch: a call that raises still reached the model and
-        # still cost a turn, and a counter that only counts successes reports
-        # a failed step as one that never ran. Deliberately AFTER `_admit`,
-        # which refuses before any request is sent -- a refusal reached no
-        # model and must not be billed as a call.
-        self.model_calls += 1
-        with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
-            response = self.backend.chat_stream(
-                admitted,
-                temperature=self.temperature,
+        try:
+            admitted = self._admit(
+                list(controller_messages if controller_messages is not None
+                     else self.messages),
                 max_tokens=self.effective_max_tokens,
                 tools=[ANALYSIS_TOOL_SCHEMA],
-                on_delta=_capture,
-                on_progress=on_progress,
+                # STEP returns to the runtime after one generation/action. Every
+                # subsequent STEP/FINISH is independently admitted; no tokens for
+                # that future request are consumed in this generation.
+                next_action_reserve=0,
             )
+            # Counted at dispatch: a call that raises still reached the model and
+            # still cost a turn, and a counter that only counts successes reports
+            # a failed step as one that never ran. Deliberately AFTER `_admit`,
+            # which refuses before any request is sent -- a refusal reached no
+            # model and must not be billed as a call.
+            self.model_calls += 1
+            with model_call_context(phase=ANALYSIS_STEP_PHASE, tools_mode="on"):
+                response = self.backend.chat_stream(
+                    admitted,
+                    temperature=self.temperature,
+                    max_tokens=self.effective_max_tokens,
+                    tools=[ANALYSIS_TOOL_SCHEMA],
+                    on_delta=_capture,
+                    on_progress=on_progress,
+                )
+            reason = str(getattr(response, "finish_reason", "") or "unknown").lower()
+            if reason in ("cancelled", "canceled"):
+                raise KeyboardInterrupt("STEP generation cancelled")
+            if reason == "timeout":
+                raise TimeoutError("STEP generation timed out")
+            if reason == "error":
+                raise RecoverableBackendError("STEP generation failed")
+        except BaseException:
+            # Identity and position establish ownership, not the role/shape
+            # of whatever happens to be last. No completed action is rewound.
+            if len(self.messages) == turn_index + 1 and self.messages[-1] is turn:
+                self.messages.pop()
+                self.analyst_turns -= 1
+            raise
         call_seconds = time.monotonic() - call_started
 
-        calls = self._with_canonical_call_ids(response.tool_calls or [])
+        calls = response.tool_calls or []
         content = response.content or ""
         if _unencodable(content):
             # Decoding makes this practically unreachable, but the cost of
@@ -4714,16 +4728,17 @@ class AnalysisRuntime:
                 refusal=refusal,
             )
 
-        rejection = self._structural_rejection(calls) if calls else None
-        if rejection is not None and _stopped_at_generation_limit(response):
-            # Same refusal path, a truer reason. The call is unparseable
-            # because generation ended mid-JSON, not because the model
-            # produced something malformed by choice, and an analyst who reads
-            # "not valid JSON" would look for the wrong problem.
+        # A parsed call is not proof of a completed generation. Native SSE
+        # preserves length/cancel and can end without a done event. Refuse
+        # before assigning ids, committing tool history, or executing code.
+        if reason not in ("stop", "tool_calls", "eos"):
             rejection = (
-                "analysis step reached its generation limit before producing "
-                "a valid tool call"
+                "analysis step reached its generation limit before completing"
+                if reason == "length" else
+                f"analysis step generation incomplete: {reason}"
             )
+        else:
+            rejection = self._structural_rejection(calls) if calls else None
         if rejection is not None:
             assistant["content"] = _rejected_action_text(content, rejection)
             self.messages.append(assistant)
@@ -4739,6 +4754,7 @@ class AnalysisRuntime:
                 diagnostics=_diagnostics(rejection),
             )
 
+        calls = self._with_canonical_call_ids(calls)
         if calls:
             assistant["tool_calls"] = calls
         self.messages.append(assistant)
@@ -6422,7 +6438,6 @@ class AnalysisRuntime:
                 model_calls += self.model_calls - step_spent_before
                 cancelled = True
                 stop_reason = STOP_CANCELLED
-                self._close_incomplete_turn()
                 break
             except (ContextAdmissionError, TimeoutError, RecoverableBackendError) as exc:
                 # A recoverable backend failure ends the run, it does not undo
@@ -6475,7 +6490,6 @@ class AnalysisRuntime:
                 model_calls += self.model_calls - step_spent_before
                 error = f"{type(exc).__name__}: {exc}"
                 stop_reason = f"{STOP_BACKEND_ERROR}: {error}"
-                self._close_incomplete_turn()
                 break
 
             steps.append(step)
