@@ -32,9 +32,13 @@ class FinishInterfaceTests(_Case):
         schema = rt.backend.chat_calls[-1]['tools'][0]
         self.assertEqual(schema, FINISH_TOOL_SCHEMA)
         description = schema['function']['description']
-        self.assertIn('`resolved` only with a non-empty answer_summary and no child_question', description)
-        self.assertIn('not a verified fact', description)
-        self.assertIn('`still_open` while work remains', description)
+        self.assertEqual(description, (
+            'Report what the action just run established about the question you '
+            'were working on. Answer `still_open` if it did not settle the question '
+            'and `blocked` if it cannot be settled -- both are real answers and '
+            'the report will say so. '
+            'Use `resolved` only with a non-empty answer_summary and no child_question.'
+        ))
 
     def test_parser_combinations_preserve_the_proposal(self):
         _, _, _, _, eid, child = self.setup_question()
@@ -77,6 +81,7 @@ class FinishInterfaceTests(_Case):
                     parse_finish_call(invalid)
                 generate = rt.backend.chat_stream
                 def probe(messages, **kw):
+                    self.assertEqual(kw['tools'], [FINISH_TOOL_SCHEMA])
                     if rt.model_calls == 2:
                         # Only the bounded repair counter may change on refusal.
                         expected = copy.deepcopy(before)
