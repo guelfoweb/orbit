@@ -67,3 +67,31 @@ Saved sessions retain documents outside CHAT messages. Saving later CHAT turns
 preserves this archive; unreadable existing archives are not overwritten.
 The live recorder's RC=0 gates document completeness and investigation
 lifecycle, not truth of free-form model conclusions.
+
+FINISH uses its existing prompt admission and compaction policy first. If only
+capacity blocks that request, it freezes the complete resulting view, including
+rehydrated evidence, and measures it again with the production tokenizer. Its
+output cap is the smaller of the qualified phase limit (2048), any lower explicit
+limit, and the effective context minus safety (256) and exact input tokens.
+Admission and generation use that same cap; a repair measures its own request.
+PLAN, STEP, REPORT, context size and action limits are unchanged.
+
+This cap is a limit, not a promise that every schema-valid answer can fit.
+FINISH accepts proposals only from completed generation. A parseable control in
+a length-limited, cancelled or failed response commits no model decision.
+Cancellation and outages retain the existing stop handlers; insufficient space
+causes a controlled stop with the runtime report. Parser and schema repairs
+share the existing two-dispatch ceiling, including when both kinds of failure
+occur in one FINISH phase.
+
+A completed but unusable `empty_response` is not a truncated generation. It
+may use the existing missing-control repair, but none of its tool arguments
+can commit a proposal. Exhausting that repair preserves prior OPEN summaries
+and citations, just as an interrupted FINISH does.
+
+The FINISH tool description exposes the same cross-field completion rule as
+the parser: `resolved` requires a non-empty `answer_summary` and no
+`child_question`. A remaining dependency is not an operationally finished
+answer. Rejection never converts the status or discards the child to accept
+the call. The existing repair carries the parser's exact rejection when a
+call remains; exhaustion blocks the question without committing the proposal.
