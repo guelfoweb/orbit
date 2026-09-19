@@ -4,10 +4,11 @@ Orbit is a Python local-AI runtime for CPU-only machines. Chat with a local
 model, work with files, and let the model use tools when needed. Linux x86_64
 is the qualified platform.
 
-**Qwen3.8 Flash Next UD-IQ1_M** is the highlighted model. It is qualified on a
-Dell Pro 5 14 with an Intel Core Ultra 7 366H, 30 GiB usable RAM and NVMe
-storage. Its 74.5 GB model is larger than RAM, so storage speed matters. Other
-verified models are listed [below](#supported-models).
+**Qwen3.8 Flash Next UD-IQ1_M** is the highlighted model. Its backend and
+CHAT execution are qualified on a Dell Pro 5 14 with an Intel Core Ultra 7
+366H, 30 GiB usable RAM and NVMe storage. Its 74.5 GB model is larger than RAM,
+so storage speed matters. Other verified models are listed
+[below](#supported-models).
 
 Orbit includes its own vendored llama.cpp backend. The build below compiles it;
 there is no separate llama.cpp installation or external inference server to set up.
@@ -110,8 +111,9 @@ Other verified model repositories and exact GGUF filenames are in the
 
 ## Supported models
 
-These are the verified model/quantization combinations. Verification does not
-extend to every quantization or similarly named model.
+These are the verified native model/quantization combinations. Backend
+verification is separate from ANALYSIS qualification and does not extend to
+every quantization or similarly named model.
 
 | Model | Verified quantization |
 |---|---|
@@ -127,8 +129,12 @@ batch/ubatch 256/128, one slot, CPU repack off and MTP off. These settings and
 its startup warm-up are qualified for that setup; other hardware and models
 can resolve different defaults.
 
-Static artifact analysis is qualified with **Ornith 1.5**. In an Ornith session,
-use `/analysis path/to/artifact` to begin and `/chat` to return to chat.
+Static artifact analysis has bounded qualification with **Ornith 1.5 Q4_K_M**.
+**Qwen3.8 Flash Next UD-IQ1_M**, in the configuration above, did not pass the
+retained ANALYSIS FINISH semantic cases; its backend/CHAT qualification remains
+valid. See [ANALYSIS qualification and limits](docs/ANALYSIS_QUALIFICATION.md).
+In an Ornith session, use `/analysis path/to/artifact` to begin and `/chat` to
+return to chat.
 Analysis handles one local artifact at a time without executing the input or
 fetching remote payloads. Advanced usage lives in [docs/](docs/).
 
