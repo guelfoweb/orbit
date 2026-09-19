@@ -66,6 +66,7 @@ from orbit.runtime.analysis_controller import (
     PHASE_PLAN,
     PHASE_REPORT,
     RESOLVED,
+    ANSWERED_UNVERIFIED,
     AnalysisController,
     ControlError,
     Question,
@@ -2777,9 +2778,30 @@ class AutonomousRunResult:
     control_repairs: int = 0
     initial_questions: int = 0
     child_questions: int = 0
+    # Deprecated wire/API field; old values migrate explicitly below.
     resolved_questions: "tuple[str, ...]" = ()
     open_questions: "tuple[str, ...]" = ()
     rejected_free_actions: int = 0
+    answered_unverified_questions: "tuple[str, ...]" = ()
+    unverified_questions: "tuple[str, ...]" = ()
+    legacy_resolved_questions: "tuple[str, ...]" = ()
+
+    def __post_init__(self) -> None:
+        # `resolved_questions` was an operational result, not an attestation.
+        # Preserve explicitly supplied legacy values, but never export them as
+        # verified resolutions. Existing stored Markdown is not rewritten.
+        if self.resolved_questions:
+            self.legacy_resolved_questions = tuple(dict.fromkeys(
+                (*self.legacy_resolved_questions, *self.resolved_questions)
+            ))
+            self.answered_unverified_questions = tuple(dict.fromkeys(
+                (*self.answered_unverified_questions, *self.resolved_questions)
+            ))
+            self.resolved_questions = ()
+        self.unverified_questions = tuple(dict.fromkeys((
+            *self.unverified_questions, *self.answered_unverified_questions,
+            *self.open_questions,
+        )))
 
     @property
     def source_covered(self) -> bool:
@@ -5703,8 +5725,8 @@ class AnalysisRuntime:
         """Ask what the action established. Returns model calls spent.
 
         A reply that cannot be used leaves the question exactly as it was, and
-        after one repair the question is blocked. Nothing here resolves a
-        question: only an explicit `resolved` from the model does.
+        after one repair the question is blocked. A model's `resolved` proposal
+        ends operational work with an unverified answer, never a proof.
 
         `max_calls` is the calls this finish may still spend against the run's
         ceiling. The first attempt is always taken -- the loop only entered
@@ -5771,7 +5793,7 @@ class AnalysisRuntime:
         decision: "dict",
         evidence_id: str,
     ) -> None:
-        """Record a validated completion, and any child it forced."""
+        """Record a model proposal after reference validation, not certify it."""
         cited = tuple(
             eid for eid in decision["evidence_ids"]
             if self.evidence_store.reattest_exact(eid) is not None
@@ -6484,7 +6506,7 @@ class AnalysisRuntime:
                         outcome = controller.states[active.id]
                         _notify(
                             on_event, ANALYSIS_FINISH_PHASE,
-                            {RESOLVED: "resolved", BLOCKED: "blocked"}.get(
+                            {ANSWERED_UNVERIFIED: "answered_unverified", BLOCKED: "blocked"}.get(
                                 outcome.status, "still_open"
                             ),
                             question=active, controller=controller,
@@ -6846,13 +6868,13 @@ class AnalysisRuntime:
                 final_report = self.report(
                     question=self._final_question(
                         stop_reason,
-                        # Everything not resolved, not merely everything still
+                        # Everything not answered, not merely everything still
                         # open: a question blocked by the action limit or by an
                         # unreadable completion is exactly the one a reader must
                         # be told about, and `open_ids` excludes it.
                         tuple(
                             qid for qid in controller.order
-                            if controller.states[qid].status != RESOLVED
+                            if controller.states[qid].status != ANSWERED_UNVERIFIED
                         ) if controller is not None else (),
                         dossier=controller.dossier() if controller is not None else "",
                     ),
@@ -6959,14 +6981,15 @@ class AnalysisRuntime:
                 sum(1 for q in controller.questions.values() if q.depth > 0)
                 if controller is not None else 0
             ),
-            resolved_questions=(
+            answered_unverified_questions=(
                 tuple(qid for qid in controller.order
-                      if controller.states[qid].status == RESOLVED)
+                      if controller.states[qid].status == ANSWERED_UNVERIFIED)
                 if controller is not None else ()
             ),
+            unverified_questions=tuple(controller.order) if controller is not None else (),
             open_questions=(
                 tuple(qid for qid in controller.order
-                      if controller.states[qid].status != RESOLVED)
+                      if controller.states[qid].status != ANSWERED_UNVERIFIED)
                 if controller is not None else ()
             ),
             rejected_free_actions=(
@@ -7137,11 +7160,10 @@ class AnalysisRuntime:
                 f"{', '.join(open_questions)}. Say what remains unknown about "
                 "each rather than omitting them."
             )
-            if dossier:
-                # The ids alone say which questions are unanswered; the dossier
-                # says what they were. A reader given only "Q2" cannot tell
-                # what was left unknown.
-                unresolved = f"{unresolved}\n{dossier}"
+        if dossier:
+            # Answered questions matter too. Previously their summaries and
+            # original objectives disappeared when every question was closed.
+            unresolved = f"{unresolved}\n{dossier}"
         if stop_reason == STOP_COMPLETE and not unresolved:
             return ""
         if stop_reason in (STOP_COMPLETE, STOP_LEDGER_EXHAUSTED):

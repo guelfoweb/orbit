@@ -37,7 +37,9 @@ from dataclasses import dataclass, field
 
 # Question states. `OPEN` is the only one that can be made active.
 OPEN = "open"
+# Wire/legacy spelling only: a model proposal, never a verified state.
 RESOLVED = "resolved"
+ANSWERED_UNVERIFIED = "answered_unverified"
 BLOCKED = "blocked"
 
 # Controller phases, in the order they occur.
@@ -97,6 +99,14 @@ class QuestionState:
     summary: str = ""
     reason: str = ""
     actions: int = 0
+    # Explicit provenance when loading a pre-separation state. No old model
+    # answer acquires verification merely by being read by a newer runtime.
+    legacy_status: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status == RESOLVED:
+            self.legacy_status = RESOLVED
+            self.status = ANSWERED_UNVERIFIED
 
 
 @dataclass
@@ -104,8 +114,8 @@ class AnalysisController:
     """The finite state of one autonomous analysis.
 
     Deliberately a plain record with explicit transitions. It refuses; it never
-    decides on the model's behalf, and in particular it never marks a question
-    resolved -- only an explicit control call from the model does that.
+    decides whether model prose is true. A model may finish work on a question
+    with an unverified answer; the ledger does not certify that answer.
     """
 
     questions: "dict[str, Question]" = field(default_factory=dict)
@@ -243,7 +253,7 @@ class AnalysisController:
     ) -> None:
         """Record what the model said became of the active question.
 
-        A RESOLVED status is honoured only with a completion witness: a
+        A model's RESOLVED proposal is recorded as ANSWERED_UNVERIFIED with a
         non-empty answer summary and at least one cited evidence id. This is the
         second, mandatory layer of the completion contract -- `parse_finish_call`
         already refuses a resolution with no stated answer, and the runtime cites
@@ -256,17 +266,19 @@ class AnalysisController:
         """
         if self.active is None:
             raise ControlError("no active question to close")
-        if status not in (RESOLVED, OPEN, BLOCKED):
+        if status not in (RESOLVED, ANSWERED_UNVERIFIED, OPEN, BLOCKED):
             raise ControlError(f"unknown status: {status!r}")
         state = self.states[self.active]
         state.evidence_ids = tuple(evidence_ids)
         state.summary = summary[:MAX_SUMMARY_CHARS]
-        if status == RESOLVED and (not state.summary.strip() or not state.evidence_ids):
+        if status in (RESOLVED, ANSWERED_UNVERIFIED) and (
+            not state.summary.strip() or not state.evidence_ids
+        ):
             # Missing witness: not a resolution. Leave it open for another
             # bounded attempt rather than record an answer that was not given.
             status = OPEN
-        if status == RESOLVED:
-            state.status = RESOLVED
+        if status in (RESOLVED, ANSWERED_UNVERIFIED):
+            state.status = ANSWERED_UNVERIFIED
         elif status == BLOCKED:
             state.status = BLOCKED
             state.reason = reason or "the model reported it blocked"
@@ -325,7 +337,7 @@ class AnalysisController:
     def dossier(self) -> str:
         """Every question and what became of it, for the closing report.
 
-        Blocked and still-open questions are rendered as plainly as resolved
+        Blocked and still-open questions are rendered as plainly as answered
         ones. A control plane that could quietly drop what it failed to answer
         would be worse than the exploration it replaced.
         """
@@ -343,6 +355,9 @@ class AnalysisController:
             # printing.
             head = f"{qid} [{state.status.upper()}]: {_one_line(question.question)}"
             lines.append(head)
+            if state.legacy_status:
+                lines.append(f"    legacy status: {_one_line(state.legacy_status)}; "
+                             "no independent verification was recorded")
             if state.summary:
                 # Labelled, because it is the model's own prose about the
                 # evidence and not the evidence itself. Rendered plainly it
@@ -361,7 +376,9 @@ class AnalysisController:
                     f"    evidence ids cited by that claim: "
                     f"{', '.join(state.evidence_ids)}"
                 )
-            if state.status != RESOLVED:
+            if state.status == ANSWERED_UNVERIFIED:
+                lines.append("    work ended on a model answer; its conclusion is not verified")
+            else:
                 lines.append(
                     "    unresolved: "
                     f"{_one_line(state.reason) or 'no answer was established'}"
@@ -371,7 +388,12 @@ class AnalysisController:
     def counts(self) -> "dict[str, int]":
         return {
             "questions": len(self.questions),
-            "resolved": sum(1 for s in self.states.values() if s.status == RESOLVED),
+            # Deprecated compatibility counter. This controller records no
+            # independently verified resolutions; use answered_unverified.
+            "resolved": 0,
+            "answered_unverified": sum(
+                1 for s in self.states.values() if s.status == ANSWERED_UNVERIFIED
+            ),
             "blocked": sum(1 for s in self.states.values() if s.status == BLOCKED),
             "open": len(self.open_ids),
             "actions": sum(s.actions for s in self.states.values()),

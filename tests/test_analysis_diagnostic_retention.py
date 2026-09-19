@@ -161,7 +161,7 @@ class RetentionDoesNotChangeBehaviourTests(_DiagnosticTestBase):
             return (
                 run.stop_reason, run.model_calls, run.actions_executed,
                 len(run.steps), run.plan_calls, run.initial_questions,
-                list(run.resolved_questions), list(run.open_questions),
+                list(run.answered_unverified_questions), list(run.open_questions),
                 run.final_report.text if run.final_report else None,
             )
 

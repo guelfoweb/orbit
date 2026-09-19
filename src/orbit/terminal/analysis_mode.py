@@ -152,7 +152,8 @@ _PROGRESS_LABELS = {
     "skipped": "Skipped",
     "classified": None,  # spelled per classification below
     "checking": "Checking completion",
-    "resolved": "Resolved",
+    "resolved": "Legacy answer (unverified)",
+    "answered_unverified": "Answer proposed (unverified)",
     "still_open": "Still open",
     "blocked": "Blocked",
     "replanning": "Replanning after no progress",
@@ -221,13 +222,13 @@ class AnalysisProgressDisplay:
     # `Resolved` with `New evidence recorded`, or `Skipped` with `No new
     # evidence`, tells the analyst the same thing twice. ERROR and COMPLETE
     # are never folded: they say something no outcome line said.
-    _OUTCOMES = frozenset({"resolved", "still_open", "blocked", "skipped"})
+    _OUTCOMES = frozenset({"resolved", "answered_unverified", "still_open", "blocked", "skipped"})
     _FOLDED = frozenset({"NEW_CONTENT", "NO_PROGRESS"})
     # Events after which the runtime hands the completed step to `on_step`,
     # which prints its block. The wait line must not be restarted between the
     # two: a fresh tick would draw a row under that block. The next
     # `investigating`, `question`, `stopped` or `report` restarts it.
-    _BEFORE_STEP_BLOCK = frozenset({"resolved", "still_open", "blocked", "skipped", "classified"})
+    _BEFORE_STEP_BLOCK = frozenset({"resolved", "answered_unverified", "still_open", "blocked", "skipped", "classified"})
 
     def __init__(self, renderer, *, interactive: bool | None = None) -> None:
         self._renderer = renderer
