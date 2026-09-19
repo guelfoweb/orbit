@@ -120,6 +120,7 @@ class SessionStore:
         model: str,
         base_url: str,
         workflow_mode: str | None = None,
+        analysis_report: dict[str, Any] | None = None,
     ) -> None:
         """Persist this session. `workflow_mode` records the mode it ended in.
 
@@ -139,6 +140,26 @@ class SessionStore:
         }
         if workflow_mode is not None:
             payload["workflow_mode"] = workflow_mode
+        # Reports are durable documents, not resumable analysis state and not
+        # CHAT messages. Preserve them across subsequent CHAT-only saves.
+        previous_reports = []
+        if self.path.exists():
+            try:
+                previous = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("cannot safely preserve the existing session report archive") from exc
+            if not isinstance(previous, dict):
+                raise ValueError("cannot overwrite an invalid session archive")
+            if isinstance(previous, dict):
+                previous_reports = previous.get("analysis_reports", [])
+                if not isinstance(previous_reports, list):
+                    raise ValueError("cannot overwrite an invalid analysis report archive")
+        if analysis_report is not None and (
+            not previous_reports or previous_reports[-1] != analysis_report
+        ):
+            previous_reports.append(analysis_report)
+        if previous_reports:
+            payload["analysis_reports"] = previous_reports
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)

@@ -52,7 +52,7 @@ _RUNTIME_SECTIONS = ("Verified indicators", "Deterministic transformations")
 _HEADING = re.compile(r"^(#{1,6})([ \t]+)(.*)$")
 _BULLET = re.compile(r"^(\s*)([-*+])([ \t]+)(.*)$")
 _NUMBERED = re.compile(r"^(\s*)(\d+[.)])([ \t]+)(.*)$")
-_FENCE = re.compile(r"^\s*(```|~~~)")
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 # `key: value` provenance lines the runtime emits inside its own sections.
 _FIELD = re.compile(r"^(\s+)([a-z_][a-z0-9_ ]*):(\s.*)$")
 
@@ -78,18 +78,20 @@ def render_report(text: str, *, force_style: bool | None = None) -> str:
         return safe
 
     out: list[str] = []
-    in_fence = False
+    fence: str | None = None
     for line in safe.split("\n"):
-        if _FENCE.match(line):
-            # The fence markers stay: they are how a reader knows where the
-            # verbatim block begins and ends, and a terminal has no border.
-            in_fence = not in_fence
+        match = _FENCE.match(line)
+        if fence is None and match:
+            fence = match.group(1)
             out.append(f"{DIM}{line}{RESET}")
             continue
-        if in_fence:
-            # Verbatim means verbatim. Inline markers inside a code block are
-            # code, not formatting.
-            out.append(f"{CYAN}{line}{RESET}")
+        if fence is not None:
+            if (match and match.group(1)[0] == fence[0]
+                    and len(match.group(1)) >= len(fence) and not match.group(2).strip()):
+                fence = None
+                out.append(f"{DIM}{line}{RESET}")
+            else:
+                out.append(f"{CYAN}{line}{RESET}")
             continue
         out.append(_render_line(line))
     return "\n".join(out)

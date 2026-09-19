@@ -595,6 +595,23 @@ class PersistenceTest(ModeTestBase):
         store.path.write_text("{not json", encoding="utf-8")
         self.assertIsNone(store.load_workflow_mode())
 
+    def test_failed_archive_save_warns_without_losing_the_analysis(self) -> None:
+        store = self.store()
+        repl = self.repl(session=store)
+        self.run_command(repl, f"/analysis {self.artifact}")
+        analysis = repl.analysis
+        original = b'{unreadable existing archive'
+        store.path.write_bytes(original)
+        calls = repl.backend.calls
+        output = self.run_command(repl, "/report")
+        self.assertIn("session was not saved", output)
+        self.assertIn("# Analysis report", output)
+        self.assertIsNotNone(analysis.last_report)
+        self.assertTrue(analysis.last_report.document_complete)
+        self.assertLessEqual(repl.backend.calls - calls, 1)
+        self.assertIs(repl.analysis, analysis)
+        self.assertEqual(store.path.read_bytes(), original)
+
     def test_repl_honours_an_injected_restored_mode(self) -> None:
         repl = self.repl(workflow_mode=WorkflowMode.CHAT)
         self.assertIs(repl.workflow_mode, WorkflowMode.CHAT)
@@ -2466,7 +2483,7 @@ class ReportCommandTest(ModeTestBase):
         output = self.run_command(repl, "/report")
 
         self.assertEqual(backend.calls, before, "nothing to report on, nothing to ask")
-        self.assertIn("No analysis evidence has been collected yet", output)
+        self.assertIn("No evidence records were retained.", output)
 
     def test_report_keeps_the_session_in_analysis(self) -> None:
         repl, _ = self._analysis_repl()
@@ -2753,6 +2770,7 @@ class RenderedAssistantTextTest(ModeTestBase):
         # the marks must give the model's bytes back unchanged.
         self.assertEqual(
             report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
+            .rsplit("\n```\n\n## Limits and unknowns", 1)[0]
             .lstrip("\n")
             .replace(UNSUPPORTED_INLINE_MARK, ""),
             HOSTILE_TEXT,

@@ -454,10 +454,9 @@ class DeterministicOnlyReportTests(unittest.TestCase):
         self.assertNotIn("could not proceed", low)
         self.assertNotIn("no evidence was collected", low)
         self.assertNotIn("so no evidence", low)
-        # IS the deterministic-only opening, and carries the decoded value.
-        self.assertTrue(
-            rep.text.startswith(DETERMINISTIC_ONLY_REPORT.split("{", 1)[0])
-        )
+        # The runtime record carries the decoded value independently of narrative.
+        self.assertTrue(rep.document_complete)
+        self.assertIn("## Runtime-attested facts", rep.text)
         self.assertIn(payload, rep.text)
 
     def test_oversized_without_decoder_still_says_coverage_limited(self) -> None:
@@ -467,10 +466,9 @@ class DeterministicOnlyReportTests(unittest.TestCase):
         rt = self._runtime(body)
         self.assertEqual(len(rt.transform_stages), 0)
         rep = rt.report()
-        # With no transforms, it is NOT the deterministic-only opening.
-        self.assertFalse(
-            rep.text.startswith(DETERMINISTIC_ONLY_REPORT.split("{", 1)[0])
-        )
+        self.assertNotIn('## Deterministic transformations', rep.text)
+        self.assertIn(rt._uncovered_report_reason(), rep.text)
+        self.assertTrue(rep.document_complete)
         self.assertEqual(rep.model_calls, 0)
 
 

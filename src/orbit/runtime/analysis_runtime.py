@@ -26,6 +26,7 @@ later exact-prefix KV strategy will need.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from urllib.parse import urlsplit
 import json
@@ -35,7 +36,7 @@ import shutil
 import stat
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -2618,10 +2619,14 @@ class AnalysisReport:
     #: the model actually wrote, kept for diagnostics so a rejected claim can
     #: be studied without reading it out of the reader-facing report. Defaults
     #: to `text` for every path that adds nothing.
-    model_text: str = ""
+    model_text: str | None = None
+    document_complete: bool | None = None  # None: historical prose-only report
+    limitations: tuple[str, ...] = ()
+    narrative_status: str = "legacy"
+    narrative_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.model_text:
+        if self.model_text is None:
             object.__setattr__(self, "model_text", self.text)
 
 
@@ -3224,6 +3229,8 @@ class AnalysisRuntime:
     # the list -- is what makes the pass once-only: an artifact with nothing to
     # decode must not be rescanned on every step.
     _transform_snapshot: str | None = None
+    _report_runs: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    last_report: AnalysisReport | None = field(default=None, repr=False)
 
     @property
     def source_covered(self) -> bool:
@@ -6857,15 +6864,21 @@ class AnalysisRuntime:
         # truthful closing result, and with no evidence that result is the
         # honest "no evidence was collected", never "source too large".
         _notify(on_event, ANALYSIS_STEP_PHASE, "stopped", detail=stop_reason)
-        if not cancelled and finalize:
+        self._remember_report_run(
+            controller, request=analyst_message, stop_reason=stop_reason,
+            actions=actions, model_calls=model_calls, cancelled=cancelled,
+        )
+        if finalize:
             # Measured, like the four sites above: `report()` reports its
             # spend in the object it returns, and the handler below leaves
             # without one -- so a closing report that reached the model and
             # then failed was spent and never counted.
             report_spent_before = self.model_calls
+            previous_report = self.last_report
             _notify(on_event, ANALYSIS_REPORT_PHASE, "report")
             try:
                 final_report = self.report(
+                    generate_narrative=not cancelled,
                     question=self._final_question(
                         stop_reason,
                         # Everything not answered, not merely everything still
@@ -6900,7 +6913,8 @@ class AnalysisRuntime:
                 # history and provenance of every completed step -- leaving
                 # their evidence durable on disk with nothing referring to it.
                 model_calls += self.model_calls - report_spent_before
-                final_report = None
+                final_report = (self.last_report if self.last_report is not previous_report
+                                else self.report(generate_narrative=False))
             else:
                 model_calls += self.model_calls - report_spent_before
 
@@ -7324,7 +7338,206 @@ class AnalysisRuntime:
         # measured it as oversized.
         return NO_EVIDENCE_REPORT
 
-    def report(
+    def _remember_report_run(self, controller, *, request, stop_reason,
+                             actions, model_calls, cancelled):
+        # Presentation state only. It cannot feed PLAN/STEP/FINISH or change
+        # their stopping policy. A rewind invalidates its history binding.
+        self._report_runs.append({
+            "request": request, "stop_reason": stop_reason,
+            "actions": actions, "model_calls": model_calls,
+            "cancelled": cancelled, "source_sha256": self.source.sha256,
+            "questions": [(asdict(controller.questions[qid]),
+                           asdict(controller.states[qid]))
+                          for qid in controller.order] if controller else [],
+            "history_size": len(self.messages),
+            "history_sha256": self._report_history_identity(len(self.messages)),
+        })
+
+    def _report_history_identity(self, size):
+        return hashlib.sha256(json.dumps(
+            self.messages[:size], ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")).hexdigest()
+
+    def _report_material(self, *, render_facts=True):
+        """Re-attest existing producers; do not certify model interpretations."""
+        limitations = []
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            raw = None
+        source_ok = (raw is not None and len(raw) == self.source.size_bytes
+                     and hashlib.sha256(raw).hexdigest() == self.source.sha256)
+        if not source_ok:
+            limitations.append("The source snapshot is missing or no longer matches its registered identity.")
+        expected = {m['evidence_id'] for m in self.messages
+                    if isinstance(m.get('evidence_id'), str)}
+        for run in self._report_runs:
+            if run["source_sha256"] != self.source.sha256:
+                limitations.append("A retained question ledger belongs to another source snapshot.")
+            if (len(self.messages) < run['history_size'] or
+                    self._report_history_identity(run['history_size']) != run['history_sha256']):
+                limitations.append("A retained question ledger no longer matches the current history (rewind or replacement).")
+            for _question, state in run['questions']:
+                expected.update(state['evidence_ids'])
+        expected.update(r.evidence_id for _, r in self.transform_stages)
+        expected.update(r.evidence_id for _, r in self.office_modules)
+        records = list(self.evidence_store.records.values())
+        for record in records:
+            raw_id = record.metadata.get('raw_output_evidence_id')
+            if isinstance(raw_id, str):
+                expected.add(raw_id)
+        missing = sorted(expected - self.evidence_store.records.keys())
+        limitations.extend(f"Missing referenced evidence: {eid}." for eid in missing)
+        bodies = {}
+        rendered = []
+        for record in records:
+            body = self.evidence_store.reattest_exact(record.evidence_id)
+            if record.metadata.get('analysis_source_sha256') != self.source.sha256:
+                body = None
+            if (record.produced_by_phase not in (ANALYSIS_TRANSFORM_PHASE, ANALYSIS_OFFICE_PHASE)
+                    and record.metadata.get('input_sha256') not in (None, self.source.sha256)):
+                body = None
+            raw_id = record.metadata.get('raw_output_evidence_id')
+            if isinstance(raw_id, str):
+                sibling = self.evidence_store.records.get(raw_id)
+                if (sibling is None or sibling.tool_call_id != record.tool_call_id
+                        or sibling.user_turn_id != record.user_turn_id
+                        or sibling.metadata.get('code_sha256') != record.metadata.get('code_sha256')):
+                    body = None
+            if body is None:
+                limitations.append(f"Evidence unavailable or incompatible with this snapshot/provenance: {record.evidence_id}.")
+            else:
+                bodies[record.evidence_id] = body
+            rendered.append((record, body))
+        # Reuse the exact existing deterministic renderers on a read-only view.
+        # A copy avoids rerunning preflight or mutating stored history/evidence.
+        view = copy.copy(self)
+        view.evidence_store = copy.copy(self.evidence_store)
+        view.evidence_store.records = {r.evidence_id: r for r, body in rendered if body is not None}
+        view.evidence_store.raw_cache = dict(bodies)
+        view.transform_stages = []
+        for stage, record in self.transform_stages:
+            if (self.evidence_store.records.get(record.evidence_id) == record
+                    and bodies.get(record.evidence_id) == stage.output
+                    and hashlib.sha256(stage.output.encode('utf-8')).hexdigest() == stage.output_sha256):
+                view.transform_stages.append((stage, record))
+            else:
+                limitations.append(f"Deterministic transform cannot be re-attested: {record.evidence_id}.")
+        view.office_modules = []
+        for module, record in self.office_modules:
+            if (self.evidence_store.records.get(record.evidence_id) == record
+                    and bodies.get(record.evidence_id) == module.source
+                    and hashlib.sha256(module.source.encode('utf-8')).hexdigest() == module.source_sha256):
+                view.office_modules.append((module, record))
+            else:
+                limitations.append(f"Office module cannot be re-attested: {record.evidence_id}.")
+        module_ids = {r.evidence_id for _, r in view.office_modules}
+        view.office_events = [event for event in self.office_events if event.module_evidence_id in module_ids]
+        view.office_exec_reach = [event for event in self.office_exec_reach if event.module_evidence_id in module_ids]
+        facts = view.deterministic_sections() if source_ok and render_facts else ""
+        delivery = self.source_delivery
+        acquisition = None
+        if delivery is not None:
+            record = self.evidence_store.records.get(delivery.evidence_id)
+            if (source_ok and delivery.evidence_id in bodies and delivery.raw_evidence_id in bodies
+                    and record.metadata.get('source_delivery') == delivery.representation
+                    and record.metadata.get('source_delivery_sha256') == self.source.sha256
+                    and record.metadata.get('raw_output_evidence_id') == delivery.raw_evidence_id):
+                acquisition = asdict(delivery)
+                acquisition['size_bytes'] = len(raw)
+                acquisition['scope'] = [0, len(raw)]
+                acquisition['meaning'] = 'complete source retained in action output; not a model-delivery assertion'
+            else:
+                limitations.append("The recorded complete acquisition is no longer re-attestable.")
+        covered = False
+        if source_ok and self.source_covered:
+            source_text = decode_artifact(raw)
+            if source_text is not None:
+                expected_cover = _cover_message(
+                    SourceCoverage(source_text, COVERAGE_COMPLETE, self.source.sha256, len(raw)),
+                    self.source, self._cover_preamble())
+                covered = any(m.get('role') == 'user' and m.get('source_covered') is True
+                              and m.get('content') == expected_cover for m in self.messages)
+            if not covered:
+                limitations.append("The historical COVER message does not match this source snapshot.")
+        coverage = {
+            'source_snapshot_reattested': source_ok,
+            'complete_source_supplied_in_recorded_call': covered,
+            'current_FINISH_full_source_delivery': 'not established by acquisition or a historical COVER mark',
+            'complete_acquisition': acquisition,
+            'uncovered_without_evidence_reason': (self._uncovered_report_reason()
+                if source_ok and not covered and not records else None),
+            'bounded_observations': [r.evidence_id for r in records if r.metadata.get('observation_truncated')],
+            'unverified_questions': [q['id'] for run in self._report_runs for q, _s in run['questions']],
+        }
+        return facts, rendered, missing, coverage, list(dict.fromkeys(limitations))
+
+    def report(self, question="", *, on_progress=None, on_delta=None,
+               generate_narrative=True):
+        """Always compose the retained record; generation is optional and bounded.
+
+        Only the canonical Markdown is emitted to a report consumer. Raw model
+        deltas remain provisional diagnostics until generation has ended.
+        """
+        from orbit.runtime.analysis_report import render_document
+
+        before = self.model_calls
+        chunks = []
+        narrative = ""
+        model_text = ""
+        diagnostics = None
+        status = "not_requested"
+        narrative_ids = ()
+        facts, records, missing, coverage, limitations = self._report_material(render_facts=False)
+        if generate_narrative and not limitations:
+            try:
+                generated = self._report_narrative(
+                    question, on_progress=on_progress, on_delta=chunks.append)
+            except (ContextAdmissionError, TimeoutError, RecoverableBackendError, KeyboardInterrupt) as exc:
+                status = "cancelled" if isinstance(exc, KeyboardInterrupt) else f"unavailable:{type(exc).__name__}"
+                model_text = "".join(chunks)
+            else:
+                diagnostics = generated.diagnostics
+                if generated.model_calls:
+                    narrative_ids = generated.evidence_ids
+                    model_text = generated.model_text
+                    reason = diagnostics.finish_reason if diagnostics else None
+                    if reason not in ('stop', 'eos'):
+                        status = f"incomplete:{reason or 'unknown_stop_reason'}"
+                    elif not model_text.strip() or model_text == NO_USABLE_REPORT_TEXT:
+                        status = "empty"
+                    else:
+                        status = "complete_unverified"
+                        narrative = generated.text
+                else:
+                    status = ("admission_refused" if generated.text.startswith(REPORT_NOT_COMPOSED_PREFIX)
+                              else "not_needed")
+        elif limitations:
+            status = "withheld_incomplete_evidence"
+        # Evidence can be withdrawn during optional generation. Never publish
+        # a fact merely because it passed a check before the model was called.
+        facts, records, missing, coverage, limitations = self._report_material()
+        text = render_document(
+            identity={'path': self.source.original_path, 'size_bytes': self.source.size_bytes,
+                      'sha256': self.source.sha256}, facts=facts, runs=self._report_runs,
+            records=records, missing_ids=missing, coverage=coverage,
+            limitations=limitations, narrative=narrative, narrative_status=status,
+            request=question, uncited_events=[str(m.get('content') or '') for m in self.messages
+                if m.get('role') == 'tool' and not m.get('evidence_id')],
+            history=[dict(m) for m in self.messages if m.get('role') != 'system'],
+        )
+        result = AnalysisReport(
+            text=text, model_text=model_text, model_calls=self.model_calls-before,
+            evidence_ids=tuple(r.evidence_id for r, _ in records), diagnostics=diagnostics,
+            document_complete=not limitations, limitations=tuple(limitations),
+            narrative_status=status, narrative_evidence_ids=narrative_ids,
+        )
+        self.last_report = result
+        if on_delta is not None:
+            on_delta(text)
+        return result
+
+    def _report_narrative(
         self,
         question: str = "",
         *,
@@ -7553,8 +7766,7 @@ class AnalysisRuntime:
         # establish -- classically a URI-string hash relabelled as the downloaded
         # payload's hash, or an invented remote-file digest under network deny.
         text = self._flag_fabricated_digest_claims(text)
-        if appendix:
-            text = f"{text}\n\n{appendix}"
+
         _record_report_diagnostics(
             self, question=question, records=records, messages=messages,
             model_text=model_text,
@@ -7698,10 +7910,16 @@ class AnalysisRuntime:
         # establish -- classically a URI-string hash relabelled as the downloaded
         # payload's hash, or an invented remote-file digest under network deny.
         text = self._flag_fabricated_digest_claims(text)
-        if appendix:
-            text = f"{text}\n\n{appendix}"
+
         return AnalysisReport(
-            text=text, model_text=model_text, model_calls=1, evidence_ids=()
+            text=text, model_text=model_text, model_calls=1, evidence_ids=(),
+            diagnostics=StepDiagnostics(
+                prompt_tokens=getattr(response, "prompt_tokens", None),
+                output_tokens=getattr(response, "completion_tokens", None),
+                reused_tokens=getattr(response, "cached_tokens", None),
+                finish_reason=getattr(response, "finish_reason", None),
+                generation_tokens_per_second=getattr(response, "generation_tokens_per_second", None),
+            ),
         )
 
     def _reportable_records(self) -> list[EvidenceRecord]:
