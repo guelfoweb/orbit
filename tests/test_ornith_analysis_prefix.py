@@ -43,7 +43,7 @@ from orbit.runtime.analysis_runtime import ANALYSIS_SYSTEM_PROMPT, ANALYSIS_TOOL
 # Evidence-delivery contract correction: only the impossible autonomous read
 # promise changes. Native offline replay proves the first 384 tokens unchanged;
 # the complete system identity still changes and must invalidate old state.
-ANALYSIS_SYSTEM_PROMPT_SHA256 = "bdc83f4878a98bf69eb06688b86e0a5b1ab42ee0a1cf32b161fecc91ba6f762b"
+ANALYSIS_SYSTEM_PROMPT_SHA256 = "5717eb32d079263c79148a102f46fde39ba1fd1344054d1f93def0754521b4b2"
 
 
 class AnalysisPrefixConfigTests(unittest.TestCase):
@@ -416,7 +416,9 @@ class AnalysisPrefixInvalidationTests(unittest.TestCase):
 
         old = ANALYSIS_SYSTEM_PROMPT.replace(
             "Runtime-supplied exact_output fields contain decoded evidence when it fits. "
-            "Evidence ids are not file paths; a reference alone does not supply its body.\n",
+            "Evidence ids are not file paths; a reference alone does not supply its body. "
+            "In an action, orbit_tools.read_evidence(id) returns a registered transform's exact str "
+            "up to 65536 UTF-8 bytes, or an explicit unavailability error.\n",
             "When you need those exact bytes again, name its id as `evidence:<evidence_id>` "
             "and they are restored verbatim. Never infer content from a reference alone.\n",
         )

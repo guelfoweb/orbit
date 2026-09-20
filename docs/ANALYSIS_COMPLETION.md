@@ -94,8 +94,19 @@ does it establish that the model read it in the later call. The exact output
 remains in the runtime report when re-attestation succeeds. Evidence IDs are
 not sandbox paths; an assistant citation does not request rehydration. Existing
 explicit analyst requests through `evidence:<id>` retain their admission rules.
-This delivery view covers registered deterministic transformations, not arbitrary
-evidence retrieval or full-source coverage.
+When a registered transform body is withheld, sandboxed actions can call
+`orbit_tools.read_evidence(id)` to read its exact UTF-8 text. Only current-session,
+current-snapshot transforms that re-attest are supplied, at most 64 KiB per body
+and the existing 8 MiB workspace bound in aggregate. Unavailable or oversized
+inputs fail explicitly. This does not mount the EvidenceStore or turn IDs into
+paths. The original code, input manifest and output provenance are retained.
+
+Sandbox availability is not delivery to the model: the action must output the
+needed data, and its observation still passes the existing output and context
+bounds. A first useful delivery is retained; repeating a value already supplied
+to STEP still follows the existing no-progress policy. A citation never invokes
+the helper. This covers registered deterministic transformations, not arbitrary
+evidence retrieval, Office module delivery or full-source coverage.
 
 FINISH uses its existing prompt admission and compaction policy first. If only
 capacity blocks that request, it freezes the complete resulting view, including

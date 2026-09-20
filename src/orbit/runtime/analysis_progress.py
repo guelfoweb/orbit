@@ -245,7 +245,10 @@ class ProgressLedger:
         source = getattr(result, "input_sha256", None)
         if not source and isinstance(metadata, dict):
             source = metadata.get("input_sha256") or metadata.get("analysis_source_sha256")
-        return observation_fingerprint(code_sha, source, self.artifacts)
+        inputs = dict(self.artifacts)
+        if isinstance(metadata, dict) and metadata.get('sandbox_evidence_inputs_sha256'):
+            inputs['\0sandbox_evidence_inputs'] = metadata['sandbox_evidence_inputs_sha256']
+        return observation_fingerprint(code_sha, source, inputs)
 
     def _append(self, record: ProgressRecord) -> ProgressRecord:
         self.history.append(record)

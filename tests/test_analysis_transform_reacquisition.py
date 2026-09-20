@@ -2,8 +2,8 @@
 
 IBAN-EVIDENCE-GROUNDING-CLOSURE-1, defect A, at the runtime seam. The transform
 preflight decodes the artifact's stages and records each as authoritative
-evidence before any model call. An action whose output only reproduces one of
-those stages re-derives a fact the session already holds exactly -- the
+evidence before any model call. Once that body's delivery to STEP is attested,
+an action whose output only reproduces one of those stages re-derives a fact the session already holds exactly -- the
 source-reacquisition case, one seam inward. These tests prove what the runtime
 does with that: the program still runs and its output is still recorded, but it
 does not consume an action slot, it does not become new useful evidence, and it
@@ -132,9 +132,16 @@ class _Case(unittest.TestCase):
             stage = _stage(stage_output)
             record = runtime.evidence_store.add(
                 "execute_analysis", stage.output,
-                metadata={"produced_by_phase": "analysis_transform"},
+                metadata={"produced_by_phase": "analysis_transform",
+                          "tool_call_id":"transform_fixture", "user_turn_id":"turn_0",
+                          "analysis_source_sha256": runtime.source.sha256},
             )
             runtime.transform_stages.append((stage, record))
+            # Model the real constructor's registered index, so the test proves
+            # suppression after admitted delivery, not merely archive presence.
+            runtime.messages.append({"role":"user",
+                "content":module._transform_preamble(runtime.transform_stages),
+                "analysis_transform_ids":[record.evidence_id]})
             self.stage_evidence_id = record.evidence_id
         return runtime
 

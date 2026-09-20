@@ -389,16 +389,8 @@ class SandboxBehaviourTest(SandboxTestBase):
         self.assertEqual(result.code_sha256, hashlib.sha256(code.encode()).hexdigest())
 
 
-class EvidenceIsNotReadableFromAProgramTests(SandboxTestBase):
-    """A live run lost an action to `read_file(evidence_id=...)`.
-
-    The system prompt says naming `evidence:<id>` restores exact bytes. That
-    is true of the conversation and false of a sandboxed program, and the
-    model read one as licensing the other. The boundary is not the canonical
-    gate -- this is a helper called inside generated Python, which the gate
-    never inspects -- so the only place the mistake can be answered is the
-    shim itself.
-    """
+class EvidenceReaderBoundaryTests(SandboxTestBase):
+    """Only authorized transform copies are readable; IDs never become paths."""
 
     def test_asking_read_file_for_an_evidence_id_explains_the_supported_move(
         self,
@@ -413,9 +405,9 @@ class EvidenceIsNotReadableFromAProgramTests(SandboxTestBase):
 
         self.assertEqual(result.status, "ok")
         # Not a bare TypeError about a signature: it has to name what to do.
-        self.assertIn("NotImplementedError", result.stdout)
-        self.assertIn("evidence:<evidence_id>", result.stdout)
-        self.assertIn("next message", result.stdout)
+        self.assertIn("TypeError", result.stdout)
+        self.assertIn("read_evidence(id)", result.stdout)
+        self.assertNotIn("next message", result.stdout)
 
     def test_the_shim_offers_read_evidence_and_it_refuses_the_same_way(self) -> None:
         """A model that reaches for the plausible name gets the same guidance."""
@@ -428,8 +420,8 @@ class EvidenceIsNotReadableFromAProgramTests(SandboxTestBase):
         )
 
         self.assertEqual(result.status, "ok")
-        self.assertIn("NotImplementedError", result.stdout)
-        self.assertIn("evidence:<evidence_id>", result.stdout)
+        self.assertIn("ValueError", result.stdout)
+        self.assertIn("not available to this action", result.stdout)
 
     def test_an_unrelated_unexpected_keyword_is_still_refused_by_name(self) -> None:
         """The tolerance is for one known confusion, not for any argument."""

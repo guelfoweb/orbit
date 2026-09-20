@@ -117,7 +117,9 @@ from orbit.runtime.analysis_bootstrap import (
     build_bootstrap_view,
 )
 from orbit.runtime.analysis_network_policy import analysis_network_denied
+from orbit.runtime.analysis_tools_shim import MAX_READ_BYTES
 from orbit.runtime.analysis_sandbox import (
+    MAX_SCRATCH_BYTES,
     SOURCE_MOUNT,
     WORK_MOUNT,
     AnalysisResult,
@@ -251,7 +253,9 @@ def _transform_preamble(
                 lines.append("  output not supplied in this request (budget or unavailable evidence)")
     lines.append(
         "Do not recompute supplied values. An id is not a file path or its body. "
-        "Budget-withheld output stays archived; unavailable evidence is not re-attested."
+        "Budget-withheld transform text up to 65536 UTF-8 bytes is readable during an action "
+        "with orbit_tools.read_evidence(id), returning the exact str. "
+        "Unavailable evidence is refused; ids never become paths."
     )
     return "\n".join(lines)
 
@@ -1306,7 +1310,9 @@ ANALYSIS_SYSTEM_PROMPT = (
     "Earlier results may appear as an evidence reference (`tool_evidence_ref: true`) "
     "instead of their full text; that is the exact output, archived, not a summary. "
     "Runtime-supplied exact_output fields contain decoded evidence when it fits. "
-    "Evidence ids are not file paths; a reference alone does not supply its body.\n"
+    "Evidence ids are not file paths; a reference alone does not supply its body. "
+    "In an action, orbit_tools.read_evidence(id) returns a registered transform's exact str "
+    "up to 65536 UTF-8 bytes, or an explicit unavailability error.\n"
     "When you have identified a deterministic transformation -- a decoder, "
     "decompressor or decryption whose algorithm and concrete inputs you "
     "already hold -- execute it and store its output before re-reading source "
@@ -2357,9 +2363,8 @@ def _transform_reacquisition_observation(
         f"{TRANSFORM_REACQUISITION.upper()}: {lead} ({verdict.detail}). It was "
         "executed, and it established nothing the session did not already hold "
         "deterministically.\n"
-        f"Those exact bytes are evidence {eid}: name `evidence:{eid}` to get "
-        "them back rather than decoding them again. Reason from the decoded "
-        "value or choose a different unresolved target."
+        f"Those exact bytes are already recorded as evidence {eid}. "
+        "Reason from the supplied decoded value or choose a different unresolved target."
     )
 
 
@@ -4316,6 +4321,25 @@ class AnalysisRuntime:
             self.context_compactions += 1
         return [dict(message) for message in plan.messages]
 
+    def _attested_transform_outputs(self) -> dict[str, str]:
+        """Re-attest this session's registered producers against its snapshot."""
+        try:
+            snapshot = self.source.snapshot_path.read_bytes()
+            source_ok = (len(snapshot) == self.source.size_bytes and
+                         hashlib.sha256(snapshot).hexdigest() == self.source.sha256)
+        except OSError:
+            source_ok = False
+        bodies = {}
+        for stage, record in self.transform_stages:
+            if (not source_ok or self.evidence_store.records.get(record.evidence_id) != record
+                    or record.metadata.get('analysis_source_sha256') != self.source.sha256):
+                continue
+            raw = self.evidence_store.reattest_exact(record.evidence_id)
+            if (raw == stage.output and raw is not None
+                    and hashlib.sha256(raw.encode('utf-8')).hexdigest() == stage.output_sha256):
+                bodies[record.evidence_id] = raw
+        return bodies
+
     def _deliver_transform_outputs(self, messages, tools, rehydrated, plan_view):
         """Supply registered deterministic results, never infer a read from citations.
 
@@ -4338,25 +4362,9 @@ class AnalysisRuntime:
         # a windowed source. Only wholly supplied bodies count as elsewhere.
         windowed = {entry[0] for entry in (self.last_rehydration_diag or {}).get('windowed', [])}
         delivered = set(rehydrated) - windowed
-        try:
-            snapshot = self.source.snapshot_path.read_bytes()
-            source_ok = (len(snapshot) == self.source.size_bytes and
-                         hashlib.sha256(snapshot).hexdigest() == self.source.sha256)
-        except OSError:
-            source_ok = False
-        bodies = {}
-        for eid in dict.fromkeys(eid for _, m in indexes for eid in m['analysis_transform_ids']):
-            pair = by_id.get(eid)
-            if pair is None:
-                continue
-            stage, record = pair
-            if (not source_ok or self.evidence_store.records.get(eid) != record
-                    or record.metadata.get('analysis_source_sha256') != self.source.sha256):
-                continue
-            raw = self.evidence_store.reattest_exact(eid)
-            if (raw == stage.output and raw is not None
-                    and hashlib.sha256(raw.encode('utf-8')).hexdigest() == stage.output_sha256):
-                bodies[eid] = raw
+        indexed = {eid for _, message in indexes for eid in message['analysis_transform_ids']}
+        bodies = {eid: body for eid, body in self._attested_transform_outputs().items()
+                  if eid in indexed}
         delivered.intersection_update(bodies)
 
         def view(selected):
@@ -4390,7 +4398,15 @@ class AnalysisRuntime:
             measured = plan_view(trial)
             if measured.admitted:
                 selected = candidate
-        return view(selected)
+        result = view(selected)
+        if not plan_view(result).admitted and plan_view(messages).admitted:
+            # Explicit rehydration may have used every available token. This
+            # optional view must not displace it merely to explain delivery.
+            # Keep the original index; receipts still describe only bodies
+            # actually supplied by rehydration (including its withheld tail).
+            for i, original in indexes:
+                result[i]['content'] = original['content']
+        return result
 
     def _with_evidence_rehydration(
         self, messages: list[Message], *,
@@ -4892,6 +4908,22 @@ class AnalysisRuntime:
         # wants the regular files it may have to diff, the fingerprint wants
         # everything a program could have observed.
         workspace_state = self._workspace_state()
+        # These immutable copies are available only through explicit helper
+        # reads. They are not a filesystem mount or model delivery.
+        evidence_inputs = {}
+        evidence_bytes = 0
+        for eid, body in self._attested_transform_outputs().items():
+            size = len(body.encode('utf-8'))
+            if size <= MAX_READ_BYTES and evidence_bytes + size + len(eid.encode()) <= MAX_SCRATCH_BYTES:
+                evidence_inputs[eid] = body
+                evidence_bytes += size + len(eid.encode())
+        evidence_manifest = [
+            {'evidence_id': eid, 'sha256': hashlib.sha256(body.encode()).hexdigest(),
+             'source_sha256': self.source.sha256, 'byte_range': [0, len(body.encode())]}
+            for eid, body in sorted(evidence_inputs.items())]
+        evidence_identity = hashlib.sha256(json.dumps(evidence_manifest, sort_keys=True).encode()).hexdigest()
+        if self.transform_stages:
+            workspace_state['\0sandbox_evidence_inputs'] = evidence_identity
 
         # Identity of the experiment about to run, computed from the same three
         # hashes the ledger uses to judge one that already ran. Asking before
@@ -4962,6 +4994,8 @@ class AnalysisRuntime:
                 scratch_dir=self.workspace.scratch_root,
                 scratch_baseline_sizes=baseline_sizes,
                 scratch_baseline_digests=baseline_digests,
+                **({'evidence_inputs': evidence_inputs,
+                    'evidence_source_sha256': self.source.sha256} if evidence_inputs else {}),
             )
         except (RuntimeError, OSError, ValueError) as exc:
             # The sandbox refuses fail-closed for a tampered scratch entry or
@@ -5015,6 +5049,7 @@ class AnalysisRuntime:
                 calls[0],
                 result,
                 _source_reacquisition_observation(equivalence, delivery),
+                sandbox_evidence_inputs=evidence_manifest,
                 extra={
                     "suppressed_as": (
                         SOURCE_DOMINATED
@@ -5088,7 +5123,12 @@ class AnalysisRuntime:
         # stage's authority rather than weakening it: the recorded decode is
         # the reference the re-derivation is measured against.
         transform_reacq = _transform_reacquisition(
-            result, self.transform_stages, self.office_modules
+            result, [(stage, record) for stage, record in self.transform_stages
+                     if any(receipt['evidence_id'] == record.evidence_id and
+                            receipt['status'] in ('complete', 'supplied_elsewhere')
+                            for message in admitted
+                            for receipt in message.get('analysis_evidence_delivery', []))],
+            self.office_modules
         )
         if transform_reacq is not None:
             verdict, stage_record = transform_reacq
@@ -5103,6 +5143,7 @@ class AnalysisRuntime:
                 calls[0],
                 result,
                 observation,
+                sandbox_evidence_inputs=evidence_manifest,
                 extra={
                     "suppressed_as": TRANSFORM_REACQUISITION,
                     # Which deterministic stage this output re-derived, so an
@@ -5157,6 +5198,7 @@ class AnalysisRuntime:
         record, raw_record = self._record_action_evidence(
             calls[0], result, observation,
             truncated=truncated, full_chars=full_chars,
+            sandbox_evidence_inputs=evidence_manifest,
             extra=(
                 {"source_delivery": delivered, "source_delivery_sha256": self.source.sha256}
                 if delivered is not None else None
@@ -5210,6 +5252,7 @@ class AnalysisRuntime:
         truncated: bool = False,
         full_chars: int | None = None,
         extra: "dict[str, object] | None" = None,
+        sandbox_evidence_inputs: list[dict] | None = None,
     ) -> "tuple[EvidenceRecord, EvidenceRecord]":
         """Persist one execution's evidence, and return the model-facing record.
 
@@ -5227,6 +5270,10 @@ class AnalysisRuntime:
         bytes that no longer exist anywhere.
         """
         provenance = self._provenance(call)
+        if sandbox_evidence_inputs is not None and self.transform_stages:
+            provenance = {**provenance,
+                'sandbox_evidence_inputs': sandbox_evidence_inputs,
+                'sandbox_evidence_inputs_sha256': hashlib.sha256(json.dumps(sandbox_evidence_inputs, sort_keys=True).encode()).hexdigest()}
         raw_record = self.evidence_store.add(
             f"{ANALYSIS_TOOL_NAME}_raw",
             _raw_action_output(result),

@@ -575,7 +575,9 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
                     )
                     new = (
                         '    "Runtime-supplied exact_output fields contain decoded evidence when it fits. "\n'
-                        '    "Evidence ids are not file paths; a reference alone does not supply its body.\\n"\n'
+                        '    "Evidence ids are not file paths; a reference alone does not supply its body. "\n'
+                        '    "In an action, orbit_tools.read_evidence(id) returns a registered transform\'s exact str "\n'
+                        '    "up to 65536 UTF-8 bytes, or an explicit unavailability error.\\n"\n'
                     )
                     self.assertEqual(expected.count(old), 1)
                     expected = expected.replace(old, new)
