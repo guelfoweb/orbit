@@ -39,6 +39,7 @@ class AppConfig:
     think: bool = DEFAULT_THINKING
     tools: ToolSpec = DEFAULT_TOOLS
     render_markdown: str = "live"
+    constrain_finish: bool = False
 
 
 def add_config_arguments(parser: argparse.ArgumentParser) -> None:
@@ -53,6 +54,12 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-system", action="store_true", help="Do not send the default system prompt.")
     parser.add_argument("--think", help="Initial thinking mode: off or on.")
     parser.add_argument("--tools", help="Initial tool mode: off or on.")
+    parser.add_argument(
+        "--constrain-finish",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Require constrained ANALYSIS FINISH control calls (default: off; does not verify conclusions).",
+    )
     parser.add_argument(
         "--render-markdown-live",
         action="store_true",
@@ -96,6 +103,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         think=_bool_value_or_spec(values, "think", AppConfig.think),
         tools=_tool_spec_value(values),
         render_markdown=_markdown_mode_value(values),
+        constrain_finish=_bool_value(values, "constrain_finish", AppConfig.constrain_finish),
     )
     cli_markdown = _cli_markdown_mode(args)
     return AppConfig(
@@ -131,6 +139,7 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
         think=normalize_think_spec(args.think) if args.think is not None else config.think,
         tools=normalize_tool_spec(args.tools) if args.tools is not None else config.tools,
         render_markdown=cli_markdown if cli_markdown is not None else config.render_markdown,
+        constrain_finish=args.constrain_finish if args.constrain_finish is not None else config.constrain_finish,
     )
 
 
