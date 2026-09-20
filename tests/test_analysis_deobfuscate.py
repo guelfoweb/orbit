@@ -666,12 +666,13 @@ class RuntimeIntegrationTests(unittest.TestCase):
         _stage, record = runtime.transform_stages[0]
         self.assertEqual(store.reattest_exact(record.evidence_id), "SYNTHETIC-STAGE")
 
-    def test_the_model_receives_references_not_a_transcript(self) -> None:
+    def test_history_index_retains_references_without_claiming_delivery(self) -> None:
         runtime, _store = self._runtime(self._fixture())
         preamble = runtime.messages[-1]["content"]
         _stage, record = runtime.transform_stages[0]
         self.assertIn(record.evidence_id, preamble)
-        self.assertIn("evidence:<evidence_id>", preamble)
+        self.assertNotIn("SYNTHETIC-STAGE", preamble)
+        self.assertIn("An id is not a file path or its body", preamble)
 
     def test_the_pass_runs_once_per_snapshot(self) -> None:
         """Not rescanned on every step: guarded by the snapshot digest."""
