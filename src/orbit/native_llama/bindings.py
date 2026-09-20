@@ -442,6 +442,12 @@ class ChatBridgeLibrary:
             c_size_t,
         ]
         lib.orbit_chat_bridge_render.restype = c_int
+        if hasattr(lib, "orbit_chat_bridge_render_required"):
+            lib.orbit_chat_bridge_render_required.argtypes = lib.orbit_chat_bridge_render.argtypes
+            lib.orbit_chat_bridge_render_required.restype = c_int
+        if hasattr(lib, "orbit_chat_bridge_required_sampler"):
+            lib.orbit_chat_bridge_required_sampler.argtypes = [c_void_p, c_char_p, c_char_p]
+            lib.orbit_chat_bridge_required_sampler.restype = c_void_p
         lib.orbit_chat_bridge_parse.argtypes = [
             c_void_p,
             c_char_p,
@@ -468,16 +474,33 @@ class ChatBridgeLibrary:
         tools: list[dict[str, object]],
         *,
         thinking: bool,
+        tool_choice: str = "auto",
     ) -> dict[str, object]:
         messages_json = json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if tool_choice not in ("auto", "required"):
+            raise ValueError("unsupported tool_choice")
+        render = self.lib.orbit_chat_bridge_render
+        if tool_choice == "required":
+            render = getattr(self.lib, "orbit_chat_bridge_render_required", None)
+            if render is None:
+                raise RuntimeError("Orbit chat bridge lacks required tool decoding")
         return self._json_call(
-            self.lib.orbit_chat_bridge_render,
+            render,
             context,
             messages_json,
             tools_json,
             thinking,
         )
+
+    def required_sampler(self, vocab, grammar: str, generation_prompt: str):
+        factory = getattr(self.lib, "orbit_chat_bridge_required_sampler", None)
+        if factory is None:
+            raise RuntimeError("Orbit chat bridge lacks required tool sampler")
+        sampler = factory(vocab, grammar.encode("utf-8"), generation_prompt.encode("utf-8"))
+        if not sampler:
+            raise RuntimeError(f"required tool sampler unavailable: {self.last_error()}")
+        return c_void_p(sampler)
 
     def parse(self, context: c_void_p, generated_text: str, *, partial: bool) -> dict[str, object]:
         return self._json_call(

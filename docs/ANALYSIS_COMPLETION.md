@@ -95,3 +95,60 @@ the parser: `resolved` requires a non-empty `answer_summary` and no
 answer. Rejection never converts the status or discards the child to accept
 the call. The existing repair carries the parser's exact rejection when a
 call remains; exhaustion blocks the question without committing the proposal.
+
+## Explicit FINISH constrained decoding
+
+`AnalysisRuntime.constrain_finish` defaults to `False`. An embedding that owns
+an initialized runtime can explicitly enable it before requesting FINISH:
+
+```python
+runtime.constrain_finish = True
+```
+
+The equivalent constructor option is
+`AnalysisRuntime(..., constrain_finish=True)`, with the usual backend, source,
+evidence store and workspace. This is a Python runtime option: there is no CLI
+flag, environment variable or public `/analysis` option for it. Ordinary
+`/analysis` callers retain the default. It does not automatically enable
+constrained decoding for Ornith, Qwen, other phases or other runtime instances.
+
+For an opted-in runtime, requests whose sole tool is
+`finish_analysis_question` use `tool_choice="required"` in exact token counting,
+admission and generation, including the existing FINISH repair. The integrated
+native server and rebuilt Orbit chat bridge must support the contract; an old
+server, unavailable grammar or incompatible configuration produces an error,
+never a silent fallback to unconstrained generation. The supported path requires
+a native chat bridge profile, text tools, thinking off and no custom stop
+override. Use the bundled native build process (`python3 scripts/build_native.py`)
+after a source upgrade; no external llama.cpp installation is needed.
+
+The bridge derives the grammar from the offered schema and actual chat format,
+including the control name. It uses the native XML format for the qualified
+Qwen and Ornith profiles. A sampler belongs to one request and is released on
+success, error or cancellation; the next request does not inherit its state.
+Requests using the default `auto` choice retain their normal behavior.
+
+Constrained decoding does not select a completion outcome: `resolved`,
+`still_open` and `blocked` remain representable. The XML grammar does not enforce
+every schema constraint, including the status enum and duplicate optional
+parameters. Existing parsing, schema and semantic validation remain mandatory;
+contradictory or incomplete output still cannot commit a decision. Budget,
+action and repair limits are unchanged. Grammar acceptance does not establish
+the truth of the proposed answer or its citations.
+
+The retained native qualification used one FINISH call per model, without
+repair, on identical prompt token IDs and unchanged output caps. Qwen3.8 Flash
+Next UD-IQ1_M produced an accepted `still_open` control but invented a numeric
+decoding detail in its summary. Its ANALYSIS semantic qualification remains
+limited as described in [model qualification](ANALYSIS_QUALIFICATION.md).
+Ornith Q4_K_M produced the exact previously retained, evidence-grounded
+`still_open` response; this covers that case, not every investigation.
+
+On the Dell, one offline replay of captured token sequences measured additional
+grammar-plus-greedy **apply** time over greedy of about 21.2 ms/token for Qwen and
+22.2 ms/token for Ornith. This used controlled logits and the full vocabulary,
+without model inference; it excludes sampler accept time. It is neither an
+end-to-end latency delta nor a portable performance guarantee. Request-local
+sampler creation during the native calls took about 1.01 ms and 0.74 ms,
+respectively. Source, raw requests/responses, identities and gate results are
+retained locally in `workdir/diag/finish_constrained_decoding/`.

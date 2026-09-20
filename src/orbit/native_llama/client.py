@@ -1386,6 +1386,7 @@ class NativeLlamaClient:
         messages: list[NativeMessage],
         *,
         max_tokens: int = 16,
+        tool_choice: str = "auto",
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
@@ -1399,6 +1400,8 @@ class NativeLlamaClient:
         on_token=None,
         should_cancel=None,
     ) -> NativeTimings:
+        if tool_choice not in ("auto", "required"):
+            raise ValueError("unsupported tool_choice")
         request_timing = _RequestTiming.start()
         self._final_prefix_store().mark_unused()
         thinking = self._thinking_enabled(thinking)
@@ -1409,6 +1412,8 @@ class NativeLlamaClient:
             else f"{'tools' if tools else 'chat'}:thinking={'on' if thinking else 'off'}"
         )
         self._ensure_prompt_cache_mode(mode)
+        if tool_choice != "auto" and (prepared_multimodal is not None or thinking or not tools):
+            raise ValueError("required tool decoding needs text tools and thinking off")
         if prepared_multimodal is not None:
             if prepared_multimodal.has_image and not self.supports_vision:
                 raise RuntimeError("image input is not supported - hint: if this is unexpected, you may need to provide the mmproj")
@@ -1466,7 +1471,10 @@ class NativeLlamaClient:
                 messages, tools=tools, thinking=thinking
             )
         try:
-            prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
+            prompt = self.apply_chat_template(
+                messages, tools=tools, thinking=thinking,
+                **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
+            )
         except Exception:
             self._invalidate_coder_route_prefix_after_failed_completion(
                 "completion_error"
@@ -1482,6 +1490,7 @@ class NativeLlamaClient:
                 thinking=thinking,
                 prompt=prompt,
                 analysis_lineage=analysis_rolling_anchor,
+                **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             )
             if (qwen_route_prefix_anchor or analysis_rolling_anchor)
             else None
@@ -1491,6 +1500,7 @@ class NativeLlamaClient:
             tools=tools,
             thinking=thinking,
             prompt=prompt,
+            **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
         ) if qwen36_shell_tool_prefix_anchor else None
         route_anchor_segments = self._route_anchor_segments_for_prompt(
             messages,
@@ -1569,32 +1579,39 @@ class NativeLlamaClient:
         rolling_boundary_suffix = (
             self._generation_prompt_suffix() if rolling_analysis_eligible else None
         )
-        return self.complete_prompt(
-            prompt,
-            max_tokens=max_tokens,
-            allow_mtp_experimental=allow_mtp,
-            thinking=thinking,
-            rolling_route_eligible=rolling_route_eligible,
-            rolling_route_identity=rolling_route_identity,
-            rolling_boundary_suffix=rolling_boundary_suffix,
-            rolling_boundary_head=rolling_boundary_head,
-            rolling_route_messages=(
-                [dict(message) for message in messages]
-                if rolling_route_identity is not None
-                and rolling_route_identity.strategy_id == ROLLING_ROUTE_STRATEGY_ID
-                else None
-            ),
-            rolling_route_tools=[dict(tool) for tool in (tools or [])],
-            route_anchor_segments=route_anchor_segments,
-            qwen_route_anchor_plan=qwen_route_anchor_plan,
-            qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
-            final_prefix_segments=final_prefix_segments,
-            kv_diag_messages=messages,
-            on_progress=on_progress,
-            on_token=on_token,
-            should_cancel=should_cancel,
-            request_timing=request_timing,
-        )
+        sampler = self._create_required_tool_sampler() if tool_choice == "required" else None
+        try:
+            return self.complete_prompt(
+                prompt,
+                **({"sampler_override": sampler} if sampler is not None else {}),
+                max_tokens=max_tokens,
+                allow_mtp_experimental=allow_mtp,
+                thinking=thinking,
+                rolling_route_eligible=rolling_route_eligible,
+                rolling_route_identity=rolling_route_identity,
+                rolling_boundary_suffix=rolling_boundary_suffix,
+                rolling_boundary_head=rolling_boundary_head,
+                rolling_route_messages=(
+                    [dict(message) for message in messages]
+                    if rolling_route_identity is not None
+                    and rolling_route_identity.strategy_id == ROLLING_ROUTE_STRATEGY_ID
+                    else None
+                ),
+                rolling_route_tools=[dict(tool) for tool in (tools or [])],
+                route_anchor_segments=route_anchor_segments,
+                qwen_route_anchor_plan=qwen_route_anchor_plan,
+                qwen36_shell_tool_anchor_plan=qwen36_shell_tool_anchor_plan,
+                final_prefix_segments=final_prefix_segments,
+                kv_diag_messages=messages,
+                on_progress=on_progress,
+                on_token=on_token,
+                should_cancel=should_cancel,
+                request_timing=request_timing,
+            )
+        finally:
+            if sampler is not None:
+                self.lib.lib.llama_sampler_free(sampler)
+                self._session.continuation_ready = False
 
     def complete_chat_text(
         self,
@@ -1602,6 +1619,7 @@ class NativeLlamaClient:
         *,
         max_tokens: int = 16,
         stop: tuple[str, ...] = (),
+        tool_choice: str = "auto",
         tools: list[dict] | None = None,
         thinking: bool | None = None,
         route_prefix_anchor: bool = False,
@@ -1616,11 +1634,14 @@ class NativeLlamaClient:
         should_cancel=None,
     ) -> NativeCompletion:
         thinking = self._thinking_enabled(thinking)
+        if tool_choice != "auto" and (thinking or stop):
+            raise ValueError("required tool decoding needs thinking off and no stop override")
         result = self._complete_chat_text_once(
             messages,
             max_tokens=max_tokens,
             stop=stop,
             tools=tools,
+            **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             analysis_rolling_anchor=analysis_rolling_anchor,
@@ -1635,7 +1656,7 @@ class NativeLlamaClient:
         )
         latest = result
         extra_budget = max(1, min(max_tokens, 64))
-        allow_auto_continuation = max_tokens >= 128
+        allow_auto_continuation = tool_choice == "auto" and max_tokens >= 128
         continuation_attempts = 0
         while allow_auto_continuation and self._should_continue_thought_after_completion(
             latest,
@@ -1662,6 +1683,8 @@ class NativeLlamaClient:
             continuation_attempts += 1
             if continuation_attempts >= 1 or not continuation.content:
                 break
+        if tool_choice != "auto":
+            self._session.continuation_ready = False
         return result
 
     def complete_artifact_text(
@@ -1754,6 +1777,18 @@ class NativeLlamaClient:
         self._session.continuation_ready = False
         return NativeCompletion(content=content, timings=timings)
 
+    def _create_required_tool_sampler(self):
+        rendered = self._active_profile_render or {}
+        grammar = rendered.get("grammar")
+        if (rendered.get("tool_choice") != "required" or rendered.get("grammar_lazy") is not False
+                or not isinstance(grammar, str) or not grammar or not self._vocab):
+            raise RuntimeError("required tool grammar unavailable for this render")
+        if self.chat_bridge is None:
+            raise RuntimeError("required tool bridge unavailable")
+        return self.chat_bridge.required_sampler(
+            self._vocab, grammar, str(rendered.get("generation_prompt", "")),
+        )
+
     def _create_qwen3_coder_artifact_sampler(self) -> c_void_p:
         if not self._vocab:
             raise RuntimeError("Qwen3-Coder artifact generation requires a loaded vocabulary")
@@ -1785,6 +1820,7 @@ class NativeLlamaClient:
         *,
         max_tokens: int,
         stop: tuple[str, ...],
+        tool_choice: str = "auto",
         tools: list[dict] | None,
         thinking: bool,
         route_prefix_anchor: bool = False,
@@ -1805,6 +1841,7 @@ class NativeLlamaClient:
                 max_tokens=max_tokens,
                 stop=stop,
                 tools=tools,
+                **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 thinking=thinking,
                 route_prefix_anchor=route_prefix_anchor,
                 analysis_rolling_anchor=analysis_rolling_anchor,
@@ -1817,6 +1854,8 @@ class NativeLlamaClient:
                 on_token=on_token,
                 should_cancel=should_cancel,
             )
+        if tool_choice != "auto":
+            raise RuntimeError("required tool decoding needs a native chat bridge profile")
         parts: list[str] = []
         channel_filter = None if thinking else _ControlChannelStreamFilter()
         thought_label_filter = None if thinking else _LeadingThoughtLabelFilter()
@@ -1902,6 +1941,7 @@ class NativeLlamaClient:
         *,
         max_tokens: int,
         stop: tuple[str, ...],
+        tool_choice: str = "auto",
         tools: list[dict] | None,
         thinking: bool,
         route_prefix_anchor: bool,
@@ -1953,6 +1993,7 @@ class NativeLlamaClient:
             messages,
             max_tokens=max_tokens,
             tools=tools,
+            **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             thinking=thinking,
             route_prefix_anchor=route_prefix_anchor,
             analysis_rolling_anchor=analysis_rolling_anchor,
@@ -3045,6 +3086,7 @@ class NativeLlamaClient:
         tools: list[dict] | None,
         thinking: bool,
         prompt: str,
+        tool_choice: str = "auto",
         analysis_lineage: bool = False,
     ) -> _QwenRouteAnchorRuntimePlan | None:
         profile = getattr(self, "model_profile", None)
@@ -3139,6 +3181,7 @@ class NativeLlamaClient:
                     [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}],
                     probe_tools,
                     thinking=False,
+                    **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
                 value = rendered.get("prompt")
                 if not isinstance(value, str) or not value:
@@ -3167,6 +3210,7 @@ class NativeLlamaClient:
                     self._serialize_profile_messages([dict(message) for message in messages]),
                     probe_tools,
                     thinking=False,
+                    **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
                 restored_prompt = restored.get("prompt")
                 if restored_prompt != prompt:
@@ -3217,6 +3261,7 @@ class NativeLlamaClient:
         tools: list[dict] | None,
         thinking: bool,
         prompt: str,
+        tool_choice: str = "auto",
     ) -> _Qwen36ShellToolAnchorRuntimePlan | None:
         profile = getattr(self, "model_profile", None)
         if getattr(profile, "profile_id", None) != QWEN36_PROFILE_ID:
@@ -3256,6 +3301,7 @@ class NativeLlamaClient:
                     [{"role": "user", "content": user_text}],
                     [dict(tool) for tool in tools or []],
                     thinking=False,
+                    **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
                 value = rendered.get("prompt")
                 if not isinstance(value, str) or not value:
@@ -3280,6 +3326,7 @@ class NativeLlamaClient:
                     self._serialize_profile_messages([dict(message) for message in messages]),
                     [dict(tool) for tool in tools or []],
                     thinking=False,
+                    **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 )
                 restored_prompt = restored.get("prompt")
                 if restored_prompt != prompt:
@@ -4765,7 +4812,10 @@ class NativeLlamaClient:
         if self.config.moe_expert_usage_enabled:
             self.lib.set_expert_usage_phase(2)
         sampler = sampler_override or self._session.sampler
-        lib.llama_sampler_reset(sampler)
+        # Overrides are newly owned per request and may already be primed
+        # with the template generation prefix. Only the reusable default resets.
+        if sampler_override is None:
+            lib.llama_sampler_reset(sampler)
         self.last_target_only_token_hashes = []
         # Exact ids decoded into KV during this generation. An EOG token breaks
         # before llama_decode, so it never joins the resident sequence.
@@ -4913,12 +4963,14 @@ class NativeLlamaClient:
         self,
         messages: list[NativeMessage],
         *,
+        tool_choice: str = "auto",
         tools: list[dict] | None = None,
         thinking: bool | None = None,
     ) -> int:
         count, _rendered_hash, _token_hash = self.inspect_chat_tokens(
             messages,
             tools=tools,
+            **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             thinking=thinking,
         )
         return count
@@ -4927,10 +4979,14 @@ class NativeLlamaClient:
         self,
         messages: list[NativeMessage],
         *,
+        tool_choice: str = "auto",
         tools: list[dict] | None = None,
         thinking: bool | None = None,
     ) -> tuple[int, str, str]:
-        prompt = self.apply_chat_template(messages, tools=tools, thinking=thinking)
+        prompt = self.apply_chat_template(
+            messages, tools=tools, thinking=thinking,
+            **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
+        )
         token_ids = self.tokenize(prompt)
         token_digest = hashlib.sha256()
         for token in token_ids:
@@ -5104,9 +5160,14 @@ class NativeLlamaClient:
         self,
         messages: list[NativeMessage],
         *,
+        tool_choice: str = "auto",
         tools: list[dict] | None = None,
         thinking: bool | None = None,
     ) -> str:
+        if tool_choice not in ("auto", "required"):
+            raise ValueError("unsupported tool_choice")
+        if tool_choice == "required" and (not tools or self._thinking_enabled(thinking)):
+            raise ValueError("required tool decoding needs tools and thinking off")
         if not self._model:
             raise RuntimeError("native client not loaded")
         thinking = self._thinking_enabled(thinking)
@@ -5120,6 +5181,7 @@ class NativeLlamaClient:
                 self._serialize_profile_messages(rendered_messages),
                 [dict(tool) for tool in (tools or [])],
                 thinking=thinking,
+                **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             )
             prompt = rendered.get("prompt")
             if not isinstance(prompt, str) or not prompt:
@@ -5128,6 +5190,8 @@ class NativeLlamaClient:
             self._profile_last_raw_output = ""
             self._profile_last_parsed_content = ""
             return prompt
+        if tool_choice != "auto":
+            raise RuntimeError("required tool decoding needs a native chat bridge profile")
         if thinking:
             return render_gemma4_chat(rendered_messages, tools=tools, thinking=True)
         if tools or any(message.get("role") == "tool" or message.get("tool_calls") for message in rendered_messages):

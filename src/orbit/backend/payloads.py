@@ -18,6 +18,7 @@ class ChatPayloadOptions:
     max_tokens: int
     thinking: bool = False
     tools: list[dict[str, Any]] | None = None
+    tool_choice: str = "auto"
     stream: bool = False
     cache_prompt: bool = True
     route_prefix_anchor: bool = False
@@ -32,6 +33,10 @@ class ChatPayloadOptions:
 
 
 def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
+    if options.tool_choice not in ("auto", "required"):
+        raise ValueError("unsupported tool_choice")
+    if options.tool_choice == "required" and not options.tools:
+        raise ValueError("required tool decoding needs tools")
     payload: dict[str, Any] = {
         "model": options.model,
         "messages": [_message_payload(message) for message in options.messages],
@@ -63,7 +68,7 @@ def build_chat_payload(options: ChatPayloadOptions) -> dict[str, Any]:
         payload["artifact_content"] = True
     if options.tools:
         payload["tools"] = options.tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = options.tool_choice
         payload["parallel_tool_calls"] = False
         payload["parse_tool_calls"] = True
     return payload

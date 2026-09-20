@@ -32,6 +32,7 @@ class ChatRequest:
     # its route prompts are rendered from: once delivered, that reply may be
     # decoded in route context ahead of the next route call.
     route_history_continuation: bool = False
+    tool_choice: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -43,8 +44,15 @@ class ContinueRequest:
 
 
 def parse_chat_request(payload: dict[str, Any]) -> ChatRequest:
+    choice = payload.get("tool_choice", "auto")
+    if choice not in ("auto", "required"):
+        raise ValueError("unsupported tool_choice")
+    if choice == "required" and (not _tools_from_payload(payload.get("tools"))
+            or payload.get("artifact_content") or payload.get("thinking") or payload.get("stop")):
+        raise ValueError("required tool decoding needs tools, thinking off, no artifact/stop override")
     return ChatRequest(
         messages=_messages_from_payload(payload),
+        tool_choice=choice,
         max_tokens=_int_value(payload.get("max_tokens"), 256),
         temperature=_float_value(payload.get("temperature"), 0.0),
         session_id=_session_id(payload.get("session_id")),
