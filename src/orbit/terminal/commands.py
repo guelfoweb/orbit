@@ -82,9 +82,11 @@ def runtime_status(
     *,
     tools_mode: ToolSpec | None = None,
     autonomous: bool = False,
+    constrain_finish: bool | None = None,
 ) -> str:
     status = collect_runtime_status(
-        runtime, config, backend, tools_mode=tools_mode, autonomous=autonomous
+        runtime, config, backend, tools_mode=tools_mode, autonomous=autonomous,
+        constrain_finish=constrain_finish,
     )
     return format_status_panel(status)
 

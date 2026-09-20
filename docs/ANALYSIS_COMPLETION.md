@@ -98,8 +98,29 @@ call remains; exhaustion blocks the question without committing the proposal.
 
 ## Explicit FINISH constrained decoding
 
-`AnalysisRuntime.constrain_finish` defaults to `False`. An embedding that owns
-an initialized runtime can explicitly enable it before requesting FINISH:
+FINISH constrained decoding defaults to **off**. With an Orbit server running,
+start the interactive client with:
+
+```sh
+orbit --constrain-finish
+```
+
+Then use `/analysis <path>` as usual. `/status` shows `FINISH constraint on`
+or `off`: the active analysis runtime's setting, or the client setting before
+an analysis is opened. This reports the requested policy, not a successful
+capability check or verified conclusions. The server checks support when the
+request is submitted.
+
+The existing client JSON configuration (`--config <path>`) also accepts
+`"constrain_finish": true`. Use `orbit --no-constrain-finish` to override it for
+one client. The choice applies to new analysis sessions in that client,
+including analysis entered through routing, and survives `/reset` within that
+client. It is not saved as a conversation setting, does not modify server state,
+and is not enabled automatically for any model. Other clients keep their own
+configuration. PLAN, STEP and CHAT retain their defaults.
+
+Python embeddings can still set `AnalysisRuntime.constrain_finish` explicitly
+on an initialized runtime:
 
 ```python
 runtime.constrain_finish = True
@@ -107,10 +128,8 @@ runtime.constrain_finish = True
 
 The equivalent constructor option is
 `AnalysisRuntime(..., constrain_finish=True)`, with the usual backend, source,
-evidence store and workspace. This is a Python runtime option: there is no CLI
-flag, environment variable or public `/analysis` option for it. Ordinary
-`/analysis` callers retain the default. It does not automatically enable
-constrained decoding for Ornith, Qwen, other phases or other runtime instances.
+evidence store and workspace. Both factories default to `False`; the terminal
+passes only the client's explicit choice. No environment variable enables it.
 
 For an opted-in runtime, requests whose sole tool is
 `finish_analysis_question` use `tool_choice="required"` in exact token counting,
@@ -121,6 +140,13 @@ never a silent fallback to unconstrained generation. The supported path requires
 a native chat bridge profile, text tools, thinking off and no custom stop
 override. Use the bundled native build process (`python3 scripts/build_native.py`)
 after a source upgrade; no external llama.cpp installation is needed.
+
+Known diagnostic limitation: on an incompatible server, exact admission can
+raise a generic `ContextAdmissionError` when required decoding is unavailable.
+That error does not necessarily mean the prompt exceeds the context window;
+the request still stops without falling back to free generation. Separate
+diagnostic TODO: preserve the unsupported-decoding cause in the client error,
+without changing admission, budgets or backend behavior.
 
 The bridge derives the grammar from the offered schema and actual chat format,
 including the control name. It uses the native XML format for the qualified

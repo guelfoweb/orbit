@@ -733,6 +733,10 @@ class Repl:
                     self.backend,
                     tools_mode=self.tools_mode,
                     autonomous=bool(self.autonomous_analysis),
+                    constrain_finish=(
+                        self.analysis.constrain_finish if self.analysis is not None
+                        else self.config.constrain_finish
+                    ),
                 )
             )
             print(format_session_token_usage(self.session_token_usage.snapshot()))
@@ -902,6 +906,7 @@ class Repl:
                 workdir=self.config.workdir,
                 evidence_store_factory=self._analysis_evidence_store,
                 on_acquired=self._analysis_acquired_hook,
+                constrain_finish=self.config.constrain_finish,
             )
         except AnalysisModeError as exc:
             print(f"error: refusing analysis: {exc}", file=sys.stderr)
@@ -944,6 +949,7 @@ class Repl:
                 context_tokens=self.runtime.context_tokens,
                 workdir=self.config.workdir,
                 evidence_store_factory=self._analysis_evidence_store,
+                constrain_finish=self.config.constrain_finish,
             )
         except AnalysisModeError as exc:
             # A refused session leaves the current mode untouched: a typo must

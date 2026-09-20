@@ -89,6 +89,7 @@ class RuntimeStatus:
     # existing caller built a status without it and none are about
     # analysis.
     autonomous: str = "off"
+    constrain_finish: str = "off"
 
 
 def collect_host_info() -> HostInfo:
@@ -111,6 +112,7 @@ def collect_runtime_status(
     tools_mode: ToolSpec | None = None,
     host_info: HostInfo | None = None,
     autonomous: bool = False,
+    constrain_finish: bool | None = None,
 ) -> RuntimeStatus:
     info = _safe_call(getattr(backend, "model_info", None))
     props = _safe_call(getattr(backend, "backend_props", None)) or {}
@@ -131,6 +133,9 @@ def collect_runtime_status(
         tools=_tools_mode(tools_mode if tools_mode is not None else config.tools),
         think="on" if config.think else "off",
         autonomous="on" if autonomous else "off",
+        constrain_finish="on" if (
+            config.constrain_finish if constrain_finish is None else constrain_finish
+        ) else "off",
         max_tokens=str(config.max_tokens),
         temperature=str(config.temperature),
         messages=str(len(runtime.messages)),
@@ -194,6 +199,7 @@ def format_status_panel(status: RuntimeStatus) -> str:
         # The banner points at `/status` for details, so the two must agree
         # about a setting the banner shows.
         ("Autonomous", status.autonomous),
+        ("FINISH constraint", status.constrain_finish),
         ("Max tokens", status.max_tokens),
         ("Workdir", status.workdir),
         ("separator", "Host"),

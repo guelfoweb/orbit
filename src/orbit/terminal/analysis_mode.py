@@ -46,6 +46,7 @@ def open_analysis_session(
     workdir: Path,
     evidence_store_factory: Callable[[Path], EvidenceStore],
     context_tokens: int | None = None,
+    constrain_finish: bool = False,
 ) -> AnalysisRuntime:
     """Snapshot the artifact and return a runtime bound to it.
 
@@ -71,6 +72,7 @@ def open_analysis_session(
         evidence_store=evidence_store,
         workspace=workspace,
         context_tokens=context_tokens,
+        constrain_finish=constrain_finish,
     )
 
 
@@ -81,6 +83,7 @@ def open_confined_analysis_session(
     workdir: Path,
     evidence_store_factory: Callable[[Path], EvidenceStore],
     context_tokens: int | None = None,
+    constrain_finish: bool = False,
     on_acquired: Callable[[], None] | None = None,
 ) -> AnalysisRuntime:
     """Open a session on a path the model chose, acquiring it safely.
@@ -119,6 +122,7 @@ def open_confined_analysis_session(
         evidence_store=evidence_store,
         workspace=workspace,
         context_tokens=context_tokens,
+        constrain_finish=constrain_finish,
     )
 
 
