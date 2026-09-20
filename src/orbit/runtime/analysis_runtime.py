@@ -6668,10 +6668,22 @@ class AnalysisRuntime:
                         question=active, controller=controller,
                     )
                     try:
+                        # This is the already bounded model-facing observation,
+                        # not the unbounded raw-output record. Re-attest it and
+                        # let FINISH's exact admission budget it; a second
+                        # generic 900-character excerpt can hide the value an
+                        # explicit evidence read just acquired.
+                        finish_observation = ""
+                        if step.evidence is not None:
+                            finish_observation = (
+                                self.evidence_store.reattest_exact(step.evidence.evidence_id)
+                                if self.evidence_store.records.get(step.evidence.evidence_id) == step.evidence
+                                else None
+                            )
+                            if finish_observation is None:
+                                finish_observation = f"raw_evidence_unavailable: {step.evidence.raw_ref}"
                         self.finish_question(
-                            controller, active,
-                            self.evidence_store.raw_excerpt(step.evidence)
-                            if step.evidence else "",
+                            controller, active, finish_observation,
                             step.evidence.evidence_id if step.evidence else "",
                             on_progress=on_progress,
                             # What this finish may still spend against the run

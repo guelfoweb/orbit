@@ -92,9 +92,9 @@ class EvidenceReaderTests(unittest.TestCase):
 
 
     def test_autonomous_reader_delivers_withheld_body_to_finish(self):
-        value = 'safe decoded text ' * 45 + 'END'
+        value = 'safe decoded text ' * 95 + 'END'
         rt, b = self.runtime(decodable(value))
-        b.context = 6000
+        b.context = 7000
         eid = rt.transform_stages[0][1].evidence_id
         b._plan_questions = ['What is the exact decoded text?']
         b._responses = [tool_response(
@@ -115,6 +115,56 @@ class EvidenceReaderTests(unittest.TestCase):
         self.assertIn(value, '\n'.join(m.get('content','') for m in finish))
         self.assertTrue(run.answered_unverified_questions)
         self.assertFalse(run.resolved_questions)
+
+    def test_finish_does_not_deliver_tampered_action_observation(self):
+        value='safe decoded text '*95+'END'
+        rt,b=self.runtime(decodable(value));b.context=7000
+        eid=rt.transform_stages[0][1].evidence_id
+        b._plan_questions=['What is the exact decoded text?']
+        b._responses=[tool_response(f'import orbit_tools\nprint(orbit_tools.read_evidence({eid!r}))')]
+        real_step=rt.step
+        def tampered(*args,**kwargs):
+            result=real_step(*args,**kwargs)
+            path=rt.evidence_store.root/(result.evidence.evidence_id+'.txt')
+            path.write_text('FORGED ACTION OUTPUT')
+            return result
+        with mock.patch.object(rt,'step',side_effect=tampered), \
+             mock.patch.object(rt,'finish_question',wraps=rt.finish_question) as finish:
+            rt.run_autonomous('Inspect the stored output.',cover=False,
+                              max_model_calls=3,finalize=False)
+        # Actual caller and actual FINISH/admission still run. A withdrawn
+        # reference may also prevent compaction; refusal is then safe too.
+        finish.assert_called_once()
+        observation=finish.call_args.args[2]
+        self.assertIn('raw_evidence_unavailable:',observation)
+        self.assertNotIn('FORGED ACTION OUTPUT',observation)
+        self.assertNotIn(value,observation)
+
+    def test_finish_does_not_deliver_replaced_action_record(self):
+        value='safe decoded text '*95+'END'
+        rt,b=self.runtime(decodable(value));b.context=7000
+        eid=rt.transform_stages[0][1].evidence_id
+        b._plan_questions=['What is the exact decoded text?']
+        b._responses=[tool_response(f'import orbit_tools\nprint(orbit_tools.read_evidence({eid!r}))')]
+        real_step=rt.step
+        def tampered(*args,**kwargs):
+            result=real_step(*args,**kwargs)
+            from dataclasses import replace
+            record=result.evidence
+            rt.evidence_store.records[record.evidence_id]=replace(
+                record,tool_call_id='unrelated-action')
+            return result
+        with mock.patch.object(rt,'step',side_effect=tampered), \
+             mock.patch.object(rt,'finish_question',wraps=rt.finish_question) as finish:
+            rt.run_autonomous('Inspect the stored output.',cover=False,
+                              max_model_calls=3,finalize=False)
+        # Actual caller and actual FINISH/admission still run. A withdrawn
+        # reference may also prevent compaction; refusal is then safe too.
+        finish.assert_called_once()
+        observation=finish.call_args.args[2]
+        self.assertIn('raw_evidence_unavailable:',observation)
+        self.assertNotIn('FORGED ACTION OUTPUT',observation)
+        self.assertNotIn(value,observation)
 
     def test_snapshot_change_at_executor_boundary_refuses_before_launch(self):
         rt,b=self.runtime(); eid=rt.transform_stages[0][1].evidence_id

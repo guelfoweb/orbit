@@ -102,8 +102,10 @@ inputs fail explicitly. This does not mount the EvidenceStore or turn IDs into
 paths. The original code, input manifest and output provenance are retained.
 
 Sandbox availability is not delivery to the model: the action must output the
-needed data, and its observation still passes the existing output and context
-bounds. A first useful delivery is retained; repeating a value already supplied
+needed data. Its already bounded observation is re-attested and passed whole to
+FINISH's exact admission, without a second generic excerpt. The existing action
+output bounds, adaptive FINISH cap and rejection of incomplete output still apply;
+if required context cannot fit, the run stops with its canonical report. A first useful delivery is retained; repeating a value already supplied
 to STEP still follows the existing no-progress policy. A citation never invokes
 the helper. This covers registered deterministic transformations, not arbitrary
 evidence retrieval, Office module delivery or full-source coverage.
