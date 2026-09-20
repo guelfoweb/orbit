@@ -351,9 +351,9 @@ class PromptContractTests(unittest.TestCase):
         from orbit.runtime.analysis_runtime import ANALYSIS_SYSTEM_PROMPT
 
         self.assertIn("tool_evidence_ref", ANALYSIS_SYSTEM_PROMPT)
-        self.assertIn("evidence:<evidence_id>", ANALYSIS_SYSTEM_PROMPT)
-        self.assertIn("Never infer content from a reference alone",
-                      ANALYSIS_SYSTEM_PROMPT)
+        self.assertIn("exact_output", ANALYSIS_SYSTEM_PROMPT)
+        self.assertIn("a reference alone does not supply its body", ANALYSIS_SYSTEM_PROMPT)
+        self.assertIn("Evidence ids are not file paths", ANALYSIS_SYSTEM_PROMPT)
 
 
 class AutonomousLoopTurnsAreCompactableTests(_Base):
