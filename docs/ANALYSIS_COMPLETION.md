@@ -141,6 +141,13 @@ a native chat bridge profile, text tools, thinking off and no custom stop
 override. Use the bundled native build process (`python3 scripts/build_native.py`)
 after a source upgrade; no external llama.cpp installation is needed.
 
+Known diagnostic limitation: on an incompatible server, exact admission can
+raise a generic `ContextAdmissionError` when required decoding is unavailable.
+That error does not necessarily mean the prompt exceeds the context window;
+the request still stops without falling back to free generation. Separate
+diagnostic TODO: preserve the unsupported-decoding cause in the client error,
+without changing admission, budgets or backend behavior.
+
 The bridge derives the grammar from the offered schema and actual chat format,
 including the control name. It uses the native XML format for the qualified
 Qwen and Ornith profiles. A sampler belongs to one request and is released on
