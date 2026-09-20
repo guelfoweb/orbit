@@ -12,7 +12,7 @@ from orbit.native_llama.bindings import LlamaLibrary, ChatBridgeLibrary, LLAMA_L
 from orbit.native_llama.chat_bridge import chat_bridge_filename
 from orbit.native_llama.events import NativeTimings
 from orbit.native_llama.model_registry import resolve_models_dir
-from orbit.native_llama.paths import DEFAULT_VENDOR_LIB_DIR
+from orbit.native_llama.paths import DEFAULT_VENDOR_BUILD_BIN, DEFAULT_VENDOR_LIB_DIR
 from orbit.native_server.app import OrbitNativeServer
 from orbit.native_server.protocol import openai_chat_response, parse_chat_request
 from orbit.runtime.analysis_controller import AnalysisController, ControlError, parse_finish_call
@@ -91,7 +91,13 @@ class NativeConstraintTests(_Case):
         model_path = resolve_models_dir().path / cls.model_relative
         if not model_path.exists():
             raise unittest.SkipTest('local Qwen vocabulary unavailable')
-        cls.binding = LlamaLibrary(DEFAULT_VENDOR_LIB_DIR)
+        # The existing in-process bridge tests use the build family when it
+        # exists. Share that canonical root; never reset native ownership or
+        # fall back from an invalid family to a different loaded runtime.
+        runtime = (DEFAULT_VENDOR_BUILD_BIN
+                   if (DEFAULT_VENDOR_BUILD_BIN / chat_bridge_filename()).exists()
+                   else DEFAULT_VENDOR_LIB_DIR)
+        cls.binding = LlamaLibrary(runtime)
         cls.lib = cls.binding.lib
         cls.lib.llama_sampler_apply.argtypes = [C.c_void_p, C.POINTER(_Candidates)]
         cls.lib.llama_sampler_apply.restype = None
@@ -100,7 +106,7 @@ class NativeConstraintTests(_Case):
         cls.model = cls.lib.llama_model_load_from_file(str(model_path).encode(), params)
         assert cls.model
         cls.vocab = cls.lib.llama_model_get_vocab(cls.model)
-        cls.bridge = ChatBridgeLibrary(DEFAULT_VENDOR_LIB_DIR, DEFAULT_VENDOR_LIB_DIR / chat_bridge_filename())
+        cls.bridge = ChatBridgeLibrary(runtime, runtime / chat_bridge_filename())
         cls.bridge_ctx = cls.bridge.create(cls.model)
 
     @classmethod
