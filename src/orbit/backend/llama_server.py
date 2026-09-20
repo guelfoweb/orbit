@@ -155,10 +155,13 @@ class LlamaServerBackend:
         temperature: float,
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
         on_delta: Callable[[str], None],
         on_progress: Callable[[StreamProgress], None] | None = None,
     ) -> ChatResult:
         native_backend = self._is_orbit_native_backend()
+        if tool_choice != "auto":
+            self._require_tool_decoding()
         payload = build_chat_payload(
             ChatPayloadOptions(
                 model=self.request_model_name(),
@@ -167,6 +170,7 @@ class LlamaServerBackend:
                 max_tokens=max_tokens,
                 thinking=self.thinking,
                 tools=tools,
+                tool_choice=tool_choice,
                 stream=True,
                 route_prefix_anchor=_route_prefix_anchor_requested(native_backend=native_backend),
                 analysis_rolling_anchor=_analysis_rolling_anchor_requested(native_backend=native_backend),
@@ -336,13 +340,21 @@ class LlamaServerBackend:
             return data["plain_text_response"]
         return json.dumps(data, ensure_ascii=False)
 
+    def _require_tool_decoding(self) -> None:
+        if (not self._is_orbit_native_backend()
+                or self._props_or_empty().get("required_tool_decoding") is not True):
+            raise LlamaServerError("server does not support required tool decoding")
+
     def count_chat_tokens(
         self,
         messages: list[Message],
         *,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
         thinking: bool = False,
     ) -> TokenCount | None:
+        if tool_choice != "auto":
+            self._require_tool_decoding()
         if not self._is_orbit_native_backend():
             return None
         try:
@@ -353,6 +365,7 @@ class LlamaServerBackend:
                     "messages": messages,
                     "tools": tools or [],
                     "thinking": thinking,
+                    **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
                 },
             )
         except LlamaServerError:

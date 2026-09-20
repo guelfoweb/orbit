@@ -3171,6 +3171,8 @@ class AnalysisRuntime:
     evidence_store: EvidenceStore
     workspace: AnalysisWorkspace | None = None
     messages: list[Message] = field(default_factory=list)
+    # Qualification opt-in; ordinary ANALYSIS remains unchanged.
+    constrain_finish: bool = False
     temperature: float = 0.0
     max_tokens: int = QUALIFIED_ANALYSIS_MAX_TOKENS
     model_calls: int = 0
@@ -4179,6 +4181,20 @@ class AnalysisRuntime:
             if candidate not in taken:
                 return candidate
 
+    def _control_constraint(self, tools):
+        if (self.constrain_finish and tools and len(tools) == 1
+                and tools[0].get("function", {}).get("name") == FINISH_TOOL_NAME):
+            return {"tool_choice": "required"}
+        return {}
+
+    def _context_counter(self, tools):
+        counter = getattr(self.backend, "count_chat_tokens", None)
+        constraint = self._control_constraint(tools)
+        if constraint and callable(counter):
+            from functools import partial
+            return partial(counter, **constraint)
+        return counter
+
     def _admit(self, messages: list[Message], *, max_tokens: int,
                tools: list[dict] | None, next_action_reserve: int | None = None,
                rehydrate_evidence: bool = True) -> list[Message]:
@@ -4265,6 +4281,7 @@ class AnalysisRuntime:
         plan = plan_exact_context(
             messages,
             backend=self.backend,
+            count_chat_override=self._context_counter(tools),
             output_reserve=max_tokens,
             next_action_reserve=(
                 DEFAULT_NEXT_ACTION_RESERVE
@@ -4361,7 +4378,7 @@ class AnalysisRuntime:
 
         Same arithmetic as `ContextBudget.input_limit`, read from the same
         backend token counter the plan uses -- not a second implementation."""
-        count = getattr(self.backend, "count_chat_tokens", None)
+        count = self._context_counter(tools)
         if not callable(count):
             return None
         thinking = bool(getattr(self.backend, "thinking", False))
@@ -4394,7 +4411,7 @@ class AnalysisRuntime:
         windowed one is referenced, not inlined. When the backend cannot attest
         tokens (`input_limit is None`) the exact block is returned unchanged, so
         a non-Orbit endpoint behaves exactly as before."""
-        count = getattr(self.backend, "count_chat_tokens", None)
+        count = self._context_counter(tools)
         thinking = bool(getattr(self.backend, "thinking", False))
 
         def prompt_tokens(block_text: str) -> "int | None":
@@ -5473,6 +5490,7 @@ class AnalysisRuntime:
         def exact(reserve):
             return plan_exact_context(
                 frozen, backend=self.backend, output_reserve=reserve,
+                count_chat_override=self._context_counter([schema]),
                 next_action_reserve=0, configured_context_tokens=self._context_tokens(),
                 tools=[schema], thinking=bool(getattr(self.backend, "thinking", False)),
                 # No available/covered IDs: this view must not shrink again.
@@ -5557,6 +5575,7 @@ class AnalysisRuntime:
                 temperature=self.temperature,
                 max_tokens=maximum,
                 tools=[schema],
+                **self._control_constraint([schema]),
                 # A control exchange produces no analyst-visible prose, so
                 # nothing here renders the deltas -- but `on_delta` is required
                 # by the backend, not optional, and every other call site

@@ -323,6 +323,7 @@ class OrbitNativeServer:
                     max_tokens=request.max_tokens,
                     stop=request.stop,
                     tools=request.tools,
+                    **({"tool_choice": request.tool_choice} if request.tool_choice != "auto" else {}),
                     thinking=thinking,
                     route_prefix_anchor=request.route_prefix_anchor,
                     analysis_rolling_anchor=request.analysis_rolling_anchor,
@@ -473,6 +474,7 @@ class OrbitNativeServer:
         *,
         tools: list[dict[str, Any]],
         thinking: bool,
+        tool_choice: str = "auto",
     ) -> dict[str, int | str]:
         # The Qwen bridge keeps the parser associated with its latest render.
         # Serialize inspection with completion so concurrent token accounting
@@ -482,6 +484,7 @@ class OrbitNativeServer:
                 messages,
                 tools=tools,
                 thinking=thinking,
+                **({"tool_choice": tool_choice} if tool_choice != "auto" else {}),
             )
         return {
             "tokens": tokens,
@@ -611,6 +614,8 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_failure_reason": session["mtp_failure_reason"],
                     "model_id": state.client.paths.model_id,
                     "backend": "orbit-native",
+                    # This protocol version rejects unsupported required grammars.
+                    "required_tool_decoding": True,
                     "artifact_content_protocol": {
                         "id": ARTIFACT_CONTENT_PROTOCOL_ID,
                         "version": ARTIFACT_CONTENT_PROTOCOL_VERSION,
@@ -693,6 +698,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                             request.messages,
                             tools=request.tools,
                             thinking=bool(request.thinking),
+                            **({"tool_choice": request.tool_choice} if request.tool_choice != "auto" else {}),
                         )
                     )
                     return

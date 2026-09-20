@@ -131,6 +131,7 @@ class ChatBackend(Protocol):
         temperature: float,
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
         on_delta: Callable[[str], None],
         on_progress: Callable[[StreamProgress], None] | None = None,
     ) -> ChatResult:

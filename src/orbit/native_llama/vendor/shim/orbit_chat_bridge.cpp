@@ -5,6 +5,8 @@
 #include "nlohmann/json.hpp"
 
 #include <cstddef>
+#include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -98,11 +100,12 @@ ORBIT_EXPORT void orbit_chat_bridge_free(void * opaque) {
     delete static_cast<orbit_chat_context *>(opaque);
 }
 
-ORBIT_EXPORT int orbit_chat_bridge_render(
+static int render_contract(
     void * opaque,
     const char * messages_json,
     const char * tools_json,
     bool enable_thinking,
+    bool required,
     char * output,
     size_t output_size
 ) {
@@ -126,7 +129,7 @@ ORBIT_EXPORT int orbit_chat_bridge_render(
         inputs.tools = common_chat_tools_parse_oaicompat(tools);
         inputs.add_generation_prompt = true;
         inputs.use_jinja = true;
-        inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
+        inputs.tool_choice = required ? COMMON_CHAT_TOOL_CHOICE_REQUIRED : COMMON_CHAT_TOOL_CHOICE_AUTO;
         inputs.parallel_tool_calls = false;
         inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
         inputs.enable_thinking = enable_thinking;
@@ -136,12 +139,15 @@ ORBIT_EXPORT int orbit_chat_bridge_render(
         if (params.prompt.empty()) {
             throw std::runtime_error("chat template produced an empty prompt");
         }
+        if (required && (inputs.tools.empty() || params.grammar.empty() || params.grammar_lazy)) {
+            throw std::runtime_error("required tool grammar unavailable or lazy");
+        }
         context->format = params.format;
         context->generation_prompt = params.generation_prompt;
         context->parser = params.parser;
         context->render_ready = true;
 
-        const json result = {
+        json result = {
             {"prompt", params.prompt},
             {"generation_prompt", params.generation_prompt},
             {"format", common_chat_format_name(params.format)},
@@ -153,11 +159,74 @@ ORBIT_EXPORT int orbit_chat_bridge_render(
             {"thinking_end_tags", params.thinking_end_tags},
             {"additional_stops", params.additional_stops},
         };
+        if (required) {
+            result["grammar"] = params.grammar;
+            result["grammar_lazy"] = params.grammar_lazy;
+            result["tool_choice"] = "required";
+        }
         return copy_result(result.dump(), output, output_size);
     } catch (const std::exception & exc) {
         context->render_ready = false;
         last_error = exc.what();
         return -1;
+    }
+}
+
+ORBIT_EXPORT int orbit_chat_bridge_render(
+    void * opaque, const char * messages_json, const char * tools_json,
+    bool enable_thinking, char * output, size_t output_size
+) {
+    return render_contract(opaque, messages_json, tools_json, enable_thinking,
+                           false, output, output_size);
+}
+
+ORBIT_EXPORT int orbit_chat_bridge_render_required(
+    void * opaque, const char * messages_json, const char * tools_json,
+    bool enable_thinking, char * output, size_t output_size
+) {
+    return render_contract(opaque, messages_json, tools_json, enable_thinking,
+                           true, output, output_size);
+}
+
+// Same generation-prompt prefill as common/sampling.cpp. Catch native errors
+// at the bridge boundary; never expose a half-initialized sampler to Python.
+ORBIT_EXPORT llama_sampler * orbit_chat_bridge_required_sampler(
+    const llama_vocab * vocab, const char * grammar, const char * generation_prompt
+) {
+    last_error.clear();
+    llama_sampler * sampler = nullptr;
+    try {
+        if (!vocab || !grammar || !*grammar || !generation_prompt) {
+            throw std::invalid_argument("invalid required grammar inputs");
+        }
+        auto params = llama_sampler_chain_default_params();
+        params.no_perf = false;
+        sampler = llama_sampler_chain_init(params);
+        if (!sampler) throw std::runtime_error("required sampler allocation failed");
+        auto * constraint = llama_sampler_init_grammar(vocab, grammar, "root");
+        if (!constraint) throw std::runtime_error("required grammar compilation failed");
+        llama_sampler_chain_add(sampler, constraint);
+        const std::string prefill(generation_prompt);
+        const auto tokens = common_tokenize(vocab, prefill, false, true);
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            const auto piece = common_token_to_piece(vocab, tokens[i], true);
+            if (i == 0 && !piece.empty() && !prefill.empty() &&
+                std::isspace(static_cast<unsigned char>(piece[0])) &&
+                !std::isspace(static_cast<unsigned char>(prefill[0]))) continue;
+            llama_token_data token{tokens[i], 0.0f, 0.0f};
+            llama_token_data_array candidates{&token, 1, -1, false};
+            llama_sampler_apply(constraint, &candidates);
+            if (!std::isfinite(token.logit)) throw std::runtime_error("grammar rejects generation prompt");
+            llama_sampler_accept(constraint, tokens[i]);
+        }
+        auto * greedy = llama_sampler_init_greedy();
+        if (!greedy) throw std::runtime_error("required greedy sampler allocation failed");
+        llama_sampler_chain_add(sampler, greedy);
+        return sampler;
+    } catch (const std::exception & exc) {
+        if (sampler) llama_sampler_free(sampler);
+        last_error = exc.what();
+        return nullptr;
     }
 }
 
