@@ -41,6 +41,10 @@ from orbit.runtime.analysis_progress import (
 
 
 READ_X = "print(open('/workspace/input').read()[:200], end='')"
+# Keep this a genuinely partial read of the 17-byte fixture. A complete
+# acquisition now authorizes a raw input and legitimately changes the next
+# action's input identity (covered separately in test_analysis_ornith_recovery).
+PARTIAL_READ_X = "print(open('/workspace/input').read()[:8], end='')"
 READ_Y = "print(open('/workspace/input').read()[200:400], end='')"
 # A deterministic transformation: it derives new bytes rather than restating
 # input, and it writes them where later steps can address them.
@@ -101,7 +105,7 @@ class ExactDuplicateSuppressionTests(AutonomousTestBase):
     def test_the_same_read_runs_once_and_is_answered_thereafter(self) -> None:
         """Three identical requests, one execution, no duplicate evidence."""
         run = self.runtime(
-            ScriptedBackend(*[tool_response(READ_X)] * 3, prose_response('done'))
+            ScriptedBackend(*[tool_response(PARTIAL_READ_X)] * 3, prose_response('done'))
         ).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(run.actions_executed, 1, "only the first request runs")
@@ -115,7 +119,7 @@ class ExactDuplicateSuppressionTests(AutonomousTestBase):
         """No fake record, no second id for one observation."""
         before = len(self.store.records)
         run = self.runtime(
-            ScriptedBackend(*[tool_response(READ_X)] * 3, prose_response('done'))
+            ScriptedBackend(*[tool_response(PARTIAL_READ_X)] * 3, prose_response('done'))
         ).run_autonomous("inspect it", finalize=False)
 
         # One executed action stores its observation and its raw output. The
@@ -126,7 +130,7 @@ class ExactDuplicateSuppressionTests(AutonomousTestBase):
 
     def test_the_prior_evidence_id_is_named_and_stays_re_attestable(self) -> None:
         run = self.runtime(
-            ScriptedBackend(*[tool_response(READ_X)] * 2, prose_response('done'))
+            ScriptedBackend(*[tool_response(PARTIAL_READ_X)] * 2, prose_response('done'))
         ).run_autonomous("inspect it", finalize=False)
 
         first = run.steps[0].evidence
@@ -139,7 +143,7 @@ class ExactDuplicateSuppressionTests(AutonomousTestBase):
         )
 
     def test_the_model_is_told_what_already_answers_it(self) -> None:
-        backend = ScriptedBackend(*[tool_response(READ_X)] * 2, prose_response('done'))
+        backend = ScriptedBackend(*[tool_response(PARTIAL_READ_X)] * 2, prose_response('done'))
         run = self.runtime(backend).run_autonomous("inspect it", finalize=False)
 
         evidence_id = run.steps[1].suppressed_duplicate_of
@@ -155,7 +159,7 @@ class ExactDuplicateSuppressionTests(AutonomousTestBase):
     def test_a_suppressed_duplicate_is_no_progress_and_not_an_error(self) -> None:
         """Nothing failed, so the error budget must not pay for it."""
         run = self.runtime(
-            ScriptedBackend(*[tool_response(READ_X)] * 2, prose_response('done'))
+            ScriptedBackend(*[tool_response(PARTIAL_READ_X)] * 2, prose_response('done'))
         ).run_autonomous("inspect it", finalize=False)
 
         self.assertEqual(
@@ -183,8 +187,8 @@ class ActionBudgetTests(AutonomousTestBase):
         budget, not the stall, is what this asserts.
         """
         backend = ScriptedBackend(
-            tool_response(READ_X),
-            tool_response(READ_X),      # suppressed: same program, same state
+            tool_response(PARTIAL_READ_X),
+            tool_response(PARTIAL_READ_X),      # suppressed: same program, same state
             tool_response(TRANSFORM),
             prose_response("done"),
         )
@@ -205,7 +209,7 @@ class ActionBudgetTests(AutonomousTestBase):
     def test_the_model_call_ceiling_still_bounds_the_run(self) -> None:
         """Suppression must not turn a bounded loop into an unbounded one."""
         run = self.runtime(
-            ScriptedBackend(*[tool_response(READ_X)] * 200)
+            ScriptedBackend(*[tool_response(PARTIAL_READ_X)] * 200)
         ).run_autonomous("inspect it", finalize=False, max_model_calls=6)
 
         self.assertLessEqual(run.model_calls, 7, "the ceiling still holds")
@@ -428,8 +432,8 @@ class ScriptedProgressRegressionTests(AutonomousTestBase):
 
     def test_the_run_reaches_the_transformation(self) -> None:
         backend = ScriptedBackend(
-            tool_response(READ_X),
-            tool_response(READ_X),
+            tool_response(PARTIAL_READ_X),
+            tool_response(PARTIAL_READ_X),
             # A second consecutive duplicate would end the run on the existing
             # stall bound, which this change deliberately leaves alone: the
             # live trace never had two duplicates in a row. One correction,
@@ -469,8 +473,8 @@ class ScriptedProgressRegressionTests(AutonomousTestBase):
 
     def test_the_decoded_output_is_readable_afterwards(self) -> None:
         backend = ScriptedBackend(
-            tool_response(READ_X),
-            tool_response(READ_X),
+            tool_response(PARTIAL_READ_X),
+            tool_response(PARTIAL_READ_X),
             tool_response(TRANSFORM),
             tool_response("print(open('/workspace/work/decoded.txt').read(), end='')"),
             prose_response('done'),

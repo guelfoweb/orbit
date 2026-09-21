@@ -1311,7 +1311,8 @@ ANALYSIS_SYSTEM_PROMPT = (
     "instead of their full text; that is the exact output, archived, not a summary. "
     "Runtime-supplied exact_output fields contain decoded evidence when it fits. "
     "Evidence ids are not file paths; a reference alone does not supply its body. "
-    "In an action, orbit_tools.read_evidence(id) returns a registered transform's exact str "
+    "In an action, orbit_tools.read_evidence(id) returns a registered transform or the "
+    "session's archived complete source acquisition as an exact str "
     "up to 65536 UTF-8 bytes, or an explicit unavailability error.\n"
     "When you have identified a deterministic transformation -- a decoder, "
     "decompressor or decryption whose algorithm and concrete inputs you "
@@ -2240,11 +2241,16 @@ def _source_reacquisition_observation(
     )
 
 
-def _no_progress_observation(evidence_id: str) -> str:
+def _no_progress_observation(evidence_id: str, *, source_output_id: str | None = None) -> str:
+    reuse = (
+        f"The complete source output is available via orbit_tools.read_evidence('{source_output_id}').\n"
+        if source_output_id else
+        f"Reuse it: name `evidence:{evidence_id}` to get its exact bytes back.\n"
+    )
     return (
         "NO_PROGRESS: this exact observation already exists as evidence "
         f"{evidence_id}. It was not run again.\n"
-        f"Reuse it: name `evidence:{evidence_id}` to get its exact bytes back.\n"
+        f"{reuse}"
         "Do not repeat this observation. Choose a different unresolved target, "
         "execute a deterministic transformation whose algorithm and inputs you "
         "already have, verify existing evidence, or finish if the evidence is "
@@ -4408,6 +4414,38 @@ class AnalysisRuntime:
                 result[i]['content'] = original['content']
         return result
 
+    def _attested_source_output(self) -> dict[str, str]:
+        """The one acquisition archive our source-reacquisition note points at.
+
+        Authorization follows the committed tool turn, not an arbitrary store
+        id or a citation. Rewind, withdrawal, snapshot change and broken sibling
+        provenance remove access. This supplies data to an action, not the model,
+        and makes no assertion about conclusions drawn from those bytes.
+        """
+        delivery = self.source_delivery
+        if delivery is None or self._snapshot_text() is None:
+            return {}
+        available, _ = self._compactable_evidence_sets(self.messages, ())
+        if delivery.evidence_id not in available:
+            return {}
+        record = self.evidence_store.records[delivery.evidence_id]
+        raw = self.evidence_store.records.get(delivery.raw_evidence_id)
+        if (record.produced_by_phase != "analysis_action"
+                or record.metadata.get("analysis_source_sha256") != self.source.sha256
+                or record.metadata.get("input_sha256") != self.source.sha256
+                or record.metadata.get("source_delivery") != delivery.representation
+                or record.metadata.get("source_delivery_sha256") != self.source.sha256
+                or record.metadata.get("raw_output_evidence_id") != delivery.raw_evidence_id
+                or raw is None or raw.tool_name != f"{ANALYSIS_TOOL_NAME}_raw"
+                or raw.produced_by_phase != "analysis_action_raw"
+                or raw.metadata.get("analysis_source_sha256") != self.source.sha256
+                or raw.tool_call_id != record.tool_call_id
+                or raw.user_turn_id != record.user_turn_id
+                or raw.metadata.get("code_sha256") != record.metadata.get("code_sha256")):
+            return {}
+        body = self.evidence_store.reattest_exact(raw.evidence_id)
+        return {raw.evidence_id: body} if body is not None else {}
+
     def _with_evidence_rehydration(
         self, messages: list[Message], *,
         tools: "list[dict] | None" = None,
@@ -4446,7 +4484,8 @@ class AnalysisRuntime:
                 latest = message
                 break
         evidence_ids = requested_evidence_ids(
-            latest.get("content") if latest is not None else None
+            latest.get("analysis_evidence_request", latest.get("content"))
+            if latest is not None else None
         )
         if not evidence_ids:
             return messages, ()
@@ -4912,7 +4951,9 @@ class AnalysisRuntime:
         # reads. They are not a filesystem mount or model delivery.
         evidence_inputs = {}
         evidence_bytes = 0
-        for eid, body in self._attested_transform_outputs().items():
+        source_outputs = self._attested_source_output()
+        authorized_inputs = {**self._attested_transform_outputs(), **source_outputs}
+        for eid, body in authorized_inputs.items():
             size = len(body.encode('utf-8'))
             if size <= MAX_READ_BYTES and evidence_bytes + size + len(eid.encode()) <= MAX_SCRATCH_BYTES:
                 evidence_inputs[eid] = body
@@ -4922,7 +4963,7 @@ class AnalysisRuntime:
              'source_sha256': self.source.sha256, 'byte_range': [0, len(body.encode())]}
             for eid, body in sorted(evidence_inputs.items())]
         evidence_identity = hashlib.sha256(json.dumps(evidence_manifest, sort_keys=True).encode()).hexdigest()
-        if self.transform_stages:
+        if evidence_inputs:
             workspace_state['\0sandbox_evidence_inputs'] = evidence_identity
 
         # Identity of the experiment about to run, computed from the same three
@@ -4955,6 +4996,12 @@ class AnalysisRuntime:
             duplicate_of = self._observed_fingerprints.get(fingerprint)
 
         if duplicate_of is not None:
+            available, _ = self._compactable_evidence_sets(self.messages, ())
+            if duplicate_of not in available:
+                self._observed_fingerprints.pop(fingerprint, None)
+                duplicate_of = None
+
+        if duplicate_of is not None:
             # No sandbox, no new evidence record, no new evidence id: the
             # observation the model asked for already exists under its own
             # identity, and creating a second copy of it is the duplication
@@ -4967,7 +5014,12 @@ class AnalysisRuntime:
                 detail="duplicate observation, not run again",
             )
             self._append_tool_result(
-                calls[0], _no_progress_observation(duplicate_of)
+                calls[0], _no_progress_observation(
+                    duplicate_of,
+                    source_output_id=(next(iter(source_outputs), None)
+                        if self.evidence_store.records[duplicate_of].metadata.get('suppressed_as')
+                        in (SOURCE_REACQUISITION, SOURCE_DOMINATED) else None),
+                )
             )
             return AnalysisStepResult(
                 model_calls=1,
@@ -5078,6 +5130,10 @@ class AnalysisRuntime:
                     ),
                 },
             )
+            # The program really ran. Its suppressed observation is still a
+            # committed, re-attestable result over this exact input state.
+            if validated is not None:
+                self._observed_fingerprints.setdefault(fingerprint, record.evidence_id)
             # Appended like any other tool result: the model made a call and
             # the history must answer it. Skipping this would leave an
             # assistant turn with no matching result, which admission refuses
@@ -5270,7 +5326,7 @@ class AnalysisRuntime:
         bytes that no longer exist anywhere.
         """
         provenance = self._provenance(call)
-        if sandbox_evidence_inputs is not None and self.transform_stages:
+        if sandbox_evidence_inputs:
             provenance = {**provenance,
                 'sandbox_evidence_inputs': sandbox_evidence_inputs,
                 'sandbox_evidence_inputs_sha256': hashlib.sha256(json.dumps(sandbox_evidence_inputs, sort_keys=True).encode()).hexdigest()}
@@ -5604,6 +5660,16 @@ class AnalysisRuntime:
         maximum = self.effective_max_tokens
         if maximum <= 0:
             raise ContextAdmissionError("FINISH has no positive output allowance")
+        # A repair adds a user-role error description, not a new evidence
+        # request. Preserve the original question-owned request selection.
+        requests = [m['analysis_evidence_request'] for m in messages
+                    if 'analysis_evidence_request' in m]
+        if requests:
+            messages = list(messages)
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get('role') == 'user':
+                    messages[i] = {**messages[i], 'analysis_evidence_request': requests[0]}
+                    break
         self.last_context_plan = None
         try:
             return self._admit(
@@ -5967,7 +6033,10 @@ class AnalysisRuntime:
                 f"What was missing: {question.missing_fact}\n"
                 f"The action produced (evidence {evidence_id}):\n{observation}\n"
                 "Call finish_analysis_question to say what this established."
-            )},
+            ),
+             # The observation is data: an id printed by an action (including
+             # a traceback) must not become a new retrieval instruction.
+             "analysis_evidence_request": f"{question.question}\n{question.missing_fact}"},
         ]
 
     def finish_question(
