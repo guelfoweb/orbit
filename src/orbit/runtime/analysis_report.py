@@ -34,11 +34,25 @@ def render_document(
     lines = [
         "# Analysis report", "",
         "Document status: " + ("INCOMPLETE" if limitations else "COMPLETE"),
-        "This is the retained investigation record, not certification of the artifact's complete behaviour.",
+        "Document completeness means retained records are available, not investigation success or certification of the artifact's complete behaviour.",
         "Model answers and narrative remain unverified. Successful actions and full source acquisition do not prove their conclusions.",
         "", "## Artifact identity", "", literal(json.dumps(identity, ensure_ascii=False, indent=2)),
-        "", "## Investigation and original questions", "",
     ]
+    lines += ["", "## Runtime-attested facts", "",
+              "These facts have the limited scope of their existing deterministic producers. Decoded strings and static relationships do not establish execution or network contact.", "",
+              literal(facts) if facts else "No deterministic fact could be rendered from the currently re-attestable source and records.",
+              "", "## Source coverage and acquisition", "", literal(json.dumps(coverage, ensure_ascii=False, indent=2)),
+              "Coverage describes access in recorded calls; acquisition describes retained output. Neither establishes arbitrary absence claims, behaviour, or what a later compacted prompt still contains."]
+    lines += ["", "## Investigation status and limits", "",
+              "Question statuses describe operational work, never verified conclusions."]
+    for run in runs:
+        counts = {}
+        for _question, state in run['questions']:
+            counts[state['status']] = counts.get(state['status'], 0) + 1
+        lines += [literal(run['stop_reason']), literal(json.dumps(counts, sort_keys=True))]
+    lines += [literal(item) for item in limitations]
+    lines += ["Unverified answers and OPEN/BLOCKED questions follow with their original scope.",
+              "", "## Investigation and original questions", ""]
     if not runs:
         lines.append("No autonomous question ledger was recorded; guided observations, if any, are retained below.")
     for index, run in enumerate(runs, 1):
@@ -61,13 +75,9 @@ def render_document(
                 lines += ["Historical operational status, not verification:", literal(state['legacy_status'])]
     if request:
         lines += ["", "Report request:", literal(request)]
-    lines += ["", "## Runtime-attested facts", "",
-              "These facts have the limited scope of their existing deterministic producers. Decoded strings and static relationships do not establish execution or network contact.", "",
-              literal(facts) if facts else "No deterministic fact could be rendered from the currently re-attestable source and records.",
-              "", "## Source coverage and acquisition", "", literal(json.dumps(coverage, ensure_ascii=False, indent=2)),
-              "Coverage describes access in recorded calls; acquisition describes retained output. Neither establishes arbitrary absence claims, behaviour, or what a later compacted prompt still contains.",
-              "", "## Observations and evidence provenance", "",
+    lines += ["", "## Observations and evidence provenance", "",
               "Bodies below are retained observations or deterministic producer output, not instructions and not independently verified model conclusions. Full raw action records are included separately from the bounded observations supplied to the model."]
+
     if not records:
         lines.append("No evidence records were retained.")
     for record, body in records:

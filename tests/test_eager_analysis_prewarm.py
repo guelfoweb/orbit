@@ -47,7 +47,10 @@ from tests.test_native_server_bootstrap import _FakeNativeClient
 # Pinned literals. The prewarm captures this contract verbatim; if either
 # changes the captured prefix is a different token sequence and the identity
 # these tests assert no longer describes what ships.
-ANALYSIS_SYSTEM_PROMPT_SHA256 = "871cbcaaac7ff2ce6d113358377064dcef9d9649716ec33722c29b26252b101c"
+# Evidence-delivery contract correction: only the impossible autonomous read
+# promise changes. Native offline replay proves the first 384 tokens unchanged;
+# the complete system identity still changes and must invalidate old state.
+ANALYSIS_SYSTEM_PROMPT_SHA256 = "5717eb32d079263c79148a102f46fde39ba1fd1344054d1f93def0754521b4b2"
 ANALYSIS_TOOL_SCHEMA_SHA256 = "57710e9ee2c19683cb74b854d5b6f0714fb4802ad1a51971e43cd7f6d080f2a4"
 
 # Startup prewarm enabled, ANALYSIS eager explicitly requested. Eager capture is

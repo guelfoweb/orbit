@@ -12,11 +12,10 @@ inside a namespace with no network and nothing but the artifact and its own
 scratch directory, so a host round-trip would add a channel to defend
 without adding a defence. The shim is plain Python doing plain reads.
 
-Only `read_file` exists. The successful trajectory imported the module in
-all nine of its actions and called `read_file` seven times; `search_file`
-and `run_command` were never called once, so neither is provided. A helper
-nobody used is surface with no upside, and `run_command` in particular
-would mean mounting executables the sandbox currently has none of.
+`read_file` reads the artifact or scratch. `read_evidence` reads only the
+runtime's bounded, re-attested transform copies supplied for this action.
+Neither exposes the EvidenceStore or a host service. No search or command
+runner is provided.
 
 Paths are still checked here even though the mount topology already
 confines them: the check costs nothing and states the intent locally, so a
@@ -39,6 +38,7 @@ import os
 SOURCE_PATH = "{SOURCE_MOUNT}"
 WORK_ROOT = "{WORK_MOUNT}"
 MAX_READ_BYTES = {MAX_READ_BYTES}
+_EVIDENCE_INPUTS = {{}}
 
 
 def _safe_path(value):
@@ -53,26 +53,15 @@ def _safe_path(value):
     raise PermissionError("path is outside the analyst workspace")
 
 
-def read_evidence(evidence_id=None, **_ignored):
-    """Not available here. Evidence is restored in conversation, not in code.
+def read_evidence(evidence_id):
+    """Return one authorized transform's complete exact UTF-8 text.
 
-    A live run lost an action to `read_file(evidence_id=...)`: the system
-    prompt says to name `evidence:<id>` to get exact bytes back, which is
-    true of the conversation and false of a sandboxed program, and the model
-    read one instruction as licensing the other. A bare
-    "unexpected keyword argument" said nothing about which of the two was
-    wrong, so the repair had nothing to act on.
-
-    Defined so that mistake lands on a message naming the supported move
-    instead of a TypeError about a signature.
+    The runtime supplies bounded immutable values, never EvidenceStore paths.
+    Availability here is not a claim that the model received these bytes.
     """
-    raise NotImplementedError(
-        "evidence cannot be read from inside an analysis program. "
-        "Stored evidence is restored in the conversation: end this action, "
-        "then write evidence:<evidence_id> in your next message and the exact "
-        "bytes are returned. Inside a program, read the artifact with "
-        "read_file(SOURCE_PATH) or a file you wrote under WORK_ROOT."
-    )
+    if not isinstance(evidence_id, str) or evidence_id not in _EVIDENCE_INPUTS:
+        raise ValueError("evidence not available to this action; use a registered transform id (not a path)")
+    return _EVIDENCE_INPUTS[evidence_id]
 
 
 def read_file(path=None, offset=0, limit=MAX_READ_BYTES, **unsupported):
@@ -83,13 +72,13 @@ def read_file(path=None, offset=0, limit=MAX_READ_BYTES, **unsupported):
     in one call.
 
     `**unsupported` exists to give one specific mistake a useful answer
-    rather than a signature error: `evidence_id=` is the conversation's way
-    of restoring bytes and has never been this function's. Anything else
-    unexpected is still refused, by name.
+    rather than a signature error: `evidence_id=` belongs to read_evidence,
+    not to this path reader. Anything else unexpected is still refused,
+    by name.
     """
     if unsupported:
         if "evidence_id" in unsupported:
-            read_evidence()
+            raise TypeError("read_file takes a path; use read_evidence(id) for an authorized transform")
         raise TypeError(
             "read_file does not accept "
             + ", ".join(sorted(unsupported))

@@ -279,9 +279,8 @@ class AdmissionFallbackTests(EvidenceFirstTestBase):
         # costs the plan. What this test is about -- that the run
         # starts and needs no observation -- is unchanged.
         self.assertEqual(run.model_calls, 2)
-        self.assertIn(
-            "Verified deterministic evidence", "\n".join(backend.delivered)
-        )
+        self.assertIn("P" * 1000, "\n".join(backend.delivered))
+        self.assertIn("exact_output:", "\n".join(backend.delivered))
 
     def test_a_prompt_that_would_not_fit_withdraws_it_and_still_runs(self) -> None:
         """The alternative is an analysis that cannot begin at all on an
@@ -297,7 +296,9 @@ class AdmissionFallbackTests(EvidenceFirstTestBase):
         # costs the plan. What this test is about -- that the run
         # starts and needs no observation -- is unchanged.
         self.assertEqual(run.model_calls, 2, "the run still starts")
-        self.assertEqual(backend.analyst_line, OPENING, "the opening was withdrawn")
+        self.assertTrue(backend.analyst_line.startswith(OPENING), "the analyst request is preserved")
+        self.assertNotIn("P" * 6000, "\n".join(backend.delivered))
+        self.assertIn("output not supplied", "\n".join(backend.delivered))
         self.assertNotIn("Verified deterministic evidence", backend.analyst_line)
 
     def test_the_withdrawal_costs_no_model_call(self) -> None:
@@ -352,7 +353,7 @@ class SufficientEvidenceTests(EvidenceFirstTestBase):
         delivered = "\n".join(backend.delivered)
         self.assertTrue(runtime.transform_stages)
         for _stage, record in runtime.transform_stages:
-            self.assertIn(f"evidence:{record.evidence_id}", delivered)
+            self.assertIn(record.evidence_id, delivered)
 
     def test_naming_the_ids_restores_their_exact_bytes(self) -> None:
         """The point of naming ids rather than copying values.

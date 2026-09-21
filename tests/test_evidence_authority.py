@@ -564,6 +564,23 @@ class NoModelFacingTextChangedTests(unittest.TestCase):
                         )
                         self.assertIn(anchor, expected, "prompt anchor moved")
                         expected = expected.replace(anchor, anchor + addition, 1)
+                if name == "ANALYSIS_SYSTEM_PROMPT":
+                    # ANALYSIS-EVIDENCE-DELIVERY-AND-REPORT-FIX: naming an id
+                    # in assistant text never invoked user-side rehydration.
+                    # Replace only that demonstrated false promise. The schema
+                    # and every unrelated historical clause remain pinned.
+                    old = (
+                        '    "When you need those exact bytes again, name its id as `evidence:<evidence_id>` "\n'
+                        '    "and they are restored verbatim. Never infer content from a reference alone.\\n"\n'
+                    )
+                    new = (
+                        '    "Runtime-supplied exact_output fields contain decoded evidence when it fits. "\n'
+                        '    "Evidence ids are not file paths; a reference alone does not supply its body. "\n'
+                        '    "In an action, orbit_tools.read_evidence(id) returns a registered transform\'s exact str "\n'
+                        '    "up to 65536 UTF-8 bytes, or an explicit unavailability error.\\n"\n'
+                    )
+                    self.assertEqual(expected.count(old), 1)
+                    expected = expected.replace(old, new)
                 self.assertEqual(
                     expected,
                     self._constant(current, name),

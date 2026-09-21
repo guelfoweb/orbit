@@ -169,15 +169,16 @@ class ContractTests(unittest.TestCase):
     """T4/T5: the sandbox/evidence contract is unchanged and complete."""
 
     def test_no_evidence_reading_tool_is_exposed(self) -> None:
-        # T4/T5: the sandbox offers read_file only; no get_evidence/read_evidence
-        # is advertised, so the qualified path never needs a nonexistent tool.
+        # No evidence tool/schema is exposed. The sandbox helper is explicitly
+        # limited to registered transform text, not Office module retrieval.
         from orbit.runtime.analysis_runtime import (
             ANALYSIS_SYSTEM_PROMPT,
             ANALYSIS_TOOL_SCHEMA,
         )
         prompt = ANALYSIS_SYSTEM_PROMPT.lower()
         self.assertNotIn("get_evidence", prompt)
-        self.assertNotIn("read_evidence", prompt)
+        self.assertIn("read_evidence(id)", prompt)
+        self.assertIn("registered transform", prompt)
         schema = str(ANALYSIS_TOOL_SCHEMA).lower()
         self.assertNotIn("get_evidence", schema)
         self.assertNotIn("read_evidence", schema)

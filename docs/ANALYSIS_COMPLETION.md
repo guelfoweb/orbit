@@ -50,6 +50,10 @@ raw action records, provenance and committed non-system history. These remain
 available after the temporary workspace closes; artifact handles themselves
 have session lifetime and are not durable download links.
 
+The document presents runtime-attested indicators, decoded values and static
+relationships before operational question states and unverified proposed
+answers. An available document does not imply a successful investigation.
+
 `document_complete=true` means the retained mandatory records passed their
 identity and re-attestation checks at composition. It does not mean every
 question was verified, or that the sample's complete behaviour is known.
@@ -67,6 +71,44 @@ Saved sessions retain documents outside CHAT messages. Saving later CHAT turns
 preserves this archive; unreadable existing archives are not overwritten.
 The live recorder's RC=0 gates document completeness and investigation
 lifecycle, not truth of free-form model conclusions.
+
+## Deterministic evidence delivered to the model
+
+The archived evidence index is not proof that a model received the bodies.
+For PLAN, STEP and FINISH (including their repairs), admission can replace the
+runtime-owned transform index with a call-local view containing re-attested
+whole outputs as JSON strings. These are untrusted data, never instructions.
+The source snapshot and each output are checked again before delivery.
+
+Whole outputs are considered smallest first against the complete request,
+schema and unchanged phase reserve using the backend's exact token counter.
+Computed outputs are never silently truncated. The view explicitly identifies
+outputs withheld for budget or unavailable evidence, and avoids duplicating
+outputs already rehydrated in the request. Delivery diagnostics retain the
+evidence ID, source hash, output hash and supplied UTF-8 byte range. Canonical
+history and archived evidence are unchanged.
+
+Delivery is recomputed for each call: a body present in PLAN may not fit in a
+later STEP or FINISH. This does not make the archived result unavailable, nor
+does it establish that the model read it in the later call. The exact output
+remains in the runtime report when re-attestation succeeds. Evidence IDs are
+not sandbox paths; an assistant citation does not request rehydration. Existing
+explicit analyst requests through `evidence:<id>` retain their admission rules.
+When a registered transform body is withheld, sandboxed actions can call
+`orbit_tools.read_evidence(id)` to read its exact UTF-8 text. Only current-session,
+current-snapshot transforms that re-attest are supplied, at most 64 KiB per body
+and the existing 8 MiB workspace bound in aggregate. Unavailable or oversized
+inputs fail explicitly. This does not mount the EvidenceStore or turn IDs into
+paths. The original code, input manifest and output provenance are retained.
+
+Sandbox availability is not delivery to the model: the action must output the
+needed data. Its already bounded observation is re-attested and passed whole to
+FINISH's exact admission, without a second generic excerpt. The existing action
+output bounds, adaptive FINISH cap and rejection of incomplete output still apply;
+if required context cannot fit, the run stops with its canonical report. A first useful delivery is retained; repeating a value already supplied
+to STEP still follows the existing no-progress policy. A citation never invokes
+the helper. This covers registered deterministic transformations, not arbitrary
+evidence retrieval, Office module delivery or full-source coverage.
 
 FINISH uses its existing prompt admission and compaction policy first. If only
 capacity blocks that request, it freezes the complete resulting view, including

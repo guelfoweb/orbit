@@ -40,7 +40,10 @@ from orbit.native_llama.prefix_anchor import PrefixAnchorState
 from orbit.runtime.analysis_runtime import ANALYSIS_SYSTEM_PROMPT, ANALYSIS_TOOL_SCHEMA
 
 # Pinned literal: the prewarm captures this contract verbatim.
-ANALYSIS_SYSTEM_PROMPT_SHA256 = "871cbcaaac7ff2ce6d113358377064dcef9d9649716ec33722c29b26252b101c"
+# Evidence-delivery contract correction: only the impossible autonomous read
+# promise changes. Native offline replay proves the first 384 tokens unchanged;
+# the complete system identity still changes and must invalidate old state.
+ANALYSIS_SYSTEM_PROMPT_SHA256 = "5717eb32d079263c79148a102f46fde39ba1fd1344054d1f93def0754521b4b2"
 
 
 class AnalysisPrefixConfigTests(unittest.TestCase):
@@ -407,6 +410,42 @@ class AnalysisPrefixIsolationTests(unittest.TestCase):
 class AnalysisPrefixInvalidationTests(unittest.TestCase):
     def _client(self):
         return AnalysisPrefixClientTests._client(AnalysisPrefixClientTests("run"))
+
+    def test_delivery_contract_change_invalidates_old_system_identity(self) -> None:
+        import hashlib
+
+        old = ANALYSIS_SYSTEM_PROMPT.replace(
+            "Runtime-supplied exact_output fields contain decoded evidence when it fits. "
+            "Evidence ids are not file paths; a reference alone does not supply its body. "
+            "In an action, orbit_tools.read_evidence(id) returns a registered transform's exact str "
+            "up to 65536 UTF-8 bytes, or an explicit unavailability error.\n",
+            "When you need those exact bytes again, name its id as `evidence:<evidence_id>` "
+            "and they are restored verbatim. Never infer content from a reference alone.\n",
+        )
+        self.assertEqual(hashlib.sha256(old.encode()).hexdigest(),
+                         "871cbcaaac7ff2ce6d113358377064dcef9d9649716ec33722c29b26252b101c")
+        client = self._client()
+
+        def plan(system):
+            messages = [{"role":"system", "content":system},
+                        {"role":"user", "content":"Artifact /workspace/input"}]
+            prompt = client.apply_chat_template(messages, tools=[ANALYSIS_TOOL_SCHEMA], thinking=False)
+            return client._qwen_route_anchor_plan_for_prompt(
+                messages, tools=[ANALYSIS_TOOL_SCHEMA], thinking=False,
+                prompt=prompt, analysis_lineage=True)
+
+        before = plan(old)
+        self.assertIsNotNone(before)
+        client._set_qwen_route_prefix_state(
+            ORNITH_ANALYSIS_LINEAGE_ID,
+            PrefixAnchorState(prefix_hash="old", token_count=384, valid=True),
+        )
+        after = plan(ANALYSIS_SYSTEM_PROMPT)
+        self.assertIsNotNone(after)
+        self.assertEqual(before.prefix_tokens, after.prefix_tokens)
+        self.assertFalse(client._qwen_route_prefix_state_for_profile(ORNITH_ANALYSIS_LINEAGE_ID).valid)
+        self.assertEqual(client._qwen_route_prefix_status_for_profile(ORNITH_ANALYSIS_LINEAGE_ID).failure_reason,
+                         "route_identity_changed")
 
     def test_reset_invalidates_the_analysis_prefix(self) -> None:
         client = self._client()

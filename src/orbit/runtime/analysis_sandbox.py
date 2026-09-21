@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from orbit.runtime.analysis_tools_shim import ORBIT_TOOLS_SOURCE
+from orbit.runtime.analysis_tools_shim import ORBIT_TOOLS_SOURCE, MAX_READ_BYTES
 
 BWRAP = "/usr/bin/bwrap"
 SOURCE_MOUNT = "/workspace/input"
@@ -177,7 +177,7 @@ def validate_code(code: object) -> str:
     return code
 
 
-def _program_with_tools(code: str) -> str:
+def _program_with_tools(code: str, evidence_inputs: dict[str, str] | None = None) -> str:
     """Make `orbit_tools` importable without relaxing interpreter isolation.
 
     The sandbox runs Python with `-I`, which keeps the script's directory off
@@ -190,6 +190,7 @@ def _program_with_tools(code: str) -> str:
         "import sys as _orbit_sys, types as _orbit_types\n"
         "_orbit_mod = _orbit_types.ModuleType('orbit_tools')\n"
         "exec(compile(_ORBIT_TOOLS_SRC, 'orbit_tools.py', 'exec'), _orbit_mod.__dict__)\n"
+        f"_orbit_mod._EVIDENCE_INPUTS = _orbit_types.MappingProxyType({(evidence_inputs or {})!r})\n"
         "_orbit_sys.modules['orbit_tools'] = _orbit_mod\n"
         "del _orbit_sys, _orbit_types, _orbit_mod, _ORBIT_TOOLS_SRC\n"
     )
@@ -457,6 +458,8 @@ def execute_analysis(
     python_executable: str | None = None,
     scratch_baseline_sizes: dict[str, int] | None = None,
     scratch_baseline_digests: dict[str, str] | None = None,
+    evidence_inputs: dict[str, str] | None = None,
+    evidence_source_sha256: str | None = None,
 ) -> AnalysisResult:
     """Run `code` with `source_path` mounted read-only, and report what happened.
 
@@ -476,6 +479,20 @@ def execute_analysis(
 
     source_before = source.read_bytes()
     input_sha = _sha256_bytes(source_before)
+    evidence_inputs = dict(evidence_inputs or {})
+    if evidence_inputs:
+        if input_sha != evidence_source_sha256:
+            raise ValueError("evidence inputs do not match the action source snapshot")
+        total = 0
+        for evidence_id, text in evidence_inputs.items():
+            if not isinstance(evidence_id, str) or not isinstance(text, str):
+                raise ValueError("evidence inputs must map ids to exact text")
+            size = len(text.encode("utf-8", "strict"))
+            if size > MAX_READ_BYTES:
+                raise ValueError("evidence input exceeds the complete-read bound")
+            total += size + len(evidence_id.encode("utf-8", "strict"))
+        if total > MAX_SCRATCH_BYTES:
+            raise ValueError("evidence inputs exceed the aggregate workspace bound")
     code_sha = _sha256_bytes(validated.encode("utf-8"))
 
     program_owner = tempfile.TemporaryDirectory(prefix="orbit-analysis-program-")
@@ -488,7 +505,7 @@ def execute_analysis(
         scratch.mkdir(parents=True, exist_ok=True)
 
     program = Path(program_owner.name) / "main.py"
-    program.write_text(_program_with_tools(validated), encoding="utf-8")
+    program.write_text(_program_with_tools(validated, evidence_inputs), encoding="utf-8")
     os.chmod(program, 0o400)
 
 
