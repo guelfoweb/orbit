@@ -13,7 +13,8 @@ scratch directory, so a host round-trip would add a channel to defend
 without adding a defence. The shim is plain Python doing plain reads.
 
 `read_file` reads the artifact or scratch. `read_evidence` reads only the
-runtime's bounded, re-attested transform copies supplied for this action.
+runtime's bounded, re-attested transforms and source-acquisition output supplied
+for this action.
 Neither exposes the EvidenceStore or a host service. No search or command
 runner is provided.
 

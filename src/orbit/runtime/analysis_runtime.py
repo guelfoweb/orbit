@@ -2241,12 +2241,21 @@ def _source_reacquisition_observation(
     )
 
 
-def _no_progress_observation(evidence_id: str, *, source_output_id: str | None = None) -> str:
+def _no_progress_observation(
+    evidence_id: str, *, source_output_id: str | None = None,
+    source_output_unavailable: bool = False,
+) -> str:
     reuse = (
         f"The complete source output is available via orbit_tools.read_evidence('{source_output_id}').\n"
         if source_output_id else
         f"Reuse it: name `evidence:{evidence_id}` to get its exact bytes back.\n"
     )
+    if source_output_unavailable:
+        reuse = (
+            "The complete archived output is not available through read_evidence "
+            "within this action's bounded inputs. Read a bounded source range "
+            "needed for the unresolved target instead.\n"
+        )
     return (
         "NO_PROGRESS: this exact observation already exists as evidence "
         f"{evidence_id}. It was not run again.\n"
@@ -5013,12 +5022,16 @@ class AnalysisRuntime:
                 question=active_question, controller=controller,
                 detail="duplicate observation, not run again",
             )
+            source_duplicate = (
+                self.evidence_store.records[duplicate_of].metadata.get('suppressed_as')
+                in (SOURCE_REACQUISITION, SOURCE_DOMINATED)
+            )
+            source_output_id = next((eid for eid in source_outputs if eid in evidence_inputs), None)
             self._append_tool_result(
                 calls[0], _no_progress_observation(
                     duplicate_of,
-                    source_output_id=(next(iter(source_outputs), None)
-                        if self.evidence_store.records[duplicate_of].metadata.get('suppressed_as')
-                        in (SOURCE_REACQUISITION, SOURCE_DOMINATED) else None),
+                    source_output_id=source_output_id if source_duplicate else None,
+                    source_output_unavailable=source_duplicate and source_output_id is None,
                 )
             )
             return AnalysisStepResult(

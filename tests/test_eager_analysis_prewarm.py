@@ -50,7 +50,8 @@ from tests.test_native_server_bootstrap import _FakeNativeClient
 # Evidence-delivery contract correction: only the impossible autonomous read
 # promise changes. Native offline replay proves the first 384 tokens unchanged;
 # the complete system identity still changes and must invalidate old state.
-ANALYSIS_SYSTEM_PROMPT_SHA256 = "5717eb32d079263c79148a102f46fde39ba1fd1344054d1f93def0754521b4b2"
+# ORNITH-RECOVERY adds only the session-bound acquisition input to read_evidence.
+ANALYSIS_SYSTEM_PROMPT_SHA256 = "5c31c6c81106860b9eb461b6b2537dfc9471be4c5df38b0d87c4fc87cbc8a900"
 ANALYSIS_TOOL_SCHEMA_SHA256 = "57710e9ee2c19683cb74b854d5b6f0714fb4802ad1a51971e43cd7f6d080f2a4"
 
 # Startup prewarm enabled, ANALYSIS eager explicitly requested. Eager capture is

@@ -134,6 +134,19 @@ class RecoveryTests(_Case):
             rt.step('Continue')
         self.assertNotIn(first.raw_output_evidence_id,execute.call_args.kwargs.get('evidence_inputs',{}))
 
+    def test_skipped_large_acquisition_does_not_offer_unavailable_helper_input(self):
+        rt = self._runtime(data=b'x\r\n' * 24000)
+        self.backend.per_char = .001
+        source = rt.source.snapshot_path.read_bytes().decode()
+        self._step(rt, _result(stdout=source), 'print("first acquisition")')
+        self._step(rt, _result(stdout=source), 'print("another acquisition")')
+        skipped = self._step(rt, _result(stdout=source), 'print("another acquisition")')
+        self.assertFalse(skipped.action_executed)
+        self.assertEqual(self.dispatched, 2)
+        note = rt.messages[-1]['content']
+        self.assertNotIn('read_evidence(', note)
+        self.assertIn('not available through read_evidence', note)
+
 
 from orbit.backend.llama_server import LlamaServerToolCallParseError
 from orbit.runtime.analysis_controller import AnalysisController

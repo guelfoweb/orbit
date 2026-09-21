@@ -676,6 +676,9 @@ class AutonomousLoopTests(_Case):
         runtime = self._runtime()
         self._cover(runtime)
         self._step(runtime, _result(stdout=SOURCE + "\n"))
+        # New work needs a different program, not a different mocked result
+        # for the identical program over unchanged inputs.
+        self.backend.code = 'print("FINDING: os.environ read")'
         step = self._step(runtime, _result(stdout="FINDING: os.environ read"))
         self.assertIsNone(step.suppressed_duplicate_of)
         self.assertTrue(step.action_executed)
