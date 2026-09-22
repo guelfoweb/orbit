@@ -111,10 +111,12 @@ so it must not be used to infer no retries. These are not new action budgets.
 
 IBAN candidate final narrative correctly describes synchronous GET, TEMP output
 and launch, while earlier FINISH claims System32 and calls the file-writing
-payload fileless. The narrative invents a runtime WSH API resolution of
-GetSpecialFolder(2): the runtime attests the decoded bytes, not that API semantic
-interpretation. Both IBAN investigations are mixed. No clean semantic non-regression
-or end-to-end recovery is declared from their different trajectories.
+payload fileless. The final narrative corrects those errors and respects unknown
+remote-payload behavior. Its GetSpecialFolder(2) mapping IS supplied by the existing
+runtime platform-constant renderer; it is not a new COM query or an invented
+attestation. The final IBAN synthesis is substantially supported, while the earlier
+FINISH answers remain mixed. Different trajectories do not prove a general semantic
+non-regression or end-to-end recovery, and Fattura still fails the frozen gate.
 
 Peak server RSS across the four runs is22292632KiB, process swap0. Host swap
 was already present and decreased (about2.64→2.56GiB); no OOM or uncontrolled
