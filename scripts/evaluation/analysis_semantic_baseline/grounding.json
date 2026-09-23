@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "origin": {
+    "commit": "10f9438e71438ee7e691a60041211348cc201810",
+    "path": "tests/test_analysis_cross_sample_gate.py",
+    "sha256": "8206912b5f0c4cfcbb2b5226b73fc23c7f12ee7bd1a9b8399715acf4b1faadba"
+  },
+  "contracts": {
+    "platform": "WSH FileSystemObject.GetSpecialFolder(2) denotes TemporaryFolder, the per-user temporary directory (%TEMP%). It does not denote System32.",
+    "invocation": "The frozen mine stage0 defines ROmYsTcn and calls ROmYsTcn;. Static invocation does not attest execution on a victim.",
+    "cross_gate": "The XHTML/W3C namespace in the frozen mine source is document metadata, not an attested C2. The six-sample runtime deterministic gate remains mandatory separately."
+  }
+}

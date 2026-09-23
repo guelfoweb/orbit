@@ -2213,6 +2213,17 @@ causal mutation (dropping/altering one expected fact per seam fails the gate).
 
 ### Two-tier analysis qualification policy (MANDATORY)
 
+The canonical versioned semantic baseline is
+[`docs/ANALYSIS_SEMANTIC_BASELINE.md`](docs/ANALYSIS_SEMANTIC_BASELINE.md), with
+Fattura/IBAN/mine oracles under `scripts/evaluation/analysis_semantic_baseline/`.
+An ANALYSIS change must not be accepted as a semantic improvement without a
+comparison against this corpus and no regressions on the applicable criteria.
+Integrity checks and literal locators do not certify narrative correctness:
+semantic criteria require explicit, hash-bound manual/engineering review.
+Missing/non-comparable evidence or `MANUAL_CHECK` is not a semantic PASS. This
+supplements the deterministic gate and bounded live policy below; it does not
+authorize new model campaigns or waive existing qualification requirements.
+
 - **Level 1 — the cross-sample deterministic gate (this file): MANDATORY before
   merging ANY change that touches** `analysis_runtime`, indicator
   extraction/admission (`analysis_indicators`), source dominance/delivery,
