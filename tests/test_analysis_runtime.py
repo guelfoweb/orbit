@@ -126,7 +126,7 @@ class ScriptedBackend:
                         "name": "submit_analysis_plan",
                         "arguments": json.dumps({
                             "questions": [
-                                {"question": q, "missing_fact": "needs execution"}
+                                {"question": q, "missing_fact": "needs execution", "data_request": None}
                                 for q in self._plan_questions
                             ]
                         }),

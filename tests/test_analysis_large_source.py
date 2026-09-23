@@ -76,6 +76,10 @@ class _Model:
         return []
 
     def _c(self, name, args):
+        if name == PLAN_TOOL_NAME and isinstance(args.get("questions"), list):
+            args = {**args, "questions": [
+                {"data_request": None, **q} if isinstance(q, dict) else q
+                for q in args["questions"]]}
         return [{"id": f"c{name}", "type": "function",
                  "function": {"name": name, "arguments": json.dumps(args)}}]
 

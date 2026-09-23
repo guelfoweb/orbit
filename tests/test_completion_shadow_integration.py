@@ -61,7 +61,7 @@ class _CountingBackend:
         if name == "submit_analysis_plan":
             arguments = {
                 "questions": [
-                    {"question": q, "missing_fact": "needs execution"}
+                    {"question": q, "missing_fact": "needs execution", "data_request": None}
                     for q in self.PLAN_QUESTIONS
                 ]
             }

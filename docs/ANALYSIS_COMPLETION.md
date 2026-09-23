@@ -220,3 +220,26 @@ end-to-end latency delta nor a portable performance guarantee. Request-local
 sampler creation during the native calls took about 1.01 ms and 0.74 ms,
 respectively. Source, raw requests/responses, identities and gate results are
 retained locally in `workdir/diag/finish_constrained_decoding/`.
+
+## PLAN byte-delivery validation (candidate)
+
+Each new PLAN question declares `data_request`: `null` means no structured
+missing-byte claim (interpretation or an unclassified need). An object names
+`evidence:<id>` for a registered deterministic transform, or
+`source:<artifact sha256>` for the current snapshot. Optional `start` and `end`
+are supplied together as a half-open byte interval; without them the runtime
+uses the complete object's byte size. Transform text uses UTF-8 bytes.
+
+Before adoption, the runtime compares that request with exact bytes admitted
+in the same PLAN dispatch. It checks session and snapshot ownership, current
+reattestation, and complete range coverage. An already-delivered byte request
+is refused atomically and can use the existing bounded PLAN repair. Repeated
+contradiction fails closed; no answer is fabricated and no question is resolved.
+Parser and validation repairs share the existing two-dispatch allowance.
+
+This is not semantic sufficiency validation. A question using `null` can still
+be redundant or incorrect in prose; the runtime does not infer a byte request
+from its words. Legacy questions without the field remain unclassified. A
+valid interpretation question about supplied bytes remains allowed. Neither a
+receipt nor accepted PLAN certifies conclusions. Arbitrary evidence IDs and
+filesystem paths are not supported references.

@@ -73,6 +73,7 @@ from orbit.runtime.analysis_controller import (
     Question,
     parse_finish_call,
     parse_plan_call,
+    plan_data_request,
 )
 from orbit.runtime.analysis_source_dominance import (
     SOURCE_DOMINATED,
@@ -1389,8 +1390,26 @@ PLAN_TOOL_SCHEMA: dict[str, Any] = {
                                     "The fact only execution can supply."
                                 ),
                             },
+                            "data_request": {
+                                "type": ["object", "null"],
+                                "description": (
+                                    "For missing bytes: identify evidence:<id> of a registered "
+                                    "transform or source:<artifact sha256>, and UTF-8 byte "
+                                    "interval [start,end); omit both offsets for the whole object. "
+                                    "Null makes no missing-bytes claim "
+                                    "(interpretation or an unclassified need). Do not request "
+                                    "bytes already supplied in this PLAN call."
+                                ),
+                                "properties": {
+                                    "ref": {"type": "string"},
+                                    "start": {"type": "integer", "minimum": 0},
+                                    "end": {"type": "integer", "minimum": 1},
+                                },
+                                "required": ["ref"],
+                                "additionalProperties": False,
+                            },
                         },
-                        "required": ["question", "missing_fact"],
+                        "required": ["question", "missing_fact", "data_request"],
                         "additionalProperties": False,
                     },
                 }
@@ -3218,6 +3237,8 @@ class AnalysisRuntime:
     # happens only when deterministic evidence exists -- the same condition the
     # re-ask depends on. A flag local to the phase would therefore allow two.
     _empty_plan_re_asked: bool = False
+    # Dispatch-owned PLAN view; never a persisted or cross-session receipt.
+    _plan_delivery: tuple | None = field(default=None, repr=False)
     last_context_plan: object | None = None
     # The last bounded-rehydration decision (requested ids, which were windowed
     # to fit, and the input ceiling), for diagnostics and tests.
@@ -5560,6 +5581,13 @@ class AnalysisRuntime:
                 # would multiply the two layers into four dispatches for one
                 # question -- measured, not feared.
                 return None, PROTOCOL_REPAIR_EXHAUSTED
+        if allowed == PLAN_TOOL_NAME:
+            reason = str(getattr(response, "finish_reason", "") or "unknown").lower()
+            if reason in ("cancelled", "canceled"):
+                raise KeyboardInterrupt("PLAN generation cancelled")
+            if reason not in ("stop", "tool_calls", "eos"):
+                self._plan_delivery = None
+                return None, f"incomplete_plan_generation:{reason}"
         if allowed == FINISH_TOOL_NAME:
             reason = str(getattr(response, "finish_reason", "") or "unknown").lower()
             if reason in ("cancelled", "canceled"):
@@ -5655,6 +5683,97 @@ class AnalysisRuntime:
             )
         return [dict(m) for m in admitted.messages], maximum
 
+    def _capture_plan_delivery(self, admitted: list[Message]) -> tuple:
+        """Freeze this dispatch's receipts and byte identity, not historical COVER."""
+        bodies = self._attested_transform_outputs()
+        ranges = {}
+        for stage, record in self.transform_stages:
+            eid = record.evidence_id
+            raw = bodies.get(eid)
+            if raw is None:
+                continue
+            pair = "\n".join(_transform_preamble([(stage, record)], {eid: raw}).splitlines()[1:-1])
+            delimiter = f"orbit-evidence-{record.raw_sha256}"
+            rehydrated = "\n".join((f"evidence_id: {eid}", f"sha256: {record.raw_sha256}",
+                                      f"exact_content_begin: {delimiter}", raw,
+                                      f"exact_content_end: {delimiter}"))
+            supplied = any(pair in m.get("content", "") or rehydrated in m.get("content", "")
+                           for m in admitted)
+            receipts = [r for m in admitted for r in m.get("analysis_evidence_delivery", ())]
+            if supplied and any(r.get("evidence_id") == eid
+                    and r.get("sha256") == record.raw_sha256
+                    and r.get("source_sha256") == self.source.sha256
+                    and r.get("status") in ("complete", "supplied_elsewhere")
+                    and r.get("byte_range") == [0, len(raw.encode("utf-8"))]
+                    for r in receipts):
+                ranges[record.raw_ref] = ((0, len(raw.encode("utf-8"))),)
+        text = self._snapshot_text()
+        if text is not None:
+            source_ref = f"source:{self.source.sha256}"
+            delimiter = f"orbit-artifact-{self.source.sha256}"
+            full = f"{delimiter}\n{text}\n{delimiter} end"
+            if any(m.get("source_covered") is True and full in m.get("content", "")
+                   for m in admitted):
+                ranges[source_ref] = ((0, len(text.encode("utf-8"))),)
+            else:
+                overview = self._oversized_source_overview()
+                if overview and any(m.get("content") == overview for m in admitted):
+                    # The existing overview tolerates split UTF-8 at its edges.
+                    # Such a window is orientation, never exact byte delivery.
+                    raw = text.encode("utf-8")
+                    windows = ((0, BOOTSTRAP_HEAD_BYTES),
+                               (len(raw) - BOOTSTRAP_TAIL_BYTES, len(raw)))
+                    ranges[source_ref] = tuple((a, b) for a, b in windows
+                        if raw[a:b].decode("utf-8", "replace").encode("utf-8") == raw[a:b])
+        return (self.evidence_store, self.source, self.control_attempts,
+                bodies, ranges)
+
+    def _validate_plan_delivery(self, entries: list[dict]) -> None:
+        """Reject only a structured missing-byte claim contradicted by this call."""
+        for entry in entries:
+            if not isinstance(entry, dict) or "data_request" not in entry:
+                raise ControlError("PLAN questions require data_request; use null when no missing bytes are claimed")
+            data = plan_data_request(entry)
+            if data is None:
+                continue  # Interpretation/unclassified: never infer scope from prose.
+            view = self._plan_delivery
+            if (view is None or view[0] is not self.evidence_store
+                    or view[1] is not self.source or view[2] != self.control_attempts):
+                raise ControlError("PLAN delivery receipt does not belong to this session/call")
+            _, _, _, captured, ranges = view
+            try:
+                snapshot = self.source.snapshot_path.read_bytes()
+            except OSError:
+                snapshot = None
+            if (snapshot is None or len(snapshot) != self.source.size_bytes
+                    or hashlib.sha256(snapshot).hexdigest() != self.source.sha256):
+                raise ControlError("PLAN source snapshot is unavailable or changed")
+            ref = data["ref"]
+            if ref == f"source:{self.source.sha256}":
+                size = len(snapshot)
+            else:
+                records = {r.raw_ref: r for _, r in self.transform_stages}
+                record = records.get(ref)
+                if record is None:
+                    raise ControlError("data_request reference is not this snapshot or a registered transform")
+                current = self._attested_transform_outputs().get(record.evidence_id)
+                if current is None or current != captured.get(record.evidence_id):
+                    raise ControlError("data_request evidence is unavailable or changed")
+                size = len(current.encode("utf-8"))
+            start, end = data.get("start", 0), data.get("end", size)
+            if not start < end <= size:
+                raise ControlError("data_request range is empty or exceeds the referenced bytes")
+            position = start
+            for lo, hi in sorted(ranges.get(ref, ())):
+                if lo <= position < hi:
+                    position = hi
+            if position >= end:
+                raise ControlError(
+                    "requested bytes are already supplied in this PLAN call; "
+                    "use them, request genuinely missing data, or declare an "
+                    "interpretation with data_request=null"
+                )
+
     def _control_dispatch(
         self,
         messages: "list[Message]",
@@ -5687,6 +5806,8 @@ class AnalysisRuntime:
         # an interrupted or failed control call was spent and never counted,
         # so every cancelled run reported one model call fewer than it made.
         self.model_calls += 1
+        self._plan_delivery = (self._capture_plan_delivery(admitted)
+                               if schema["function"]["name"] == PLAN_TOOL_NAME else None)
         # Which control call this is, for the trace only. The loop treats all
         # three identically; an autopsy cannot.
         control_phase = {
@@ -5780,18 +5901,29 @@ class AnalysisRuntime:
         # rather than by accident, and a local flag would allow one re-ask per
         # dispatch instead of one per run.
         re_asked = False
+        self._plan_delivery = None
+        dispatch_start = self.control_attempts
         for attempt in range(attempts):
+            remaining = attempts - (self.control_attempts - dispatch_start)
+            if remaining <= 0:
+                controller.unsupported = True
+                controller.phase = PHASE_REPORT
+                return calls
             arguments, _text = self._control_call(
-                messages, PLAN_TOOL_SCHEMA, on_progress=on_progress
+                messages, PLAN_TOOL_SCHEMA, on_progress=on_progress,
+                repair_budget=remaining - 1,
             )
             calls += 1
             if arguments is not None:
                 try:
-                    adopted = controller.adopt_plan(parse_plan_call(arguments))
+                    entries = parse_plan_call(arguments)
+                    self._validate_plan_delivery(entries)
+                    adopted = controller.adopt_plan(entries)
                 except ControlError as exc:
                     detail = str(exc)
                 else:
-                    # Four clauses, none redundant. A plan with questions
+                    # A protocol repair may also have spent the last dispatch.
+                    # A plan with questions
                     # needs nothing; an iteration must remain to send the
                     # re-ask in; a call must survive it; and the run gets one.
                     # `attempt + 1 >= attempts` subsumes a separate
@@ -5816,6 +5948,7 @@ class AnalysisRuntime:
                         "" if (
                             adopted
                             or attempt + 1 >= attempts
+                            or self.control_attempts - dispatch_start >= attempts
                             # A call must remain for investigating whatever the
                             # re-ask produces, exactly as COVER requires above.
                             # The re-ask is more optional than coverage is: the
@@ -5896,7 +6029,8 @@ class AnalysisRuntime:
                 # exactly one call returned into planning.
                 controller.phase = PHASE_REPORT
                 return 1
-            if attempt == 0 and attempts > 1:
+            if (attempt == 0 and attempts > 1
+                    and self.control_attempts - dispatch_start < attempts):
                 # Counted here, where the repair is about to be DISPATCHED.
                 # A repair the budget denied was never sent, and reporting it
                 # would tell the analyst the model was given a second chance

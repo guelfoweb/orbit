@@ -1,0 +1,137 @@
+[
+  {
+    "case": "iban_A",
+    "ordinal": 1,
+    "question": "What is the decoded payload that eval(MMGCLZ) executes? The source uses String.fromCharCode with large numbers minus J7f (177904575), which is a non-standard encoding. I need the actual decoded JavaScript string to determine behavior.",
+    "missing_fact": "The decoded content of MMGCLZ after fromCharCode arithmetic, which reveals what the eval executes (the payload body).",
+    "classification": "ALREADY_PRESENT",
+    "adjudication": "Il corpo MMGCLZ richiesto è esattamente il risultato js_fromcharcode_offset completo: 564 byte, non un estratto.",
+    "data_target": 0
+  },
+  {
+    "case": "iban_A",
+    "ordinal": 2,
+    "question": "What is the full structure and behavior of the decoded payload? The ev_158a04fa evidence shows a JScript/WSF-style downloader using ActiveXObjects (MSXML2.XMLHTTP, Scripting.FileSystemObject, ADODB.Stream, WScript.Shell) fetching https://productoslili.cl/cv/cr2.exe and running it, but I need to confirm this is the complete payload and check for additional stages.",
+    "missing_fact": "The complete decoded payload text to confirm all actions performed (download location, executable name, execution method, any additional obfuscation or secondary stages).",
+    "classification": "ALREADY_PRESENT",
+    "adjudication": "missing_fact chiede il testo completo decodificato per esaminare le operazioni: quel testo è interamente consegnato. Non equivale a disporre del contenuto remoto dell’EXE, che qui non viene identificato come input mancante.",
+    "data_target": 0
+  },
+  {
+    "case": "iban_B",
+    "ordinal": 1,
+    "question": "What is the complete content of the /workspace/input artifact and does it contain the JS eval payload referenced in ev_158a04fa02ee, or other distinct payloads/sections?",
+    "missing_fact": "The full text of the artifact file, since the evidence only shows one transformed snippet (a JScript/VBScript downloader) and the file may contain more.",
+    "classification": "ACTUALLY_MISSING",
+    "adjudication": "Il sorgente originale da 7963 byte non è nel contratto B: il corpo trasformato non ne garantisce la copertura. La richiesta di verificare ulteriori sezioni è distinta dalla ri-decodifica dei 564 byte.",
+    "data_target": "source"
+  },
+  {
+    "case": "iban_B",
+    "ordinal": 2,
+    "question": "How is the eval'd payload embedded in the source (e.g., String.fromCharCode offset concatenation) and what is the surrounding wrapper code?",
+    "missing_fact": "The original source structure that produces the fromcharcode offset transform, which is not visible in the transformed output alone.",
+    "classification": "ACTUALLY_MISSING",
+    "adjudication": "Wrapper e statement originali circostanti non sono contenuti nel solo risultato trasformato o nei suoi metadati di posizione.",
+    "data_target": "source"
+  },
+  {
+    "case": "fattura_A",
+    "ordinal": 1,
+    "question": "What is the full decoded PowerShell payload (the XOR'd string on line 24) and what does it do step by step?",
+    "missing_fact": "The complete deobfuscated PowerShell command sequence, including the XOR key used and the final decoded script body beyond what's shown in ev_5f453953ab7b.",
+    "classification": "AMBIGUOUS",
+    "adjudication": "Requisito composto: comando PowerShell completo e chiavi 46/34 sono già presenti; “final decoded script body beyond” può invece indicare il contenuto remoto, mai acquisito. Il sotto-requisito duplicato è registrato, non nascosto dal giudizio ambiguo.",
+    "data_target": null
+  },
+  {
+    "case": "fattura_A",
+    "ordinal": 2,
+    "question": "What is the purpose of the two WMI query functions (lines 18-19) and how do they relate to the overall execution flow?",
+    "missing_fact": "The role of the GetObject winmgmts connection and Win32_ProcessStartup instantiation, and whether they're decoys or part of the delivery mechanism.",
+    "classification": "ACTUALLY_MISSING",
+    "adjudication": "I nomi WMI sono presenti, ma il collegamento fra le funzioni di query, startup e flusso principale non è interamente mostrato dai soli head/tail. Servono statement esterni mancanti, non una nuova decodifica dei nomi.",
+    "data_target": "source"
+  },
+  {
+    "case": "fattura_A",
+    "ordinal": 3,
+    "question": "What is the significance of the file-deletion commands (IT4085315567030.html, IT4085315567030.zip, vrPKt7tS2M2dt.js, Fattura981033956.js) in the PowerShell payload?",
+    "missing_fact": "Whether these deletions target specific files for anti-forensics or are part of the malicious payload's cleanup routine.",
+    "classification": "AMBIGUOUS",
+    "adjudication": "I comandi Remove-Item e i quattro pattern sono letterali nel corpo. La distinzione anti-forensics/cleanup richiede una valutazione d’intento: non è un valore mancante identificato né prova ottenibile automaticamente da quei comandi.",
+    "data_target": null
+  },
+  {
+    "case": "fattura_A",
+    "ordinal": 4,
+    "question": "What does the final eh4788KSFsziR7Fzb7Z6Q0Tjbv2Td40vZsX1Hg9FuBp12RVq7dCmAwtRcalS1Dvx92Qy2ZCAUeSlXNPR65uOXfntnKKfoP function do with the random coordinates and encoded string?",
+    "missing_fact": "The behavior of this final function call and its role in the artifact's execution.",
+    "classification": "ACTUALLY_MISSING",
+    "adjudication": "L’overview mostra la chiamata finale con coordinate casuali, ma non il corpo completo della funzione eh4788… necessario per ricostruirne gli effetti. La classificazione non inventa quegli effetti.",
+    "data_target": "source"
+  },
+  {
+    "case": "fattura_B",
+    "ordinal": 1,
+    "question": "What is the full content and structure of the artifact file?",
+    "missing_fact": "The complete text of /workspace/input to understand the document structure, obfuscation technique, and how the embedded PowerShell payload is invoked.",
+    "classification": "ACTUALLY_MISSING",
+    "adjudication": "B contiene identità e cinque output, ma non il sorgente esterno o il collegamento che invoca il PowerShell. La domanda non richiede nuovamente il risultato XOR.",
+    "data_target": "source"
+  },
+  {
+    "case": "mine_A",
+    "ordinal": 1,
+    "question": "What is the overall structure and execution flow of the VBScript? Specifically, what triggers the malicious payload and how does the obfuscation decode?",
+    "missing_fact": "The actual script logic connecting the obfuscated functions, since the head/tail only show function stubs with meaningless variable assignments.",
+    "classification": "ACTUALLY_MISSING",
+    "adjudication": "L’overview contiene head/tail e indici, non le connessioni complete fra funzioni VBScript e trigger. Il PowerShell completo non prova l’intero flusso HTA esterno.",
+    "data_target": "source"
+  },
+  {
+    "case": "mine_A",
+    "ordinal": 2,
+    "question": "What is the complete decoded PowerShell payload and what does it do step by step (download location, file writing, execution method)?",
+    "missing_fact": "The full decoded PowerShell command sequence beyond what's already shown in the evidence.",
+    "classification": "ALREADY_PRESENT",
+    "adjudication": "Il PowerShell decodificato è consegnato integralmente in 1237 byte, insieme ai quattro risultati interni chr-offset. Nessun resto locale di quel corpo è trattenuto; la domanda specifica download/scrittura/esecuzione nello stage, non il contenuto remoto.",
+    "data_target": 0
+  },
+  {
+    "case": "mine_A",
+    "ordinal": 3,
+    "question": "What is the final C2/delivery URL and what files/executables are involved in the attack chain?",
+    "missing_fact": "The complete attack chain from initial HTA execution to final payload delivery.",
+    "classification": "AMBIGUOUS",
+    "adjudication": "La domanda esplicita URL finale e file/nomi già presenti; missing_fact amplia però il compito alla catena completa a partire dall’HTA, la cui parte esterna è soltanto parziale. Non si restringe la domanda per dichiararla risolta.",
+    "data_target": null
+  },
+  {
+    "case": "mine_B",
+    "ordinal": 1,
+    "question": "What is the overall structure and purpose of the artifact file?",
+    "missing_fact": "The artifact contains obfuscated PowerShell and VBScript that decodes to download and execute a remote file. Need to confirm the file type and how the components relate.",
+    "classification": "ACTUALLY_MISSING",
+    "adjudication": "Tipo del contenitore e relazioni nel sorgente esterno non sono forniti dalla sola identità /workspace/input e dagli output. Resta una richiesta pertinente, distinta dalle stringhe già decodificate.",
+    "data_target": "source"
+  },
+  {
+    "case": "mine_B",
+    "ordinal": 2,
+    "question": "What does the PowerShell obfuscation decode to?",
+    "missing_fact": "The atHcQU function subtracts 22624 from each number and converts to char. The decoded strings reveal the actual commands and URLs being used.",
+    "classification": "ALREADY_PRESENT",
+    "adjudication": "La domanda chiede i risultati atHcQU. Questi sono già consegnati esattamente come .dll, rundll32.exe, Net.WebClient e URL da 67 byte; il corpo da 1237 byte contiene anche la funzione con costante 22624. missing_fact descrive tali risultati invece di individuare un dato ulteriore.",
+    "data_target": 2
+  },
+  {
+    "case": "mine_B",
+    "ordinal": 3,
+    "question": "What is the final payload being downloaded and executed?",
+    "missing_fact": "The decoded URL points to a remote server, and the downloaded file is executed via rundll32.exe or similar.",
+    "classification": "AMBIGUOUS",
+    "adjudication": "La domanda sul payload finale potrebbe richiedere i byte remoti, davvero assenti. missing_fact non li identifica e ripete URL/esecuzione, aggiungendo “rundll32.exe or similar”: il corpo mostra una scelta condizionata dall’estensione, non prova il comportamento remoto. Non è un’assenza verificabile univoca.",
+    "data_target": null
+  }
+]

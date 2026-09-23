@@ -84,6 +84,10 @@ class _Model:
         return None
 
     def _call(self, name, arguments):
+        if name == PLAN_TOOL_NAME and isinstance(arguments.get("questions"), list):
+            arguments = {**arguments, "questions": [
+                {"data_request": None, **q} if isinstance(q, dict) else q
+                for q in arguments["questions"]]}
         return [{"id": f"c{len(self.calls)}", "type": "function",
                  "function": {"name": name, "arguments": json.dumps(arguments)}}]
 

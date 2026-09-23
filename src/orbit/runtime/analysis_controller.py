@@ -88,6 +88,9 @@ class Question:
     depth: int = 0
     parent: str | None = None
     caused_by: str | None = None
+    # A declared byte requirement, not a claim that the question is answered.
+    # None also covers legacy/unclassified questions; it does not certify meaning.
+    data_request: dict | None = None
 
 
 @dataclass
@@ -175,14 +178,16 @@ class AnalysisController:
         seen: set[str] = set()
         depth_zero = sum(1 for q in self.questions.values() if q.depth == 0)
         for entry in entries:
-            text, missing = _question_fields(entry)
+            text, missing = _question_fields(entry, plan=True)
+            data = plan_data_request(entry)
             key = " ".join(text.lower().split())
             if key in seen:
                 raise ControlError("plan repeats a question")
             seen.add(key)
             depth_zero += 1
             adopted.append(
-                Question(id=f"Q{depth_zero}", question=text, missing_fact=missing)
+                Question(id=f"Q{depth_zero}", question=text, missing_fact=missing,
+                         data_request=dict(data) if data is not None else None)
             )
         for question in adopted:
             self.questions[question.id] = question
@@ -405,11 +410,12 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def _question_fields(entry: object) -> "tuple[str, str]":
+def _question_fields(entry: object, *, plan: bool = False) -> "tuple[str, str]":
     """The two bounded strings a question is made of, or raise."""
     if not isinstance(entry, dict):
         raise ControlError("question entry is not an object")
-    unexpected = set(entry) - {"question", "missing_fact"}
+    unexpected = set(entry) - ({"question", "missing_fact", "data_request"}
+                               if plan else {"question", "missing_fact"})
     if unexpected:
         raise ControlError(f"unexpected fields: {sorted(unexpected)}")
     text = entry.get("question")
@@ -425,6 +431,21 @@ def _question_fields(entry: object) -> "tuple[str, str]":
             f"missing_fact is longer than {MAX_MISSING_FACT_CHARS} characters"
         )
     return text.strip(), missing.strip()
+
+
+def plan_data_request(entry: dict) -> dict | None:
+    """Validate only byte-address syntax. Absence is legacy/unclassified, not DATA."""
+    data = entry.get("data_request")
+    if data is None:
+        return None
+    if not isinstance(data, dict) or set(data) not in ({"ref"}, {"ref", "start", "end"}):
+        raise ControlError("data_request must be null or {ref} with optional start and end together")
+    if (not isinstance(data["ref"], str) or not data["ref"]
+            or ("start" in data and (type(data["start"]) is not int
+                or type(data["end"]) is not int
+                or not 0 <= data["start"] < data["end"]))):
+        raise ControlError("data_request requires a reference and nonempty UTF-8 byte interval [start,end)")
+    return data
 
 
 def parse_plan_call(arguments: object) -> "list[dict]":

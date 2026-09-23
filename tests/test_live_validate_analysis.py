@@ -140,6 +140,10 @@ class _StubBackend:
         return self.chat_stream(messages, **kwargs)
 
     def _call(self, name, arguments):
+        if name == PLAN_TOOL_NAME and isinstance(arguments.get("questions"), list):
+            arguments = {**arguments, "questions": [
+                {"data_request": None, **q} if isinstance(q, dict) else q
+                for q in arguments["questions"]]}
         return [{"id": f"c{self.calls}", "type": "function",
                  "function": {"name": name,
                               "arguments": json.dumps(arguments)}}][0]
