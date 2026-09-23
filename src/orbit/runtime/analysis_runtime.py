@@ -8230,7 +8230,10 @@ class AnalysisRuntime:
             if r.evidence_id in standing and not standing[r.evidence_id].is_active
         ]
 
-    def _evidence_cards(self, records: list[EvidenceRecord]) -> list[str]:
+    def _evidence_cards(
+        self, records: list[EvidenceRecord], *,
+        fits: Callable[[list[str]], bool] | None = None,
+    ) -> list[str]:
         """Every record as a card, within a TOTAL quoted-text budget.
 
         The per-record bound alone let five records of ~3,092 chars -- each
@@ -8376,6 +8379,12 @@ class AnalysisRuntime:
             full = self._evidence_card(record)
             delta = measure(full) - floor_cost[record.evidence_id]
             if delta <= 0 or spent + delta <= budget:
+                proposed = {**chosen, record.evidence_id: full}
+                # A short complete result can cost LESS than its provenance
+                # floor. Keep those savings even while the whole dossier is
+                # over budget; the final exact admission remains authoritative.
+                if delta > 0 and fits is not None and not fits([proposed[r.evidence_id] for r in carried]):
+                    continue
                 spent += delta
                 chosen[record.evidence_id] = full
         return [chosen[record.evidence_id] for record in carried]
@@ -8555,7 +8564,6 @@ class AnalysisRuntime:
         put the model back in the frame where running something is the
         expected move.
         """
-        cards = "\n\n".join(self._evidence_cards(records))
         asked = question.strip() or "Report on what the evidence establishes."
         # The deterministic values, IN the prompt rather than only appended to
         # the answer. They were excluded from the citation budget because
@@ -8579,18 +8587,34 @@ class AnalysisRuntime:
         references = self.indicator_reference_table()
         if references:
             grounding = f"{grounding}{references}\n\n"
-        return [
-            {"role": "system", "content": ANALYSIS_REPORT_INSTRUCTION},
-            {
-                "role": "user",
-                "content": (
-                    f"Artifact under analysis: {self.source.size_bytes} bytes, "
-                    f"sha256 {self.source.sha256}.\n\n"
-                    f"{grounding}"
-                    f"Evidence collected so far:\n\n{cards}\n\n{asked}"
-                ),
-            },
-        ]
+        def render(cards):
+            quoted = "\n\n".join(cards)
+            return [
+                {"role": "system", "content": ANALYSIS_REPORT_INSTRUCTION},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Artifact under analysis: {self.source.size_bytes} bytes, "
+                        f"sha256 {self.source.sha256}.\n\n"
+                        f"{grounding}"
+                        f"Evidence collected so far:\n\n{quoted}\n\n{asked}"
+                    ),
+                },
+            ]
+
+        def fits(cards):
+            # The dossier in `asked` is required context too. Price optional
+            # quote upgrades against the complete rendered request, not just
+            # the instruction and facts. No generation or evidence retrieval;
+            # the final admission still refuses if even provenance cannot fit.
+            try:
+                self._admit(render(cards), max_tokens=self.effective_max_tokens,
+                            tools=[], next_action_reserve=0, rehydrate_evidence=False)
+            except ContextAdmissionError:
+                return False
+            return True
+
+        return render(self._evidence_cards(records, fits=fits))
 
     def _structural_rejection(self, calls: list[dict[str, Any]]) -> str | None:
         """Why this tool call cannot be committed, or None if it can.
