@@ -4421,12 +4421,14 @@ class AnalysisRuntime:
         evidence -- so the model must be able to name an id and get the exact
         bytes back. Same primitive CHAT uses, same attestation.
 
-        Only the latest USER message is scanned, exactly as CHAT does. Scanning
+        Outside FINISH, only the latest USER message is scanned, as CHAT does. Scanning
         tool messages too would be self-defeating: a canonical reference names
         its own id in `exact_content_ref`, so every compacted turn would
         immediately re-inline itself and undo the compaction that just happened.
         This syntax belongs to the active user instruction; an assistant
         citation or an id embedded in an archived record is not a read request.
+        FINISH instead carries a runtime-owned selection from its question;
+        observations and repair errors never create a retrieval request.
 
         BOUNDED to the remaining context. An extracted source can be larger than
         the whole window (the frozen Office VBA module is ~55 KB), and inlining
@@ -4445,9 +4447,15 @@ class AnalysisRuntime:
             if message.get("role") == "user":
                 latest = message
                 break
-        evidence_ids = requested_evidence_ids(
-            latest.get("content") if latest is not None else None
-        )
+        if tools and any(t.get("function", {}).get("name") == FINISH_TOOL_NAME
+                         for t in tools):
+            # FINISH wraps observations/errors in user-role messages. They
+            # are data, not requests, including on either bounded repair.
+            evidence_ids = self._finish_rehydration_ids(messages)
+        else:
+            evidence_ids = requested_evidence_ids(
+                latest.get("content") if latest is not None else None
+            )
         if not evidence_ids:
             return messages, ()
         # The exact input budget, computed the way admission computes it, so the
@@ -5957,9 +5965,82 @@ class AnalysisRuntime:
             messages.append({"role": "user", "content": current_instruction})
         return messages
 
+    def _finish_rehydration_ids(self, messages: list[Message]) -> tuple[str, ...]:
+        requests = [m["analysis_finish_request"] for m in messages
+                    if "analysis_finish_request" in m]
+        if not requests:
+            return ()  # No runtime-owned request; never fall back to prose.
+        if len(requests) != 1:
+            raise ContextAdmissionError("FINISH evidence request has ambiguous ownership")
+        request = requests[0]
+        if not isinstance(request, dict) or set(request) != {
+            "scope", "question_id", "current_action", "evidence_ids"
+        } or not isinstance(request["evidence_ids"], tuple):
+            raise ContextAdmissionError("FINISH evidence request has invalid ownership")
+        if request["scope"] != (id(self), id(self.evidence_store),
+                                self.source.sha256, self.analyst_turns):
+            raise ContextAdmissionError("FINISH evidence request ownership changed")
+        evidence_ids = request["evidence_ids"]
+        if not evidence_ids:
+            return ()
+        try:
+            snapshot = self.source.snapshot_path.read_bytes()
+        except OSError as exc:
+            raise ContextAdmissionError("FINISH source snapshot unavailable") from exc
+        if (len(snapshot) != self.source.size_bytes
+                or hashlib.sha256(snapshot).hexdigest() != self.source.sha256):
+            raise ContextAdmissionError("FINISH source snapshot changed")
+        # Uses this session's committed canonical references, including their
+        # tool name/call id/user turn, not references copied into the prompt.
+        available, _ = self._compactable_evidence_sets(self.messages, ())
+        # Transforms and Office modules use registered preambles, not tool
+        # turns. Preserve both existing producers without granting authority
+        # to any other record merely because it is present in the store.
+        for body, registered in _extracted_source_authorities(
+            self.transform_stages, self.office_modules
+        ):
+            if (registered.evidence_id in evidence_ids
+                    and self.evidence_store.records.get(registered.evidence_id) == registered
+                    and self.evidence_store.reattest_exact(registered.evidence_id) == body):
+                available.add(registered.evidence_id)
+        latest_tool = next((m for m in reversed(self.messages)
+                            if m.get("role") == "tool"), {})
+        for eid in evidence_ids:
+            record = self.evidence_store.records.get(eid)
+            # A separately archived raw result can already be explicitly
+            # associated with a child/prior question state. Its committed
+            # bounded sibling owns the action lineage; this never discovers
+            # or requests raw output just because a diagnostic mentions it.
+            raw_owned = record is not None and record.produced_by_phase == "analysis_action_raw" and any(
+                parent.produced_by_phase == "analysis_action"
+                and parent.metadata.get("raw_output_evidence_id") == eid
+                and parent.metadata.get("analysis_source_sha256") == self.source.sha256
+                and parent.tool_call_id == record.tool_call_id
+                and parent.user_turn_id == record.user_turn_id
+                and parent.metadata.get("code_sha256") == record.metadata.get("code_sha256")
+                and bool(record.metadata.get("code_sha256"))
+                for parent_id in available
+                for parent in (self.evidence_store.records[parent_id],)
+            )
+            if ((eid not in available and not raw_owned) or record is None
+                    or record.metadata.get("analysis_source_sha256") != self.source.sha256
+                    or (eid == request["current_action"] and (
+                        latest_tool.get("evidence_id") != eid
+                        or record.user_turn_id != f"turn_{self.analyst_turns}"))):
+                raise ContextAdmissionError(
+                    f"FINISH evidence-rehydration-unavailable: {eid} ownership/provenance"
+                )
+        return evidence_ids
+
     def _finish_messages(
-        self, question: "Question", observation: str, evidence_id: str
+        self, question: "Question", observation: str, evidence_id: str,
+        *, prior_evidence_ids: tuple[str, ...] = (),
     ) -> "list[Message]":
+        # run_autonomous hands the current action result to its active question
+        # synchronously. Older records need an explicit controller association;
+        # same-store existence or a textual mention cannot create one.
+        owned = {evidence_id, question.caused_by, *prior_evidence_ids}
+        requested = requested_evidence_ids(f"{question.question}\n{question.missing_fact}")
         return [
             *self.messages,
             {"role": "user", "content": (
@@ -5967,7 +6048,13 @@ class AnalysisRuntime:
                 f"What was missing: {question.missing_fact}\n"
                 f"The action produced (evidence {evidence_id}):\n{observation}\n"
                 "Call finish_analysis_question to say what this established."
-            )},
+            ), "analysis_finish_request": {
+                "scope": (id(self), id(self.evidence_store), self.source.sha256,
+                          self.analyst_turns),
+                "question_id": question.id,
+                "current_action": evidence_id,
+                "evidence_ids": tuple(eid for eid in requested if eid in owned),
+            }},
         ]
 
     def finish_question(
@@ -5993,7 +6080,13 @@ class AnalysisRuntime:
         calls = 0
         spent_at_entry = self.model_calls
         allowance = 2 if max_calls is None else min(2, max_calls)
-        messages = self._finish_messages(question, observation, evidence_id)
+        if (controller.active != question.id
+                or controller.questions.get(question.id) != question):
+            raise ControlError("FINISH question is not the active registered question")
+        messages = self._finish_messages(
+            question, observation, evidence_id,
+            prior_evidence_ids=controller.states[question.id].evidence_ids,
+        )
         for attempt in range(2):
             remaining = allowance - calls
             if remaining <= 0:
