@@ -148,6 +148,20 @@ class FinishMissingFactTests(_Case):
 
     def test_evidence_reference_in_requirement_uses_existing_reattestation(self):
         rt, model, c, q, eid = self.setup_finish()
+        # A production FINISH owns the result just committed by STEP, rather
+        # than an arbitrary store record mentioned in model-authored prose.
+        rt.analyst_turns = 1
+        call = {'id': 'count_action', 'type': 'function', 'function': {
+            'name': 'execute_analysis', 'arguments': '{"code":"print(3)"}'}}
+        record = rt.evidence_store.add('execute_analysis', 'LINE_COUNT 3', metadata={
+            'tool_call_id': 'count_action', 'user_turn_id': 'turn_1',
+            'produced_by_phase': 'analysis_action',
+            'analysis_source_sha256': rt.source.sha256,
+        })
+        eid = record.evidence_id
+        rt.messages.extend([{'role': 'user', 'content': 'Count lines'},
+                            {'role': 'assistant', 'content': '', 'tool_calls': [call]}])
+        rt._append_tool_result(call, 'LINE_COUNT 3', record=record)
         q = replace(q, missing_fact=f'The exact count in evidence:{eid}.')
         view = rt._finish_messages(q, 'Observation', eid)
         rt._control_dispatch(view, FINISH_TOOL_SCHEMA)
