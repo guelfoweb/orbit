@@ -1,0 +1,270 @@
+{
+  "schema_version": 2,
+  "sample_id": "iban",
+  "sample": {
+    "path": "workdir/samples/IBAN.js",
+    "sha256": "86e23fa673271308578daf61e783a00662351bab66d74f5f16e16302ad40d8b8",
+    "bytes": 7963
+  },
+  "scope": "Complete analysis explanation of this exact artifact with the frozen evidence available. A phase-only/partial-delivery run is not a complete-report candidate.",
+  "facts": [
+    {
+      "id": "iban.language",
+      "category": "MUST",
+      "claim": "Il wrapper e il payload decodificato sono JScript/JavaScript per Windows Script Host.",
+      "evidence": [
+        "source",
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.decode_eval",
+      "category": "MUST",
+      "claim": "String.fromCharCode con offset produce il corpo di 564 byte passato a eval(MMGCLZ).",
+      "evidence": [
+        "source",
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "MMGCLZ"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.url",
+      "category": "MUST",
+      "claim": "La destinazione GET è esattamente https://productoslili.cl/cv/cr2.exe.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "https://productoslili.cl/cv/cr2.exe"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.sync_get",
+      "category": "MUST",
+      "claim": "MSXML2.XMLHTTP.Open(GET, URL, false) richiede GET sincrono; Send effettua la richiesta nel codice.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "MSXML2.XMLHTTP"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.temp",
+      "category": "MUST",
+      "claim": "GetSpecialFolder(2) è TemporaryFolder/%TEMP%; il file è TKFSIK.exe.",
+      "evidence": [
+        "stage0",
+        "platform"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "TKFSIK.exe"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.write",
+      "category": "MUST",
+      "claim": "La risposta scaricata viene scritta su disco prima dell’esecuzione; il meccanismo attestato è ADODB.Stream/SaveToFile. Non occorre elencare ogni flag API per spiegare la catena.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "ADODB.Stream"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.execute",
+      "category": "MUST",
+      "claim": "WScript.Shell.Run(filepath) avvia il file salvato; download → scrittura su disco → esecuzione.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.vbscript",
+      "category": "MUST_NOT",
+      "claim": "Descrivere il payload come VBScript (API COM e WScript non cambiano la lingua).",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.async",
+      "category": "MUST_NOT",
+      "claim": "Affermare che il GET è asincrono.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.fileless",
+      "category": "MUST_NOT",
+      "claim": "Descrivere questa catena come fileless ignorando SaveToFile dell’eseguibile.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.system32",
+      "category": "MUST_NOT",
+      "claim": "Mappare GetSpecialFolder(2) a System32/Windows anziché TemporaryFolder.",
+      "evidence": [
+        "stage0",
+        "platform"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.payload_missing",
+      "category": "MUST_NOT",
+      "claim": "Dichiarare mancante o non decodificato il corpo di 564 byte quando è effettivamente consegnato.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.stream_flags",
+      "category": "MAY",
+      "claim": "Il codice verifica Status==200, usa Stream.Type=1 e SaveToFile(filepath,2) per overwrite.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.offset",
+      "category": "MAY",
+      "claim": "La costante J7f vale 177904575 e gli operandi ricostruiscono i caratteri per sottrazione.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.errors",
+      "category": "MAY",
+      "claim": "Il try/catch vuoto sopprime gli errori nel codice; lo scopo evasivo non è attestato.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.persistence_limit",
+      "category": "MAY",
+      "claim": "Nel corpo decodificato non è mostrato un meccanismo di riavvio persistente; ciò non prova assenza di persistenza nel payload remoto.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.remote_payload",
+      "category": "UNKNOWN",
+      "claim": "Tipo effettivo, famiglia, funzionalità e comportamento del remoto cr2.exe/TKFSIK.exe non acquisito.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "iban.actual_execution",
+      "category": "UNKNOWN",
+      "claim": "Non osservati download riuscito, HTTP200 effettivo, scrittura o esecuzione sulla macchina vittima.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    }
+  ],
+  "evidence": {
+    "source": {
+      "path": "workdir/samples/IBAN.js",
+      "sha256": "86e23fa673271308578daf61e783a00662351bab66d74f5f16e16302ad40d8b8",
+      "bytes": 7963,
+      "byte_range": [
+        0,
+        7963
+      ],
+      "authority": "frozen source, untrusted code, never executed"
+    },
+    "cross_gate": {
+      "path": "scripts/evaluation/analysis_semantic_baseline/grounding.json",
+      "sha256": "9c41eae6deda6ec2e0970fdebdaf0d1c800a765ac4f52f5acf37765f6ea2488d"
+    },
+    "stage0": {
+      "sha256": "8e9dc375be481cb9741227ea59d29ece7f6518600a98b9a8d3253d204017d2a4",
+      "pointer": [
+        "stages",
+        0,
+        "body"
+      ],
+      "body_sha256": "5d51e7659955a754d55a83bce9157d8999864ee30a4f3cd5dc752ed0191a7de0",
+      "body_bytes": 564,
+      "byte_range": [
+        0,
+        564
+      ],
+      "source_sha256": "86e23fa673271308578daf61e783a00662351bab66d74f5f16e16302ad40d8b8",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "js_fromcharcode_offset",
+      "key": 0,
+      "producer": "analysis_deobfuscate"
+    },
+    "platform": {
+      "path": "scripts/evaluation/analysis_semantic_baseline/grounding.json",
+      "sha256": "9c41eae6deda6ec2e0970fdebdaf0d1c800a765ac4f52f5acf37765f6ea2488d",
+      "authority": "qualified existing WSH GetSpecialFolder(2)=TemporaryFolder contract, not observed victim path"
+    }
+  },
+  "qualified_stage_sha256": [
+    "5d51e7659955a754d55a83bce9157d8999864ee30a4f3cd5dc752ed0191a7de0"
+  ],
+  "unknown_policy": "UNKNOWN is an evidence boundary, not a missing positive claim. Do not certify execution, remote payload or arbitrary whole-source absence. Inferences must remain labelled.",
+  "evaluation_policy": "No LLM judge. Hashes/stage identities/byte ranges and literal locators are deterministic; semantic requirements require a explicitly owned engineering/manual review record bound to report and oracle SHA. No automatic semantic classification from keywords.",
+  "origin_oracle_sha256": "3a24d8daeb64657f82cd6b123698cf3ab053ea3c2846b231b669eb981a87a188"
+}

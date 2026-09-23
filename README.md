@@ -1,28 +1,24 @@
 # Orbit
 
-Orbit is a Python local-AI runtime for CPU-only machines. Chat with a local
-model, work with files, and let the model use tools when needed. Linux x86_64
-is the qualified platform.
+Orbit is a Python local-AI runtime for CPU-only machines. It combines local
+chat, model-selected tools, file workflows and static artifact analysis in a
+terminal client. Linux x86_64 is the qualified platform.
 
-**Qwen3.8 Flash Next UD-IQ1_M** is the highlighted model. Its backend and
-CHAT execution are qualified on a Dell Pro 5 14 with an Intel Core Ultra 7
-366H, 30 GiB usable RAM and NVMe storage. Its 74.5 GB model is larger than RAM,
-so storage speed matters. Other verified models are listed
-[below](#supported-models).
+The runtime manages tools, sessions, evidence, verification and bounded repair.
+The integrated llama.cpp backend handles tokenization, inference, streaming and
+model state. Orbit builds its own vendored backend; no separate llama.cpp
+installation or external inference server is required.
 
-Orbit includes its own vendored llama.cpp backend. The build below compiles it;
-there is no separate llama.cpp installation or external inference server to set up.
+## Install and quick start
 
-## Install
-
-You need Python 3.11 or newer, Git, CMake and a C/C++ build toolchain. RAM and
-storage requirements depend on the model; the Qwen configuration above is a
-measured setup, not a minimum requirement for every model or machine.
+You need Python 3.11 or newer, Git, CMake and a C/C++ build toolchain. ANALYSIS
+also requires bubblewrap. Memory and storage requirements depend on the model
+and workload.
 
 On Debian/Ubuntu with Python 3.11 or newer:
 
 ```bash
-sudo apt install git build-essential cmake python3-venv
+sudo apt install git build-essential cmake python3-venv bubblewrap
 git clone https://github.com/guelfoweb/orbit.git
 cd orbit
 python3 -m venv .venv
@@ -31,13 +27,101 @@ python3 -m pip install -e .
 python3 scripts/build_native.py
 ```
 
-## Choose a model directory
+Start the local server:
 
-Downloads and the server use the same model directory. The default is `models/`
-in the checkout, or `~/.cache/orbit/models` outside a checkout.
+```bash
+orbit server
+```
 
-To use another disk, set a writable directory before downloading. Replace this
-example path with yours:
+Choose a model from the menu. If it is missing, Orbit offers to download it.
+To store models on another disk, [set the model directory](#configuration-and-model-store)
+first. Orbit selects the startup profile; normal use needs no tuning flags.
+Loading and any startup warm-up depend on the model. Wait for `listening on`
+before connecting.
+
+Leave the server terminal running. In a second terminal, open the same checkout:
+
+```bash
+. .venv/bin/activate
+orbit
+```
+
+The client connects to the local server. Exiting the client leaves the server
+running; stop the server with Ctrl-C when finished. See `orbit --help` and
+`orbit server --help` for options.
+
+## Supported models and qualification
+
+The [model registry](src/orbit/native_llama/model_registry.json) contains these
+verified native profiles. Verification applies to the exact model,
+quantization, template and tested workflows, not every related variant.
+This list is not a performance ranking.
+
+| Model | Verified quantization |
+|---|---|
+| Gemma 4 26B-A4B | Q4_0 |
+| Ornith 1.5 35B-A3B | Q4_K_M |
+| Qwen 3.6 35B-A3B | Q4_K_M |
+| Qwen3-Coder 30B-A3B Instruct | Q4_K_M |
+| Qwen3.8 27B | Q4_K_M |
+| Qwen3.8 Flash Next | UD-IQ1_M, three shards |
+
+**Backend/CHAT qualification is separate from ANALYSIS semantic qualification.**
+A working model integration and valid tool calls do not establish that its
+explanations are correct.
+
+Ornith has bounded ANALYSIS qualification on specific retained tests, but
+retained reports also contain factual errors. It is not generally qualified
+for accurate explanations across the semantic corpus.
+
+Qwen3.8 Flash Next UD-IQ1_M retains backend/CHAT qualification on the tested
+Dell configuration. It did not pass the retained ANALYSIS semantic cases.
+That result does not extend to every Qwen model or quantization.
+
+See the [qualification scope](docs/ANALYSIS_QUALIFICATION.md) and
+[semantic baseline](docs/ANALYSIS_SEMANTIC_BASELINE.md) for evidence and limits.
+No model in this table is presented as generally semantically qualified for
+ANALYSIS.
+
+## Chat and tools
+
+Ask a question or request a task, for example:
+`Use system_info to describe this computer.` Tools are on by default and can
+run local shell commands; the model chooses when to use them. Use `/tools off`
+for chat without tools and `/tools on` to restore access.
+
+| Client command | Purpose |
+|---|---|
+| `/help` | List commands and their syntax. |
+| `/status` | Inspect the active model and runtime settings. |
+| `/read <source> [prompt]` | Read a local document or URL. |
+| `/reset` | Clear the conversation and saved session. |
+| `/exit` | Close the client. |
+
+## ANALYSIS and its limits
+
+Use `/analysis path/to/artifact` to investigate one local artifact, and `/chat`
+to return to chat. ANALYSIS combines deterministic extraction and decoding with
+model-guided investigation. Generated Python actions run in a resource-bounded
+bubblewrap sandbox with a read-only input and network access denied.
+
+The canonical Markdown report puts attested indicators and decoded values
+before unverified model answers. It retains provenance, evidence coverage,
+open questions and the reason the investigation stopped. A complete report
+records the work performed; it does not mean the investigation answered every
+question or established all of the artifact's behavior.
+
+Source acquisition, delivery to the model and proof of a conclusion are distinct.
+Review model interpretations against the evidence, especially claims about
+remote content or behavior not observed. The
+[semantic baseline](docs/ANALYSIS_SEMANTIC_BASELINE.md) records required facts,
+known errors and unknowns; automatic integrity checks do not replace semantic
+review.
+
+## Configuration and model store
+
+Downloads and the server use the same model directory: `models/` in a checkout,
+or `~/.cache/orbit/models` outside one. To choose a writable location:
 
 ```bash
 orbit config models-dir /mnt/data/orbit-models
@@ -45,115 +129,35 @@ orbit config models-dir
 ```
 
 The first command creates the directory if needed and saves the setting; the
-second shows the effective directory. Existing models are not moved. If you
-copy them, retain the `<owner>--<repo>/` subdirectories.
+second shows the effective directory. Existing models are not moved. When
+copying models, retain the `<owner>--<repo>/` subdirectories.
 
-A command's `--models-dir` override takes precedence over `ORBIT_MODELS_DIR`,
-then the saved setting, then the default. For a model larger than RAM, use fast
-local storage; Orbit warns about known unsuitable filesystems such as eCryptfs.
+Precedence is an explicit command's `--models-dir`, then `ORBIT_MODELS_DIR`,
+then the saved setting, then the default.
 
-## Run
-
-Start the server from your activated environment:
+You can also download before starting the server, for example:
 
 ```bash
-orbit server
+orbit download ornith-ai/Ornith-1.5-35B-A3B-GGUF/Ornith-1.5-35B-Q4_K_M.gguf
 ```
 
-Choose **Qwen 3.8 Flash Next** from the model menu. If it is missing, confirm the
-offered download, or choose another verified model. Orbit selects the startup
-profile; normal use needs no tuning flags.
+For a multi-shard GGUF, request its first shard. Orbit downloads the complete
+set, reports per-shard progress, resumes interrupted transfers and reuses
+complete shards. Keep the shards together; they appear as one model in the
+menu. Rerun the same command to finish an interrupted set. Exact repository and
+GGUF names are in the registry; options are in `orbit download --help`.
 
-Leave this terminal running. Wait for the `listening on` message before chatting.
-On the qualified Qwen setup, startup includes a synchronous warm-up that can take
-a few minutes. It moves work to startup to shorten the first request; it does
-not reduce total computation.
+## Development and tests
 
-Open a second terminal in the checkout:
+The project uses `unittest`. From the checkout, run the non-live suite:
 
 ```bash
-. .venv/bin/activate
-orbit
+TMPDIR=/tmp PYTHONPATH=src python3 -m unittest discover -s tests -q
 ```
 
-Ask a question, or try `Use system_info to describe this computer.` Tools are
-on by default; the model chooses when to use them.
-
-Useful commands inside the chat:
-
-| Command | Purpose |
-|---|---|
-| `/help` | List available commands. |
-| `/status` | Inspect the active model and runtime settings. |
-| `/reset` | Clear the conversation and saved session. |
-| `/exit` | Close the chat client. |
-
-The server stays open when the client exits. Stop it with Ctrl-C when finished.
-For command-line options, use `orbit --help` or `orbit server --help`.
-
-## Download models separately
-
-You can download before starting the server:
-
-```bash
-orbit download unsloth/Qwen3.8-Flash-Next-GGUF/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf
-```
-
-This command downloads **all three shards**, about **74.5 GB total**. They form
-one model: keep them together and choose its single entry in the model menu.
-Orbit shows progress for each shard, resumes interrupted downloads, reuses
-complete shards and validates the set. Rerun the same command to finish missing
-or interrupted shards.
-
-Other verified model repositories and exact GGUF filenames are in the
-[model registry](src/orbit/native_llama/model_registry.json).
-`orbit download --help` lists download options.
-
-## Supported models
-
-These are the verified native model/quantization combinations. Backend
-verification is separate from ANALYSIS qualification and does not extend to
-every quantization or similarly named model.
-
-| Model | Verified quantization |
-|---|---|
-| **Qwen3.8 Flash Next** | **UD-IQ1_M**, three shards |
-| Ornith 1.5 35B-A3B | Q4_K_M |
-| Qwen3.8 27B | Q4_K_M |
-| Qwen 3.6 35B-A3B | Q4_K_M |
-| Qwen3-Coder 30B-A3B Instruct | Q4_K_M |
-| Gemma 4 26B-A4B | Q4_0 |
-
-Qwen Flash Next's automatic Dell profile uses ctx 4096, threads 10/10,
-batch/ubatch 256/128, one slot, CPU repack off and MTP off. These settings and
-its startup warm-up are qualified for that setup; other hardware and models
-can resolve different defaults.
-
-Static artifact analysis has bounded qualification with **Ornith 1.5 Q4_K_M**.
-**Qwen3.8 Flash Next UD-IQ1_M**, in the configuration above, did not pass the
-retained ANALYSIS FINISH semantic cases; its backend/CHAT qualification remains
-valid. See [ANALYSIS qualification and limits](docs/ANALYSIS_QUALIFICATION.md).
-In an Ornith session, use `/analysis path/to/artifact` to begin and `/chat` to
-return to chat.
-Analysis handles one local artifact at a time without executing the input or
-fetching remote payloads. Advanced usage lives in [docs/](docs/).
-
-## Observed performance
-
-This is a production observation, not a comparison between models:
-
-| Model and hardware | Workload | Prefill | Decode |
-|---|---|---:|---:|
-| Qwen3.8 Flash Next UD-IQ1_M; Dell Core Ultra 7 366H, 30 GiB RAM, NVMe, CPU-only | 119-token final prompt, 419-token answer after startup warm-up and two short turns | 10.2 tok/s | 2.8 tok/s |
-
-Measured on 2026-09-17 at Orbit `de93c14`, with the Qwen profile above,
-temperature 0 and thinking off. Rates are native per-call measurements; cached
-input is not counted as evaluated prefill. This bounded conversation is not a
-steady-state throughput benchmark.
-
-In the same run, startup warm-up took 150.5 s, the server was ready after
-175.4 s, and the first short turn took 12.5 s. Peak server RSS was 27.3 GiB.
-Longer conversations can take substantially more time even with route caching,
-because final answers still need their conversation context. Timing depends on
-the prompt, reply length, model/page-cache warmth, storage and host load.
-These figures do not describe Ornith, the other verified models, or other CPUs.
+Some qualification tests require external, hash-pinned corpus files. Follow
+[AGENTS.md](AGENTS.md) for provisioning and contribution gates. ANALYSIS changes
+must preserve the [deterministic cross-sample gate](tests/test_analysis_cross_sample_gate.py);
+claims of semantic improvement also require comparison against the
+[semantic baseline](docs/ANALYSIS_SEMANTIC_BASELINE.md), with no regressions on
+applicable criteria.

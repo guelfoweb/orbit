@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "production_sha": "10f9438e71438ee7e691a60041211348cc201810",
+  "samples": [
+    {
+      "id": "fattura",
+      "path": "workdir/samples/Fattura981033956.js",
+      "sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+      "bytes": 7706,
+      "oracle": "oracles/fattura.json",
+      "oracle_sha256": "f044c3f29a31870619abbe9cfa91d6c228a394c84390191b1c7fe34e56fb8a00",
+      "stages": 5
+    },
+    {
+      "id": "iban",
+      "path": "workdir/samples/IBAN.js",
+      "sha256": "86e23fa673271308578daf61e783a00662351bab66d74f5f16e16302ad40d8b8",
+      "bytes": 7963,
+      "oracle": "oracles/iban.json",
+      "oracle_sha256": "a2de538109eecf0aeca006fc4196da6a3696e6f9d6c7e93b9bad980fe13180de",
+      "stages": 1
+    },
+    {
+      "id": "mine",
+      "path": "workdir/samples/mine.hta",
+      "sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "bytes": 50114,
+      "oracle": "oracles/mine.json",
+      "oracle_sha256": "ca781fa9c30eb446dbf086bf1bb34a5061daa026a8aa7c0d586392f389835573",
+      "stages": 6
+    }
+  ],
+  "other_cross_gate_samples": "Not expanded into semantic oracles in this mission; the existing six-sample deterministic gate remains separate.",
+  "historical_identity_notes": {
+    "IBAN_old_outer_hash": "f74ee18642a0c6466884d202be86ab26c26e7d9cb8354e27d028d732056eabbe; same decoded stage does NOT make full runs comparable",
+    "Fattura_origin19948": "different sample; NEVER apply the 7706-byte oracle"
+  },
+  "origin": {
+    "mission": "ANALYSIS-SEMANTIC-BASELINE-1",
+    "manifest_sha256": "97a93f3995ff05b4c9ef1367feecf87866f225cb99679c44aaa5849874ebe0e1",
+    "corpus_sha256": "3e4cef7cf0ee10b9915805c72a74f62e2febe7026ff83bbcb2707bfd2fadea81"
+  }
+}

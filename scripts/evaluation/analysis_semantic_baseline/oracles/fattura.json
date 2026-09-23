@@ -1,0 +1,371 @@
+{
+  "schema_version": 2,
+  "sample_id": "fattura",
+  "sample": {
+    "path": "workdir/samples/Fattura981033956.js",
+    "sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+    "bytes": 7706
+  },
+  "scope": "Complete analysis explanation of this exact artifact with the frozen evidence available. A phase-only/partial-delivery run is not a complete-report candidate.",
+  "facts": [
+    {
+      "id": "fattura.language",
+      "category": "MUST",
+      "claim": "Il sorgente è JavaScript/JScript eseguito in Windows Script Host (WScript), non VBScript.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "WScript"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.wmi_namespace",
+      "category": "MUST",
+      "claim": "Binding WMI al namespace locale root\\cimv2 tramite winmgmts:\\\\.\\root\\cimv2.",
+      "evidence": [
+        "source",
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "root",
+        "cimv2"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.startup",
+      "category": "MUST",
+      "claim": "Win32_ProcessStartup configura la creazione del processo.",
+      "evidence": [
+        "source",
+        "stage1"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "Win32_ProcessStartup"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.showwindow",
+      "category": "MUST",
+      "claim": "ShowWindow=0 appartiene alla configurazione startup e richiede finestra nascosta.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "ShowWindow"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.create",
+      "category": "MUST",
+      "claim": "Win32_Process.Create riceve il comando PowerShell decodificato e la configurazione startup.",
+      "evidence": [
+        "source",
+        "stage2",
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "Create"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.hidden_ps",
+      "category": "MUST",
+      "claim": "PowerShell è invocato con -noprofile -WindowStyle hidden.",
+      "evidence": [
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "PowerShell"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.url_key34",
+      "category": "MUST",
+      "claim": "XOR key 34 produce esattamente l’URL indicato (66 byte), già disponibile.",
+      "evidence": [
+        "stage3",
+        "stage4"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "http://smartmaket.com/1.php?s=AA1789FF-522F-4D9A-94E9-C9BE2BA3A1D3"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.irm",
+      "category": "MUST",
+      "claim": "Heyiuw3=rm; set-alias oeKsuw i$($Heyiuw3) crea alias per irm/Invoke-RestMethod: recupera la risposta.",
+      "evidence": [
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.iex",
+      "category": "MUST",
+      "claim": "I caratteri 105,e,120 costruiscono iex/Invoke-Expression, che valuta il risultato di oeKsuw (irm); non valuta direttamente la stringa URL.",
+      "evidence": [
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.cleanup",
+      "category": "MUST",
+      "claim": "Quattro Get-ChildItem ricorsivi sotto USERPROFILE passano a Remove-Item i quattro pattern indicati.",
+      "evidence": [
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "IT4085315567030.html*",
+        "IT4085315567030.zip*",
+        "vrPKt7tS2M2dt.js*",
+        "Fattura981033956.js*"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.vbscript",
+      "category": "MUST_NOT",
+      "claim": "Descrivere il sorgente come VBScript o dire che .js maschera un file VBScript.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.alias_confusion",
+      "category": "MUST_NOT",
+      "claim": "Attribuire iex all’alias oeKsuw di irm o invertire retrieval ed evaluation.",
+      "evidence": [
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.url_missing",
+      "category": "MUST_NOT",
+      "claim": "Dire che l’URL/key34 rimane da decodificare o non è disponibile quando le prove congelate sono fornite.",
+      "evidence": [
+        "stage4"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.wmi_persistence",
+      "category": "MUST_NOT",
+      "claim": "Inferire una sottoscrizione WMI permanente o persistenza dalla sola creazione di un processo.",
+      "evidence": [
+        "source",
+        "stage0",
+        "stage1",
+        "stage2"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.delay",
+      "category": "MAY",
+      "claim": "WScript.Sleep(6000) introduce sei secondi di attesa.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.obfuscation",
+      "category": "MAY",
+      "claim": "XOR, delimitatori e indirection ricorsiva sono visibili; eventuale intento anti-analisi deve restare inferenza.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.cleanup_intent",
+      "category": "MAY",
+      "claim": "La rimozione può essere interpretata come cleanup/anti-forensics, esplicitamente come inferenza e non esecuzione osservata.",
+      "evidence": [
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.remote_payload",
+      "category": "UNKNOWN",
+      "claim": "Il contenuto remoto non è stato acquisito: comportamento, famiglia, persistenza e ulteriori stadi non sono noti.",
+      "evidence": [
+        "stage4"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "fattura.actual_execution",
+      "category": "UNKNOWN",
+      "claim": "Successo di Create/download/esecuzione/cancellazioni su una vittima non osservato; distinguere comportamento statico da telemetria.",
+      "evidence": [
+        "source",
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    }
+  ],
+  "evidence": {
+    "source": {
+      "path": "workdir/samples/Fattura981033956.js",
+      "sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+      "bytes": 7706,
+      "byte_range": [
+        0,
+        7706
+      ],
+      "authority": "frozen source, untrusted code, never executed"
+    },
+    "cross_gate": {
+      "path": "scripts/evaluation/analysis_semantic_baseline/grounding.json",
+      "sha256": "9c41eae6deda6ec2e0970fdebdaf0d1c800a765ac4f52f5acf37765f6ea2488d"
+    },
+    "stage0": {
+      "sha256": "be6dac42303d7161136531c9b99f3609895478ca25e7e5fa7374c8a4190bd55a",
+      "pointer": [
+        "stages",
+        0,
+        "body"
+      ],
+      "body_sha256": "6a892b624a2a237ca8b6fdd64d2dc02a30aa1afc08db9b9a21f269d9fb67eac2",
+      "body_bytes": 23,
+      "byte_range": [
+        0,
+        23
+      ],
+      "source_sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "jscript_numeric_xor",
+      "key": 60,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage1": {
+      "sha256": "be6dac42303d7161136531c9b99f3609895478ca25e7e5fa7374c8a4190bd55a",
+      "pointer": [
+        "stages",
+        1,
+        "body"
+      ],
+      "body_sha256": "cafa14b8acab599aeb5425fabb3bdb519935cd39947e653dd89619db19b1b3fe",
+      "body_bytes": 20,
+      "byte_range": [
+        0,
+        20
+      ],
+      "source_sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "jscript_numeric_xor",
+      "key": 123,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage2": {
+      "sha256": "be6dac42303d7161136531c9b99f3609895478ca25e7e5fa7374c8a4190bd55a",
+      "pointer": [
+        "stages",
+        2,
+        "body"
+      ],
+      "body_sha256": "8716f5d4559ed0f5dbfdb7bfb1717abcc9cfa1171caeea548aaf9c38fccd04db",
+      "body_bytes": 37,
+      "byte_range": [
+        0,
+        37
+      ],
+      "source_sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "jscript_numeric_xor",
+      "key": 102,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage3": {
+      "sha256": "be6dac42303d7161136531c9b99f3609895478ca25e7e5fa7374c8a4190bd55a",
+      "pointer": [
+        "stages",
+        3,
+        "body"
+      ],
+      "body_sha256": "ec8ccda0cbdce79a76748c0e32c1fb788276c762abc5fd8c6f77609a0c8f58f1",
+      "body_bytes": 1008,
+      "byte_range": [
+        0,
+        1008
+      ],
+      "source_sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "jscript_numeric_xor",
+      "key": 46,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage4": {
+      "sha256": "be6dac42303d7161136531c9b99f3609895478ca25e7e5fa7374c8a4190bd55a",
+      "pointer": [
+        "stages",
+        4,
+        "body"
+      ],
+      "body_sha256": "6a4277aa4ae872f43b368c35fcee79ea2ee40824822ae215cf52483f8faa48a3",
+      "body_bytes": 66,
+      "byte_range": [
+        0,
+        66
+      ],
+      "source_sha256": "b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "powershell_numeric_xor",
+      "key": 34,
+      "producer": "analysis_deobfuscate"
+    }
+  },
+  "qualified_stage_sha256": [
+    "6a892b624a2a237ca8b6fdd64d2dc02a30aa1afc08db9b9a21f269d9fb67eac2",
+    "cafa14b8acab599aeb5425fabb3bdb519935cd39947e653dd89619db19b1b3fe",
+    "8716f5d4559ed0f5dbfdb7bfb1717abcc9cfa1171caeea548aaf9c38fccd04db",
+    "ec8ccda0cbdce79a76748c0e32c1fb788276c762abc5fd8c6f77609a0c8f58f1",
+    "6a4277aa4ae872f43b368c35fcee79ea2ee40824822ae215cf52483f8faa48a3"
+  ],
+  "unknown_policy": "UNKNOWN is an evidence boundary, not a missing positive claim. Do not certify execution, remote payload or arbitrary whole-source absence. Inferences must remain labelled.",
+  "evaluation_policy": "No LLM judge. Hashes/stage identities/byte ranges and literal locators are deterministic; semantic requirements require a explicitly owned engineering/manual review record bound to report and oracle SHA. No automatic semantic classification from keywords.",
+  "origin_oracle_sha256": "0ceeccdc7cd18a10853a9024538c530d9c8eccf2c553acb4e82d95c39d030ce7"
+}

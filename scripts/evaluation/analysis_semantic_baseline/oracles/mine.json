@@ -1,0 +1,366 @@
+{
+  "schema_version": 2,
+  "sample_id": "mine",
+  "sample": {
+    "path": "workdir/samples/mine.hta",
+    "sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+    "bytes": 50114
+  },
+  "scope": "Complete analysis explanation of this exact artifact with the frozen evidence available. A phase-only/partial-delivery run is not a complete-report candidate.",
+  "facts": [
+    {
+      "id": "mine.language_entry",
+      "category": "MUST",
+      "claim": "HTA con blocco VBScript: chiamata top-level CCbeyicBCOAVY() entra nella catena.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "CCbeyicBCOAVY"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.hidden_run",
+      "category": "MUST",
+      "claim": "Wscript.Shell.Run avvia PowerShell con argomenti 0,True (hidden, wait); self.close chiude la finestra HTA.",
+      "evidence": [
+        "source",
+        "stage0",
+        "stage1"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "Wscript.Shell"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.decoders",
+      "category": "MUST",
+      "claim": "VBScript Chr(n-29450); PowerShell atHcQU sottrae 22624 e decodifica .dll, rundll32.exe, Net.WebClient e URL.",
+      "evidence": [
+        "source",
+        "stage0",
+        "stage2",
+        "stage3",
+        "stage4",
+        "stage5"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "atHcQU"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.url",
+      "category": "MUST",
+      "claim": "DownloadData usa esattamente https://wall5tghf6fdg.api.opensourcesaas.org/ZOdcfNuo/myxwr5cli.bat.",
+      "evidence": [
+        "stage0",
+        "stage5"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "https://wall5tghf6fdg.api.opensourcesaas.org/ZOdcfNuo/myxwr5cli.bat"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.download_write",
+      "category": "MUST",
+      "claim": "Net.WebClient scarica byte; IO.File.WriteAllBytes scrive APPDATA/myxwr5cli.bat.",
+      "evidence": [
+        "stage0",
+        "stage4"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "myxwr5cli.bat"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.branches",
+      "category": "MUST",
+      "claim": "Il ramo .dll usa rundll32.exe; il ramo else avvia direttamente il file. Per myxwr5cli.bat vale il ramo else, non rundll32.",
+      "evidence": [
+        "stage0",
+        "stage2",
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.invocation",
+      "category": "MUST",
+      "claim": "ROmYsTcn è definita E invocata alla fine dello stage, quindi la catena non è una funzione soltanto definita.",
+      "evidence": [
+        "stage0",
+        "invocation"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "ROmYsTcn"
+      ],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.bat_rundll",
+      "category": "MUST_NOT",
+      "claim": "Affermare che il .bat è eseguito tramite rundll32.",
+      "evidence": [
+        "stage0",
+        "stage2",
+        "stage3"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.decoded_missing",
+      "category": "MUST_NOT",
+      "claim": "Dire che .dll/URL/atHcQU rimangono da decodificare quando sono forniti i sei stage.",
+      "evidence": [
+        "stage0",
+        "stage2",
+        "stage3",
+        "stage4",
+        "stage5"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.namespace_ioc",
+      "category": "MUST_NOT",
+      "claim": "Promuovere http://www.w3.org/1999/xhtml a IOC/rete malevola: è namespace HTML.",
+      "evidence": [
+        "source",
+        "cross_gate"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.dormant",
+      "category": "MUST_NOT",
+      "claim": "Dichiarare ROmYsTcn mai invocata, oppure il solo staging senza percorso Start-Process.",
+      "evidence": [
+        "stage0",
+        "invocation"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.tls",
+      "category": "MAY",
+      "claim": "Il codice seleziona TLS12 e PowerShell -ExecutionPolicy UnRestricted.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.decoys",
+      "category": "MAY",
+      "claim": "Numerose funzioni/assegnazioni estranee ostacolano la lettura; non imporre conteggi di funzioni storici non riconciliati.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.persistence_limit",
+      "category": "MAY",
+      "claim": "La scrittura in APPDATA non dimostra persistenza; nessun meccanismo futuro è stabilito dalle prove qui fornite.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.remote_payload",
+      "category": "UNKNOWN",
+      "claim": "Contenuto/comportamento del .bat remoto non acquisito; non inventare beaconing, famiglia, stadi o persistenza.",
+      "evidence": [
+        "stage5"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    },
+    {
+      "id": "mine.actual_execution",
+      "category": "UNKNOWN",
+      "claim": "Download, scrittura ed esecuzione riusciti non osservati; il ramo statico non è una cattura di esecuzione.",
+      "evidence": [
+        "stage0"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Literal hits are locators only, never semantic PASS. Negations/quotes and attested appendix must not mask contradictory model prose."
+    }
+  ],
+  "evidence": {
+    "source": {
+      "path": "workdir/samples/mine.hta",
+      "sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "bytes": 50114,
+      "byte_range": [
+        0,
+        50114
+      ],
+      "authority": "frozen source, untrusted code, never executed"
+    },
+    "cross_gate": {
+      "path": "scripts/evaluation/analysis_semantic_baseline/grounding.json",
+      "sha256": "9c41eae6deda6ec2e0970fdebdaf0d1c800a765ac4f52f5acf37765f6ea2488d"
+    },
+    "stage0": {
+      "sha256": "47cccafa17f39d6a5d87fefd3d2820350d0404b675b64c86157ae8165536f547",
+      "pointer": [
+        "stages",
+        0,
+        "body"
+      ],
+      "body_sha256": "0c6b4253cbd1eb8b4a2b0a58f0cad9a846860aa49579b2eea91090b8a2d627c1",
+      "body_bytes": 1237,
+      "byte_range": [
+        0,
+        1237
+      ],
+      "source_sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "vbscript_chr_offset",
+      "key": 29450,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage1": {
+      "sha256": "47cccafa17f39d6a5d87fefd3d2820350d0404b675b64c86157ae8165536f547",
+      "pointer": [
+        "stages",
+        1,
+        "body"
+      ],
+      "body_sha256": "95e52b2ec509e63e7bf30d9daea95b9a491e04ec4b9c62a425b232bc5c38e9e0",
+      "body_bytes": 13,
+      "byte_range": [
+        0,
+        13
+      ],
+      "source_sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "vbscript_chr_offset",
+      "key": 29450,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage2": {
+      "sha256": "47cccafa17f39d6a5d87fefd3d2820350d0404b675b64c86157ae8165536f547",
+      "pointer": [
+        "stages",
+        2,
+        "body"
+      ],
+      "body_sha256": "81907992dd4830c96203709899fd1854e98fb60afd2efaa58df72583207ae53d",
+      "body_bytes": 4,
+      "byte_range": [
+        0,
+        4
+      ],
+      "source_sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "powershell_chr_offset",
+      "key": 22624,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage3": {
+      "sha256": "47cccafa17f39d6a5d87fefd3d2820350d0404b675b64c86157ae8165536f547",
+      "pointer": [
+        "stages",
+        3,
+        "body"
+      ],
+      "body_sha256": "c7e6e3becb343cfec4d3732c04ba6b65d9d4291af3b8080974a2a4c4c95f0e3a",
+      "body_bytes": 12,
+      "byte_range": [
+        0,
+        12
+      ],
+      "source_sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "powershell_chr_offset",
+      "key": 22624,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage4": {
+      "sha256": "47cccafa17f39d6a5d87fefd3d2820350d0404b675b64c86157ae8165536f547",
+      "pointer": [
+        "stages",
+        4,
+        "body"
+      ],
+      "body_sha256": "460d8e1b1739d05839f305bb9b71a5433c4c34ef02f822bc191bc9c4d9dd66fc",
+      "body_bytes": 13,
+      "byte_range": [
+        0,
+        13
+      ],
+      "source_sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "powershell_chr_offset",
+      "key": 22624,
+      "producer": "analysis_deobfuscate"
+    },
+    "stage5": {
+      "sha256": "47cccafa17f39d6a5d87fefd3d2820350d0404b675b64c86157ae8165536f547",
+      "pointer": [
+        "stages",
+        5,
+        "body"
+      ],
+      "body_sha256": "e2214909b2e7c67123563b4c0aada2530430ed333665a08c3ae832ca1d4706ca",
+      "body_bytes": 67,
+      "byte_range": [
+        0,
+        67
+      ],
+      "source_sha256": "6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d",
+      "authority": "exact deterministic output re-derived from the pinned inert source; not a model-delivery receipt",
+      "kind": "powershell_chr_offset",
+      "key": 22624,
+      "producer": "analysis_deobfuscate"
+    },
+    "invocation": {
+      "path": "scripts/evaluation/analysis_semantic_baseline/grounding.json",
+      "sha256": "9c41eae6deda6ec2e0970fdebdaf0d1c800a765ac4f52f5acf37765f6ea2488d",
+      "authority": "qualified existing _stage_entry_invocations ROmYsTcn contract"
+    }
+  },
+  "qualified_stage_sha256": [
+    "0c6b4253cbd1eb8b4a2b0a58f0cad9a846860aa49579b2eea91090b8a2d627c1",
+    "95e52b2ec509e63e7bf30d9daea95b9a491e04ec4b9c62a425b232bc5c38e9e0",
+    "81907992dd4830c96203709899fd1854e98fb60afd2efaa58df72583207ae53d",
+    "c7e6e3becb343cfec4d3732c04ba6b65d9d4291af3b8080974a2a4c4c95f0e3a",
+    "460d8e1b1739d05839f305bb9b71a5433c4c34ef02f822bc191bc9c4d9dd66fc",
+    "e2214909b2e7c67123563b4c0aada2530430ed333665a08c3ae832ca1d4706ca"
+  ],
+  "unknown_policy": "UNKNOWN is an evidence boundary, not a missing positive claim. Do not certify execution, remote payload or arbitrary whole-source absence. Inferences must remain labelled.",
+  "evaluation_policy": "No LLM judge. Hashes/stage identities/byte ranges and literal locators are deterministic; semantic requirements require a explicitly owned engineering/manual review record bound to report and oracle SHA. No automatic semantic classification from keywords.",
+  "origin_oracle_sha256": "ad8925d82f1c38f5ff63b1edc478c331a06e5c393dbf2248f466730034a80f56"
+}
