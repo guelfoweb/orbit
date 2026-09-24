@@ -236,7 +236,7 @@ class GatePortabilityTests(unittest.TestCase):
 
 class CanonicalCorpusTests(unittest.TestCase):
     def test_versioned_oracles_and_corpus(self):
-        counts = {'fattura': 19, 'iban': 18, 'mine': 16}
+        counts = {'fattura': 19, 'iban': 18, 'mine': 16, 'html': 20}
         for sample_id, count in counts.items():
             with self.subTest(sample=sample_id):
                 oracle, _ = load_oracle(sample_id)
@@ -251,13 +251,14 @@ class CanonicalCorpusTests(unittest.TestCase):
         self.assertFalse(missing, 'Provision frozen samples or explicitly set ORBIT_ALLOW_MISSING_CORPUS=1')
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            # Only the three samples and the versioned grounding metadata exist
+            # Only the four samples and versioned evidence metadata exist
             # here: no workdir/diag, server, native library or session store.
-            grounding = D / 'grounding.json'
-            target = root / grounding.relative_to(ROOT)
-            target.parent.mkdir(parents=True)
-            target.write_bytes(grounding.read_bytes())
-            for sample_id, stages in [('fattura', 5), ('iban', 1), ('mine', 6)]:
+            for name in ('grounding.json', 'html_delivery.json'):
+                grounding = D / name
+                target = root / grounding.relative_to(ROOT)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(grounding.read_bytes())
+            for sample_id, stages in [('fattura', 5), ('iban', 1), ('mine', 6), ('html', 0)]:
                 with self.subTest(sample=sample_id):
                     oracle, _ = load_oracle(sample_id)
                     sample = root / oracle['sample']['path']

@@ -48,6 +48,17 @@ def verify_oracle(oracle, root=ROOT):
     raw = (root / sample["path"]).read_bytes()
     if sha(raw) != sample["sha256"] or len(raw) != sample["bytes"]:
         raise ValueError("sample identity mismatch")
+    # Static locators / retained-view ranges, never model-delivery receipts.
+    for name, span in oracle.get("source_ranges", {}).items():
+        a, b = span["byte_range"]
+        if (type(a) is not int or type(b) is not int
+                or not 0 <= a < b <= len(raw)):
+            raise ValueError("source range bounds: " + name)
+        if sha(raw[a:b]) != span["sha256"]:
+            raise ValueError("source range identity: " + name)
+        if span["char_range"] != [len(raw[:a].decode("utf-8")),
+                                  len(raw[:b].decode("utf-8"))]:
+            raise ValueError("source range UTF-8 mapping: " + name)
     ids = [f["id"] for f in oracle["facts"]]
     if len(ids) != len(set(ids)) or not ids:
         raise ValueError("duplicate/empty criteria")
