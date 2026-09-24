@@ -173,7 +173,7 @@ class AnalysisController:
         # which reads the record this method must not write until it commits.
         adopted: list[Question] = []
         seen: set[str] = set()
-        depth_zero = sum(1 for q in self.questions.values() if q.depth == 0)
+        depth_zero = sum(1 for q in self.questions.values() if q.depth == 0 and q.id.startswith("Q"))
         for entry in entries:
             text, missing = _question_fields(entry)
             key = " ".join(text.lower().split())

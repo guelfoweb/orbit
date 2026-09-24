@@ -71,6 +71,7 @@ from orbit.runtime.analysis_controller import (
     AnalysisController,
     ControlError,
     Question,
+    QuestionState,
     parse_finish_call,
     parse_plan_call,
 )
@@ -116,6 +117,7 @@ from orbit.runtime.analysis_bootstrap import (
     BOOTSTRAP_TAIL_BYTES,
     build_bootstrap_view,
 )
+from orbit.runtime.analysis_ioc_proof import KIND as IOC_PROOF_KIND, Destination, destinations
 from orbit.runtime.analysis_network_policy import analysis_network_denied
 from orbit.runtime.analysis_tools_shim import MAX_READ_BYTES
 from orbit.runtime.analysis_sandbox import (
@@ -3227,6 +3229,13 @@ class AnalysisRuntime:
     transform_stages: list[tuple[TransformStage, EvidenceRecord]] = field(
         default_factory=list
     )
+    # Source-bound objectives, independent of the model PLAN. Exact proof is
+    # evidence, not a model QuestionState or a FINISH narrative.
+    ioc_objectives: tuple[Destination, ...] = ()
+    _ioc_source_sha256: str | None = None
+    _ioc_store_root: str | None = None
+    _ioc_scan_incomplete: str | None = None
+
     # VBA modules the Office preflight extracted, paired with their evidence
     # records. Derived source, not the container's own bytes: the raw Office
     # binary is never "covered", but its macro source becomes analyzable text.
@@ -3422,20 +3431,33 @@ class AnalysisRuntime:
             # run from this static enrichment; any escape leaves the session
             # exactly as it would have been without the pass.
             return
-        # De-duplicate by (output digest, origin): the SAME value found again in
+        if origin is None:
+            exact_source = self._snapshot_text()
+            if exact_source is not None:
+                from orbit.runtime.analysis_ioc_proof import MAX_INPUT_CHARS as IOC_SCAN_LIMIT
+                if len(exact_source) > IOC_SCAN_LIMIT:
+                    self._ioc_scan_incomplete = 'Static destination scan not performed: source exceeds its character bound; no absence of network destinations is established.'
+                self.ioc_objectives = tuple(destinations(exact_source))
+                self._ioc_source_sha256 = self.source.sha256
+                self._ioc_store_root = str(self.evidence_store.root.resolve())
+                stages.extend(d.stage(exact_source) for d in self.ioc_objectives
+                              if d.state == 'RESOLVED_EXACT')
+        # De-duplicate by (output digest, origin, proof class): the SAME value found again in
         # the SAME source is noise, but the same value in a different module is a
         # distinct provenance worth keeping (which module carried it). Existing
-        # records' origin is read from their metadata.
+        # records' origin is read from their metadata. A destination proof has
+        # additional sink semantics and cannot be replaced by a plain value.
         already = {
-            (stage.output_sha256, record.metadata.get("transform_origin"))
+            (stage.output_sha256, record.metadata.get("transform_origin"), stage.kind == IOC_PROOF_KIND)
             for stage, record in self.transform_stages
         }
         added = False
         base = len(self.transform_stages)
         for offset, stage in enumerate(stages, 1):
-            if (stage.output_sha256, origin) in already:
+            identity = (stage.output_sha256, origin, stage.kind == IOC_PROOF_KIND)
+            if identity in already:
                 continue
-            already.add((stage.output_sha256, origin))
+            already.add(identity)
             metadata = {
                 # Provenance sufficient to reproduce the value: which bytes,
                 # which rule, which parameters, and what came out. A reader with
@@ -3456,6 +3478,9 @@ class AnalysisRuntime:
                 "user_turn_id": "turn_0",
                 "produced_by_phase": ANALYSIS_TRANSFORM_PHASE,
             }
+            if stage.kind == IOC_PROOF_KIND:
+                metadata['ioc_proofs'] = self._ioc_links(stage.output)
+                metadata['ioc_store_root'] = self._ioc_store_root
             if origin is not None:
                 # The decoded value came from an extracted VBA module, not the
                 # raw file: record which module so provenance points at the
@@ -3474,6 +3499,96 @@ class AnalysisRuntime:
                 {"role": "user", "content": _transform_preamble(self.transform_stages),
                  "analysis_transform_ids": [r.evidence_id for _, r in self.transform_stages]}
             )
+
+    def _ioc_links(self, value):
+        # Persisted evidence metadata uses JSON arrays, including nested ranges.
+        return json.loads(json.dumps([asdict(d) for d in self.ioc_objectives if d.value == value]))
+
+    def _ioc_record(self, objective):
+        if (self.source.sha256 != self._ioc_source_sha256
+                or str(self.evidence_store.root.resolve()) != self._ioc_store_root
+                or objective.state != 'RESOLVED_EXACT'):
+            return None
+        exact = self._snapshot_text()
+        if exact is None or objective not in destinations(exact):
+            return None
+        owned = {eid for m in self.messages for eid in m.get('analysis_transform_ids', [])}
+        for stage, record in self.transform_stages:
+            if (stage.kind == IOC_PROOF_KIND and stage.output == objective.value
+                    and record.evidence_id in owned
+                    and self.evidence_store.records.get(record.evidence_id) == record
+                    and record.metadata.get('analysis_source_sha256') == self.source.sha256
+                    and record.metadata.get('input_sha256') == self.source.sha256
+                    and record.metadata.get('output_sha256') == stage.output_sha256
+                    and record.metadata.get('ioc_proofs') == self._ioc_links(stage.output)
+                    and record.metadata.get('ioc_store_root') == self._ioc_store_root
+                    and record.produced_by_phase == ANALYSIS_TRANSFORM_PHASE
+                    and self.evidence_store.reattest_exact(record.evidence_id) == objective.value):
+                return record
+        return None
+
+    def ioc_checks(self, *, include_outcome=False):
+        checks = []
+        for index, objective in enumerate(self.ioc_objectives, 1):
+            record = self._ioc_record(objective)
+            state, reason = objective.state, objective.reason
+            if objective.state == 'RESOLVED_EXACT' and record is None:
+                state, reason = 'OPEN', 'the exact destination proof or its source binding no longer re-attests'
+            if include_outcome and record is None:
+                for run in reversed(self._report_runs):
+                    if (run['source_sha256'] != self.source.sha256
+                            or self._report_history_identity(run['history_size']) != run['history_sha256']):
+                        continue
+                    outcome = next((s for q, s in run['questions'] if q['id'] == 'IOC'), None)
+                    if outcome and outcome['status'] == BLOCKED:
+                        state, reason = 'BLOCKED', outcome['reason']
+                        break
+            checks.append({
+                'id': f'IOC{index}', 'state': 'RESOLVED_EXACT' if record else state,
+                'source_sha256': self._ioc_source_sha256,
+                'source_byte_range': [objective.start, objective.end],
+                'property': objective.property,
+                'value': objective.value if record else None,
+                'evidence_id': record.evidence_id if record else None,
+                'proof_chain': list(objective.links) if record else [], 'reason': reason,
+            })
+        return checks
+
+    def _ioc_register(self, controller):
+        if controller is None:
+            return
+        unresolved = [c for c in self.ioc_checks() if c['state'] != 'RESOLVED_EXACT']
+        if not unresolved or 'IOC' in controller.questions:
+            return
+        # One operational question owns the source's unresolved destinations.
+        # Individual proof identities/ranges remain separate in ioc_checks().
+        # This uses the existing per-question and global action ceilings.
+        first = unresolved[0]
+        lo, hi = first['source_byte_range']
+        controller.questions['IOC'] = Question(
+            id='IOC', question=(f'Recover the exact unresolved network destinations in this source, '
+                               f'starting with the assignment at UTF-8 bytes [{lo}, {hi}) and its local dependencies.'),
+            missing_fact=f'Closed source-to-value-to-sink proofs; source sha256 {first["source_sha256"]}. {first["reason"]}'[:512])
+        external = all(c['state'] == 'BLOCKED' for c in unresolved)
+        controller.states['IOC'] = QuestionState(
+            status=BLOCKED if external else OPEN,
+            reason='; '.join(c['reason'] for c in unresolved) if external else '')
+        controller.order.insert(0, 'IOC')
+
+    def _ioc_pending(self, controller):
+        return (controller is not None and 'IOC' in controller.states
+                and controller.states['IOC'].status == OPEN
+                and any(c['state'] != 'RESOLVED_EXACT' for c in self.ioc_checks()))
+
+    def ioc_facts(self):
+        checks = self.ioc_checks(include_outcome=True)
+        if not checks:
+            return ('## Network destination coverage\n\n' + self._ioc_scan_incomplete
+                    if self._ioc_scan_incomplete else '')
+        return ('## Network destination objectives\n\n'
+                'Exact values describe static destination operands, not effective browser mutation, observed execution or network contact. '
+                'Only closed, re-attested proofs certify a value; model interpretations remain separate.\n\n'
+                '```json\n' + json.dumps(checks, ensure_ascii=False, indent=2) + '\n```')
 
     def _run_office_preflight(self) -> None:
         """Recognise an OLE2/CFB Office container and expose its VBA module
@@ -3626,6 +3741,7 @@ class AnalysisRuntime:
             section
             for section in (
                 self.verified_indicators(),
+                self.ioc_facts(),
                 self.folder_semantics(),
                 self.stage_invocations(),
                 self.transform_appendix(),
@@ -3839,21 +3955,7 @@ class AnalysisRuntime:
         Nothing is fetched and nothing is labelled. What an address is for is
         the analysis's conclusion, not this method's.
         """
-        sources: list[tuple[str, str, str]] = []
-        # The artifact snapshot first, so a plainly written address keeps the
-        # plainest provenance: the session's own pinned copy, named by its
-        # digest. Read from the snapshot rather than from an evidence record
-        # because the artifact is not stored as evidence -- the snapshot IS
-        # the durable, hash-identified copy the whole session is bound to.
-        try:
-            raw = self.source.snapshot_path.read_bytes()
-        except OSError:
-            raw = b""
-        for label, text in _decoded_views(raw):
-            sources.append((label, f"sha256:{self.source.sha256}", text))
-        for stage, record in self.transform_stages:
-            sources.append((stage.kind, record.evidence_id, stage.output))
-        return render_indicators(extract_indicators(sources))
+        return render_indicators(self.canonical_indicators())
 
     def _deterministic_evidence_summary(self) -> str:
         """What the preflight established, in one bounded clause, or "".
@@ -3930,8 +4032,28 @@ class AnalysisRuntime:
         for label, text in _decoded_views(raw):
             sources.append((label, f"sha256:{self.source.sha256}", text))
         for stage, record in self.transform_stages:
+            if stage.kind == IOC_PROOF_KIND and not any(self._ioc_record(d) == record for d in self.ioc_objectives):
+                continue
             sources.append((stage.kind, record.evidence_id, stage.output))
-        return _extract(sources)
+        indicators = _extract(sources)
+        from orbit.runtime.analysis_indicators import Indicator, MAX_INDICATORS
+        import ipaddress
+        for objective in self.ioc_objectives:
+            if len(indicators) >= MAX_INDICATORS:
+                break  # complete proof records remain in ioc_checks()/dossier
+            if objective.property not in ('host', 'hostname'):
+                continue
+            record = self._ioc_record(objective)
+            if record is None or any(i.value == objective.value for i in indicators):
+                continue
+            try:
+                ipaddress.ip_address(objective.value)
+                kind = 'IP'
+            except ValueError:
+                kind = 'hostname'
+            indicators.append(Indicator(kind, objective.value, record.evidence_id,
+                IOC_PROOF_KIND, 1, hashlib.sha256(objective.value.encode()).hexdigest()))
+        return indicators
 
     def indicator_reference_table(self) -> str:
         """The references a report may cite, and what each one is.
@@ -6158,6 +6280,12 @@ class AnalysisRuntime:
                 cited = (evidence_id,)
             else:
                 status = OPEN
+        if controller.active == 'IOC' and bool(self.ioc_objectives):
+            state = controller.states[controller.active]
+            state.evidence_ids = cited
+            state.summary = decision['answer_summary'][:1000]
+            state.reason = 'model proposal retained unverified; the static destination proof is still required'
+            return
         controller.close_active(
             status,
             evidence_ids=cited,
@@ -6310,6 +6438,9 @@ class AnalysisRuntime:
         covered_calls = 0
         plan_calls = 0
         controller: "AnalysisController | None" = None
+        if any(c['state'] != 'RESOLVED_EXACT' for c in self.ioc_checks()):
+            controller = AnalysisController()
+            self._ioc_register(controller)
         # Set when PLAN ended on a failure that is not the model's, so the
         # loop leaves with the cause already in `stop_reason`.
         plan_failed = False
@@ -6404,7 +6535,8 @@ class AnalysisRuntime:
         # asks for what it cannot see rather than being handed an unbounded
         # licence to explore.
         if plan and not cancelled and model_calls < max_model_calls:
-            controller = AnalysisController()
+            controller = controller or AnalysisController()
+            self._ioc_register(controller)
             # PLAN builds call-local messages; it never opens a turn in
             # self.messages. Its failure paths therefore own no incomplete
             # history to close, including when admission retries PLAN.
@@ -6592,6 +6724,7 @@ class AnalysisRuntime:
                 # planned into -- report itself unsupported over the top.
                 break
             if controller is not None:
+                self._ioc_register(controller)
                 if controller.unsupported:
                     # The model could not use the control protocol even after a
                     # repair. A bounded outcome to report, not a reason to
@@ -6998,7 +7131,7 @@ class AnalysisRuntime:
                     except Exception:  # noqa: BLE001 - diagnostics never end a run
                         shadow_ledger.failures.append("checkpoint_serialization_failed")
 
-            if record.classification == COMPLETE:
+            if record.classification == COMPLETE and not self._ioc_pending(controller):
                 stop_reason = STOP_COMPLETE
                 break
 
@@ -7207,6 +7340,17 @@ class AnalysisRuntime:
         # run is not special-cased here: it is not cancelled, so it too gets a
         # truthful closing result, and with no evidence that result is the
         # honest "no evidence was collected", never "source too large".
+        self._ioc_register(controller)
+        if controller is not None:
+            unresolved_iocs = {'IOC'} if any(c['state'] != 'RESOLVED_EXACT' for c in self.ioc_checks()) else set()
+            for qid in unresolved_iocs:
+                state = controller.states[qid]
+                if state.status == OPEN:
+                    state.status = BLOCKED
+                    state.reason = f'closed destination proof not established before investigation stop: {stop_reason}'
+            if unresolved_iocs and stop_reason in (STOP_COMPLETE, STOP_LEDGER_EXHAUSTED):
+                stop_reason = 'network destination proof incomplete; ' + '; '.join(
+                    f'{qid}: {controller.states[qid].reason}' for qid in sorted(unresolved_iocs))
         _notify(on_event, ANALYSIS_STEP_PHASE, "stopped", detail=stop_reason)
         self._remember_report_run(
             controller, request=analyst_message, stop_reason=stop_reason,
@@ -7763,7 +7907,8 @@ class AnalysisRuntime:
         for stage, record in self.transform_stages:
             if (self.evidence_store.records.get(record.evidence_id) == record
                     and bodies.get(record.evidence_id) == stage.output
-                    and hashlib.sha256(stage.output.encode('utf-8')).hexdigest() == stage.output_sha256):
+                    and hashlib.sha256(stage.output.encode('utf-8')).hexdigest() == stage.output_sha256
+                    and (stage.kind != IOC_PROOF_KIND or any(self._ioc_record(d) == record for d in self.ioc_objectives))):
                 view.transform_stages.append((stage, record))
             else:
                 limitations.append(f"Deterministic transform cannot be re-attested: {record.evidence_id}.")
@@ -7814,6 +7959,11 @@ class AnalysisRuntime:
             'bounded_observations': [r.evidence_id for r in records if r.metadata.get('observation_truncated')],
             'unverified_questions': [q['id'] for run in self._report_runs for q, _s in run['questions']],
         }
+        if self.ioc_objectives:
+            coverage['network_destination_objectives'] = self.ioc_checks(include_outcome=True)
+        if self._ioc_scan_incomplete:
+            coverage['network_destination_scan_limit'] = self._ioc_scan_incomplete
+            limitations.append(self._ioc_scan_incomplete)
         return facts, rendered, missing, coverage, list(dict.fromkeys(limitations))
 
     def report(self, question="", *, on_progress=None, on_delta=None,
