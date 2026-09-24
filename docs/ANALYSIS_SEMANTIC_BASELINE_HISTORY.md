@@ -76,3 +76,35 @@ sufficient independent recovery/integration evidence for extraction now.
 The earlier four-fix extraction proposal is superseded by this defer decision.
 No fix is extracted, implemented or requalified by this documentation PR.
 #374 remains draft and unchanged.
+
+
+## HTML extension: retained run, no new qualification
+
+`raw_archive_need_audit_1/session_original.json` (SHA256
+`4301ef435713a78a60d39733d0438aa8515417dbd1dba400d4ec0064feab96c6`)
+and `report_original.md` (SHA256
+`c6167aa85eed1349269bda46a3146667cfd9f8394816e6fd8e6d2c18ce77df68`)
+retain the 2026-09-24 HTML investigation. The new `html_delivery.json` pins
+its audit and related artifact hashes without requiring those local files
+to run the canonical gate.
+
+The exact 30668-byte sample matches the HTML oracle. The saved model is
+Ornith Q4_K_M; the audited checkout is `c6eba6d`, but the session does not
+identify the running server build/profile or admitted prompts. Classification:
+**NON_COMPARABLE for causal performance/model comparisons**; usable for the
+pinned source, archived outputs, bounded-view audit and specific semantic
+counterexamples. There is no corresponding Qwen HTML result.
+
+The report records 13 investigative calls plus one optional REPORT, five
+counted actions but six physical sandbox executions. Operator wall time
+1021.8 seconds is not a new benchmark. Q2 stops at its two-action limit.
+The document includes unsupported proposed claims of no DOM manipulation,
+whole-source absence and meta purpose; final narrative cannot cancel them.
+No complete semantic PASS is asserted. The later audit proves that existing
+source-range reads address the omitted bytes, not that every region was
+actually delivered or understood.
+
+The draft assessments above describe the historical promotion, not current
+PR states: #374 and #375 were subsequently closed without merge; REPORT
+accounting and FINISH reference ownership landed separately as #377/#378.
+This HTML extension changes none of the deferred TODO decisions.

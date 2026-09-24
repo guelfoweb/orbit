@@ -28,6 +28,15 @@
       "oracle": "oracles/mine.json",
       "oracle_sha256": "ca781fa9c30eb446dbf086bf1bb34a5061daa026a8aa7c0d586392f389835573",
       "stages": 6
+    },
+    {
+      "id": "html",
+      "path": "workdir/samples/IT5440738233991.html",
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e",
+      "bytes": 30668,
+      "oracle": "oracles/html.json",
+      "oracle_sha256": "4bb58514d986b9dc410c5016668b02616b993f5400dce1b01c35b54081ae98c6",
+      "stages": 0
     }
   ],
   "other_cross_gate_samples": "Not expanded into semantic oracles in this mission; the existing six-sample deterministic gate remains separate.",
@@ -39,5 +48,13 @@
     "mission": "ANALYSIS-SEMANTIC-BASELINE-1",
     "manifest_sha256": "97a93f3995ff05b4c9ef1367feecf87866f225cb99679c44aaa5849874ebe0e1",
     "corpus_sha256": "3e4cef7cf0ee10b9915805c72a74f62e2febe7026ff83bbcb2707bfd2fadea81"
-  }
+  },
+  "extensions": [
+    {
+      "mission": "ANALYSIS-SEMANTIC-BASELINE-HTML-1",
+      "sample_id": "html",
+      "production_sha": "c6eba6de676eb3cddc9f0c661e638ffa2c3c81db",
+      "new_inference": false
+    }
+  ]
 }

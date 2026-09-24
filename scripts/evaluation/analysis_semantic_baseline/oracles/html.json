@@ -1,0 +1,547 @@
+{
+  "schema_version": 2,
+  "sample_id": "html",
+  "sample": {
+    "path": "workdir/samples/IT5440738233991.html",
+    "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e",
+    "bytes": 30668
+  },
+  "scope": "Static-source facts plus the retained bounded-delivery failure. Delivery criteria apply to the supplied run/view, not an invented whole-prompt receipt. Capability criterion applies when assessing this delivery failure. Future reports must record their own coverage and applicability; no hidden region becomes known solely through archival.",
+  "facts": [
+    {
+      "id": "html.artifact",
+      "category": "MUST",
+      "claim": "Identify this artifact as HTML (including inline JavaScript), not a standalone script.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "<!DOCTYPE html>"
+      ],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.javascript",
+      "category": "MUST",
+      "claim": "Recognize JavaScript in script elements; do not characterize the file as only inert meta tags.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "<script>"
+      ],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.user_agent",
+      "category": "MUST",
+      "claim": "The final inline script reads navigator.userAgent.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "navigator.userAgent"
+      ],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.branches",
+      "category": "MUST",
+      "claim": "The final inline script checks the lower-cased user agent for windows and android, then uses Windows / Android / other branches.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.dom",
+      "category": "MUST",
+      "claim": "The final inline script obtains DOM elements by ID and sets the selected element style.display to block; this is DOM manipulation. Static source does not attest an actual browser execution.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [
+        "display = 'block'"
+      ],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.definition_vs_execution",
+      "category": "MUST",
+      "claim": "Distinguish a function definition (its body needs invocation) from the final top-level inline userAgent/DOM statements, run when that script is evaluated during parsing. Do not infer that all code is dormant from seeing a function definition; do not claim observed victim execution.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.bounded_limits",
+      "category": "MUST",
+      "claim": "Explain the limits of the view actually used. For the retained run, bounded observations and a reconstructed head/tail report card omit source regions; exact admitted prompts are unavailable. Do not claim that the entire 15902-character card gap was unseen throughout the investigation.",
+      "evidence": [
+        "source",
+        "retained_views"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.no_dom",
+      "category": "MUST_NOT",
+      "claim": "Assert that there is no DOM manipulation: the visible final script changes display to block.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.meta_purpose_as_fact",
+      "category": "MUST_NOT",
+      "claim": "State that the meta tags are SEO spam, decoy, noise or anti-analysis as an established purpose without supporting evidence. A clearly labelled hypothesis is not a verified fact.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.invent_activity",
+      "category": "MUST_NOT",
+      "claim": "Invent executed network activity, persistence, file writes, beaconing or remote payload behavior. Static code or UI text alone does not prove those events occurred.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.absence_from_excerpt",
+      "category": "MUST_NOT",
+      "claim": "Assert whole-source absence of network, persistence, file writes, scripts or other behavior merely because it is not visible in excerpts. Absence and observed execution both need appropriate proof.",
+      "evidence": [
+        "source",
+        "retained_views"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.archive_is_delivery",
+      "category": "MUST_NOT",
+      "claim": "Treat full source acquisition or an available raw archive as proof that the model received or read the full source; do not certify comprehension from delivery either.",
+      "evidence": [
+        "retained_views"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.meta_strings",
+      "category": "MAY",
+      "claim": "Describe long sequences of words in meta attributes without assigning a purpose. The pinned strings include English words; the retained non-English characterization is not established by this evidence.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.branch_description",
+      "category": "MAY",
+      "claim": "Describe the user-agent branching without inventing the function or effect of the selected UI beyond what the inspected source supports.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.incomplete_view",
+      "category": "MAY",
+      "claim": "Note that some functions/blocks are incomplete in the bounded model view; this does not mean the archive or source file itself is truncated.",
+      "evidence": [
+        "retained_views"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.unseen_behavior",
+      "category": "UNKNOWN",
+      "claim": "Complete behavior of JavaScript not fully inspected in the retained view remains unverified. A future review with additional attested coverage may establish more; this is not a permanent unknowability claim.",
+      "evidence": [
+        "source",
+        "retained_views"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.unseen_scripts_iocs",
+      "category": "UNKNOWN",
+      "claim": "Further scripts/IOCs in uninspected regions cannot be ruled out from the retained excerpts. Do not require inventing their contents or executing/decoding new stages.",
+      "evidence": [
+        "source",
+        "retained_views"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.element_meaning",
+      "category": "UNKNOWN",
+      "claim": "The full functional purpose of the displayed elements is not established merely by observing display changes or their labels.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.meta_purpose",
+      "category": "UNKNOWN",
+      "claim": "The purpose of the meta tags is not established by their long word sequences.",
+      "evidence": [
+        "source"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    },
+    {
+      "id": "html.source_range_capability",
+      "category": "MUST",
+      "claim": "For analysis of this retained delivery failure, preserve the existing read_file(SOURCE_PATH, offset, limit) capability: offsets/limits are bytes, not str indices. It could retrieve the omitted literal source in bounded ranges within existing limits; no new raw-archive capability is required.",
+      "evidence": [
+        "source",
+        "retained_views"
+      ],
+      "evaluation": "MANUAL_CHECK",
+      "literal_witnesses": [],
+      "rule": "Review meaning in the whole report. Quoting or denying an error is not asserting it. Literal matches are locators, never semantic scores."
+    }
+  ],
+  "evidence": {
+    "source": {
+      "path": "workdir/samples/IT5440738233991.html",
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e",
+      "bytes": 30668,
+      "byte_range": [
+        0,
+        30668
+      ],
+      "authority": "Pinned inert source, not observed execution or proof of model delivery"
+    },
+    "retained_views": {
+      "path": "scripts/evaluation/analysis_semantic_baseline/html_delivery.json",
+      "sha256": "94da38cdc417c3ce628cdc380319d8693c5b5369e6951c04c53d0df9d85489d3",
+      "authority": "Versioned extraction of retained audit metadata and its limits; original hashes retained, original diagnostic files not required by portable gate"
+    }
+  },
+  "source_ranges": {
+    "html_header_and_meta": {
+      "char_range": [
+        0,
+        2900
+      ],
+      "byte_range": [
+        0,
+        2900
+      ],
+      "sha256": "6cf6411aef3368967f3cdd295e7c28e72a0df830567c28746d421089a277cc38"
+    },
+    "first_function_definition": {
+      "char_range": [
+        12105,
+        13040
+      ],
+      "byte_range": [
+        12105,
+        13040
+      ],
+      "sha256": "cbd9ff85e10cc10fa95ab87280cfd2789dbfb9bb05ef370b36601a86811104fb"
+    },
+    "user_agent_dom_block": {
+      "char_range": [
+        28707,
+        30644
+      ],
+      "byte_range": [
+        28731,
+        30668
+      ],
+      "sha256": "af212705920594dada834437b8ee82467dfcc1fcb340af278ea08e7937de7a48"
+    },
+    "call_02_read": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_02_raw": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_02_bounded": {
+      "char_range": [
+        0,
+        2900
+      ],
+      "byte_range": [
+        0,
+        2900
+      ],
+      "sha256": "6cf6411aef3368967f3cdd295e7c28e72a0df830567c28746d421089a277cc38"
+    },
+    "call_04_read": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_04_raw": {
+      "char_range": [
+        12105,
+        30644
+      ],
+      "byte_range": [
+        12105,
+        30668
+      ],
+      "sha256": "fa1764153c7e8d8bfba2bfc6e0610761345748e662040bc78a2a9119e4d57b61"
+    },
+    "call_04_bounded": {
+      "char_range": [
+        12105,
+        15004
+      ],
+      "byte_range": [
+        12105,
+        15006
+      ],
+      "sha256": "9204728dac612765d240c24decff3dc9c2e91ee4f418ec5e2ab687b91c4859e5"
+    },
+    "call_06_read": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_06_raw": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_07_read": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_07_raw": {
+      "char_range": [
+        12105,
+        30644
+      ],
+      "byte_range": [
+        12105,
+        30668
+      ],
+      "sha256": "fa1764153c7e8d8bfba2bfc6e0610761345748e662040bc78a2a9119e4d57b61"
+    },
+    "call_07_bounded": {
+      "char_range": [
+        12105,
+        14987
+      ],
+      "byte_range": [
+        12105,
+        14989
+      ],
+      "sha256": "5885fd536b5e5a69a1499bc23bc5a6b260df44a8947cef95082917f68f03ff53"
+    },
+    "call_09_read": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_09_raw": {
+      "char_range": [
+        2609,
+        28690
+      ],
+      "byte_range": [
+        2609,
+        28714
+      ],
+      "sha256": "172d767f8730764ed87328b0f5c7454c61797bf58580e48a568acb39e91408b3"
+    },
+    "call_09_bounded": {
+      "char_range": [
+        2609,
+        5490
+      ],
+      "byte_range": [
+        2609,
+        5490
+      ],
+      "sha256": "19632b8c5fdb84d5bf71cbcaf74fe71456965331b84b9ff67987e8ab4b85a141"
+    },
+    "call_11_read": {
+      "char_range": [
+        0,
+        30644
+      ],
+      "byte_range": [
+        0,
+        30668
+      ],
+      "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e"
+    },
+    "call_11_raw": {
+      "char_range": [
+        12118,
+        30644
+      ],
+      "byte_range": [
+        12118,
+        30668
+      ],
+      "sha256": "7caf376c932f0412f95b31885a84810cd40a413713f6a39f78e73c1c2e8da71e"
+    },
+    "call_11_bounded": {
+      "char_range": [
+        12118,
+        14952
+      ],
+      "byte_range": [
+        12118,
+        14954
+      ],
+      "sha256": "0461608f0ffd4180dafe272b93234d6c728156c036821c0793faf6557ac6ce11"
+    },
+    "report_card_omitted_source": {
+      "char_range": [
+        12552,
+        28454
+      ],
+      "byte_range": [
+        12552,
+        28478
+      ],
+      "sha256": "c8ce496c309488dc9f4e23961568204fc6128cfd71a62fb634b1bc4db0bc4ef1"
+    },
+    "report_card_head_source": {
+      "char_range": [
+        12118,
+        12552
+      ],
+      "byte_range": [
+        12118,
+        12552
+      ],
+      "sha256": "3d9a2f70316ac19cd1aa71590a016ac7c02d1aa328ed319db841a5c84cebf330"
+    },
+    "report_card_tail_source": {
+      "char_range": [
+        28454,
+        30644
+      ],
+      "byte_range": [
+        28478,
+        30668
+      ],
+      "sha256": "96b93c04e0dd52d51695f17c0cd06ee0e03a4d5e29b3c2fd553ff923c48a242d"
+    },
+    "q2_outside_new_observations": {
+      "char_range": [
+        15004,
+        30644
+      ],
+      "byte_range": [
+        15006,
+        30668
+      ],
+      "sha256": "0ac07cdd2affc063ae57394e1c22de8c50adbfee2ba373bd73452a70ef83040c"
+    },
+    "bounded_source_read_example": {
+      "char_range": [
+        12552,
+        14552
+      ],
+      "byte_range": [
+        12552,
+        14554
+      ],
+      "sha256": "85ed2740360aedacd8643eaa8f7011b0b1d6ec82a9b9d9a80d442753e8c6c0cb"
+    }
+  },
+  "qualified_stage_sha256": [],
+  "unknown_policy": "Scope depends on actual inspected/delivered evidence. Source read by an action, archived output, model delivery and semantic proof are distinct.",
+  "evaluation_policy": "Source identity, range hashes and UTF-8 offsets are automatic integrity checks. Meaning, negation, support and scope are MANUAL_CHECK; no keyword scoring or LLM judge.",
+  "origin": {
+    "mission": "ANALYSIS-SEMANTIC-BASELINE-HTML-1",
+    "audit": "RAW-ARCHIVE-NEED-AUDIT-1",
+    "runtime_sha": "c6eba6de676eb3cddc9f0c661e638ffa2c3c81db"
+  }
+}

@@ -3,9 +3,11 @@
 The versioned [corpus](../scripts/evaluation/analysis_semantic_baseline/corpus.json)
 promotes `ANALYSIS-SEMANTIC-BASELINE-1`, frozen on
 `10f9438e71438ee7e691a60041211348cc201810`. It changes no runtime behavior.
-The three oracles retain all **53 criteria** and all **12 transform hashes**.
-Other samples remain covered by the existing six-sample deterministic gate;
-this promotion does not invent semantic oracles for them.
+The original three oracles retain all **53 criteria** and all **12 transform hashes**.
+The HTML extension adds **20 criteria** from the retained source/run audit at
+`c6eba6de676eb3cddc9f0c661e638ffa2c3c81db`: four samples, 73 criteria, and no
+new transform or model run. Other samples remain covered by the separate
+six-sample deterministic gate.
 
 ## Acceptance rule for future changes
 
@@ -33,6 +35,7 @@ matching decoded stage does not establish source identity.
 | [Fattura](../scripts/evaluation/analysis_semantic_baseline/oracles/fattura.json) | Fattura981033956.js | 7706 | `b7cfd5fdeb16d7b5ecea1063419bdad6ad280ed9b73c636707874c3f4001dc0c` |
 | [IBAN](../scripts/evaluation/analysis_semantic_baseline/oracles/iban.json) | IBAN.js | 7963 | `86e23fa673271308578daf61e783a00662351bab66d74f5f16e16302ad40d8b8` |
 | [mine](../scripts/evaluation/analysis_semantic_baseline/oracles/mine.json) | mine.hta | 50114 | `6840b6d84f7c7190424fd465e466e2477e7c8a781457e2c6dcd523df498cea3d` |
+| [HTML](../scripts/evaluation/analysis_semantic_baseline/oracles/html.json) | IT5440738233991.html | 30668 | `fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e` |
 
 - **MUST:** explain the specified supported fact.
 - **MUST_NOT:** do not assert the specified error. Quoting or denying that error
@@ -54,13 +57,15 @@ From the repository root, with the pinned samples provisioned:
 
 ```sh
 TMPDIR=/tmp PYTHONPATH=src python3 scripts/evaluation/analysis_semantic_baseline/gate.py --verify
-TMPDIR=/tmp PYTHONPATH=src python3 -m unittest tests.test_analysis_semantic_baseline -q
+TMPDIR=/tmp PYTHONPATH=src python3 -m unittest tests.test_analysis_semantic_baseline tests.test_analysis_semantic_baseline_html -q
 TMPDIR=/tmp PYTHONPATH=src python3 scripts/evaluation/analysis_semantic_baseline/mutations.py --output /tmp/analysis-semantic-mutations.json
 TMPDIR=/tmp PYTHONPATH=src python3 -m unittest tests.test_analysis_cross_sample_gate -q
 ```
 
 `--verify` checks source hashes/sizes, evidence hashes, decoded UTF-8 body
-hashes/sizes, complete byte ranges, source binding and the ordered stage set.
+hashes/sizes, complete byte ranges, source binding and the ordered stage set. HTML source locators additionally
+check half-open byte bounds, exact slice hashes and Unicode-to-UTF-8 offsets;
+they do not certify model delivery or semantic correctness.
 It reuses the existing bounded `analysis_deobfuscate` producer on inert text;
 it runs no sample, action, model, backend or network request. The expected
 container is canonical JSON with ordered `body`, `kind`, `key` records. Its
@@ -75,7 +80,7 @@ cross-sample gate tests those current production contracts.
 
 No untracked `workdir/diag` file is required to run this gate. The original
 twenty harness tests use benign temporary fixtures; a separate integration
-test verifies all three real samples without any retained diagnostics.
+test verifies all four real samples without any retained diagnostics.
 On a sample-less checkout, `ORBIT_ALLOW_MISSING_CORPUS=1` explicitly waives
 that integration test, as for the existing cross-sample gate. Such a skip is
 not corpus qualification. The CLI never silently waives missing samples.
@@ -85,6 +90,12 @@ an isolated copy and requires its named assertion to fail. Missing fixtures,
 import errors and other test errors do not count as caught mutants. Both
 accept-all and reject-all must fail. One additional mutation covers the review
 finding that an explicitly pending MAY decision must prevent overall PASS.
+Nine HTML mutations cover source ranges/UTF-8 mapping, dropping explicit
+negative review decisions for DOM/meta/absence/delivery errors, and HTML
+accept-all/reject-all. All 23 mutants must be caught by named assertions.
+The adversarial reports are authored fixtures with manual annotations, not
+model results. Their meaning is not inferred by a keyword classifier; tests
+prove that the gate preserves those review decisions.
 
 ## Review a report
 
@@ -133,8 +144,8 @@ Omitted MAY decisions remain optional; explicitly submitted MANUAL_CHECK
 decisions, including MAY, prevent PASS.
 Review declarations are not signatures or an automated proof of semantics.
 
-The promotion changes only portable evidence bindings, not the 53 facts.
-Each oracle records its original oracle SHA; the corpus records the original
+The original promotion changed only portable evidence bindings, not its 53 facts.
+Each of those original oracles records its original oracle SHA; the corpus records the original
 manifest and corpus hashes. Session-local evidence IDs are replaced by stable
 source/stage identities. Byte ranges describe the archived/reconstructed
 body, **not a receipt of delivery to a model**. Historical reviews bound to
@@ -146,3 +157,43 @@ The compact [history and draft assessment](ANALYSIS_SEMANTIC_BASELINE_HISTORY.md
 records reusable limits of the retained runs and recommendations for #374 and
 #375. Historical reports and full diagnostics stay unchanged outside git.
 No historical timing is a new benchmark or a causal model ranking.
+
+## HTML bounded-evidence oracle
+
+The [retained-view metadata](../scripts/evaluation/analysis_semantic_baseline/html_delivery.json)
+is a compact, hash-bound extraction from `raw_archive_need_audit_1`. It records
+raw/bounded evidence identities, question/action links, source ranges, original
+artifact hashes and the limits of reconstruction. No malware source, full raw
+body, sandbox code or session is committed. Only the pinned external sample
+and tracked metadata are needed for portable integrity/review checks.
+
+The source establishes inline JavaScript, a `navigator.userAgent` read,
+Windows/Android/other branches and DOM `style.display = 'block'` assignments.
+Function definition is distinct from invocation; the final top-level inline
+script is evaluated during parsing, not merely defined. This is a static
+code statement, not evidence of browser execution. Meta attributes contain
+long word sequences including English words. Neither a non-English language
+classification nor an SEO/decoy purpose is established by those strings.
+
+The retained investigation acquired all **30668 bytes / 30644 characters**.
+Its bounded observations did not deliver all those bytes. The reconstructed
+last REPORT card omits **15902 characters**, corresponding to source bytes
+**[12552, 28478)**, **15926 bytes**. Some of that region was in earlier Q2
+observations. The exact admitted requests and per-call receipts are absent:
+never interpret the card gap as the union of all bytes the model never saw.
+The oracle records this uncertainty instead of fabricating delivery receipts.
+
+`read_file(SOURCE_PATH, offset, limit)` already addresses these literal source
+bytes; offsets/limits are bytes and UTF-8 boundaries matter. Smaller reads
+remain subject to action/admission limits. Printing the entire missing region
+would hit the observation bound again. This case does **not** justify raw
+archive access or reopen any deferred TODO. The capability criterion applies
+when reviewing this retained delivery failure, not as mandatory API advice in
+every future sample report.
+
+UNKNOWN describes the supplied evidence scope. It is not a permanent ban on
+establishing additional facts after new, attested coverage. Conversely,
+available archives, a correct appendix or a complete report document do not
+prove that earlier model claims were supported. Review proposed answers and
+narrative together; no clean semantic PASS is claimed for the retained HTML
+run. Model/build/profile comparability and exact wire coverage are incomplete.

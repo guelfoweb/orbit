@@ -1,0 +1,52 @@
+{
+  "authority": "Authored test texts with explicit manual annotations; not native outputs, an automatic semantic classifier, or a new run. Verdict aggregation must preserve these annotations.",
+  "cases": [
+    {
+      "id": "supported",
+      "expected": "PASS",
+      "failed_criterion": null,
+      "rationale": "Authored coverage-limited fixture, manually inspected against the pinned source and retained audit. Not a model qualification.",
+      "append": ""
+    },
+    {
+      "id": "no_dom",
+      "expected": "FAIL",
+      "failed_criterion": "html.no_dom",
+      "quote": "There is no DOM manipulation in this artifact.",
+      "rationale": "Contradicts the final inline getElementById / style.display assignments, even when correct text appears elsewhere.",
+      "append": "\nThere is no DOM manipulation in this artifact.\n"
+    },
+    {
+      "id": "seo_fact",
+      "expected": "FAIL",
+      "failed_criterion": "html.meta_purpose_as_fact",
+      "quote": "The meta tags are SEO spam; this is their established purpose.",
+      "rationale": "Word sequences do not establish author intent or a search-engine objective.",
+      "append": "\nThe meta tags are SEO spam; this is their established purpose.\n"
+    },
+    {
+      "id": "false_absence",
+      "expected": "FAIL",
+      "failed_criterion": "html.absence_from_excerpt",
+      "quote": "There is no network or persistence behavior anywhere in the file because none appears in these excerpts.",
+      "rationale": "Partial views do not establish whole-source absence; this is not a demand to invent positive activity.",
+      "append": "\nThere is no network or persistence behavior anywhere in the file because none appears in these excerpts.\n"
+    },
+    {
+      "id": "archive_delivery",
+      "expected": "FAIL",
+      "failed_criterion": "html.archive_is_delivery",
+      "quote": "The full raw source was archived, so the model read and understood all of it.",
+      "rationale": "Acquisition and raw archival are not delivery receipts or semantic proof.",
+      "append": "\nThe full raw source was archived, so the model read and understood all of it.\n"
+    },
+    {
+      "id": "quoted_errors",
+      "expected": "PASS",
+      "failed_criterion": null,
+      "rationale": "Explicit denial/quotation of an error is not assertion of it. This defeats keyword scoring.",
+      "append": "\nReject the claims “no DOM manipulation” and “meta = SEO spam”: neither is an established description here.\n"
+    }
+  ],
+  "positive_text": "This HTML artifact contains inline JavaScript. The final inline script reads navigator.userAgent, lower-cases it, tests windows then android, and chooses a Windows, Android or other branch. It selects DOM elements by ID and assigns style.display = 'block'. That is DOM manipulation. Defining a function alone does not invoke its body; the final top-level script is evaluated during HTML parsing. These are static code observations, not witnessed browser execution.\n\nThe meta attributes contain long sequences of words, including English words. Their purpose is unknown: SEO spam, decoy or noise is not an established explanation. The functional purpose of the selected elements cannot be inferred from display changes or UI labels alone.\n\nThe retained investigation acquired the full 30668-byte source in raw output, but acquisition and archival do not establish full model delivery or comprehension. Bounded observations omit parts of functions and blocks. The reconstructed REPORT card omits 15902 characters (15926 UTF-8 bytes); some of these were in earlier observations. The exact admitted prompts are unavailable, so the total source coverage of all model calls is unknown. Complete behavior and possible additional scripts or indicators in the uninspected regions remain unverified. No claim of observed network activity, persistence, file writes or beaconing, nor of their whole-source absence, follows from these excerpts.\n\nFor this delivery failure, read_file(SOURCE_PATH, offset, limit) already supports bounded byte reads with strict UTF-8 decoding. The omitted card region maps to source bytes [12552, 28478); smaller valid UTF-8 ranges are possible within existing action/admission limits. String character offsets are not interchangeable with byte offsets. Raw archive access is not required for these same source bytes. This does not imply that another action remained available after Q2 reached its limit.\n"
+}

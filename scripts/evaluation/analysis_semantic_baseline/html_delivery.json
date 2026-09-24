@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "sample": {
+    "path": "workdir/samples/IT5440738233991.html",
+    "sha256": "fdf79cf05d09968868ac2ac739a7f82693e9d47e9acb0be6effdcfab469c626e",
+    "bytes": 30668,
+    "chars": 30644
+  },
+  "authority": "Retained raw/bounded records and offline source-range reconstruction. Not wire receipts or model comprehension attestation.",
+  "origin": {
+    "audit": "RAW-ARCHIVE-NEED-AUDIT-1",
+    "audited_checkout": "c6eba6de676eb3cddc9f0c661e638ffa2c3c81db",
+    "session_basename": "workdir-fe1d21c7b48ede02-20260924T131831813995Z-84ea012f.json",
+    "saved_utc": "2026-09-24T13:35:55.619637+00:00",
+    "model": "Ornith-1.5-35B-Q4_K_M.gguf",
+    "server_build_and_profile": "NOT_RECORDED; checkout is not server provenance",
+    "artifacts": {
+      "fixture.json": {
+        "bytes": 200455,
+        "sha256": "e78f7d8dc4023fcde1d7fef538be8b8ef0fb7d2af09d1d3549acd6e340311b62"
+      },
+      "session_original.json": {
+        "bytes": 230493,
+        "sha256": "4301ef435713a78a60d39733d0438aa8515417dbd1dba400d4ec0064feab96c6"
+      },
+      "report_original.md": {
+        "bytes": 213418,
+        "sha256": "c6167aa85eed1349269bda46a3146667cfd9f8394816e6fd8e6d2c18ce77df68"
+      },
+      "report_card_reconstructed.txt": {
+        "bytes": 3162,
+        "sha256": "2284359fc14bd39ee9e1a196b2591d5191b6b532bb653a73c4ef55949f224a47"
+      },
+      "range_verification.json": {
+        "bytes": 1789,
+        "sha256": "d575abdc0949637a0b871f4fce65dc232dbd4af105558f3a4d4a61fa590bd7eb"
+      },
+      "omitted_region_utf8.txt": {
+        "bytes": 15926,
+        "sha256": "c8ce496c309488dc9f4e23961568204fc6128cfd71a62fb634b1bc4db0bc4ef1"
+      }
+    },
+    "audit_result_sha256": "d730bc116aec1e6ba65bc41bd2556232e1cec8fc28b9b354a011f6f14e9e9868"
+  },
+  "wire_requests_available": false,
+  "whole_prompt_coverage": "UNKNOWN",
+  "counts": {
+    "investigative_calls": 13,
+    "optional_report_calls": 1,
+    "counted_actions": 5,
+    "sandbox_executions": 6,
+    "operator_wall_seconds": 1021.8,
+    "timing_trace_available": false
+  },
+  "actions": [
+    {
+      "call_id": "orbit_analysis_call_2",
+      "question_id": "Q1",
+      "code_sha256": "e7dae76a11be115ccd35da2a7ecea156044f13833426bc3ef8abfc7b70e3ef22",
+      "raw_evidence_id": "ev_b2a6d6608d85_53449bbeecf53d84",
+      "observation_evidence_id": "ev_db18c55d871e_cd7547f32f43b50a",
+      "counted_action": true,
+      "suppressed_as": null,
+      "physical_source_read": "call_02_read",
+      "raw_source_span": "call_02_raw",
+      "bounded_source_span": "call_02_bounded",
+      "raw_sha256": "53449bbeecf53d847a623f0a442a419f30a8b1ab3faf72b59b374ecb5c2a1baa",
+      "raw_chars": 30754,
+      "bounded_sha256": "cd7547f32f43b50ad90779ac88ea5201e6bc892b32b582a2b2952e05b83581c6",
+      "bounded_chars": 3092
+    },
+    {
+      "call_id": "orbit_analysis_call_4",
+      "question_id": "Q2",
+      "code_sha256": "f77f95f206e6731b82a7872f0e07de095f71388b9a2be339138377016ab9c107",
+      "raw_evidence_id": "ev_ca7e7fb45fb7_6c90882168176e72",
+      "observation_evidence_id": "ev_ffde65eeef47_1f3b7330a4a241d1",
+      "counted_action": true,
+      "suppressed_as": null,
+      "physical_source_read": "call_04_read",
+      "raw_source_span": "call_04_raw",
+      "bounded_source_span": "call_04_bounded",
+      "raw_sha256": "6c90882168176e729db1cfe9964793c4bdad78ad1e5ffa97adbe117cd979b8da",
+      "raw_chars": 18650,
+      "bounded_sha256": "1f3b7330a4a241d10b093326afc202d279e316975a059f400f38a2ffc29c3d33",
+      "bounded_chars": 3092
+    },
+    {
+      "call_id": "orbit_analysis_call_6",
+      "question_id": "Q2",
+      "code_sha256": "3752faa73c3bbfcba2a739ecd1fc27a79fe60ffb7609344764d09e5a0ca1e646",
+      "raw_evidence_id": "ev_cd87774f358e_d316fc0477f97d0e",
+      "observation_evidence_id": "ev_a7e5b5273b52_6e63563630c41d2d",
+      "counted_action": false,
+      "suppressed_as": "source_reacquisition",
+      "physical_source_read": "call_06_read",
+      "raw_source_span": "call_06_raw",
+      "bounded_source_span": null,
+      "raw_sha256": "d316fc0477f97d0eb3512a416cb380edca21b8428e644f93f432ed8d89c458d1",
+      "raw_chars": 30673,
+      "bounded_sha256": "6e63563630c41d2d868c3bfee4c6f1a58de1e5f0d6d3d414857a94a7be85ba83",
+      "bounded_chars": 506
+    },
+    {
+      "call_id": "orbit_analysis_call_7",
+      "question_id": "Q2",
+      "code_sha256": "da17023c7400142bb32c96f064d9c43ae1f1785cc23ca35bea6da07deb88eaad",
+      "raw_evidence_id": "ev_cb06bd9433f2_c1252da3e05d5c30",
+      "observation_evidence_id": "ev_93950ce7624f_fe2125684135e4c5",
+      "counted_action": true,
+      "suppressed_as": null,
+      "physical_source_read": "call_07_read",
+      "raw_source_span": "call_07_raw",
+      "bounded_source_span": "call_07_bounded",
+      "raw_sha256": "c1252da3e05d5c3064ad933c6abc27439409559db8ad8be9f874b7382e500ead",
+      "raw_chars": 18667,
+      "bounded_sha256": "fe2125684135e4c56ebf5f36109607fdad8c0a02b95dfcd3cd12bf7b8ca90951",
+      "bounded_chars": 3092
+    },
+    {
+      "call_id": "orbit_analysis_call_9",
+      "question_id": "Q3",
+      "code_sha256": "7b2172f5f3f7045cb21009f1ba26ea34212e364558dc06a30834836b70e4268a",
+      "raw_evidence_id": "ev_6710014f8611_d85ee16474e606cb",
+      "observation_evidence_id": "ev_266b946e4e3d_fcd86af9356f3f86",
+      "counted_action": true,
+      "suppressed_as": null,
+      "physical_source_read": "call_09_read",
+      "raw_source_span": "call_09_raw",
+      "bounded_source_span": "call_09_bounded",
+      "raw_sha256": "d85ee16474e606cb0fb96e28e0043fdcb7051105d8188b64d55e04da2f5d76fa",
+      "raw_chars": 26210,
+      "bounded_sha256": "fcd86af9356f3f86439d3f91d48521efa2ac5518abc4149cef9fa3e38faebd0a",
+      "bounded_chars": 3092
+    },
+    {
+      "call_id": "orbit_analysis_call_11",
+      "question_id": "Q2.1",
+      "code_sha256": "7495629851809060b6489b3f857df5fbd9d79d722713ae4bd1bc104762e32240",
+      "raw_evidence_id": "ev_1ee5fe9dd191_d62b1cebd8610542",
+      "observation_evidence_id": "ev_6da8ad391a1a_332172251f839f49",
+      "counted_action": true,
+      "suppressed_as": null,
+      "physical_source_read": "call_11_read",
+      "raw_source_span": "call_11_raw",
+      "bounded_source_span": "call_11_bounded",
+      "raw_sha256": "d62b1cebd8610542f1b168993cf2fe99e0022cde84ae598d1d6bd09566546ed8",
+      "raw_chars": 18702,
+      "bounded_sha256": "332172251f839f49154a10a9c398ff5deef8ddcaa32979237a4af62d67b46d96",
+      "bounded_chars": 3092
+    }
+  ],
+  "q2": {
+    "question": "What does the JavaScript code at the end of the file do?",
+    "missing_fact": "The full JavaScript logic and what it manipulates in the DOM",
+    "status": "BLOCKED",
+    "reason": "reached the 2-action limit for one question",
+    "outside_new_observations": "q2_outside_new_observations",
+    "limit": "This is not the union of bytes in admitted PLAN/history/FINISH prompts."
+  },
+  "report_card": {
+    "raw_evidence_id": "ev_1ee5fe9dd191_d62b1cebd8610542",
+    "raw_chars": 18702,
+    "head_chars": 600,
+    "tail_chars": 2200,
+    "omitted_raw_char_range": [
+      600,
+      16502
+    ],
+    "omitted_chars": 15902,
+    "omitted_source": "report_card_omitted_source",
+    "head_source": "report_card_head_source",
+    "tail_source": "report_card_tail_source",
+    "method": "Reconstructed with the production card renderer from SHA-checked raw; not an original admitted request. Part of the omitted range occurs in earlier Q2 observations."
+  },
+  "existing_capability": {
+    "signature": "read_file(path, offset=0, limit=65536) -> str",
+    "offset_limit_units": "bytes, strict UTF-8 decoding",
+    "source_path": "SOURCE_PATH",
+    "equivalent_omitted_range": {
+      "offset": 12552,
+      "limit": 15926
+    },
+    "bounded_example": "bounded_source_read_example",
+    "raw_archive_access": "NOT_JUSTIFIED for this case",
+    "raw_access_attempts": 0,
+    "limit": "Printing the full missing region would exceed the bounded observation again. Existing action/admission limits still apply.",
+    "source_contract": {
+      "path": "src/orbit/runtime/analysis_tools_shim.py",
+      "sha256": "afe5c40260e80cb9a00255e5a8b63d36268681ba8de581466af351b44d31ea15"
+    }
+  },
+  "semantic_status": "No complete semantic PASS. Saved proposed answers include unsupported absence and meta-purpose claims. Final narrative does not certify them."
+}
