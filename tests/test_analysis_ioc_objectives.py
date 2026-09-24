@@ -97,6 +97,65 @@ class ObjectiveTests(unittest.TestCase):
         self.assertIn('runtime input',controller.states['IOC'].reason)
         self.assertFalse(rt._ioc_pending(controller))
 
+    def test_admitted_proof_description_does_not_invent_decoder_parameters(self):
+        import copy
+        import json
+        from tests.test_analysis_evidence_delivery import Backend
+        from orbit.runtime.analysis_runtime import PLAN_TOOL_SCHEMA, ANALYSIS_TOOL_SCHEMA, FINISH_TOOL_SCHEMA
+        rt = self.runtime(fixture(), backend=Backend())
+        history, records = copy.deepcopy(rt.messages), copy.deepcopy(rt.evidence_store.records)
+        stage, record = rt.transform_stages[0]
+        for schema in (PLAN_TOOL_SCHEMA, ANALYSIS_TOOL_SCHEMA, FINISH_TOOL_SCHEMA):
+            with self.subTest(phase=schema['function']['name']):
+                admitted = rt._admit(rt.messages, max_tokens=2048, tools=[schema], next_action_reserve=0)
+                index = next(m for m in admitted if m.get('analysis_transform_ids'))
+                self.assertIn(stage.summary, index['content'])
+                self.assertNotIn('key=0', index['content'])
+                self.assertNotIn("delimiter='href'", index['content'])
+                self.assertIn('not evidence of execution or network contact', index['content'])
+                body = next(s for s in index['content'].splitlines() if s.startswith('  exact_output: '))
+                self.assertEqual(json.loads(body.partition(': ')[2]), stage.output)
+                receipt = index['analysis_evidence_delivery'][0]
+                self.assertEqual(receipt['evidence_id'], record.evidence_id)
+                self.assertEqual(receipt['status'], 'complete')
+                self.assertEqual(receipt['byte_range'], [0, len(stage.output.encode())])
+        self.assertEqual(rt.messages, history)
+        self.assertEqual(rt.evidence_store.records, records)
+
+    def test_canonical_appendix_does_not_present_placeholder_key_as_a_fact(self):
+        rt = self.runtime(fixture())
+        stage, record = rt.transform_stages[0]
+        appendix = rt.transform_appendix()
+        self.assertIn(stage.summary, appendix)
+        self.assertNotIn('key 0', appendix)
+        self.assertNotIn("delimiter 'href'", appendix)
+        self.assertIn(stage.output, appendix)
+        self.assertIn(record.evidence_id, appendix)
+        self.assertIn(stage.output_sha256, appendix)
+        self.assertIn(appendix, rt.report(generate_narrative=False).text)
+
+    def test_existing_decoder_parameters_remain_in_delivery_and_report(self):
+        from tests.test_analysis_evidence_delivery import Backend
+        from tests.test_analysis_evidence_first import decodable
+        from orbit.runtime.analysis_runtime import ANALYSIS_TOOL_SCHEMA
+        rt = self.runtime(decodable(), backend=Backend())
+        stage, record = rt.transform_stages[0]
+        admitted = rt._admit(rt.messages, max_tokens=2048, tools=[ANALYSIS_TOOL_SCHEMA], next_action_reserve=0)
+        index = next(m for m in admitted if m.get('analysis_transform_ids'))
+        self.assertIn(f'key={stage.key!r} delimiter={stage.delimiter!r}', index['content'])
+        self.assertIn(f'key {stage.key} | delimiter {stage.delimiter!r}', rt.transform_appendix())
+        self.assertIn(record.evidence_id, index['content'])
+
+    def test_proof_metadata_records_sink_links_not_placeholder_decoder_parameters(self):
+        rt = self.runtime(fixture())
+        _stage, record = rt.transform_stages[0]
+        for field in ('transform_key', 'transform_delimiter', 'transform_depth'):
+            self.assertNotIn(field, record.metadata)
+        self.assertEqual(record.metadata['ioc_proofs'][0]['property'], 'href')
+        self.assertEqual(rt.ioc_checks()[0]['state'], 'RESOLVED_EXACT')
+        rt.evidence_store.load_index()
+        self.assertEqual(rt.ioc_checks()[0]['state'], 'RESOLVED_EXACT')
+
     def test_destination_proof_is_not_deduplicated_against_plain_value(self):
         url = 'https://example.invalid/a'
         encoded = ','.join(str(ord(c)) for c in url)

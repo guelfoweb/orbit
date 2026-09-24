@@ -242,7 +242,7 @@ def _transform_preamble(
         # The durable index keeps its full summary. The delivery view keeps
         # producer parameters beside the body, and full digest/byte range in
         # its diagnostic receipt rather than duplicating the id's digest suffix.
-        summary = (stage.summary if outputs is None else
+        summary = (stage.summary if outputs is None or stage.kind == IOC_PROOF_KIND else
                    f"{stage.kind} key={stage.key!r} delimiter={stage.delimiter!r} "
                    f"line={stage.line} depth={stage.depth}")
         lines.append(f"- {record.evidence_id}: {summary}")
@@ -3465,11 +3465,8 @@ class AnalysisRuntime:
                 "analysis_source_sha256": self.source.sha256,
                 "original_path": self.source.original_path,
                 "transform_kind": stage.kind,
-                "transform_key": stage.key,
-                "transform_delimiter": stage.delimiter,
                 "transform_line": stage.line,
                 "transform_offset": stage.offset,
-                "transform_depth": stage.depth,
                 "input_sha256": stage.input_sha256,
                 "output_sha256": stage.output_sha256,
                 # Attestation requires all three; the ids are stable and name the
@@ -3481,6 +3478,10 @@ class AnalysisRuntime:
             if stage.kind == IOC_PROOF_KIND:
                 metadata['ioc_proofs'] = self._ioc_links(stage.output)
                 metadata['ioc_store_root'] = self._ioc_store_root
+            else:
+                metadata.update(transform_key=stage.key,
+                                transform_delimiter=stage.delimiter,
+                                transform_depth=stage.depth)
             if origin is not None:
                 # The decoded value came from an extracted VBA module, not the
                 # raw file: record which module so provenance points at the
@@ -4145,10 +4146,13 @@ class AnalysisRuntime:
         lines = ["## Deterministic transformations", ""]
         inlined = 0  # verbatim decoded bytes rendered so far, across all stages
         for stage, record in self.transform_stages:
-            lines.append(
-                f"- {stage.kind} | line {stage.line} (offset {stage.offset}) | "
-                f"key {stage.key} | delimiter {stage.delimiter!r} | depth {stage.depth}"
-            )
+            if stage.kind == IOC_PROOF_KIND:
+                lines.append(f"- {stage.summary} | offset {stage.offset}")
+            else:
+                lines.append(
+                    f"- {stage.kind} | line {stage.line} (offset {stage.offset}) | "
+                    f"key {stage.key} | delimiter {stage.delimiter!r} | depth {stage.depth}"
+                )
             lines.append(f"  evidence: {record.evidence_id}")
             lines.append(f"  output sha256: {stage.output_sha256}")
             # Inline the whole decoded stage when it fits the per-stage bound AND
