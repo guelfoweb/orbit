@@ -150,3 +150,10 @@ class SoundnessTests(unittest.TestCase):
                 scan = proof.scan_destinations(source)
                 self.assertFalse(scan.complete)
                 self.assertFalse(any(d.state == 'RESOLVED_EXACT' for d in scan.objectives))
+
+    def test_ignored_html_callbacks_are_not_a_positive_discovery_certificate(self):
+        for prefix in ['<![unknown]>', '<?processing data?>', '<![CDATA[not classified]]>']:
+            with self.subTest(prefix=prefix):
+                scan = proof.scan_destinations(prefix + '<script>location.href="https://known.invalid/";</script>')
+                self.assertFalse(scan.complete)
+                self.assertTrue(scan.reason)

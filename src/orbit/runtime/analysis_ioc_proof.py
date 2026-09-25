@@ -160,6 +160,14 @@ class Scripts(HTMLParser):
             self.dom_complete = False
             self.incomplete('unsupported HTML declaration')
 
+    def unknown_decl(self, data):
+        self.dom_complete = False
+        self.incomplete('unclassified HTML declaration')
+
+    def handle_pi(self, data):
+        self.dom_complete = False
+        self.incomplete('unclassified HTML processing instruction')
+
 
 def _script_view(source):
     if not source.lstrip().startswith('<'):
