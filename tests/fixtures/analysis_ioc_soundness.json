@@ -1,0 +1,369 @@
+[
+  {
+    "id": "01",
+    "name": "literal_fetch",
+    "source": "fetch('https://beacon.audit.invalid/ping');",
+    "exact": [
+      "https://beacon.audit.invalid/ping"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "02",
+    "name": "concat_xhr",
+    "source": "const transport=new XMLHttpRequest();\nconst zone='api.audit.invalid';\ntransport.open('POST','https://'+zone+'/collect');",
+    "exact": [
+      "https://api.audit.invalid/collect"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "03",
+    "name": "decoded_hostname_location",
+    "source": "function addressText(){return String.fromCharCode(97,117,100,105,116,46,105,110,118,97,108,105,100);}\nlocation.href='https://'+addressText()+'/lookup';",
+    "exact": [
+      "https://audit.invalid/lookup"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "04",
+    "name": "array_join_image_src",
+    "source": "<img id=\"picture-7\"><script>const segments=[\"https:\",\"\",\"assets.audit.invalid\",\"tile.png\"];document.getElementById(\"picture-7\").src=segments.join(\"/\");</script>",
+    "exact": [
+      "https://assets.audit.invalid/tile.png"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "05",
+    "name": "pure_chain_window_open",
+    "source": "function schemePart(){return 'https://';}\nfunction targetPart(){return schemePart()+'window.audit.invalid/manual';}\nwindow.open(targetPart(),'_self');",
+    "exact": [
+      "https://window.audit.invalid/manual"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "06",
+    "name": "static_conditional",
+    "source": "if(true){location.href='https://chosen.audit.invalid/a';}else{location.href='https://dead.audit.invalid/b';}",
+    "exact": [
+      "https://chosen.audit.invalid/a",
+      "https://dead.audit.invalid/b"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": "Both literal operands have syntactic sinks; only first branch is reachable. Exact operand is not execution proof."
+  },
+  {
+    "id": "07",
+    "name": "two_sink_classes",
+    "source": "location.href='https://navigation.audit.invalid/a';\nfetch('https://service.audit.invalid/b');",
+    "exact": [
+      "https://navigation.audit.invalid/a",
+      "https://service.audit.invalid/b"
+    ],
+    "scope": "required",
+    "forbidden_close": true,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "08",
+    "name": "benign_anchor_mutation",
+    "source": "<a id=\"manual-link\">Documentation</a><script>const manual=document.getElementById(\"manual-link\");manual.href=\"https://docs.audit.invalid/start\";</script>",
+    "exact": [
+      "https://docs.audit.invalid/start"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": "Anchor mutation is not a network request or evidence of maliciousness."
+  },
+  {
+    "id": "09",
+    "name": "unrelated_literal",
+    "source": "const sampleMessage='https://unrelated.audit.invalid/example';",
+    "exact": [],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "10",
+    "name": "runtime_value",
+    "source": "window.location.href=navigator.userAgent;",
+    "exact": [],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "11",
+    "name": "unsupported_decoder",
+    "source": "function shuffled(){return 'moc.elpmaxe'.split('').reverse().join('');}\nlocation.href='https://'+shuffled()+'/';",
+    "exact": [],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": true,
+    "note": "Closed proof is unsupported; do not turn the plausible decoded value into exact evidence."
+  },
+  {
+    "id": "12",
+    "name": "nested_helper",
+    "source": "function outerPath(){function innerPath(){return 'https://nested.audit.invalid/resource';}return innerPath();}\nlocation.href=outerPath();",
+    "exact": [
+      "https://nested.audit.invalid/resource"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "13",
+    "name": "equivalent_computed_layout",
+    "source": "// independent spelling and CRLF layout\r\nconst destination = \"https://docs.audit.invalid/start\";\r\nwindow [ \"location\" ] [ \"href\" ] = destination;\r\n",
+    "exact": [
+      "https://docs.audit.invalid/start"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "14",
+    "name": "standalone_pure_js",
+    "source": "const prefix='https://standalone.audit.invalid';\nfunction endpoint(){var suffix='/stream';return prefix+suffix;}\nwindow.location.href=endpoint();",
+    "exact": [
+      "https://standalone.audit.invalid/stream"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "15",
+    "name": "only_one_candidate_reaches_sink",
+    "source": "const misleading='https://unused.audit.invalid/never';\nconst actual='https://active.audit.invalid/now';\nlocation.href=actual;",
+    "exact": [
+      "https://active.audit.invalid/now"
+    ],
+    "scope": "required",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "16",
+    "name": "passive_image_plus_proven_js",
+    "source": "<img src=\"https://image.audit.invalid/unread.png\"><script>location.href=\"https://known.audit.invalid/closed\";</script>",
+    "exact": [
+      "https://known.audit.invalid/closed"
+    ],
+    "scope": "discovery",
+    "forbidden_close": true,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "17",
+    "name": "markup_href_plus_proven_js",
+    "source": "<a href=\"https://markup.audit.invalid/other\">Other destination</a><script>location.href=\"https://known.audit.invalid/closed\";</script>",
+    "exact": [
+      "https://known.audit.invalid/closed"
+    ],
+    "scope": "discovery",
+    "forbidden_close": true,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "18",
+    "name": "textarea_rcdata",
+    "source": "<textarea><script>location.href=\"https://not-code.audit.invalid/a\";</script></textarea>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": true,
+    "negative": true,
+    "note": "HTML RCDATA: script-looking characters are text, not an executable script element."
+  },
+  {
+    "id": "19",
+    "name": "title_rcdata",
+    "source": "<title><script>location.href=\"https://not-code.audit.invalid/b\";</script></title>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": true,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "20",
+    "name": "xmp_rawtext",
+    "source": "<xmp><script>location.href=\"https://not-code.audit.invalid/c\";</script></xmp>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": true,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "21",
+    "name": "plaintext_mode",
+    "source": "<plaintext><script>location.href=\"https://not-code.audit.invalid/d\";</script>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": true,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "22",
+    "name": "style_rawtext_control",
+    "source": "<style><script>location.href=\"https://not-code.audit.invalid/e\";</script></style>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": false,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "23",
+    "name": "external_script_plus_known",
+    "source": "<script src=\"https://external.audit.invalid/unknown.js\"></script><script>location.href=\"https://known.audit.invalid/closed\";</script>",
+    "exact": [],
+    "scope": "discovery",
+    "forbidden_close": true,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "24",
+    "name": "computed_dynamic_plus_known",
+    "source": "location['href']=navigator.userAgent;location.href='https://known.audit.invalid/closed';",
+    "exact": [],
+    "scope": "discovery",
+    "forbidden_close": true,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "25",
+    "name": "template_control",
+    "source": "<template><script>location.href=\"https://not-code.audit.invalid/f\";</script></template>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": false,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "26",
+    "name": "relative_with_local_base",
+    "source": "<base href=\"https://base.audit.invalid/\"><script>location.href=\"/next\";location.hostname=\"known.audit.invalid\";</script>",
+    "exact": [
+      "known.audit.invalid"
+    ],
+    "scope": "discovery",
+    "forbidden_close": true,
+    "negative": false,
+    "note": "A locally known base can supply a complete destination for the omitted relative operand."
+  },
+  {
+    "id": "27",
+    "name": "protocol_relative_plus_known",
+    "source": "location.href='//relative.audit.invalid/data';location.host='known.audit.invalid';",
+    "exact": [
+      "known.audit.invalid"
+    ],
+    "scope": "discovery",
+    "forbidden_close": true,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "28",
+    "name": "unknown_call_plus_known",
+    "source": "fetch(navigator.userAgent);location.host='known.audit.invalid';",
+    "exact": [],
+    "scope": "discovery",
+    "forbidden_close": true,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "29",
+    "name": "ambiguous_pure_helper",
+    "source": "function option(){if(navigator.userAgent){return 'https://a.audit.invalid/';}else{return 'https://b.audit.invalid/';}}location.href=option();",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": false,
+    "negative": true,
+    "note": ""
+  },
+  {
+    "id": "30",
+    "name": "independent_exact_ip_domain",
+    "source": "const ending='.audit.invalid';location.hostname='delta'+ending;location.host='203.0.113.'+'47';",
+    "exact": [
+      "delta.audit.invalid",
+      "203.0.113.47"
+    ],
+    "scope": "positive",
+    "forbidden_close": false,
+    "negative": false,
+    "note": ""
+  },
+  {
+    "id": "31",
+    "name": "template_dom_origin",
+    "source": "<template><a id=\"absent\"></a></template><script>var edge=document.getElementById(\"absent\");edge.href=\"https://phantom.audit.invalid/a\";</script>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": true,
+    "negative": true,
+    "note": "Template contents belong to a separate DocumentFragment, not document descendants. The alleged DOM lookup origin does not exist."
+  },
+  {
+    "id": "32",
+    "name": "noscript_dom_origin",
+    "source": "<noscript><a id=\"absent\"></a></noscript><script>var edge=document.getElementById(\"absent\");edge.href=\"https://phantom.audit.invalid/b\";</script>",
+    "exact": [],
+    "scope": "negative",
+    "forbidden_close": true,
+    "negative": true,
+    "note": "With scripting enabled the noscript contents are text. With scripting disabled the later script is not executed. No valid DOM origin is established."
+  },
+  {
+    "id": "33",
+    "name": "select_dom_origin",
+    "source": "<select><a id=\"absent\">x</a></select><script>var edge=document.getElementById(\"absent\");edge.href=\"https://phantom.audit.invalid/c\";</script>",
+    "exact": [],
+    "scope": "manual",
+    "forbidden_close": false,
+    "negative": false,
+    "note": "html5lib 1.1 omits the anchor, but the current HTML Living Standard has changed select parsing. Version-dependent; excluded from definitive false-proof assertions."
+  }
+]

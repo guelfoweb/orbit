@@ -50,16 +50,17 @@ class IoCCompletionTests(unittest.TestCase):
         self.assertEqual(run.actions_executed, 1)
         self.assertNotEqual(run.stop_reason, 'known network destination objectives closed')
 
-    def test_final_budget_block_does_not_spend_an_optional_narrative_call(self):
+    def test_final_budget_block_does_not_certify_discovery_and_report_is_retained(self):
         rt = self.runtime(backend=ScriptedBackend(tool_response('print("checked dependency")'),
                                                plan_questions=[]))
-        with patch.object(rt, '_report_narrative') as narrative:
+        with patch.object(rt, '_report_narrative', return_value=AnalysisReport('No optional synthesis.', 0)) as narrative:
             run = rt.run_autonomous('Analyse.', cover=False, max_model_calls=2)
         self.assertEqual(run.model_calls, 2)
         self.assertEqual(run.stop_reason, 'model call bound reached')
         self.assertEqual(rt.ioc_checks(include_outcome=True)[0]['state'], 'BLOCKED')
-        narrative.assert_not_called()
-        self.assertEqual(run.final_report.narrative_status, 'not_requested')
+        narrative.assert_called_once()
+        self.assertEqual(run.final_report.narrative_status, 'not_needed')
+        self.assertIn('Static destination discovery incomplete', run.final_report.text)
 
     def test_open_nonactionable_needs_concrete_block_reason(self):
         rt = self.runtime()
@@ -69,13 +70,15 @@ class IoCCompletionTests(unittest.TestCase):
         c.states['IOC'].status = BLOCKED
         self.assertFalse(rt._ioc_closed(c))
         c.states['IOC'].reason = 'reached the 2-action limit for one question'
-        self.assertTrue(rt._ioc_closed(c))
+        self.assertTrue(rt._known_ioc_objectives_closed(c))
+        self.assertFalse(rt._ioc_closed(c))  # budget exhaustion cannot certify discovery
 
     def test_new_open_objective_cannot_inherit_old_blocked_outcome(self):
         rt = self.runtime()
         c = AnalysisController(); rt._ioc_register(c)
         c.states['IOC'].status = BLOCKED; c.states['IOC'].reason = 'local dependency unavailable'
-        self.assertTrue(rt._ioc_closed(c))
+        self.assertTrue(rt._known_ioc_objectives_closed(c))
+        self.assertFalse(rt._ioc_closed(c))
         rt.ioc_objectives += (replace(rt.ioc_objectives[0], start=123, end=130),)
         self.assertFalse(rt._ioc_closed(c))
         rt._ioc_register(c)
@@ -83,16 +86,16 @@ class IoCCompletionTests(unittest.TestCase):
         self.assertFalse(rt._ioc_closed(c))
         self.assertEqual(c.states['IOC'].actions, 0)
 
-    def test_action_ceiling_closes_ioc_work_without_spending_on_other_questions(self):
+    def test_action_ceiling_blocks_ioc_work_without_certifying_unsupported_discovery(self):
         backend = ScriptedBackend(tool_response('print("inspect dependency one")'),
                                   tool_response('print("inspect dependency two")'),
                                   plan_questions=['Explain the whole artifact'])
         rt = self.runtime(backend=backend)
-        with patch.object(rt, '_report_narrative') as narrative:
-            run = rt.run_autonomous('Analyse.', cover=False)
+        with patch.object(rt, '_report_narrative', return_value=AnalysisReport('No optional synthesis.', 0)) as narrative:
+            run = rt.run_autonomous('Analyse.', cover=False, max_actions=2)
         self.assertEqual(run.actions_executed, 2)
-        self.assertEqual(run.stop_reason, 'known network destination objectives closed')
-        narrative.assert_not_called()
+        self.assertNotEqual(run.stop_reason, 'known network destination objectives closed')
+        narrative.assert_called_once()
         states = dict((q['id'], s) for q, s in rt._report_runs[-1]['questions'])
         self.assertEqual(states['Q1']['status'], OPEN)
         self.assertEqual(states['Q1']['actions'], 0)
@@ -137,17 +140,20 @@ class IoCCompletionTests(unittest.TestCase):
         self.assertFalse(rt._ioc_closed(c))
 
     def test_mid_action_trusted_producer_closure_skips_finish_and_narrative(self):
-        rt = self.runtime(backend=ScriptedBackend(tool_response('print("bounded local inspection")'),
+        rt = self.runtime("location.href='https://one.invalid/a';", backend=ScriptedBackend(tool_response('print("bounded local inspection")'),
                                                plan_questions=['Interpret everything']))
         real_step = rt.step
+        reattest = rt.evidence_store.reattest_exact
+        available = False
         def step(*args, **kwargs):
+            nonlocal available
             result = real_step(*args, **kwargs)
-            # Simulate a trusted producer establishing an external dependency,
-            # not a model summary. The concrete reason is mandatory.
-            rt.ioc_objectives = tuple(replace(d, state='BLOCKED', reason='destination requires unavailable runtime input')
-                                      for d in rt.ioc_objectives)
+            # The identical owned proof becomes re-attestable. A narrative or
+            # manual objective-state replacement cannot certify discovery.
+            available = True
             return result
-        with patch.object(rt, 'step', side_effect=step), patch.object(rt, 'finish_question') as finish, \
+        with patch.object(rt.evidence_store, 'reattest_exact', side_effect=lambda eid: reattest(eid) if available else None), \
+             patch.object(rt, 'step', side_effect=step), patch.object(rt, 'finish_question') as finish, \
              patch.object(rt, '_report_narrative') as narrative:
             run = rt.run_autonomous('Analyse.', cover=False)
         self.assertEqual(run.actions_executed, 1)

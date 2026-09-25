@@ -44,7 +44,8 @@ obligations from question text.
 ## The runtime document and optional narrative
 
 Autonomous analyses with known network-destination objectives use IoC-first
-completion. Work stops when every known objective is either `RESOLVED_EXACT`
+completion. Early stopping requires a positive discovery-completeness certificate
+for the current source and inventory, and every known objective either `RESOLVED_EXACT`
 with a currently re-attestable proof, or `BLOCKED` with a concrete dependency
 or operational-limit reason. This check precedes COVER/PLAN and subsequent
 investigative calls. Closure does not spend another call on optional narrative.
@@ -54,6 +55,12 @@ or silently answered. Action, repair and model-call ceilings are unchanged.
 An empty inventory or incomplete bounded discovery does not authorize this
 early stop. New objectives cannot inherit a previous inventory's block; they
 share its remaining action budget. Withdrawn proofs cease to be exact.
+Closing known objectives alone is insufficient: unsupported syntax, unclassified
+HTML contexts/attributes, unknown effects and ambiguous flow leave discovery
+incomplete. An operational BLOCKED reason cannot change that certificate. The
+normal bounded controller proceeds instead; reports preserve the exact known
+operands and explicitly disclose incomplete discovery. This scope limit is
+distinct from unavailable or corrupt retained evidence.
 This policy uses the registered objectives, independently of their producer
 or artifact language; it does not expand the supported static-proof syntax or
 claim discovery of every possible network destination.
