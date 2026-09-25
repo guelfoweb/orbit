@@ -2380,6 +2380,7 @@ STOP_COMPLETE = "model returned prose with no action"
 # Every declared question answered or given up on. Says nothing about the
 # analysis being complete -- only that nothing left open needs a tool.
 STOP_LEDGER_EXHAUSTED = "no open question requires an action"
+STOP_IOC_CLOSED = "known network destination objectives closed"
 
 
 # The model could not use the structured control protocol. A bounded, honest
@@ -2649,6 +2650,9 @@ class AnalysisReport:
     limitations: tuple[str, ...] = ()
     narrative_status: str = "legacy"
     narrative_evidence_ids: tuple[str, ...] = ()
+    # Complete self-contained record, including raw observations, history and
+    # unverified proposals. Persisted with text by the existing session writer.
+    dossier_text: str = ""
 
     def __post_init__(self) -> None:
         if self.model_text is None:
@@ -3535,9 +3539,10 @@ class AnalysisRuntime:
             state, reason = objective.state, objective.reason
             if objective.state == 'RESOLVED_EXACT' and record is None:
                 state, reason = 'OPEN', 'the exact destination proof or its source binding no longer re-attests'
-            if include_outcome and record is None:
+            if include_outcome and record is None and objective.state != 'RESOLVED_EXACT':
                 for run in reversed(self._report_runs):
                     if (run['source_sha256'] != self.source.sha256
+                            or run.get('network_objective_identity') != self._ioc_inventory_identity()
                             or self._report_history_identity(run['history_size']) != run['history_sha256']):
                         continue
                     outcome = next((s for q, s in run['questions'] if q['id'] == 'IOC'), None)
@@ -3559,7 +3564,20 @@ class AnalysisRuntime:
         if controller is None:
             return
         unresolved = [c for c in self.ioc_checks() if c['state'] != 'RESOLVED_EXACT']
-        if not unresolved or 'IOC' in controller.questions:
+        if not unresolved:
+            return
+        identity = self._ioc_inventory_identity()
+        if 'IOC' in controller.questions:
+            if controller.network_objective_identity != identity:
+                # New objectives share the existing work ceiling; they never
+                # inherit an unrelated earlier block or reset action counters.
+                state = controller.states['IOC']
+                external = all(c['state'] == 'BLOCKED' for c in unresolved)
+                state.status = BLOCKED if external or state.actions >= MAX_ACTIONS_PER_QUESTION else OPEN
+                state.reason = ('; '.join(c['reason'] for c in unresolved) if external else
+                    f'reached the {MAX_ACTIONS_PER_QUESTION}-action limit for one question'
+                    if state.actions >= MAX_ACTIONS_PER_QUESTION else '')
+                controller.network_objective_identity = identity
             return
         # One operational question owns the source's unresolved destinations.
         # Individual proof identities/ranges remain separate in ioc_checks().
@@ -3575,6 +3593,46 @@ class AnalysisRuntime:
             status=BLOCKED if external else OPEN,
             reason='; '.join(c['reason'] for c in unresolved) if external else '')
         controller.order.insert(0, 'IOC')
+        controller.network_objective_identity = self._ioc_inventory_identity()
+
+    def _ioc_inventory_identity(self):
+        return hashlib.sha256(json.dumps([
+            self._ioc_source_sha256, str(self._ioc_store_root),
+            [asdict(item) for item in self.ioc_objectives],
+        ], sort_keys=True).encode()).hexdigest()
+
+    def _ioc_closed(self, controller):
+        """All *known* destinations settled; never certify whole-artifact coverage.
+
+        Empty/incomplete discovery is not a completion certificate. Exact
+        values must still re-attest; a concrete operational block applies only
+        to the inventory owned by that runtime question, not later discoveries.
+        """
+        if (not self.ioc_objectives or self._ioc_scan_incomplete
+                or any(d.property == 'scan' for d in self.ioc_objectives)):
+            return False
+        if (self._ioc_source_sha256 != self.source.sha256
+                or self._ioc_store_root != str(self.evidence_store.root.resolve())):
+            return False
+        try:
+            raw = self.source.snapshot_path.read_bytes()
+        except OSError:
+            return False
+        if len(raw) != self.source.size_bytes or hashlib.sha256(raw).hexdigest() != self.source.sha256:
+            return False
+        checks = self.ioc_checks()
+        for objective, check in zip(self.ioc_objectives, checks):
+            if objective.state == 'RESOLVED_EXACT' and check['state'] != 'RESOLVED_EXACT':
+                return False
+            if check['state'] == 'RESOLVED_EXACT':
+                continue
+            if check['state'] == 'BLOCKED' and check['reason']:
+                continue
+            state = controller.states.get('IOC') if controller else None
+            if (state is None or state.status != BLOCKED or not state.reason
+                    or controller.network_objective_identity != self._ioc_inventory_identity()):
+                return False
+        return True
 
     def _ioc_pending(self, controller):
         return (controller is not None and 'IOC' in controller.states
@@ -6459,7 +6517,7 @@ class AnalysisRuntime:
         # measured as too large -- never for a source that is simply not text,
         # or that a non-attesting backend could not measure.
         coverage_status = ""
-        if cover and not self.source_covered:
+        if cover and not self.source_covered and not self._ioc_closed(controller):
             # COVER owns this block alone. It is an optimisation, and a
             # backend that refuses it must leave the run exactly as it was --
             # including PLAN, which is not an optimisation and runs below on
@@ -6538,7 +6596,7 @@ class AnalysisRuntime:
         # simply plans from less, which is what questions are FOR: the model
         # asks for what it cannot see rather than being handed an unbounded
         # licence to explore.
-        if plan and not cancelled and model_calls < max_model_calls:
+        if plan and not cancelled and model_calls < max_model_calls and not self._ioc_closed(controller):
             controller = controller or AnalysisController()
             self._ioc_register(controller)
             # PLAN builds call-local messages; it never opens a turn in
@@ -6717,6 +6775,9 @@ class AnalysisRuntime:
         # still classified and rendered before the loop ends.
         ended = False
         while not cancelled:
+            if self._ioc_closed(controller):
+                stop_reason = STOP_IOC_CLOSED
+                break
             if model_calls >= max_model_calls:
                 stop_reason = STOP_MAX_MODEL_CALLS
                 break
@@ -6729,6 +6790,9 @@ class AnalysisRuntime:
                 break
             if controller is not None:
                 self._ioc_register(controller)
+                if self._ioc_closed(controller):
+                    stop_reason = STOP_IOC_CLOSED
+                    break
                 if controller.unsupported:
                     # The model could not use the control protocol even after a
                     # repair. A bounded outcome to report, not a reason to
@@ -6761,6 +6825,9 @@ class AnalysisRuntime:
                             controller=controller, detail=limit_reason,
                         )
                         controller.exhaust_active(limit_reason)
+                    if self._ioc_closed(controller):
+                        stop_reason = STOP_IOC_CLOSED
+                        break
                     active = controller.activate_next()
                 # Diagnostics only: which question the next dispatches belong
                 # to. Read by the trace label, never by the loop.
@@ -6884,7 +6951,7 @@ class AnalysisRuntime:
                 # question was active, so it belongs to that question. Nothing
                 # is parsed out of the reply and nothing was asked of the model.
                 controller.record_action()
-                if model_calls < max_model_calls:
+                if model_calls < max_model_calls and not self._ioc_closed(controller):
                     # Measured rather than returned. `finish_question` reports
                     # its spend on the way out, and an interrupt leaves by a
                     # path that has no way out -- so the calls it had already
@@ -7010,6 +7077,9 @@ class AnalysisRuntime:
             )
             if on_step is not None:
                 on_step(step, record)
+            if self._ioc_closed(controller) and not cancelled:
+                stop_reason = STOP_IOC_CLOSED
+                break
             if ended:
                 # The completion failed, and the step it belonged to is now
                 # recorded and rendered like any other. What must not happen
@@ -7370,7 +7440,8 @@ class AnalysisRuntime:
             _notify(on_event, ANALYSIS_REPORT_PHASE, "report")
             try:
                 final_report = self.report(
-                    generate_narrative=not cancelled,
+                    generate_narrative=not cancelled and not self._ioc_closed(controller),
+                    concise=bool(self.ioc_objectives),
                     question=self._final_question(
                         stop_reason,
                         # Everything not answered, not merely everything still
@@ -7838,6 +7909,7 @@ class AnalysisRuntime:
             "request": request, "stop_reason": stop_reason,
             "actions": actions, "model_calls": model_calls,
             "cancelled": cancelled, "source_sha256": self.source.sha256,
+            "network_objective_identity": (controller.network_objective_identity if controller else ""),
             "questions": [(asdict(controller.questions[qid]),
                            asdict(controller.states[qid]))
                           for qid in controller.order] if controller else [],
@@ -7963,6 +8035,11 @@ class AnalysisRuntime:
             'bounded_observations': [r.evidence_id for r in records if r.metadata.get('observation_truncated')],
             'unverified_questions': [q['id'] for run in self._report_runs for q, _s in run['questions']],
         }
+        if source_ok and render_facts:
+            coverage['literal_indicators'] = [asdict(i) for i in view.canonical_indicators()]
+            coverage['static_relationships'] = [text for text in (
+                view.folder_semantics(), view.stage_invocations(), view.office_events_appendix(),
+            ) if text]
         if self.ioc_objectives:
             coverage['network_destination_objectives'] = self.ioc_checks(include_outcome=True)
         if self._ioc_scan_incomplete:
@@ -7971,13 +8048,13 @@ class AnalysisRuntime:
         return facts, rendered, missing, coverage, list(dict.fromkeys(limitations))
 
     def report(self, question="", *, on_progress=None, on_delta=None,
-               generate_narrative=True):
+               generate_narrative=True, concise=False):
         """Always compose the retained record; generation is optional and bounded.
 
         Only the canonical Markdown is emitted to a report consumer. Raw model
         deltas remain provisional diagnostics until generation has ended.
         """
-        from orbit.runtime.analysis_report import render_document
+        from orbit.runtime.analysis_report import render_document, render_summary
 
         before = self.model_calls
         chunks = []
@@ -8015,7 +8092,7 @@ class AnalysisRuntime:
         # Evidence can be withdrawn during optional generation. Never publish
         # a fact merely because it passed a check before the model was called.
         facts, records, missing, coverage, limitations = self._report_material()
-        text = render_document(
+        dossier_text = render_document(
             identity={'path': self.source.original_path, 'size_bytes': self.source.size_bytes,
                       'sha256': self.source.sha256}, facts=facts, runs=self._report_runs,
             records=records, missing_ids=missing, coverage=coverage,
@@ -8024,11 +8101,18 @@ class AnalysisRuntime:
                 if m.get('role') == 'tool' and not m.get('evidence_id')],
             history=[dict(m) for m in self.messages if m.get('role') != 'system'],
         )
+        text = (render_summary(
+            identity={'path': self.source.original_path, 'size_bytes': self.source.size_bytes,
+                      'sha256': self.source.sha256},
+            runs=self._report_runs, coverage=coverage, limitations=limitations,
+            records=records, narrative_status=status,
+        ) if concise else dossier_text)
         result = AnalysisReport(
             text=text, model_text=model_text, model_calls=self.model_calls-before,
             evidence_ids=tuple(r.evidence_id for r, _ in records), diagnostics=diagnostics,
             document_complete=not limitations, limitations=tuple(limitations),
             narrative_status=status, narrative_evidence_ids=narrative_ids,
+            dossier_text=dossier_text,
         )
         self.last_report = result
         if on_delta is not None:

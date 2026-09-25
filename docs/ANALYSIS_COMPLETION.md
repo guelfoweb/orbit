@@ -43,8 +43,43 @@ obligations from question text.
 
 ## The runtime document and optional narrative
 
+Autonomous analyses with known network-destination objectives use IoC-first
+completion. Work stops when every known objective is either `RESOLVED_EXACT`
+with a currently re-attestable proof, or `BLOCKED` with a concrete dependency
+or operational-limit reason. This check precedes COVER/PLAN and subsequent
+investigative calls. Closure does not spend another call on optional narrative.
+Other questions keep their original scope and state; they are not certified
+or silently answered. Action, repair and model-call ceilings are unchanged.
+
+An empty inventory or incomplete bounded discovery does not authorize this
+early stop. New objectives cannot inherit a previous inventory's block; they
+share its remaining action budget. Withdrawn proofs cease to be exact.
+This policy uses the registered objectives, independently of their producer
+or artifact language; it does not expand the supported static-proof syntax or
+claim discovery of every possible network destination.
+
+The automatic IoC-first report has four sections: **Summary**, **Technical
+behaviour**, **Limits**, and **IoC / Evidence** last. It lists exact values,
+states, producer/evidence identities and source provenance, without dumping
+the whole proof chain. Model narrative is not promoted into this factual view.
+Literal indicators without a sink proof retain that narrower label.
+
+For this view, `report.text` is the concise canonical Markdown used by terminal,
+API and file consumers. `report.dossier_text` preserves the complete report
+described below, including questions, proposed answers, raw records, history
+and full proof chains. The existing saved-session `analysis_reports` objects
+persist both fields, so the dossier survives workspace cleanup. Consumers that
+need the complete record must export `dossier_text` as well as `text`.
+Historical reports remain in `text`; the new dossier field defaults to empty
+when loading a legacy report. No historical narrative gains authority.
+
+Runs without identified network objectives and explicit guided `report()`
+calls retain their existing behavior and full-document presentation; callers
+may request `report(concise=True)` for the compact view independently of
+completion. No model or filename selects the policy.
+
 `report.text` is canonical Markdown shared by the terminal, API and saved
-session. It contains the original questions and proposed answers, stop reason,
+session. In the full-document view it contains the original questions and proposed answers, stop reason,
 source identity and coverage, re-attested deterministic results, observations,
 raw action records, provenance and committed non-system history. These remain
 available after the temporary workspace closes; artifact handles themselves

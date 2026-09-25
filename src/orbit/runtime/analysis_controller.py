@@ -128,6 +128,9 @@ class AnalysisController:
     rejected_children: int = 0
     repairs: int = 0
     unsupported: bool = False
+    # Runtime-owned binding of the aggregate IOC question to the inventory it
+    # investigated. A later discovery cannot inherit an earlier blocked result.
+    network_objective_identity: str = ""
 
     # -- identity ---------------------------------------------------------
     def _next_id(self, parent: str) -> str:
