@@ -73,6 +73,10 @@ class TransformStage:
     def summary(self) -> str:
         # The key/delimiter describe the XOR and Chr passes; a folded value has
         # neither, so it is summarised by what it is and where it came from.
+        if self.kind == 'js_destination_proof':
+            return (f"{self.kind} line={self.line} static {self.delimiter} value "
+                    f"({len(self.output)} chars, sha256 {self.output_sha256[:16]}; "
+                    "not evidence of execution or network contact)")
         if self.kind == JS_STRINGARRAY_FOLD:
             return (
                 f"{self.kind} line={self.line} depth={self.depth} "
