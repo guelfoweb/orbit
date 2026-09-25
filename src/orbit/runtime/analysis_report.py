@@ -17,6 +17,90 @@ def literal(text: str) -> str:
     return f"{fence}text\n{text}\n{fence}"
 
 
+def render_summary(*, identity, runs, coverage, limitations, records, narrative_status):
+    """Short human view. The complete document remains in report.dossier_text.
+
+    Render producer facts, not model prose. An extracted literal and a proven
+    network operand have different authority even when their values coincide.
+    """
+    objectives = coverage.get('network_destination_objectives', [])
+    exact = [item for item in objectives if item['state'] == 'RESOLVED_EXACT']
+    counts = {state: sum(item['state'] == state for item in objectives)
+              for state in ('RESOLVED_EXACT', 'OPEN', 'BLOCKED')}
+    lines = ['# Analysis report', '## Summary',
+             literal(json.dumps(identity, ensure_ascii=False)),
+             (f"Known network destinations: {counts['RESOLVED_EXACT']} exact, "
+              f"{counts['OPEN']} open, {counts['BLOCKED']} blocked."
+              if objectives else 'No network destination objective was identified by the supported static producers; this does not prove absence.'),
+             'Document status: ' + ('INCOMPLETE' if limitations else 'COMPLETE') +
+             '. Record completeness is not investigation success or proof of complete behaviour.']
+    if runs:
+        lines.extend(['Operational stop:', literal(runs[-1]['stop_reason'])])
+    lines += ['## Technical behaviour']
+    if exact:
+        lines.append('Static destination operands were established for ' + str(len(exact)) +
+                     ' source assignments. These prove values, not effective browser mutation, observed execution or network contact.')
+        lines.extend(['Sink properties:', literal(', '.join(sorted({item['property'] for item in exact})))])
+    relationships = coverage.get('static_relationships', [])
+    lines.extend(literal(text) for text in relationships)
+    if not exact and not relationships:
+        lines.append('No additional behavioural relationship was attested by the available producers.')
+    lines += ['## Limits',
+              'Only known destinations are accounted for; unsupported source constructs and undiscovered destinations remain outside this completion decision. No sample execution or destination contact is established by static proofs.',
+              'Acquisition and archived output do not establish complete delivery to the model. Free-form answers remain unverified. The complete original questions, answers, observations, proof chains and provenance are retained in dossier_text and the saved session.']
+    if runs and any(state['status'] in ('open', 'blocked') for _q, state in runs[-1]['questions']):
+        lines.append('Other questions remain OPEN/BLOCKED; they were not resolved by composing this report.')
+    lines.extend(literal(item) for item in limitations)
+    for item in objectives:
+        if item['state'] != 'RESOLVED_EXACT':
+            lines.append(literal(f"{item['id']}: {item['state']}: {item['reason']}"))
+    lines += ['## IoC / Evidence']
+    by_id = {r.evidence_id: r for r, body in records if body is not None}
+    from urllib.parse import urlsplit
+    import ipaddress
+
+    def kind(value):
+        if '://' in value:
+            return 'URL'
+        try:
+            ipaddress.ip_address(value)
+            return 'IP'
+        except ValueError:
+            return 'domain'
+
+    for item in objectives:
+        record = by_id.get(item['evidence_id'])
+        value = item['value']
+        entry = {'objective': item['id'], 'type': kind(value) if value else 'unresolved network destination',
+                 'value': value, 'state': item['state'], 'sink': item['property'],
+                 'evidence_id': item['evidence_id'], 'producer': record.metadata.get('transform_kind', record.tool_name) if record else None,
+                 'source_sha256': item['source_sha256'], 'source_byte_range': item['source_byte_range']}
+        if value and kind(value) == 'URL':
+            try:
+                entry['hostname_from_URL'] = urlsplit(value).hostname
+            except ValueError:
+                # An exact source operand is not a guarantee of URL syntax.
+                # Preserve it; a derived display field must not lose a report.
+                entry['hostname_from_URL'] = None
+        lines.append(literal(json.dumps(entry, ensure_ascii=False, indent=2)))
+    exact_values = {item['value'] for item in exact}
+    for item in coverage.get('literal_indicators', []):
+        if item['value'] not in exact_values:
+            # The existing producer verifies literal occurrence, not a sink.
+            lines.append(literal(json.dumps({'state': 'ATTESTED_LITERAL_NOT_SINK_PROOF',
+                                            'source_sha256': identity['sha256'], **item}, ensure_ascii=False)))
+    transforms = [r for r, body in records if body is not None and r.produced_by_phase == 'analysis_transform']
+    for record in transforms:
+        if any(item['evidence_id'] == record.evidence_id for item in exact):
+            continue
+        lines.append(literal(json.dumps({'evidence_id': record.evidence_id, 'producer': record.tool_name,
+            'output_sha256': record.raw_sha256, 'source_sha256': identity['sha256'],
+            'state': 'ATTESTED_TRANSFORM_OUTPUT', 'body': 'retained in dossier_text'}, ensure_ascii=False)))
+    if not objectives and not coverage.get('literal_indicators') and not transforms:
+        lines.append('No currently re-attested network indicator or deterministic output.')
+    return '\n\n'.join(lines) + '\n'
+
+
 def render_document(
     *, identity: dict[str, Any], facts: str, runs: list[dict[str, Any]],
     records: list[tuple[Any, str | None]], missing_ids: list[str],
