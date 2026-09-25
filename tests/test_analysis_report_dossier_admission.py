@@ -184,8 +184,8 @@ class CompleteReportBudgetTests(_Base):
         self.assertEqual(actual.evidence_ids, expected.evidence_ids)
         self.assertEqual(actual.document_complete, expected.document_complete)
         # Only optional narrative status differs, not the structured dossier.
-        self.assertEqual(actual.text.replace(actual.narrative_status, expected.narrative_status),
-                         expected.text)
+        self.assertEqual(actual.dossier_text.replace(actual.narrative_status, expected.narrative_status),
+                         expected.dossier_text)
         self.assertEqual(self.backend.sent, [])
         self.assertEqual(self.state(), before)
 

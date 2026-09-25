@@ -31,13 +31,13 @@ class RuntimeDocumentTests(_Case):
             report = rt.report()
         self.assertTrue(report.document_complete)
         self.assertEqual(rt.model_calls, before)
-        self.assertIn('Does the whole source contain any other commands?', report.text)
-        self.assertIn('The raw source contains no plaintext URLs', report.text)
-        self.assertIn('ANSWERED_UNVERIFIED', report.text)
-        self.assertIn(run.stop_reason, report.text)
-        self.assertIn(run.last_step.evidence.evidence_id, report.text)
-        self.assertIn('stdout:', report.text)
-        self.assertNotIn('#### Q1 — RESOLVED', report.text)
+        self.assertIn('Does the whole source contain any other commands?', report.dossier_text)
+        self.assertIn('The raw source contains no plaintext URLs', report.dossier_text)
+        self.assertIn('ANSWERED_UNVERIFIED', report.dossier_text)
+        self.assertIn(run.stop_reason, report.dossier_text)
+        self.assertIn(run.last_step.evidence.evidence_id, report.dossier_text)
+        self.assertIn('stdout:', report.dossier_text)
+        self.assertNotIn('#### Q1 — RESOLVED', report.dossier_text)
 
     def test_document_is_the_exact_stream_and_does_not_mutate_evidence_or_history(self):
         rt, _ = self.investigated()
@@ -60,7 +60,7 @@ class RuntimeDocumentTests(_Case):
         self.assertFalse(report.document_complete)
         self.assertIn(eid, report.text)
         self.assertTrue(any(eid in issue for issue in report.limitations))
-        self.assertIn('Does the whole source', report.text)
+        self.assertIn('Does the whole source', report.dossier_text)
 
     def test_changed_snapshot_is_not_certified(self):
         rt, _ = self.investigated()
@@ -103,9 +103,9 @@ class RuntimeDocumentTests(_Case):
         self.assertTrue(report.document_complete)
         for eid in ids:
             self.assertIn(eid, report.evidence_ids)
-            self.assertIn(eid, report.text)
+            self.assertIn(eid, report.dossier_text)
         for i in range(14):
-            self.assertIn(f'Observation number {i} complete tail', report.text)
+            self.assertIn(f'Observation number {i} complete tail', report.dossier_text)
 
     def test_truncated_narrative_never_published_as_finished_interpretation(self):
         rt, _ = self.investigated()
@@ -127,14 +127,14 @@ class RuntimeDocumentTests(_Case):
         self.assertEqual(report.narrative_status, 'complete_unverified')
         self.assertIn(response.content, report.text)
         self.assertIn('````text\n' + response.content, report.text)
-        self.assertIn('not a source of attested facts', report.text)
+        self.assertIn('Model interpretation (unverified)', report.text)
 
     def test_history_rewind_invalidates_ledger_without_deleting_questions(self):
         rt, _ = self.investigated()
         rt.messages[:] = rt.messages[:2]
         report = rt.report(generate_narrative=False)
         self.assertFalse(report.document_complete)
-        self.assertIn('Does the whole source', report.text)
+        self.assertIn('Does the whole source', report.dossier_text)
         self.assertIn('rewind', ' '.join(report.limitations))
 
     def test_original_open_and_blocked_questions_are_retained(self):
@@ -146,10 +146,10 @@ class RuntimeDocumentTests(_Case):
                                 model_calls=4, cancelled=False)
         report = rt.report(generate_narrative=False)
         self.assertTrue(report.document_complete)
-        self.assertIn('Q1 — BLOCKED', report.text)
-        self.assertIn('Q2 — OPEN', report.text)
-        self.assertIn('Broad original objective', report.text)
-        self.assertIn('existing action limit', report.text)
+        self.assertIn('Q1 — BLOCKED', report.dossier_text)
+        self.assertIn('Q2 — OPEN', report.dossier_text)
+        self.assertIn('Broad original objective', report.dossier_text)
+        self.assertIn('existing action limit', report.dossier_text)
 
     def test_legacy_report_does_not_claim_document_completeness(self):
         report = AnalysisReport('legacy prose', 1)
@@ -195,7 +195,7 @@ class RuntimeDocumentTests(_Case):
         self.assertTrue(report.document_complete)
         self.assertIn('"size_bytes": 40', report.text)
         self.assertIn('The file is 37 bytes.', report.text)
-        self.assertIn('complete source retained in action output; not a model-delivery assertion', report.text)
+        self.assertIn('complete source retained in action output; not a model-delivery assertion', report.dossier_text)
         self.assertEqual(report.narrative_status, 'complete_unverified')
         self.assertEqual(rt.source.snapshot_path.read_bytes(), data)
 
@@ -204,7 +204,7 @@ class RuntimeDocumentTests(_Case):
         rt.messages.append({'role': 'user', 'source_covered': True, 'content': 'another snapshot'})
         report = rt.report(generate_narrative=False)
         self.assertFalse(report.document_complete)
-        self.assertIn('"complete_source_supplied_in_recorded_call": false', report.text)
+        self.assertIn('"complete_source_supplied_in_recorded_call": false', report.dossier_text)
 
     def test_legacy_document_completeness_remains_unknown(self):
         from tests.test_live_validate_analysis import harness
@@ -223,9 +223,9 @@ class RuntimeDocumentTests(_Case):
             report = rt.report()
         rt.close()
         self.assertTrue(report.document_complete)
-        self.assertIn(data.decode(), report.text)
-        self.assertIn(model.prose, report.text)
-        self.assertIn('"complete_source_supplied_in_recorded_call": true', report.text)
+        self.assertIn(data.decode(), report.dossier_text)
+        self.assertIn(model.prose, report.dossier_text)
+        self.assertIn('"complete_source_supplied_in_recorded_call": true', report.dossier_text)
 
     def test_committed_action_code_and_original_request_are_preserved(self):
         rt, _ = self.investigated()
@@ -234,9 +234,9 @@ class RuntimeDocumentTests(_Case):
             if message.get('role') == 'system':
                 continue
             if message.get('content'):
-                self.assertIn(message['content'], report.text)
-        self.assertIn('tool_calls', report.text)
-        self.assertIn('print(1)', report.text)
+                self.assertIn(message['content'], report.dossier_text)
+        self.assertIn('tool_calls', report.dossier_text)
+        self.assertIn('print(1)', report.dossier_text)
 
     def test_saved_report_is_not_overwritten_if_existing_archive_cannot_be_read(self):
         from orbit.runtime.sessions import SessionStore
@@ -260,7 +260,7 @@ class RuntimeDocumentTests(_Case):
         rt.source = replace(rt.source, sha256='e' * 64)
         report = rt.report(generate_narrative=False)
         self.assertFalse(report.document_complete)
-        self.assertIn('Does the whole source', report.text)
+        self.assertIn('Does the whole source', report.dossier_text)
         self.assertIn('snapshot', ' '.join(report.limitations))
 
     def test_evidence_withdrawn_during_narrative_is_rechecked(self):

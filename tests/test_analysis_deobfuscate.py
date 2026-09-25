@@ -879,7 +879,7 @@ class ReportIntegrationTests(unittest.TestCase):
         report = runtime.report("summarise")
 
         self.assertEqual(report.model_calls, 0)
-        self.assertIn("## Deterministic transformations", report.text)
+        self.assertIn("## Deterministic transformations", report.dossier_text)
         self.assertIn(uri, report.text)
 
     def test_a_refused_narrative_keeps_the_action_record_without_transforms(self) -> None:
@@ -902,7 +902,7 @@ class ReportIntegrationTests(unittest.TestCase):
         report = runtime.report("summarise")
         self.assertTrue(report.document_complete)
         self.assertEqual(report.narrative_status, "unavailable:ContextAdmissionError")
-        self.assertIn("an action finding", report.text)
+        self.assertIn("an action finding", report.dossier_text)
 
     def test_the_appendix_stands_without_any_action_findings(self) -> None:
         """What the artifact determines does not depend on findings about it."""
@@ -911,7 +911,7 @@ class ReportIntegrationTests(unittest.TestCase):
         report = runtime.report("summarise")
 
         self.assertEqual(report.model_calls, 0)
-        self.assertIn("## Deterministic transformations", report.text)
+        self.assertIn("## Deterministic transformations", report.dossier_text)
         self.assertIn(uri, report.text)
 
     def test_the_appendix_is_appended_to_the_report_text(self) -> None:
@@ -944,7 +944,7 @@ class ReportIntegrationTests(unittest.TestCase):
 
         report = runtime.report("summarise")
         self.assertIn("model prose about the artifact", report.text)
-        self.assertIn("## Deterministic transformations", report.text)
+        self.assertIn("## Deterministic transformations", report.dossier_text)
         self.assertIn(uri, report.text)
 
 

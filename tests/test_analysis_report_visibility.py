@@ -1,13 +1,8 @@
-"""The deterministic appendix must reach the analyst on both report paths.
+"""Canonical findings reach guided/autonomous terminals independently of narrative.
 
-`report()` streams the model's prose through `on_delta` and attaches the
-appendix to `report.text` afterwards. A terminal that prints `report.text`
-only when no model call happened therefore shows the appendix on the empty
-path and silently drops it on the ordinary one -- losing exactly the half of
-the report that does not depend on the model having mentioned anything.
-
-These cover both paths, and the two failure modes a naive fix invites: the
-prose printed twice, or the appendix printed twice.
+The concise human view has one final IoC / Evidence section. Full transform
+bodies, raw records and question history remain in dossier_text. Both stream
+paths still publish report.text exactly once and neutralise terminal controls.
 """
 
 from __future__ import annotations
@@ -31,7 +26,7 @@ from orbit.terminal.repl import Repl
 from orbit.runtime.workflow_mode import WorkflowMode
 
 PROSE = "The artifact drops a hidden second stage."
-HEADING = "## Deterministic transformations"
+HEADING = "## IoC / Evidence"
 
 DECODER = (
     "function dec(s, k, d) {\n"
@@ -193,8 +188,8 @@ class StreamedPathTests(ReportVisibilityTestBase):
         output = self._render(analysis)
 
         self.assertLess(
-            output.index(HEADING), output.index(PROSE),
-            "runtime facts precede optional unverified narrative",
+            output.index(PROSE), output.index(HEADING),
+            "canonical IoC section follows unverified interpretation",
         )
 
     def test_the_whole_report_text_is_not_printed_again(self) -> None:
@@ -208,7 +203,7 @@ class StreamedPathTests(ReportVisibilityTestBase):
     def test_prose_resembling_the_appendix_is_not_truncated_or_split(self) -> None:
         """No slicing of the report text: the two halves are never separated
         by searching for a heading that the model may itself have written."""
-        mimic = f"I will now describe them.\n{HEADING}\nnothing real here."
+        mimic = "I will now describe them.\n## Deterministic transformations\nnothing real here."
         analysis = self._analysis(self._source(), backend=_ReportBackend(mimic))
         self._finding(analysis)
 
@@ -216,8 +211,9 @@ class StreamedPathTests(ReportVisibilityTestBase):
 
         self.assertIn("I will now describe them.", output)
         self.assertIn("nothing real here.", output)
-        # The model's imitation plus the real one.
-        self.assertEqual(output.count(HEADING), 2)
+        # A quoted model heading cannot replace the final runtime-owned section.
+        self.assertEqual(output.count(HEADING), 1)
+        self.assertIn("## Deterministic transformations", output)
         self.assertIn("STAGE-TWO", output)
 
     def test_multiple_stages_all_render(self) -> None:
@@ -267,7 +263,7 @@ class ZeroModelCallPathTests(ReportVisibilityTestBase):
         analysis = self._analysis("var x = 1;\n")
         output = self._render(analysis)
 
-        self.assertIn("No evidence records were retained.", output)
+        self.assertIn("No currently re-attested network indicator", output)
 
     def test_the_deterministic_notice_accompanies_the_appendix(self) -> None:
         """When an artifact DECODES but produced no action findings, the closing
@@ -285,7 +281,7 @@ class ZeroModelCallPathTests(ReportVisibilityTestBase):
 
         # The deterministic decode IS evidence: the "no evidence" notice is gone.
         self.assertNotIn(NO_EVIDENCE_REPORT, output)
-        self.assertIn("Runtime-attested facts", output)
+        self.assertIn("ATTESTED_TRANSFORM_OUTPUT", output)
         self.assertEqual(output.count(HEADING), 1)
         self.assertIn("NOTICE-AND-STAGE", output)
 
@@ -305,7 +301,7 @@ class ZeroModelCallPathTests(ReportVisibilityTestBase):
         analysis._admit = _refuse
         output = self._render(analysis)
 
-        self.assertIn("admission_refused", output)
+        self.assertIn("Optional narrative did not fit the context budget", output)
         self.assertIn("REFUSAL-TEXT", output)
 
     def test_a_refused_report_still_shows_the_appendix_once(self) -> None:
@@ -338,7 +334,8 @@ class NoTransformTests(ReportVisibilityTestBase):
 
         self.assertEqual(analysis.transform_stages, [])
         self.assertIn(PROSE, output)
-        self.assertNotIn(HEADING, output)
+        self.assertEqual(output.count(HEADING), 1)
+        self.assertNotIn("ATTESTED_TRANSFORM_OUTPUT", output)
         self.assertNotIn("Deterministic", output)
         # Nor blank separators for an appendix that does not exist: the guard
         # decides whether anything is emitted at all, not merely what. Without
@@ -353,7 +350,8 @@ class NoTransformTests(ReportVisibilityTestBase):
     def test_no_phantom_appendix_on_the_zero_call_path(self) -> None:
         analysis = self._analysis("var x = 1;\n")
         output = self._render(analysis)
-        self.assertNotIn(HEADING, output)
+        self.assertEqual(output.count(HEADING), 1)
+        self.assertNotIn("ATTESTED_TRANSFORM_OUTPUT", output)
 
 
 REPORT_PROSE = "Closing report prose, distinct from any step."
@@ -454,7 +452,8 @@ class AutonomousRunTests(ReportVisibilityTestBase):
         analysis = self._analysis("var x = 1;\n", backend=_ReportBackend())
         output = self._run_with_finding(analysis)
         self.assertIn(PROSE, output)
-        self.assertNotIn(HEADING, output)
+        self.assertEqual(output.count(HEADING), 1)
+        self.assertNotIn("ATTESTED_TRANSFORM_OUTPUT", output)
 
 
 class TerminalSafetyTests(ReportVisibilityTestBase):
@@ -515,7 +514,7 @@ class TerminalSafetyTests(ReportVisibilityTestBase):
 
         output = self._render(analysis)
         appendix_lines = [
-            line for line in output.splitlines() if line.startswith("  output: ")
+            line for line in output.splitlines() if '"output": "LINE-' in line
         ]
         self.assertEqual(len(appendix_lines), 3)
 
@@ -601,18 +600,16 @@ class RealSampleRenderingTests(ReportVisibilityTestBase):
         self.assertEqual(len(analysis.transform_stages), 5)
         self.assertEqual(output.count(HEADING), 1)
         # S1-S3: exact short outputs.
-        self.assertIn(r"winmgmts:\\.\root\cimv2", output)
+        self.assertIn(r"winmgmts:\\.\root\cimv2", analysis.last_report.dossier_text)
         self.assertIn("Win32_ProcessStartup", output)
-        self.assertIn(r"winmgmts:\\.\root\cimv2:Win32_Process", output)
-        # S4: a 1008-char decoded PowerShell command. It is within the inline
-        # bound, so its full body -- the -bxor decode loop and the cleanup
-        # Remove-Item operations that are the finding -- reaches the report
-        # rather than being reduced to a digest. Its sha is still rendered.
+        self.assertIn(r"winmgmts:\\.\root\cimv2:Win32_Process", analysis.last_report.dossier_text)
+        # S4: the human view names its identity; the complete decoded command,
+        # including cleanup operations, remains in the unchanged dossier.
         self.assertIn(
             "ec8ccda0cbdce79a76748c0e32c1fb788276c762abc5fd8c6f77609a0c8f58f1", output
         )
-        self.assertIn("powershell -noprofile -WindowStyle hidden", output)
-        self.assertIn("Remove-Item", output)
+        self.assertIn("powershell -noprofile -WindowStyle hidden", analysis.last_report.dossier_text)
+        self.assertIn("Remove-Item", analysis.last_report.dossier_text)
         # S5: the recovered address, verbatim.
         self.assertIn(self.EXPECTED_URI, output)
 
@@ -627,7 +624,8 @@ class RealSampleRenderingTests(ReportVisibilityTestBase):
         output = self._render(analysis)
 
         self.assertEqual(output.count(HEADING), 1)
-        self.assertEqual(output.count(f"decoded URI: {self.EXPECTED_URI}"), 1)
+        self.assertEqual(analysis.last_report.dossier_text.count(f"decoded URI: {self.EXPECTED_URI}"), 1)
+        self.assertIn(self.EXPECTED_URI, output.split(HEADING)[1])
         self.assertEqual(output.count(PROSE), 1)
 
 

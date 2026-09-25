@@ -456,7 +456,7 @@ class DeterministicOnlyReportTests(unittest.TestCase):
         self.assertNotIn("so no evidence", low)
         # The runtime record carries the decoded value independently of narrative.
         self.assertTrue(rep.document_complete)
-        self.assertIn("## Runtime-attested facts", rep.text)
+        self.assertIn("## Runtime-attested facts", rep.dossier_text)
         self.assertIn(payload, rep.text)
 
     def test_oversized_without_decoder_still_says_coverage_limited(self) -> None:

@@ -58,11 +58,21 @@ This policy uses the registered objectives, independently of their producer
 or artifact language; it does not expand the supported static-proof syntax or
 claim discovery of every possible network destination.
 
-The automatic IoC-first report has four sections: **Summary**, **Technical
+The human report has four sections: **Summary**, **Technical
 behaviour**, **Limits**, and **IoC / Evidence** last. It lists exact values,
 states, producer/evidence identities and source provenance, without dumping
-the whole proof chain. Model narrative is not promoted into this factual view.
-Literal indicators without a sink proof retain that narrower label.
+the whole proof chain. This view is independent of whether a destination
+objective was created or optional narrative generation succeeded. Indicators
+recovered from the source or deterministic transforms are published even after
+admission refusal, incomplete generation or a model-call limit. URL/IP/domain
+entries precede other artifacts. Literal indicators without a sink proof retain
+that narrower label; an occurrence is not proof of network use.
+
+Completed model narrative can appear only as an explicitly unverified
+interpretation in Technical behaviour. Long interpretations are displayed as a
+labelled excerpt (at most 2,000 characters); the complete text remains in the
+dossier. Incomplete or failed generation is not presented as a finished
+synthesis. The model cannot supply or overwrite the final canonical IoC list.
 
 For this view, `report.text` is the concise canonical Markdown used by terminal,
 API and file consumers. `report.dossier_text` preserves the complete report
@@ -73,10 +83,11 @@ need the complete record must export `dossier_text` as well as `text`.
 Historical reports remain in `text`; the new dossier field defaults to empty
 when loading a legacy report. No historical narrative gains authority.
 
-Runs without identified network objectives and explicit guided `report()`
-calls retain their existing behavior and full-document presentation; callers
-may request `report(concise=True)` for the compact view independently of
-completion. No model or filename selects the policy.
+Both automatic and guided `report()` calls use the human view by default,
+including runs without identified IoCs. For explicit diagnostic export,
+`report(concise=False)` returns the full dossier in `text` as well. This changes
+presentation only: runs without network objectives keep their existing
+investigation policy. No model or filename selects the view.
 
 `report.text` is canonical Markdown shared by the terminal, API and saved
 session. In the full-document view it contains the original questions and proposed answers, stop reason,

@@ -64,7 +64,7 @@ class EvidenceDeliveryTests(unittest.TestCase):
 
     def test_report_facts_precede_unverified_answers(self):
         rt, _ = self.runtime()
-        doc = rt.report(generate_narrative=False).text
+        doc = rt.report(generate_narrative=False).dossier_text
         self.assertLess(doc.index(SECRET), doc.index('## Investigation and original questions'))
         self.assertIn('not investigation success', doc)
 
