@@ -390,7 +390,7 @@ class Repl:
         # never displays reasoning.
         renderer = StreamRenderer(
             thinking=False,
-            render_markdown_mode="plain",
+            render_markdown_mode=self.config.render_markdown,
         )
         renderer.set_activity("analysis")
         # `step()` appends the analyst line before it calls the model, so a
@@ -526,7 +526,9 @@ class Repl:
                 # Nothing streamed, so this is the whole report -- a complete
                 # text, which is the only thing that may be rendered as
                 # Markdown. `render_report` sanitises before it styles.
-                print(render_report(run.final_report.text), flush=True)
+                print(render_report(run.final_report.text,
+                                    force_style=False if self.config.render_markdown == "plain" else None),
+                      flush=True)
             if run.final_report is not None:
                 self._save_session(analysis_report=asdict(run.final_report))
             replans = f" | replans: {run.replans}" if run.replans else ""
@@ -981,7 +983,7 @@ class Repl:
             return
         print()
         started = time.monotonic()
-        renderer = StreamRenderer(thinking=False, render_markdown_mode="plain")
+        renderer = StreamRenderer(thinking=False, render_markdown_mode=self.config.render_markdown)
         renderer.set_activity("analysis")
         renderer.start()
         try:
@@ -1001,7 +1003,9 @@ class Repl:
             return
         renderer.finish()
         if not renderer.rendered_visible_text:
-            print(render_report(report.text), flush=True)
+            print(render_report(report.text,
+                                force_style=False if self.config.render_markdown == "plain" else None),
+                  flush=True)
         self._save_session(analysis_report=asdict(report))
         elapsed = time.monotonic() - started
         summary = (

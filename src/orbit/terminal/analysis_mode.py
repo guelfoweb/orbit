@@ -242,6 +242,10 @@ class AnalysisProgressDisplay:
         self._outcome_shown = False
 
     def __call__(self, event: "AnalysisProgressEvent") -> None:
+        if event.event == "report":
+            # A canonical report is a new presentation document, including
+            # recovery paths where no completed step reset the renderer.
+            self._renderer.reset_visible_text()
         if not self._interactive:
             return
         if event.event == "investigating":

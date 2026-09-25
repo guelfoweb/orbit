@@ -216,12 +216,16 @@ class StreamRenderer:
         return self._rendered_visible_text
 
     def reset_visible_text(self) -> None:
-        """Forget that prose was shown, so the next step is judged on its own.
+        """End this document, so the next step is rendered on its own.
 
         An autonomous run renders several steps through one renderer. Without
         this, one step that streamed prose would suppress the prose of every
         later step, because the flag would still be set from the earlier one.
+        Pending markup must end here too: an unfinished heading or fence
+        must not style the next document.
         """
+        self._flush_markdown_buffer(interrupted=False)
+        self._markdown_live = _LiveMarkdownRenderer(enabled=self._markdown_mode == "live")
         self._rendered_visible_text = False
 
     def finish(self, *, interrupted: bool = False) -> None:
