@@ -992,7 +992,7 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
         report = runtime.report("what is it")
 
         body = report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1].lstrip("\n")
-        body = body.rsplit("\n```\n\n## Limits and unknowns", 1)[0]
+        body = body.rsplit("\n```\n\n## Limits", 1)[0]
         self.assertEqual(body.replace(UNSUPPORTED_INLINE_MARK, ""), narrative)
         # And the untouched original is kept for audit.
         self.assertEqual(report.model_text, narrative)
@@ -1040,7 +1040,7 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
         ))
         report = runtime.report("what is it")
 
-        body = report.text.split("## Optional model narrative", 1)[1]
+        body = report.text.split("## Technical behaviour", 1)[1].split("## Limits", 1)[0]
         self.assertIn(self.DECODED_URL, body)
         self.assertNotIn(token, body, "the token must not survive into the report")
         # Nothing is flagged: a resolved reference is a recovered value.
@@ -1060,7 +1060,11 @@ class DeterministicFactsReachTheReportTests(unittest.TestCase):
 
         self.assertIn(UNRESOLVED_REFERENCE_MARK, report.text)
         self.assertNotIn(self.DECODED_URL,
-                         report.text.split("## Verified indicators")[0])
+                         report.text.split("## IoC / Evidence")[0])
+        # Unknown narrative references cannot borrow the independent runtime
+        # value. The exact attested value must still be published at the end.
+        self.assertIn(self.DECODED_URL,
+                      report.text.split("## IoC / Evidence", 1)[1])
 
     def test_the_reference_table_reaches_the_prompt(self) -> None:
         """A token the model never saw cannot be cited."""

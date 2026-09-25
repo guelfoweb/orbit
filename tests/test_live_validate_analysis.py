@@ -713,9 +713,13 @@ class ExitCodeTests(unittest.TestCase):
         # be able to tell an oversized-source limitation from an inert file.
         self.assertIs(record["final_report_present"], True)
         self.assertTrue(record["document_complete"])
-        self.assertIn("No evidence records were retained", record["final_report"])
-        # It is still NOT an answer: the harness must fail on it exactly as it
-        # does on every other non-answer shape.
+        self.assertIn("source is larger than the model context", record["final_report"])
+        self.assertIn("no evidence was collected", record["final_report"])
+        self.assertEqual(record["final_report_evidence_ids"], [])
+        self.assertIn("http://185.234.72.19/gate.php",
+                      record["final_report"].split("## IoC / Evidence", 1)[1])
+        # Complete documentation of the limitation is not an analytical answer;
+        # the harness's existing RC=0 gate certifies the document/lifecycle only.
         self.assertEqual(observed["_exit_code"], 0)
 
     def test_a_report_that_could_not_be_composed_fails(self) -> None:
