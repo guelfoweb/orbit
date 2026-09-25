@@ -359,10 +359,11 @@ class PreflightIntegrationTests(unittest.TestCase):
         self.assertEqual(report.model_calls, 0)
         self.assertNotIn(NO_EVIDENCE_REPORT, report.text)
         self.assertTrue(report.document_complete)
-        self.assertIn("## Runtime-attested facts", report.text)
+        self.assertIn("## Runtime-attested facts", report.dossier_text)
         # ...and the macro source is present in the same report.
-        self.assertIn("Extracted VBA modules", report.text)
-        self.assertIn(WITNESS_MODULE, report.text)
+        self.assertIn("Extracted VBA modules", report.dossier_text)
+        self.assertIn(WITNESS_MODULE, report.dossier_text)
+        self.assertIn('ATTESTED_MODULE_SOURCE', report.text)
 
     def test_office_appendix_bounds_many_modules(self):
         # A crafted document can declare hundreds of modules. The appendix must

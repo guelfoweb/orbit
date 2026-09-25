@@ -132,7 +132,7 @@ class ObjectiveTests(unittest.TestCase):
         self.assertIn(stage.output, appendix)
         self.assertIn(record.evidence_id, appendix)
         self.assertIn(stage.output_sha256, appendix)
-        self.assertIn(appendix, rt.report(generate_narrative=False).text)
+        self.assertIn(appendix, rt.report(generate_narrative=False).dossier_text)
 
     def test_existing_decoder_parameters_remain_in_delivery_and_report(self):
         from tests.test_analysis_evidence_delivery import Backend
@@ -228,7 +228,7 @@ class ObjectiveTests(unittest.TestCase):
                 self.assertEqual(run.actions_executed, 0)
                 self.assertIn('IOC', run.open_questions)
                 self.assertEqual(rt.ioc_checks(include_outcome=True)[0]['state'], 'BLOCKED')
-                self.assertIn('Network destination', rt.report(generate_narrative=False).text)
+                self.assertIn('Network destination', rt.report(generate_narrative=False).dossier_text)
 
     def test_existing_action_repair_retains_objective_and_limits(self):
         from tests.test_analysis_repair import ExactRecordingBackend, _tool_call

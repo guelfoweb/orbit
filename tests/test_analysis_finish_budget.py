@@ -228,7 +228,7 @@ class FinishBudgetTests(_Case):
                     run = rt.run_autonomous('Analyse it.', cover=False, finalize=True)
                 self.assertEqual(run.actions_executed, 1)
                 self.assertEqual(run.answered_unverified_questions, ())
-                self.assertIn('retained observation', run.final_report.text)
+                self.assertIn('retained observation', run.final_report.dossier_text)
                 self.assertTrue(run.final_report.document_complete)
                 self.assertEqual(run.cancelled, reason == 'cancelled')
                 if reason == 'cancelled':

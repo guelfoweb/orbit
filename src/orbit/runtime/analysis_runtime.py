@@ -7441,7 +7441,7 @@ class AnalysisRuntime:
             try:
                 final_report = self.report(
                     generate_narrative=not cancelled and not self._ioc_closed(controller),
-                    concise=bool(self.ioc_objectives),
+                    concise=True,
                     question=self._final_question(
                         stop_reason,
                         # Everything not answered, not merely everything still
@@ -7922,7 +7922,7 @@ class AnalysisRuntime:
             self.messages[:size], ensure_ascii=False, sort_keys=True
         ).encode("utf-8")).hexdigest()
 
-    def _report_material(self, *, render_facts=True):
+    def _report_material(self, *, render_facts=True, summary_transforms=None):
         """Re-attest existing producers; do not certify model interpretations."""
         limitations = []
         try:
@@ -8036,6 +8036,9 @@ class AnalysisRuntime:
             'unverified_questions': [q['id'] for run in self._report_runs for q, _s in run['questions']],
         }
         if source_ok and render_facts:
+            if summary_transforms is not None:
+                summary_transforms.extend((record, stage.output) for stage, record in view.transform_stages)
+                summary_transforms.extend((record, module.source) for module, record in view.office_modules)
             coverage['literal_indicators'] = [asdict(i) for i in view.canonical_indicators()]
             coverage['static_relationships'] = [text for text in (
                 view.folder_semantics(), view.stage_invocations(), view.office_events_appendix(),
@@ -8048,7 +8051,7 @@ class AnalysisRuntime:
         return facts, rendered, missing, coverage, list(dict.fromkeys(limitations))
 
     def report(self, question="", *, on_progress=None, on_delta=None,
-               generate_narrative=True, concise=False):
+               generate_narrative=True, concise=True):
         """Always compose the retained record; generation is optional and bounded.
 
         Only the canonical Markdown is emitted to a report consumer. Raw model
@@ -8091,7 +8094,8 @@ class AnalysisRuntime:
             status = "withheld_incomplete_evidence"
         # Evidence can be withdrawn during optional generation. Never publish
         # a fact merely because it passed a check before the model was called.
-        facts, records, missing, coverage, limitations = self._report_material()
+        summary_transforms = []
+        facts, records, missing, coverage, limitations = self._report_material(summary_transforms=summary_transforms)
         dossier_text = render_document(
             identity={'path': self.source.original_path, 'size_bytes': self.source.size_bytes,
                       'sha256': self.source.sha256}, facts=facts, runs=self._report_runs,
@@ -8105,7 +8109,8 @@ class AnalysisRuntime:
             identity={'path': self.source.original_path, 'size_bytes': self.source.size_bytes,
                       'sha256': self.source.sha256},
             runs=self._report_runs, coverage=coverage, limitations=limitations,
-            records=records, narrative_status=status,
+            records=records, narrative_status=status, narrative=narrative,
+            transforms=summary_transforms,
         ) if concise else dossier_text)
         result = AnalysisReport(
             text=text, model_text=model_text, model_calls=self.model_calls-before,

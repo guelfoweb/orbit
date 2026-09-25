@@ -1863,7 +1863,7 @@ class AnalysisReportTest(AnalysisRuntimeTestBase):
         self.assertEqual(backend.calls, 0, "nothing to ground a report in")
         self.assertEqual(report.model_calls, 0)
         self.assertTrue(report.document_complete)
-        self.assertIn("No evidence records were retained.", report.text)
+        self.assertIn("No evidence records were retained.", report.dossier_text)
 
     def test_a_report_makes_exactly_one_model_call(self) -> None:
         runtime, backend = self._with_evidence(prose_response("Confirmed: three strings."))

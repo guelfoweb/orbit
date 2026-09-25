@@ -17,87 +17,111 @@ def literal(text: str) -> str:
     return f"{fence}text\n{text}\n{fence}"
 
 
-def render_summary(*, identity, runs, coverage, limitations, records, narrative_status):
-    """Short human view. The complete document remains in report.dossier_text.
+# Presentation bound only: the complete interpretation remains in dossier_text.
+HUMAN_NARRATIVE_CHARS = 2000
 
-    Render producer facts, not model prose. An extracted literal and a proven
-    network operand have different authority even when their values coincide.
+
+def render_summary(*, identity, runs, coverage, limitations, records, narrative_status,
+                   narrative="", transforms=()):
+    """Publish re-attested runtime facts regardless of narrative availability.
+
+    Literal indicators and proven network operands retain distinct authority.
+    Model text is isolated and cannot supply entries or report structure.
     """
+    from urllib.parse import urlsplit
+    import ipaddress
+
     objectives = coverage.get('network_destination_objectives', [])
     exact = [item for item in objectives if item['state'] == 'RESOLVED_EXACT']
+    indicators = coverage.get('literal_indicators', [])
     counts = {state: sum(item['state'] == state for item in objectives)
               for state in ('RESOLVED_EXACT', 'OPEN', 'BLOCKED')}
     lines = ['# Analysis report', '## Summary',
              literal(json.dumps(identity, ensure_ascii=False)),
              (f"Known network destinations: {counts['RESOLVED_EXACT']} exact, "
               f"{counts['OPEN']} open, {counts['BLOCKED']} blocked."
-              if objectives else 'No network destination objective was identified by the supported static producers; this does not prove absence.'),
-             'Document status: ' + ('INCOMPLETE' if limitations else 'COMPLETE') +
-             '. Record completeness is not investigation success or proof of complete behaviour.']
+              if objectives else f"Runtime-recovered network indicators: {len(indicators)}. "
+              'Literal occurrence does not establish use as a destination.'),
+             'The retained record is incomplete.' if limitations else
+             'The retained record is complete; this does not mean every behaviour is understood.']
     if runs:
-        lines.extend(['Operational stop:', literal(runs[-1]['stop_reason'])])
+        lines.extend(['Investigation stopped:', literal(runs[-1]['stop_reason'])])
     lines += ['## Technical behaviour']
     if exact:
-        lines.append('Static destination operands were established for ' + str(len(exact)) +
-                     ' source assignments. These prove values, not effective browser mutation, observed execution or network contact.')
+        lines.append(f'Static destination values were established for {len(exact)} source assignments.')
         lines.extend(['Sink properties:', literal(', '.join(sorted({item['property'] for item in exact})))])
     relationships = coverage.get('static_relationships', [])
     lines.extend(literal(text) for text in relationships)
-    if not exact and not relationships:
-        lines.append('No additional behavioural relationship was attested by the available producers.')
+    if narrative_status == 'complete_unverified' and narrative:
+        lines += ['Model interpretation (unverified):', literal(narrative[:HUMAN_NARRATIVE_CHARS])]
+        if len(narrative) > HUMAN_NARRATIVE_CHARS:
+            lines.append('Interpretation excerpt; the complete text is preserved in the dossier.')
+    elif not exact and not relationships:
+        lines.append('No technical synthesis is available from the completed investigation.')
     lines += ['## Limits',
-              'Only known destinations are accounted for; unsupported source constructs and undiscovered destinations remain outside this completion decision. No sample execution or destination contact is established by static proofs.',
-              'Acquisition and archived output do not establish complete delivery to the model. Free-form answers remain unverified. The complete original questions, answers, observations, proof chains and provenance are retained in dossier_text and the saved session.']
+              'Static values prove operands, not effective browser mutation, observed execution or network contact. Acquisition does not establish delivery to the model.']
+    if coverage.get('uncovered_without_evidence_reason'):
+        lines.append(literal(coverage['uncovered_without_evidence_reason']))
+    if objectives:
+        lines.append('Only known destinations are accounted for; unsupported or undiscovered destinations remain outside this result.')
+    if narrative_status == 'admission_refused':
+        lines.append('Optional narrative did not fit the context budget; the attested indicators below are unaffected.')
+    elif narrative_status not in ('complete_unverified', 'not_requested', 'not_needed'):
+        lines.append('No complete model narrative was published; available attested indicators remain below.')
     if runs and any(state['status'] in ('open', 'blocked') for _q, state in runs[-1]['questions']):
-        lines.append('Other questions remain OPEN/BLOCKED; they were not resolved by composing this report.')
+        lines.append('Some questions remain OPEN/BLOCKED. Report composition does not resolve them.')
     lines.extend(literal(item) for item in limitations)
     for item in objectives:
         if item['state'] != 'RESOLVED_EXACT':
             lines.append(literal(f"{item['id']}: {item['state']}: {item['reason']}"))
+    lines.append('Full questions, observations and proof provenance are retained in the dossier.')
     lines += ['## IoC / Evidence']
     by_id = {r.evidence_id: r for r, body in records if body is not None}
-    from urllib.parse import urlsplit
-    import ipaddress
 
-    def kind(value):
+    def kind(value, property=''):
         if '://' in value:
             return 'URL'
         try:
             ipaddress.ip_address(value)
             return 'IP'
         except ValueError:
-            return 'domain'
+            return 'domain' if property in ('host', 'hostname') else 'destination operand'
 
+    entries = []
     for item in objectives:
         record = by_id.get(item['evidence_id'])
         value = item['value']
-        entry = {'objective': item['id'], 'type': kind(value) if value else 'unresolved network destination',
+        entry = {'objective': item['id'], 'type': kind(value, item['property']) if value else 'unresolved network destination',
                  'value': value, 'state': item['state'], 'sink': item['property'],
                  'evidence_id': item['evidence_id'], 'producer': record.metadata.get('transform_kind', record.tool_name) if record else None,
                  'source_sha256': item['source_sha256'], 'source_byte_range': item['source_byte_range']}
-        if value and kind(value) == 'URL':
+        if value and entry['type'] == 'URL':
             try:
                 entry['hostname_from_URL'] = urlsplit(value).hostname
             except ValueError:
-                # An exact source operand is not a guarantee of URL syntax.
-                # Preserve it; a derived display field must not lose a report.
                 entry['hostname_from_URL'] = None
-        lines.append(literal(json.dumps(entry, ensure_ascii=False, indent=2)))
+        entries.append(entry)
     exact_values = {item['value'] for item in exact}
-    for item in coverage.get('literal_indicators', []):
+    for item in indicators:
         if item['value'] not in exact_values:
-            # The existing producer verifies literal occurrence, not a sink.
-            lines.append(literal(json.dumps({'state': 'ATTESTED_LITERAL_NOT_SINK_PROOF',
-                                            'source_sha256': identity['sha256'], **item}, ensure_ascii=False)))
-    transforms = [r for r, body in records if body is not None and r.produced_by_phase == 'analysis_transform']
-    for record in transforms:
+            # The existing producer attests occurrence, not a network sink.
+            # 'line' belongs to the named source/decoded output, never an
+            # invented byte range in the original artifact.
+            entries.append({'type': {'uri': 'URL', 'hostname': 'domain'}.get(item['kind'], item['kind']),
+                            'state': 'ATTESTED_LITERAL_NOT_SINK_PROOF',
+                            'source_sha256': identity['sha256'], **item})
+    priority = {'URL': 0, 'IP': 1, 'domain': 2}
+    for entry in sorted(entries, key=lambda e: priority.get(e['type'], 3)):
+        lines.append(literal(json.dumps(entry, ensure_ascii=False, indent=2)))
+    for record, body in transforms:
         if any(item['evidence_id'] == record.evidence_id for item in exact):
             continue
         lines.append(literal(json.dumps({'evidence_id': record.evidence_id, 'producer': record.tool_name,
             'output_sha256': record.raw_sha256, 'source_sha256': identity['sha256'],
-            'state': 'ATTESTED_TRANSFORM_OUTPUT', 'body': 'retained in dossier_text'}, ensure_ascii=False)))
-    if not objectives and not coverage.get('literal_indicators') and not transforms:
-        lines.append('No currently re-attested network indicator or deterministic output.')
+            'state': 'ATTESTED_MODULE_SOURCE' if record.metadata.get('office_module_name') else 'ATTESTED_TRANSFORM_OUTPUT',
+            'output': body if len(body) <= 240 else 'Full output retained in dossier_text.'}, ensure_ascii=False)))
+    if not objectives and not indicators and not transforms:
+        lines.append('No currently re-attested network indicator or deterministic output. This does not prove absence.')
     return '\n\n'.join(lines) + '\n'
 
 

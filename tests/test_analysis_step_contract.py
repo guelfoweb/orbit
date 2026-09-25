@@ -172,7 +172,7 @@ class StepContractTests(_Case):
         self.assertEqual(rt.analyst_turns, 1)
         self.assertIn("ContextAdmissionError", run.stop_reason)
         self.assertTrue(run.final_report.text)
-        self.assertIn("original objective", run.final_report.text)
+        self.assertIn("original objective", run.final_report.dossier_text)
 
     def test_incomplete_stream_is_rejected_by_actual_transport_path(self):
         import io
@@ -245,7 +245,7 @@ class StepContractTests(_Case):
         self.assertEqual(run.resolved_questions, ())
         self.assertIn("ContextAdmissionError", run.stop_reason)
         self.assertTrue(run.final_report.document_complete)
-        self.assertIn("original objective", run.final_report.text)
+        self.assertIn("original objective", run.final_report.dossier_text)
         self.assertTrue(rt.evidence_store.records)
 
     def test_ornith_near_boundary_keeps_more_history_not_less_evidence(self):

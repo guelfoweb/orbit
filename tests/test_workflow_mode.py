@@ -2483,7 +2483,8 @@ class ReportCommandTest(ModeTestBase):
         output = self.run_command(repl, "/report")
 
         self.assertEqual(backend.calls, before, "nothing to report on, nothing to ask")
-        self.assertIn("No evidence records were retained.", output)
+        self.assertIn("No analysis evidence has been collected yet.", output)
+        self.assertIn("No currently re-attested network indicator", output)
 
     def test_report_keeps_the_session_in_analysis(self) -> None:
         repl, _ = self._analysis_repl()
@@ -2770,7 +2771,7 @@ class RenderedAssistantTextTest(ModeTestBase):
         # the marks must give the model's bytes back unchanged.
         self.assertEqual(
             report.text.split(UNSUPPORTED_INDICATOR_FOOTER, 1)[1]
-            .rsplit("\n```\n\n## Limits and unknowns", 1)[0]
+            .rsplit("\n```\n\n## Limits", 1)[0]
             .lstrip("\n")
             .replace(UNSUPPORTED_INLINE_MARK, ""),
             HOSTILE_TEXT,
