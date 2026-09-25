@@ -62,6 +62,9 @@ def render_summary(*, identity, runs, coverage, limitations, records, narrative_
               'Static values prove operands, not effective browser mutation, observed execution or network contact. Acquisition does not establish delivery to the model.']
     if coverage.get('uncovered_without_evidence_reason'):
         lines.append(literal(coverage['uncovered_without_evidence_reason']))
+    discovery = coverage.get('network_destination_discovery', {})
+    if discovery.get('complete') is False:
+        lines.append(literal(discovery.get('reason') or 'Network destination discovery is incomplete.'))
     if objectives:
         lines.append('Only known destinations are accounted for; unsupported or undiscovered destinations remain outside this result.')
     if narrative_status == 'admission_refused':

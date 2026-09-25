@@ -220,10 +220,18 @@ class RuntimeIntegrationTests(unittest.TestCase):
         # Provenance is the session's pinned snapshot, named by its digest.
         self.assertIn(f"sha256:{runtime.source.sha256}", rendered)
 
-    def test_an_artifact_without_a_uri_renders_nothing(self) -> None:
+    def test_an_artifact_without_a_uri_reports_incomplete_discovery(self) -> None:
         runtime = self._runtime("Remove-Item $env:APPDATA\\*.ps1 -Force\n")
         self.assertEqual(runtime.verified_indicators(), "")
-        self.assertEqual(runtime.deterministic_sections(), "")
+        # No indicator is invented for unsupported source syntax, but an empty
+        # inventory must not silently certify complete destination discovery.
+        self.assertEqual(runtime.ioc_checks(), [])
+        self.assertFalse(runtime._ioc_discovery_complete())
+        self.assertFalse(runtime._ioc_closed(None))
+        self.assertEqual(
+            runtime.deterministic_sections(),
+            "## Network destination coverage\n\n" + runtime._ioc_scan_incomplete,
+        )
 
     def test_indicators_precede_the_transformation_appendix(self) -> None:
         """Shortest and most often acted on first; the work that produced it

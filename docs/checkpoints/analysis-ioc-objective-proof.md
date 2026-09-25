@@ -33,6 +33,32 @@ limitation; an unscanned region does not establish absence of destinations and
 does not invent a destination objective. Source acquisition is not delivery of
 all source bytes to the model.
 
+Known-objective closure and discovery completeness are independent. The early
+IoC-first stop requires both. `scan_destinations` issues a source-hash-bound,
+immutable certificate only after all script tokens/effects and the HTML envelope
+belong to the supported closed subset. Missing certificates, parse/bound errors,
+unknown effects or sink syntax, relative operands and ambiguous control flow
+leave discovery incomplete. Exhausting an IOC question's action budget can
+close that question operationally, but cannot certify the rest of the artifact.
+The normal bounded investigation remains available, with the incomplete scope
+recorded in the dossier and human report. This does not mean retained evidence
+is missing, and does not by itself withhold optional narrative generation.
+
+HTML DOM origins require a supported document-membership context, not merely a
+lexical tag/id. Inert/foreign contexts, unsupported tree structure, ambiguous
+attribute character references and non-void self-closing syntax cannot authorize
+`getElementById`. Script classification/source extraction also fails closed for
+unhandled attributes, escaped HTML script modes and NUL preprocessing. No browser
+tree constructor or character-reference decoder is inferred from HTMLParser.
+Styles, unclassified HTML attributes and other destination-bearing contexts
+prevent complete discovery even when independent JS operands remain provable.
+
+Literal conditional truth excludes the statically dead branch. Alternative
+branches without a proven selection stay OPEN; they are not two exact outcomes.
+An operand under a single runtime/event guard may still have an exact static
+value, without proving that the guard succeeds; its uncertain reachability
+prevents the positive discovery certificate. There is no new sink or decoder.
+
 The proof establishes an exact **static operand linked to a URL-bearing sink**.
 It does not establish that an event happened, a browser setter succeeded, a
 network request occurred, or a remote payload behaved in any particular way.

@@ -52,6 +52,26 @@ class Destination:
                               hashlib.sha256(self.value.encode()).hexdigest())
 
 
+@dataclass(frozen=True)
+class DestinationScan:
+    """A positive closed-subset certificate, separate from per-sink proofs."""
+    source_sha256: str
+    objectives: tuple[Destination, ...]
+    complete: bool
+    reason: str = ''
+
+
+# Plain HTML structure whose document membership we can account for without
+# implementing browser tree construction. Unknown/inert/foreign contexts never
+# supply DOM origins. Discovery uses a stricter subset: CSS and URL attributes
+# can introduce other destinations even when they do not invalidate a DOM ID.
+_DOM_TAGS = frozenset(('html head body title style script div span main section '
+    'article header footer nav aside p h1 h2 h3 h4 h5 h6 a area br meta').split())
+_PASSIVE_TAGS = _DOM_TAGS - {'style', 'meta'}
+_VOID_TAGS = frozenset('area base br col embed hr img input link meta param source track wbr'.split())
+_PASSIVE_ATTRS = frozenset('id class title lang dir role'.split())
+
+
 class Scripts(HTMLParser):
     def __init__(self, source):
         super().__init__(convert_charrefs=False)
@@ -63,12 +83,30 @@ class Scripts(HTMLParser):
         self.inert = []
         self.elements = {}
         self.open_elements = []
+        self.dom_complete = True
+        self.discovery_issues = []
+
+    def incomplete(self, reason):
+        if reason not in self.discovery_issues:
+            self.discovery_issues.append(reason)
 
     def pos(self):
         line, column = self.getpos()
         return self.lines[line - 1] + column
 
     def handle_starttag(self, tag, attrs):
+        # HTMLParser applies generic character-reference decoding to attributes;
+        # HTML's attribute-context rules differ for ambiguous ampersands. Until
+        # that context is proved, decoded IDs cannot authorize a DOM lookup.
+        if '&' in self.get_starttag_text():
+            self.dom_complete = False
+            self.incomplete('HTML attribute character-reference semantics are unsupported')
+        if tag not in _DOM_TAGS:
+            self.dom_complete = False
+        if tag not in _PASSIVE_TAGS:
+            self.incomplete('HTML contains a context outside the closed discovery subset')
+        if any(k not in _PASSIVE_ATTRS and not (tag == 'script' and k == 'type') for k, _v in attrs):
+            self.incomplete('HTML attributes are not fully classified for destination discovery')
         if tag in ('iframe', 'frame', 'object', 'embed') or any(k == 'srcdoc' for k, _v in attrs):
             self.external = True
         if tag in ('template', 'noscript', 'svg', 'math'):
@@ -76,17 +114,23 @@ class Scripts(HTMLParser):
         pairs = dict(attrs)
         if len(pairs) != len(attrs):
             self.external = True  # duplicate attribute semantics not interpreted
+        # Tree-construction repairs can invalidate lexical nesting/leaf claims.
+        parents = [entry[0] for entry in self.open_elements]
+        if ((tag == 'a' and 'a' in parents)
+                or ('p' in parents and tag not in ('span', 'a', 'br', 'script'))):
+            self.dom_complete = False
         for entry in self.open_elements:
             entry[3] = False
         element = [tag, self.pos(), self.pos() + len(self.get_starttag_text()), True]
-        if pairs.get('id'):
+        if pairs.get('id') and not self.inert:
             self.elements.setdefault(pairs['id'], []).append(element)
-        if tag not in ('meta', 'link', 'img', 'br', 'input', 'hr', 'area', 'base', 'source', 'embed', 'wbr'):
+        if tag not in _VOID_TAGS:
             self.open_elements.append(element)
         if any(k.startswith('on') or (v or '').lstrip().lower().startswith('javascript:') for k, v in attrs):
             self.external = True
         if tag == 'script':
-            if (self.inert or 'src' in pairs or (pairs.get('type') or '').lower() not in
+            if (self.inert or set(pairs) - _PASSIVE_ATTRS - {'type'}
+                    or (pairs.get('type') or '').lower() not in
                     ('', 'text/javascript', 'application/javascript')):
                 self.external = True
             else:
@@ -100,17 +144,57 @@ class Scripts(HTMLParser):
             self.inert.remove(tag)
         if self.open_elements and self.open_elements[-1][0] == tag:
             self.open_elements.pop()
+        elif tag not in _VOID_TAGS:
+            self.dom_complete = False
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in _VOID_TAGS:
+            # HTML ignores a self-closing flag on ordinary elements. Do not
+            # pretend that an XML-style lexical closure proves HTML structure.
+            self.dom_complete = False
+            self.incomplete('non-void self-closing HTML structure is unsupported')
+
+    def handle_decl(self, decl):
+        if decl.lower() != 'doctype html':
+            self.dom_complete = False
+            self.incomplete('unsupported HTML declaration')
+
+    def unknown_decl(self, data):
+        self.dom_complete = False
+        self.incomplete('unclassified HTML declaration')
+
+    def handle_pi(self, data):
+        self.dom_complete = False
+        self.incomplete('unclassified HTML processing instruction')
 
 
-def script_view(source):
+def _script_view(source):
     if not source.lstrip().startswith('<'):
-        return source, False, {}, [(0, len(source))]
+        return source, False, {}, [(0, len(source))], ()
     parser = Scripts(source)
     parser.feed(source)
+    parser.close()
+    if parser.open_elements:
+        parser.dom_complete = False
+    if not parser.dom_complete:
+        parser.incomplete('HTML document membership is not proven by the supported structure')
     view = list(' ' * len(source))
     for lo, hi in parser.ranges:
         view[lo:hi] = source[lo:hi]
-    return ''.join(view), parser.external or parser.begin is not None, parser.elements, parser.ranges
+    # HTMLParser is not the HTML script-data state machine: escaped script
+    # modes can change where a closing tag takes effect. U+0000 is replaced by
+    # HTML preprocessing. Neither may silently supply byte-exact JS premises.
+    if '\x00' in source or any('<!--' in source[lo:hi] for lo, hi in parser.ranges):
+        parser.external = True
+        parser.incomplete('HTML tokenizer state does not preserve the supported script view')
+    return (''.join(view), parser.external or parser.begin is not None,
+            parser.elements if parser.dom_complete else {}, parser.ranges,
+            tuple(parser.discovery_issues))
+
+
+def script_view(source):
+    return _script_view(source)[:4]
 
 
 # No escape interpretation, ASI, regex literals, legacy numbers or catch-all
@@ -341,6 +425,9 @@ class Proof:
         self.sinks = []
         self.sink_origins = {}
         self.effects_checked = False
+        self.excluded_branches = []
+        self.ambiguous_branches = []
+        self.discovery_issues = []
         self.elements = elements
         self.scripts = scripts
         self.work = 0
@@ -615,8 +702,18 @@ class Proof:
             elif node.kind == 'block':
                 self.check(node.children)
             elif node.kind == 'if':
-                self.value(node.children[0])
+                condition = self.value(node.children[0])
+                # Check every branch for unsupported effects, including an
+                # unreachable branch. Only a proven condition excludes sinks.
                 self.check(node.children[1:])
+                truth = self.truth(condition)
+                if truth is not None:
+                    dead = node.children[2:] if truth else node.children[1:2]
+                    self.excluded_branches.extend((n.start, n.end) for n in dead)
+                else:
+                    self.discovery_issues.append('conditional reachability is not statically established')
+                    if len(node.children) == 3:
+                        self.ambiguous_branches.extend((n.start, n.end) for n in node.children[1:])
             elif node.kind == 'expr':
                 expr = node.children[0]
                 if expr.kind == 'binary' and expr.value == '=':
@@ -648,15 +745,28 @@ class Proof:
         self.effects_checked = True
 
 
-def destinations(source):
-    """Return source-bound candidates; only complete proofs carry exact values."""
+    @staticmethod
+    def truth(value):
+        if value.kind == 'boolean' and value.text in ('true', 'false'):
+            return value.text == 'true'
+        if value.kind == 'string' and value.text is not None:
+            return bool(value.text)
+        if value.kind == 'number' and value.text is not None:
+            return int(value.text) != 0
+        if value.kind == 'dom' and value.text is not None:
+            return True
+        return None
+
+
+def scan_destinations(source):
+    """Prove operands and independently certify complete supported discovery."""
+    source_hash = hashlib.sha256(source.encode()).hexdigest()
     if len(source) > MAX_INPUT_CHARS:
-        return []  # caller must expose incomplete scan coverage, not invent a sink
-    view, external, elements, scripts = script_view(source)
+        return DestinationScan(source_hash, (), False, 'source exceeds static destination scan bound')
+    view, external, elements, scripts, html_issues = _script_view(source)
+    issues = list(html_issues)
     masked = _fcc_mask_code(view)
     candidates = list(re.finditer(r'\.\s*(href|host|hostname)\s*=(?!=)', masked))
-    if not candidates:
-        return []
     error = None
     proof = None
     try:
@@ -672,10 +782,14 @@ def destinations(source):
             raise Unproved('static syntax bound reached')
         proof = Proof(source, nodes, elements, scripts)
         proof.check(nodes)
+        issues.extend(proof.discovery_issues)
     except (Unproved, RecursionError) as exc:
         error = str(exc) or 'static nesting bound reached'
+        issues.append(error)
     result = []
     for m in candidates[:32]:
+        if proof is not None and error is None and any(lo <= m.start() < hi for lo, hi in proof.excluded_branches):
+            continue
         end = masked.find(';', m.end())
         end = len(view) if end < 0 else end
         value, links = None, ()
@@ -688,12 +802,15 @@ def destinations(source):
             if pair:
                 lhs, rhs = pair
                 try:
+                    if any(lo <= lhs.start < hi for lo, hi in proof.ambiguous_branches):
+                        raise Unproved('alternative destination reachability is not established')
                     v = proof.value(rhs)
                     if v.kind == 'runtime_string' or v.kind == 'parameter':
                         state, reason = 'BLOCKED', 'destination depends on runtime input absent from the snapshot'
                     elif v.kind == 'string' and v.text is not None:
                         if lhs.value == 'href' and uris_in(v.text) != [v.text]:
                             if '://' not in v.text:
+                                issues.append('relative destination is outside the closed value proof')
                                 continue  # literal relative link, not network IoC
                             raise Unproved('absolute destination is incomplete')
                         if lhs.value != 'href':
@@ -711,8 +828,17 @@ def destinations(source):
                         raise Unproved('destination has no exact string value')
                 except Unproved as exc:
                     reason = str(exc)
+                    issues.append(reason)
+            else:
+                issues.append('candidate sink is not structurally classified')
         result.append(Destination(len(source[:m.start()].encode()), len(source[:end].encode()), m[1], state, reason, value, links))
     if len(candidates) > 32:
+        issues.append('destination scan bound reached')
         m = candidates[32]
         result.append(Destination(len(source[:m.start()].encode()), len(source.encode()), 'scan', 'OPEN', 'destination scan bound reached'))
-    return result
+    return DestinationScan(source_hash, tuple(result), not issues, '; '.join(dict.fromkeys(issues)))
+
+
+def destinations(source):
+    """Compatibility view: per-sink proof is not a discovery certificate."""
+    return list(scan_destinations(source).objectives)

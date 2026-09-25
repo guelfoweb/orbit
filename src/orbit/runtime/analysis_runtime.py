@@ -117,7 +117,7 @@ from orbit.runtime.analysis_bootstrap import (
     BOOTSTRAP_TAIL_BYTES,
     build_bootstrap_view,
 )
-from orbit.runtime.analysis_ioc_proof import KIND as IOC_PROOF_KIND, Destination, destinations
+from orbit.runtime.analysis_ioc_proof import KIND as IOC_PROOF_KIND, Destination, DestinationScan, destinations, scan_destinations
 from orbit.runtime.analysis_network_policy import analysis_network_denied
 from orbit.runtime.analysis_tools_shim import MAX_READ_BYTES
 from orbit.runtime.analysis_sandbox import (
@@ -3239,6 +3239,7 @@ class AnalysisRuntime:
     _ioc_source_sha256: str | None = None
     _ioc_store_root: str | None = None
     _ioc_scan_incomplete: str | None = None
+    _ioc_discovery: DestinationScan | None = None
 
     # VBA modules the Office preflight extracted, paired with their evidence
     # records. Derived source, not the container's own bytes: the raw Office
@@ -3438,10 +3439,11 @@ class AnalysisRuntime:
         if origin is None:
             exact_source = self._snapshot_text()
             if exact_source is not None:
-                from orbit.runtime.analysis_ioc_proof import MAX_INPUT_CHARS as IOC_SCAN_LIMIT
-                if len(exact_source) > IOC_SCAN_LIMIT:
-                    self._ioc_scan_incomplete = 'Static destination scan not performed: source exceeds its character bound; no absence of network destinations is established.'
-                self.ioc_objectives = tuple(destinations(exact_source))
+                self._ioc_discovery = scan_destinations(exact_source)
+                self._ioc_scan_incomplete = (None if self._ioc_discovery.complete else
+                    'Static destination discovery incomplete: ' + self._ioc_discovery.reason
+                    + '; no absence of network destinations is established.')
+                self.ioc_objectives = self._ioc_discovery.objectives
                 self._ioc_source_sha256 = self.source.sha256
                 self._ioc_store_root = str(self.evidence_store.root.resolve())
                 stages.extend(d.stage(exact_source) for d in self.ioc_objectives
@@ -3601,15 +3603,25 @@ class AnalysisRuntime:
             [asdict(item) for item in self.ioc_objectives],
         ], sort_keys=True).encode()).hexdigest()
 
-    def _ioc_closed(self, controller):
-        """All *known* destinations settled; never certify whole-artifact coverage.
+    def _ioc_discovery_complete(self):
+        """Only a positive, current source/inventory certificate permits preflight."""
+        scan = self._ioc_discovery
+        return bool(scan is not None and scan.complete and not self._ioc_scan_incomplete
+                    and scan.source_sha256 == self.source.sha256 == self._ioc_source_sha256
+                    and scan.objectives == self.ioc_objectives
+                    and self._ioc_store_root == str(self.evidence_store.root.resolve()))
 
-        Empty/incomplete discovery is not a completion certificate. Exact
+    def _ioc_closed(self, controller):
+        return self._ioc_discovery_complete() and self._known_ioc_objectives_closed(controller)
+
+    def _known_ioc_objectives_closed(self, controller):
+        """Known destinations settled; independent of source discovery coverage.
+
+        An empty inventory is not a completion certificate. Exact
         values must still re-attest; a concrete operational block applies only
         to the inventory owned by that runtime question, not later discoveries.
         """
-        if (not self.ioc_objectives or self._ioc_scan_incomplete
-                or any(d.property == 'scan' for d in self.ioc_objectives)):
+        if not self.ioc_objectives:
             return False
         if (self._ioc_source_sha256 != self.source.sha256
                 or self._ioc_store_root != str(self.evidence_store.root.resolve())):
@@ -8045,9 +8057,17 @@ class AnalysisRuntime:
             ) if text]
         if self.ioc_objectives:
             coverage['network_destination_objectives'] = self.ioc_checks(include_outcome=True)
+        coverage['network_destination_discovery'] = {
+            'complete': source_ok and self._ioc_discovery_complete(),
+            'source_sha256': self._ioc_source_sha256,
+            'reason': self._ioc_scan_incomplete or ('' if self._ioc_discovery_complete() else
+                                                   'no current closed discovery certificate'),
+        }
         if self._ioc_scan_incomplete:
             coverage['network_destination_scan_limit'] = self._ioc_scan_incomplete
-            limitations.append(self._ioc_scan_incomplete)
+            # An incomplete investigation is not missing/corrupt retained
+            # evidence. Preserve the scope limitation without withholding a
+            # report about the evidence that is actually available.
         return facts, rendered, missing, coverage, list(dict.fromkeys(limitations))
 
     def report(self, question="", *, on_progress=None, on_delta=None,
