@@ -1240,7 +1240,7 @@ def run_tool_loop(
         if (
             executing_mutation_verification
             and artifact_verification_required
-            and result.finish_reason in {"cancelled", "error", "length", "timeout"}
+            and result.finish_reason not in {"stop", "tool_calls"}
         ):
             abort_pending_artifact()
             artifact_verification_required = False
@@ -1387,6 +1387,18 @@ def run_tool_loop(
                 reason="model_cancelled" if result.finish_reason == "cancelled" else "incomplete_tool_completion",
                 phase=produced_by_phase or "tool_call",
             )
+            if not result.tool_calls and state.tool_rounds > 0 and shell_full_enabled:
+                # Preserve the existing post-tool finalization path using
+                # committed evidence only. Never reuse incomplete prose or
+                # reconsider/dispatch a tool from this completion.
+                record_post_tool_final_reuse_fallback("finish_reason")
+                turn.mark_finalizable()
+                return answer_from_tool_results(
+                    temperature=temperature, max_tokens=max_tokens,
+                    on_final_delta=on_final_delta, on_progress=on_progress,
+                    on_model_step=on_model_step, on_phase_start=on_phase_start,
+                    loop=loop_index + 1, use_tool_prompt=state.used_tool_call_prompt,
+                )
             return replace(result, tool_calls=[])
         if canonical_gate_enabled and len(result.tool_calls) > 1:
             record_terminal(

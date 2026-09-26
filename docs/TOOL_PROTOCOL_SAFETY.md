@@ -30,7 +30,10 @@ argument values remain valid.
 Prompt rendering, generation grammar, sampling, budgets and retry counts are
 unchanged. The existing FINISH-only parameter-order recovery still requires a
 complete original envelope and exact argument equality after native reparsing.
-Failed or cancelled calls retain their completion state; no safety rejection is
+Failed or cancelled attempts retain their diagnostic completion state. The
+existing tools-off finalization of committed shell results can still produce a
+fresh answer after a cancelled response with no calls. It cannot dispatch that
+response or bypass required artifact verification. No safety rejection is
 converted into a successful execution.
 
 This hardening does not enable MiMo or qualify model reasoning. MiMo's template

@@ -759,6 +759,33 @@ class ArtifactToolLoopTests(unittest.TestCase):
             self.assertTrue((root / "samples/game.js").is_file())
             self.assertEqual(result.finish_reason, "stop")
 
+    def test_incomplete_verification_cannot_fall_through_to_shell_finalization(self) -> None:
+        for finish_reason in ("incomplete", "unknown", "content_filter", None):
+            with self.subTest(finish_reason=finish_reason), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                backend = _ArtifactWorkflowBackend(
+                    initial_result=_result("", tool_calls=[_tool_call(
+                        "write_artifact", {
+                            "path": "samples/game.js", "overwrite": False,
+                            "create_parents": True,
+                        }, "write-1")]),
+                    verification_result=_result("", finish_reason=finish_reason),
+                )
+                runtime = ChatRuntime(backend=backend, system_prompt=None)
+                dispatched = []
+                result = runtime.ask_with_tools(
+                    "Create a fixture and verify it.", temperature=0, max_tokens=256,
+                    workdir=root,
+                    tool_names=("write_artifact", "verify_artifact", "exec_shell_full_command"),
+                    on_tool_call=lambda name, arguments: dispatched.append(name),
+                )
+                self.assertEqual(backend.calls, 2)
+                self.assertEqual(dispatched, ["write_artifact"])
+                self.assertEqual(runtime.mutation_verifications, 1)  # One attempt, no retry.
+                self.assertEqual((root / "samples/game.js").read_bytes(), b"console.log('playable');\n")
+                self.assertIn("artifact was published but verification did not complete", result.content)
+                self.assertFalse(result.tool_calls)
+
     def test_no_mutation_policy_blocks_artifact_before_content_generation(self) -> None:
         for canonical_gate in ("0", "1"):
             with self.subTest(canonical_gate=canonical_gate), mock.patch.dict(

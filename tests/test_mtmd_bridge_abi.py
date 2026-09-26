@@ -39,10 +39,9 @@ class MtmdBridgeAbiTests(unittest.TestCase):
         self.assertEqual(provenance.upstream_tag, EXPECTED_TAG)
         self.assertEqual(provenance.source_tree_sha256, source_tree_sha256(BUNDLED_SOURCE_ROOT))
         self.assertEqual(len(provenance.patchset_sha256), 64)
-        # 56 at the 41abbfd pin (46 whitespace-normalised upstream files plus the
-        # 10 Orbit-patched sources); the count is derived by the provenance
-        # generator, not hand-maintained.
-        self.assertEqual(len(provenance.patched_paths), 56)
+        # 56 at the pin, plus chat.cpp/chat.h/qwen3-coder.cpp for strict final
+        # protocol validation. Independently derived by the provenance gate.
+        self.assertEqual(len(provenance.patched_paths), 59)
         self.assertEqual(provenance.upstream_build_number, EXPECTED_BUILD_NUMBER)
 
     def test_untagged_pin_carries_an_explicit_build_number(self) -> None:
