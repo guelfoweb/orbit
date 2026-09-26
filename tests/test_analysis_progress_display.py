@@ -382,6 +382,9 @@ class _FakeRenderer:
         self.kwargs: list[dict] = []
         self.settled = 0
 
+    def reset_visible_text(self) -> None:
+        pass
+
     def settle_progress_line(self) -> None:
         self.settled += 1
 
@@ -659,6 +662,7 @@ class ReplWiringTests(unittest.TestCase):
                 raise KeyboardInterrupt
 
         repl = repl_module.Repl.__new__(repl_module.Repl)
+        repl.config = repl_module.AppConfig()
         repl.analysis = _Analysis()
         repl.autonomous_analysis = True
         repl._analysis_checkpoint = lambda: object()  # type: ignore[method-assign]

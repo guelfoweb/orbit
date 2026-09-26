@@ -428,7 +428,7 @@ class NonStreamingReportTests(unittest.TestCase):
         from orbit.terminal import repl
 
         source = inspect.getsource(repl.Repl._ask_analysis)
-        self.assertIn("render_report(run.final_report.text)", source)
+        self.assertIn("render_report(run.final_report.text,", source)
         self.assertNotIn(
             "sanitize_terminal_text(\n                        run.final_report.text",
             source,

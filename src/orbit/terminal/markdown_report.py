@@ -70,7 +70,8 @@ def render_report(text: str, *, force_style: bool | None = None) -> str:
     permitted -- NO_COLOR, a dumb terminal, a pipe, a redirect -- so a captured
     or piped report is raw Markdown with no escape in it at all.
 
-    `force_style` exists for tests, which cannot make a StringIO a terminal.
+    `force_style=False` also honours an explicit plain presentation setting;
+    `True` is for tests. The default respects the terminal's capabilities.
     """
     styled = supports_ansi() if force_style is None else force_style
     safe = sanitize_terminal_text(text, allow_newlines=True)
