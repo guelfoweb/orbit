@@ -6151,13 +6151,15 @@ class AnalysisRuntime:
             )},
         ]
         # `step()` appends its analyst message after this transient controller
-        # view is built.  Normally the controller question is the complete
-        # instruction for the call.  A repair is different: the next call must
-        # receive the repair directive immediately, while the failed action is
-        # still the one it is meant to correct.  Put that operation-owned
-        # instruction last so evidence:<id> is also the latest-user request
-        # recognised by the existing exact rehydration path.
-        if current_instruction is not None:
+        # view is built. Normally the controller question is the complete
+        # instruction for the call. A repair or bounded replan must instead
+        # reach the immediate next STEP, not just a later history view.
+        # A generic replan supplements the question; keep the question last
+        # so its explicit evidence requests retain their rehydration ownership.
+        # A repair instead owns its failed-action/traceback requests itself.
+        if current_instruction == AUTONOMOUS_REPLAN_MESSAGE:
+            messages.insert(-1, {"role": "user", "content": current_instruction})
+        elif current_instruction is not None:
             messages.append({"role": "user", "content": current_instruction})
         return messages
 
@@ -6878,7 +6880,11 @@ class AnalysisRuntime:
                         self._resolve_messages(
                             controller,
                             active,
-                            current_instruction=message if repairing else None,
+                            current_instruction=(
+                                message
+                                if repairing or message == AUTONOMOUS_REPLAN_MESSAGE
+                                else None
+                            ),
                         )
                         if active is not None else None
                     ),
@@ -6929,9 +6935,12 @@ class AnalysisRuntime:
                 # own the failed program and exact traceback. Dispatching
                 # without them would turn a refused repair into an unrelated
                 # action while still charging it to the failed question.
+                # Nor may a bounded replan be retried without the instruction
+                # explaining the no-progress result it is meant to address.
                 if (
                     isinstance(exc, ContextAdmissionError)
                     and not repairing
+                    and message != AUTONOMOUS_REPLAN_MESSAGE
                     and message is not analyst_message
                 ):
                     # Bounded by identity, not by a counter: the retry sets
@@ -7299,6 +7308,10 @@ class AnalysisRuntime:
                         # from. Kept so the diversion cannot carry a pending
                         # replan into a question that never asked for one.
                         replan_pending = False
+                        if message == AUTONOMOUS_REPLAN_MESSAGE:
+                            # This directive was already delivered. Keep its
+                            # history, but do not issue it to the next question.
+                            message = AUTONOMOUS_CONTINUATION_MESSAGE
                         continue
                     # No other question to move to, so this stall ends the
                     # run -- but it is still THIS question's stall, and the
