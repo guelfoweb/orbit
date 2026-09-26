@@ -290,6 +290,8 @@ struct common_chat_parser_params {
     // Whether reasoning_content should be inlined in the content (e.g. for reasoning_format=deepseek in stream mode)
     bool                    reasoning_in_content = false;
     std::string             generation_prompt;
+    std::string             reasoning_start_tag;
+    std::string             reasoning_end_tag;
     bool                    parse_tool_calls     = true;
     bool                    is_continuation      = false;
     bool                    echo                 = false;  // Include assistant prefilled msg in output
@@ -299,6 +301,10 @@ struct common_chat_parser_params {
     common_chat_parser_params(const common_chat_params & chat_params) {
         format  = chat_params.format;
         generation_prompt = chat_params.generation_prompt;
+        reasoning_start_tag = chat_params.thinking_start_tag;
+        if (!chat_params.thinking_end_tags.empty()) {
+            reasoning_end_tag = chat_params.thinking_end_tags.front();
+        }
     }
 };
 

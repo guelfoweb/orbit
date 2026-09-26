@@ -30,6 +30,8 @@ struct orbit_chat_context {
     common_chat_format format = COMMON_CHAT_FORMAT_CONTENT_ONLY;
     std::string generation_prompt;
     std::string parser;
+    std::string reasoning_start_tag;
+    std::string reasoning_end_tag;
     bool render_ready = false;
 };
 
@@ -145,6 +147,8 @@ static int render_contract(
         context->format = params.format;
         context->generation_prompt = params.generation_prompt;
         context->parser = params.parser;
+        context->reasoning_start_tag = params.thinking_start_tag;
+        context->reasoning_end_tag = params.thinking_end_tags.empty() ? std::string() : params.thinking_end_tags.front();
         context->render_ready = true;
 
         json result = {
@@ -249,6 +253,8 @@ ORBIT_EXPORT int orbit_chat_bridge_parse(
         params.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
         params.reasoning_in_content = false;
         params.generation_prompt = context->generation_prompt;
+        params.reasoning_start_tag = context->reasoning_start_tag;
+        params.reasoning_end_tag = context->reasoning_end_tag;
         params.parse_tool_calls = true;
         if (!context->parser.empty()) {
             params.parser.load(context->parser);

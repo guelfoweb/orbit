@@ -119,6 +119,7 @@ def run_tool_loop(
     on_phase_start: Callable[[ModelPhaseStart], None] | None,
     tool_names: tuple[str, ...] | None,
     initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+    initial_finish_reason: str | None = None,
     local_capabilities: LocalCapabilities | None = None,
     user_turn_id: str | None = None,
 ) -> ChatResult:
@@ -903,6 +904,13 @@ def run_tool_loop(
         ):
             request_mutation_verification()
     if initial_tool_calls:
+        if initial_finish_reason not in {"stop", "tool_calls"}:
+            return ChatResult(
+                content="error: initial tool completion did not finish",
+                model=None, finish_reason=initial_finish_reason, tool_calls=[],
+                prompt_tokens=None, completion_tokens=None, cached_tokens=None,
+                prompt_tokens_per_second=None, generation_tokens_per_second=None,
+            )
         calls = [initial_tool_calls] if isinstance(initial_tool_calls, dict) else list(initial_tool_calls)
         initial_decision: CanonicalToolDecision | None = None
         if canonical_gate_enabled:
@@ -1232,7 +1240,7 @@ def run_tool_loop(
         if (
             executing_mutation_verification
             and artifact_verification_required
-            and result.finish_reason in {"cancelled", "error", "length", "timeout"}
+            and result.finish_reason not in {"stop", "tool_calls"}
         ):
             abort_pending_artifact()
             artifact_verification_required = False
@@ -1369,6 +1377,29 @@ def run_tool_loop(
                     on_phase_start=on_phase_start,
                     loop=loop_index + 2,
                 )
+        # Parsing, normalization and formal healing cannot confer execution
+        # authority on an incomplete completion (including retry results).
+        if result.finish_reason not in {"stop", "tool_calls"}:
+            abort_pending_artifact()
+            record_terminal(
+                attempt_id=attempt_id, report=shadow_report, result=result,
+                outcome="cancelled" if result.finish_reason == "cancelled" else "rejected_guardrail",
+                reason="model_cancelled" if result.finish_reason == "cancelled" else "incomplete_tool_completion",
+                phase=produced_by_phase or "tool_call",
+            )
+            if not result.tool_calls and state.tool_rounds > 0 and shell_full_enabled:
+                # Preserve the existing post-tool finalization path using
+                # committed evidence only. Never reuse incomplete prose or
+                # reconsider/dispatch a tool from this completion.
+                record_post_tool_final_reuse_fallback("finish_reason")
+                turn.mark_finalizable()
+                return answer_from_tool_results(
+                    temperature=temperature, max_tokens=max_tokens,
+                    on_final_delta=on_final_delta, on_progress=on_progress,
+                    on_model_step=on_model_step, on_phase_start=on_phase_start,
+                    loop=loop_index + 1, use_tool_prompt=state.used_tool_call_prompt,
+                )
+            return replace(result, tool_calls=[])
         if canonical_gate_enabled and len(result.tool_calls) > 1:
             record_terminal(
                 attempt_id=attempt_id,

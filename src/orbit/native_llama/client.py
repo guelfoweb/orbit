@@ -2007,12 +2007,18 @@ class NativeLlamaClient:
             should_cancel=should_cancel,
         )
         raw_content = "".join(raw_parts)
+        final_parse_error = None
         try:
             parsed = self._parse_profile_output(raw_content, partial=False)
-        except RuntimeError:
+        except RuntimeError as exc:
             if not timings.cancelled and timings.output_tokens < max_tokens:
-                raise
-            parsed = self._parse_profile_output(raw_content, partial=True)
+                # Strict finalization now rejects cases formerly mapped to an
+                # empty message. Preserve only the existing lossless FINISH
+                # parameter-order recovery below; all other failures propagate.
+                final_parse_error = exc
+                parsed = _ProfileParsedOutput("", "", ())
+            else:
+                parsed = self._parse_profile_output(raw_content, partial=True)
 
         if (
             not timings.cancelled
@@ -2033,6 +2039,10 @@ class NativeLlamaClient:
                     if (not candidate.content and not candidate.reasoning_content
                             and exact_finish_arguments(candidate.tool_calls, expected)):
                         parsed = candidate
+                        final_parse_error = None
+
+        if final_parse_error is not None:
+            raise final_parse_error
 
         if (not tools or not parsed.tool_calls) and parsed.content.startswith(emitted_content):
             emit_visible(parsed.content[len(emitted_content) :])

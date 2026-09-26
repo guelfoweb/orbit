@@ -132,6 +132,14 @@ class FinishNativeIntegrationTests(unittest.TestCase):
         self.assertEqual(parser.call_args.args[0], wire([VALUES[2], *VALUES[:2]]))
         self.assertEqual(parse_finish_call(json.loads(result.tool_calls[0]['function']['arguments']))['status'], 'open')
 
+    def test_strict_native_parse_error_uses_same_lossless_ordering(self):
+        result, parser = self.complete(initial=RuntimeError("strict final parse"))
+        self.assertEqual(result.tool_calls, calls(EXPECTED))
+        self.assertEqual(parser.call_count, 2)
+        with self.assertRaisesRegex(RuntimeError, "strict final parse"):
+            self.complete(initial=RuntimeError("strict final parse"),
+                          second=_ProfileParsedOutput("", "", calls({**EXPECTED, "status": "resolved"})))
+
     def test_cancel_length_other_phases_and_protocol_never_reparse(self):
         for kwargs in ({"cancelled": True}, {"output_tokens": 2048},
                        {"tools": [PLAN_TOOL_SCHEMA]}, {"tools": []},

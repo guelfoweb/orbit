@@ -133,6 +133,25 @@ class NativeConstraintTests(_Case):
             self.lib.llama_sampler_accept(sampler, token)
         return True
 
+    def test_strict_final_parser_preserves_existing_finish_parameter_order_recovery(self):
+        client = self.client()
+        messages = [{'role': 'user', 'content': 'Control'}]
+        client.apply_chat_template(messages, tools=[FINISH_TOOL_SCHEMA])
+        raw = ('<tool_call>\n<function=finish_analysis_question>\n'
+               '<parameter=answer_summary>\nBounded finding.\n</parameter>\n'
+               '<parameter=status>\nstill_open\n</parameter>\n</function>\n</tool_call>')
+        def generate(_messages, **kwargs):
+            kwargs['on_token'](raw)
+            return NativeTimings(100, 50, 0, 100, 1, 1)
+        with mock.patch.object(client, 'complete_chat', side_effect=generate):
+            result = client._complete_profile_chat_text_once(
+                messages, max_tokens=2048, stop=(), tools=[FINISH_TOOL_SCHEMA], thinking=False,
+                route_prefix_anchor=False, qwen_route_prefix_anchor=False,
+                qwen36_shell_tool_prefix_anchor=False, allow_mtp_experimental=None,
+                final_prefix_experiment=False)
+        args = json.loads(result.tool_calls[0]['function']['arguments'])
+        self.assertEqual(args, {'status': 'still_open', 'answer_summary': 'Bounded finding.'})
+
     def test_native_grammar_all_statuses_roundtrip_and_excludes_other_tools(self):
         client = self.client(); messages = [{'role': 'user', 'content': 'Control'}]
         auto = client.apply_chat_template(messages, tools=[FINISH_TOOL_SCHEMA])
