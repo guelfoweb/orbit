@@ -1452,7 +1452,9 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
 
     //LOG_DBG("Parsing PEG input with format %s: %s\n", common_chat_format_name(params.format), effective_input.c_str());
 
-    common_peg_parse_flags flags = COMMON_PEG_PARSE_FLAG_LENIENT;
+    // Partial ASTs serve streaming only. A final tool envelope must be closed
+    // and consume the entire response, not merely contain valid arguments.
+    common_peg_parse_flags flags = is_partial ? COMMON_PEG_PARSE_FLAG_LENIENT : COMMON_PEG_PARSE_FLAG_NONE;
     if (params.debug) {
         flags |= COMMON_PEG_PARSE_FLAG_DEBUG;
     }
@@ -1460,7 +1462,28 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     common_peg_parse_context ctx(effective_input, flags);
     auto result = parser.parse(ctx);
 
-    if (result.fail()) {
+    auto validate_reasoning = [&](const common_chat_msg & msg) {
+        // Reasoning delimiters left in visible content mean the optional reasoning
+        // production was bypassed (e.g. a second block after a closed prefill).
+        // Inspect AST roles, never argument strings: literal tags inside JSON/XML
+        // arguments remain data. This check does not change the generation grammar.
+        if (params.reasoning_format != COMMON_REASONING_FORMAT_NONE) {
+            if (!params.reasoning_start_tag.empty() &&
+                msg.content.find(params.reasoning_start_tag) != std::string::npos) {
+                throw std::runtime_error("Unexpected reasoning delimiter in assistant content");
+            }
+            if (!params.reasoning_end_tag.empty() && !msg.tool_calls.empty()) {
+                ctx.ast.visit(result, [&](const common_peg_ast_node & node) {
+                    if (node.tag == common_chat_peg_builder::REASONING &&
+                        effective_input.compare(node.end, params.reasoning_end_tag.size(), params.reasoning_end_tag) != 0) {
+                        throw std::runtime_error("Tool call cannot terminate an unclosed reasoning block");
+                    }
+                });
+            }
+        }
+    };
+
+    if (result.fail() || (!is_partial && (!result.success() || result.end != effective_input.size()))) {
         // During partial parsing, return partial results if any AST nodes were captured
         // This allows streaming to work correctly for formats like FUNC_MARKDOWN_CODE_BLOCK
         if (is_partial && result.end > 0) {
@@ -1476,6 +1499,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
                 mapper = std::make_unique<common_chat_peg_mapper>(msg);
             }
             mapper->from_ast(ctx.ast, result);
+            validate_reasoning(msg);
 
             if (ctx.is_debug()) {
                 fprintf(stderr, "\nAST for partial parse (fail):\n%s\n", ctx.ast.dump().c_str());
@@ -1500,6 +1524,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
         mapper = std::make_unique<common_chat_peg_mapper>(msg);
     }
     mapper->from_ast(ctx.ast, result);
+    validate_reasoning(msg);
 
     if (ctx.is_debug()) {
         fprintf(stderr, "\nAST for %s parse:\n%s\n", is_partial ? "partial" : "full", ctx.ast.dump().c_str());

@@ -1149,6 +1149,7 @@ class ToolLoopEnvironment:
         on_phase_start: Callable[[ModelPhaseStart], None] | None,
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+        initial_finish_reason: str | None = None,
         local_capabilities=None,
         user_turn_id: str | None = None,
     ) -> ToolResultBundle:
@@ -1166,6 +1167,7 @@ class ToolLoopEnvironment:
             on_phase_start=on_phase_start,
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
+            initial_finish_reason=initial_finish_reason,
             local_capabilities=local_capabilities,
             user_turn_id=user_turn_id,
         )

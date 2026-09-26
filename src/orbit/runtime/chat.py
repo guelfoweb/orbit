@@ -887,6 +887,7 @@ class ChatRuntime:
                 command_tool_call_from_tool_calls(first.tool_calls, tools)
                 or command_tool_call_from_content(command_content, tools)
             ),
+            initial_finish_reason=first.finish_reason,
         )
         return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(bundle))
 
@@ -1043,6 +1044,7 @@ class ChatRuntime:
         on_phase_start: Callable[[ModelPhaseStart], None] | None = None,
         tool_names: tuple[str, ...] | None,
         initial_tool_calls: list[dict[str, object]] | dict[str, object] | None = None,
+        initial_finish_reason: str | None = None,
         ):
         return self._tool_loop_environment().run(
             temperature=temperature,
@@ -1057,6 +1059,7 @@ class ChatRuntime:
             on_phase_start=on_phase_start,
             tool_names=tool_names,
             initial_tool_calls=initial_tool_calls,
+            initial_finish_reason=initial_finish_reason,
             local_capabilities=self.local_capabilities,
             user_turn_id=self.current_user_turn_id,
         )

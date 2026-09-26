@@ -3,7 +3,7 @@
   "upstream_commit": "41abbfd599fbdd3470fcae0a1fb6530ad8403cd7",
   "upstream_tag": "untagged",
   "upstream_build_number": 10968,
-  "source_tree_sha256": "166e8a8c933e0445de27af3c30347fe61d116bf0ee850d093a4749bcdf18da83",
+  "source_tree_sha256": "eb3d4bb504174ebb2bb46be8c43d4a550802b2a003bf02a5f368f9d3c14e2ea5",
   "patchset_sha256": "07b1a48d13610cc7fc51c63d6bbb0d6be8788f3faaf88a8d66770372ecfb5cb0",
   "patchset_sha256_algorithm": "orbit-unified-diff-v1",
   "omitted_upstream_path_count": 1791,
@@ -11,6 +11,9 @@
   "patched_paths": [
     "cmake/arm64-linux-clang.cmake",
     "common/chat-auto-parser-helpers.cpp",
+    "common/chat.cpp",
+    "common/chat.h",
+    "common/parsers/qwen3-coder.cpp",
     "common/speculative.cpp",
     "common/speculative.h",
     "common/unicode.cpp",
@@ -67,5 +70,5 @@
     "vendor/miniaudio/miniaudio.h"
   ],
   "patchset_algorithm": "orbit-patchset-v2",
-  "patchset_v2_sha256": "f50b7229db767cbd5bc5ef1f69bb39156bbe4578ee7a143b3c5d3a3a1dda4e84"
+  "patchset_v2_sha256": "2656e07596947af0d4a4f1e29b46727d0048ef74534b4a33fdcaf5997c328409"
 }
