@@ -247,6 +247,34 @@ class FinishConstraintCliTests(unittest.TestCase):
         self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts), (0, 0, 0))
         self.assertEqual(self.generations, [])
 
+    def test_adaptive_final_recount_preserves_failure_in_initial_and_repair(self):
+        from orbit.backend.base import TokenCount
+        count = TokenCount(2500, 4096, "a" * 64, "b" * 64)
+        error = LlamaServerError("private", diagnostic_code="required-tool-decoding-unavailable")
+        for repair in (False, True):
+            for failure, reason in ((error, "required-tool-decoding-unavailable"),
+                                    (None, "exact-token-count-unavailable"),
+                                    (TokenCount(5000, 4096, "a" * 64, "b" * 64),
+                                     "required-context-does-not-fit")):
+                with self.subTest(repair=repair, reason=reason):
+                    repl = self.client("--constrain-finish")
+                    rt = self.open(repl)
+                    self.generations.clear()
+                    self.repair_once = repair
+                    first_call = [TokenCount(200, 4096, "a" * 64, "b" * 64)] * 2 if repair else []
+                    with mock.patch.object(repl.backend, "count_chat_tokens",
+                                           side_effect=first_call + [count] * 4 + [failure] * 2) as counter:
+                        with self.assertRaisesRegex(ContextAdmissionError,
+                                                    "FINISH frozen context unavailable: " + reason):
+                            self.finish(rt)
+                    self.assertEqual(rt.last_context_plan.reason, reason)
+                    self.assertEqual(counter.call_count, 8 if repair else 6)
+                    expected = 1 if repair else 0
+                    self.assertEqual(len(self.generations), expected)
+                    self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts),
+                                     (expected, expected, expected))
+                    repl._close_analysis()
+
     def test_unknown_exact_capability_and_unavailable_count_are_distinct(self):
         for unknown, reason in ((True, "exact-token-capability-unavailable"),
                                 (False, "exact-token-count-unavailable")):

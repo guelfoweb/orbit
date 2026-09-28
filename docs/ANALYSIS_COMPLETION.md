@@ -238,11 +238,13 @@ after a source upgrade; no external llama.cpp installation is needed.
 
 If the server lacks required decoding, exact admission reports
 `required-tool-decoding-unavailable`. Missing exact counts report
-`exact-token-count-unavailable`; failed or malformed count responses are
-reported separately. None of these diagnoses means the prompt exceeds the
+`exact-token-count-unavailable`; counter exceptions and invalid returned counts
+report `exact-token-count-failed` and `exact-token-count-invalid`. If an adapter
+already returns no count for a failed/malformed HTTP response, its deeper cause
+remains unavailable. None of these diagnoses means the prompt exceeds the
 context window. A measured overflow retains `required-context-does-not-fit`
 (or an exhausted-reserve diagnosis). The reason survives FINISH repair
-admission and the investigation's recorded stop reason. Requests still stop
+admission, the final adaptive recount and the investigation's recorded stop reason. Requests still stop
 without falling back to free generation; admission policy, budgets and repair
 limits are unchanged. External endpoints retain their explicit backend refusal
 when they cannot provide the requested constraint.

@@ -1,5 +1,6 @@
 """Admission failures retain bounded causes without changing permission/budgets."""
 import copy
+from dataclasses import replace
 import unittest
 from unittest import mock
 
@@ -32,7 +33,10 @@ class ExactCountDiagnosticTests(unittest.TestCase):
     def test_capability_cause_from_either_attestation_survives(self):
         error = LlamaServerError("private backend detail")
         error.diagnostic_code = "required-tool-decoding-unavailable"
-        for sequence in ((error, error), (self.count(), error), (error, self.count())):
+        sequences = [(error, error)]
+        for other in (self.count(), None, ValueError("private"), {}):
+            sequences.extend(((other, error), (error, other)))
+        for sequence in sequences:
             with self.subTest(sequence=sequence):
                 counter = mock.Mock(side_effect=sequence)
                 plan = self.plan(counter)
@@ -55,7 +59,11 @@ class ExactCountDiagnosticTests(unittest.TestCase):
         self.assertEqual(plan.reason, "exact-token-count-failed")
 
     def test_invalid_return_is_not_a_count_or_diagnostic_code(self):
-        for value in ({"tokens": 100}, "required-tool-decoding-unavailable", False):
+        values = [{"tokens": 100}, "required-tool-decoding-unavailable", False]
+        for fields in ({"tokens": -1}, {"context_tokens": None},
+                       {"rendered_hash": None}, {"token_hash": "short"}):
+            values.append(replace(self.count(), **fields))
+        for value in values:
             with self.subTest(value=value):
                 plan = self.plan(mock.Mock(return_value=value))
                 self.assertFalse(plan.admitted)

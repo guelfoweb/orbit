@@ -5843,7 +5843,9 @@ class AnalysisRuntime:
             raise ContextAdmissionError("FINISH output capacity exhausted")
         admitted = exact(maximum)
         self.last_context_plan = admitted
-        if (not admitted.admitted or list(admitted.messages) != frozen
+        if not admitted.admitted:
+            raise ContextAdmissionError(f"FINISH frozen context unavailable: {admitted.reason}")
+        if (list(admitted.messages) != frozen
                 or admitted.tokens_after != capacity.tokens_after
                 or admitted.input_limit + maximum != capacity.input_limit):
             self.last_context_plan = replace(

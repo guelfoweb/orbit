@@ -569,10 +569,14 @@ def _safe_count_chat(
         return "exact-token-count-failed"
     if value is None:
         return "exact-token-count-unavailable"
-    return value if isinstance(value, TokenCount) else "exact-token-count-invalid"
+    return value if _exact_count(value) else "exact-token-count-invalid"
 
 
 def _count_failure_reason(first, second, *, default: str) -> str:
+    # A specific capability refusal must survive either attestation, even if
+    # the other count failed without a cause.
+    if "required-tool-decoding-unavailable" in (first, second):
+        return "required-tool-decoding-unavailable"
     for value in (first, second):
         if isinstance(value, str):
             return value
