@@ -323,7 +323,11 @@ class BannerTests(unittest.TestCase):
 
         from orbit.terminal.runtime_status import RuntimeStatus
 
-        values = {field.name: "x" for field in dataclasses.fields(RuntimeStatus)}
+        values = {
+            field.name: "x" for field in dataclasses.fields(RuntimeStatus)
+            if field.default is dataclasses.MISSING
+            and field.default_factory is dataclasses.MISSING
+        }
         values.update(
             version="0.1", workdir="~/w", model="m", backend="native",
             banner_model="Ornith", context_window="8192",

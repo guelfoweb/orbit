@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from orbit import __version__
+from orbit.build_identity import BuildIdentity, PROCESS_BUILD_IDENTITY, parse_build_identity
 from orbit.native_llama.model_registry import load_registry
 from orbit.runtime.session_memory import DEFAULT_CONTEXT_TOKENS, SOFT_MEMORY_RATIO, estimate_message_tokens
 from orbit.runtime.tools import tool_names
@@ -90,6 +91,8 @@ class RuntimeStatus:
     # analysis.
     autonomous: str = "off"
     constrain_finish: str = "off"
+    client_build: BuildIdentity = BuildIdentity()
+    server_build: BuildIdentity = BuildIdentity()
 
 
 def collect_host_info() -> HostInfo:
@@ -115,13 +118,22 @@ def collect_runtime_status(
     constrain_finish: bool | None = None,
 ) -> RuntimeStatus:
     info = _safe_call(getattr(backend, "model_info", None))
-    props = _safe_call(getattr(backend, "backend_props", None)) or {}
+    props = _safe_call(getattr(backend, "backend_props", None))
+    props = props if isinstance(props, dict) else {}
     display_model = _model_name(info, backend)
     context_window = runtime.context_tokens or _model_context(info) or DEFAULT_CONTEXT_TOKENS
-    display_version = _display_version(__version__, config.workdir)
+    display_version = PROCESS_BUILD_IDENTITY.description or __version__
+    # Native HTTP clients refresh identity without changing the props cache
+    # used by inference. Older/external adapters can expose it through props.
+    build_reader = getattr(backend, "server_build_info", None)
+    server_build = parse_build_identity(
+        _safe_call(build_reader) if callable(build_reader) else props.get("orbit_build")
+    )
     return RuntimeStatus(
         version=display_version,
         package_version=__version__,
+        client_build=PROCESS_BUILD_IDENTITY,
+        server_build=server_build,
         workdir=_workdir_display(config.workdir),
         model=display_model,
         backend=_backend_name(props),
@@ -180,6 +192,7 @@ def format_startup_banner(status: RuntimeStatus) -> str:
             f"think {_state(status.think)} · autonomous {_state(status.autonomous)} · "
             f"ctx {status.context_window}",
             "/help for commands · /status for details",
+            *([_build_warning(status)] if _build_warning(status) else []),
         ]
     )
 
@@ -189,6 +202,9 @@ def format_status_panel(status: RuntimeStatus) -> str:
         ("header", "Orbit Runtime"),
         ("Version", status.version),
         *([("Package", status.package_version)] if status.version != status.package_version else []),
+        ("Client build", status.client_build.commit or UNKNOWN),
+        ("Server build", status.server_build.commit or UNKNOWN),
+        ("Server ver.", status.server_build.description or status.server_build.version or UNKNOWN),
         ("Model", status.model),
         ("Backend", f"{status.backend}, server {status.server}"),
         ("Low memory", status.low_memory),
@@ -221,7 +237,16 @@ def format_status_panel(status: RuntimeStatus) -> str:
         ("Memory", _memory_summary(status)),
         ("Mutations", _mutation_summary(status)),
     ]
-    return _box(rows, width=80)
+    panel = _box(rows, width=80)
+    warning = _build_warning(status)
+    return f"{panel}\n{warning}" if warning else panel
+
+
+def _build_warning(status: RuntimeStatus) -> str | None:
+    client, server = status.client_build.commit, status.server_build.commit
+    if client is not None and server is not None and client != server:
+        return "warning: Orbit client/server build mismatch"
+    return None
 
 
 def _linux_cpu_model(path: Path = Path("/proc/cpuinfo")) -> str | None:
@@ -387,39 +412,6 @@ def _short_machine_name(value: str) -> str:
     if len(value) <= 48:
         return value
     return value[:45].rstrip() + "..."
-
-
-def _display_version(package_version: str, cwd: Path) -> str:
-    exact = _git_describe(["git", "describe", "--tags", "--exact-match", "HEAD"], cwd)
-    if exact:
-        return exact
-    described = _git_describe(["git", "describe", "--tags", "--always", "--dirty"], cwd)
-    return described or package_version
-
-
-def _git_describe(command: list[str], cwd: Path) -> str | None:
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=_safe_cwd(cwd),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=0.5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    value = completed.stdout.strip()
-    return value or None
-
-
-def _safe_cwd(cwd: Path) -> Path:
-    try:
-        return Path(cwd).expanduser().resolve()
-    except OSError:
-        return Path(".")
 
 
 def _workdir_display(workdir: Path) -> str:

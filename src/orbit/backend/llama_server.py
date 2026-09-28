@@ -326,6 +326,14 @@ class LlamaServerBackend:
         props.update(tool_call_healing_status())
         return props
 
+    def server_build_info(self) -> object:
+        """Fresh observability only; do not invalidate inference/profile caches."""
+        try:
+            props = self._get_json("/props")
+        except LlamaServerError:
+            return None
+        return props.get("orbit_build") if isinstance(props, dict) else None
+
     def uses_native_separated_reasoning(self) -> bool:
         compatibility = self._props_or_empty().get("model_compatibility")
         return bool(
