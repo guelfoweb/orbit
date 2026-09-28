@@ -201,14 +201,121 @@ class FinishConstraintCliTests(unittest.TestCase):
         rt = self.open(repl)
         # Exact admission rejects the unavailable count before dispatch; the
         # existing backend capability guard also rejects direct generation.
-        with self.assertRaisesRegex(ContextAdmissionError, "context admission failed"):
+        with self.assertRaisesRegex(ContextAdmissionError, "context admission failed: required-tool-decoding-unavailable") as caught:
             self.finish(rt)
         self.assertEqual(self.generations, [])
         self.assertEqual(rt.control_repairs, 0)
+        self.assertEqual(rt.model_calls, 0)
+        self.assertEqual(rt.control_attempts, 0)
+        self.assertEqual(rt.last_context_plan.reason, "required-tool-decoding-unavailable")
+        from orbit.terminal.theme import runtime_error_text
+        self.assertEqual(runtime_error_text(caught.exception),
+                         "error: context admission failed: required-tool-decoding-unavailable")
+        rt._remember_report_run(None, request="fixture", stop_reason=str(caught.exception),
+                                actions=0, model_calls=0, cancelled=False)
+        report = rt.report(generate_narrative=False)
+        self.assertIn("required-tool-decoding-unavailable", report.text)
+        self.assertIn("required-tool-decoding-unavailable", report.dossier_text)
+        self.assertEqual(report.model_calls, 0)
         with self.assertRaisesRegex(LlamaServerError, "required tool decoding"):
             repl.backend.chat_stream(rt.messages, tools=[FINISH_TOOL_SCHEMA],
                                      tool_choice="required", max_tokens=2048,
                                      temperature=0, on_delta=lambda _: None)
+        self.assertEqual(self.generations, [])
+
+    def test_invalid_capability_flags_do_not_enable_generation_or_repair(self):
+        for flag in (None, 1, "true", {}):
+            with self.subTest(flag=flag):
+                repl = self.client("--constrain-finish", backend=self.backend(supported=flag))
+                rt = self.open(repl)
+                history = copy.deepcopy(rt.messages)
+                with self.assertRaisesRegex(ContextAdmissionError, "required-tool-decoding-unavailable"):
+                    self.finish(rt)
+                self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts), (0, 0, 0))
+                self.assertEqual(self.generations, [])
+                self.assertEqual(rt.messages, history)
+                repl._close_analysis()
+
+    def test_real_overflow_does_not_become_capability_failure(self):
+        from orbit.backend.base import TokenCount
+        repl = self.client("--constrain-finish")
+        rt = self.open(repl)
+        value = TokenCount(5000, 4096, "a" * 64, "b" * 64)
+        with mock.patch.object(repl.backend, "count_chat_tokens", return_value=value):
+            with self.assertRaisesRegex(ContextAdmissionError, "FINISH capacity unavailable: required-context-does-not-fit"):
+                self.finish(rt)
+        self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts), (0, 0, 0))
+        self.assertEqual(self.generations, [])
+
+    def test_adaptive_final_recount_preserves_failure_in_initial_and_repair(self):
+        from orbit.backend.base import TokenCount
+        count = TokenCount(2500, 4096, "a" * 64, "b" * 64)
+        error = LlamaServerError("private", diagnostic_code="required-tool-decoding-unavailable")
+        for repair in (False, True):
+            for failure, reason in ((error, "required-tool-decoding-unavailable"),
+                                    (None, "exact-token-count-unavailable"),
+                                    (TokenCount(5000, 4096, "a" * 64, "b" * 64),
+                                     "required-context-does-not-fit")):
+                with self.subTest(repair=repair, reason=reason):
+                    repl = self.client("--constrain-finish")
+                    rt = self.open(repl)
+                    self.generations.clear()
+                    self.repair_once = repair
+                    first_call = [TokenCount(200, 4096, "a" * 64, "b" * 64)] * 2 if repair else []
+                    with mock.patch.object(repl.backend, "count_chat_tokens",
+                                           side_effect=first_call + [count] * 4 + [failure] * 2) as counter:
+                        with self.assertRaisesRegex(ContextAdmissionError,
+                                                    "FINISH frozen context unavailable: " + reason):
+                            self.finish(rt)
+                    self.assertEqual(rt.last_context_plan.reason, reason)
+                    self.assertEqual(counter.call_count, 8 if repair else 6)
+                    expected = 1 if repair else 0
+                    self.assertEqual(len(self.generations), expected)
+                    self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts),
+                                     (expected, expected, expected))
+                    repl._close_analysis()
+
+    def test_unknown_exact_capability_and_unavailable_count_are_distinct(self):
+        for unknown, reason in ((True, "exact-token-capability-unavailable"),
+                                (False, "exact-token-count-unavailable")):
+            with self.subTest(unknown=unknown):
+                repl = self.client("--constrain-finish")
+                rt = self.open(repl)
+                if unknown:
+                    repl.backend._props_cache = {}
+                    repl.backend._props_discovery_status = "unavailable"
+                else:
+                    repl.backend._post_json.side_effect = LlamaServerError("private HTTP error")
+                with self.assertRaisesRegex(ContextAdmissionError, reason):
+                    self.finish(rt)
+                self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts), (0, 0, 0))
+                self.assertEqual(self.generations, [])
+                repl._close_analysis()
+
+    def test_capability_loss_during_existing_repair_stops_without_dispatch(self):
+        repl = self.client("--constrain-finish")
+        rt = self.open(repl)
+        original_stream = repl.backend._post_native_stream.side_effect
+        self.repair_once = True
+        def withdraw(*args, **kwargs):
+            repl.backend._props_cache["required_tool_decoding"] = False
+            return original_stream(*args, **kwargs)
+        repl.backend._post_native_stream.side_effect = withdraw
+        with self.assertRaisesRegex(ContextAdmissionError, "required-tool-decoding-unavailable"):
+            self.finish(rt)
+        self.assertEqual(len(self.generations), 1)
+        self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts), (1, 1, 1))
+        self.assertEqual(self.generations[0]["tool_choice"], "required")
+
+    def test_external_backend_keeps_existing_explicit_refusal(self):
+        repl = self.client("--constrain-finish")
+        rt = self.open(repl)
+        repl.backend._props_cache = {"backend": "external"}
+        with self.assertRaisesRegex(LlamaServerError, "server does not support required tool decoding"):
+            self.finish(rt)
+        # Existing external admission opt-out is unchanged; the guarded
+        # dispatch attempt is counted, but no generation or repair occurs.
+        self.assertEqual((rt.model_calls, rt.control_repairs, rt.control_attempts), (1, 0, 1))
         self.assertEqual(self.generations, [])
 
     def test_choice_does_not_rewrite_messages_schemas_or_output_budget(self):
