@@ -147,6 +147,14 @@ complete shards. Keep the shards together; they appear as one model in the
 menu. Rerun the same command to finish an interrupted set. Exact repository and
 GGUF names are in the registry; options are in `orbit download --help`.
 
+Single files and shards retain a `.part` beside the destination across
+interruptions. Rerun the same command to resume; progress includes the bytes
+already downloaded. Transfers use a 30-second socket inactivity timeout and
+at most four attempts with bounded backoff. Only a complete transfer matching
+the declared size is published by atomic rename. Existing final files are reused.
+See [download recovery](docs/DOWNLOAD_RECOVERY.md) for server compatibility and
+integrity limits.
+
 ## Development and tests
 
 The project uses `unittest`. From the checkout, run the non-live suite:

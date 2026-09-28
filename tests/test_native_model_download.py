@@ -4,6 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from tests.test_download_reliability import Response
+
 from orbit.native_llama.model_download import (
     download_all_for_repo,
     DownloadRequest,
@@ -73,7 +75,7 @@ class NativeModelDownloadTests(unittest.TestCase):
             result = download_model(
                 "owner/repo/model.gguf",
                 models_dir=models_dir,
-                retrieve=lambda url, dest: calls.append(url),
+                opener=lambda request, timeout: calls.append(request.full_url),
             )
 
         self.assertEqual(result.path, path)
@@ -84,61 +86,50 @@ class NativeModelDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp) / "models"
 
-            def retrieve(url: str, dest: str) -> None:
-                Path(dest).write_text(f"downloaded from {url}", encoding="utf-8")
+            def opener(request, timeout):
+                return Response(f"downloaded from {request.full_url}".encode())
 
-            result = download_model("owner/repo/path/model.gguf", models_dir=models_dir, retrieve=retrieve)
+            result = download_model("owner/repo/path/model.gguf", models_dir=models_dir, opener=opener)
 
             self.assertTrue(result.downloaded)
             self.assertEqual(result.path, models_dir / "owner--repo" / "path/model.gguf")
             self.assertIn("downloaded from https://huggingface.co/owner/repo/resolve/main/path/model.gguf", result.path.read_text(encoding="utf-8"))
 
-    def test_interrupted_download_removes_temporary_file(self) -> None:
+    def test_interrupted_download_preserves_partial_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp) / "models"
 
-            def retrieve(_url: str, dest: str) -> None:
-                Path(dest).write_text("partial", encoding="utf-8")
-                raise KeyboardInterrupt
+            def progress(written, total):
+                if written:
+                    raise KeyboardInterrupt
 
             with self.assertRaises(KeyboardInterrupt):
-                download_model("owner/repo/model.gguf", models_dir=models_dir, retrieve=retrieve)
-
+                download_model("owner/repo/model.gguf", models_dir=models_dir,
+                               opener=lambda *a, **k: Response(b"partial"), progress=progress)
             destination = models_dir / "owner--repo" / "model.gguf"
             self.assertFalse(destination.exists())
-            self.assertEqual(list(destination.parent.glob(".*.tmp")), [])
+            self.assertEqual(destination.with_name("model.gguf.part").read_bytes(), b"partial")
 
-    def test_download_reports_bounded_percentage_inputs(self) -> None:
+    def test_download_reports_actual_total_byte_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            progress: list[tuple[int, int]] = []
-
-            def retrieve(_url: str, dest: str, reporthook) -> None:
-                reporthook(0, 25, 100)
-                reporthook(2, 25, 100)
-                reporthook(5, 25, 100)
-                Path(dest).write_text("ok", encoding="utf-8")
-
-            download_model(
-                "owner/repo/model.gguf",
-                models_dir=Path(tmp),
-                retrieve=retrieve,
-                progress=lambda downloaded, total: progress.append((downloaded, total)),
-            )
-
-        self.assertEqual(progress, [(0, 100), (50, 100), (100, 100)])
+            progress = []
+            download_model("owner/repo/model.gguf", models_dir=Path(tmp),
+                opener=lambda *a, **k: Response(b"x" * 100),
+                progress=lambda downloaded, total: progress.append((downloaded, total)))
+        self.assertEqual(progress, [(0, 100), (100, 100)])
 
     def test_download_mmproj_from_repo_uses_projector_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp) / "models"
 
-            def retrieve(url: str, dest: str) -> None:
-                Path(dest).write_text(f"downloaded from {url}", encoding="utf-8")
+            def opener(request, timeout):
+                return Response(f"downloaded from {request.full_url}".encode())
 
             result = download_model(
                 "ggml-org/gemma-4-26B-A4B-it-GGUF",
                 models_dir=models_dir,
                 prefer="mmproj",
-                retrieve=retrieve,
+                opener=opener,
             )
 
             self.assertTrue(result.downloaded)
@@ -152,14 +143,14 @@ class NativeModelDownloadTests(unittest.TestCase):
             models_dir = Path(tmp) / "models"
             seen: list[str] = []
 
-            def retrieve(url: str, dest: str) -> None:
-                seen.append(url)
-                Path(dest).write_text("ok", encoding="utf-8")
+            def opener(request, timeout):
+                seen.append(request.full_url)
+                return Response(b"ok")
 
             batch = download_all_for_repo(
                 "ggml-org/gemma-4-26B-A4B-it-GGUF",
                 models_dir=models_dir,
-                retrieve=retrieve,
+                opener=opener,
             )
 
         self.assertEqual(len(batch.results), 3)
