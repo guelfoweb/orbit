@@ -11,6 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from orbit.build_identity import BuildIdentity
 from orbit.terminal.runtime_status import (
     AccelerationInfo,
     HostInfo,
@@ -130,12 +131,8 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
         self.assertIn("│ Package      0.0.1", panel)
 
     def test_collect_runtime_status_uses_exact_git_tag(self) -> None:
-        def fake_run(command, **kwargs):
-            if "--exact-match" in command:
-                return SimpleNamespace(returncode=0, stdout="v0.0.1-rc11\n")
-            return SimpleNamespace(returncode=0, stdout="ignored\n")
-
-        with mock.patch("orbit.terminal.runtime_status.subprocess.run", side_effect=fake_run):
+        with mock.patch("orbit.terminal.runtime_status.PROCESS_BUILD_IDENTITY",
+                        BuildIdentity("a" * 40, "0.0.1", "v0.0.1-rc11")):
             status = collect_runtime_status(_Runtime(), AppConfig(workdir=ROOT), _Backend())
 
         self.assertEqual(status.version, "v0.0.1-rc11")
@@ -143,21 +140,13 @@ class RuntimeStatusFormattingTests(unittest.TestCase):
         self.assertEqual(status.workdir, str(ROOT))
 
     def test_collect_runtime_status_falls_back_to_describe_then_package(self) -> None:
-        calls = []
-
-        def fake_run(command, **kwargs):
-            calls.append(command)
-            if "--exact-match" in command:
-                return SimpleNamespace(returncode=1, stdout="")
-            return SimpleNamespace(returncode=0, stdout="v0.0.1-rc11-2-gabc123\n")
-
-        with mock.patch("orbit.terminal.runtime_status.subprocess.run", side_effect=fake_run):
+        with mock.patch("orbit.terminal.runtime_status.PROCESS_BUILD_IDENTITY",
+                        BuildIdentity("a" * 40, "0.0.1", "v0.0.1-rc11-2-gabc123")):
             status = collect_runtime_status(_Runtime(), AppConfig(workdir=ROOT), _Backend())
 
         self.assertEqual(status.version, "v0.0.1-rc11-2-gabc123")
-        self.assertEqual(len(calls), 2)
-
-        with mock.patch("orbit.terminal.runtime_status.subprocess.run", side_effect=OSError):
+        with mock.patch("orbit.terminal.runtime_status.PROCESS_BUILD_IDENTITY",
+                        BuildIdentity(version="0.0.1")):
             fallback = collect_runtime_status(_Runtime(), AppConfig(workdir=ROOT), _Backend())
 
         self.assertEqual(fallback.version, "0.0.1")

@@ -14,6 +14,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from orbit.build_identity import PROCESS_BUILD_IDENTITY
 from orbit.backend.payloads import ARTIFACT_CONTENT_PROTOCOL_ID, ARTIFACT_CONTENT_PROTOCOL_VERSION
 from orbit.final_prefix_config import resolve_final_prefix_reuse
 from orbit.native_llama.capabilities import safe_native_capability_manifest
@@ -614,6 +615,7 @@ class OrbitNativeHandler(BaseHTTPRequestHandler):
                     "mtp_failure_reason": session["mtp_failure_reason"],
                     "model_id": state.client.paths.model_id,
                     "backend": "orbit-native",
+                    "orbit_build": PROCESS_BUILD_IDENTITY.to_dict(),
                     # This protocol version rejects unsupported required grammars.
                     "required_tool_decoding": True,
                     "artifact_content_protocol": {
@@ -1537,6 +1539,8 @@ def run_server(argv: list[str] | None = None) -> int:
     model_alias = resolve_model_alias(args.alias, paths)
     httpd = ThreadingHTTPServer((args.host, args.port), OrbitNativeHandler)
     httpd.orbit_state = OrbitNativeServer(client=client, model_alias=model_alias)  # type: ignore[attr-defined]
+    print(f"orbit-server build: {PROCESS_BUILD_IDENTITY.commit or 'unknown'} "
+          f"({PROCESS_BUILD_IDENTITY.description or PROCESS_BUILD_IDENTITY.version})", flush=True)
     print(f"orbit-server model: {model_alias}", flush=True)
     print(f"orbit-server listening on http://{args.host}:{args.port}", flush=True)
     try:

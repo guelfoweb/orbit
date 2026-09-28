@@ -50,6 +50,15 @@ The client connects to the local server. Exiting the client leaves the server
 running; stop the server with Ctrl-C when finished. See `orbit --help` and
 `orbit server --help` for options.
 
+`/status` shows the client and server Orbit commits. If both are known and
+different, startup and `/status` display a non-blocking build-mismatch warning.
+The native server also publishes its identity in `/props` and its startup log.
+Identity is captured from the installed source checkout once per process, so
+updating a checkout does not relabel an already-running server. Packages without
+Git metadata and older/external servers report an unknown commit. This is a
+revision diagnostic, not an integrity check of local edits or compatibility
+certification; it never restarts or disconnects a server.
+
 ## Supported models and qualification
 
 The [model registry](src/orbit/native_llama/model_registry.json) contains these
