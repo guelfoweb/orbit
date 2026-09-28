@@ -1,5 +1,39 @@
 # Native Packaging Roadmap
 
+## Current disposition (2026-09-28)
+
+Reconciled against `ab6109743f47d391070a1ee374c5e17325db24be`. Native loading
+and explicit source builds are implemented. **Zero-build binary distribution
+remains DEFERRED**, not a loader/runtime blocker and not an active build rewrite.
+
+| Milestone from the original plan | Current state |
+|---|---|
+| 1. Orbit-owned native layout and loader | **Implemented.** Vendored source/build/lib/shim boundaries exist. [paths.py](../src/orbit/native_llama/paths.py) prefers the compatible vendored SONAME build runtime, then `vendor/lib`, before documented external fallbacks. #73 unified mixed target/MTP runtime loading; #249 isolated library runpaths. |
+| 2. Packaged shim preparation | **Local build implemented.** [build_cli.py](../src/orbit/native_llama/build_cli.py) builds and verifies the packaged helpers/shim; #278 makes failed rebuilds fail closed. Publishing prebuilt binaries for supported platforms remains separate. |
+| 3. Native library packaging | **Local build/copy/verification and package-data declarations implemented.** [pyproject.toml](../pyproject.toml) and [MANIFEST.in](../MANIFEST.in) define inclusion; they do not prove a zero-build wheel was published. Binary distribution/ABI release policy remains open and deferred. |
+| 4. Product bootstrap | **Source-checkout bootstrap implemented.** Native `orbit server`, registry/model store, downloads and explicit MTP opt-in exist. A no-compiler installation still depends on the binary distribution milestone. |
+
+Use the current [installation instructions](../README.md#install-and-quick-start).
+`python3 scripts/build_native.py` is an explicit build command from a source
+checkout; a loader lookup is not an automatic build. No external `llama-server`
+process or external llama.cpp checkout is needed for this path. A CMake/C++
+toolchain is still required for building. Developer library/root overrides are
+supported compatibility paths, not unfinished product-path migration.
+
+The [model-store configuration](../README.md#configuration-and-model-store)
+is already implemented; historical `models/` paths below are not a required
+layout. #387 added persistent bounded HTTP resume; it is not packaging work
+still to implement. Latest published rc39 has no attached native assets.
+This reconciliation neither changes the build nor authorizes a binary release.
+
+## Historical roadmap (superseded status, retained design)
+
+The original milestone definitions below explain the intended boundaries.
+"Current", "blocker", "recommended implementation order" and command examples
+in this record refer to its earlier planning stage. Use the disposition above
+for unfinished work and README for current commands; do not reimplement the
+completed loader/build milestones.
+
 Orbit already owns:
 
 - model download and local `models/` cache

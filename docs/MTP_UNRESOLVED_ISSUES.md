@@ -1,4 +1,32 @@
-# MTP Unresolved Issues
+# MTP issue history and current disposition
+
+## Current disposition (2026-09-28)
+
+Reconciled against `ab6109743f47d391070a1ee374c5e17325db24be`. This document
+contains a chronological investigation, not thirty currently open defects.
+The issue table and phase-by-phase recommendations below retain the original
+observations, including failures subsequently fixed. Do not rerun that plan
+merely because an old row says "needs validation" or "next patch".
+
+| Historical issue | Disposition supported by the follow-up |
+|---|---|
+| MTP-030: mixed target-only/MTP teardown | **CLOSED for the reproduced text-generation benchmark.** #73 / `7257ddd` unified runtime loading. The [MTP-030 follow-up](#mtp-030-follow-up-mixed-teardown-root-cause-and-fix) records three clean reproductions and a clean 18-row benchmark; the original exit-134 run remains a failure. |
+| MTP-028: output-equivalence blocker | **CLOSED for the investigated prompts.** [Phase 6](#phase-6-first-sample-root-cause) corrected the non-equivalent harness; [Phase 7](#phase-7-restorelogits-equivalence-and-teardown-stability) refreshed target logits after restore. This is bounded equivalence evidence, not universal MTP correctness. |
+| MTP-009: hard 32-token generation clamp | **CLOSED**, #92 / `e2eb14b`; caller-supplied generation caps are respected. The old clamp is not current behavior. |
+| MTP-003/007/017/026: missing phase attribution | The [Phase 4 timing fields](#phase-4-clean-metrics-and-acceptance-diagnosis) and later `/props` diagnostics (#105–#110) were implemented. Missing-instrumentation proposals are historical; comparisons must still separate suffix prefill from the speculative loop. |
+| MTP-020: unrecorded upstream comparison | Subsequent provenance work and #354 pinned the vendored backend to `41abbfd`. Do not interpret the old upstream-`master` description as current identity or an instruction to upgrade. |
+| MTP-004: heavy trace getter lifetime | **DEFERRED**; unsafe heavy trace retrieval was not re-exposed. The normal mixed-runtime teardown fix does not qualify those getters. |
+| Validate cost, acceptance and row/frontier hypotheses (MTP-001/002/015/016/022–025/027/029) | Historical measurements and narrowed/rejected hypotheses, not a demonstrated new runtime defect. CPU MTP optimization remains **TECHNICAL_STOP without new evidence**; do not drop validate rows or required suffix prefill. |
+| Other original validation/risk rows | Retained as path-specific checks, not automatic NOW tasks or proof of a live failure. Use the existing lifecycle, completion and qualified-artifact tests before any separately authorized MTP change. |
+
+MTP remains optional, off by default and profile/artifact-gated. Single-GGUF
+self-MTP support and lifecycle follow-ups (#267–#288) are distinct from the
+older draft-model experiments here. Neither line establishes a general CPU
+speedup. Current entry points are [README](../README.md),
+[native capabilities](NATIVE_BACKEND_CAPABILITIES.md), and the actual
+`src/orbit/native_llama/` implementation. No new MTP experiment is selected.
+
+## Historical investigation (original record)
 
 Status: consolidated MTP correctness/stability analysis. No prompt, routing,
 tool-selection, final-policy, evidence-policy, KV, or streaming behavior changes

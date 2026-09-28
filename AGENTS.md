@@ -11,7 +11,85 @@ approaches (so they are not reopened), and prioritised next steps. When this fil
 and any older handoff text disagree, the ACTUAL repository (HEAD, tests, source)
 is authoritative; then this file; then release notes.
 
-## Current State & Machine-Migration Handoff
+## Current state (reconciled 2026-09-28)
+
+This section describes production at `ab6109743f47d391070a1ee374c5e17325db24be`
+(#391). Verify `git rev-parse main origin/main` and `git status` when resuming:
+the recorded SHA is an audit anchor, not a permanent expected HEAD. Untracked
+`workdir/` material is preserved evidence, not cleanup or staging input.
+
+- Latest published pre-release: [v0.0.1-rc39](https://github.com/guelfoweb/orbit/releases/tag/v0.0.1-rc39),
+  tag commit `d9b03423a1cce59e77d1719e069266baa10e5960`. Package version remains
+  `0.0.1`. Main includes subsequent production changes; rc38/rc39 qualification
+  records below do not describe all current behavior.
+- The Dell remains the active workstation; the NUC migration is CLOSED.
+  Hardware, kernel, power, RSS, throughput and file/skip counts in the migration
+  and benchmark records describe those observations, not a fresh machine audit.
+  The operational model store is `/srv/orbit-models`; use the resolver precedence
+  documented in [README](README.md#configuration-and-model-store). Historical
+  `models/` and removed research-worktree paths are provenance, not instructions
+  to recreate those directories or copy models.
+- Latest retained full-suite qualification: #391 candidate `025fb63`,
+  **6516 tests / 45 skips / RC=0**, merged with an identical tree. These counts
+  belong to that run; skips depend on the host's retained artifacts. Evidence:
+  `workdir/diag/finish_constraint_diagnostic_1/` and
+  `workdir/diag/finish_constraint_diagnostic_merge/`. This document change does
+  not rerun or extend native/model qualification.
+
+### Closed runtime and harness work
+
+| Work | Current disposition and source |
+|---|---|
+| Shared tool protocol hardening | CLOSED, #386 / `558c47d`: strict complete envelopes, reasoning isolation and terminal-completion dispatch guards. No MiMo enablement. |
+| Persistent download/resume | CLOSED, #387 / `87b55ff`: persistent partial, verified HTTP resume, bounded timeout/retry and atomic publication. Final verification is dimensional, not a checksum guarantee. |
+| Bilingual tool-intent harness | CLOSED, #388 / `959e31d`: versioned 24-case gate with intercepted executor; [contract and command](docs/TOOL_INTENT_QUALIFICATION.md). It does not validate generated-code correctness. |
+| Client/server build identity | CLOSED, #389 / `f3f2d6e`: process-bound server identity and non-blocking mismatch diagnosis. |
+| Status metadata semantics | CLOSED, #390 / `fd42ec3`: unknown acceleration, zero offload and available/loaded distinctions; no counter consolidation. |
+| FINISH constraint diagnosis | CLOSED, #391 / `ab61097`: capability refusal survives exact admission and adaptive recount; [diagnostic contract](docs/ANALYSIS_COMPLETION.md). Budgets, fallback and repair bounds unchanged. |
+| REPORT accounting / FINISH reference ownership | CLOSED, #377 / `09e25d3` and #378 / `c6eba6d`; not future extraction work. |
+| Recovery drafts | #374 and #375 CLOSED without merge. Only #374's independently qualified accounting/ownership fixes landed. [History and dispositions](docs/ANALYSIS_SEMANTIC_BASELINE_HISTORY.md). |
+
+ANALYSIS keeps proposed answers separate from attested facts and preserves the
+complete dossier. Canonical IoCs are published independently of optional
+narrative. IoC early stop requires both closed known objectives and positively
+certified discovery completeness (#380–#383); it does not imply universal
+discovery. #384 renders only the terminal presentation; #385 fixes replan-to-next
+STEP delivery, with no demonstrated performance claim. The canonical
+[semantic baseline](docs/ANALYSIS_SEMANTIC_BASELINE.md) covers Fattura, IBAN,
+mine.hta and HTML. Neither Ornith nor Qwen has general ANALYSIS semantic
+qualification; technical runtime PASS cannot certify free narrative.
+
+### Active follow-up and retained stops
+
+These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
+#391 closure, rather than introducing a new roadmap:
+
+- **NEXT — Nemotron qualification**, only after the download is complete and
+  identity is verified: identity/load → CHAT → the 24-case tool-intent gate.
+  No capability is qualified in advance. Do not stop or alter the operator's
+  curl download or its `.part`; no new run is authorized by this handoff.
+- **TECHNICAL_STOP — MiMo tool-enabled**. In the retained A/B/C comparison,
+  A/B missed 11 requested executions and C would authorize four unwanted ones.
+  Load and CHAT positives do not qualify ROUTE. MiMo remains disabled; preserve
+  `workdir/diag/mimo_route_contract_1/RESULT.md` and do not resume prompt tuning.
+- **DEFERRED — raw archive access and pre-sandbox duplicate suppression**.
+  Closing #374 did not authorize extraction. Existing source-range reads suffice
+  for the audited HTML omission; neither TODO has a new integration gate here.
+- **DEFERRED — zero-build binary distribution**. Loader/build milestones are
+  already implemented; only the distribution work remains in the
+  [packaging roadmap](docs/NATIVE_PACKAGING_ROADMAP.md).
+- Preserve existing stops on custom SSD expert streaming, semantic chunking,
+  agent mode, prompt_toolkit/TUI slash menus, Qwen prompt tuning, semantic runtime
+  classifiers and CPU MTP optimization without new evidence. Historical
+  experiment recommendations below are not active NOW/NEXT tasks.
+
+## Historical machine-migration handoff (2026-09-13)
+
+The following migration record is retained as written. Its release, Git state,
+machine inventory, model paths, test counts, availability claims and words such
+as "current" or "now" refer to that reconciliation, not today's checkout.
+For current status use the section above; do not rerun migration qualification
+or alter a running server to reproduce this history.
 
 Last reconciled against the repository on 2026-09-13 (mission
 POST-RC38-STATE-RECONCILE-1). The NUC → Dell migration closed earlier the same
@@ -198,6 +276,11 @@ Release State entry below.
 - Do not create tags or releases unless explicitly requested.
 
 ## Release State
+
+Historical release/change records follow in chronological order. "Current",
+"next" and qualification claims inside an entry are scoped to that entry's
+commit and evidence. The current-state section above takes precedence for the
+active roadmap and qualification limits.
 
 ### RC13
 
@@ -2215,7 +2298,7 @@ causal mutation (dropping/altering one expected fact per seam fails the gate).
 
 The canonical versioned semantic baseline is
 [`docs/ANALYSIS_SEMANTIC_BASELINE.md`](docs/ANALYSIS_SEMANTIC_BASELINE.md), with
-Fattura/IBAN/mine oracles under `scripts/evaluation/analysis_semantic_baseline/`.
+Fattura/IBAN/mine/HTML oracles under `scripts/evaluation/analysis_semantic_baseline/`.
 An ANALYSIS change must not be accepted as a semantic improvement without a
 comparison against this corpus and no regressions on the applicable criteria.
 Integrity checks and literal locators do not certify narrative correctness:
@@ -2242,7 +2325,16 @@ authorize new model campaigns or waive existing qualification requirements.
   deeper investigation; or an explicit campaign qualification. This bounds CPU
   cost.
 
-### Remaining evidence-driven candidates (recorded, not fixed here)
+### Closed cross-sample follow-ups
+
+Both candidates below were subsequently addressed: A by #346 / `180ea14`
+(bounded oversized extracted-source admission), B by #345 / `ca40e08`
+(report digest provenance). See the Oversized-Source Admission and Report
+Digest-Provenance sections above for their bounded contracts and residual
+limits. They are CLOSED as implementation tasks, not new roadmap candidates;
+they do not establish general narrative correctness.
+
+Historical candidate notes, retained to explain those follow-ups:
 
 - **A.** An Office live smoke can still end on a bounded `ContextAdmissionError`
   on an 8k source-window step for the oversized (33k-token) `.doc`; the report
@@ -3247,6 +3339,17 @@ box is not a comparable number; token/cache/rate and correctness are.
 
 ## Suggested Next Objectives
 
+Use **Active follow-up and retained stops** in the current-state section:
+Nemotron's sequential qualification is NEXT; the closed fixes are not new work.
+No additional runtime NOW task is selected by this documentation reconciliation.
+
+## Historical workstation objectives and measurements (2026-09-13–14)
+
+This is the former Suggested Next Objectives record. The Git/release/boot
+state and proposed measurements below are historical, including statements
+later superseded within the record itself. They neither describe the present
+boot nor authorize new experiments or power changes.
+
 Current state (2026-09-13): rc38 is **RELEASED** — tag `v0.0.1-rc38` → `95ba0d5`,
 GitHub pre-release published. The NUC → Dell migration is CLOSED and the Dell is
 the active workstation. **Post-release research is UNDER WAY**: `main` is four
@@ -3353,7 +3456,7 @@ ran under that same 30 W as a same-system, same-host-policy comparison (NOT
   compatibility.md, device/openvino/correctness captures, build metadata; machine-local,
   gitignored). External build: `~/LAB/llamacpp-npubench/` (outside Orbit).
 
-### Authoritative Dell CPU CHAT baseline (2026-09-13, `fa67e5a`)
+### Historical Dell CPU CHAT baseline (2026-09-13, `fa67e5a`)
 
 Measured for DELL-INTEL-GPU-BENCH-1 so CPU and GPU are compared under MATCHED
 cache states. Ornith-1.5-35B-A3B Q4_K_M, ctx 8192, threads 6/6, batch 256,
