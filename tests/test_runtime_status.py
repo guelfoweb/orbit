@@ -245,7 +245,7 @@ def _status(
         low_memory="off",
         cpu_repack="on",
         mtp="on",
-        mmproj="loaded",
+        mmproj="available",
         tools="on",
         think="off",
         max_tokens="192",
