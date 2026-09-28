@@ -141,7 +141,7 @@ def collect_runtime_status(
         low_memory=_on_off(props.get("low_memory")),
         cpu_repack=_on_off(props.get("cpu_repack")),
         mtp=_on_off(props.get("mtp_enabled")),
-        mmproj=_loaded_missing(props.get("multimodal_available")),
+        mmproj=_availability(props.get("multimodal_available")),
         tools=_tools_mode(tools_mode if tools_mode is not None else config.tools),
         think="on" if config.think else "off",
         autonomous="on" if autonomous else "off",
@@ -461,15 +461,9 @@ def _backend_name(props: dict[str, object]) -> str:
 
 
 def _acceleration_info(props: dict[str, object]) -> AccelerationInfo:
-    mode = props.get("accel") or props.get("accelerator") or props.get("acceleration") or props.get("gpu_backend")
-    if isinstance(mode, str) and mode:
-        mode_text = mode
-    elif any(_truthy(props.get(key)) for key in ("cuda", "metal", "rocm", "vulkan", "gpu_enabled")):
-        mode_text = "unknown"
-    else:
-        mode_text = "CPU-only"
     return AccelerationInfo(
-        mode=mode_text,
+        # Missing GPU metadata is not evidence of CPU-only execution.
+        mode=_string_prop(props, "accel", "accelerator", "acceleration", "gpu_backend"),
         gpu=_string_prop(props, "gpu_name", "gpu", "device_name"),
         vram_total=_format_bytes(_first_int_prop(props, "vram_total", "gpu_vram_total", "vram_total_bytes")),
         vram_available=_format_bytes(_first_int_prop(props, "vram_available", "gpu_vram_available", "vram_available_bytes")),
@@ -480,7 +474,7 @@ def _acceleration_info(props: dict[str, object]) -> AccelerationInfo:
 def _first_int_prop(props: dict[str, object], *keys: str) -> int | None:
     for key in keys:
         value = props.get(key)
-        if isinstance(value, int):
+        if type(value) is int and value >= 0:
             return value
     return None
 
@@ -494,11 +488,12 @@ def _string_prop(props: dict[str, object], *keys: str) -> str:
 
 
 def _offload_layers(props: dict[str, object]) -> str:
-    value = props.get("offload_layers") or props.get("gpu_layers") or props.get("n_gpu_layers")
-    if isinstance(value, int):
-        return f"{value} layers"
-    if isinstance(value, str) and value:
-        return value
+    for key in ("offload_layers", "gpu_layers", "n_gpu_layers"):
+        value = props.get(key)
+        if type(value) is int and value >= 0:
+            return f"{value} layers"
+        if isinstance(value, str) and value:
+            return value
     return UNKNOWN
 
 
@@ -512,14 +507,10 @@ def _on_off(value: object) -> str:
     return UNKNOWN
 
 
-def _loaded_missing(value: object) -> str:
+def _availability(value: object) -> str:
     if isinstance(value, bool):
-        return "loaded" if value else "missing"
+        return "available" if value else "unavailable"
     return UNKNOWN
-
-
-def _truthy(value: object) -> bool:
-    return bool(value) if isinstance(value, bool | int | str) else False
 
 
 def _safe_call(fn):

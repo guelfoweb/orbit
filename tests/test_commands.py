@@ -154,7 +154,7 @@ class CommandTests(unittest.TestCase):
         status = runtime_status(runtime, AppConfig(think=True), backend)
 
         self.assertIn("Backend      orbit-native, server ok", status)
-        self.assertIn("MTP          off, mmproj loaded", status)
+        self.assertIn("MTP          off, mmproj available", status)
 
     def test_tools_text_shows_user_selectable_specs_only(self) -> None:
         output = tools_text("off")
