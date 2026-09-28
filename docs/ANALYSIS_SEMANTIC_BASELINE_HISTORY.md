@@ -1,4 +1,4 @@
-# Retained semantic baseline and draft assessment
+# Retained semantic baseline and historical draft assessment
 
 This is a selected reproduction index, not a ranking or new qualification.
 Original records live under `workdir/diag/`; missing local records must be
@@ -7,6 +7,25 @@ is `analysis_semantic_baseline_1/HISTORY.md` (SHA256
 `be4b52980f953d6015f21c809e0fd9ca2771bae4eccbd7f3e464c56a71fde9e3`).
 Its corresponding `runs.json` is SHA256
 `ecb9f540b1e8fc388cec696e5449034a1007963654ec44689ccf9345c0bceff7`.
+
+## Current disposition (2026-09-28)
+
+Reconciled against main `ab6109743f47d391070a1ee374c5e17325db24be`:
+
+| Item | Disposition |
+|---|---|
+| #374 | Closed **without merge** on 2026-09-24. The monolithic recovery candidate was not promoted. |
+| #375 | Closed **without merge** on 2026-09-23. The PLAN guard did not recover useful reliable planning. |
+| REPORT accounting | Extracted and merged as #377, `09e25d39c6b01c67a78c2256aef348d013dbc4ee`. |
+| FINISH reference ownership | Extracted and merged as #378, `c6eba6de676eb3cddc9f0c661e638ffa2c3c81db`. |
+| Pre-sandbox duplicate suppression / raw archive access | Separate **DEFERRED** TODOs; no extraction or reopening authorized. |
+
+The assessments below are the historical decisions at baseline promotion.
+Their "future PR", "draft" and "no merge" language is retained as a record,
+not an outstanding action. The closure does not retroactively qualify either
+model's free narrative or turn unsuccessful runs into semantic PASS.
+Retained closure evidence: `workdir/diag/ornith_recovery_closure/RESULT.md`;
+the merged fixes are independently identifiable in Git history.
 
 ## Useful retained comparisons
 
@@ -41,7 +60,7 @@ for both models; they do not establish a model ranking or general Qwen/Ornith
 ANALYSIS qualification. Newly evaluated reports must use exact source, report
 and versioned oracle hashes, with actual delivery scope identified.
 
-## #375: recommend closing without merge
+## Historical #375 assessment: recommend closing without merge
 
 Keep the diagnostic evidence, but do not promote the current PLAN guard.
 At `9a3efe04347960f614e710a4b0cbb0d5ac95cc24`, `data_request=null` makes no
@@ -58,7 +77,7 @@ Sources: `plan_delivery_guard_1/RESULT.md` and
 or alternative implementation is proposed here. **Recommendation only: this
 promotion does not close or modify #375.**
 
-## #374: split only independently justified fixes; no monolithic merge
+## Historical #374 assessment: split only independently justified fixes
 
 Assessment of `ba97fd499f0a1add094a08eeeeaf1b29cf604e1e`, using
 `ornith_finish_recovery/RESULT.md` and the subsequent behavioral-bisect decision:
