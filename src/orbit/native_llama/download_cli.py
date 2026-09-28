@@ -103,6 +103,8 @@ class _DownloadProgress:
         if total <= 0:
             return
         percent = min(100, max(0, int(downloaded * 100 / total)))
+        if not self._active and downloaded > 0:
+            print(f"download: resuming from {downloaded / 1_000_000_000:.1f} GB ({percent}%)", flush=True)
         if percent == self._last_percent:
             return
         if self._active and self._last_percent == 100 and percent < 100:

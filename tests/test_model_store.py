@@ -117,8 +117,8 @@ class ResolverTests(unittest.TestCase):
                 os.environ.pop(MODELS_DIR_ENV, None)
                 self.assertEqual(effective_models_dir(), store)
                 # download writes there without any explicit directory
-                retrieve = mock.Mock(side_effect=lambda url, dest, *a: Path(dest).write_bytes(b"gguf"))
-                result = download_model("owner/repo/model.gguf", retrieve=retrieve)
+                from tests.test_download_reliability import Response
+                result = download_model("owner/repo/model.gguf", opener=lambda *a, **k: Response(b"gguf"))
                 self.assertEqual(result.path, store / "owner--repo" / "model.gguf")
                 self.assertTrue(result.path.is_file())
                 # the server's registry resolution finds a model placed there

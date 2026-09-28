@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen, urlretrieve
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 import contextlib
 import fcntl
 import os
 import re
-import tempfile
+import time
+from http.client import IncompleteRead, RemoteDisconnected
 from typing import Callable
 
 from orbit.native_llama.gguf_split import parse_split_name, shard_header_problems, validate_split_set
@@ -76,7 +77,6 @@ def download_model(
     *,
     models_dir: Path | None = None,
     prefer: str = "target",
-    retrieve=urlretrieve,
     progress: DownloadProgress | None = None,
     opener=None,
     on_shard: ShardCallback | None = None,
@@ -84,8 +84,8 @@ def download_model(
     """Fetch one model. A split GGUF (`<base>-00001-of-00003.gguf`) is fetched
     as its whole shard set: the siblings are derived from the requested name
     (zero padding preserved), complete shards are reused, partial ones resumed,
-    and the set is validated before it is reported. Ordinary single files keep
-    their original semantics (`retrieve` + temporary file + atomic rename).
+    and the set is validated before it is reported. Single files use the same
+    persistent, size-verified HTTP transfer and atomic publication.
     """
     request = parse_huggingface_spec(spec, prefer=prefer)
     destination = local_model_path(
@@ -99,19 +99,7 @@ def download_model(
     if destination.exists():
         return DownloadResult(path=destination, downloaded=False, url=url, shards=(destination,))
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-    try:
-        if progress is None:
-            retrieve(url, str(tmp_path))
-        else:
-            retrieve(url, str(tmp_path), _progress_hook(progress))
-        tmp_path.replace(destination)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    fetch_resumable(url, destination, opener=opener, progress=progress)
     return DownloadResult(path=destination, downloaded=True, url=url, shards=(destination,))
 
 
@@ -120,7 +108,10 @@ def download_model(
 _CHUNK = 1 << 20
 _PART_SUFFIX = ".part"
 _LOCK_SUFFIX = ".lock"
-_ETAG_SUFFIX = ".part.etag"
+_READ_TIMEOUT = 30.0
+_MAX_ATTEMPTS = 4
+_RETRY_BACKOFF = 1.0
+_TRANSIENT_HTTP = {408, 429, 500, 502, 503, 504}
 _CONTENT_RANGE = re.compile(r"^bytes (?:(?P<start>\d+)-(?P<end>\d+)|\*)/(?:(?P<total>\d+)|\*)$")
 
 
@@ -184,100 +175,163 @@ def _part_path(destination: Path) -> Path:
     return destination.with_name(destination.name + _PART_SUFFIX)
 
 
+class _TransferInterrupted(DownloadIncomplete):
+    """A bounded retry may continue the bytes already committed to .part."""
+
+
 def fetch_resumable(url: str, destination: Path, *, opener=None, progress: DownloadProgress | None = None,
                     chunk_size: int = _CHUNK) -> Path:
-    """Fetch `url` into `destination` through a persistent `<name>.part` file.
+    """One locked, persistent .part for single files and shards.
 
-    A partial file is continued with an HTTP Range request (`If-Range` with
-    the ETag recorded when it was started, so a changed remote object restarts
-    it). 206 appends only when the server's `Content-Range` starts exactly at
-    the partial size; 200 restarts from zero; 416 ("range not satisfiable")
-    finalizes the partial only when its size equals the `Content-Range` total,
-    otherwise the stale partial is discarded and the fetch starts over. A
-    transfer whose size the server does not declare is never finalized. The
-    final name appears only after the declared size has been written, by an
-    atomic rename followed by a directory fsync, so a partial transfer never
-    looks complete. One writer per destination is enforced with a lock file; a
-    second concurrent caller fails instead of corrupting the file.
+    Network inactivity has a socket timeout. Reads return available bytes
+    rather than waiting to fill a large block, so received bytes are persisted
+    before another potentially stalled read. Only transient transport failures
+    and short bodies retry, with bounded exponential backoff. Protocol errors,
+    disk errors and cancellation preserve the partial and propagate immediately.
+    A 200 restart uses .part.restart, preserving the original partial until
+    publication. If that restart is interrupted, it is resumed first. Another
+    200 must match its existing prefix; incompatible bytes fail closed rather
+    than losing either partial or accumulating unbounded backup files.
     """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
     destination.parent.mkdir(parents=True, exist_ok=True)
     part = _part_path(destination)
-    etag_path = destination.with_name(destination.name + _ETAG_SUFFIX)
+    restart = part.with_name(part.name + ".restart")
     lock_path = destination.with_name(destination.name + _LOCK_SUFFIX)
     with _destination_lock(lock_path):
-        for _attempt in range(2):
-            existing = part.stat().st_size if part.exists() else 0
-            headers: dict[str, str] = {}
-            if existing > 0:
-                headers["Range"] = f"bytes={existing}-"
-                etag = _read_small(etag_path)
-                if etag:
-                    headers["If-Range"] = etag
-            try:
-                response = (opener or urlopen)(Request(url, headers=headers), timeout=60)
-            except HTTPError as exc:
-                # urllib raises for 416; a fake opener may return it instead
-                # (handled below). Both mean "your offset is past the end".
-                if exc.code != 416 or existing == 0:
-                    raise
-                total_416 = _content_range_total(exc.headers)
-                exc.close()
-                if total_416 == existing:
-                    _finalize(part, destination, etag_path)
-                    return destination
-                _discard(part, etag_path)
-                continue
-            with response:
-                status = int(getattr(response, "status", 200) or 200)
-                if status == 416 and existing > 0:
-                    if _content_range_total(response.headers) == existing:
-                        _finalize(part, destination, etag_path)
-                        return destination
-                    _discard(part, etag_path)
-                    continue
-                if status == 206 and existing > 0:
-                    start, total = _content_range(response.headers)
-                    if total is None and _content_length(response.headers) is not None:
-                        total = existing + _content_length(response.headers)
-                    if start is not None and start != existing:
-                        _discard(part, etag_path)
-                        continue
-                    mode = "ab"
-                else:
-                    # 200: the server ignored the range (or there was none) —
-                    # whatever partial we had is replaced from byte zero.
-                    mode = "wb"
-                    existing = 0
-                    total = _content_length(response.headers)
-                    _remember_etag(etag_path, response.headers.get("ETag"))
-                if total is None:
-                    raise DownloadIncomplete(
-                        f"{destination.name}: the server did not declare the file size, so completion "
-                        f"cannot be verified; the transfer was not started"
-                    )
-                written = existing
-                with part.open(mode) as handle:
-                    if progress is not None:
-                        progress(written, total)
-                    while True:
-                        data = response.read(chunk_size)
-                        if not data:
-                            break
-                        handle.write(data)
-                        written += len(data)
-                        if progress is not None:
-                            progress(written, total)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            if written != total:
-                raise DownloadIncomplete(
-                    f"{destination.name}: received {written} of {total} bytes; run the download again to resume"
-                )
-            if written == 0:
-                raise DownloadIncomplete(f"{destination.name}: the server sent no data")
-            _finalize(part, destination, etag_path)
+        if destination.exists():
             return destination
-        raise DownloadIncomplete(f"{destination.name}: the partial file could not be resumed; run the download again")
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                active = restart if restart.exists() else part
+                _fetch_attempt(url, destination, active, opener or urlopen, progress, chunk_size)
+                # Only a verified final permits removal of obsolete partials.
+                for obsolete in (part, restart):
+                    obsolete.unlink(missing_ok=True)
+                    _etag_path(obsolete).unlink(missing_ok=True)
+                return destination
+            except _TransferInterrupted as exc:
+                if attempt + 1 == _MAX_ATTEMPTS:
+                    raise DownloadIncomplete(
+                        f"{destination.name}: download interrupted after {_MAX_ATTEMPTS} attempts "
+                        f"({exc}); partial files kept beside {destination}; rerun to resume"
+                    ) from exc
+                time.sleep(_RETRY_BACKOFF * (2 ** attempt))
+    raise AssertionError("download retry budget must be positive")
+
+
+def _network_call(operation):
+    """Scope retryability to network operations, never file writes/callbacks."""
+    try:
+        return operation()
+    except HTTPError as exc:
+        if exc.code == 416:
+            return exc  # process and close it like an ordinary response
+        if exc.code not in _TRANSIENT_HTTP:
+            exc.close()
+            raise
+        exc.close()
+        raise _TransferInterrupted(f"HTTP {exc.code}") from exc
+    except (TimeoutError, ConnectionError, IncompleteRead, RemoteDisconnected) as exc:
+        raise _TransferInterrupted(str(exc) or type(exc).__name__) from exc
+    except URLError as exc:
+        if not isinstance(exc.reason, (TimeoutError, ConnectionError)):
+            raise
+        raise _TransferInterrupted(str(exc.reason)) from exc
+
+
+def _etag_path(part: Path) -> Path:
+    return part.with_name(part.name + ".etag")
+
+
+def _fetch_attempt(url, destination, part, opener, progress, chunk_size):
+    etag_path = _etag_path(part)
+    existing = part.stat().st_size if part.exists() else 0
+    saved_etag = _strong_etag(_read_small(etag_path)) if existing else None
+    headers = {"Accept-Encoding": "identity"}
+    if existing:
+        headers["Range"] = f"bytes={existing}-"
+        if saved_etag:
+            headers["If-Range"] = saved_etag
+    response = _network_call(lambda: opener(Request(url, headers=headers), timeout=_READ_TIMEOUT))
+    with response:
+        status = int(getattr(response, "status", 200) or 200)
+        if status in _TRANSIENT_HTTP:
+            raise _TransferInterrupted(f"HTTP {status}")
+        if status not in {200, 206, 416}:
+            raise DownloadIncomplete(f"{destination.name}: unexpected HTTP {status}")
+        if (response.headers.get("Content-Encoding") or "identity").lower() != "identity":
+            raise DownloadIncomplete(f"{destination.name}: encoded representation cannot be resumed safely")
+        etag_header = response.headers.get("ETag")
+        current_etag = _strong_etag(etag_header)
+        if status in {206, 416} and saved_etag and etag_header is not None and current_etag != saved_etag:
+            raise DownloadIncomplete(f"{destination.name}: ETag changed in a ranged response")
+        if status == 416:
+            total = _content_range_total(response.headers)
+            if not existing or total != existing:
+                raise DownloadIncomplete(f"{destination.name}: 416 does not verify the partial size; partial kept")
+            with part.open("rb") as handle:
+                os.fsync(handle.fileno())
+            if progress:
+                progress(existing, total)
+            _finalize(part, destination, etag_path)
+            return
+        length = _content_length(response.headers)
+        if status == 206:
+            start, end, total = _content_range(response.headers)
+            if (not existing or start != existing or end is None or total is None
+                    or not (start <= end < total)
+                    or length is not None and length != end - start + 1):
+                raise DownloadIncomplete(f"{destination.name}: inconsistent Content-Range; partial kept")
+            mode = "ab"
+            expected = end + 1
+        else:
+            total = length
+            expected = total
+            if existing and part == _part_path(destination):
+                part = part.with_name(part.name + ".restart")
+                etag_path = _etag_path(part)
+                existing = 0
+            mode = "r+b" if existing else "wb"
+        if total is None or total <= 0:
+            raise DownloadIncomplete(f"{destination.name}: the server did not declare the file size; transfer not started")
+        prefix = existing if status == 200 else 0
+        if prefix > total:
+            raise DownloadIncomplete(f"{destination.name}: restarted representation is smaller than its partial; partials kept")
+        written = 0 if status == 200 else existing
+        # Unbuffered writes survive SIGTERM without relying on Python cleanup.
+        with part.open(mode, buffering=0) as handle:
+            if status == 200 and not prefix:
+                _remember_etag(etag_path, current_etag)
+            if progress:
+                progress(written, total)
+            read = getattr(response, "read1", response.read)
+            while True:
+                data = _network_call(lambda: read(min(chunk_size, expected - written + 1)))
+                if not data:
+                    break
+                if written + len(data) > expected:
+                    raise DownloadIncomplete(f"{destination.name}: response exceeds its declared range/size")
+                # A server may repeatedly ignore Range. Re-read from byte zero,
+                # but retain the existing prefix until it matches completely.
+                compare = min(len(data), max(0, prefix - written))
+                if compare and handle.read(compare) != data[:compare]:
+                    raise DownloadIncomplete(f"{destination.name}: restarted representation changed; partials kept")
+                if compare and written + compare == prefix:
+                    _remember_etag(etag_path, current_etag)
+                remaining = data[compare:]
+                if remaining and handle.write(remaining) != len(remaining):
+                    raise OSError(f"{destination.name}: short file write; partial kept")
+                written += len(data)
+                if progress:
+                    progress(written, total)
+            os.fsync(handle.fileno())
+            if os.fstat(handle.fileno()).st_size != max(prefix, written):
+                raise DownloadIncomplete(f"{destination.name}: partial size changed during transfer")
+        if written != expected or written != total:
+            raise _TransferInterrupted(f"received {written} of {total} bytes")
+        _finalize(part, destination, etag_path)
 
 
 @contextlib.contextmanager
@@ -319,11 +373,6 @@ def _finalize(part: Path, destination: Path, etag_path: Path) -> None:
     _fsync_directory(destination.parent)
 
 
-def _discard(part: Path, etag_path: Path) -> None:
-    part.unlink(missing_ok=True)
-    etag_path.unlink(missing_ok=True)
-
-
 def _fsync_directory(directory: Path) -> None:
     try:
         fd = os.open(directory, os.O_RDONLY)
@@ -344,9 +393,18 @@ def _read_small(path: Path) -> str | None:
         return None
 
 
+def _strong_etag(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if len(value) < 2 or not value.startswith('"') or not value.endswith('"'):
+        return None
+    return value if all(c == "!" or 35 <= ord(c) <= 126 or ord(c) >= 128 for c in value[1:-1]) else None
+
+
 def _remember_etag(etag_path: Path, etag: str | None) -> None:
     if etag:
-        etag_path.write_text(etag.strip(), encoding="utf-8")
+        etag_path.write_text(etag, encoding="utf-8")
     else:
         etag_path.unlink(missing_ok=True)
 
@@ -356,26 +414,27 @@ def _content_length(headers) -> int | None:
     return int(value) if value.isdigit() else None
 
 
-def _content_range(headers) -> tuple[int | None, int | None]:
-    """(start, total) from `Content-Range: bytes S-E/T`; None for what is absent."""
+def _content_range(headers) -> tuple[int | None, int | None, int | None]:
+    """Exact start/end/total; absent or malformed values are not authority."""
     value = (headers.get("Content-Range") or "").strip() if headers is not None else ""
     match = _CONTENT_RANGE.match(value)
     if match is None:
-        return None, None
+        return None, None, None
     start = int(match.group("start")) if match.group("start") else None
     total = int(match.group("total")) if match.group("total") else None
-    return start, total
+    end = int(match.group("end")) if match.group("end") else None
+    return start, end, total
 
 
 def _content_range_total(headers) -> int | None:
-    return _content_range(headers)[1]
+    start, end, total = _content_range(headers)
+    return total if start is None and end is None else None
 
 
 def download_all_for_repo(
     repo: str,
     *,
     models_dir: Path | None = None,
-    retrieve=urlretrieve,
     progress: DownloadProgress | None = None,
     opener=None,
     on_shard: ShardCallback | None = None,
@@ -394,7 +453,6 @@ def download_all_for_repo(
         download_model(
             f"{request.repo}/{request.file}",
             models_dir=models_dir,
-            retrieve=retrieve,
             progress=progress,
             opener=opener,
             on_shard=on_shard,
@@ -406,16 +464,6 @@ def download_all_for_repo(
 
 def huggingface_resolve_url(request: DownloadRequest) -> str:
     return f"{HF_RESOLVE_BASE}/{request.repo}/resolve/main/{request.file}"
-
-
-def _progress_hook(progress: DownloadProgress):
-    def report(block_count: int, block_size: int, total_size: int) -> None:
-        downloaded = max(0, block_count * block_size)
-        if total_size > 0:
-            downloaded = min(downloaded, total_size)
-        progress(downloaded, total_size)
-
-    return report
 
 
 def _find_manifest_file_for_repo(repo: str, *, prefer: str = "target") -> ModelFileSpec | None:

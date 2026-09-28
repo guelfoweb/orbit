@@ -288,6 +288,13 @@ class ValidationTests(unittest.TestCase):
 
 
 class DownloadTests(unittest.TestCase):
+    def setUp(self):
+        # These lifecycle tests retain a single-attempt boundary. Automatic
+        # bounded recovery is exercised by test_download_reliability.
+        patcher = mock.patch("orbit.native_llama.model_download._MAX_ATTEMPTS", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_J_requesting_the_first_shard_downloads_the_whole_set(self) -> None:
         files = shard_set()
         http = FakeHTTP(_urls(QWEN_REPO, files))
@@ -313,17 +320,12 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(http.requests, [])
             self.assertEqual(events, ["present"] * 3)
 
-    def test_A_single_file_download_is_unchanged(self) -> None:
+    def test_A_single_file_download_uses_the_same_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            calls = []
-
-            def retrieve(url, dest):
-                calls.append(url); Path(dest).write_bytes(b"single")
-
-            http = FakeHTTP({})
-            result = download_model("owner/repo/model.gguf", models_dir=Path(tmp), retrieve=retrieve, opener=http)
-            self.assertEqual(calls, [f"{HF}/owner/repo/resolve/main/model.gguf"])
-            self.assertEqual(http.requests, [])  # the resumable path is split-only
+            url = f"{HF}/owner/repo/resolve/main/model.gguf"
+            http = FakeHTTP({url: b"single"})
+            result = download_model("owner/repo/model.gguf", models_dir=Path(tmp), opener=http)
+            self.assertEqual(http.requests, [(url, None)])
             self.assertEqual(result.shards, (result.path,))
             self.assertEqual(result.path.read_bytes(), b"single")
             self.assertEqual(sorted(p.name for p in result.path.parent.iterdir()), ["model.gguf"])
@@ -335,7 +337,7 @@ class DownloadTests(unittest.TestCase):
         http = FakeHTTP(urls, fail_after={second_url: 20})
         with tempfile.TemporaryDirectory() as tmp:
             store = Path(tmp) / "unsloth--Qwen3.8-Flash-Next-GGUF"
-            with self.assertRaises(ConnectionResetError):
+            with self.assertRaises(DownloadIncomplete):
                 download_model(f"{QWEN_REPO}/{QWEN_FIRST}", models_dir=Path(tmp), opener=http)
             self.assertTrue((store / QWEN_FIRST).exists())                                  # shard 1 kept
             second = store / "Qwen3.8-Flash-Next-UD-IQ1_M-00002-of-00003.gguf"
@@ -436,29 +438,33 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual([r for r in http.requests if r[1]], [(f"{HF}/{QWEN_REPO}/resolve/main/{second}", f"bytes={len(files[second])}-")])
             self.assertEqual(sorted(p.name for p in store.iterdir()), sorted(files))
 
-    def test_a_416_for_an_oversized_stale_partial_discards_it_and_restarts(self) -> None:
+    def test_a_416_for_an_oversized_partial_preserves_it_and_fails_closed(self) -> None:
         for raise_416 in (True, False):
             with self.subTest(raise_416=raise_416), tempfile.TemporaryDirectory() as tmp:
                 url = "https://example.invalid/x.gguf"
-                body = b"N" * 100
-                http = FakeHTTP({url: body}, raise_416=raise_416)
+                http = FakeHTTP({url: b"N" * 100}, raise_416=raise_416)
                 dest = Path(tmp) / "x.gguf"
-                (Path(tmp) / "x.gguf.part").write_bytes(b"S" * 200)   # from another revision
-                fetch_resumable(url, dest, opener=http)
-                self.assertEqual(dest.read_bytes(), body)
-                self.assertEqual([r[1] for r in http.requests], ["bytes=200-", None])
-                self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["x.gguf"])
+                part = Path(tmp) / "x.gguf.part"
+                part.write_bytes(b"S" * 200)
+                with self.assertRaisesRegex(DownloadIncomplete, "416"):
+                    fetch_resumable(url, dest, opener=http)
+                self.assertEqual(part.read_bytes(), b"S" * 200)
+                self.assertFalse(dest.exists())
+                self.assertEqual([r[1] for r in http.requests], ["bytes=200-"])
 
-    def test_a_206_that_does_not_start_at_the_partial_size_restarts(self) -> None:
+    def test_a_206_with_wrong_offset_preserves_partial_and_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             url = "https://example.invalid/x.gguf"
             body = bytes(range(256)) * 4
             http = FakeHTTP({url: body}, shift_start=-7)
             dest = Path(tmp) / "x.gguf"
-            (Path(tmp) / "x.gguf.part").write_bytes(body[:300])
-            fetch_resumable(url, dest, opener=http)
-            self.assertEqual(dest.read_bytes(), body)
-            self.assertEqual([r[1] for r in http.requests], ["bytes=300-", None])
+            part = Path(tmp) / "x.gguf.part"
+            part.write_bytes(body[:300])
+            with self.assertRaisesRegex(DownloadIncomplete, "Content-Range"):
+                fetch_resumable(url, dest, opener=http)
+            self.assertEqual(part.read_bytes(), body[:300])
+            self.assertFalse(dest.exists())
+            self.assertEqual([r[1] for r in http.requests], ["bytes=300-"])
 
     def test_a_server_without_a_declared_size_is_refused_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -475,7 +481,7 @@ class DownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "x.gguf"
             http = FakeHTTP({url: body}, etag='"abc123"', fail_after={url: 120})
-            with self.assertRaises(ConnectionResetError):
+            with self.assertRaises(DownloadIncomplete):
                 fetch_resumable(url, dest, opener=http)
             self.assertEqual((Path(tmp) / "x.gguf.part.etag").read_text(), '"abc123"')
             fetch_resumable(url, dest, opener=http)
