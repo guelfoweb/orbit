@@ -1,0 +1,1500 @@
+{
+  "version": 1,
+  "corpus_sha256": "de9f6e5d594f24b0e235ed4a707bc7d836b5bffafd9df007c935d8144b838a9f",
+  "provenance": {
+    "mission": "MIMO-ROUTE-CONTRACT-1",
+    "variant": "A",
+    "runtime_commit": "558c47d3c11e57d0a2078072a0813780f6da16fa",
+    "profile_candidate": "42b9f0844846ca6280debf33baf4732a914f4da5",
+    "model": "MiMo-V2.6-Distill-Qwen-9B Q8_0",
+    "model_sha256": "de6dae10334e088876358ef9f574835bb3b401ea2ecf5d6a9473f37894df6b73",
+    "profile": "orbit-mimo-v26-qwen9b-native-v1",
+    "ctx": 8192,
+    "temperature": 0,
+    "route_cap": 64,
+    "thinking": false,
+    "tools": [
+      "exec_shell_full_command",
+      "fetch_url",
+      "list_directory",
+      "system_info",
+      "write_artifact"
+    ],
+    "route_prompt_sha256": "49c689fee9029d49c6f624a955403b834acb30aa9a65c3635772a8e510099740",
+    "measurement_scope": "Historical bounded streams collected before production consumer replay; wall is not current latency. No tool execution or final generation.",
+    "template_sha256": "d2365d1a768f61a6e46156c7dc5a7e08fe95f6bd0a9ce5cf606e908b3489a840",
+    "backend_revision": "41abbfd",
+    "threads": 8,
+    "threads_batch": 8,
+    "batch": 256,
+    "ubatch": 128,
+    "mtp": false,
+    "repack": false,
+    "low_memory": false,
+    "source_artifacts": {
+      "workdir/diag/mimo_route_contract_1/RESULT.md": "9f72b1cbb7ff305f7dc2a1c00045d06a3492b56c6bda9c7f33bb1c84f26b15c8",
+      "workdir/diag/mimo_route_contract_1/identity.json": "68bd1d123ea408cdcc662bfb6c7b734e46e44d1ae77eed2f9f6f80ea8d1bf4e6",
+      "workdir/diag/mimo_route_contract_1/frozen_contracts.json": "a884ac7f69ee8057c585aff1421464ec3a5fea28af5161a0300a3fb61dfc7bad",
+      "workdir/diag/mimo_route_contract_1/resumed_results.json": "63253e3a8db429e346933c24c4877dae57cb7b46d564dfe752fffbd903194f64"
+    }
+  },
+  "cases": [
+    {
+      "case_id": "original",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "9179f7355232e46f9d3728a0cc4f963fb22ccc7f856d5aed904ec6903fbd001b",
+          "messages_digest": "d587aabea8b83d36d92a83385b5dc4ff6afabafd77e79aee440a23c4b8f1110c",
+          "result": {
+            "content": "<tool_call><function=write_artifact>{\"path\": \"C:\\\\Users\\\\Utente\\\\Desktop\\\\CercaMarkdown.ps1\", \"overwrite\": false, \"create_parents\": true}</function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1072,
+            "completion_tokens": 39,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.383283234537654,
+            "generation_tokens_per_second": 6.629890606804988,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55335.560267,
+            "stream_ttft_ms": 55336.473246
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "write",
+            "_art",
+            "ifact",
+            ">{\"",
+            "path",
+            "\":",
+            " \"",
+            "C",
+            ":\\\\",
+            "Users",
+            "\\\\",
+            "Utente",
+            "\\\\",
+            "Desktop",
+            "\\\\",
+            "C",
+            "erca",
+            "Markdown",
+            ".ps",
+            "1",
+            "\",",
+            " \"",
+            "overwrite",
+            "\":",
+            " false",
+            ",",
+            " \"",
+            "create",
+            "_parents",
+            "\":",
+            " true",
+            "}</",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 61.2175195349846,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/original/call_1.json",
+          "source_sha256": "1d9ba8cfc48fe5dd5b8f9a4badeae4a5172b1bd6082fccaa26cc0dcc67cb779b",
+          "exact_count": {
+            "tokens": 1072,
+            "context_tokens": 8192,
+            "rendered_hash": "8872368e452b9bce9e1a8f3640964805b1c80cb9edca07ef75812902756c9e75",
+            "token_hash": "5307ab69ede478ffcfe76230a32927993c3c60a337c95c4a67b6cc8cc8b4dbfc"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "run_control",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "d7cfc6ff7f68b85a9bfb45c269691212e3c92ce03e78505ce61ca2fedb76f33b",
+          "messages_digest": "1d1af468c717efd7b969df4bdd32b67ddae1893cb5000725f62090b77db85aa5",
+          "result": {
+            "content": "<tool_call><function=list_directory>{\"path\":\".\", \"recursive\":true}</function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1067,
+            "completion_tokens": 17,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.18346437868885,
+            "generation_tokens_per_second": 6.54936118686753,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55640.462586,
+            "stream_ttft_ms": 55641.024982
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=list",
+            "_directory",
+            ">{\"",
+            "path",
+            "\":\"",
+            ".\",",
+            " \"",
+            "recursive",
+            "\":",
+            "true",
+            "}</",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 58.23705779699958,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/run_control/call_1.json",
+          "source_sha256": "6fc69248e1184c1e4ebfd6ce3232ba7421475614f15caa0ca0b097aeff894b9b",
+          "exact_count": {
+            "tokens": 1067,
+            "context_tokens": 8192,
+            "rendered_hash": "d1a54b1c75c233b7a25a3dc341aae53b375d59a00bfddc448cd8dd19a9eb869b",
+            "token_hash": "fc3865c1880d4516f6f6483bc3ad05a87a7b1e68ee53b9fbd36734c4e3e4ae56"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "code_python",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "01e541e42374767b723b467a00b9f9ac26278a5f0da05a3cf1e10cd90ef5c16e",
+          "messages_digest": "ba1a2ca4896bc58ecd9fe40bdba8243c3de0dc2474e22744ee29c5f639c33c19",
+          "result": {
+            "content": "<tool_call><function=write_artifact><parameter=path>remove_blank_lines.py</parameter><parameter=content>def remove_blank_lines(text: str) -> str:\n    \"\"\"Remove blank lines from a string, keeping non-blank lines in order.\"\"\"\n    return \"\\n\".join(line for line in text.split",
+            "model": null,
+            "finish_reason": "length",
+            "tool_calls": [],
+            "prompt_tokens": 1075,
+            "completion_tokens": 64,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.255005737275244,
+            "generation_tokens_per_second": 6.548047423414958,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55846.798443,
+            "stream_ttft_ms": 55847.350636
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "write",
+            "_art",
+            "ifact",
+            ">",
+            "<parameter",
+            "=path",
+            ">",
+            "remove",
+            "_blank",
+            "_lines",
+            ".py",
+            "</",
+            "parameter",
+            ">",
+            "<parameter",
+            "=",
+            "content",
+            ">",
+            "def",
+            " remove",
+            "_blank",
+            "_lines",
+            "(text",
+            ":",
+            " str",
+            ")",
+            " ->",
+            " str",
+            ":",
+            "\n",
+            "   ",
+            " \"\"\"",
+            "Remove",
+            " blank",
+            " lines",
+            " from",
+            " a",
+            " string",
+            ",",
+            " keeping",
+            " non",
+            "-bl",
+            "ank",
+            " lines",
+            " in",
+            " order",
+            ".\"\"\"",
+            "\n",
+            "   ",
+            " return",
+            " \"\\",
+            "n",
+            "\".",
+            "join",
+            "(line",
+            " for",
+            " line",
+            " in",
+            " text",
+            ".split"
+          ],
+          "wall_seconds": 65.62145381199662,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/code_python/call_1.json",
+          "source_sha256": "40ba6e1e4e56c15bd95de14662723efd9853520440c4d8dcf96c28ce652a463a",
+          "exact_count": {
+            "tokens": 1075,
+            "context_tokens": 8192,
+            "rendered_hash": "4f37b0589deb7a70933cbc1865f7157367be0f26b849219bfd85fa242155fac7",
+            "token_hash": "0ba9416661146598f93f7e1fc9c3f1db485eed7c885e9c55255ffe802e48a90d"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "code_shell",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "589987a4f1f800050b6e54ffcf61aca1f2e4efa05694988ddc1f45ac7e3e02e3",
+          "messages_digest": "2feb5b5a8b61060e3b8e6268bc14e218f01ac1ac7fc618fccdd0439264770c1b",
+          "result": {
+            "content": "Ecco uno script Bash che archivia i file di log più vecchi di 30 giorni.\n\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\n\nLOG_DIR=\"${1:-/var/log}\"\nARCHIVE_DIR=\"${2:-/var/log/archive}\"\nMAX_AGE_DAYS=\"${",
+            "model": null,
+            "finish_reason": "length",
+            "tool_calls": [],
+            "prompt_tokens": 1077,
+            "completion_tokens": 64,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.25035265948984,
+            "generation_tokens_per_second": 6.540001150631452,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55964.141245,
+            "stream_ttft_ms": 55964.724506
+          },
+          "deltas": [
+            "E",
+            "cco",
+            " uno",
+            " script",
+            " Bash",
+            " che",
+            " arch",
+            "ivia",
+            " i",
+            " file",
+            " di",
+            " log",
+            " più",
+            " vecchi",
+            " di",
+            " ",
+            "3",
+            "0",
+            " giorni",
+            ".",
+            "\n\n",
+            "```",
+            "bash",
+            "\n",
+            "#!/",
+            "usr",
+            "/bin",
+            "/env",
+            " bash",
+            "\n",
+            "set",
+            " -",
+            "eu",
+            "o",
+            " pipe",
+            "fail",
+            "\n\n",
+            "LOG",
+            "_DIR",
+            "=\"${",
+            "1",
+            ":-",
+            "/",
+            "var",
+            "/log",
+            "}\"",
+            "\n",
+            "ARCH",
+            "IVE",
+            "_DIR",
+            "=\"${",
+            "2",
+            ":-",
+            "/",
+            "var",
+            "/log",
+            "/archive",
+            "}\"",
+            "\n",
+            "MAX",
+            "_A",
+            "GE",
+            "_DAYS",
+            "=\"${"
+          ],
+          "wall_seconds": 65.75089381699217,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/code_shell/call_1.json",
+          "source_sha256": "98111b1a38ca558a771ecbabcba51fefbebf2dbb625ff398a654e6b78c18872a",
+          "exact_count": {
+            "tokens": 1077,
+            "context_tokens": 8192,
+            "rendered_hash": "1939c01ff9ea53b38b6905e4bf6fd1383471b404de809a9962cf81dc6ed8eeb3",
+            "token_hash": "d4a76a16effc9046dc52b88c5c95c73eb4045efb4ba487da1d71907a358af5a6"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "indirect_recipe",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "e1c31c8f99803062db209b50259e1f6588c5c16ef2dc804b43bd23171e85630f",
+          "messages_digest": "4983d2ca363a3f2d894e1d264f1a447154ed5ae948023e65dd64d9f8632eaa40",
+          "result": {
+            "content": "<tool_call><function=orbit-web-search><parameter=query>find all markdown files in directory command line</parameter></function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1067,
+            "completion_tokens": 25,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.1587894474896,
+            "generation_tokens_per_second": 6.567671713090473,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55712.023141,
+            "stream_ttft_ms": 55712.785039
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "orbit",
+            "-web",
+            "-search",
+            ">",
+            "<parameter",
+            "=query",
+            ">",
+            "find",
+            " all",
+            " markdown",
+            " files",
+            " in",
+            " directory",
+            " command",
+            " line",
+            "</",
+            "parameter",
+            "></",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 59.51953433599556,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/indirect_recipe/call_1.json",
+          "source_sha256": "e12386d5f97e38a6a8363dc07c2767d9c9d6d062ad1368ec1fb4638bfb5293e5",
+          "exact_count": {
+            "tokens": 1067,
+            "context_tokens": 8192,
+            "rendered_hash": "a24e5f7c930306ff0aca63439100e29a82b5d35e523f646e6dab7c8443fe144b",
+            "token_hash": "797507e340efab397de0945840e05c86dc4deb8b1f7b2a600e1ddf70721ac163"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "indirect_write",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "afffee6d1542a762d88d45ccb97ca757d64381164d71a8041c43f787c207bc0f",
+          "messages_digest": "3b1b3c9eee09a02eaf0eba52c29e156ac96c962d8be315cd0916404f24846c87",
+          "result": {
+            "content": "{\"route\":\"CHAT\"}",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1071,
+            "completion_tokens": 5,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.030407659584494,
+            "generation_tokens_per_second": 6.416006138834674,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56296.058672,
+            "stream_ttft_ms": 56296.667324
+          },
+          "deltas": [
+            "{\"",
+            "route",
+            "\":\"",
+            "CHAT",
+            "\"}"
+          ],
+          "wall_seconds": 57.07626146401162,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/indirect_write/call_1.json",
+          "source_sha256": "da87f67d7e41cbeda1be67f9f745a9a1359a1c931799678ff843711f4de2aa6b",
+          "exact_count": {
+            "tokens": 1071,
+            "context_tokens": 8192,
+            "rendered_hash": "7a673cd6ad8167927d6da8d61f8a336a850af3c055b35378f47864eda3d25dc9",
+            "token_hash": "7afb3113ea7d51952d799d7157da3a6492ad3c446bf2014672e31607b99ccdfc"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "explain_code",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "71811412a4213a7999ca2c6ed8419b03bd5420bd53e9219ac2bc9c67e5eb3217",
+          "messages_digest": "fb9e1b589d31a4e7d3590b8fb3328ed650d7c4c8e2bbaed28f24836b052935f4",
+          "result": {
+            "content": "{\"route\":\"CHAT\"}",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1070,
+            "completion_tokens": 5,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.15039676400533,
+            "generation_tokens_per_second": 6.575521175808395,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55891.609397,
+            "stream_ttft_ms": 55892.155918
+          },
+          "deltas": [
+            "{\"",
+            "route",
+            "\":\"",
+            "CHAT",
+            "\"}"
+          ],
+          "wall_seconds": 56.65299380401848,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/explain_code/call_1.json",
+          "source_sha256": "3879c5314efed576713c8bf583960627979741c0ad058bc63d07d77061c09cb1",
+          "exact_count": {
+            "tokens": 1070,
+            "context_tokens": 8192,
+            "rendered_hash": "6e5f27e1c78f4a3ae0023312e170a1c9f313693519350f1cb68af906c2f6877b",
+            "token_hash": "ae27b15a77ef7250ecdf71c64259c3417f49e4f8491819c303983b25347880bb"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "explain_concept",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "96fdec0d100009a665ab2723caee2af4f1d2618d185d7297c35cfb70175f226f",
+          "messages_digest": "3fe5746094a6428db8b04d99622cf512e2926cbb8de5a91558173319124ed34f",
+          "result": {
+            "content": "{\"route\":\"CHAT\"}",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1071,
+            "completion_tokens": 5,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 18.939822648278827,
+            "generation_tokens_per_second": 6.4595811090842385,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56564.944654,
+            "stream_ttft_ms": 56565.572249
+          },
+          "deltas": [
+            "{\"",
+            "route",
+            "\":\"",
+            "CHAT",
+            "\"}"
+          ],
+          "wall_seconds": 57.34001152100973,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/explain_concept/call_1.json",
+          "source_sha256": "e5f0d914bb3fde684231e56bc75c0ad1c7d72239ff32cf036c4c291ca3960f4f",
+          "exact_count": {
+            "tokens": 1071,
+            "context_tokens": 8192,
+            "rendered_hash": "8b210f110d06b56d6c295053d4726e29a306e3175f478dcb9768f997878e734d",
+            "token_hash": "25b618b906972789782bc9432451cec9b6d0f624875baf7406974ca3a3ab1158"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "edit_inline",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "e4d5faf5963867f9891b6140f46f1755901d6471e8e5fef5d4aad33c83671a0b",
+          "messages_digest": "a3e44b3718523c9aa577c0bdddbcdb864013d9f7009d190e1793df5e3b588d3e",
+          "result": {
+            "content": "```python\ndef first(items):\n    if not items:\n        return None\n    return items[0]\n```\n\nThe `if not items:` guard catches both `[]` and `None`, returning `None` instead of raising `IndexError`. If you'd prefer an explicit error for non-list",
+            "model": null,
+            "finish_reason": "length",
+            "tool_calls": [],
+            "prompt_tokens": 1076,
+            "completion_tokens": 64,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 18.988250261326677,
+            "generation_tokens_per_second": 6.484296502968237,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56684.75822,
+            "stream_ttft_ms": 56685.347201
+          },
+          "deltas": [
+            "```",
+            "python",
+            "\n",
+            "def",
+            " first",
+            "(items",
+            "):",
+            "\n",
+            "   ",
+            " if",
+            " not",
+            " items",
+            ":",
+            "\n",
+            "       ",
+            " return",
+            " None",
+            "\n",
+            "   ",
+            " return",
+            " items",
+            "[",
+            "0",
+            "]",
+            "\n",
+            "```",
+            "\n\n",
+            "The",
+            " `",
+            "if",
+            " not",
+            " items",
+            ":`",
+            " guard",
+            " catches",
+            " both",
+            " `",
+            "[]",
+            "`",
+            " and",
+            " `",
+            "None",
+            "`,",
+            " returning",
+            " `",
+            "None",
+            "`",
+            " instead",
+            " of",
+            " raising",
+            " `",
+            "Index",
+            "Error",
+            "`.",
+            " If",
+            " you",
+            "'d",
+            " prefer",
+            " an",
+            " explicit",
+            " error",
+            " for",
+            " non",
+            "-list"
+          ],
+          "wall_seconds": 66.55557164500351,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/edit_inline/call_1.json",
+          "source_sha256": "d1093ac5911a74acb1673c35166928d4e525537613a41a3a0b17f2cace74603b",
+          "exact_count": {
+            "tokens": 1076,
+            "context_tokens": 8192,
+            "rendered_hash": "ed6b63788e0b4aa538bece21489786a920965784e3295cc9bb2116615b552203",
+            "token_hash": "6db21247f578db674a659ca54c5d3c94d3c82b23c23e4b442a38d65f3725d32f"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "write_prose",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "9aadfa5bdab8c0e7042b9a1883398e4c9e926b66d36506fe918fbdaebd7721d2",
+          "messages_digest": "9e983d2e5250b1a1ddab765033b4cf3f2588128e35c24da5b076b2a27f064273",
+          "result": {
+            "content": "Ora scrivo l'email.\n\n**Oggetto:** Pulizia dei file temporanei — azione richiesta entro venerdì\n\nCiao a tutti,\n\nvi scrivo per un piccolo ma importante intervento di manutenzione: **eliminate i file temporanei** presenti sulle vostre postazioni e nelle cartelle condivise.\n\n",
+            "model": null,
+            "finish_reason": "length",
+            "tool_calls": [],
+            "prompt_tokens": 1070,
+            "completion_tokens": 64,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.00371277490136,
+            "generation_tokens_per_second": 6.473374404196689,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56322.72651,
+            "stream_ttft_ms": 56323.331073
+          },
+          "deltas": [
+            "O",
+            "ra",
+            " scr",
+            "ivo",
+            " l",
+            "'email",
+            ".",
+            "\n\n",
+            "**",
+            "O",
+            "g",
+            "getto",
+            ":**",
+            " Pul",
+            "izia",
+            " dei",
+            " file",
+            " tempor",
+            "anei",
+            " —",
+            " azione",
+            " richiesta",
+            " entro",
+            " venerdì",
+            "\n\n",
+            "C",
+            "iao",
+            " a",
+            " tutti",
+            ",",
+            "\n\n",
+            "vi",
+            " scr",
+            "ivo",
+            " per",
+            " un",
+            " piccolo",
+            " ma",
+            " importante",
+            " intervento",
+            " di",
+            " manutenzione",
+            ":",
+            " **",
+            "elim",
+            "inate",
+            " i",
+            " file",
+            " tempor",
+            "anei",
+            "**",
+            " presenti",
+            " sulle",
+            " vostre",
+            " post",
+            "azioni",
+            " e",
+            " nelle",
+            " cart",
+            "elle",
+            " condiv",
+            "ise",
+            ".",
+            "\n\n"
+          ],
+          "wall_seconds": 66.21018815599382,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/write_prose/call_1.json",
+          "source_sha256": "6f39c1a4f560692389580e212049aa488a2aec5507fb27eea7e89c887f801b79",
+          "exact_count": {
+            "tokens": 1070,
+            "context_tokens": 8192,
+            "rendered_hash": "cd52b7b1131daa4cb962f24b7a9cda7617b8239bade3b502f3c49032f69d2b15",
+            "token_hash": "cb9938588af9cb85320514be5abbd0a2808334779bc282bdd1521463cb443a59"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "actual_search",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "5e3f2b31c695e2274297cd3f9abf4fd345b8977cf9f6d9a620814ed2252c92f8",
+          "messages_digest": "f58d9afad9e0ed644f795edc8b4a747a6e55d3b7f53d18b50005f5c622c730e0",
+          "result": {
+            "content": "<tool_call><function=list_directory>{\"path\":\".\", \"recursive\":true}</function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1077,
+            "completion_tokens": 17,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 18.967629108001894,
+            "generation_tokens_per_second": 6.459835403393921,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56798.205858,
+            "stream_ttft_ms": 56798.826866
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=list",
+            "_directory",
+            ">{\"",
+            "path",
+            "\":\"",
+            ".\",",
+            " \"",
+            "recursive",
+            "\":",
+            "true",
+            "}</",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 59.43065457500052,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/actual_search/call_1.json",
+          "source_sha256": "982088925d25c4fcb88ecc56e4636bab4bc7db18233b628e34188422a79cb2f5",
+          "exact_count": {
+            "tokens": 1077,
+            "context_tokens": 8192,
+            "rendered_hash": "e0750521db17aa1f05412ffd0f4d72b03c264d137ebb9570e4d6a114c8f4f037",
+            "token_hash": "a889a8c550e11bf822742ef7fe2ef447a4b06e2b8cc220f80509c436b1dc316b"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "actual_run",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "a21a59fc0d09cdea03a672adfed75a988038c5f702e4cfa66c57f8b0c4bbb991",
+          "messages_digest": "578a346d18bf400519cf86d815c967733c21fbe779501529eb92b2aa72770396",
+          "result": {
+            "content": "<tool_call><function=shell><parameter=command>python3 -c \"print(6 * 7)\"</parameter></function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1073,
+            "completion_tokens": 28,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.012142876696686,
+            "generation_tokens_per_second": 6.441142336593395,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56455.753221,
+            "stream_ttft_ms": 56456.529032
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "shell",
+            ">",
+            "<parameter",
+            "=",
+            "command",
+            ">",
+            "python",
+            "3",
+            " -",
+            "c",
+            " \"",
+            "print",
+            "(",
+            "6",
+            " *",
+            " ",
+            "7",
+            ")\"",
+            "</",
+            "parameter",
+            "></",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 60.80371668198495,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/actual_run/call_1.json",
+          "source_sha256": "2fbb407dc153d3ae4bd4bde944d0a995e0b16df71029abc2dc6edf97d7bd1262",
+          "exact_count": {
+            "tokens": 1073,
+            "context_tokens": 8192,
+            "rendered_hash": "5b147ceca228859d21095773a36f982a4aaf229f8c84bb5b7363bfb66ac9718b",
+            "token_hash": "87efceb3c3ddd67d18959a76e867fbcd176b4c915acb9ab15ca4bbe796709018"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "mixed_code",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "92eb5876cd88cf94842856642a704855deabaca400d7c34faddc71ac0183a3e4",
+          "messages_digest": "0bc9b6e6d96f6299e4ee74a19090b33f7d3a72a3b699111f57152f7c995dce7f",
+          "result": {
+            "content": "<tool_call><function=write_artifact>{\"path\": \"sum_first_ten_squares.py\", \"overwrite\": false, \"create_parents\": true}</function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1078,
+            "completion_tokens": 32,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 18.863636347728423,
+            "generation_tokens_per_second": 6.479532372148703,
+            "reasoning_content": "",
+            "backend_ttft_ms": 57164.243712,
+            "stream_ttft_ms": 57164.816516
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "write",
+            "_art",
+            "ifact",
+            ">{\"",
+            "path",
+            "\":",
+            " \"",
+            "sum",
+            "_first",
+            "_ten",
+            "_s",
+            "quares",
+            ".py",
+            "\",",
+            " \"",
+            "overwrite",
+            "\":",
+            " false",
+            ",",
+            " \"",
+            "create",
+            "_parents",
+            "\":",
+            " true",
+            "}</",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 62.10373203299241,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/mixed_code/call_1.json",
+          "source_sha256": "c10e828b2860b8280dd9568ed70a4dbc544dddc26005e45f42a69b08869eaa9f",
+          "exact_count": {
+            "tokens": 1078,
+            "context_tokens": 8192,
+            "rendered_hash": "ebc96ecd74b96d96572a533f15aea10e6a82b6158eb75b50b89642ec812c33d9",
+            "token_hash": "2f019908e5cb6e0293e235d91490cf3cd57842100fd06c2970a976f3b3616d74"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "mixed_it",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "90fb3cbf5135802c080be97a1a2b24a22d74ceb0a1d1eef78a8df5badbda0f58",
+          "messages_digest": "2f8fc7ddb4f3dd2c368714530345ed44d134a759f279566cda4d32deba594da9",
+          "result": {
+            "content": "<tool_call><function=shell><parameter=command>find . -maxdepth 1 -type f | wc -l</parameter></function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1073,
+            "completion_tokens": 30,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 18.911165583962784,
+            "generation_tokens_per_second": 6.520198379209086,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56761.648024,
+            "stream_ttft_ms": 56762.404372
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "shell",
+            ">",
+            "<parameter",
+            "=",
+            "command",
+            ">",
+            "find",
+            " .",
+            " -",
+            "max",
+            "depth",
+            " ",
+            "1",
+            " -",
+            "type",
+            " f",
+            " |",
+            " wc",
+            " -",
+            "l",
+            "</",
+            "parameter",
+            "></",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 61.363856305019,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/mixed_it/call_1.json",
+          "source_sha256": "9def94da1eae50629ee257e37cab3d199543d064550adee352c39e42ed428552",
+          "exact_count": {
+            "tokens": 1073,
+            "context_tokens": 8192,
+            "rendered_hash": "bf0ca8b2368d25ae9ed8fe3ce1955ea0435038df0f7b950f906f117b1ce3cec0",
+            "token_hash": "83428a5b6794c4c96544ca81e124177122408fbc2c3db7cb1b94b08188089cb8"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "inspect_file",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "452735ac9abfe96585a7779667fa65ec4e1ac4c29163a3ba595bf074a8fd6ec9",
+          "messages_digest": "7f6ec6665716e9aa7b05ee65874bc42928aeffcfc42fd521f2775521a31b2d9d",
+          "result": {
+            "content": "<tool_call><function=shell><parameter=command>cat notes.txt</parameter></function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1066,
+            "completion_tokens": 19,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.01861926394161,
+            "generation_tokens_per_second": 6.424051649375261,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56073.836035,
+            "stream_ttft_ms": 56074.455934
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "shell",
+            ">",
+            "<parameter",
+            "=",
+            "command",
+            ">",
+            "cat",
+            " notes",
+            ".txt",
+            "</",
+            "parameter",
+            "></",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 59.03229460699367,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/inspect_file/call_1.json",
+          "source_sha256": "b1b42400a605780b123f569127c61ccff282d873286a964df730a2f8e2eba836",
+          "exact_count": {
+            "tokens": 1066,
+            "context_tokens": 8192,
+            "rendered_hash": "e88e5aecfac0ed48f26ab9b6202e2971e2694564ec49fd5f97abffc98fc7b7f7",
+            "token_hash": "c7e2e52ca674bdde9a1f63bd92700abc97bef9f9bcfdd47e0cc391a80a1a4ad8"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "modify_file",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "6207ad1f0f599a7600aa39c5ea7c7bf8d7c9bfc015ed60ee1661fe04e9e91410",
+          "messages_digest": "9f91488385c4015d6216892f2cd56958f2c8b0a6fac497426e83d3487ab2fb17",
+          "result": {
+            "content": "<tool_call><function=shell><parameter=command>printf 'Fine\\n' >> notes.txt</parameter></function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1071,
+            "completion_tokens": 24,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.01079232562537,
+            "generation_tokens_per_second": 6.480408913802461,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56353.781114,
+            "stream_ttft_ms": 56354.382578
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "shell",
+            ">",
+            "<parameter",
+            "=",
+            "command",
+            ">",
+            "printf",
+            " '",
+            "Fine",
+            "\\n",
+            "'",
+            " >>",
+            " notes",
+            ".txt",
+            "</",
+            "parameter",
+            "></",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 60.057978336990345,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/modify_file/call_1.json",
+          "source_sha256": "253b08879a879b53914fe7bfe3a58b396d71e44d6216d673b34146595a03a44f",
+          "exact_count": {
+            "tokens": 1071,
+            "context_tokens": 8192,
+            "rendered_hash": "76aba23bdf4c53bcbd885982e70194ca2f50027d7d93c26d6ae8e739c3a37853",
+            "token_hash": "948be19509bc5c2aa2e83d72a370816e14f2722026ca92d85526cadb4d629f06"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "explain_os",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "b7e080420b7ba7d52a509d90fcd92cd2fca167606b7c7a50a0be3cce89f99cb6",
+          "messages_digest": "79e9cb7f403239c9ab78f1d27f5519015dda1bd3e5ea696b81084e926a6f6bab",
+          "result": {
+            "content": "{\"route\":\"CHAT\"}",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1065,
+            "completion_tokens": 5,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.74548679355098,
+            "generation_tokens_per_second": 6.742997397203005,
+            "reasoning_content": "",
+            "backend_ttft_ms": 53953.015352,
+            "stream_ttft_ms": 53953.853823
+          },
+          "deltas": [
+            "{\"",
+            "route",
+            "\":\"",
+            "CHAT",
+            "\"}"
+          ],
+          "wall_seconds": 54.69580047999625,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/explain_os/call_1.json",
+          "source_sha256": "b5f706d7b67959ff6b0a51af9939e5761b97594e2492c8e55118316f1fcdc6d1",
+          "exact_count": {
+            "tokens": 1065,
+            "context_tokens": 8192,
+            "rendered_hash": "fdff31ad69cd06ebbf267f8ebe355d4ef7fe7a98b6e3859d67976b4efdd6204e",
+            "token_hash": "1bb2c9d87daec2851250adc9750fd29c5f2759748214d65b8aedafed5c71d9ec"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "save_artifact",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "17a284c652349b1138ecb89a17407f087c71a5d9f5486ea8c0ef86ff894ccbb8",
+          "messages_digest": "ff6a8f1884938ea43bc92f0b3151d310d178ed7d4724dcfcce1a978628855b75",
+          "result": {
+            "content": "<tool_call><function=write_artifact><parameter=arguments>{\"path\":\"greeting.txt\",\"content\":\"Welcome! Glad you're here.\\n\"}</parameter></function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1068,
+            "completion_tokens": 35,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.80485357991736,
+            "generation_tokens_per_second": 6.525160178699902,
+            "reasoning_content": "",
+            "backend_ttft_ms": 53943.911247,
+            "stream_ttft_ms": 53944.52802
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "write",
+            "_art",
+            "ifact",
+            ">",
+            "<parameter",
+            "=",
+            "arguments",
+            ">{\"",
+            "path",
+            "\":\"",
+            "g",
+            "reeting",
+            ".txt",
+            "\",\"",
+            "content",
+            "\":\"",
+            "Welcome",
+            "!",
+            " Glad",
+            " you",
+            "'re",
+            " here",
+            ".\\",
+            "n",
+            "\"",
+            "}</",
+            "parameter",
+            "></",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 59.30867834397941,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/save_artifact/call_1.json",
+          "source_sha256": "d072e2a796dc96fef4c0faaf8428f276dcddd01cd991fcb74c68b3b020c55226",
+          "exact_count": {
+            "tokens": 1068,
+            "context_tokens": 8192,
+            "rendered_hash": "c8354983e9297c00f856c2fd128dc59d76382907ea8e6cef42f24f6acbfb9106",
+            "token_hash": "1689ca4f9be484586926fce9c55b2a6e62d120eb5cd6dddb0d1e3854b0d318ea"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "host",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "dd4800791d41e9c05384be6418b91eaccbd612e38b43a7ece12ebedb367a945c",
+          "messages_digest": "3f5a76c7b45b429f1f0855fdd58b049631589650a79312e69bf3a9e7f1463764",
+          "result": {
+            "content": "{\"include_cpu\":true,\"include_memory\":true,\"include_disks\":true,\"include_os\":true}",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1064,
+            "completion_tokens": 22,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.240118047527286,
+            "generation_tokens_per_second": 6.5435390731076915,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55319.7753,
+            "stream_ttft_ms": 55320.429202
+          },
+          "deltas": [
+            "{\"",
+            "include",
+            "_cpu",
+            "\":",
+            "true",
+            ",\"",
+            "include",
+            "_memory",
+            "\":",
+            "true",
+            ",\"",
+            "include",
+            "_dis",
+            "ks",
+            "\":",
+            "true",
+            ",\"",
+            "include",
+            "_os",
+            "\":",
+            "true",
+            "}"
+          ],
+          "wall_seconds": 58.68311534798704,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/host/call_1.json",
+          "source_sha256": "bcd7c19fdf56c4a7a4bc9c16f1280765f6aef33b424b480ae13269cfafb1965b",
+          "exact_count": {
+            "tokens": 1064,
+            "context_tokens": 8192,
+            "rendered_hash": "e160490a81594794e1b38ecc0be19f8e9d0b0c2d9c0fe40e351cd9bae28a0432",
+            "token_hash": "b32164bceb11c41afb9664a05e9516844c805c5bd2947844dbb8265b4bd5c2dd"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "chat",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "e7825fccf4009f9f008fd0be413e0bad3254f57308109d76964368dab18bbe98",
+          "messages_digest": "0d8c67f276f3d146a4548d4c3d08444f4bd4ad56ac1a9434a42684be1c9aa002",
+          "result": {
+            "content": "France's capital is Paris.",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1060,
+            "completion_tokens": 6,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.885390365033107,
+            "generation_tokens_per_second": 6.948731103794355,
+            "reasoning_content": "",
+            "backend_ttft_ms": 53322.41622,
+            "stream_ttft_ms": 53323.182333
+          },
+          "deltas": [
+            "France",
+            "'s",
+            " capital",
+            " is",
+            " Paris",
+            "."
+          ],
+          "wall_seconds": 54.18673107397626,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/chat/call_1.json",
+          "source_sha256": "3d598cb53de9aa1529084baee4c240c54e264e4e06af54ba922e252a8f0dfae9",
+          "exact_count": {
+            "tokens": 1060,
+            "context_tokens": 8192,
+            "rendered_hash": "824296ee51c0704f53c9974f09291d42b397246b4dfb5804151196c3b9028614",
+            "token_hash": "88b5a7a0d1af4b2c9ee253f5e2b40100711b1eacff1de19ef9bbefed22cf175b"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "list",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "df272d0b6cc8ae7a990cf8b4b2ba5029e5264e2353e5e20a81054f33fa4b3011",
+          "messages_digest": "ae4c7b137905c0a5f1330284c92c1afea6698b7e8ab1e1397f5ad44c6b4d1b65",
+          "result": {
+            "content": "<tool_call><function=list_directory>{\"path\":\".\"}</function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1061,
+            "completion_tokens": 13,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.965704903042695,
+            "generation_tokens_per_second": 6.778063267485317,
+            "reasoning_content": "",
+            "backend_ttft_ms": 53158.176378,
+            "stream_ttft_ms": 53158.774488
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=list",
+            "_directory",
+            ">{\"",
+            "path",
+            "\":\"",
+            ".\"",
+            "}</",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 55.07684478099691,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/list/call_1.json",
+          "source_sha256": "5778fb60eb6016cdfb46053ad4be30df0f5a9ffcc9d59b696e26f9258cf3ec4a",
+          "exact_count": {
+            "tokens": 1061,
+            "context_tokens": 8192,
+            "rendered_hash": "a0c5708e988e385aba5558af5caa8683827d411ea0ee0a2436238286266a7693",
+            "token_hash": "82bbd981ffb995d39b9a90b3b22db41b68262785d8ef7d4d25554e0617f47eab"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "fetch",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "76656932c2de4efe13d15070e547959f2e1eadfb9173fee9d03ae0d07eb79ba3",
+          "messages_digest": "0713eac73b475116a43b1daae22bb41204514d475336659d07b4699b7ede1e65",
+          "result": {
+            "content": "<tool_call><function=fetch_url>{\"url\":\"https://example.com\"}</function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1063,
+            "completion_tokens": 18,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.811547638590255,
+            "generation_tokens_per_second": 6.673859604240125,
+            "reasoning_content": "",
+            "backend_ttft_ms": 53674.508015,
+            "stream_ttft_ms": 53675.157853
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=",
+            "fetch",
+            "_url",
+            ">{\"",
+            "url",
+            "\":\"",
+            "https",
+            "://",
+            "example",
+            ".com",
+            "\"",
+            "}</",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 56.37261660900549,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/fetch/call_1.json",
+          "source_sha256": "09e02fe6fa1495dcaa2c542832224adfb97526679191809a524f87444b9eaa64",
+          "exact_count": {
+            "tokens": 1063,
+            "context_tokens": 8192,
+            "rendered_hash": "ecee3efd918add66f45bf6ac1b6eb54c810a9341bd9f004c0762f3477a369299",
+            "token_hash": "9c1086c1ff414d39f93587f3ba1a1c0319a961393393916d63376ad254973ba8"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "recap",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "9278dfe8d50a3eae1d2dcb242d4338e369f166db0babff1b111907a6531647a0",
+          "messages_digest": "947f653007fce29e2e1848a1af391218d31e2f6ab4d74c433a9988ff42e95a8d",
+          "result": {
+            "content": "/tmp/route-intent-fixture",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1090,
+            "completion_tokens": 7,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.62678851361109,
+            "generation_tokens_per_second": 6.700449695895305,
+            "reasoning_content": "",
+            "backend_ttft_ms": 55557.821276,
+            "stream_ttft_ms": 55558.150342
+          },
+          "deltas": [
+            "/tmp",
+            "/r",
+            "oute",
+            "-int",
+            "ent",
+            "-f",
+            "ixture"
+          ],
+          "wall_seconds": 56.60338700300781,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/recap/call_1.json",
+          "source_sha256": "50193791c7e4a6c792aab87a607d97820e726829f608737a47a87432982e7925",
+          "exact_count": {
+            "tokens": 1090,
+            "context_tokens": 8192,
+            "rendered_hash": "721e2edd993506c1a86b7a15ee9fc56e29ab78c56c6d49d8a4bad55192e8f40f",
+            "token_hash": "3b9aa5f3ead94ce230d24646db351e37a1a4d25466ec2c977b93daacdf35f624"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "refresh",
+      "calls": [
+        {
+          "phase": "route",
+          "request_digest": "0aa588d256278cca30f103f7ba24ad4bd20911d705e5edf558ffa02b70d2cfa9",
+          "messages_digest": "a24915984c9340035492af3feedc65667c0c4c740eaaa76bf8a0bb2ed3cd4367",
+          "result": {
+            "content": "<tool_call><function=list_directory>{\"path\":\"/tmp/route-intent-fixture\",\"recursive\":false}</function></tool_call>",
+            "model": null,
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "prompt_tokens": 1089,
+            "completion_tokens": 23,
+            "cached_tokens": 0,
+            "prompt_tokens_per_second": 19.414001987929623,
+            "generation_tokens_per_second": 6.674902916439213,
+            "reasoning_content": "",
+            "backend_ttft_ms": 56111.969695,
+            "stream_ttft_ms": 56112.554021
+          },
+          "deltas": [
+            "<tool_call>",
+            "<function",
+            "=list",
+            "_directory",
+            ">{\"",
+            "path",
+            "\":\"/",
+            "tmp",
+            "/r",
+            "oute",
+            "-int",
+            "ent",
+            "-f",
+            "ixture",
+            "\",\"",
+            "recursive",
+            "\":",
+            "false",
+            "}</",
+            "function",
+            ">",
+            "</tool_call>"
+          ],
+          "wall_seconds": 59.5585395199887,
+          "source": "workdir/diag/mimo_route_contract_1/initial/A/refresh/call_1.json",
+          "source_sha256": "72f42f3218b30e7ed9f04ea23fde0f2ada1dfa71dc49caa2cb6435474fcf9abf",
+          "exact_count": {
+            "tokens": 1089,
+            "context_tokens": 8192,
+            "rendered_hash": "614132e8e0635c5dbc43ccbf2df7a35ef2f423ce8323d842b5742f2c885982b7",
+            "token_hash": "da8d0bec0657e84b80b0fad8ef0bcc20746ff15dd2892d4a83744fffb98b4ac2"
+          }
+        }
+      ]
+    }
+  ]
+}
