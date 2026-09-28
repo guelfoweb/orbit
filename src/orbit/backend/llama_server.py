@@ -51,7 +51,9 @@ from orbit.runtime.tool_healing import tool_call_healing_status
 
 
 class LlamaServerError(RecoverableBackendError):
-    pass
+    def __init__(self, *args: object, diagnostic_code: str | None = None) -> None:
+        super().__init__(*args)
+        self.diagnostic_code = diagnostic_code
 
 
 # What the server says when its tool-call grammar rejects the model's output.
@@ -351,7 +353,10 @@ class LlamaServerBackend:
     def _require_tool_decoding(self) -> None:
         if (not self._is_orbit_native_backend()
                 or self._props_or_empty().get("required_tool_decoding") is not True):
-            raise LlamaServerError("server does not support required tool decoding")
+            raise LlamaServerError(
+                "server does not support required tool decoding",
+                diagnostic_code="required-tool-decoding-unavailable",
+            )
 
     def count_chat_tokens(
         self,

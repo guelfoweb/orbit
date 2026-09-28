@@ -236,12 +236,16 @@ a native chat bridge profile, text tools, thinking off and no custom stop
 override. Use the bundled native build process (`python3 scripts/build_native.py`)
 after a source upgrade; no external llama.cpp installation is needed.
 
-Known diagnostic limitation: on an incompatible server, exact admission can
-raise a generic `ContextAdmissionError` when required decoding is unavailable.
-That error does not necessarily mean the prompt exceeds the context window;
-the request still stops without falling back to free generation. Separate
-diagnostic TODO: preserve the unsupported-decoding cause in the client error,
-without changing admission, budgets or backend behavior.
+If the server lacks required decoding, exact admission reports
+`required-tool-decoding-unavailable`. Missing exact counts report
+`exact-token-count-unavailable`; failed or malformed count responses are
+reported separately. None of these diagnoses means the prompt exceeds the
+context window. A measured overflow retains `required-context-does-not-fit`
+(or an exhausted-reserve diagnosis). The reason survives FINISH repair
+admission and the investigation's recorded stop reason. Requests still stop
+without falling back to free generation; admission policy, budgets and repair
+limits are unchanged. External endpoints retain their explicit backend refusal
+when they cannot provide the requested constraint.
 
 The bridge derives the grammar from the offered schema and actual chat format,
 including the control name. It uses the native XML format for the qualified

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
 
-from orbit.backend.base import ChatResult, Message, StreamProgress, TokenCount
+from orbit.backend.base import ChatResult, Message, RecoverableBackendError, StreamProgress, TokenCount
 
 
 EVIDENCE_REF_MARKER = "tool_evidence_ref: true"
@@ -173,7 +173,9 @@ def plan_exact_context(
     first = _safe_count_chat(count_chat, source, tools=tools, thinking=thinking)
     second = _safe_count_chat(count_chat, source, tools=tools, thinking=thinking)
     if not _same_exact_count(first, second):
-        return _blocked_without_budget(source, "tokenizer-template-or-context-changed")
+        return _blocked_without_budget(source, _count_failure_reason(
+            first, second, default="tokenizer-template-or-context-changed",
+        ))
     assert first is not None and first.context_tokens is not None
     active_context = first.context_tokens
     if isinstance(configured_context_tokens, int) and configured_context_tokens > 0:
@@ -186,8 +188,10 @@ def plan_exact_context(
     )
     source_key = _message_identity(source)
     exact_cache: dict[str, int] = {source_key: first.tokens}
+    count_failure = "exact-token-count-unavailable"
 
     def exact_counter(candidate: list[Message]) -> int:
+        nonlocal count_failure
         key = _message_identity(candidate)
         cached = exact_cache.get(key)
         if cached is not None:
@@ -195,6 +199,9 @@ def plan_exact_context(
         candidate_first = _safe_count_chat(count_chat, candidate, tools=tools, thinking=thinking)
         candidate_second = _safe_count_chat(count_chat, candidate, tools=tools, thinking=thinking)
         if not _same_exact_count(candidate_first, candidate_second):
+            count_failure = _count_failure_reason(
+                candidate_first, candidate_second, default=count_failure,
+            )
             raise ValueError("exact token identity unavailable")
         assert candidate_first is not None
         if candidate_first.context_tokens != first.context_tokens:
@@ -202,13 +209,18 @@ def plan_exact_context(
         exact_cache[key] = candidate_first.tokens
         return candidate_first.tokens
 
-    return plan_context(
+    plan = plan_context(
         source,
         budget=budget,
         available_evidence_ids=available_evidence_ids,
         covered_evidence_ids=covered_evidence_ids,
         count_tokens=exact_counter,
     )
+    # Preserve the existing blocked projection, budget and accounting; only
+    # refine the diagnostic when a compacted view could not be counted.
+    if plan.reason == "exact-token-count-unavailable":
+        return replace(plan, reason=count_failure)
+    return plan
 
 
 class ContextManagedBackend:
@@ -544,17 +556,32 @@ def _safe_count_chat(
     *,
     tools: list[dict[str, Any]] | None,
     thinking: bool,
-) -> TokenCount | None:
+) -> TokenCount | str:
+    """Return a count or a bounded diagnostic, never backend exception text."""
     try:
         value = counter(messages, tools=tools, thinking=thinking)
+    except RecoverableBackendError as exc:
+        code = getattr(exc, "diagnostic_code", None)
+        if type(code) is str and code == "required-tool-decoding-unavailable":
+            return code
+        return "exact-token-count-failed"
     except Exception:
-        return None
-    return value if isinstance(value, TokenCount) else None
+        return "exact-token-count-failed"
+    if value is None:
+        return "exact-token-count-unavailable"
+    return value if isinstance(value, TokenCount) else "exact-token-count-invalid"
 
 
-def _exact_count(value: TokenCount | None) -> bool:
+def _count_failure_reason(first, second, *, default: str) -> str:
+    for value in (first, second):
+        if isinstance(value, str):
+            return value
+    return default
+
+
+def _exact_count(value: TokenCount | str | None) -> bool:
     return (
-        value is not None
+        isinstance(value, TokenCount)
         and isinstance(value.tokens, int)
         and value.tokens >= 0
         and isinstance(value.context_tokens, int)
@@ -566,7 +593,7 @@ def _exact_count(value: TokenCount | None) -> bool:
     )
 
 
-def _same_exact_count(first: TokenCount | None, second: TokenCount | None) -> bool:
+def _same_exact_count(first: TokenCount | str | None, second: TokenCount | str | None) -> bool:
     return _exact_count(first) and _exact_count(second) and first == second
 
 
