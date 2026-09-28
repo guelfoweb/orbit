@@ -169,3 +169,7 @@ must preserve the [deterministic cross-sample gate](tests/test_analysis_cross_sa
 claims of semantic improvement also require comparison against the
 [semantic baseline](docs/ANALYSIS_SEMANTIC_BASELINE.md), with no regressions on
 applicable criteria.
+
+The [tool-intent qualification gate](docs/TOOL_INTENT_QUALIFICATION.md) checks
+24 frozen bilingual intents with tool execution intercepted. Its retained-response
+replay runs offline and emits JSON and Markdown capability results.

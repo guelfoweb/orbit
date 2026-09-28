@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "original",
+      "split": "design",
+      "language": "it",
+      "category": "generation",
+      "prompt": "scrivi uno script powershell per cercare ricorsivamente in una cartella i file markdown.",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "run_control",
+      "split": "design",
+      "language": "en",
+      "category": "execution",
+      "prompt": "Run a recursive search in the current folder and list its Markdown files.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command",
+        "list_directory"
+      ],
+      "history": []
+    },
+    {
+      "id": "code_python",
+      "split": "held_out",
+      "language": "en",
+      "category": "generation",
+      "prompt": "Write a Python function that removes blank lines from a string. Return the code so I can use it later.",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "code_shell",
+      "split": "held_out",
+      "language": "it",
+      "category": "generation",
+      "prompt": "Mi serve uno script Bash che archivi i file di log più vecchi di trenta giorni. Incolla qui il codice.",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "indirect_recipe",
+      "split": "held_out",
+      "language": "en",
+      "category": "indirect",
+      "prompt": "What would I type to find every Markdown document below an arbitrary directory?",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "indirect_write",
+      "split": "held_out",
+      "language": "it",
+      "category": "indirect",
+      "prompt": "Vorrei poter controllare lo spazio disco con uno script: me ne prepari il testo?",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "explain_code",
+      "split": "held_out",
+      "language": "en",
+      "category": "explanation",
+      "prompt": "Explain what this command does: find . -type f -name \"*.md\"",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "explain_concept",
+      "split": "held_out",
+      "language": "it",
+      "category": "explanation",
+      "prompt": "Spiegami come funziona la ricerca ricorsiva dei file e quando conviene usarla.",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "edit_inline",
+      "split": "held_out",
+      "language": "en",
+      "category": "modification",
+      "prompt": "Change this function to handle an empty list and show the revised code: def first(items): return items[0]",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "write_prose",
+      "split": "held_out",
+      "language": "it",
+      "category": "generation",
+      "prompt": "Scrivi una breve email che chieda al team di eliminare i file temporanei.",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "actual_search",
+      "split": "held_out",
+      "language": "it",
+      "category": "execution",
+      "prompt": "Cerca adesso i file Markdown nella cartella corrente e nelle sottocartelle e mostrami i percorsi trovati.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command",
+        "list_directory"
+      ],
+      "history": []
+    },
+    {
+      "id": "actual_run",
+      "split": "held_out",
+      "language": "en",
+      "category": "execution",
+      "prompt": "Execute python3 -c \"print(6 * 7)\" here and give me its output.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command"
+      ],
+      "history": []
+    },
+    {
+      "id": "mixed_code",
+      "split": "held_out",
+      "language": "en",
+      "category": "mixed",
+      "prompt": "Write Python code to compute the sum of the first ten squares, run it, and show both the code and its output.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command",
+        "write_artifact"
+      ],
+      "history": []
+    },
+    {
+      "id": "mixed_it",
+      "split": "held_out",
+      "language": "it",
+      "category": "mixed",
+      "prompt": "Prepara uno script che conti i file nella cartella corrente, eseguilo e riporta il risultato.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command",
+        "write_artifact"
+      ],
+      "history": []
+    },
+    {
+      "id": "inspect_file",
+      "split": "held_out",
+      "language": "en",
+      "category": "inspection",
+      "prompt": "Read notes.txt in the current directory and explain what it contains.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command"
+      ],
+      "history": []
+    },
+    {
+      "id": "modify_file",
+      "split": "held_out",
+      "language": "it",
+      "category": "modification",
+      "prompt": "Nel file notes.txt della cartella corrente aggiungi una riga con il testo Fine.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command",
+        "write_artifact"
+      ],
+      "history": []
+    },
+    {
+      "id": "explain_os",
+      "split": "held_out",
+      "language": "en",
+      "category": "explanation",
+      "prompt": "Explain the difference between an operating system and a shell.",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "save_artifact",
+      "split": "held_out",
+      "language": "en",
+      "category": "generation_action",
+      "prompt": "Save a new UTF-8 file greeting.txt containing a short welcome message.",
+      "expected": "tool",
+      "allowed_tools": [
+        "write_artifact",
+        "exec_shell_full_command"
+      ],
+      "history": []
+    },
+    {
+      "id": "host",
+      "split": "regression",
+      "language": "en",
+      "category": "inspection",
+      "prompt": "what are this machine's cpu, memory, and os",
+      "expected": "tool",
+      "allowed_tools": [
+        "system_info",
+        "exec_shell_full_command"
+      ],
+      "history": []
+    },
+    {
+      "id": "chat",
+      "split": "regression",
+      "language": "en",
+      "category": "knowledge",
+      "prompt": "What is the capital of France?",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": []
+    },
+    {
+      "id": "list",
+      "split": "regression",
+      "language": "en",
+      "category": "inspection",
+      "prompt": "List the files in the current directory.",
+      "expected": "tool",
+      "allowed_tools": [
+        "list_directory",
+        "exec_shell_full_command"
+      ],
+      "history": []
+    },
+    {
+      "id": "fetch",
+      "split": "regression",
+      "language": "en",
+      "category": "inspection",
+      "prompt": "Read https://example.com and summarize the page.",
+      "expected": "tool",
+      "allowed_tools": [
+        "fetch_url",
+        "exec_shell_full_command"
+      ],
+      "history": []
+    },
+    {
+      "id": "recap",
+      "split": "regression",
+      "language": "en",
+      "category": "history",
+      "prompt": "Repeat the directory path you just reported.",
+      "expected": "content",
+      "allowed_tools": [],
+      "history": [
+        {
+          "role": "user",
+          "content": "What was the working directory?"
+        },
+        {
+          "role": "assistant",
+          "content": "The working directory was /tmp/route-intent-fixture."
+        }
+      ]
+    },
+    {
+      "id": "refresh",
+      "split": "regression",
+      "language": "en",
+      "category": "history",
+      "prompt": "Check the current working directory again.",
+      "expected": "tool",
+      "allowed_tools": [
+        "exec_shell_full_command"
+      ],
+      "history": [
+        {
+          "role": "user",
+          "content": "What was the working directory?"
+        },
+        {
+          "role": "assistant",
+          "content": "The working directory was /tmp/route-intent-fixture."
+        }
+      ]
+    }
+  ]
+}
