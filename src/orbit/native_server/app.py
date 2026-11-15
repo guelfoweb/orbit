@@ -1285,8 +1285,12 @@ def _report_startup_prewarm(label: str, result: "NativeRoutePrefixPrefillResult"
         _startup_note(f"prewarm failed ({label}): {result.failed_reason or 'unknown'}")
 
 
-def run_server(argv: list[str] | None = None) -> int:
+def run_server(argv: list[str] | None = None, *, research_admission=None) -> int:
     args = build_parser().parse_args(argv)
+    if research_admission is not None and (
+        args.model is None or args.model_id is not None or args.host != "127.0.0.1"
+    ):
+        raise ValueError("research startup requires an explicit model path on IPv4 loopback")
     if getattr(args, "show_profile", False):
         # Preview only, and model-aware: it resolves the model the same way a
         # real start would (explicit path/id, the shared interactive selection,
@@ -1395,6 +1399,7 @@ def run_server(argv: list[str] | None = None) -> int:
                 lazy_mode=qualified.lazy_mode if qualified is not None else None,
                 load_mtp=qualified.load_mtp if qualified is not None else None,
             ),
+            **({"research_admission": research_admission} if research_admission is not None else {}),
         )
         if not args.verbose_llama_log:
             client.set_quiet_logging()

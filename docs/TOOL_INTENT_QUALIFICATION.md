@@ -55,6 +55,11 @@ probe's `wall_seconds`; unavailable token counts remain `null`.
 
 ## Future model qualification
 
+Unregistered artifacts can first use the isolated, hash-pinned
+[research qualification command](MODEL_RESEARCH_QUALIFICATION.md). It keeps the
+profile unverified and uses the same observer without weakening the verified
+profile precondition of the production CLI below. Neither path enables models.
+
 Only when a live gate is explicitly authorized, use an independently managed,
 idle Orbit qualification server with an already verified profile:
 
