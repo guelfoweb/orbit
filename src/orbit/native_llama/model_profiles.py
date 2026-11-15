@@ -5,6 +5,8 @@ import hashlib
 from types import MappingProxyType
 from typing import Mapping
 
+from .model_contract import ReasoningBehavior, TEXT_CAPABILITIES, reasoning_enabled
+
 
 GEMMA4_PROFILE_ID = "orbit-gemma4-native-v1"
 GEMMA4_VERIFIED_MODEL_NAME = "gemma-4-26B-A4B-it"
@@ -95,12 +97,38 @@ class NativeModelProfile:
     artifact_content_protocol: str = "literal-content-v1"
     route_prefix_reuse_supported: bool = False
     multimodal_supported: bool = False
+    # Each profile declares support explicitly; identity verification alone
+    # grants no operation, and no support field certifies semantic quality.
+    supported_capabilities: frozenset[str] = frozenset()
+    reasoning_behavior: ReasoningBehavior | None = None
+    separated_reasoning: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.supported_capabilities, frozenset)
+            or not self.supported_capabilities <= TEXT_CAPABILITIES
+        ):
+            raise ValueError("unknown technical text capability")
+        if self.reasoning_behavior is not None and (
+            not isinstance(self.reasoning_behavior, ReasoningBehavior)
+            or (self.reasoning_behavior != ReasoningBehavior.NONE) != self.thinking_supported
+        ):
+            raise ValueError("reasoning behavior contradicts thinking support")
+        if type(self.separated_reasoning) is not bool:
+            raise ValueError("separated_reasoning must be a boolean")
+
+    @property
+    def effective_reasoning_behavior(self) -> ReasoningBehavior:
+        if self.reasoning_behavior is not None:
+            return self.reasoning_behavior
+        return ReasoningBehavior.OPTIONAL if self.thinking_supported else ReasoningBehavior.NONE
 
     @property
     def uses_native_chat_bridge(self) -> bool:
         return self.renderer == "llama.cpp-jinja"
 
     def diagnostics(self, *, thinking_enabled: bool) -> dict[str, object]:
+        support = self.supported_capabilities
         return {
             "model_family": self.family,
             "model_name": self.model_name,
@@ -110,7 +138,10 @@ class NativeModelProfile:
             "template_hash": self.template_sha256,
             "renderer": self.renderer,
             "thinking_supported": self.thinking_supported,
-            "thinking_enabled": thinking_enabled,
+            "thinking_enabled": reasoning_enabled(self.effective_reasoning_behavior, thinking_enabled),
+            "thinking_requested": thinking_enabled,
+            "reasoning_behavior": self.effective_reasoning_behavior.value,
+            "separated_reasoning": self.separated_reasoning,
             "reasoning_protocol": self.reasoning_protocol,
             "tool_call_protocol": self.tool_call_protocol,
             "history_serialization": self.history_serialization,
@@ -119,13 +150,10 @@ class NativeModelProfile:
             "mtp_supported": self.mtp_supported,
             "verified_quantization": self.verified_quantization,
             "artifact_content_protocol": self.artifact_content_protocol,
+            "capability_scope": "technical_profile_support_not_qualification",
+            "qualification": {"status": "reported_separately", "automatic_promotion": False},
             "capabilities": {
-                "chat": self.verified,
-                "tools": self.verified,
-                "tool_history_results": self.verified,
-                "write_artifact": self.verified,
-                "verify_artifact": self.verified,
-                "full_document_analysis": self.verified,
+                **{name: self.verified and name in support for name in sorted(TEXT_CAPABILITIES)},
                 "mtp": self.mtp_supported,
                 "route_prefix_reuse": self.route_prefix_reuse_supported,
                 "multimodal": self.multimodal_supported,
@@ -247,9 +275,11 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             architecture=architecture,
             renderer="orbit-gemma4",
             reasoning_protocol="gemma4-control-channel",
+            reasoning_behavior=ReasoningBehavior.OPTIONAL,
             tool_call_protocol="gemma4-native",
             history_serialization="orbit-native-roles",
             verified=True,
+            supported_capabilities=TEXT_CAPABILITIES,
             failure_reason=None,
             template_source="orbit-reviewed",
             template_sha256=template_hash,
@@ -276,9 +306,12 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             architecture=architecture,
             renderer="llama.cpp-jinja",
             reasoning_protocol="qwen-think",
+            reasoning_behavior=ReasoningBehavior.OPTIONAL,
+            separated_reasoning=True,
             tool_call_protocol="qwen3.6-xml",
             history_serialization="qwen-leading-system-only",
             verified=True,
+            supported_capabilities=TEXT_CAPABILITIES,
             failure_reason=None,
             template_source="gguf-embedded-official",
             template_sha256=template_hash,
@@ -311,6 +344,8 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             architecture=architecture,
             renderer="llama.cpp-jinja",
             reasoning_protocol="qwen-think",
+            reasoning_behavior=ReasoningBehavior.OPTIONAL,
+            separated_reasoning=True,
             # Tool envelope verified byte-identical to the reviewed Qwen3.6
             # template: same <tool_call>/<function=>/<parameter=> form and
             # <tool_response> results.
@@ -320,6 +355,7 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             # would vanish without the leading-system-only contract.
             history_serialization="qwen-leading-system-only",
             verified=True,
+            supported_capabilities=TEXT_CAPABILITIES,
             failure_reason=None,
             template_source="gguf-embedded-official",
             template_sha256=template_hash,
@@ -350,6 +386,8 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             architecture=architecture,
             renderer="llama.cpp-jinja",
             reasoning_protocol="qwen-think",
+            reasoning_behavior=ReasoningBehavior.OPTIONAL,
+            separated_reasoning=True,
             # Wire protocol verified byte-identical to Qwen3.6: same
             # <tool_call>/<function=>/<parameter=> envelope, same
             # <tool_response> result form. Qwen3.8 only adds template-side
@@ -357,6 +395,7 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             tool_call_protocol="qwen3.6-xml",
             history_serialization="qwen-leading-system-only",
             verified=True,
+            supported_capabilities=TEXT_CAPABILITIES,
             failure_reason=None,
             template_source="gguf-embedded-official",
             template_sha256=template_hash,
@@ -389,12 +428,15 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             architecture=architecture,
             renderer="llama.cpp-jinja",
             reasoning_protocol="qwen-think",
+            reasoning_behavior=ReasoningBehavior.OPTIONAL,
+            separated_reasoning=True,
             # Same template bytes (sha256) as the verified Qwen3.8 27B pin, so
             # the same <tool_call>/<function=>/<parameter=> envelope and
             # <tool_response> results.
             tool_call_protocol="qwen3.6-xml",
             history_serialization="qwen-leading-system-only",
             verified=True,
+            supported_capabilities=TEXT_CAPABILITIES,
             failure_reason=None,
             template_source="gguf-embedded-official",
             template_sha256=template_hash,
@@ -430,9 +472,11 @@ def detect_native_model_profile(metadata: Mapping[str, str], template: str) -> N
             architecture=architecture,
             renderer="llama.cpp-jinja",
             reasoning_protocol="none",
+            reasoning_behavior=ReasoningBehavior.NONE,
             tool_call_protocol="qwen3-coder-xml",
             history_serialization="qwen3-coder-chatml",
             verified=True,
+            supported_capabilities=TEXT_CAPABILITIES,
             failure_reason=None,
             template_source="gguf-embedded-official",
             template_sha256=template_hash,

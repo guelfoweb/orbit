@@ -14,6 +14,7 @@ the client -- nothing here is duplicated or cached.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import os
 
 from .expert_usage import summarize_expert_usage
 from .model_profiles import ORNITH15_PROFILE_ID, QWEN36_PROFILE_ID, QWEN3_CODER_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID
@@ -186,6 +187,14 @@ def compatibility_diagnostics(client: "NativeLlamaClient") -> dict[str, object]:
             "failure_reason": "model_profile_uninitialized",
         }
     diagnostics = profile.diagnostics(thinking_enabled=client.config.thinking)
+    admission = getattr(client, "_research_admission", None)
+    if admission is not None:
+        diagnostics["research_admission"] = {
+            "pid": os.getpid(),
+            "artifact_sha256": admission.artifact_sha256,
+            "template_sha256": admission.template_sha256,
+            "production_enabled": False,
+        }
     diagnostics["chat_bridge_loaded"] = client.chat_bridge is not None
     diagnostics["chat_bridge_revision_bound"] = bool(
         client.chat_bridge is not None and client.chat_bridge.build_identity

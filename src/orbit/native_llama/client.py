@@ -56,6 +56,7 @@ from .model_profiles import (
 )
 from .gguf_split import split_sibling_names
 from .model_discovery import inspect_native_model_profile
+from .research_admission import ResearchAdmission
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
 from .mtp_accept_probe import MtpAcceptProbeResult, run_mtp_accept_probe
@@ -336,9 +337,18 @@ def _resolve_chat_bridge_path(paths: NativeLlamaPaths) -> Path | None:
 
 
 class NativeLlamaClient:
-    def __init__(self, paths: NativeLlamaPaths, config: NativeClientConfig | None = None) -> None:
+    def __init__(self, paths: NativeLlamaPaths, config: NativeClientConfig | None = None,
+                 *, research_admission: ResearchAdmission | None = None) -> None:
         self.paths = paths
         self.config = config or NativeClientConfig()
+        self._research_admission = research_admission
+        self._research_attestation = None
+        if research_admission is not None and (
+            self.config.gpu_layers or self.config.low_memory or self.config.use_mtp_experimental
+            or self.config.mtp_probe_enabled or self.config.mtp_dry_run_enabled
+            or self.config.mtp_accept_probe_enabled or self.config.mtp_decode_probe_enabled
+        ):
+            raise ValueError("research admission supports CPU-only, MTP-off qualification")
         self.lib = LlamaLibrary(paths.build_bin)
         mtmd_bridge = _resolve_mtmd_bridge_path(paths)
         self.mtmd = (
@@ -578,6 +588,9 @@ class NativeLlamaClient:
             return None
 
     def load(self, on_progress=None) -> None:
+        admission = getattr(self, "_research_admission", None)
+        if admission is not None:
+            self._research_attestation = admission.attest(self.paths.model)
         if self._model or self._session.ctx_tgt:
             self._invalidate_qwen_route_prefix(
                 "model_reload", profile_id=QWEN3_CODER_PROFILE_ID
@@ -715,8 +728,11 @@ class NativeLlamaClient:
         template_ptr = self.lib.lib.llama_model_chat_template(self._model, None)
         template = template_ptr.decode("utf-8", errors="replace") if template_ptr else ""
         profile = detect_native_model_profile(metadata, template)
+        admission = getattr(self, "_research_admission", None)
+        if admission is not None:
+            profile = admission.profile(self.paths.model, template, self._research_attestation)
         self.model_profile = profile
-        if not profile.verified:
+        if not profile.verified and admission is None:
             raise RuntimeError(
                 "unsupported or unverified native model compatibility: "
                 f"family={profile.family}; reason={profile.failure_reason}"
