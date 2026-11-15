@@ -191,7 +191,7 @@ def tool_intent_observations(base_url, admission, pid, *, root: Path, output: Pa
             print(f"tool-intent {len(observations)}/24: {case['id']} {observation['kind']}", flush=True)
     report = summarize(corpus, observations, provenance={
         "mode": "live_intercepted_research", "props": props,
-        "scope": "Explicit unqualified admission; unchanged observer/corpus/budgets; no production enablement",
+        "scope": "Explicit unqualified admission; unchanged observer/corpus and caller ceiling; runtime phase budgets bound to source identity; no production enablement",
     })
     write_report(report, output / "tool-intent.json")
     return report

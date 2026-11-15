@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 DEFAULT_MAX_TOKENS = 256
 
+REQUIRED_REASONING_RESERVE_TOKENS = 1024
+
 ROUTE_MAX_TOKENS = 64
 TOOL_CALL_MAX_TOKENS = 96
 FILE_RECOVERY_TOOL_CALL_MAX_TOKENS = 64
@@ -135,3 +137,20 @@ def _positive_or_none(value: int | None) -> int | None:
     if value is None:
         return None
     return max(1, int(value))
+
+
+def reasoning_decision_budget(base_budget: int, backend: object) -> int:
+    """Reserve bounded internal generation for mandatory native reasoning.
+
+    The base budget still bounds the ordinary decision phase. An explicitly
+    always-reasoning native backend adds 1024 tokens to its total generation
+    ceiling. This does not force a reasoning stop or guarantee visible output;
+    exhausting the combined ceiling remains a normal length failure. Context
+    admission receives the complete ceiling before inference. This internal
+    reserve leaves dedicated CHAT/final policies and retry counts unchanged.
+    Any prose returned by an internal phase shares its combined ceiling.
+    """
+    capability = getattr(backend, "requires_native_reasoning", None)
+    if not callable(capability) or capability() is not True:
+        return base_budget
+    return base_budget + REQUIRED_REASONING_RESERVE_TOKENS

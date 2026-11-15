@@ -20,7 +20,7 @@ from orbit.runtime.artifacts import (
 )
 from orbit.runtime.capabilities import LocalCapabilities
 from orbit.runtime.command_request import command_like_tool_call, command_tool_call_from_tool_calls
-from orbit.runtime.completion_budget import resolve_max_tokens
+from orbit.runtime.completion_budget import reasoning_decision_budget, resolve_max_tokens
 from orbit.runtime.evidence import EvidenceStore
 from orbit.runtime.kv_diag import model_call_context
 from orbit.runtime.messages import (
@@ -1144,6 +1144,7 @@ def run_tool_loop(
             ),
             file_recovery=turn.pending_file_recovery_guard,
         )
+        tool_max_tokens = reasoning_decision_budget(tool_max_tokens, runtime.backend)
         artifact_verification_round = executing_mutation_verification and artifact_verification_required
         tool_delta_callback = (
             suppress_tool_delta
@@ -1329,7 +1330,7 @@ def run_tool_loop(
                 phase=produced_by_phase or "tool_call",
             )
             result, shadow_report, attempt_id = observed_model_call(
-                lambda: _backend_tool_retry(runtime, call_messages, temperature, max_tokens, active_tools),
+                lambda: _backend_tool_retry(runtime, call_messages, temperature, max(max_tokens, tool_max_tokens), active_tools),
                 phase="tool_call_retry",
             )
             produced_by_phase = "tool_call_retry"
