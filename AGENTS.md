@@ -29,7 +29,7 @@ the recorded SHA is an audit anchor, not a permanent expected HEAD. Untracked
   documented in [README](README.md#configuration-and-model-store). Historical
   `models/` and removed research-worktree paths are provenance, not instructions
   to recreate those directories or copy models.
-- Latest retained full-suite qualification: #391 candidate `025fb63`,
+- Retained runtime full-suite qualification anchor: #391 candidate `025fb63`,
   **6516 tests / 45 skips / RC=0**, merged with an identical tree. These counts
   belong to that run; skips depend on the host's retained artifacts. Evidence:
   `workdir/diag/finish_constraint_diagnostic_1/` and
@@ -82,6 +82,33 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   agent mode, prompt_toolkit/TUI slash menus, Qwen prompt tuning, semantic runtime
   classifiers and CPU MTP optimization without new evidence. Historical
   experiment recommendations below are not active NOW/NEXT tasks.
+
+### Subsequent tooling addendum (2026-11-15)
+
+- Model qualification contracts landed in #393 / `6a16972`: explicit technical
+  support and reasoning declarations, hash-bound per-capability observations,
+  and an isolated research admission command. Support declarations are
+  diagnostics, not a new dispatch authorization layer; CHAT observation requires
+  manual review, and no model was enabled. Contract:
+  [MODEL_RESEARCH_QUALIFICATION.md](docs/MODEL_RESEARCH_QUALIFICATION.md).
+- Repeated cache-profile membership declarations are centralized without moving
+  native state or changing cache identities, token boundaries, eligibility
+  guards, reset rules or prewarm ordering. R2–R6 remain TECHNICAL_STOP.
+- A lightweight core CI now exists. Its explicit source-fresh unittest subset
+  requires zero skips and no native/model/corpus artifacts; it does not waive
+  the frozen-corpus gate or replace full/native/model/semantic qualification.
+  Scope and local command: [CORE_CI.md](docs/CORE_CI.md). Historical statements
+  below that no CI existed retain their original date-scoped meaning.
+- Source-fresh validation of this tooling follow-up: **6563 tests / 47 skips /
+  RC=0**, with a separate artifact-free core run of **351 tests / zero skips**.
+  These counts belong to those runs; full-suite skips remain host-dependent.
+  Evidence: `workdir/diag/cache_policy_and_ci_1/`. This extends source regression
+  coverage, not native model or ANALYSIS semantic qualification.
+- **OPERATOR HOLD — Liquid LFM2.5-24B-A2B Q4_K_M:** the operator requested a
+  download but reserved the verification trigger. Leave the transfer alone;
+  do not check its progress, verify bytes, load, run CHAT or run the 24-intent
+  gate until explicitly requested. No Liquid capability is qualified or enabled.
+  Machine-local continuation evidence: `workdir/diag/lfm25_q4km_qualification_1/`.
 
 ## Historical machine-migration handoff (2026-09-13)
 

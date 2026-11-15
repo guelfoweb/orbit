@@ -52,7 +52,7 @@ from orbit.native_llama.model_discovery import (
 from orbit.terminal.theme import supports_ansi
 from orbit.native_llama.model_download import download_model, huggingface_resolve_url, parse_huggingface_spec
 from orbit.native_llama.model_store import download_advisory
-from orbit.native_llama.model_profiles import ORNITH15_PROFILE_ID, QWEN3_CODER_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID
+from orbit.native_llama.cache_profile_policy import cache_policy_for_profile
 from orbit.native_llama.model_registry import default_hf_cache, effective_models_dir, get_manifest, local_model_path
 from orbit.native_llama.paths import (
     DEFAULT_LLAMA_ROOT,
@@ -265,7 +265,7 @@ class OrbitNativeServer:
             profile = getattr(self.client, "model_profile", None)
             preserve_coder_checkpoint = bool(
                 getattr(profile, "verified", False)
-                and getattr(profile, "profile_id", None) == QWEN3_CODER_PROFILE_ID
+                and cache_policy_for_profile(getattr(profile, "profile_id", None)).preserve_fixed_on_session_reset
             )
             self.client.reset_session_state(
                 preserve_qwen3_coder_route_checkpoint=preserve_coder_checkpoint
@@ -1492,11 +1492,7 @@ def run_server(argv: list[str] | None = None, *, research_admission=None) -> int
         # start line is emitted immediately before the expensive call, the
         # outcome only after it returns.
         announce_prewarm = route_prefix_prewarm_mode() == PREFIX_PREWARM_STARTUP
-        if getattr(getattr(client, "model_profile", None), "profile_id", None) not in (
-            QWEN3_CODER_PROFILE_ID,
-            ORNITH15_PROFILE_ID,
-            QWEN38_FLASH_NEXT_PROFILE_ID,
-        ):
+        if not cache_policy_for_profile(getattr(getattr(client, "model_profile", None), "profile_id", None)).jinja_route_prefill:
             if announce_prewarm:
                 _startup_note("prewarming route-prefix cache...")
             result = prewarm_startup_route_prefix(client)
@@ -1522,7 +1518,9 @@ def run_server(argv: list[str] | None = None, *, research_admission=None) -> int
                 # has already run and recorded its result, and this one owns a
                 # separate slot. It is inside the same cancellable window because
                 # it is more startup prefill the operator may want to interrupt.
-                if not prewarm_interrupted and client.model_profile.profile_id != QWEN38_FLASH_NEXT_PROFILE_ID:
+                if (not prewarm_interrupted and cache_policy_for_profile(
+                    client.model_profile.profile_id
+                ).attempt_analysis_prewarm_after_route):
                     if announce_prewarm:
                         _startup_note("prewarming analysis-prefix cache...")
                     analysis_result = prewarm_startup_analysis_prefix(client)
@@ -1630,7 +1628,7 @@ def prewarm_startup_route_prefix(client: NativeLlamaClient) -> NativeRoutePrefix
         _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result)
         return result
     profile = getattr(client, "model_profile", None)
-    if getattr(profile, "profile_id", None) in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID):
+    if cache_policy_for_profile(getattr(profile, "profile_id", None)).jinja_route_prefill:
         try:
             result = client.capture_qwen3_coder_route_prefix_prefill_only(
                 system_prompt=ROUTE_SYSTEM_PROMPT,
@@ -1709,7 +1707,7 @@ def prewarm_startup_analysis_prefix(client: NativeLlamaClient) -> NativeRoutePre
         _emit_startup_prewarm_diag(mode=mode, tools_enabled=tools_enabled, result=result, lineage="analysis")
         return result
     profile = getattr(client, "model_profile", None)
-    if getattr(profile, "profile_id", None) != ORNITH15_PROFILE_ID:
+    if not cache_policy_for_profile(getattr(profile, "profile_id", None)).analysis_prefix:
         # Only Ornith has a qualified ANALYSIS prefix. Every other profile keeps
         # the lazy capture it has now.
         result = _startup_prewarm_skipped("model_profile_ineligible")

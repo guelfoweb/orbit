@@ -166,6 +166,12 @@ integrity limits.
 
 ## Development and tests
 
+For the lightweight, artifact-free [core CI gate](docs/CORE_CI.md), run:
+
+```bash
+python3 scripts/check_core.py
+```
+
 The project uses `unittest`. From the checkout, run the non-live suite:
 
 ```bash
