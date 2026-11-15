@@ -568,7 +568,7 @@ class ChatRuntime:
             )
             return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(bundle))
         command_max_tokens = reasoning_decision_budget(
-            resolve_max_tokens("route", max_tokens), max_tokens, self.backend,
+            resolve_max_tokens("route", max_tokens), self.backend,
         )
         streamed_final_retry = False
         retried_empty_final = False

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 DEFAULT_MAX_TOKENS = 256
 
-REQUIRED_REASONING_DECISION_MAX_TOKENS = 1024
+REQUIRED_REASONING_RESERVE_TOKENS = 1024
 
 ROUTE_MAX_TOKENS = 64
 TOOL_CALL_MAX_TOKENS = 96
@@ -139,17 +139,18 @@ def _positive_or_none(value: int | None) -> int | None:
     return max(1, int(value))
 
 
-def reasoning_decision_budget(base_budget: int, requested_max_tokens: int | None, backend: object) -> int:
-    """Allow required reasoning within the caller's total completion ceiling.
+def reasoning_decision_budget(base_budget: int, backend: object) -> int:
+    """Reserve bounded internal generation for mandatory native reasoning.
 
-    This is not an extra token allowance or a reasoning-forcing mechanism.
-    Optional/off and unknown backends retain their exact existing phase caps.
-    Always-reasoning native profiles may use up to 1024 total tokens, still
-    bounded by an explicit caller limit. Exhaustion remains a normal length
-    failure; this function never retries or inspects a request's meaning.
+    The base budget still bounds the ordinary decision phase. An explicitly
+    always-reasoning native backend adds 1024 tokens to its total generation
+    ceiling. This does not force a reasoning stop or guarantee visible output;
+    exhausting the combined ceiling remains a normal length failure. Context
+    admission receives the complete ceiling before inference. This internal
+    reserve leaves dedicated CHAT/final policies and retry counts unchanged.
+    Any prose returned by an internal phase shares its combined ceiling.
     """
     capability = getattr(backend, "requires_native_reasoning", None)
     if not callable(capability) or capability() is not True:
         return base_budget
-    return max(base_budget, _internal(_positive_or_none(requested_max_tokens),
-                                      REQUIRED_REASONING_DECISION_MAX_TOKENS))
+    return base_budget + REQUIRED_REASONING_RESERVE_TOKENS

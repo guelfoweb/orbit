@@ -37,14 +37,21 @@ budgets, retries or current profile eligibility.
 
 ## Decision budgets for required reasoning
 
-ROUTE and tool-call phases retain their existing small caps for optional/off
-reasoning and unknown backends. A native server explicitly declaring
-`reasoning_behavior=always` and `separated_reasoning=true` lets these phases use
-up to 1024 **total** completion tokens, including reasoning. An explicit caller
-limit remains the ceiling: the frozen 24-intent observer requests 256, so its
-reasoning-required decisions can use at most 256 total tokens. This is not a
-separate reasoning allowance, a forced reasoning stop, or a retry. Existing
-larger mutation budgets are preserved. User-visible budgets are unchanged.
+ROUTE and tool-call phases retain their existing small base budgets for
+optional/off reasoning and unknown backends. A native server explicitly
+declaring `reasoning_behavior=always` and `separated_reasoning=true` adds a fixed
+1024-token internal reserve to the ordinary decision budget. This increases
+the **total generation ceiling**, including reasoning and the visible decision;
+it does not independently limit reasoning or force its closure.
+
+For the frozen observer's caller limit of 256, ROUTE has a 64-token base plus
+1024 reserve (1088 total); an ordinary tool call has 96 plus 1024 (1120 total).
+The base still respects its phase/caller limit. This reserve belongs only to
+internal decisions; dedicated CHAT/final budget policies remain unchanged.
+The combined internal ceiling also covers visible decision text or prose
+returned or reused from that phase; it does not independently cap that prose.
+An existing length retry retains at least the same decision ceiling without
+adding another retry. Mutation/recovery base policies remain intact.
 
 The declaration informs budgeting even for an unverified research profile;
 it grants no tool authority and does not promote the profile. Exact context
