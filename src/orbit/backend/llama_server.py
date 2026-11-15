@@ -336,6 +336,18 @@ class LlamaServerBackend:
             return None
         return props.get("orbit_build") if isinstance(props, dict) else None
 
+    def requires_native_reasoning(self) -> bool:
+        # Budget information grants no production capability. Explicit research
+        # admission can report always-reasoning while remaining unverified.
+        props = self._props_or_empty()
+        compatibility = props.get("model_compatibility")
+        return bool(
+            props.get("backend") == "orbit-native"
+            and isinstance(compatibility, dict)
+            and compatibility.get("reasoning_behavior") == "always"
+            and compatibility.get("separated_reasoning") is True
+        )
+
     def uses_native_separated_reasoning(self) -> bool:
         compatibility = self._props_or_empty().get("model_compatibility")
         if not isinstance(compatibility, dict) or compatibility.get("verified") is not True:

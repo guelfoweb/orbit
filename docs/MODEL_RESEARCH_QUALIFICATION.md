@@ -35,6 +35,23 @@ the compatibility fallback. An explicit false or malformed capability never
 falls back to an inferred true. This does not change templates, decoding,
 budgets, retries or current profile eligibility.
 
+## Decision budgets for required reasoning
+
+ROUTE and tool-call phases retain their existing small caps for optional/off
+reasoning and unknown backends. A native server explicitly declaring
+`reasoning_behavior=always` and `separated_reasoning=true` lets these phases use
+up to 1024 **total** completion tokens, including reasoning. An explicit caller
+limit remains the ceiling: the frozen 24-intent observer requests 256, so its
+reasoning-required decisions can use at most 256 total tokens. This is not a
+separate reasoning allowance, a forced reasoning stop, or a retry. Existing
+larger mutation budgets are preserved. User-visible budgets are unchanged.
+
+The declaration informs budgeting even for an unverified research profile;
+it grants no tool authority and does not promote the profile. Exact context
+admission sees the expanded total before inference. Truncation still fails
+closed, and a CHAT fallback after a truncated decision cannot pass the gate.
+No prompt, grammar, parser, oracle, or repair policy changes with this budget.
+
 ## Explicit research admission
 
 The source-checkout command below admits an exact, unqualified, single-file

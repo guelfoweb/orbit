@@ -11,7 +11,7 @@ from orbit.backend.base import Message, StreamConsumerAbort, StreamProgress
 from orbit.runtime.capabilities import LocalCapabilities, discover_local_capabilities
 from orbit.runtime.client_state import ClientState
 from orbit.runtime.command_evidence import AcquiredEvidence
-from orbit.runtime.completion_budget import resolve_max_tokens
+from orbit.runtime.completion_budget import reasoning_decision_budget, resolve_max_tokens
 from orbit.runtime.context_manager import (
     ContextAdmissionError,
     ContextManagedBackend,
@@ -567,7 +567,9 @@ class ChatRuntime:
                 tool_names=("exec_shell_full_command",),
             )
             return self._remember_visible_result_streamed(_visible_delta, _delta_sink, _tool_loop_result_value(bundle))
-        command_max_tokens = resolve_max_tokens("route", max_tokens)
+        command_max_tokens = reasoning_decision_budget(
+            resolve_max_tokens("route", max_tokens), max_tokens, self.backend,
+        )
         streamed_final_retry = False
         retried_empty_final = False
         route_abort_reason: str | None = None
