@@ -57,6 +57,10 @@ from .model_profiles import (
 from .gguf_split import split_sibling_names
 from .model_discovery import inspect_native_model_profile
 from .research_admission import ResearchAdmission
+from .cache_profile_policy import (
+    ROLLING_ROUTE_PROFILE_IDS, POST_FINAL_ROUTE_SHADOW_PROFILE_IDS,
+    cache_policy_for_profile,
+)
 from .mtp_completion import MtpCompletionResult
 from .mtp_decode_probe import MtpDecodeProbeResult, run_mtp_decode_probe
 from .mtp_accept_probe import MtpAcceptProbeResult, run_mtp_accept_probe
@@ -141,20 +145,6 @@ from .persistent_mtp import (
     run_persistent_mtp_completion,
 )
 from .session_state import DEFAULT_NATIVE_SESSION_ID, NativeSessionSnapshot, NativeSessionState
-
-# Profiles whose CHAT route calls may use the rolling route checkpoint (the
-# conversation's own route prompt, captured at the prefill boundary and
-# restored on the next route call under the exact-prefix rule). Membership is
-# a qualification decision: the state round-trip has to be demonstrated on the
-# real model. The ANALYSIS rolling lineage stays Ornith-only.
-ROLLING_ROUTE_PROFILE_IDS = frozenset({ORNITH15_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID})
-# The profiles whose route checkpoint is advanced past the committed reply
-# after a final call (QWEN38-POST-FINAL-ROUTE-CACHE-23). A subset of the
-# rolling set: the mechanism is generic, but each profile is admitted on its
-# own measured evidence. Ornith prefills an order of magnitude faster and its
-# rolling behaviour is qualified as it stands, so it stays out until measured.
-POST_FINAL_ROUTE_SHADOW_PROFILE_IDS = frozenset({QWEN38_FLASH_NEXT_PROFILE_ID})
-
 
 DEFAULT_MEDIA_MARKER = "<__media__>"
 
@@ -1020,7 +1010,7 @@ class NativeLlamaClient:
         )
         preserve_qwen3_coder_route_checkpoint = (
             getattr(profile, "verified", False)
-            and profile_id == QWEN3_CODER_PROFILE_ID
+            and cache_policy_for_profile(profile_id).preserve_fixed_on_mode_switch
             and qualified_transition
         )
         # The route and final phases of one turn differ only by this internal
@@ -1029,7 +1019,7 @@ class NativeLlamaClient:
         # state holds the conversation's own tokens.
         preserve_ornith_rolling_route_checkpoint = (
             getattr(profile, "verified", False)
-            and profile_id in ROLLING_ROUTE_PROFILE_IDS
+            and cache_policy_for_profile(profile_id).rolling_route
             and qualified_transition
         )
         self.reset_session_state(
@@ -1044,11 +1034,7 @@ class NativeLlamaClient:
         # prewarm, so both have to be dropped on their own failures.
         profile = getattr(self, "model_profile", None)
         profile_id = getattr(profile, "profile_id", None)
-        if getattr(profile, "verified", False) and profile_id in (
-            QWEN3_CODER_PROFILE_ID,
-            ORNITH15_PROFILE_ID,
-            QWEN38_FLASH_NEXT_PROFILE_ID,
-        ):
+        if getattr(profile, "verified", False) and cache_policy_for_profile(profile_id).jinja_route_prefill:
             self._invalidate_qwen_route_prefix(reason, profile_id=profile_id)
 
     def _initialize_multimodal_context(self) -> None:
@@ -1273,13 +1259,13 @@ class NativeLlamaClient:
         # These ChatML-family route-prefix profiles capture identically; only
         # the rendered tokens and the config switch differ.
         if (
-            profile_id not in (QWEN3_CODER_PROFILE_ID, ORNITH15_PROFILE_ID, QWEN38_FLASH_NEXT_PROFILE_ID)
+            not cache_policy_for_profile(profile_id).jinja_route_prefill
             or not getattr(profile, "verified", False)
             or not getattr(profile, "route_prefix_reuse_supported", False)
         ):
             return _route_prefix_prefill_skipped("model_profile_ineligible")
         if analysis_lineage:
-            if profile_id != ORNITH15_PROFILE_ID:
+            if not cache_policy_for_profile(profile_id).analysis_prefix:
                 return _route_prefix_prefill_skipped("model_profile_ineligible")
             # The capture is bookkept under the lineage it belongs to, so the
             # analysis prefix lands in its own slot rather than the route one.
@@ -3920,7 +3906,7 @@ class NativeLlamaClient:
         profile = getattr(self, "model_profile", None)
         if not getattr(profile, "verified", False):
             return False
-        if getattr(profile, "profile_id", None) not in ROLLING_ROUTE_PROFILE_IDS:
+        if not cache_policy_for_profile(getattr(profile, "profile_id", None)).rolling_route:
             return False
         if thinking:
             return False
@@ -4067,7 +4053,7 @@ class NativeLlamaClient:
         profile = getattr(self, "model_profile", None)
         if not getattr(profile, "verified", False):
             return False
-        if getattr(profile, "profile_id", None) != ORNITH15_PROFILE_ID:
+        if not cache_policy_for_profile(getattr(profile, "profile_id", None)).rolling_analysis:
             return False
         if thinking:
             return False
@@ -4286,7 +4272,7 @@ class NativeLlamaClient:
         profile = getattr(self, "model_profile", None)
         if not getattr(profile, "verified", False):
             return False
-        if getattr(profile, "profile_id", None) not in POST_FINAL_ROUTE_SHADOW_PROFILE_IDS:
+        if not cache_policy_for_profile(getattr(profile, "profile_id", None)).post_final_shadow:
             return False
         if self.config.thinking:
             return False

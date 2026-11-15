@@ -715,17 +715,21 @@ class OrnithStartupPrewarmWiringTests(unittest.TestCase):
     def test_startup_prewarm_reaches_the_capture_for_ornith(self) -> None:
         import orbit.native_server.app as app
 
-        source = Path(app.__file__).read_text(encoding="utf-8")
-        block = source[source.index("def prewarm_startup_route_prefix") :][:2600]
-
-        self.assertIn("ORNITH15_PROFILE_ID", block)
-        # Ornith must be handled by the ChatML capture branch, before the
-        # Gemma-only check that would otherwise skip it as ineligible.
-        self.assertLess(
-            block.index("ORNITH15_PROFILE_ID"),
-            block.index("gemma_prefix_reuse_supported"),
-            "Ornith must not fall through to the Gemma ineligibility branch",
+        client = SimpleNamespace(
+            model_profile=SimpleNamespace(profile_id=ORNITH15_PROFILE_ID, gemma_prefix_reuse_supported=False),
+            capture_qwen3_coder_route_prefix_prefill_only=mock.Mock(return_value=mock.sentinel.capture),
+            capture_route_prefix_prefill_only=mock.Mock(side_effect=AssertionError("Gemma capture reached")),
         )
+        with mock.patch.object(app, "route_prefix_prewarm_mode", return_value=app.PREFIX_PREWARM_STARTUP), \
+             mock.patch.object(app, "tools_startup_enabled", return_value=True), \
+             mock.patch.object(app, "prefix_anchor_enabled", return_value=True), \
+             mock.patch.object(app, "_emit_startup_prewarm_diag"):
+            result = app.prewarm_startup_route_prefix(client)
+        self.assertIs(result, mock.sentinel.capture)
+        client.capture_qwen3_coder_route_prefix_prefill_only.assert_called_once_with(
+            system_prompt=ROUTE_SYSTEM_PROMPT, tools_mode="on",
+        )
+        client.capture_route_prefix_prefill_only.assert_not_called()
 
     def test_route_prompt_is_unchanged_by_this_mission(self) -> None:
         import hashlib
