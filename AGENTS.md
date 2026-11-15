@@ -99,16 +99,41 @@ These dispositions carry forward ORBIT-TODO-PRIORITY-AUDIT-1 and the subsequent
   the frozen-corpus gate or replace full/native/model/semantic qualification.
   Scope and local command: [CORE_CI.md](docs/CORE_CI.md). Historical statements
   below that no CI existed retain their original date-scoped meaning.
-- Source-fresh validation of this tooling follow-up: **6563 tests / 47 skips /
+- Source-fresh validation of the cache/CI follow-up: **6563 tests / 47 skips /
   RC=0**, with a separate artifact-free core run of **351 tests / zero skips**.
   These counts belong to those runs; full-suite skips remain host-dependent.
   Evidence: `workdir/diag/cache_policy_and_ci_1/`. This extends source regression
   coverage, not native model or ANALYSIS semantic qualification.
-- **OPERATOR HOLD — Liquid LFM2.5-24B-A2B Q4_K_M:** the operator requested a
-  download but reserved the verification trigger. Leave the transfer alone;
-  do not check its progress, verify bytes, load, run CHAT or run the 24-intent
-  gate until explicitly requested. No Liquid capability is qualified or enabled.
-  Machine-local continuation evidence: `workdir/diag/lfm25_q4km_qualification_1/`.
+- Required-reasoning decision budgets now add a fixed 1024-token internal
+  reserve only for native profiles declaring `reasoning_behavior=always` and
+  `separated_reasoning=true`. The combined ceiling reaches exact admission;
+  optional/unknown profiles and retry counts remain unchanged. This fixes an
+  insufficient decision budget, not the model's semantic choices. Contract:
+  [MODEL_RESEARCH_QUALIFICATION.md](docs/MODEL_RESEARCH_QUALIFICATION.md).
+- **NOT QUALIFIED — Liquid LFM2.5-24B-A2B Q4_K_M tools:** the operator resumed
+  verification and then requested a ROUTE fix. Download is complete at
+  `/srv/orbit-models/LiquidAI--LFM2.5-24B-A2B-GGUF/LFM2.5-24B-A2B-Q4_K_M.gguf`;
+  14,526,258,464 bytes, SHA256
+  `d3334405b96228eb9908cdebb5c6194908f2da64282bda852afc3a3910c64e7d`.
+  Exact identity/load and five manually reviewed tools-off CHAT smokes passed.
+  The frozen 24-intent baseline passed 0/24; after the bounded reasoning fix,
+  the complete gate passed **5/24 (FAIL)**, with 10 missed executions,
+  19 invalid route/protocol outcomes and zero unwanted authorized handoffs.
+  No model-selected operation executed: the executor remained intercepted.
+  Incorrect ANALYSIS selection for script generation and incomplete/prose
+  route decisions remain visible; no prompt/parser/oracle changes, semantic
+  Python classifiers or extra retries were added to mask them. Liquid remains
+  unregistered and disabled; load/CHAT positives do not qualify ROUTE or
+  ANALYSIS semantics (not run). Preserve both evidence bundles:
+  `workdir/diag/lfm25_q4km_qualification_1/` and
+  `workdir/diag/reasoning_route_budget_1/`. Native/source identities remained
+  unchanged during the retained final probe. No additional run is implied.
+- Required-reasoning source regression: **6570 tests / 47 skips / RC=0**,
+  with **358 artifact-free core tests / zero skips**, nine applied mutants
+  caught, and independent review at BLOCKER 0 / MAJOR 0. Isolated checkouts must
+  provision the retained frozen samples hash-exact; the initial missing-corpus
+  run failed and was not accepted or waived. These source checks do not turn
+  Liquid's 5/24 tool-intent FAIL into a capability qualification.
 
 ## Historical machine-migration handoff (2026-09-13)
 
